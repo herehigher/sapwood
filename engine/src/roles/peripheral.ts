@@ -692,25 +692,31 @@ export class RoleRunner {
         disallowedTools,
         // #286 (E4a): see RoleSessionOpts.maxBudgetUsd's own doc — additive, review-mode-agnostic.
         ...(opts.maxBudgetUsd !== undefined ? { maxBudgetUsd: opts.maxBudgetUsd } : {}),
-        // #410 (extends #285's review-mode-only triple to EVERY peripheral session, review mode
-        // included — Codex sol-high PR #300 review, P1's load-bearing fix generalized): an
-        // operator's user-level settings can neither grant NOR deny a peripheral session's tools.
-        // The #410 decision record's load-bearing measurement is why this is unconditional, not
-        // reviewMode-gated: a probing machine's `~/.claude/settings.json` carrying `"deny":
-        // ["WebSearch", "WebFetch"]` silently removed those tools from the session's own reported
-        // tool list — ZERO permission-denial signal, indistinguishable from "this CLI version
-        // doesn't have the tool" — so with the #410 grant defaulted on, an unpinned session would
-        // let an operator's local settings silently strip a capability the engine just decided to
-        // grant (exactly the shackle docs/PLAN.md's #238 guardrail/shackle criterion forbids).
-        // `--strict-mcp-config` + `--setting-sources ""` also close the SAME ambient-MCP-server /
-        // settings-declared-hook execution surface #285 closed for a materialized review tree —
-        // now every peripheral session's own worktree, not just a reviewed PR's. mcpConfig carries
-        // the proxy's own inline config when one is attached (proxyHandle is always undefined in
-        // review mode, enforced above, so these two cases never conflict); otherwise the same
-        // explicit-empty map review mode has always used.
-        mcpConfig: proxyHandle ? proxyHandle.mcpConfigJson : EMPTY_MCP_CONFIG_JSON,
-        strictMcpConfig: true,
-        settingSources: "",
+        // Codex sol-high PR #300 review, P1 (load-bearing fix; settingSources tightened to ""
+        // in a SECOND review round — see RoleSessionOpts.reviewCwd's own doc for the full
+        // rationale, including the worker-real-HOME residual this closes): review sessions close
+        // the MCP + settings-source execution surface entirely (a materialized tree's
+        // producer-authored `.mcp.json`/`.claude/settings.json` is otherwise a live execution
+        // channel neither `--disallowedTools Bash` nor the PreToolUse guard hook mediates at
+        // all) — NO file-based settings source loads, not even `user` (worker.ts's
+        // `settingSources` doc has the empirical verification). reviewMode is checked FIRST —
+        // proxyHandle is always undefined in review mode (enforced above), so these branches
+        // never conflict.
+        //
+        // #410 amendment (owner ruling 2026-07-28): this triple is DELIBERATELY review-mode-only
+        // — an earlier version of this PR pinned it for EVERY peripheral session, but a live
+        // measurement found `--setting-sources ""` also stops loading the repo's own CLAUDE.md,
+        // colliding with the locked #236 ruling (docs/security.md "Ambient repo context: record,
+        // don't seal" — peripheral sessions absorbing the target repo's CLAUDE.md is a
+        // deliberately OPEN channel, never sealed). The #410 decision record's own reserved
+        // fallback — lightweight startup detection + warning (cli.ts's
+        // checkWebAccessSettingsDenial) — replaces the pinning for non-review sessions instead;
+        // see docs/security.md's peripheral-egress section for the full rationale.
+        ...(reviewMode
+          ? { mcpConfig: EMPTY_MCP_CONFIG_JSON, strictMcpConfig: true, settingSources: "" }
+          : proxyHandle
+            ? { mcpConfig: proxyHandle.mcpConfigJson }
+            : {}),
         // NB: no addDir — same as worker.ts's dispatch(): a role session must never see engine
         // state (sentinels, the sqlite db) via --add-dir.
       });

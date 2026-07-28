@@ -674,38 +674,6 @@ test("run: fallbackModel none omits Claude's fallback flag for a role session", 
   }
 });
 
-// ── #410: settings pinning extends to EVERY peripheral session, not just review mode ──────────
-// This test is RED on pre-#410 main: a plain (non-review, no-proxy) role session passed neither
-// --strict-mcp-config nor --setting-sources at all, and no --mcp-config flag either — an
-// operator's own ~/.claude/settings.json (a "deny": ["WebSearch","WebFetch"] entry, per #410's
-// own decision-record measurement) would have been free to reach the session's settings sources
-// unpinned. Argv is the same mechanism #285's review-mode test already pins this via — see that
-// test ("reviewCwd closes the MCP + settings-source execution surface") for the live-CLI
-// verification this flag combination is built on.
-
-test('run (#410): an ORDINARY (non-review, no-proxy) role session ALSO pins --strict-mcp-config, an explicit empty --mcp-config, and --setting-sources "" — an operator-level settings deny of WebFetch/WebSearch can neither grant nor strip a tool because no file-based settings source loads at all', async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
-  try {
-    const bin = mkStub(
-      dir,
-      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
-    );
-    const runner = mkRunner(dir, bin);
-    await runner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
-    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
-    const at = (flag: string): string => seen[seen.indexOf(flag) + 1] ?? "";
-    assert.ok(seen.includes("--strict-mcp-config"), "pinned for an ordinary session too, not just reviewCwd");
-    assert.equal(at("--mcp-config"), '{"mcpServers":{}}', "explicit empty map, same as review mode, when no proxy is attached");
-    assert.equal(
-      at("--setting-sources"),
-      "",
-      "zero file-based settings sources load — the operator's own settings can neither grant nor deny",
-    );
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 // ── #410: per-role web-access grant exports — the CONFIRM_ALLOWED_TOOLS named-export-plus-
 // pinned-test precedent, applied to the three granted roles. ────────────────────────────────
 
@@ -1797,13 +1765,7 @@ test("run: a proxy mint FAILURE is non-fatal — the session still runs to compl
     });
     assert.equal(result.outcome, "done");
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
-    const at = (flag: string): string => seen[seen.indexOf(flag) + 1] ?? "";
-    // #410: EVERY peripheral session now pins the mcp/settings triple, proxy attached or not —
-    // no proxy still means an EXPLICIT empty --mcp-config (never the bare absence of the flag
-    // the pre-#410 behavior had), alongside --strict-mcp-config and --setting-sources "".
-    assert.equal(at("--mcp-config"), '{"mcpServers":{}}', "no proxy attached -> the explicit empty map, not a bare absence of the flag");
-    assert.ok(seen.includes("--strict-mcp-config"), "#410: pinned even without a proxy attached");
-    assert.equal(at("--setting-sources"), "", "#410: pinned even without a proxy attached");
+    assert.ok(!seen.includes("--mcp-config"), "no proxy attached -> no --mcp-config flag");
     assert.equal(seen[seen.indexOf("--allowedTools") + 1], ROLE_ALLOWED_TOOLS, "falls back to the base allowedTools, unwidened");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2031,7 +1993,7 @@ test("run: #253 a session's OWN RoleSessionOpts.proxy wins over RoleRunnerDeps.d
   }
 });
 
-test("run: #253 no RoleRunnerDeps.defaultProxy and no opts.proxy -> base allowedTools, unwidened; #410 update — --mcp-config is now ALWAYS present (an explicit empty map, part of the settings-pinning triple every peripheral session gets, proxy or not)", async () => {
+test("run: #253 no RoleRunnerDeps.defaultProxy and no opts.proxy -> today's behavior, byte-for-byte unchanged (no --mcp-config, base allowedTools)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(
@@ -2042,17 +2004,8 @@ test("run: #253 no RoleRunnerDeps.defaultProxy and no opts.proxy -> base allowed
     const result = await runner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "done");
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
-    const at = (flag: string): string => seen[seen.indexOf(flag) + 1] ?? "";
-    assert.equal(
-      at("--mcp-config"),
-      '{"mcpServers":{}}',
-      "#410: no proxy anywhere -> the explicit empty map, not a bare absence of the flag",
-    );
-    // Since this test's roleId ("architect") is one of the #410-granted roles, allowedTools falls
-    // back to ROLE_ALLOWED_TOOLS here only because no `allowedTools` opt was supplied at all — the
-    // grant is applied by the CALLER (architect.ts), never inside RoleRunner itself; see the
-    // dedicated ARCHITECT_ALLOWED_TOOLS tests above for the call-site-level behavior.
-    assert.equal(at("--allowedTools"), ROLE_ALLOWED_TOOLS, "base allowedTools, unwidened — no allowedTools opt supplied to run() directly");
+    assert.ok(!seen.includes("--mcp-config"), "no proxy anywhere -> no --mcp-config flag");
+    assert.equal(seen[seen.indexOf("--allowedTools") + 1], ROLE_ALLOWED_TOOLS, "base allowedTools, unwidened");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

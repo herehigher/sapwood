@@ -391,7 +391,7 @@ test("sapwood run (default driver, #253): cfg.proxy.enabled: true, shadow: false
   }
 });
 
-test("sapwood run (default driver, #253 review round 2, H1): cfg.proxy.enabled: true, shadow: true (the DEFAULT once enabled) -> the RoleRunner NEVER gets a defaultProxy — a real role session's argv carries no mcp__forge__* tool name and no proxy-shaped --mcp-config content at all (#410: --mcp-config itself is now ALWAYS present, an explicit empty map — the settings-pinning triple every peripheral session gets, proxy or not)", async () => {
+test("sapwood run (default driver, #253 review round 2, H1): cfg.proxy.enabled: true, shadow: true (the DEFAULT once enabled) -> the RoleRunner NEVER gets a defaultProxy — a real role session's argv carries no --mcp-config, no mcp__forge__* tool name, at all", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-rounds-proxy-shadow-"));
   try {
     const argvLog = join(dir, "argv.log");
@@ -442,11 +442,7 @@ test("sapwood run (default driver, #253 review round 2, H1): cfg.proxy.enabled: 
     assert.ok(sentinels.length > 0, "expected at least one real role session to have run to completion");
 
     const argvText = readFileSync(argvLog, "utf8");
-    // #410: --mcp-config is now unconditional (every peripheral session pins the settings triple),
-    // so its bare presence no longer signals a proxy — assert on the PROXY-SHAPED content instead
-    // (its mcp__forge__* tool names, which shadow mode must never let any session hold).
-    assert.ok(argvText.includes('{"mcpServers":{}}'), "#410: --mcp-config now always carries the explicit empty map");
-    assert.ok(!argvText.includes("mcp__forge__"), "shadow mode: no session anywhere gets a proxy attached");
+    assert.ok(!argvText.includes("--mcp-config"), "shadow mode: no session anywhere gets a proxy attached");
     assert.ok(!argvText.includes("mcp__forge__"), "shadow mode: allowedTools is never widened");
   } finally {
     rmSync(dir, { recursive: true, force: true });

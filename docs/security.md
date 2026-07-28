@@ -109,18 +109,18 @@ It can catch naive or accidental exfiltration attempts and leave an audit trail,
 deliberate adversary can trivially evade lexical executable matching — for example with an
 interpreter one-liner or DNS exfiltration.
 
-## Peripheral network egress: WebSearch/WebFetch, closed by settings pinning (#410)
+## Peripheral network egress: WebSearch/WebFetch, detected not pinned (#410)
 
 Three role sessions — `architect`, `po-align`, `po-triage` — are granted the CLI's built-in
-`WebSearch`/`WebFetch` tools, `roles.webAccess.enabled` (default `true`, a config key can
-disable it). This is a bounded widening, not a relaxation of the posture above: unlike the
-worker's Bash egress, this channel is exactly two named, read-only tools, carries no credential
-into any project system, and every call is journalled (see the audit paragraph below). The
-decision record (issue #410) rejected a domain allowlist (self-defeating — the point is
-discovering things nobody knew to look for, and an allowlisted domain accepting an arbitrary
-path/query is itself an egress channel) and MCP delivery (the guard hook has no `mcp__`
-handling at all, so a built-in-tool grant stays visible to the engine's own enforcement layer
-and journal in a way an engine-hosted MCP tool would not).
+`WebSearch`/`WebFetch` tools, `webAccess.enabled` (default `true`, a config key can disable it).
+This is a bounded widening, not a relaxation of the posture above: unlike the worker's Bash
+egress, this channel is exactly two named, read-only tools, carries no credential into any
+project system, and every call is journalled (see the audit paragraph below). The decision
+record (issue #410) rejected a domain allowlist (self-defeating — the point is discovering
+things nobody knew to look for, and an allowlisted domain accepting an arbitrary path/query is
+itself an egress channel) and MCP delivery (the guard hook has no `mcp__` handling at all, so a
+built-in-tool grant stays visible to the engine's own enforcement layer and journal in a way an
+engine-hosted MCP tool would not).
 
 **Grant, per-role, named exports.** `peripheral.ts`'s `ARCHITECT_ALLOWED_TOOLS`/
 `PO_ALIGN_ALLOWED_TOOLS`/`PO_TRIAGE_ALLOWED_TOOLS` each widen the base `ROLE_ALLOWED_TOOLS`/
@@ -138,21 +138,35 @@ misconfigured. Gate②'s review-session mode (`reviewCwd`, see below) goes furth
 REFUSES a caller-supplied `allowedTools` outright (thrown, not silently accepted) alongside
 `reviewCwd`, so even a future direct call attempting to widen it would fail loudly rather than
 reopen the surface. A gate whose conclusions could drift run to run over a live web result is
-not an inspectable gate — this is recorded as a deliberate reproducibility property.
+not an inspectable gate — this is recorded as a deliberate reproducibility property. Gate②'s
+`--strict-mcp-config`/`--setting-sources ""` seal (see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard-285)
+below) is unaffected by anything in this section — it was justified independently, for a
+materialized PR tree, and #410 leaves it exactly as it was.
 
-**Settings pinning — every peripheral session, not just review mode.** `RoleRunner.run()` now
-pins the same triple #285 first proved for gate②'s materialized-tree review sessions —
-`--strict-mcp-config`, an explicit `--mcp-config` (empty, or the forge proxy's own inline config
-when one is attached), and `--setting-sources ""` — for EVERY peripheral session, not only
-`reviewCwd` ones. This closes the exact failure mode #410's own measurement hit: an operator's
-`~/.claude/settings.json` carrying `"deny": ["WebSearch", "WebFetch"]` silently removes the tool
-from the session's own reported tool list, with **zero** permission-denial signal —
-indistinguishable from "this CLI version doesn't have the tool." With the grant defaulted on,
-an unpinned session would let local operator settings silently strip a capability the engine
-just decided to grant — the exact shackle `docs/PLAN.md`'s #238 guardrail/shackle criterion
-forbids (a mediation design must never deny evidence while still demanding the judgment it
-enables). Pinning also closes ambient MCP servers leaking into any peripheral session, not just
-a reviewed PR's materialized tree.
+**Detected, not pinned — the operator's own settings can still silently strip the grant.** An
+earlier version of this feature pinned `--strict-mcp-config`/`--setting-sources ""` for EVERY
+peripheral session (the same triple #285 uses for gate②'s materialized-tree review sessions).
+A live measurement found that `--setting-sources ""` ALSO stops loading the target repo's own
+`CLAUDE.md` — colliding with the locked ruling below ([Ambient repo context: record, don't
+seal](#ambient-repo-context-record-dont-seal-236)): a peripheral session absorbing the repo's
+own `CLAUDE.md` is a deliberately OPEN channel, never sealed, and pinning would have sealed it
+as a side effect for every non-review session. The owner rejected the pinning and adopted the
+fallback the original decision record reserved for exactly this case: **lightweight startup
+detection**, not containment. `cli.ts`'s `checkWebAccessSettingsDenial` — called from the same
+best-effort startup pass as `normalizeUnplacedBoardItems`, right after `assertStopMilestoneExists`
+— reads ONLY the operator's user-level settings (`$CLAUDE_CONFIG_DIR/settings.json`, or
+`~/.claude/settings.json`; never project/local settings — project settings are repo-governed,
+and an engine worktree carries no local settings of its own) and, when `webAccess.enabled` is
+true and `permissions.deny` names `WebSearch`/`WebFetch` (bare, or a `Tool(...)`-qualified
+prefix like `WebFetch(domain:x)`), emits one warning log line plus one durable
+`web-access-denied-by-operator-settings` state event. This is exactly the failure mode #410's
+own measurement hit: a granted session's own reported tool list simply omits the denied tool,
+with **zero** permission-denial signal — indistinguishable from "this CLI version doesn't have
+the tool" without this check. Detection only: it never blocks startup, never spawns a probe
+session, and never mutates the operator's settings. The prompts' first-class abstention wording
+(`po.md`/`architect.md`, below) is the session-side complement this fallback depends on: a
+session whose tool turned out silently absent is expected to report that it could not verify
+something externally, rather than silently omit the check or guess.
 
 **Audit: the SAME scanner, not a second one.** `worker.ts`'s `scanEgressSuspects` — the function
 the worker's own Bash lexical tripwire already calls — now ALSO recognizes `WebFetch`/

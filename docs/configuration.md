@@ -680,10 +680,18 @@ only, no other role. Ships **enabled by default**: the capability is read-only, 
 credential into any project system, is strictly weaker than the worker's own unrestricted Bash
 egress (see [`security.md`](security.md#worker-network-egress-accepted-blind-spot)), and every
 call is journalled through the same `egress-suspect` ledger event the worker's own tripwire
-uses (see [`security.md`](security.md#peripheral-network-egress-websearchwebfetch-closed-by-settings-pinning-410)).
+uses (see [`security.md`](security.md#peripheral-network-egress-websearchwebfetch-detected-not-pinned-410)).
 The review family (`plan-reviewer`, `plan-drafter`, `plan-reviewer-confirm`, and every gate②
 reviewer session) never reads this key at all — refusal is structural, not a `false` this key
 could be set to.
+
+The grant is **not** paired with settings pinning — see `security.md`'s peripheral-egress section
+(linked above) for why an earlier pinned version was rejected (it also silently sealed the
+target repo's own `CLAUDE.md`) and replaced with `cli.ts`'s lightweight `checkWebAccessSettingsDenial`
+startup check: an operator's user-level `permissions.deny` for `WebSearch`/`WebFetch` CAN still
+silently strip the grant from a session (zero permission-denial signal) — this check only
+*detects and reports* that (one warning log line + one `web-access-denied-by-operator-settings`
+state event), it never blocks startup or restores the capability.
 
 | Key | Default | Meaning |
 |---|---|---|
