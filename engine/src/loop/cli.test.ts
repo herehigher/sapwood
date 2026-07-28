@@ -511,6 +511,30 @@ test("checkWebAccessSettingsDenial: CLAUDE_CONFIG_DIR, when set, overrides the ~
   }
 });
 
+test("checkWebAccessSettingsDenial (Codex sol-high PR #417 review, P1): state.appendEvent THROWING (e.g. a SQLite write failure) never escapes the function — the deny warning is still logged before the throw, a second failure note is logged, and the call returns normally, never blocking either driver's startup", () => {
+  const logs: string[] = [];
+  assert.doesNotThrow(() => {
+    checkWebAccessSettingsDenial(
+      { webAccess: { enabled: true } },
+      {
+        appendEvent: () => {
+          throw new Error("SQLITE_BUSY: database is locked");
+        },
+      },
+      (line) => logs.push(line),
+      { homedir: () => "/home/op", readFile: () => JSON.stringify({ permissions: { deny: ["WebSearch"] } }) },
+    );
+  });
+  assert.ok(
+    logs.some((line) => line.includes("WebSearch")),
+    "the deny warning is logged BEFORE the throwing appendEvent call",
+  );
+  assert.ok(
+    logs.some((line) => line.includes("web-access denial check failed") && line.includes("non-fatal")),
+    "the containment catch's own note is also logged",
+  );
+});
+
 // ── #129: `--milestone NAME` shortcut — scope + stop in one flag ───────────────────────────────
 
 test("parseMilestoneFlag: parses --milestone NAME, tolerates the full argv, leaves everything else in `rest`", () => {

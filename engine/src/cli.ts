@@ -824,38 +824,52 @@ export function checkWebAccessSettingsDenial(
   deps: WebAccessDenialCheckDeps = {},
 ): void {
   if (!cfg.webAccess.enabled) return;
-  const readFile = deps.readFile ?? ((path: string) => readFileSync(path, "utf8"));
-  const configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join((deps.homedir ?? homedir)(), ".claude");
-  const settingsPath = join(configDir, "settings.json");
-  let raw: string;
+  // Codex sol-high PR #417 review, P1: the ENTIRE body below — including `homedir()`'s own
+  // resolution and the final `state.appendEvent` — must be inside ONE best-effort containment,
+  // not just the two file-read/parse steps. Reproduced: a SQLite write failure on the
+  // (uncaught) `appendEvent` call after a real detected deny would THROW and abort BOTH
+  // drivers' startup, violating this function's own "never blocks startup" contract — the
+  // same contract normalizeUnplacedBoardItems (just above) already honors end to end. A
+  // detection feature must never itself become a NEW startup-failure mode.
   try {
-    raw = readFile(settingsPath);
-  } catch (error) {
-    log(`[sapwood:startup] no operator settings readable at ${settingsPath}; web-access denial check skipped: ${String(error)}`);
-    return;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    log(
-      `[sapwood:startup] operator settings at ${settingsPath} could not be parsed as JSON; web-access denial check skipped: ${String(error)}`,
+    const readFile = deps.readFile ?? ((path: string) => readFileSync(path, "utf8"));
+    const configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join((deps.homedir ?? homedir)(), ".claude");
+    const settingsPath = join(configDir, "settings.json");
+    let raw: string;
+    try {
+      raw = readFile(settingsPath);
+    } catch (error) {
+      log(`[sapwood:startup] no operator settings readable at ${settingsPath}; web-access denial check skipped: ${String(error)}`);
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      log(
+        `[sapwood:startup] operator settings at ${settingsPath} could not be parsed as JSON; web-access denial check skipped: ${String(error)}`,
+      );
+      return;
+    }
+    const deny = (parsed as { permissions?: { deny?: unknown } } | null)?.permissions?.deny;
+    if (!Array.isArray(deny)) return;
+    const denied = deny.filter(
+      (entry): entry is string =>
+        typeof entry === "string" && WEB_ACCESS_TOOLS.some((tool) => entry === tool || entry.startsWith(`${tool}(`)),
     );
-    return;
+    if (denied.length === 0) return;
+    log(
+      `[sapwood:startup] operator settings (${settingsPath}) deny ${denied.join(", ")} — the #410 web-access grant to ` +
+        "architect/po-align/po-triage will be silently stripped from these sessions (zero permission-denial signal); " +
+        "a granted session should abstain, per its prompt's first-class-abstention wording, rather than guess when the tool turns out absent",
+    );
+    state.appendEvent("web-access-denied-by-operator-settings", { settingsPath, denied });
+  } catch (error) {
+    // Best-effort, same stance as every other startup-pass check in this function's
+    // neighborhood: a failure HERE (e.g. state.appendEvent throwing on a SQLite write error)
+    // is logged and swallowed, never allowed to propagate out and abort engine startup.
+    log(`[sapwood:startup] web-access denial check failed (non-fatal, startup continues): ${String(error)}`);
   }
-  const deny = (parsed as { permissions?: { deny?: unknown } } | null)?.permissions?.deny;
-  if (!Array.isArray(deny)) return;
-  const denied = deny.filter(
-    (entry): entry is string =>
-      typeof entry === "string" && WEB_ACCESS_TOOLS.some((tool) => entry === tool || entry.startsWith(`${tool}(`)),
-  );
-  if (denied.length === 0) return;
-  log(
-    `[sapwood:startup] operator settings (${settingsPath}) deny ${denied.join(", ")} — the #410 web-access grant to ` +
-      "architect/po-align/po-triage will be silently stripped from these sessions (zero permission-denial signal); " +
-      "a granted session should abstain, per its prompt's first-class-abstention wording, rather than guess when the tool turns out absent",
-  );
-  state.appendEvent("web-access-denied-by-operator-settings", { settingsPath, denied });
 }
 
 /** #76: the exit log line naming whichever stop condition fired — e.g. "sapwood run: stop

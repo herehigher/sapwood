@@ -983,10 +983,15 @@ export class RoleRunner {
 
       const jsonl = this.readJsonl(jsonlPath);
       // #410: audit by REUSING worker.ts's existing egress scanner (no second scanner) — reads
-      // this SAME jsonl for WebFetch/WebSearch tool_use blocks (structurally a no-op for any
-      // role that doesn't hold either tool, since none can emit that block at all) and emits the
-      // identical `egress-suspect` ledger event worker.ts's own Bash tripwire uses. Contained:
-      // best-effort, never throws, never affects the session's own outcome.
+      // this SAME jsonl for WebFetch/WebSearch tool_use blocks and emits the identical
+      // `egress-suspect` ledger event worker.ts's own Bash tripwire uses. Codex sol-high PR #417
+      // review, P2-b (corrects an earlier, inaccurate version of this comment): this is
+      // content-driven, not role-gated — scanEgressSuspects hits on ANY WebFetch/WebSearch
+      // tool_use block in this jsonl regardless of whether opts.allowedTools actually granted
+      // the tool (see scanEgressSuspects' own doc, worker.ts). For an UNGRANTED role
+      // (plan-reviewer, etc.) a hit here would mean the session attempted a tool call the CLI's
+      // permission layer then denied — evidence worth surfacing, not a case this scan silently
+      // drops. Contained: best-effort, never throws, never affects the session's own outcome.
       this.recordEgressSuspects(name, jsonl);
       // #302 review (Codex P1, cost cap): parse once via the null-honest variant — `costUsd`
       // keeps its 0-fallback shape for spend accounting, `costKnown` records whether a cost

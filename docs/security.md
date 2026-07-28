@@ -175,10 +175,16 @@ the worker's own Bash lexical tripwire already calls — now ALSO recognizes `We
 executables are legitimate, these two tool names ARE the entire sanctioned peripheral-egress
 channel). `RoleRunner.run()` calls it on every session's own completed jsonl and emits the
 identical `egress-suspect` ledger event kind the worker's tripwire uses — `round-artifact.ts`'s
-existing assembler needs no changes to surface either kind. This is a no-op for any role that
-never holds either tool (a worker leg, or a peripheral role the grant doesn't cover) — the
-scanner finds no matching `tool_use` block to begin with, structurally, not by a role check
-inside the scanner itself.
+existing assembler needs no changes to surface either kind. This flagging is deliberately
+**content-driven, not role-gated**: `--allowedTools`/`--disallowedTools` is a noise-reduction
+permission layer, not a schema removal (see [Worker denylist vs. peripheral allowlist](#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry)
+below), so a session without the grant — a worker leg, or a peripheral role the #410 grant
+doesn't cover — can still EMIT a `WebFetch`/`WebSearch` tool_use block; the CLI's own
+permission layer denies it at the paired `tool_result`, which this scanner does not read. A hit
+therefore records an attempt, never proof of execution — the same "evidence, not a verdict"
+stance the Bash tripwire above already takes. The engine deliberately keeps this unconditional
+for every session kind: an attempted egress through a tool a session was never granted is
+exactly what a post-hoc tripwire should surface, not suppress.
 
 ## Worker denylist vs. peripheral allowlist: deliberate asymmetry
 
@@ -373,11 +379,14 @@ the engine (`plan-review.ts`), never by a tool call of its own.
 ### The forge MCP proxy's role x tool matrix (#234, #244)
 
 `RoleRunner` peripheral sessions and worker legs can be attached (config-gated, shadow-mode-first
-— see [`configuration.md`](configuration.md#roles); it runs live, `shadow: false`, under this
-repo's own `sapwood.dogfood.yaml`) to a per-session, revocable, read-only forge MCP proxy that
-returns sanitized forge data verbatim, with no gate/verdict logic of its own (fresh-head
-counting, identity filtering, trigger-pin checks stay
-in `reviewer.ts`/`merge-driver.ts`). Each session's role scopes it to a fixed subset of the tool
+— see [`configuration.md`](configuration.md#roles)) to a per-session, revocable, read-only forge
+MCP proxy that returns sanitized forge data verbatim, with no gate/verdict logic of its own
+(fresh-head counting, identity filtering, trigger-pin checks stay
+in `reviewer.ts`/`merge-driver.ts`). The live (state 3: `enabled: true, shadow: false`)
+production-attachment path is real code, exercised by tests — not merely
+constructible-but-inert — but whether a given deployment's OWN config flips it live is that
+deployment's choice; this shipped tree's own default config keeps the proxy off
+(`enabled: false`). Each session's role scopes it to a fixed subset of the tool
 algebra (`proxy/access.ts`'s `PROXY_ROLE_TOOL_MATRIX`), enforced server-side in the proxy itself
 (the CLI's own `--allowedTools` widening is noise reduction only, same stance as every other
 allow/deny pair on this page) — a role absent from the table below is granted **no tool at all**

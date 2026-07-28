@@ -798,14 +798,13 @@ test("#410: a peripheral session's WebFetch/WebSearch tool_use calls produce the
   }
 });
 
-test("#410: a role session that never holds WebFetch/WebSearch (e.g. plan-reviewer, the base ROLE_ALLOWED_TOOLS grant) emits NO egress-suspect event even if its transcript somehow named one — structurally a no-op, not a role-id check inside the scanner", async () => {
+test("#410 (Codex sol-high PR #417 review, P2-b): a role session WITHOUT the WebFetch/WebSearch grant (e.g. plan-reviewer, the base ROLE_ALLOWED_TOOLS scope) STILL produces an egress-suspect event for a WebFetch tool_use block in its transcript — the scanner is jsonl-CONTENT-driven, never role-id-gated; a session's `--allowedTools` is a noise-reduction permission layer (worker.ts's own header doc), not a schema removal, so an ungranted session can still ATTEMPT the call (permission-denied at the paired tool_result, which this scanner never reads) and this tripwire correctly flags that attempt", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
-    // A transcript naming a WebFetch call is itself unrealistic for a session without the tool
-    // (the CLI wouldn't honor the call) — this proves the scanner has no OTHER gate suppressing
-    // it either: the same jsonl that produces a hit for a granted role still produces a hit here,
-    // audit and grant are independent layers, and it's the CALLER'S allowedTools that determines
-    // whether the tool could ever really appear.
+    // Not a synthetic edge case: a real CLI session without the grant CAN emit exactly this
+    // shape (the model attempts the call, the CLI permission-denies it in the tool_use's own
+    // paired tool_result) — this stub reproduces that transcript shape directly rather than
+    // asserting anything about whether the real call would have "worked".
     const stream = [
       JSON.stringify({
         type: "assistant",
@@ -822,7 +821,7 @@ test("#410: a role session that never holds WebFetch/WebSearch (e.g. plan-review
     assert.equal(
       events.filter((e) => e.kind === "egress-suspect").length,
       1,
-      "the scanner is jsonl-content-driven, not role-id-gated — it still recognizes the block; the REAL boundary is that a real CLI session without the grant could never have produced this jsonl in the first place",
+      "the scanner is jsonl-content-driven, not role-id-gated — an ungranted role's attempted call is flagged exactly like a granted one's, by design (PM ruling: keep this unconditional)",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

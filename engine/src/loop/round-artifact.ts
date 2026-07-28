@@ -505,7 +505,18 @@ export function renderRoundArtifactMarkdown(artifact: RoundArtifact): string {
     ]),
     section(
       "Egress suspects (informational)",
-      artifact.egressSuspects.map((s) => `- #${s.issue} (${s.worker}): ${s.executable} — ${s.snippet}`),
+      // Codex sol-high PR #417 review, P2-a: a role session's own egress-suspect events
+      // (peripheral.ts's #410 audit — architect/po-align/po-triage's WebFetch/WebSearch calls)
+      // carry `issue: 0`, the SAME round-level sentinel every other role-session record uses
+      // (RetriedSession.issue's own doc) — never a real issue number. `#0` would render a
+      // nonexistent issue reference; render these as a role-session line instead, keyed off
+      // `worker` (the session's own lane/sentinel name, e.g. "role-architect-1a2b3c4d") rather
+      // than a fabricated issue anchor. Worker-leg events (a real issue number) are unaffected.
+      artifact.egressSuspects.map((s) =>
+        s.issue === 0
+          ? `- role session ${s.worker}: ${s.executable} — ${s.snippet}`
+          : `- #${s.issue} (${s.worker}): ${s.executable} — ${s.snippet}`,
+      ),
     ),
     section("Handoffs", [`Soft-budget handoffs: ${artifact.handoffs}`]),
     section(

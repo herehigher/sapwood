@@ -254,14 +254,26 @@ export interface EgressSuspectScan {
  *  - **Bash** (#304, worker legs): only the executable position is considered (after leading
  *    assignments plus ordinary `env`/`sudo` prefixes) against the CALLER-SUPPLIED
  *    `suspectCommands` list; suspect names appearing in arguments are intentionally ignored.
- *  - **WebFetch/WebSearch** (#410, peripheral role sessions granted the web-access tools):
- *    UNCONDITIONALLY a hit — every call is journalled, not just a configured subset, because
- *    these two tool names ARE the entire sanctioned peripheral-egress channel (unlike Bash,
- *    where most executables are legitimate worker activity and only a configured suspect list is
- *    worth flagging). Structural, not lexical: a worker leg never holds either tool (peripheral.ts
- *    grants them to `architect`/`po-align`/`po-triage` only), so this branch is a no-op there.
- *    `executable` carries the literal tool name; `snippet` is `WebFetch`'s `url` or `WebSearch`'s
- *    `query`, truncated the same way a Bash snippet is.
+ *  - **WebFetch/WebSearch** (#410): UNCONDITIONALLY a hit — every call is journalled, not just
+ *    a configured subset, because these two tool names ARE the entire sanctioned
+ *    peripheral-egress channel (unlike Bash, where most executables are legitimate worker
+ *    activity and only a configured suspect list is worth flagging). `executable` carries the
+ *    literal tool name; `snippet` is `WebFetch`'s `url` or `WebSearch`'s `query`, truncated the
+ *    same way a Bash snippet is.
+ *
+ *    Codex sol-high PR #417 review, P2-b (corrects an earlier, inaccurate version of this doc):
+ *    this branch is **content-driven, not role-gated** — it hits on ANY `WebFetch`/`WebSearch`
+ *    `tool_use` block this jsonl contains, worker leg included. A worker leg's own
+ *    `WORKER_ALLOWED_TOOLS` never lists either tool, but `--allowedTools`/`--disallowedTools`
+ *    is a noise-reduction PERMISSION layer, not a schema removal (this module's own header
+ *    doc) — the model can still EMIT a `WebFetch`/`WebSearch` `tool_use` block, which the CLI
+ *    then permission-denies at the paired `tool_result` (never scanned here). A hit therefore
+ *    means "this session attempted the call," never "the call executed" — exactly the same
+ *    "evidence, not a verdict" stance the Bash branch above already takes (a Bash hit doesn't
+ *    prove the command ran either, e.g. under guard denial). PM ruling (#410 amendment
+ *    follow-up): keep this UNCONDITIONAL for worker legs too — an attempted egress through a
+ *    tool the leg was never granted is exactly what a post-hoc tripwire should surface, not
+ *    suppress.
  *
  *  Same tolerance as the sibling parsers: malformed/partial lines and malformed blocks are
  *  skipped silently. Collection stops at the engine-owned per-leg cap, bounding both evidence and
