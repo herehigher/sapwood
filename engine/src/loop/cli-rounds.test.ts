@@ -59,6 +59,7 @@ class FakeForge implements IForge {
   issueLabels: Record<number, string[]> = {};
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
   unplaced = { issues: [] as number[], skipped: 0 };
+  absentIssues: number[] = [];
   boardCalls: string[] = [];
   reconcileData: StartupReconcileData = { placements: [], openPrs: [] };
   reconcileReads = 0;
@@ -70,6 +71,10 @@ class FakeForge implements IForge {
   async listUnplacedIssues() {
     this.boardCalls.push("list-unplaced");
     return this.unplaced;
+  }
+  async listIssuesAbsentFromBoard() {
+    this.boardCalls.push("list-absent");
+    return this.absentIssues;
   }
   async readStartupReconcileData() {
     this.reconcileReads++;
@@ -185,7 +190,7 @@ test("sapwood run startup reconcile emits board/PR orphans without forge writes,
     });
     assert.equal(code, 0);
     assert.equal(forge.reconcileReads, 1);
-    assert.deepEqual(forge.boardCalls, ["list-unplaced"]);
+    assert.deepEqual(forge.boardCalls, ["list-unplaced", "list-absent"]);
     assert.equal(state.eventsSince("1970-01-01T00:00:00.000Z", ["orphan-detected"]).length, 2);
   } finally {
     state.close();
@@ -253,6 +258,12 @@ test("sapwood run (default driver): runEngine reaches runRounds via createDefaul
     const state = new State(":memory:");
     const forge = new FakeForge();
     forge.unplaced = { issues: [173], skipped: 0 };
+    // #415 review finding 3: the widened IForge wasn't reflected in this suite's FakeForge, so
+    // a broken production call site to listIssuesAbsentFromBoard would have silently exercised
+    // only the try/catch failure path (tsconfig excludes *.test.ts from typechecking). Set a
+    // non-empty absent set so the assertion below proves the #412 report actually flows through
+    // this REAL runEngine -> normalizeUnplacedBoardItems wiring, not just the unit-level fakes.
+    forge.absentIssues = [999];
     // #125: FakeForge is an intentionally empty board (this test is about the CLI's wiring to a
     // REAL RoleRunner, not the standby probe) — opt out explicitly so round 1 still opens
     // immediately, same as before #125.
@@ -303,6 +314,13 @@ test("sapwood run (default driver): runEngine reaches runRounds via createDefaul
     assert.equal(forge.reconcileReads, 1, "round driver reconciles exactly once per engine start");
     assert.deepEqual(state.eventsSince("2020-01-01T00:00:00Z", ["board-normalized"]), [
       { kind: "board-normalized", payload: { issue: 173, status: "backlog" } },
+    ]);
+    // #415 review finding 3: proves the #412 absent-issue report reaches State through the REAL
+    // production wiring (runEngine -> runRoundsEngine -> normalizeUnplacedBoardItems), not only
+    // through the narrower Pick<IForge, ...> fakes in cli.test.ts.
+    assert.ok(forge.boardCalls.includes("list-absent"), "the real startup path calls listIssuesAbsentFromBoard");
+    assert.deepEqual(state.eventsSince("2020-01-01T00:00:00Z", ["board-gap-detected"]), [
+      { kind: "board-gap-detected", payload: { total: 1, issues: [999] } },
     ]);
     const round = state.getRound(1)!;
     assert.equal(round.phase, "closed", "graceful stop still let the in-flight round finish (harvest included)");

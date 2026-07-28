@@ -98,6 +98,9 @@ class FakeForge implements IForge {
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
+  async listIssuesAbsentFromBoard() {
+    return [];
+  }
   async readStartupReconcileData() {
     this.reads.push("readStartupReconcileData");
     if (this.failBoardRead) throw new Error("board read exploded");

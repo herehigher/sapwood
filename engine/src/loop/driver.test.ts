@@ -14,6 +14,9 @@ class FakeForge implements IForge {
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
+  async listIssuesAbsentFromBoard() {
+    return [];
+  }
   async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
