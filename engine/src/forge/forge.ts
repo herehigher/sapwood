@@ -33,6 +33,31 @@ export function stampEngineComment(body: string): string {
 
 export type OwnerKind = "user" | "org";
 
+/** #377 (gate② round 4): what a branch read on the forge actually established.
+ *  `absent` is GitHub's own answer (404); `unknown` means the CHECK failed and nothing was
+ *  established at all. See GithubForge.probePushedBranch. */
+export type BranchProbe = "present" | "absent" | "unknown";
+
+/** Did this `gh` failure carry GitHub's own 404 status?
+ *
+ *  The status code is the provider-authoritative signal; `gh` surfaces it in its error text
+ *  (`gh: Not Found (HTTP 404)`), which node's execFile rejection carries on `stderr` and in
+ *  `message`. There is no richer channel available here — `gh api` exits 1 for every HTTP error
+ *  and for network failure alike — so this reads the status token and nothing else: no "not
+ *  found" prose matching, and `\b404\b` alone is deliberately NOT accepted (a branch literally
+ *  named `404-error-handling` appears in gh's message for unrelated failures).
+ *
+ *  FAILURE DIRECTION, stated deliberately: this errs toward UNKNOWN. A real 404 whose wording we
+ *  fail to match costs at most MAX_INCONCLUSIVE_PR_PROBES deferred ticks before the lane settles
+ *  by the ordinary rules — bounded and mild. The opposite error (a network blip misread as
+ *  "absent") is the harm this exists to prevent: it settles a lane whose pushed branch never got
+ *  a PR, with no later probe to correct it. */
+function isHttpNotFound(e: unknown): boolean {
+  const err = e as { stderr?: unknown; message?: unknown };
+  const text = `${typeof err?.stderr === "string" ? err.stderr : ""}\n${typeof err?.message === "string" ? err.message : ""}`;
+  return /HTTP 404\b/.test(text);
+}
+
 export interface Issue {
   number: number;
   title: string;
@@ -798,18 +823,31 @@ export class GithubForge implements IForge {
   }
 
   async branchExists(branch: string): Promise<boolean> {
-    // Per-SEGMENT encoding: branch names routinely contain "/" (feat/x), which must survive as
-    // a path separator for GitHub's greedy branch route, while any other reserved character in
-    // a segment must not be able to reshape the API path (the branch name originates from a
-    // SESSION-written scratch file — treated as data, same stance as every other session-text
-    // input in this file). gh exits non-zero on a 404 (and on any network/auth failure) — both
-    // read as "not verifiably pushed", the fail direction the IForge doc requires.
+    // Unchanged contract (retro.ts depends on it): ANY failure — 404, network, auth — reads as
+    // "not verifiably pushed", so a PR is never opened against an unverified head. Implemented
+    // on top of the tri-state probe below so the two can't drift; "unknown" collapses to false
+    // exactly as it always did.
+    return (await this.probePushedBranch(branch)) === "present";
+  }
+
+  /** #377 (gate② round 4): branchExists' answer, WITHOUT the lossy collapse — the lane-association
+   *  path needs to tell "GitHub says this branch does not exist" apart from "the check itself
+   *  failed". Collapsing the two re-created the round-3 harm one call earlier: a transient blip
+   *  read as `false` -> fell through to the marker scan -> a CONCLUSIVE "no PR" -> the conductor
+   *  settled a lane whose pushed branch never got its PR (see LanePrOutcome).
+   *
+   *  Per-SEGMENT encoding: branch names routinely contain "/" (feat/x), which must survive as a
+   *  path separator for GitHub's greedy branch route, while any other reserved character in a
+   *  segment must not be able to reshape the API path (the branch name originates from a
+   *  SESSION-written scratch file — treated as data, same stance as every other session-text
+   *  input in this file). */
+  async probePushedBranch(branch: string): Promise<BranchProbe> {
     const path = branch.split("/").map(encodeURIComponent).join("/");
     try {
       await this.gh(["api", `repos/${this.cfg.board.owner}/${this.repo()}/branches/${path}`]);
-      return true;
-    } catch {
-      return false;
+      return "present";
+    } catch (e) {
+      return isHttpNotFound(e) ? "absent" : "unknown";
     }
   }
 
@@ -1927,7 +1965,9 @@ export interface LanePrForge {
   listOpenPrBodies(): Promise<OpenPrBody[]>;
   updatePRBody(pr: number, body: string): Promise<void>;
   openPR(branch: string, title: string, body: string): Promise<number>;
-  branchExists(branch: string): Promise<boolean>;
+  /** #377 round 4: the TRI-STATE read, not IForge's lossy `branchExists` boolean — a check that
+   *  failed must not read as "nothing was pushed" on this path. */
+  probePushedBranch(branch: string): Promise<BranchProbe>;
   getIssueMeta(issue: number): Promise<Pick<IssueMeta, "title">>;
 }
 
@@ -2032,13 +2072,22 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
           `(another lane's marker, contested markers, or several candidates) — not adopting any`,
       );
     }
-    if (lane.mayOpenPr && (await forge.branchExists(lane.branch))) {
-      try {
-        const title = await forge.getIssueMeta(lane.issue).then((m) => m.title);
-        const opened = await forge.openPR(lane.branch, title, engineAuthoredPrBody(lane.name, lane.issue, lane.branch));
-        return { pr: opened, inconclusive: false };
-      } catch (e) {
-        return unknown(`could not open a PR for pushed branch ${lane.branch} (${String(e)}) — branch preserved, retried later`);
+    if (lane.mayOpenPr) {
+      // A branch check that FAILED is not a branch that is ABSENT (gate② round 4): only GitHub's
+      // own 404 is evidence that nothing was pushed. Anything else leaves the answer unknown, so
+      // the lane is retried rather than settled with its pushed work unPRed.
+      const pushed = await forge.probePushedBranch(lane.branch);
+      if (pushed === "unknown") {
+        return unknown(`could not verify whether ${lane.branch} is pushed — association UNKNOWN, retried later`);
+      }
+      if (pushed === "present") {
+        try {
+          const title = await forge.getIssueMeta(lane.issue).then((m) => m.title);
+          const opened = await forge.openPR(lane.branch, title, engineAuthoredPrBody(lane.name, lane.issue, lane.branch));
+          return { pr: opened, inconclusive: false };
+        } catch (e) {
+          return unknown(`could not open a PR for pushed branch ${lane.branch} (${String(e)}) — branch preserved, retried later`);
+        }
       }
     }
   }

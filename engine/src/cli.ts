@@ -1016,7 +1016,7 @@ function buildLanePrAssociator(forge: IForge, log: (message: string) => void): (
     typeof candidate.listOpenPrBodies === "function" &&
     typeof candidate.updatePRBody === "function" &&
     typeof candidate.openPR === "function" &&
-    typeof candidate.branchExists === "function" &&
+    typeof candidate.probePushedBranch === "function" &&
     typeof candidate.getIssueMeta === "function";
   // No branch-keyed forge surface -> a CONCLUSIVE "no association" (nothing failed, so
   // nothing to retry) rather than an inconclusive one that would defer every lane forever.

@@ -10,7 +10,15 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ConfigSchema, loadConfig, type SapwoodConfig } from "../config/config.js";
-import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import {
+  associateLanePr,
+  type CommitInfo,
+  type IForge,
+  type Issue,
+  type PRReviewData,
+  type PRStatus,
+  readPrOwner,
+} from "../forge/forge.js";
 import { type DriveOutcome, MergeDriver } from "../roles/merge-driver.js";
 import { CODEX_REVIEWER_LOGINS, CodexReviewer } from "../roles/reviewer.js";
 import { WorkerSupervisor } from "../roles/worker.js";
@@ -767,6 +775,88 @@ test("tick reclaim: DEAD lane no-PR requeue succeeding on the first try leaves n
   assert.deepEqual(forge.boardSet, [[4, "ready"]]);
   assert.equal(st.pendingRollbacks().length, 0);
   st.close();
+});
+
+// ── #377 gate② round 4 (P2): the F15 fixture END-TO-END ─────────────────────────────────────
+// The unit fixture calls associateLanePr() directly and the probe tests stub `lanePr`, so a
+// WIRING regression between them — probe not reading the real branch, mayOpenPr wrong, the
+// conductor not persisting the association — would leave every one of those green. This runs the
+// live 2026-07-24 scenario through the REAL WorkerSupervisor.probe (real worktree HEAD, real
+// terminal sentinel) into the REAL associateLanePr and out through the conductor's reclaim.
+test("#377 F15 end-to-end: real probe -> real associateLanePr -> conductor reclaim lands on the lane's OWN branch PR, never the prose PR", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-f15-"));
+  try {
+    const stateDir = join(dir, "state");
+    const worktreeRoot = join(dir, "worktrees");
+    const lane = "lane-294-a1b2c3d4";
+    const branch = "feat/294-hold-visibility-events";
+    mkdirSync(stateDir, { recursive: true });
+
+    // The lane's real worktree, exactly as the `claude` CLI leaves one: `.git` is a FILE
+    // pointing at the parent repo's per-worktree gitdir, whose HEAD names the lane's branch.
+    const gitDir = join(dir, "parent-git", "worktrees", lane);
+    mkdirSync(gitDir, { recursive: true });
+    mkdirSync(join(worktreeRoot, lane), { recursive: true });
+    writeFileSync(join(worktreeRoot, lane, ".git"), `gitdir: ${gitDir}\n`);
+    writeFileSync(join(gitDir, "HEAD"), `ref: refs/heads/${branch}\n`);
+    // Terminal sentinel: the worker finished (so mayOpenPr is derived, not stubbed).
+    writeFileSync(join(stateDir, `${lane}.done.json`), JSON.stringify({ name: lane, issue: 294, total_cost_usd: 0 }));
+
+    // PR #368's analog: a retro digest whose PROSE cites the issue, on some OTHER branch, with
+    // no owner marker. Under the pre-#377 prose match this is what the lane adopted.
+    const prosePr = { number: 368, body: "Round 7 retro digest — covers #294 and #295", branch: "retro/round-7" };
+    const openPrs = [prosePr];
+    const laneForge = {
+      async listOpenPrsForBranch(b: string) {
+        return openPrs.filter((pr) => pr.branch === b).map((pr) => ({ number: pr.number, body: pr.body }));
+      },
+      async listOpenPrBodies() {
+        return openPrs.map((pr) => ({ number: pr.number, body: pr.body }));
+      },
+      async updatePRBody(n: number, body: string) {
+        openPrs.find((pr) => pr.number === n)!.body = body;
+      },
+      async openPR(b: string, _title: string, body: string) {
+        openPrs.push({ number: 372, body, branch: b });
+        return 372;
+      },
+      async probePushedBranch(b: string): Promise<"present" | "absent" | "unknown"> {
+        return b === branch ? "present" : "absent";
+      },
+      async getIssueMeta(issue: number) {
+        return { title: `issue ${issue} title` };
+      },
+    };
+
+    const supervisor = new WorkerSupervisor({
+      cfg: mkCfg(),
+      stateDir,
+      worktreeRoot,
+      claudeBin: "claude",
+      heartbeatMs: 60_000,
+      // The REAL association function — the only seam between probe and the forge.
+      lanePr: (l) => associateLanePr(laneForge, l),
+    });
+
+    const st = new State(":memory:");
+    const forge = new FakeForge();
+    seedRunning(st, lane, 294);
+    const r = await tick({ forge, state: st, supervisor, cfg: mkCfg() });
+
+    const settled = st.getWorker(lane);
+    assert.equal(settled?.state, "driving", "the lane was rescued to driving, not escalated as no-PR");
+    assert.equal(settled?.pr, 372, "the engine opened and adopted the lane's OWN branch PR");
+    assert.notEqual(settled?.pr, 368, "never the PR that merely cites #294 in prose");
+    assert.deepEqual(r.reclaimed, [{ kind: "done", worker: lane, issue: 294, next: "DRIVING", costUsd: 0, modelUsage: [] }]);
+    assert.equal(prosePr.body, "Round 7 retro digest — covers #294 and #295", "the unrelated PR is never touched");
+    // The PR the engine authored carries the structural marker naming THIS lane.
+    assert.deepEqual(readPrOwner(openPrs.find((pr) => pr.number === 372)!.body), { lane, issue: 294 });
+    assert.deepEqual(forge.labelsAdded, [], "no needs-human escalation");
+    st.close();
+    supervisor.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("#377 gate② round 3 (P1): a DONE lane whose PR association is UNKNOWN is DEFERRED, not escalated — and settles normally once the forge answers", async () => {

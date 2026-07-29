@@ -2826,9 +2826,9 @@ function fakeLanePrForge(prs: { number: number; body: string; branch?: string }[
       prs.push({ number, body, branch });
       return number;
     },
-    async branchExists(branch: string) {
-      calls.push({ kind: "branchExists", args: [branch] });
-      return (opts.branches ?? []).includes(branch);
+    async probePushedBranch(branch: string): Promise<"present" | "absent" | "unknown"> {
+      calls.push({ kind: "probePushedBranch", args: [branch] });
+      return (opts.branches ?? []).includes(branch) ? "present" : "absent";
     },
     async getIssueMeta(issue: number) {
       calls.push({ kind: "getIssueMeta", args: [issue] });
@@ -3097,4 +3097,79 @@ test("#379 GithubForge.ensureRepoLabels: lists the configured repo's labels once
       "In this round's dispatch-eligible pool",
     ],
   ]);
+});
+
+// ── #377 gate② round 4 (P1): a branch check that FAILED is not a branch that is ABSENT ───────
+// branchExists collapses 404/network/auth into `false` by design (retro's fail-closed contract).
+// On the lane-association path that collapse re-created the round-3 harm one call earlier: a
+// transient blip read as "not pushed", fell through to the marker scan, and returned a
+// CONCLUSIVE null — settling the lane with its pushed branch still unPRed.
+
+test("probePushedBranch: a genuine 404 is ABSENT — GitHub's own status, surfaced by gh, is the signal", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+    throw new Error("Command failed: gh api repos/o/r/branches/nope\ngh: Not Found (HTTP 404)\n");
+  };
+  assert.equal(await forge.probePushedBranch("nope"), "absent");
+  assert.equal(await forge.branchExists("nope"), false, "branchExists' own fail-closed contract is unchanged");
+});
+
+test("probePushedBranch: anything WITHOUT a 404 status is UNKNOWN — network, auth, 5xx, timeout", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  for (const message of [
+    "getaddrinfo ENOTFOUND api.github.com",
+    "gh: Bad credentials (HTTP 401)",
+    "gh: Must have admin rights (HTTP 403)",
+    "gh: Server Error (HTTP 502)",
+    "Command failed: gh api ... \nsocket hang up",
+  ]) {
+    (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+      throw new Error(message);
+    };
+    assert.equal(await forge.probePushedBranch("feat/x"), "unknown", message);
+    // The legacy boolean still reads every one of these as "not verifiably pushed" — retro.ts
+    // depends on that fail direction and #377 does not change it.
+    assert.equal(await forge.branchExists("feat/x"), false, message);
+  }
+});
+
+test("probePushedBranch: a 404 mentioned in an unrelated position still counts only via the HTTP status token", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+    throw new Error("gh: could not resolve branch 404-error-handling (HTTP 500)");
+  };
+  assert.equal(await forge.probePushedBranch("404-error-handling"), "unknown", "a branch NAMED 404 is not a 404 status");
+});
+
+test("probePushedBranch: present on success, and issues the same per-segment-encoded read branchExists does", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return "{}";
+  };
+  assert.equal(await forge.probePushedBranch("feat/111-pr-b#x"), "present");
+  assert.deepEqual(seen[0], ["api", "repos/o/r/branches/feat/111-pr-b%23x"]);
+});
+
+test("associateLanePr (gate② round 4, P1): an UNKNOWN branch check is inconclusive — never a conclusive 'no PR' that settles the lane", async () => {
+  const forge = fakeLanePrForge([{ number: 368, body: "retro digest — covers #294" }], { branches: ["feat/294-hold"] });
+  forge.probePushedBranch = async () => "unknown";
+  const logs: string[] = [];
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", mayOpenPr: true }, (line) =>
+    logs.push(line),
+  );
+  assert.deepEqual(out, { pr: null, inconclusive: true });
+  assert.equal(forge.calls.filter((c) => c.kind === "openPR").length, 0, "never opened against an unverified head");
+  assert.ok(logs.some((l) => l.includes("feat/294-hold")));
+});
+
+test("associateLanePr (gate② round 4, P1): an ABSENT branch stays CONCLUSIVE — nothing was pushed, so there is nothing to retry", async () => {
+  const forge = fakeLanePrForge([], { branches: [] });
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", mayOpenPr: true });
+  assert.deepEqual(out, { pr: null, inconclusive: false });
 });
