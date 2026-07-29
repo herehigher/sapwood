@@ -194,7 +194,15 @@ false approval from one source never clears CI, human labels, or threads).
    it can never match a configured `{name, app}` pair) — a `ci.requiredChecks`-specific
    requirement, not a gate①-wide one. The Status API has no SKIPPED/NEUTRAL concept
    for the closed hole to reappear through, and rejecting it gate①-wide would
-   permanently wedge every Status-API CI repo. #401
+   permanently wedge every Status-API CI repo — the F26 class #401 exists to remove,
+   and something #401's own AC forbids the fix from doing silently. **Readjudicated,
+   not deviated:** PR #422's review read the retained legacy path as a third
+   adjudication direction outside #401's two-way AC, twice. The repo owner ruled on
+   2026-07-29 (PR #422, supervising session): dispute ACCEPTED, scope call upheld —
+   #401's "SUCCESS-only" requirement is scoped to CHECKRUN CONCLUSIONS, the legacy
+   status-context path is unchanged, and the strict app-bound boundary remains the
+   opt-in `ci.requiredChecks` chain. Recorded here because that ruling is durable
+   knowledge; the PR thread is only where it happened. #401
    narrowed that existing predicate rather than promoting `requiredChecksSatisfied`
    to the merge gate, because this function is fail-closed on an empty
    `ci.requiredChecks` (the default) and promoting it would have wedged every repo

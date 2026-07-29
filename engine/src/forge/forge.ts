@@ -2068,8 +2068,13 @@ export function parsePRStatus(json: string): PRStatus {
   // the stance review/ci-evidence.ts's requiredChecksSatisfied takes on the engine-agent path,
   // now applied gate①-wide.
   //
-  // The legacy `state === "SUCCESS"` fallback below is DELIBERATELY KEPT (#422 review, P1) and is
-  // NOT a third adjudication path: requiredChecksSatisfied rejects a legacy commit StatusContext
+  // The legacy `state === "SUCCESS"` fallback below is DELIBERATELY KEPT and is READJUDICATED,
+  // not a documented deviation: #401's AC named two directions ("conclusion === SUCCESS only" or
+  // app-bound evidence), and PR #422's review twice read the retained legacy path as a third one.
+  // The repo owner adjudicated it on 2026-07-29 (PR #422, supervising session): dispute ACCEPTED,
+  // the AC's SUCCESS-only requirement is scoped to CHECKRUN CONCLUSIONS, and the legacy
+  // status-context path stays. Reasoning upheld there, and why it is not a third path:
+  // requiredChecksSatisfied rejects a legacy commit StatusContext
   // for a reason that is specific to `ci.requiredChecks` — a status context carries no check
   // suite, so its owning App cannot be verified against a configured `{name, app}` pair
   // (docs/security.md "CI execution evidence for engine-agent review" scopes that rejection to

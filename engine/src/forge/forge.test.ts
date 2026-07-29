@@ -1366,8 +1366,11 @@ test("parsePRStatus (#401): ciGreen conclusion truth table — only SUCCESS is g
   assert.equal(status("SKIPPED").ciRed, false);
   assert.equal(status("NEUTRAL").ciRed, false);
 
-  // Legacy commit StatusContext: state SUCCESS is STILL green (#422 review P1 — deliberate, not
-  // an oversight). requiredChecksSatisfied rejects status contexts because their owning App can't
+  // Legacy commit StatusContext: state SUCCESS is STILL green — deliberate, not an oversight, and
+  // READJUDICATED: PR #422's review read it as a third direction outside #401's two-way AC; the
+  // repo owner ruled 2026-07-29 that "SUCCESS-only" is scoped to CheckRun CONCLUSIONS and this
+  // path stays (design #279 §4 records the ruling).
+  // requiredChecksSatisfied rejects status contexts because their owning App can't
   // be verified, a `ci.requiredChecks`-specific binding (docs/security.md); gate① is the general
   // CI signal for every reviewer mode, the Status API has no SKIPPED/NEUTRAL concept to exploit,
   // and rejecting it would permanently wedge every Status-API CI repo (Jenkins, Buildkite).
