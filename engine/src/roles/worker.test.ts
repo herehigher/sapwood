@@ -40,6 +40,7 @@ import {
   loadFixPromptTemplate,
   loadWorkerPromptTemplate,
   MAX_EGRESS_SUSPECTS_PER_LEG,
+  MAX_INCONCLUSIVE_PR_PROBES,
   parseAssistantUsageDeltas,
   parseCostUsd,
   parseCostUsdOrNull,
@@ -1155,7 +1156,7 @@ test("probe: #377 lanePr supplies prNumber and derives hasPr from it (the lane's
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      lanePr: async (lane) => (lane.issue === 8 ? 42 : null),
+      lanePr: async (lane) => ({ pr: lane.issue === 8 ? 42 : null, inconclusive: false }),
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -1179,7 +1180,7 @@ test("probe: #377 lanePr returning null -> hasPr false, prNumber undefined (fail
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      lanePr: async () => null,
+      lanePr: async () => ({ pr: null, inconclusive: false }),
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -1210,7 +1211,7 @@ test("probe: #377 passes the lane's OWN branch (read from its worktree git HEAD,
       claudeBin: bin,
       lanePr: async (lane) => {
         seen.push(lane);
-        return null;
+        return { pr: null, inconclusive: false };
       },
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
@@ -1255,7 +1256,7 @@ test("probe: #377 gate② P1 — a CONFIRMED-DEAD wrapper with no sentinel still
       claudeBin: mkStub(dir, FAST_STUB),
       lanePr: async (lane) => {
         seen.push(lane);
-        return null;
+        return { pr: null, inconclusive: false };
       },
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
@@ -1271,6 +1272,84 @@ test("probe: #377 gate② P1 — a CONFIRMED-DEAD wrapper with no sentinel still
     assert.equal(probe.failed, false);
     assert.equal(probe.handoff, false);
     assert.equal(seen.at(-1)!.mayOpenPr, true, "nothing is left alive to race the engine's own `gh pr create`");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probe: #377 gate② round 3 (P1) — an INCONCLUSIVE association (forge write failed) is surfaced, so the conductor defers instead of settling the lane as no-PR", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: mkStub(dir, FAST_STUB),
+      lanePr: async () => ({ pr: null, inconclusive: true }),
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+    });
+    writeFileSync(join(dir, "lane-blip.done.json"), JSON.stringify({ issue: 377 }));
+    const probe = await s.probe("lane-blip");
+    assert.equal(probe.hasPr, false);
+    assert.equal(probe.prNumber, undefined);
+    assert.equal(probe.prAssociationInconclusive, true, "UNKNOWN is not the same claim as 'this lane has no PR'");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probe: #377 gate② round 3 (P1) — the inconclusive deferral is BOUNDED: after the cap the lane settles by the ordinary no-PR rules", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const logs: string[] = [];
+    const s = new WorkerSupervisor({
+      cfg,
+      log: (line) => logs.push(line),
+      stateDir: dir,
+      claudeBin: mkStub(dir, FAST_STUB),
+      // A PERMANENTLY failing openPR (e.g. "No commits between main and <branch>") — not every
+      // write failure is transient, so an unbounded defer would hold the lane slot forever.
+      lanePr: async () => ({ pr: null, inconclusive: true }),
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+    });
+    writeFileSync(join(dir, "lane-wedge.done.json"), JSON.stringify({ issue: 377 }));
+    for (let i = 0; i < MAX_INCONCLUSIVE_PR_PROBES; i++) {
+      assert.equal((await s.probe("lane-wedge")).prAssociationInconclusive, true, `attempt ${i + 1} still retryable`);
+    }
+    const settled = await s.probe("lane-wedge");
+    assert.equal(settled.prAssociationInconclusive, undefined, "retry budget spent -> the lane settles rather than wedging a slot");
+    assert.equal(settled.hasPr, false);
+    assert.ok(logs.some((l) => l.includes("lane-wedge") && l.includes("PR association still unknown")));
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probe: #377 gate② round 3 (P1) — a CONCLUSIVE answer resets the retry budget (a later blip gets its own full allowance)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    let inconclusive = true;
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: mkStub(dir, FAST_STUB),
+      lanePr: async () => (inconclusive ? { pr: null, inconclusive: true } : { pr: 42, inconclusive: false }),
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+    });
+    writeFileSync(join(dir, "lane-blip2.done.json"), JSON.stringify({ issue: 377 }));
+    for (let i = 0; i < MAX_INCONCLUSIVE_PR_PROBES; i++) await s.probe("lane-blip2");
+    inconclusive = false;
+    assert.equal((await s.probe("lane-blip2")).prNumber, 42, "the forge recovered within the budget");
+    inconclusive = true;
+    assert.equal((await s.probe("lane-blip2")).prAssociationInconclusive, true, "budget reset by the conclusive answer");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

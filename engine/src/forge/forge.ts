@@ -1945,6 +1945,26 @@ export interface LanePrRequest {
   mayOpenPr: boolean;
 }
 
+/** What associateLanePr concluded. The two fields answer DIFFERENT questions, and the caller
+ *  (worker.ts's probe -> the conductor's reclaim) needs both:
+ *
+ *  - `pr`: the lane's PR, when one was conclusively identified.
+ *  - `inconclusive`: a forge WRITE this association depended on FAILED (openPR, or the marker
+ *    stamp), so the answer is UNKNOWN — not "this lane has no PR". That distinction is
+ *    load-bearing (gate② round 3, P1): `mayOpenPr` only ever becomes true on the very probe the
+ *    conductor SETTLES the lane from, so collapsing a transient 502 into a definitive `null`
+ *    escalated finished work to a human, or requeued a dead lane onto a FRESH worker while its
+ *    pushed branch sat there — with no later probe to correct either. An inconclusive answer is
+ *    retried on a later tick instead of being settled.
+ *
+ *  A definitive refusal (branch not pushed, another lane's marker, a contested body, not yet
+ *  allowed to open one) is `{ pr: null, inconclusive: false }` — a real answer about the world,
+ *  with nothing to retry. */
+export interface LanePrOutcome {
+  pr: number | null;
+  inconclusive: boolean;
+}
+
 /**
  * #377: resolve a worker lane to ITS OWN PR. Two structural signals, in order — the lane
  * worktree's branch (which PR was opened off the code this lane actually produced), then the
@@ -1968,18 +1988,26 @@ export interface LanePrRequest {
  * identified escalates to a human (conductor's ESCALATE_NOPR) — the F15 failure, by contrast,
  * silently drove a stranger's PR through review.
  *
- * A forge WRITE that fails (403, network) degrades visibly through `log` and yields null; it
- * never throws out of the caller's probe() and wedges the tick.
+ * A forge WRITE that fails (403, network) degrades visibly through `log` and yields an
+ * INCONCLUSIVE outcome — never a definitive "no PR" (see LanePrOutcome), and never a throw out
+ * of the caller's probe() that would wedge the tick.
  */
-export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, log?: (message: string) => void): Promise<number | null> {
-  const note = (message: string): null => {
-    log?.(`[sapwood:forge] lane ${lane.name}: ${message}`);
-    return null;
+export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, log?: (message: string) => void): Promise<LanePrOutcome> {
+  const say = (message: string): void => log?.(`[sapwood:forge] lane ${lane.name}: ${message}`);
+  /** A real answer about the world: nothing to retry. */
+  const refuse = (message: string): LanePrOutcome => {
+    say(message);
+    return { pr: null, inconclusive: false };
+  };
+  /** A forge write failed: the answer is UNKNOWN, so the caller must retry rather than settle. */
+  const unknown = (message: string): LanePrOutcome => {
+    say(message);
+    return { pr: null, inconclusive: true };
   };
   if (lane.branch) {
     const candidates = await forge.listOpenPrsForBranch(lane.branch);
     const owned = findLaneOwnedPr(candidates, lane.name, lane.issue);
-    if (owned != null) return owned;
+    if (owned != null) return { pr: owned, inconclusive: false };
     // Stamp-and-adopt is eligible ONLY for a branch with exactly ONE open PR that carries no
     // marker at all. Both halves of that are load-bearing (gate② P1s on PR #423):
     //  - ONE candidate: an unmarked PR sitting alongside a marker-bearing one used to qualify by
@@ -1994,12 +2022,12 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
       try {
         await forge.updatePRBody(pr.number, stampPrOwner(pr.body, lane.name, lane.issue));
       } catch (e) {
-        return note(`could not stamp the owner marker on PR #${pr.number} (${String(e)}) — no association this tick`);
+        return unknown(`could not stamp the owner marker on PR #${pr.number} (${String(e)}) — association UNKNOWN, retried later`);
       }
-      return pr.number;
+      return { pr: pr.number, inconclusive: false };
     }
     if (candidates.length > 0) {
-      return note(
+      return refuse(
         `branch ${lane.branch} has ${candidates.length} open PR(s), none claimable by this lane ` +
           `(another lane's marker, contested markers, or several candidates) — not adopting any`,
       );
@@ -2007,13 +2035,14 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
     if (lane.mayOpenPr && (await forge.branchExists(lane.branch))) {
       try {
         const title = await forge.getIssueMeta(lane.issue).then((m) => m.title);
-        return await forge.openPR(lane.branch, title, engineAuthoredPrBody(lane.name, lane.issue, lane.branch));
+        const opened = await forge.openPR(lane.branch, title, engineAuthoredPrBody(lane.name, lane.issue, lane.branch));
+        return { pr: opened, inconclusive: false };
       } catch (e) {
-        return note(`could not open a PR for pushed branch ${lane.branch} (${String(e)}) — the branch is preserved`);
+        return unknown(`could not open a PR for pushed branch ${lane.branch} (${String(e)}) — branch preserved, retried later`);
       }
     }
   }
-  return findLaneOwnedPr(await forge.listOpenPrBodies(), lane.name, lane.issue);
+  return { pr: findLaneOwnedPr(await forge.listOpenPrBodies(), lane.name, lane.issue), inconclusive: false };
 }
 
 /** The body the engine writes when IT opens a lane's PR. Carries the human-facing closing keyword

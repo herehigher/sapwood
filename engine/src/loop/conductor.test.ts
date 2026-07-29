@@ -769,6 +769,68 @@ test("tick reclaim: DEAD lane no-PR requeue succeeding on the first try leaves n
   st.close();
 });
 
+test("#377 gate② round 3 (P1): a DONE lane whose PR association is UNKNOWN is DEFERRED, not escalated — and settles normally once the forge answers", async () => {
+  // The harm: mayOpenPr only becomes true on the very probe the reclaim settles from, so a
+  // transient `gh pr create` 502 used to escalate finished work to a human with no later probe
+  // to notice the PR that a retry would have opened.
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-blip", 3);
+  sup.probes["lane-blip"] = { ...DEFAULT_PROBE, done: true, hasPr: false, prAssociationInconclusive: true };
+
+  const deferred = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(deferred.reclaimed, [], "nothing settled from an unknown association");
+  assert.deepEqual(forge.labelsAdded, [], "no premature needs-human escalation");
+  assert.equal(st.getWorker("lane-blip")?.state, "running", "the lane is held for the next tick's retry");
+  assert.deepEqual(sup.reclaimed, [], "and never torn down as if it were DEAD");
+
+  // Next tick: the forge recovered and the engine's retry opened/found the PR.
+  sup.probes["lane-blip"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 372 };
+  const settled = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(settled.reclaimed, [{ kind: "done", worker: "lane-blip", issue: 3, next: "DRIVING", costUsd: 0, modelUsage: [] }]);
+  assert.equal(st.getWorker("lane-blip")?.state, "driving");
+  assert.equal(st.getWorker("lane-blip")?.pr, 372);
+  st.close();
+});
+
+test("#377 gate② round 3 (P1): a DEAD lane whose PR association is UNKNOWN is never requeued — no duplicate worker racing its pushed branch", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-dead", 4);
+  // Confirmed-dead wrapper, no sentinel: without the deferral this requeues issue 4 to Ready and
+  // a fresh worker is dispatched onto an issue whose branch is already pushed.
+  sup.probes["lane-dead"] = { ...DEFAULT_PROBE, wrapperAlive: 0, hasPr: false, prAssociationInconclusive: true };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(r.reclaimed, []);
+  assert.deepEqual(sup.reclaimed, [], "no teardown");
+  assert.equal(st.getWorker("lane-dead")?.state, "running");
+  assert.deepEqual(forge.boardSet, [], "the issue is NOT handed back to Ready");
+  st.close();
+});
+
+test("#377 gate② round 3 (P1): the deferral does NOT apply under a kill switch — a drain must still settle every lane", async () => {
+  // Safety-layer cross-check: a lane that refuses to settle would fight the very layer whose job
+  // is to stop the engine. The drain path keeps the ordinary no-PR disposition.
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-conductor-"));
+  try {
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const st = new State(join(dir, "sapwood.sqlite"));
+    seedRunning(st, "lane-drain", 5);
+    sup.probes["lane-drain"] = { ...DEFAULT_PROBE, done: true, hasPr: false, prAssociationInconclusive: true };
+    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    assert.ok(r.ceilingBreached);
+    assert.equal(st.getWorker("lane-drain")?.state, "done", "a drain settles the lane by the ordinary no-PR rules");
+    assert.ok(r.reclaimed.some((o) => o.worker === "lane-drain"));
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("tick reclaim: KEEP stays, DONE+PR -> done/DRIVING, DONE+noPR -> escalate+needs-human", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

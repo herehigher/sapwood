@@ -11,7 +11,15 @@ import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import { configHash, DEFAULT_CONFIG_PATHS, dashboardConfigSubset, loadConfig, type SapwoodConfig } from "./config/config.js";
 import { loadPricingTable } from "./config/pricing.js";
-import { associateLanePr, GithubForge, type IForge, type Issue, type LanePrForge, type LanePrRequest } from "./forge/forge.js";
+import {
+  associateLanePr,
+  GithubForge,
+  type IForge,
+  type Issue,
+  type LanePrForge,
+  type LanePrOutcome,
+  type LanePrRequest,
+} from "./forge/forge.js";
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
 import { unadjudicatedConcerns } from "./loop/dissent.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
@@ -1001,7 +1009,7 @@ export function roundsExitCode(result: Pick<RoundsResult, "stoppedBy">): number 
  *  GithubForge (EngineOverrides.forge is unset), so this always resolves to the real methods
  *  there; a test-injected bare-IForge fake falls back to "no association", which is fine because
  *  those tests never dispatch a worker (no ready issues). */
-function buildLanePrAssociator(forge: IForge, log: (message: string) => void): (lane: LanePrRequest) => Promise<number | null> {
+function buildLanePrAssociator(forge: IForge, log: (message: string) => void): (lane: LanePrRequest) => Promise<LanePrOutcome> {
   const candidate = forge as Partial<LanePrForge>;
   const complete =
     typeof candidate.listOpenPrsForBranch === "function" &&
@@ -1010,7 +1018,9 @@ function buildLanePrAssociator(forge: IForge, log: (message: string) => void): (
     typeof candidate.openPR === "function" &&
     typeof candidate.branchExists === "function" &&
     typeof candidate.getIssueMeta === "function";
-  if (!complete) return () => Promise.resolve(null);
+  // No branch-keyed forge surface -> a CONCLUSIVE "no association" (nothing failed, so
+  // nothing to retry) rather than an inconclusive one that would defer every lane forever.
+  if (!complete) return () => Promise.resolve({ pr: null, inconclusive: false });
   return (lane) => associateLanePr(candidate as LanePrForge, lane, log);
 }
 

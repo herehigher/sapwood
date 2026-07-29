@@ -37,7 +37,7 @@ import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine } from "../config/doctrine.js";
 import { estimateUsd, loadPricingTable, type PricingTable } from "../config/pricing.js";
-import type { Issue } from "../forge/forge.js";
+import type { Issue, LanePrOutcome } from "../forge/forge.js";
 import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor } from "../loop/conductor.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import { sanitizeUpstreamError } from "../proxy/tools.js";
@@ -1219,6 +1219,20 @@ export function spawnClaudeSession(
   };
 }
 
+/** #377 (gate② round 3): consecutive INCONCLUSIVE PR associations a single lane may defer on
+ *  before the engine settles it by the ordinary no-PR rules. The deferral exists so a
+ *  TRANSIENT forge write failure (a 502 on `gh pr create`) isn't mistaken for "this lane has
+ *  no PR" on the one probe the conductor settles from — but not every such failure is
+ *  transient (`No commits between main and <branch>` fails identically, forever), and an
+ *  unbounded defer would hold that lane's slot for the life of the engine. Three consecutive
+ *  ticks is the compromise: long enough to ride out a blip, short enough that a permanent
+ *  failure reaches a human quickly.
+ *
+ *  Counted IN MEMORY, per supervisor instance (one per `sapwood run`), deliberately not
+ *  persisted: an engine restart hands the lane a fresh budget, which is the safe direction —
+ *  more retries against a preserved branch, never fewer. */
+export const MAX_INCONCLUSIVE_PR_PROBES = 3;
+
 export interface WorkerDeps {
   cfg: SapwoodConfig;
   log?: (message: string) => void;
@@ -1240,7 +1254,7 @@ export interface WorkerDeps {
    *  marker); omitted -> no lane is ever associated with a PR (hasPr false, prNumber undefined),
    *  which is the fail-closed direction: conductor.ts escalates such a lane to a human rather
    *  than driving a guessed merge target. */
-  lanePr?: (lane: { name: string; issue: number; branch: string | null; mayOpenPr: boolean }) => Promise<number | null>;
+  lanePr?: (lane: { name: string; issue: number; branch: string | null; mayOpenPr: boolean }) => Promise<LanePrOutcome>;
   /** Worker prompt for an issue. Default: a minimal imperative skeleton. */
   renderPrompt?: (issue: Issue) => string;
   /** Path to the compiled guard hook (node <path>). Default: the dist sibling of this module. */
@@ -1427,6 +1441,10 @@ export class WorkerSupervisor implements Supervisor {
   // also happens to match "handoff was requested, pid now confirmed dead" — reclaim() already
   // decided its fate.
   private readonly detachedReclaiming = new Set<string>();
+  // #377 (gate② round 3): consecutive inconclusive PR associations per lane — the deferral
+  // budget MAX_INCONCLUSIVE_PR_PROBES bounds. Cleared by any conclusive outcome and by
+  // reclaim(), so it can never outlive the lane it belongs to.
+  private readonly inconclusivePrProbes = new Map<string, number>();
 
   constructor(private readonly deps: WorkerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "state");
@@ -2506,6 +2524,7 @@ export class WorkerSupervisor implements Supervisor {
     const issue = this.laneIssue(name);
     let hasPr = false;
     let prNumber: number | undefined;
+    let prAssociationInconclusive = false;
     if (issue != null && this.deps.lanePr) {
       // #377: the lane's PR is resolved from what THIS lane structurally produced — its own
       // worktree's branch, plus the engine-authored owner marker — never from a PR body's prose.
@@ -2521,9 +2540,10 @@ export class WorkerSupervisor implements Supervisor {
       // as "no PR" and be requeued or escalated — the exact pushed-but-unPRed case this whole
       // issue exists to fix, just arrived at by a crash instead of a clean exit.
       const sessionOver = done || failed || handoff || wrapperAlive === 0;
-      const n = await this.deps.lanePr({ name, issue, branch: this.laneBranch(name), mayOpenPr: sessionOver });
-      hasPr = n != null;
-      if (n != null) prNumber = n;
+      const outcome = await this.deps.lanePr({ name, issue, branch: this.laneBranch(name), mayOpenPr: sessionOver });
+      hasPr = outcome.pr != null;
+      if (outcome.pr != null) prNumber = outcome.pr;
+      prAssociationInconclusive = this.trackInconclusiveAssociation(name, outcome);
     }
     const costUsd = this.terminalCostUsd({ done, failed, handoff }, name);
     const modelUsage = this.terminalModelUsage({ done, failed, handoff }, name);
@@ -2579,7 +2599,28 @@ export class WorkerSupervisor implements Supervisor {
       ...(actualModel != null ? { actualModel } : {}),
       ...(rateLimitResetAtMs != null ? { rateLimitResetAtMs } : {}),
       ...(envSignalStructured ? { envSignalStructured } : {}),
+      ...(prAssociationInconclusive ? { prAssociationInconclusive } : {}),
     };
+  }
+
+  /** #377 (gate② round 3): decides whether THIS probe reports the lane's PR association as
+   *  still-unknown (so the conductor defers settling it) or gives up and lets the ordinary
+   *  no-PR rules settle it. A conclusive outcome — including a conclusive "no PR" — clears the
+   *  lane's budget, so a later, unrelated blip gets its own full allowance. See
+   *  MAX_INCONCLUSIVE_PR_PROBES for why the budget exists and why it is in-memory only. */
+  private trackInconclusiveAssociation(name: string, outcome: LanePrOutcome): boolean {
+    if (!outcome.inconclusive) {
+      this.inconclusivePrProbes.delete(name);
+      return false;
+    }
+    const attempts = (this.inconclusivePrProbes.get(name) ?? 0) + 1;
+    this.inconclusivePrProbes.set(name, attempts);
+    if (attempts <= MAX_INCONCLUSIVE_PR_PROBES) return true;
+    this.log(
+      `[sapwood:worker] lane ${name}: PR association still unknown after ${MAX_INCONCLUSIVE_PR_PROBES} retries — ` +
+        `settling the lane by the ordinary no-PR rules (its pushed branch, if any, is preserved)`,
+    );
+    return false;
   }
 
   /** The terminal sentinel (whichever is present) carries the parsed stream-json
@@ -2680,6 +2721,7 @@ export class WorkerSupervisor implements Supervisor {
    *  returned ReclaimResult to escalate a retained worktree to a human (issue comment + label);
    *  worker.ts itself never talks to the forge. */
   async reclaim(name: string): Promise<ReclaimResult> {
+    this.inconclusivePrProbes.delete(name); // #377: the lane is going away — its retry budget with it
     const lane = this.lanes.get(name);
     if (lane) {
       lane.reclaiming = true;
