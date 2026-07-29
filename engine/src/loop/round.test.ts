@@ -2914,6 +2914,58 @@ test("runRounds #212: dispatch is restricted to pool-labelled Ready issues — a
   deps.state.close();
 });
 
+test("runRounds #379 (gate② P1): a round whose pool-label reconcile TOTALLY failed dispatches NOTHING — a stale pool label left over from an earlier round must not pass the executing filter as if this round had selected it", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 3 } });
+  // The exact residual the reviewer named: a Ready issue still carrying LAST round's pool label
+  // (its removal is what reconcilePoolLabels never reaches once every add write fails), which
+  // PoolScopedForge — a LIVE label read, not the selection result — would otherwise dispatch.
+  forge.ready = [{ number: 1, title: "stale pool member", labels: [cfg.labels.roundPool] }];
+  const sup = new AutoCompleteSupervisor();
+  const deps = baseDeps({ forge, supervisor: sup, sleep, cfg, poolLabel: cfg.labels.roundPool });
+  // Stand in for align.ts's runPoolSelection on the total-failure path: it records exactly this
+  // durable event for this round and returns an empty pool.
+  deps.peripherals = {
+    aligning: {
+      async run(ctx) {
+        deps.state.appendEvent("pool-labels-failed", { round_id: ctx.roundId, attempted: 2, error: "simulated forge failure" });
+        return { marker: null };
+      },
+    },
+  };
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  await runRounds(deps);
+  stopSafety();
+  assert.deepEqual(sup.dispatchedIssues, [], "the round parked — no dispatch off a pool this round never actually selected");
+  deps.state.close();
+});
+
+test("runRounds #379 (gate② P1): the dispatch block is scoped to the round that failed — a LATER round with a healthy pool dispatches normally", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 3 } });
+  forge.ready = [{ number: 1, title: "pooled", labels: [cfg.labels.roundPool] }];
+  const sup = new AutoCompleteSupervisor();
+  const deps = baseDeps({ forge, supervisor: sup, sleep, cfg, poolLabel: cfg.labels.roundPool });
+  // Round 1 fails its pool-label reconcile; round 2 succeeds (no event).
+  deps.peripherals = {
+    aligning: {
+      async run(ctx) {
+        if (ctx.roundId === 1) {
+          deps.state.appendEvent("pool-labels-failed", { round_id: ctx.roundId, attempted: 1, error: "simulated forge failure" });
+        }
+        return { marker: null };
+      },
+    },
+  };
+  const stopSafety = boundedStopOnPhase(deps, 11); // ~2 rounds of phases
+  await runRounds(deps);
+  stopSafety();
+  assert.deepEqual(sup.dispatchedIssues, [1], "round 2's dispatch is unaffected by round 1's failure event");
+  deps.state.close();
+});
+
 test("runRounds #212: poolLabel unset -> no pool scoping at all, every approved Ready issue dispatches (today's behavior, unchanged — the opt-in default)", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();

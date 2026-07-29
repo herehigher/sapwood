@@ -1397,14 +1397,18 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
     // ENVIRONMENT condition, not a defect to die on: the label may not exist, or this token may
     // not be allowed to write it. Contained HERE, at the one production call site, so the
     // failure behaves the way applyPoolLabels' own message always claimed it did — the round
-    // proceeds with an EMPTY pool, which means PoolScopedForge finds nothing dispatchable and
-    // the round parks, and the NEXT round re-selects from scratch. Before this, the throw
+    // dispatches nothing and the NEXT round re-selects from scratch. Before this, the throw
     // propagated through the aligning PeripheralStub and out of runRounds itself, killing the
     // engine with exit 1 (dogfood 2026-07-24: all 8 pool-label writes failed on first start
     // against labels this repo had never created). The failure is NOT silent — it lands as a
-    // durable `pool-labels-failed` event next to the log line. `selectRoundPool` (the exported,
-    // no-event, direct-call variant) still propagates: it has no state handle to record with,
-    // so its caller must see the throw.
+    // durable `pool-labels-failed` event next to the log line — and that event is LOAD-BEARING,
+    // not just observability: round.ts's dispatch gate (poolReconcileFailedThisRound) reads it
+    // to withhold every dispatch wave this round. An empty RETURN value here would not park
+    // anything on its own — the executing phase re-reads pool membership LIVE off GitHub
+    // (PoolScopedForge), so an earlier round's residual label, which the reconcile's removal
+    // loop never got to, would otherwise dispatch as though this round had selected it (#379
+    // gate② P1). `selectRoundPool` (the exported, no-event, direct-call variant) still
+    // propagates the throw: it has no state handle to record with, so its caller must see it.
     try {
       await reconcilePoolLabels(forge, cfg, target, log, { state: deps.state, roundId: deps.roundId });
     } catch (e) {

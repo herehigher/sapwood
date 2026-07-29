@@ -266,9 +266,11 @@ start; you never need to create one by hand.
 If the pass fails (typically a token without permission to create labels), the engine logs
 `[sapwood:startup] could not reconcile the configured workflow labels; continuing: …` and
 starts anyway. Downstream, a round whose round-pool label writes **all** fail records a
-`pool-labels-failed` state event, dispatches nothing that round (an empty pool has nothing
-dispatchable), and the next round re-selects — the engine stays alive. Fix the token's
-permissions, or create the labels manually, and the following round proceeds normally.
+`pool-labels-failed` state event and withholds dispatch for the rest of that round — including
+any issue still carrying a pool label from an earlier round, since that label is not this
+round's selection. In-flight lanes still drain and a handed-off lane still resumes; only new
+dispatch is withheld. The next round re-selects and the engine stays alive throughout. Fix the
+token's permissions, or create the labels manually, and the following round proceeds normally.
 
 ## See also
 
