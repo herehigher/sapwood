@@ -188,6 +188,13 @@ false approval from one source never clears CI, human labels, or threads).
    as a follow-up hardening candidate — **CLOSED by #401 (F26)**: gate① `ciGreen`
    (`forge/forge.ts`'s `parsePRStatus`) now requires `conclusion === "SUCCESS"` from
    every CheckRun, so SKIPPED/NEUTRAL no longer read as green on ANY path. #401
+   carried across the CONCLUSION half of this item's stance only: a legacy commit
+   status context with state `SUCCESS` still passes gate①, because the reason THIS
+   item rejects one is app-ownership binding (a status context has no check suite, so
+   it can never match a configured `{name, app}` pair) — a `ci.requiredChecks`-specific
+   requirement, not a gate①-wide one. The Status API has no SKIPPED/NEUTRAL concept
+   for the closed hole to reappear through, and rejecting it gate①-wide would
+   permanently wedge every Status-API CI repo. #401
    narrowed that existing predicate rather than promoting `requiredChecksSatisfied`
    to the merge gate, because this function is fail-closed on an empty
    `ci.requiredChecks` (the default) and promoting it would have wedged every repo

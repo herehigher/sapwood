@@ -1366,6 +1366,18 @@ test("parsePRStatus (#401): ciGreen conclusion truth table — only SUCCESS is g
   assert.equal(status("SKIPPED").ciRed, false);
   assert.equal(status("NEUTRAL").ciRed, false);
 
+  // Legacy commit StatusContext: state SUCCESS is STILL green (#422 review P1 — deliberate, not
+  // an oversight). requiredChecksSatisfied rejects status contexts because their owning App can't
+  // be verified, a `ci.requiredChecks`-specific binding (docs/security.md); gate① is the general
+  // CI signal for every reviewer mode, the Status API has no SKIPPED/NEUTRAL concept to exploit,
+  // and rejecting it would permanently wedge every Status-API CI repo (Jenkins, Buildkite).
+  const legacy = (state: string) =>
+    parsePRStatus(JSON.stringify({ number: 4, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [{ state }] }))
+      .ciGreen;
+  assert.equal(legacy("SUCCESS"), true);
+  assert.equal(legacy("PENDING"), false);
+  assert.equal(legacy("FAILURE"), false);
+
   // Empty rollup: unchanged, fail-closed (no checks reported yet != "this repo has no CI").
   assert.equal(
     parsePRStatus(JSON.stringify({ number: 4, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] })).ciGreen,

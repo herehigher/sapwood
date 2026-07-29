@@ -2064,9 +2064,22 @@ export function parsePRStatus(json: string): PRStatus {
   // #401 (F26), adjudicating the deferral recorded in design #279 §4 / §9: SKIPPED and NEUTRAL
   // used to count as passing here, so a workflow whose test job never RAN (path filter, `if:`
   // guard, a required job skipped by a bad matrix) read as gate①-green and could merge with zero
-  // execution evidence. They are completed-but-not-executed, not passing — the same stance
-  // review/ci-evidence.ts's requiredChecksSatisfied already takes on the engine-agent path
-  // ("SKIPPED/NEUTRAL/legacy-status-context DO NOT satisfy it"), now applied gate①-wide.
+  // execution evidence. They are completed-but-not-executed, not passing — the CONCLUSION half of
+  // the stance review/ci-evidence.ts's requiredChecksSatisfied takes on the engine-agent path,
+  // now applied gate①-wide.
+  //
+  // The legacy `state === "SUCCESS"` fallback below is DELIBERATELY KEPT (#422 review, P1) and is
+  // NOT a third adjudication path: requiredChecksSatisfied rejects a legacy commit StatusContext
+  // for a reason that is specific to `ci.requiredChecks` — a status context carries no check
+  // suite, so its owning App cannot be verified against a configured `{name, app}` pair
+  // (docs/security.md "CI execution evidence for engine-agent review" scopes that rejection to
+  // that chain, not to gate①). Gate① is the general "did this repo's CI pass" signal for EVERY
+  // reviewer mode, and the Status API has no SKIPPED/NEUTRAL concept at all (states are
+  // error|failure|pending|success), so the hole this change closes cannot exist on that path.
+  // Dropping it would leave every repo whose CI reports via the Status API (Jenkins, Buildkite,
+  // classic CircleCI) unable to EVER reach gate①-green — a permanent wedge, the same F26 class
+  // #401 exists to remove. Repos wanting the app-bound, forge-resistant evidence boundary opt in
+  // via `ci.requiredChecks`; that is the mechanism for it, and it is unchanged here.
   // Direction chosen: narrow this predicate, NOT adopt requiredChecksSatisfied at the merge gate
   // — that function is fail-closed on an EMPTY `ci.requiredChecks` (the default), so making it
   // gate① would wedge every repo that has not configured a required-check list, and it needs
