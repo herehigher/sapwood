@@ -256,6 +256,22 @@ If `init` fails partway through a *later* step (labels/milestones/board), each s
 independently detect-before-create — just re-run `init` after addressing whatever it
 reported; already-provisioned pieces are left untouched.
 
+## Missing workflow labels / round-pool label writes failing
+
+Every `sapwood run` startup reconciles the repo's labels against the full list the resolved
+config names — the same list `sapwood init` provisions — and creates any that are missing. A
+repo initialized before a newer workflow label existed therefore heals itself on the next
+start; you never need to create one by hand.
+
+If the pass fails (typically a token without permission to create labels), the engine logs
+`[sapwood:startup] could not reconcile the configured workflow labels; continuing: …` and
+starts anyway. Downstream, a round whose round-pool label writes **all** fail records a
+`pool-labels-failed` state event and withholds dispatch for the rest of that round — including
+any issue still carrying a pool label from an earlier round, since that label is not this
+round's selection. In-flight lanes still drain and a handed-off lane still resumes; only new
+dispatch is withheld. The next round re-selects and the engine stays alive throughout. Fix the
+token's permissions, or create the labels manually, and the following round proceeds normally.
+
 ## See also
 
 - [`security.md`](security.md) — the guard, human controls, and escalation model

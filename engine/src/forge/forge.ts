@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import type { SapwoodConfig } from "../config/config.js";
 import { extractMarkdownSections } from "../util/markdown.js";
 import { ghWithTimeout } from "./gh.js";
-import { labelsInclude } from "./labels.js";
+import { createMissingLabels, type LabelSpec, labelsInclude } from "./labels.js";
 
 // Exported (#415 review, finding 2) so a test can assert against the real ceiling value
 // instead of duplicating the literal 1000.
@@ -187,6 +187,11 @@ export interface IForge {
   claimIssue(issue: number): Promise<void>;
   setBoardStatus(issue: number, status: "backlog" | "ready" | "inProgress" | "done"): Promise<void>;
   addLabel(issue: number, label: string): Promise<void>;
+  /** #379: REPO-level label provisioning (not an issue write) — create every spec'd label the
+   *  repo lacks and return the created names. Idempotent, detect-before-create; called once per
+   *  engine start (cli.ts's reconcileWorkflowLabels) so a repo that predates a newer workflow
+   *  label gets it rather than failing every write against it forever. */
+  ensureRepoLabels(specs: readonly LabelSpec[]): Promise<string[]>;
   /** #212: remove a label from an ISSUE (the WRITE counterpart to addLabel) — round.ts's
    *  round-close pool cleanup uses this to release an undispatched round-pool member back to
    *  plain Ready. Idempotent: removing an absent label is a no-op on GitHub's side, never an
@@ -717,6 +722,12 @@ export class GithubForge implements IForge {
 
   async addLabel(issue: number, label: string): Promise<void> {
     await this.gh(["issue", "edit", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--add-label", label]);
+  }
+
+  /** #379: the same provisioning primitive `sapwood init` uses (labels.ts's createMissingLabels),
+   *  run against the configured repo through this forge's own bounded `gh`. */
+  async ensureRepoLabels(specs: readonly LabelSpec[]): Promise<string[]> {
+    return createMissingLabels((args) => this.gh(args), `${this.cfg.board.owner}/${this.repo()}`, specs);
   }
 
   async removeLabel(issue: number, label: string): Promise<void> {

@@ -15,6 +15,7 @@ import { after, test } from "node:test";
 import { type EngineOverrides, runCli, runDryRun, runEngine, tickOnlyFlagError } from "../cli.js";
 import { ConfigSchema, configHash, dashboardConfigSubset, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus, StartupReconcileData } from "../forge/forge.js";
+import type { LabelSpec } from "../forge/labels.js";
 import { State } from "../state/state.js";
 import type { PeripheralPhase } from "./round.js";
 
@@ -65,6 +66,13 @@ class FakeForge implements IForge {
   reconcileReads = 0;
   reconcileError: Error | null = null;
 
+  ensureRepoLabelsCalls: LabelSpec[][] = [];
+  labelWriteError: Error | null = null;
+  async ensureRepoLabels(specs: readonly LabelSpec[]): Promise<string[]> {
+    this.ensureRepoLabelsCalls.push([...specs]);
+    if (this.labelWriteError) throw this.labelWriteError;
+    return specs.filter((spec) => spec.name === "sapwood:round:pool").map((spec) => spec.name);
+  }
   async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
@@ -173,6 +181,52 @@ class FakeForge implements IForge {
     return [];
   }
 }
+
+test("#379 sapwood run: startup provisions every workflow label the resolved config names — a repo missing round:pool gets it created, and the run proceeds", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge,
+      state,
+      logger: silentLogger,
+    });
+    assert.equal(code, 0);
+    assert.equal(forge.ensureRepoLabelsCalls.length, 1, "one startup reconcile pass, before any dispatch");
+    const names = new Set(forge.ensureRepoLabelsCalls[0]!.map((spec) => spec.name));
+    for (const name of ["sapwood:round:pool", "sapwood:split", "sapwood:decomposed", "sapwood:hold"]) {
+      assert.ok(names.has(name), `${name} is provisioned at startup`);
+    }
+    const events = state.eventsSince("1970-01-01T00:00:00.000Z", ["labels-reconciled"]);
+    assert.deepEqual(
+      events.map((e) => e.payload),
+      [{ created: ["sapwood:round:pool"] }],
+    );
+  } finally {
+    state.close();
+  }
+});
+
+test("#379 sapwood run: a DENIED label write is best-effort — logged, no event, startup continues to a normal run", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  forge.labelWriteError = new Error("HTTP 403: Resource not accessible");
+  const logged: string[] = [];
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge,
+      state,
+      logger: { log: (line) => logged.push(line) },
+    });
+    assert.equal(code, 0, "a label-provisioning failure never blocks the engine");
+    assert.deepEqual(state.eventsSince("1970-01-01T00:00:00.000Z", ["labels-reconciled"]), []);
+    assert.ok(logged.some((line) => /403/.test(line)));
+  } finally {
+    state.close();
+  }
+});
 
 test("sapwood run startup reconcile emits board/PR orphans without forge writes, and runs once", async () => {
   const state = new State(":memory:");
@@ -497,6 +551,10 @@ test("sapwood run (default driver): KILL_SWITCH blocks every peripheral AND disp
     const code = await runEngine(["node", "sapwood", "run"], overrides);
 
     assert.equal(code, 1, "kill-switch stop is a non-zero exit — an operator must notice");
+    // #379: the startup label reconcile is wired on the ROUNDS path too, not just the tick
+    // driver's — it runs before the round loop (and, like every other startup pass, ahead of the
+    // kill-switch check the first phase makes).
+    assert.equal(forge.ensureRepoLabelsCalls.length, 1);
     // A round IS opened (round.ts's startRound runs before the first phase's kill-switch check),
     // but it never advances past the first phase and never closes — the blocked peripheral, not
     // "no round at all", is the safety property under test (same shape as round-defaults.test.ts's

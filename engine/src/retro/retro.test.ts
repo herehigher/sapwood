@@ -637,6 +637,10 @@ test("prompts/retro.md never instructs a direct merge/approve — the PR-only pa
 // ── Integration: wired as round.ts's real `retro` peripheral ────────────────────────────────
 
 class MinimalForge implements IForge {
+  // #379: repo-level label provisioning — no test in this file exercises it.
+  async ensureRepoLabels(): Promise<string[]> {
+    return [];
+  }
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }

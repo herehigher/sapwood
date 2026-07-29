@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { OwnerKind } from "../forge/forge.js";
 import { type GhRunner, gh, ghText } from "../forge/gh.js";
-import { labelsInclude, normalizeLabel, taxonomyLabels } from "../forge/labels.js";
+import { createMissingLabels, type LabelSpec, normalizeLabel, taxonomyLabels } from "../forge/labels.js";
 
 export interface InitDeps {
   run: GhRunner; // generic gh runner (label/milestone/api/graphql)
@@ -42,13 +42,11 @@ export function missing<T>(desired: readonly T[], existing: readonly T[]): T[] {
   return desired.filter((d) => !have.has(d));
 }
 
-export interface LabelSpec {
-  name: string;
-  color: string; // 6-hex, no '#'
-  description: string;
-}
+export type { LabelSpec };
 
-/** The label taxonomy the loop depends on, derived from config (no literals hidden in code). */
+/** The label taxonomy the loop depends on, derived from config (no literals hidden in code).
+ *  #379: also read by the ENGINE's startup reconcile (cli.ts's reconcileWorkflowLabels), so
+ *  `sapwood init` and a running engine provision from exactly one list. */
 export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
   const l = cfg.labels;
   const base: LabelSpec[] = [
@@ -113,24 +111,7 @@ export async function preflight(getAuthStatus: () => Promise<string>): Promise<v
 }
 
 async function ensureLabels(cfg: SapwoodConfig, run: GhRunner, repo: string): Promise<string[]> {
-  const existing = JSON.parse(await run(["label", "list", "--repo", repo, "--limit", "200", "--json", "name"])) as { name: string }[];
-  const have = existing.map((e) => e.name);
-  const toCreate = requiredLabels(cfg).filter((l) => !labelsInclude(have, l.name));
-  const created: string[] = [];
-  for (const l of toCreate) {
-    // No --force: detect-before-create preserves any color/description the user customized.
-    try {
-      const name = normalizeLabel(l.name);
-      await run(["label", "create", name, "--repo", repo, "--color", l.color, "--description", l.description]);
-      created.push(name);
-    } catch (error) {
-      // Listing caps at 200; create is the authoritative existence check and also closes the list→create race.
-      const text = (error as { stderr?: string }).stderr ?? String(error);
-      if (/already exists/i.test(text)) continue;
-      throw error;
-    }
-  }
-  return created;
+  return createMissingLabels(run, repo, requiredLabels(cfg));
 }
 
 async function ensureMilestones(cfg: SapwoodConfig, run: GhRunner, repo: string): Promise<string[]> {

@@ -1,6 +1,8 @@
 /** Shared GitHub-label names and comparison helpers. GitHub preserves label case but treats
  * names as case-insensitively unique, so every engine read follows the same rule. */
 
+import type { GhRunner } from "./gh.js";
+
 export const SAPWOOD_LABEL_PREFIX = "sapwood:";
 
 export function workflowLabelDefaults(prefix: string) {
@@ -48,6 +50,45 @@ const TAXONOMY_SPECS = [
 export function taxonomyLabels(prefix: string) {
   const normalizedPrefix = normalizeLabel(prefix);
   return TAXONOMY_SPECS.map((spec) => ({ ...spec, name: `${normalizedPrefix}${spec.name}` }));
+}
+
+export interface LabelSpec {
+  name: string;
+  color: string; // 6-hex, no '#'
+  description: string;
+}
+
+/** Create every spec'd label the repo doesn't already have, and return the created names.
+ *  Idempotent and detect-before-create (no `--force`), so any color/description a user
+ *  customized survives a re-run.
+ *
+ *  #379: ONE provisioning primitive with TWO callers — `sapwood init`'s onboarding pass
+ *  (init.ts's ensureLabels) and the engine's own startup reconcile (cli.ts's
+ *  reconcileWorkflowLabels, via GithubForge.ensureRepoLabels). They share `requiredLabels(cfg)`
+ *  as the list AND this function as the write path, so a label added to the taxonomy later
+ *  cannot drift out of either one — the live failure this closes is a repo initialized before
+ *  round:pool/split/decomposed/hold existed, where every pool-label write failed forever because
+ *  nothing ever created them. */
+export async function createMissingLabels(run: GhRunner, repo: string, specs: readonly LabelSpec[]): Promise<string[]> {
+  const existing = JSON.parse(await run(["label", "list", "--repo", repo, "--limit", "200", "--json", "name"])) as { name: string }[];
+  const have = existing.map((e) => e.name);
+  const created: string[] = [];
+  for (const spec of specs) {
+    if (labelsInclude(have, spec.name)) continue;
+    const name = normalizeLabel(spec.name);
+    try {
+      await run(["label", "create", name, "--repo", repo, "--color", spec.color, "--description", spec.description]);
+      created.push(name);
+    } catch (error) {
+      // Listing caps at 200; create is the authoritative existence check and also closes the
+      // list→create race. Any OTHER failure (403, network) propagates — the caller decides
+      // whether that is fatal (`sapwood init`) or best-effort (engine startup).
+      const text = (error as { stderr?: string }).stderr ?? String(error);
+      if (/already exists/i.test(text)) continue;
+      throw error;
+    }
+  }
+  return created;
 }
 
 const PRIORITY_LABEL = /^prio:([0-4])(?:-|$)/;

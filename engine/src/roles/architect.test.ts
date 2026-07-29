@@ -45,6 +45,10 @@ import {
 import { loadRolePromptTemplate } from "./plan-review.js";
 
 class FakeForge implements IForge {
+  // #379: repo-level label provisioning — no test in this file exercises it.
+  async ensureRepoLabels(): Promise<string[]> {
+    return [];
+  }
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
