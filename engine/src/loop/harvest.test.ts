@@ -58,6 +58,10 @@ class ScriptedRunner {
  *  a validated harvest decision reaches GitHub through (the session itself has no gh grant it
  *  acts on), so this capture is what every "the engine posted X" assertion below reads. */
 class MinimalForge implements IForge {
+  // #379: repo-level label provisioning — no test in this file exercises it.
+  async ensureRepoLabels(): Promise<string[]> {
+    return [];
+  }
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }

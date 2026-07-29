@@ -249,6 +249,10 @@ test("#248 review round 1 (G3): reviewSilenceDuration's holdLabelPresent input i
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
 class FakeForge implements IForge {
+  // #379: repo-level label provisioning — no test in this file exercises it.
+  async ensureRepoLabels(): Promise<string[]> {
+    return [];
+  }
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }

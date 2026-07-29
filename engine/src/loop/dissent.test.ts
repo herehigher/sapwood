@@ -33,6 +33,10 @@ import {
  *  per-issue stores dissent.ts's getIssueBody/getIssueComments/getIssueMeta read from; tests
  *  seed them directly to script a scenario. */
 class FakeForge implements IForge {
+  // #379: repo-level label provisioning — no test in this file exercises it.
+  async ensureRepoLabels(): Promise<string[]> {
+    return [];
+  }
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }

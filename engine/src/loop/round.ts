@@ -20,7 +20,7 @@
 
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
-import { labelsInclude } from "../forge/labels.js";
+import { type LabelSpec, labelsInclude } from "../forge/labels.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import { createProxyMint } from "../proxy/mint.js";
 import type { RoundPhase, RoundRow, State } from "../state/state.js";
@@ -422,6 +422,9 @@ export class RoundScopedForge implements IForge {
   addLabel(issue: number, label: string) {
     return this.inner.addLabel(issue, label);
   }
+  ensureRepoLabels(specs: readonly LabelSpec[]) {
+    return this.inner.ensureRepoLabels(specs);
+  }
   removeLabel(issue: number, label: string) {
     return this.inner.removeLabel(issue, label);
   }
@@ -604,6 +607,9 @@ export class PoolScopedForge implements IForge {
   }
   addLabel(issue: number, label: string) {
     return this.inner.addLabel(issue, label);
+  }
+  ensureRepoLabels(specs: readonly LabelSpec[]) {
+    return this.inner.ensureRepoLabels(specs);
   }
   removeLabel(issue: number, label: string) {
     return this.inner.removeLabel(issue, label);
@@ -1307,6 +1313,27 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // #124: the durable per-round dispatch count — see this function's own doc comment above.
     const dispatchedThisRound = (): number => deps.state.eventsAfterId(round.start_event_id ?? 0, ["dispatched"]).length;
 
+    /** #379 gate② P1: did THIS round's pool-label reconcile fail totally (align.ts's
+     *  runPoolSelection recording `pool-labels-failed`)? Pool membership is read LIVE off GitHub
+     *  by PoolScopedForge — never from the selection's return value — and reconcilePoolLabels
+     *  throws BEFORE its stale-label removal loop, so a total add-failure leaves any earlier
+     *  round's residual pool labels in place. Without this gate those residuals would sail
+     *  through the executing filter and dispatch as if this round had selected them: the round
+     *  wouldn't park at all, it would dispatch a pool nobody chose. Blocking new waves (the
+     *  caller turns this into forceDispatchPause + a zero cap) is the containment; in-flight
+     *  lanes still drain and a durable handoff still resumes, same as every other wave block.
+     *
+     *  Same durable round window and THUNK discipline as dispatchedThisRound above — evaluated
+     *  inside tryDispatchWave, never snapshotted before the phase, so a crash-resumed executing
+     *  phase reads the same fact a from-scratch run would. Payload round_id is matched
+     *  explicitly rather than trusting the id cursor alone. The event itself is the durable
+     *  record (it names the round and the attempt count); this gate adds no second one. */
+    const poolReconcileFailedThisRound = (): boolean =>
+      deps.poolLabel !== undefined &&
+      deps.state
+        .eventsAfterId(round.start_event_id ?? 0, ["pool-labels-failed"])
+        .some((e) => (e.payload as { round_id?: number }).round_id === round.round_id);
+
     // #124: may this call attempt ONE MORE dispatch-enabled tick (a fresh wave)? False forever
     // on a resumed drain (freshBatch); otherwise true until the round-quota or the milestone
     // scope is exhausted, at which point the round-stop hit is recorded (first hit wins) and
@@ -1322,6 +1349,15 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // was unreachable; with multi-wave refill, "graceful wind-down" means in-flight lanes
       // finish but no further wave opens once ANY run-level condition has fired.
       if (!freshBatch || stopHit || finalStopHit) return false;
+      // #379 gate② P1: a totally-failed pool-label reconcile blocks every wave this round — see
+      // poolReconcileFailedThisRound's own doc for why an empty selection alone doesn't park.
+      if (poolReconcileFailedThisRound()) {
+        deps.log?.(
+          `[sapwood:pool] round ${round.round_id}: pool-label reconcile failed for every write — withholding dispatch this round ` +
+            `(any leftover pool label from an earlier round is NOT this round's selection); the next round re-selects`,
+        );
+        return false;
+      }
       const already = dispatchedThisRound();
       if (already >= cfg.lanes.roundDispatchCap) {
         stopHit = { name: "roundDispatchCap", detail: `dispatched ${already}` };

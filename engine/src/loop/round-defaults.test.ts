@@ -44,6 +44,10 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   });
 
 class FakeForge implements IForge {
+  // #379: repo-level label provisioning — no test in this file exercises it.
+  async ensureRepoLabels(): Promise<string[]> {
+    return [];
+  }
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
@@ -610,7 +614,7 @@ test("createDefaultPeripherals (#394 F23 gate② fix): roles.po.enabled=false bu
   state.close();
 });
 
-test("createDefaultPeripherals (#212 gate② P2-4): every pool label write failing propagates OUT of the aligning phase — round.ts never persists the marker, so a rerun retries selection from scratch", async () => {
+test("createDefaultPeripherals (#379 F2, superseding #212 gate② P2-4's fatal throw): every pool label write failing is CONTAINED inside the aligning phase — a durable pool-labels-failed event, never an exception out of the stub", async () => {
   const state = new State(":memory:");
   class FailAddLabelForge extends FakeForge {
     override async addLabel(): Promise<void> {
@@ -619,26 +623,23 @@ test("createDefaultPeripherals (#212 gate② P2-4): every pool label write faili
   }
   const forge = new FailAddLabelForge();
   forge.ready = [{ number: 1, title: "t", labels: [] }];
-  // roles.po disabled keeps this test focused on applyPoolLabels' own throw behavior (the
+  // roles.po disabled keeps this test focused on applyPoolLabels' own failure behavior (the
   // deterministic path also routes every write through it) rather than session scripting.
   const cfg = mkCfg({ roles: { po: { enabled: false } } });
   const runner = new ScriptedRunner(forge, cfg);
   const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
-  await assert.rejects(() => peripherals.aligning!.run({ roundId: 1, phase: "aligning", marker: null }), /ALL 1 label write\(s\) failed/);
+  await assert.doesNotReject(() => peripherals.aligning!.run({ roundId: 1, phase: "aligning", marker: null }));
+  const events = state.eventsSince("1970-01-01T00:00:00.000Z", ["pool-labels-failed"]);
+  assert.equal(events.length, 1, "the failure is recorded durably instead of thrown");
   state.close();
 });
 
-test("runRounds (#212 gate② r2 finding 3): every pool-label write failing keeps the round in_progress at aligning with a null marker; a second runRounds call resumes the SAME round and retries the phase — never silently advances, never opens a new round", async () => {
+test("runRounds (#379 F2): every pool-label write failing keeps the ENGINE ALIVE — the round closes with an empty pool (nothing dispatchable, so it parks), records the failure durably, and the next round re-selects", async () => {
   const state = new State(":memory:");
   class FailAddLabelForge extends FakeForge {
     override async addLabel(): Promise<void> {
       throw new Error("simulated forge failure");
     }
-    // The base FakeForge hardcodes listOpenIssues() to [] — this test's SECOND runRounds call
-    // replays the persisted pool-selected event (gate② r2) and needs the target issue to
-    // actually resolve as "still open" (same as a real GithubForge would report for a genuinely
-    // open issue), or the replayed target would spuriously resolve empty and mask the
-    // total-failure throw this test is pinning.
     override async listOpenIssues(): Promise<Issue[]> {
       return this.ready;
     }
@@ -657,24 +658,29 @@ test("runRounds (#212 gate② r2 finding 3): every pool-label write failing keep
     tickIntervalSec: 1,
     sleep: async () => {},
     peripherals,
+    poolLabel: cfg.labels.roundPool,
     registerSignals: () => () => {}, // never touch real process signals in this test
   };
+  // Graceful stop as soon as the round reaches aligning (the same pattern every other runRounds
+  // integration test here uses): the in-flight round still runs every phase to completion, so
+  // this asserts what a live engine actually does with a total label-write failure — finish the
+  // round, dispatch nothing, keep running — instead of the pre-#379 process exit.
+  deps.registerSignals = (requestStop) => {
+    deps.onRoundPhase = (_roundId, phase) => {
+      if (phase === "aligning") requestStop();
+    };
+    return () => {};
+  };
 
-  // round.ts's runPeripheral has no try/catch around stub.run() — an uncaught peripheral
-  // exception propagates straight out of runRounds, the same crash-rerun contract every
-  // peripheral relies on (a real deployment restarts the process; here, a second runRounds
-  // call over the SAME state simulates exactly that restart).
-  await assert.rejects(() => runRounds(deps), /ALL 1 label write\(s\) failed/);
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal", "the loop stopped on its own terms — no crash, no exit(1)");
+  assert.equal(result.rounds, 1, "the round completed rather than wedging at aligning");
   const round = state.getRound(1)!;
-  assert.equal(round.status, "in_progress", "the round never closed");
-  assert.equal(round.phase, "aligning", "still sitting at the phase that threw");
-  assert.equal(round.artifact_ref, null, "the phase marker was never persisted");
-
-  await assert.rejects(() => runRounds(deps), /ALL 1 label write\(s\) failed/);
-  const roundAfterRetry = state.getRound(1)!;
-  assert.equal(roundAfterRetry.round_id, round.round_id, "the SAME round was resumed — openRound() picked it back up, no new round opened");
-  assert.equal(roundAfterRetry.phase, "aligning");
-  assert.equal(roundAfterRetry.artifact_ref, null);
+  assert.equal(round.status, "done");
+  assert.equal(round.phase, "closed");
+  const failures = state.eventsSince("1970-01-01T00:00:00.000Z", ["pool-labels-failed"]);
+  assert.equal(failures.length, 1, "one durable honesty record of the total label-write failure");
+  assert.deepEqual((failures[0]!.payload as { round_id: number }).round_id, 1);
   state.close();
 });
 

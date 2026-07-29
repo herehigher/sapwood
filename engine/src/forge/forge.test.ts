@@ -1340,17 +1340,65 @@ test("parsePRStatus: a queued/in-progress check (null conclusion) is not green",
   assert.equal(s.ciRed, false); // #246: pending (null conclusion), not failed — must not read as CI_RED
 });
 
-test("parsePRStatus: SKIPPED/NEUTRAL count as passing", () => {
-  const s = parsePRStatus(
-    JSON.stringify({
-      number: 4,
-      headRefOid: "abc",
-      state: "OPEN",
-      mergeable: "MERGEABLE",
-      statusCheckRollup: [{ conclusion: "SKIPPED" }, { conclusion: "NEUTRAL" }, { conclusion: "SUCCESS" }],
-    }),
+// ── #401 (F26): gate① ciGreen conclusion truth table ────────────────────────────────────────
+// PRE-#401 behavior (for the record): PASSING was {SUCCESS, SKIPPED, NEUTRAL}, so a rollup of
+// [SKIPPED, NEUTRAL, SUCCESS] read ciGreen: true — a workflow whose test job was skipped merged
+// as "green". POST-#401: only a completed SUCCESS is execution evidence.
+test("parsePRStatus (#401): ciGreen conclusion truth table — only SUCCESS is green; SKIPPED/NEUTRAL no longer pass", () => {
+  const status = (conclusion: string | null) =>
+    parsePRStatus(
+      JSON.stringify({ number: 4, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [{ conclusion }] }),
+    );
+  const green = (conclusion: string | null) => status(conclusion).ciGreen;
+
+  assert.equal(green("SUCCESS"), true);
+  // The #401 change: completed-but-not-executed conclusions are not passing evidence.
+  assert.equal(green("SKIPPED"), false);
+  assert.equal(green("NEUTRAL"), false);
+  // Unchanged by #401 — never were green.
+  assert.equal(green("CANCELLED"), false);
+  assert.equal(green("STALE"), false);
+  assert.equal(green("ACTION_REQUIRED"), false);
+  assert.equal(green("FAILURE"), false);
+  assert.equal(green(null), false); // queued/in-progress
+  // #246 tri-state is untouched: SKIPPED/NEUTRAL are not-green but still NOT red — the engine
+  // must not dispatch a mechanical CI-fix leg at a job that was deliberately skipped.
+  assert.equal(status("SKIPPED").ciRed, false);
+  assert.equal(status("NEUTRAL").ciRed, false);
+
+  // Legacy commit StatusContext: state SUCCESS is STILL green — deliberate, not an oversight, and
+  // READJUDICATED: PR #422's review read it as a third direction outside #401's two-way AC; the
+  // repo owner ruled 2026-07-29 that "SUCCESS-only" is scoped to CheckRun CONCLUSIONS and this
+  // path stays (design #279 §4 records the ruling).
+  // requiredChecksSatisfied rejects status contexts because their owning App can't
+  // be verified, a `ci.requiredChecks`-specific binding (docs/security.md); gate① is the general
+  // CI signal for every reviewer mode, the Status API has no SKIPPED/NEUTRAL concept to exploit,
+  // and rejecting it would permanently wedge every Status-API CI repo (Jenkins, Buildkite).
+  const legacy = (state: string) =>
+    parsePRStatus(JSON.stringify({ number: 4, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [{ state }] }))
+      .ciGreen;
+  assert.equal(legacy("SUCCESS"), true);
+  assert.equal(legacy("PENDING"), false);
+  assert.equal(legacy("FAILURE"), false);
+
+  // Empty rollup: unchanged, fail-closed (no checks reported yet != "this repo has no CI").
+  assert.equal(
+    parsePRStatus(JSON.stringify({ number: 4, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] })).ciGreen,
+    false,
   );
-  assert.equal(s.ciGreen, true);
+  // Mixed rollup: one SKIPPED among otherwise-SUCCESS checks is enough to withhold green.
+  assert.equal(
+    parsePRStatus(
+      JSON.stringify({
+        number: 4,
+        headRefOid: "abc",
+        state: "OPEN",
+        mergeable: "MERGEABLE",
+        statusCheckRollup: [{ conclusion: "SKIPPED" }, { conclusion: "NEUTRAL" }, { conclusion: "SUCCESS" }],
+      }),
+    ).ciGreen,
+    false,
+  );
 });
 
 test("parsePRStatus: legacy StatusContext with passing state is green", () => {
@@ -2777,4 +2825,33 @@ test("addIssueComment: a body that ALREADY carries its own specific sapwood mark
   const posted = seen[0]![bodyIdx + 1]!;
   assert.ok(posted.includes(specificMarker));
   assert.ok(posted.includes(ENGINE_COMMENT_MARKER));
+});
+
+test("#379 GithubForge.ensureRepoLabels: lists the configured repo's labels once, creates only the missing ones, returns their names", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return args[1] === "list" ? JSON.stringify([{ name: "sapwood:split" }]) : "";
+  };
+  const created = await forge.ensureRepoLabels([
+    { name: "sapwood:split", color: "fbca04", description: "already there" },
+    { name: "sapwood:round:pool", color: "5319e7", description: "In this round's dispatch-eligible pool" },
+  ]);
+  assert.deepEqual(created, ["sapwood:round:pool"]);
+  assert.deepEqual(seen, [
+    ["label", "list", "--repo", "o/r", "--limit", "200", "--json", "name"],
+    [
+      "label",
+      "create",
+      "sapwood:round:pool",
+      "--repo",
+      "o/r",
+      "--color",
+      "5319e7",
+      "--description",
+      "In this round's dispatch-eligible pool",
+    ],
+  ]);
 });

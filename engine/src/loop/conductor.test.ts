@@ -66,6 +66,10 @@ const DEFAULT_PROBE: LaneProbe = {
 };
 
 class FakeForge implements IForge {
+  // #379: repo-level label provisioning — no test in this file exercises it.
+  async ensureRepoLabels(): Promise<string[]> {
+    return [];
+  }
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
@@ -3933,21 +3937,14 @@ test("drivingLaneTerminalForDrain (#375): under cap + no daily-budget breach is 
 // reclaims the SAME worker row/PR/branch back into `driving` and re-drives it through the
 // ordinary DRIVE loop. No new worker/dispatch, ever. ──────────────────────────────────────────
 
-test("gatedReentryDecision: any human-hold label present -> SKIP (no complete human act yet); all holds cleared + under cap -> RECLAIM; at/over cap -> CAPPED", () => {
-  assert.equal(gatedReentryDecision(true, false, 0, 2), "SKIP");
-  assert.equal(gatedReentryDecision(true, false, 5, 2), "SKIP"); // a standing hold always wins, regardless of attempts
-  assert.equal(gatedReentryDecision(false, false, 0, 2), "RECLAIM");
-  assert.equal(gatedReentryDecision(false, false, 1, 2), "RECLAIM");
-  assert.equal(gatedReentryDecision(false, false, 2, 2), "CAPPED");
-  assert.equal(gatedReentryDecision(false, false, 3, 2), "CAPPED");
-  assert.equal(gatedReentryDecision(false, false, 0, 0), "CAPPED"); // cap=0 disables reentry outright
-});
-
-test("gatedReentryDecision (#248 review round 1, G1): an issue-level hold is a SEPARATE SKIP input from humanHoldPresent — either alone suppresses reclaim, regardless of attempts/cap", () => {
-  assert.equal(gatedReentryDecision(false, true, 0, 2), "SKIP"); // issue hold alone, no needs-human/blocked
-  assert.equal(gatedReentryDecision(false, true, 5, 2), "SKIP"); // issue hold alone, past cap — still SKIP, never CAPPED
-  assert.equal(gatedReentryDecision(true, true, 0, 2), "SKIP"); // both present
-  assert.equal(gatedReentryDecision(false, false, 0, 2), "RECLAIM"); // neither present — sanity, unaffected
+test("gatedReentryDecision (#400: one input, humanHoldPresent): a human-hold label present -> SKIP (no complete human act yet); cleared + under cap -> RECLAIM; at/over cap -> CAPPED", () => {
+  assert.equal(gatedReentryDecision(true, 0, 2), "SKIP");
+  assert.equal(gatedReentryDecision(true, 5, 2), "SKIP"); // a standing hold always wins, regardless of attempts
+  assert.equal(gatedReentryDecision(false, 0, 2), "RECLAIM");
+  assert.equal(gatedReentryDecision(false, 1, 2), "RECLAIM");
+  assert.equal(gatedReentryDecision(false, 2, 2), "CAPPED");
+  assert.equal(gatedReentryDecision(false, 3, 2), "CAPPED");
+  assert.equal(gatedReentryDecision(false, 0, 0), "CAPPED"); // cap=0 disables reentry outright
 });
 
 test("resumeDecision (#172): exhaustive confirmed × undecidable × paused × kill-switch × holds × attempts-vs-cap × capacity table", () => {
@@ -4193,7 +4190,7 @@ test("tick DRIVE (#248): hold + needs-human simultaneously on the SAME PR -> esc
   st.close();
 });
 
-test("tick GATED RECLAIM (#248 review round 1, G1 — the confirmed Codex scenario): a fix-cap-escalated row (failed + issue needs-human) gets an ISSUE-level hold applied while needs-human is removed -> SKIP, zero attempts consumed, zero writes; removing the hold too then reclaims normally", async () => {
+test("tick GATED RECLAIM (#400): hold has ONE carrier, the PR — an ISSUE-level hold no longer gates reentry; removing needs-human reclaims regardless of what else sits on the issue", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -4215,32 +4212,20 @@ test("tick GATED RECLAIM (#248 review round 1, G1 — the confirmed Codex scenar
     gated_reentry_attempts: 0,
   });
 
-  // The human starts investigating: applies an ISSUE-level hold (taking control of the reentry
-  // decision) and removes needs-human BEFORE finishing — the exact scenario the pre-fix code
-  // would have mishandled (needs-human alone gone -> gatedReentryDecision would have said
-  // RECLAIM, burning an attempt and letting DRIVE immediately re-escalate/re-latch).
-  forge.issueLabelsByIssue[60] = ["hold"];
+  // A standing needs-human still SKIPs — the human-hold set is the only reentry gate left.
+  forge.issueLabelsByIssue[60] = ["needs-human", "hold"];
   const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
-  assert.deepEqual(r1.gatedReclaimed, []); // SKIP — no outcome of any kind
-  assert.equal(st.getWorker("lane-capped")?.state, "failed"); // untouched
-  assert.equal(st.getWorker("lane-capped")?.gated_reentry_attempts, 0); // zero attempts consumed
-  assert.deepEqual(forge.labelsAdded, []); // zero writes — no re-escalation, no re-latch
-  assert.deepEqual(forge.prLabelsAdded, []);
-  assert.deepEqual(forge.issueComments, []);
-  assertNeverWritesHoldLabel(forge, cfg.escalation.holdLabels);
-
-  // A second tick, hold still standing: same SKIP, still zero consumption (not a one-shot).
-  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
-  assert.deepEqual(r2.gatedReclaimed, []);
+  assert.deepEqual(r1.gatedReclaimed, []);
   assert.equal(st.getWorker("lane-capped")?.gated_reentry_attempts, 0);
-  assert.deepEqual(forge.labelsAdded, []);
 
-  // The human finishes investigating and removes the hold too — apply=take control,
-  // remove=return it: reclaim now proceeds exactly like the ordinary #147 path.
-  forge.issueLabelsByIssue[60] = [];
-  const r3 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
-  assert.deepEqual(r3.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-capped", issue: 60, pr: 700, attempt: 1 }]);
+  // needs-human removed while an issue-level `hold` still sits there: the go-ahead signal IS the
+  // needs-human removal, and hold means nothing on this surface — reclaim proceeds. (#400: the
+  // GATED RECLAIM label read no longer feeds a hold check at all.)
+  forge.issueLabelsByIssue[60] = ["hold"];
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r2.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-capped", issue: 60, pr: 700, attempt: 1 }]);
   assert.equal(st.getWorker("lane-capped")?.state, "driving");
+  assertNeverWritesHoldLabel(forge, cfg.escalation.holdLabels); // still never written by the engine
   st.close();
 });
 
