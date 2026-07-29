@@ -446,8 +446,13 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   (`driver.ts`) now passes `tickIntervalSec` into every `tick()`; #172's live empirical
   verification established that resumed `total_cost_usd` is per-leg, so
   `State.recordSpend` records every handoff/resume leg directly with no baseline
-  subtraction or double count; `GithubForge.findOpenPrForIssue` gives `sapwood run` a first-pass
-  (not yet hardened) live wiring.** ~~**The gate② verification-plan re-check (Decision
+  subtraction or double count; ~~`GithubForge.findOpenPrForIssue` gives `sapwood run` a
+  first-pass (not yet hardened) live wiring~~ **→ #377: that first-pass wiring selected a lane's
+  PR by matching the issue number against PR-body PROSE and, in the 2026-07-24 dogfood run (F15),
+  handed a lane an unrelated PR to shepherd. It is deleted. A lane is now matched to its PR
+  structurally: the lane worktree's own branch, plus an engine-authored
+  `<!-- sapwood:pr-owner … -->` marker the engine stamps onto (or writes into) that branch's PR —
+  see docs/dev-guide/05-core-modules.md.** ~~**The gate② verification-plan re-check (Decision
   #8) is NOT yet wired:** the plan gate holds at *dispatch* (`getReadyIssues` refuses
   issues without a verification plan, fail-closed), but the M3 gate data carries no
   issue body, so no code path yet re-checks the finished PR against the plan — that

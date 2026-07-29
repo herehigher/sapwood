@@ -479,12 +479,25 @@ export interface LaneProbe {
    *  new lane state. Optional only for pre-#169 probe fixtures; stale lanes without it fail
    *  safe to DEAD. */
   dispatchedAgeSec?: number;
-  hasPr: boolean; // an open PR exists for this lane's issue
+  // #377: an open PR belonging to THIS LANE exists — resolved from the lane's own branch plus
+  // the engine-authored PR-owner marker (worker.ts's probe -> forge.ts's associateLanePr), not
+  // from any PR that merely mentions the lane's issue number.
+  hasPr: boolean;
   /** The open PR's number, when hasPr — the merge driver's gate/merge target (#13). Optional:
    *  probe fixtures that predate #13 (hasPr only, no number) still type-check; a driving lane
    *  with hasPr=true but no prNumber known keeps hasPr's rescue behavior but can't be driven
    *  through gates until a number is available (tick's fail-safe below escalates it). */
   prNumber?: number;
+  /** #377 (gate② round 3): the lane's PR association is UNKNOWN — a forge WRITE it depended on
+   *  failed (a 502 on `gh pr create`, a 403 on the marker stamp) — as opposed to a definitive
+   *  "this lane has no PR". The reclaim loops DEFER a lane flagged this way instead of settling
+   *  it, because settling consumes the only probe that would ever have opened or found the PR:
+   *  a DONE lane would be escalated to a human and a DEAD one requeued onto a FRESH worker,
+   *  both while its pushed branch sat there. Bounded by the supervisor
+   *  (MAX_INCONCLUSIVE_PR_PROBES) so a PERMANENT write failure can't hold a lane slot forever;
+   *  once the budget is spent the flag stops appearing and the ordinary no-PR rules settle the
+   *  lane. Absent/false ⇒ the answer is conclusive, today's behavior exactly. */
+  prAssociationInconclusive?: boolean;
   /** Terminal total_cost_usd (stream-json), once done/failed/handoff; 0 while still running
    *  or if unknown (e.g. a DEAD lane with no sentinel). Optional for probe fixtures that
    *  predate #14 — treated as 0. */
@@ -1399,6 +1412,34 @@ function writeLocalEscalation(state: State, park: ParkRow, message: string, log?
  *  duplicating this logic (Codex PR #72 P2) — a graceful drain that already wrote .handoff/.done
  *  must be recorded as such, never rotted as `running` until drainThenEscalate mislabels it
  *  failed. Touches no process/worktree (terminal lanes have sentinels — nothing to kill). */
+/**
+ * #377 (gate② round 3, P1): hold a lane whose PR association came back UNKNOWN, rather than
+ * settling it as "no PR". The engine only ever opens a lane's missing PR on the SAME probe the
+ * reclaim below settles from, so a transient forge write failure was a one-shot loss: a DONE
+ * lane got escalated to a human, a DEAD one got requeued onto a FRESH worker racing its own
+ * pushed branch, and neither was ever probed again to notice the PR. Skipping the lane leaves
+ * its row exactly as it stands, so the next tick re-probes and retries the write.
+ *
+ * Deliberately NOT applied on the two DRAIN paths (kill switch, cost/wall-clock ceiling —
+ * safety-layer cross-check): a drain's whole job is to get lanes settled and the engine stopped,
+ * so a lane that refuses to settle would fight the safety layer it is supposed to obey. There
+ * the ordinary no-PR disposition still applies, unchanged.
+ *
+ * Bounded by the supervisor's own retry budget (worker.ts's MAX_INCONCLUSIVE_PR_PROBES), which
+ * stops setting the flag once spent — so a PERMANENTLY failing write (`No commits between main
+ * and <branch>`) settles by the ordinary rules after a few ticks instead of pinning the slot.
+ * Returns true when the caller must `continue` (lane deferred, nothing recorded this tick).
+ */
+function deferForUnknownPr(state: Pick<State, "appendEvent">, w: WorkerRow, p: LaneProbe): boolean {
+  if (!p.prAssociationInconclusive) return false;
+  state.appendEvent("lane-pr-unknown", {
+    worker: w.name,
+    issue: w.issue,
+    note: "PR association unknown (forge write failed) — retrying next tick.",
+  });
+  return true;
+}
+
 async function reclaimTerminalLane(
   forge: IForge,
   state: State,
@@ -2132,6 +2173,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // ── RECLAIM: classify each in-flight lane from its 4 completion signals ──
   for (const w of state.runningWorkers()) {
     const p = await supervisor.probe(w.name);
+    if (deferForUnknownPr(state, w, p)) continue;
     // Terminal sentinel (handoff/done/failed) -> record + transition out of `running`. Shared
     // with the kill-switch gate above; returns null for KEEP/DEAD, handled below.
     const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
@@ -2275,6 +2317,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const fixingReclaimed: ReclaimOutcome[] = [];
   for (const w of state.fixingWorkers()) {
     const p = await supervisor.probe(w.name);
+    if (deferForUnknownPr(state, w, p)) continue;
     const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
     if (terminal) {
       fixingReclaimed.push(terminal);

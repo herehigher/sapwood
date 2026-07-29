@@ -37,7 +37,7 @@ import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine } from "../config/doctrine.js";
 import { estimateUsd, loadPricingTable, type PricingTable } from "../config/pricing.js";
-import type { Issue } from "../forge/forge.js";
+import type { Issue, LanePrOutcome } from "../forge/forge.js";
 import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor } from "../loop/conductor.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import { sanitizeUpstreamError } from "../proxy/tools.js";
@@ -1219,6 +1219,24 @@ export function spawnClaudeSession(
   };
 }
 
+/** #377 (gate② round 3): consecutive INCONCLUSIVE PR associations a single lane may defer on
+ *  before the engine settles it by the ordinary no-PR rules. The deferral exists so a
+ *  TRANSIENT forge write failure (a 502 on `gh pr create`) isn't mistaken for "this lane has
+ *  no PR" on the one probe the conductor settles from — but not every such failure is
+ *  transient (`No commits between main and <branch>` fails identically, forever), and an
+ *  unbounded defer would hold that lane's slot for the life of the engine. Three consecutive
+ *  ticks is the compromise: long enough to ride out a blip, short enough that a permanent
+ *  failure reaches a human quickly.
+ *
+ *  Counted IN MEMORY, per supervisor instance (one per `sapwood run`), deliberately not
+ *  persisted: an engine restart hands the lane a fresh budget, which is the safe direction —
+ *  more retries against a preserved branch, never fewer. */
+/** #377 (gate② round 5): `<lane>.<running|done|failed|handoff>.json` — the engine-written lane
+ *  sentinels, the trusted record of which lanes exist. */
+const SENTINEL_FILE = /^(.+)\.(?:running|done|failed|handoff)\.json$/;
+
+export const MAX_INCONCLUSIVE_PR_PROBES = 3;
+
 export interface WorkerDeps {
   cfg: SapwoodConfig;
   log?: (message: string) => void;
@@ -1233,14 +1251,14 @@ export interface WorkerDeps {
   worktreeRoot?: string;
   /** claude binary; default discoverClaudeBin(process.env). */
   claudeBin?: string;
-  /** probe()'s hasPr — engine wires this to the forge (an open PR for the issue). */
-  hasOpenPr: (issue: number) => Promise<boolean>;
-  /** probe()'s prNumber (#13 merge driver needs the actual PR number, not just "has one").
-   *  Optional and additive: when provided it also derives hasPr (a number means yes); when
-   *  omitted, probe() falls back to the legacy hasOpenPr-only boolean path (prNumber stays
-   *  undefined — a driving lane rescued that way can't be gated/merged until a number is
-   *  known, conductor.ts fails that lane safe rather than guessing). */
-  findOpenPr?: (issue: number) => Promise<number | null>;
+  /** #377: probe()'s hasPr/prNumber — resolves THIS LANE's own PR. Replaces the pre-#377
+   *  issue-number-keyed pair (`hasOpenPr`/`findOpenPr`, both deleted) that matched a PR body's
+   *  PROSE mention of the issue and, in the live F15 case, adopted an unrelated PR. The engine
+   *  wires this to forge.ts's `associateLanePr` (branch identity + the engine-authored PR-owner
+   *  marker); omitted -> no lane is ever associated with a PR (hasPr false, prNumber undefined),
+   *  which is the fail-closed direction: conductor.ts escalates such a lane to a human rather
+   *  than driving a guessed merge target. */
+  lanePr?: (lane: { name: string; issue: number; branch: string | null; sessionOver: boolean }) => Promise<LanePrOutcome>;
   /** Worker prompt for an issue. Default: a minimal imperative skeleton. */
   renderPrompt?: (issue: Issue) => string;
   /** Path to the compiled guard hook (node <path>). Default: the dist sibling of this module. */
@@ -1427,6 +1445,10 @@ export class WorkerSupervisor implements Supervisor {
   // also happens to match "handoff was requested, pid now confirmed dead" — reclaim() already
   // decided its fate.
   private readonly detachedReclaiming = new Set<string>();
+  // #377 (gate② round 3): consecutive inconclusive PR associations per lane — the deferral
+  // budget MAX_INCONCLUSIVE_PR_PROBES bounds. Cleared by any conclusive outcome and by
+  // reclaim(), so it can never outlive the lane it belongs to.
+  private readonly inconclusivePrProbes = new Map<string, number>();
 
   constructor(private readonly deps: WorkerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "state");
@@ -2506,14 +2528,30 @@ export class WorkerSupervisor implements Supervisor {
     const issue = this.laneIssue(name);
     let hasPr = false;
     let prNumber: number | undefined;
-    if (issue != null) {
-      if (this.deps.findOpenPr) {
-        const n = await this.deps.findOpenPr(issue);
-        hasPr = n != null;
-        if (n != null) prNumber = n;
-      } else {
-        hasPr = await this.deps.hasOpenPr(issue);
-      }
+    let prAssociationInconclusive = false;
+    if (issue != null && this.deps.lanePr) {
+      // #377: the lane's PR is resolved from what THIS lane structurally produced — its own
+      // worktree's branch, plus the engine-authored owner marker — never from a PR body's prose.
+      // `sessionOver` gates EVERY engine-authored write on that path — opening a PR (which would
+      // race the worker's own `gh pr create`) and stamping one (an unconditional read-modify-write
+      // that would clobber a concurrent description edit; gate② round 5). Reads are never gated.
+      //
+      // "Nothing is left to race" has TWO structural signals, and both must count (gate② P1 on
+      // PR #423): a terminal SENTINEL, or a CONFIRMED-DEAD wrapper (wrapperAlive === 0 — the same
+      // kill(pid, 0) signal finalizeDetachedHandoffIfConfirmedDead already treats as death, never
+      // -1/unknown). A detached lane that pushed its branch and then died writes no sentinel at
+      // all; without the second signal its pushed work would reach the conductor's DEAD reclaim
+      // as "no PR" and be requeued or escalated — the exact pushed-but-unPRed case this whole
+      // issue exists to fix, just arrived at by a crash instead of a clean exit.
+      const sessionOver = done || failed || handoff || wrapperAlive === 0;
+      const outcome = await this.deps.lanePr({ name, issue, branch: this.laneBranch(name), sessionOver });
+      hasPr = outcome.pr != null;
+      if (outcome.pr != null) prNumber = outcome.pr;
+      // Budget only counts once settlement is actually possible (gate② round 5): while the lane
+      // is still running the conductor classifies it KEEP no matter what this says, so spending
+      // retries here could leave none for the one probe that does settle it. No write can even
+      // fail before then, so this is belt-and-braces over that guarantee, not the only guard.
+      prAssociationInconclusive = sessionOver && this.trackInconclusiveAssociation(name, outcome);
     }
     const costUsd = this.terminalCostUsd({ done, failed, handoff }, name);
     const modelUsage = this.terminalModelUsage({ done, failed, handoff }, name);
@@ -2569,7 +2607,28 @@ export class WorkerSupervisor implements Supervisor {
       ...(actualModel != null ? { actualModel } : {}),
       ...(rateLimitResetAtMs != null ? { rateLimitResetAtMs } : {}),
       ...(envSignalStructured ? { envSignalStructured } : {}),
+      ...(prAssociationInconclusive ? { prAssociationInconclusive } : {}),
     };
+  }
+
+  /** #377 (gate② round 3): decides whether THIS probe reports the lane's PR association as
+   *  still-unknown (so the conductor defers settling it) or gives up and lets the ordinary
+   *  no-PR rules settle it. A conclusive outcome — including a conclusive "no PR" — clears the
+   *  lane's budget, so a later, unrelated blip gets its own full allowance. See
+   *  MAX_INCONCLUSIVE_PR_PROBES for why the budget exists and why it is in-memory only. */
+  private trackInconclusiveAssociation(name: string, outcome: LanePrOutcome): boolean {
+    if (!outcome.inconclusive) {
+      this.inconclusivePrProbes.delete(name);
+      return false;
+    }
+    const attempts = (this.inconclusivePrProbes.get(name) ?? 0) + 1;
+    this.inconclusivePrProbes.set(name, attempts);
+    if (attempts <= MAX_INCONCLUSIVE_PR_PROBES) return true;
+    this.log(
+      `[sapwood:worker] lane ${name}: PR association still unknown after ${MAX_INCONCLUSIVE_PR_PROBES} retries — ` +
+        `settling the lane by the ordinary no-PR rules (its pushed branch, if any, is preserved)`,
+    );
+    return false;
   }
 
   /** The terminal sentinel (whichever is present) carries the parsed stream-json
@@ -2670,6 +2729,7 @@ export class WorkerSupervisor implements Supervisor {
    *  returned ReclaimResult to escalate a retained worktree to a human (issue comment + label);
    *  worker.ts itself never talks to the forge. */
   async reclaim(name: string): Promise<ReclaimResult> {
+    this.inconclusivePrProbes.delete(name); // #377: the lane is going away — its retry budget with it
     const lane = this.lanes.get(name);
     if (lane) {
       lane.reclaiming = true;
@@ -2881,6 +2941,91 @@ export class WorkerSupervisor implements Supervisor {
     const r = this.readJson(this.path(name, "running.json"));
     return typeof r?.wrapper_pid === "number" ? r.wrapper_pid : null;
   }
+  /** #377: the branch a lane's worktree is currently on — the structural "which code did THIS
+   *  lane produce" signal that lane->PR association is keyed on (see WorkerDeps.lanePr).
+   *
+   *  Read straight off git's own on-disk refs, never by shelling git: `<worktree>/.git` is a file
+   *  containing `gitdir: <path>` (a linked worktree, which is what the `claude` CLI's
+   *  `--worktree` flag creates), and that directory's `HEAD` holds `ref: refs/heads/<branch>`.
+   *  Plain file reads keep this path git-free for the same #65/#69 reason retainOrDeleteWorktree
+   *  is: the engine must never invoke git inside a directory a worker fully controlled (a
+   *  worker-set clean filter turns any git invocation into engine-side code execution). Reading
+   *  two files it wrote is data, not execution.
+   *
+   *  null — meaning "unknowable, fall back to a marker scan" — for a missing/deleted worktree, a
+   *  detached HEAD, or anything unparseable. Never throws. */
+  private laneBranch(name: string): string | null {
+    const branch = this.laneHeadBranch(name);
+    if (branch == null) return null;
+    // #377 (gate② round 5): HEAD is WORKER-MUTABLE. The producer's own grant permits branch
+    // changes (`Bash(git *)`), so a lane can `git checkout` its way onto a branch it never
+    // produced — and a bare HEAD read would then let associateLanePr stamp and adopt THAT
+    // branch's sole unmarked PR, handing the driver an unrelated merge target. That is the same
+    // wrong-PR class this whole issue exists to close, re-entered through the branch instead of
+    // through prose.
+    //
+    // Validated against the trusted lane state the engine keeps for itself: the sentinels under
+    // `stateDir`, which live outside every worktree and which no worker can write (workers are
+    // never granted `data/` via --add-dir). A branch that ANY other known lane is also sitting
+    // on is contested and unusable as an association key — for BOTH lanes, deliberately: the
+    // engine cannot tell the thief from the victim, so it refuses rather than picking.
+    //
+    // RESIDUAL, stated rather than papered over: this closes lane-vs-lane capture, not a worker
+    // checking out some unrelated branch no lane owns (a human's feature branch, say) and having
+    // its sole unmarked PR adopted. Bounding that needs a trusted record of what the lane itself
+    // PUSHED — the engine has no seam for that today, since the worker runs its own `git push`.
+    // What still holds in that case: the PR must be the branch's ONLY open one and carry no
+    // marker, the adoption writes a marker naming this lane (so it is auditable, not silent),
+    // and gate② still demands a fresh non-author review before anything merges.
+    const rival = this.otherLaneOnBranch(name, branch);
+    if (rival) {
+      this.log(`[sapwood:worker] lane ${name}: branch ${branch} is also checked out by lane ${rival} — refusing it as an association key`);
+      return null;
+    }
+    return branch;
+  }
+
+  /** Every OTHER lane this stateDir knows about that currently sits on `branch`, if any. Lanes
+   *  are enumerated from the engine-written sentinels (never from the worktrees themselves — a
+   *  worker could create a directory, but not a sentinel). */
+  private otherLaneOnBranch(name: string, branch: string): string | null {
+    let entries: string[];
+    try {
+      entries = readdirSync(this.dir);
+    } catch {
+      return null; // unreadable state dir -> no evidence of a rival; the marker still gates adoption
+    }
+    const lanes = new Set<string>();
+    for (const entry of entries) {
+      const lane = entry.match(SENTINEL_FILE)?.[1]; // String.match, per the #69 grep-invariant
+
+      if (lane && lane !== name) lanes.add(lane);
+    }
+    for (const lane of lanes) {
+      if (this.laneHeadBranch(lane) === branch) return lane;
+    }
+    return null;
+  }
+
+  /** The raw `HEAD` read, with no cross-lane validation — see laneBranch for that. */
+  private laneHeadBranch(name: string): string | null {
+    const dotGit = join(this.worktreeRoot, name, ".git");
+    try {
+      let gitDir = dotGit;
+      if (!lstatSync(dotGit).isDirectory()) {
+        // `String.match`, deliberately not the RegExp-side equivalent: worker.test.ts's #69
+        // grep-invariant bans that method's bare name anywhere in this module.
+        const link = readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+)$/m);
+        if (!link) return null;
+        gitDir = resolve(dirname(dotGit), link[1]!.trim());
+      }
+      const head = readFileSync(join(gitDir, "HEAD"), "utf8").match(/^ref:\s*refs\/heads\/(.+)$/m);
+      return head ? head[1]!.trim() : null;
+    } catch {
+      return null;
+    }
+  }
+
   private laneIssue(name: string): number | null {
     for (const ext of ["running.json", "done.json", "failed.json", "handoff.json"]) {
       const r = this.readJson(this.path(name, ext));
