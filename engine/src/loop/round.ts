@@ -20,7 +20,7 @@
 
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
-import { labelsInclude } from "../forge/labels.js";
+import { type LabelSpec, labelsInclude } from "../forge/labels.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import { createProxyMint } from "../proxy/mint.js";
 import type { RoundPhase, RoundRow, State } from "../state/state.js";
@@ -422,6 +422,9 @@ export class RoundScopedForge implements IForge {
   addLabel(issue: number, label: string) {
     return this.inner.addLabel(issue, label);
   }
+  ensureRepoLabels(specs: readonly LabelSpec[]) {
+    return this.inner.ensureRepoLabels(specs);
+  }
   removeLabel(issue: number, label: string) {
     return this.inner.removeLabel(issue, label);
   }
@@ -604,6 +607,9 @@ export class PoolScopedForge implements IForge {
   }
   addLabel(issue: number, label: string) {
     return this.inner.addLabel(issue, label);
+  }
+  ensureRepoLabels(specs: readonly LabelSpec[]) {
+    return this.inner.ensureRepoLabels(specs);
   }
   removeLabel(issue: number, label: string) {
     return this.inner.removeLabel(issue, label);

@@ -16,6 +16,10 @@ import { openEscalations, reconcileEscalations } from "./escalation-reconcile.js
  *  to script a scenario. Every WRITE method records into `writes` so the read-only assertion
  *  (#295 AC3) can be made structurally rather than by inspection. */
 class FakeForge implements IForge {
+  // #379: repo-level label provisioning — no test in this file exercises it.
+  async ensureRepoLabels(): Promise<string[]> {
+    return [];
+  }
   issueStates: Record<number, "OPEN" | "CLOSED"> = {};
   issueLabels: Record<number, string[]> = {};
   prStates: Record<number, "OPEN" | "CLOSED" | "MERGED"> = {};

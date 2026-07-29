@@ -19,6 +19,7 @@ import {
   parseRunStopMode,
   parseStatusArgs,
   parseStopFlags,
+  reconcileWorkflowLabels,
   resolveStopConfig,
   runCli,
   runExitCode,
@@ -27,8 +28,10 @@ import {
 } from "../cli.js";
 import { ConfigSchema, parseConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
+import type { LabelSpec } from "../forge/labels.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import { SCHEMA_VERSION, State } from "../state/state.js";
+import { requiredLabels } from "./init.js";
 
 test("--version prints package version and exits 0", () => {
   const r = runCli(["node", "sapwood", "--version"]);
@@ -321,6 +324,63 @@ test("assertStopMilestoneExists: unknown/partial title fails CLOSED at startup, 
     },
     {},
   );
+});
+
+// ── #379 F1: startup workflow-label reconcile — the engine provisions any label the resolved
+// config names but the repo lacks, from the SAME list `sapwood init` uses. Live baseline: this
+// repo predated round:pool/split/decomposed/hold and every pool-label write failed on first
+// start, because nothing ever created the labels as the feature set grew. ──
+
+test("#379 reconcileWorkflowLabels: provisions the resolved config's FULL label list (the same one `sapwood init` uses) and records what it created", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  const seen: LabelSpec[][] = [];
+  const events: Array<[string, unknown]> = [];
+  const logs: string[] = [];
+  await reconcileWorkflowLabels(
+    {
+      ensureRepoLabels: async (specs) => {
+        seen.push([...specs]);
+        return ["sapwood:round:pool", "sapwood:hold"];
+      },
+    },
+    { appendEvent: (kind, payload) => events.push([kind, payload]) },
+    cfg,
+    (line) => logs.push(line),
+  );
+  assert.deepEqual(seen, [requiredLabels(cfg)], "one pass over the shared provisioning list — no second, drifting copy");
+  const names = new Set(seen[0]!.map((spec) => spec.name));
+  for (const name of ["sapwood:round:pool", "sapwood:split", "sapwood:decomposed", "sapwood:hold"]) {
+    assert.ok(names.has(name), `${name} is provisioned`);
+  }
+  assert.deepEqual(events, [["labels-reconciled", { created: ["sapwood:round:pool", "sapwood:hold"] }]]);
+  assert.ok(logs.some((line) => /sapwood:round:pool/.test(line)));
+});
+
+test("#379 reconcileWorkflowLabels: nothing missing -> no event, no noise", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  const events: unknown[] = [];
+  const logs: string[] = [];
+  await reconcileWorkflowLabels({ ensureRepoLabels: async () => [] }, { appendEvent: (_k, p) => events.push(p) }, cfg, (l) => logs.push(l));
+  assert.deepEqual(events, []);
+  assert.deepEqual(logs, []);
+});
+
+test("#379 reconcileWorkflowLabels: a denied/failing label write logs and lets startup continue — never blocks the engine", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  const events: unknown[] = [];
+  const logs: string[] = [];
+  await reconcileWorkflowLabels(
+    {
+      ensureRepoLabels: async () => {
+        throw new Error("HTTP 403: Resource not accessible");
+      },
+    },
+    { appendEvent: (_kind, payload) => events.push(payload) },
+    cfg,
+    (line) => logs.push(line),
+  );
+  assert.deepEqual(events, [], "no event on a failed provisioning pass");
+  assert.ok(logs.some((line) => /403/.test(line) && /continuing/.test(line)));
 });
 
 test("normalizeUnplacedBoardItems: moves every issue to backlog and records one event per move", async () => {

@@ -994,18 +994,19 @@ async function applyPoolLabels(
     }
   }
   // #212 gate② P2-4: propagate a TOTAL failure (every write in a non-empty set failed) instead
-  // of returning as if the pool were legitimately empty. Thrown out of the aligning phase's
-  // PeripheralStub, this reaches round.ts's runPeripheral uncaught — the phase marker is never
-  // persisted, so a crash-rerun (the SAME rerun-not-resume contract every peripheral relies on)
-  // retries selection from scratch instead of silently advancing past aligning with an empty
-  // pool and a marker that claims the phase succeeded. A validly EMPTY selection (the session
+  // of returning as if the pool were legitimately empty. #379 F2 changed WHERE that propagation
+  // stops, not whether it happens: runPoolSelection (the one production call site) now catches
+  // it, records a durable `pool-labels-failed` event, and returns an empty pool — so the round
+  // parks (nothing carries the pool label, so PoolScopedForge finds nothing to dispatch) and the
+  // next round re-selects. It no longer escapes the aligning PeripheralStub into round.ts, which
+  // used to kill the engine outright. A validly EMPTY selection (the session
   // chose zero candidates, or the deterministic path had zero candidates to begin with) never
   // hits this — `issues.length === 0` short-circuits the guard, exactly the "select none is a
   // valid, complete outcome" case the po-pool prompt documents.
   if (issues.length > 0 && successes === 0) {
     throw new Error(
-      `round-pool selection: ALL ${issues.length} label write(s) failed — refusing to silently advance past ` +
-        `aligning with an empty pool; the phase will retry on the next attempt`,
+      `round-pool selection: ALL ${issues.length} label write(s) failed — refusing to report an empty pool as a ` +
+        `correct selection; this round dispatches nothing and the next round re-selects`,
     );
   }
 }
@@ -1392,7 +1393,29 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
   // persistPoolSelection's own doc comment for the honesty-event/tick-error containment already
   // performed at the failure site above).
   if (decisionPersisted) {
-    await reconcilePoolLabels(forge, cfg, target, log, { state: deps.state, roundId: deps.roundId });
+    // #379 F2: a TOTAL label-write failure (applyPoolLabels' throw — see its own doc) is an
+    // ENVIRONMENT condition, not a defect to die on: the label may not exist, or this token may
+    // not be allowed to write it. Contained HERE, at the one production call site, so the
+    // failure behaves the way applyPoolLabels' own message always claimed it did — the round
+    // proceeds with an EMPTY pool, which means PoolScopedForge finds nothing dispatchable and
+    // the round parks, and the NEXT round re-selects from scratch. Before this, the throw
+    // propagated through the aligning PeripheralStub and out of runRounds itself, killing the
+    // engine with exit 1 (dogfood 2026-07-24: all 8 pool-label writes failed on first start
+    // against labels this repo had never created). The failure is NOT silent — it lands as a
+    // durable `pool-labels-failed` event next to the log line. `selectRoundPool` (the exported,
+    // no-event, direct-call variant) still propagates: it has no state handle to record with,
+    // so its caller must see the throw.
+    try {
+      await reconcilePoolLabels(forge, cfg, target, log, { state: deps.state, roundId: deps.roundId });
+    } catch (e) {
+      log(`[sapwood:pool] round ${deps.roundId}: ${String(e)}`);
+      try {
+        deps.state.appendEvent("pool-labels-failed", { round_id: deps.roundId, attempted: target.length, error: String(e) });
+      } catch (writeError) {
+        log(`[sapwood:pool] round ${deps.roundId}: failed to record the pool-label-failure event: ${String(writeError)}`);
+      }
+      return [];
+    }
   } else {
     log(`[sapwood:pool] round ${deps.roundId}: skipping label reconcile — the pool-selection decision failed to persist this pass`);
   }

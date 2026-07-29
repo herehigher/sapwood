@@ -2778,3 +2778,32 @@ test("addIssueComment: a body that ALREADY carries its own specific sapwood mark
   assert.ok(posted.includes(specificMarker));
   assert.ok(posted.includes(ENGINE_COMMENT_MARKER));
 });
+
+test("#379 GithubForge.ensureRepoLabels: lists the configured repo's labels once, creates only the missing ones, returns their names", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return args[1] === "list" ? JSON.stringify([{ name: "sapwood:split" }]) : "";
+  };
+  const created = await forge.ensureRepoLabels([
+    { name: "sapwood:split", color: "fbca04", description: "already there" },
+    { name: "sapwood:round:pool", color: "5319e7", description: "In this round's dispatch-eligible pool" },
+  ]);
+  assert.deepEqual(created, ["sapwood:round:pool"]);
+  assert.deepEqual(seen, [
+    ["label", "list", "--repo", "o/r", "--limit", "200", "--json", "name"],
+    [
+      "label",
+      "create",
+      "sapwood:round:pool",
+      "--repo",
+      "o/r",
+      "--color",
+      "5319e7",
+      "--description",
+      "In this round's dispatch-eligible pool",
+    ],
+  ]);
+});
