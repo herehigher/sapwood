@@ -30,6 +30,13 @@ import type { IForge, Issue } from "../forge/forge.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import { SCHEMA_VERSION, State } from "../state/state.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 test("--version prints package version and exits 0", () => {
   const r = runCli(["node", "sapwood", "--version"]);
   assert.equal(r.code, 0);
@@ -1637,7 +1644,7 @@ test("buildTickFixLegResume (#253): cfg.proxy.enabled: false (the default) -> un
   const state = new State(":memory:");
   try {
     const forge = fakeProxyForgeForCli() as unknown as IForge;
-    const result = buildTickFixLegResume(cfg, forge, state, (i, p) => `fix #${i} for PR #${p}`);
+    const result = buildTickFixLegResume(cfg, forge, state, (i, p) => `fix #${i} for PR #${p}`, realClock);
     assert.equal(result, undefined);
   } finally {
     state.close();
@@ -1650,7 +1657,7 @@ test("buildTickFixLegResume (#253 review round 2, H1): cfg.proxy.enabled: true, 
   const state = new State(":memory:");
   try {
     const forge = fakeProxyForgeForCli() as unknown as IForge;
-    const result = buildTickFixLegResume(cfg, forge, state, (i, p) => `fix #${i} for PR #${p}`);
+    const result = buildTickFixLegResume(cfg, forge, state, (i, p) => `fix #${i} for PR #${p}`, realClock);
     assert.equal(
       result,
       undefined,
@@ -1670,7 +1677,7 @@ test("buildTickFixLegResume (#253): cfg.proxy.enabled: true, shadow: false (the 
   try {
     const forge = fakeProxyForgeForCli() as unknown as IForge;
     const renderFixPrompt = (issueNumber: number, pr: number): string => `fix #${issueNumber} for PR #${pr}`;
-    const result = buildTickFixLegResume(cfg, forge, state, renderFixPrompt);
+    const result = buildTickFixLegResume(cfg, forge, state, renderFixPrompt, realClock);
     assert.ok(result, "expected a real fixLegResume");
     assert.equal(result.renderFixPrompt(3, 4), "fix #3 for PR #4");
     const handle = await result.mintProxy({ role: "worker", session: "lane-7-abc" });

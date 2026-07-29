@@ -373,7 +373,7 @@ test("createAligningStub: marker present -> returns it unchanged, no forge/sessi
   const forge = new FakeForge();
   const runner = new ScriptedRunner([doneResult("s1")]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const stub = createAligningStub(deps);
   const { marker } = await stub.run({ roundId: 5, phase: "aligning", marker: "prior-marker" });
   assert.equal(marker, "prior-marker");
@@ -386,7 +386,7 @@ test("createAligningStub: dispatches the align session with the PO tool pair (PO
   const forge = new FakeForge();
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const stub = createAligningStub(deps);
   const { marker, ranSession } = await stub.run({ roundId: 5, phase: "aligning", marker: null });
   assert.equal(marker, alignMarker(5));
@@ -408,7 +408,7 @@ test("createAligningStub (#410): webAccess.enabled: false falls the align sessio
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
   const state = new State(":memory:");
   const cfg = mkCfg({ webAccess: { enabled: false } });
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 5, phase: "aligning", marker: null });
   assert.equal(runner.calls[0]!.allowedTools, PO_ALLOWED_TOOLS);
@@ -420,7 +420,7 @@ test("createAligningStub: a declared issue with a plan section gets stamped orig
   const cfg = mkCfg();
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "Do the thing", body: PLAN_BODY }]))]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 1, phase: "aligning", marker: null });
   assert.equal(forge.createdIssues.length, 1);
@@ -448,7 +448,7 @@ test("createAligningStub #123: the phase externalizes ONE align-summary event re
     doneResult("po-triage-1", triageResultText(9, PLAN_BODY)),
   ]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 1, phase: "aligning", marker: null });
   const summaries = state.eventsSince("2020-01-01T00:00:00.000Z", ["align-summary"]);
@@ -473,7 +473,7 @@ test("createAligningStub #123: a DEGRADED align pass emits NO align-summary — 
     { outcome: "failed", costUsd: 0, modelUsage: [], exitCode: 1, name: "po-align-2" },
   ]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 1, phase: "aligning", marker: null });
   assert.equal(state.eventsSince("2020-01-01T00:00:00.000Z", ["align-summary"]).length, 0);
@@ -495,7 +495,7 @@ test("createAligningStub #231: a missing goal file is an EXPLICIT align-creation
     const runner = new ScriptedRunner([doneResult("po-triage-1", triageResultText(9, PLAN_BODY))]);
     const state = new State(":memory:");
     const logs: string[] = [];
-    const deps: AlignDeps = { forge, state, cfg, runner, log: (line) => logs.push(line) };
+    const deps: AlignDeps = { now: realClock, forge, state, cfg, runner, log: (line) => logs.push(line) };
     const stub = createAligningStub(deps);
     const { marker } = await stub.run({ roundId: 7, phase: "aligning", marker: null });
 
@@ -553,7 +553,7 @@ test("createAligningStub (#394 F23 gate② fix): an unreadable goal file (persis
     const cfg = mkCfg({ goal: { file: missingGoalPath } });
     const runner = new ScriptedRunner([doneResult("must-not-run", alignResultText([]))]);
     const state = new State(":memory:");
-    const deps: AlignDeps = { forge, state, cfg, runner };
+    const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
     const stub = createAligningStub(deps);
     const { marker, ranSession } = await stub.run({ roundId: 11, phase: "aligning", marker: null });
 
@@ -579,7 +579,7 @@ test("createAligningStub #231: a backlog read failure SUPPRESSES issue creation 
   ]);
   const state = new State(":memory:");
   const logs: string[] = [];
-  const deps: AlignDeps = { forge, state, cfg, runner, log: (line) => logs.push(line) };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner, log: (line) => logs.push(line) };
   const stub = createAligningStub(deps);
   const { marker } = await stub.run({ roundId: 8, phase: "aligning", marker: null });
 
@@ -613,7 +613,7 @@ test("createAligningStub #231: input-manifest rows record what a normal po-align
     doneResult("po-triage-1", triageResultText(9, PLAN_BODY)),
   ]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   await createAligningStub(deps).run({ roundId: 3, phase: "aligning", marker: null });
 
   const manifest = state.inputManifestRows(3);
@@ -649,7 +649,7 @@ test("createAligningStub #251: the po-align session's context manifest is persis
   const manifest = mkFakeManifest("po-align-attempt");
   const runner = new ScriptedRunner([{ ...doneResult("po-align-1", alignResultText([])), contextManifest: manifest }]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   await createAligningStub(deps).run({ roundId: 11, phase: "aligning", marker: null });
   const rows = state.listContextManifestsForRound(11);
   const row = rows.find((r) => r.session === "po-align-1");
@@ -670,7 +670,7 @@ test("createAligningStub #251: the po-triage session's context manifest is persi
     { ...doneResult("po-triage-1", triageResultText(9, PLAN_BODY)), contextManifest: manifest },
   ]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   await createAligningStub(deps).run({ roundId: 12, phase: "aligning", marker: null });
   const rows = state.listContextManifestsForRound(12);
   const row = rows.find((r) => r.session === "po-triage-1");
@@ -689,7 +689,7 @@ test("createAligningStub #251: the po-pool session's context manifest is persist
   const manifest = mkFakeManifest("po-pool-attempt");
   const runner = new ScriptedRunner([{ ...doneResult("role-po-pool-1", poolResultText([1])), contextManifest: manifest }]);
   const state = new State(":memory:");
-  await runPoolSelection({ forge, cfg, state, runner, roundId: 13 });
+  await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 13 });
   const rows = state.listContextManifestsForRound(13);
   const row = rows.find((r) => r.session === "role-po-pool-1");
   assert.ok(row);
@@ -712,7 +712,7 @@ test("createAligningStub #231 gate② F2: a backlog read failure is reflected TR
     doneResult("po-triage-1", triageResultText(9, PLAN_BODY)),
   ]);
   const state = new State(":memory:");
-  await createAligningStub({ forge, state, cfg, runner }).run({ roundId: 6, phase: "aligning", marker: null });
+  await createAligningStub({ now: realClock, forge, state, cfg, runner }).run({ roundId: 6, phase: "aligning", marker: null });
   const manifest = state.inputManifestRows(6);
   const triageBacklogRow = manifest.find((r) => r.channel === "backlog-digest" && r.session === "po-triage:9");
   assert.ok(triageBacklogRow);
@@ -730,6 +730,7 @@ test("createAligningStub #231 gate② F2: the triage issue-body manifest version
       state: new State(":memory:"),
       cfg: mkCfg(),
       runner: new ScriptedRunner([doneResult("po-triage-1", triageResultText(9, PLAN_BODY))]),
+      now: realClock,
     };
   };
   const depsA = mkStub("Original title");
@@ -751,7 +752,7 @@ test("createAligningStub: a declared issue WITHOUT a plan section is escalated n
   const cfg = mkCfg();
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "Vague issue", body: NO_PLAN_BODY }]))]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 2, phase: "aligning", marker: null });
   const newIssue = forge.openIssueNumbers[0]!;
@@ -776,7 +777,7 @@ test("createAligningStub: multiple declared issues are each processed independen
     ),
   ]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 3, phase: "aligning", marker: null });
   assert.equal(forge.openIssueNumbers.length, 2);
@@ -816,7 +817,8 @@ test("createAligningStub #216: crash before the first creation leaves a durable 
   };
   const firstRunner = new ScriptedRunner([doneResult("po-align-1", alignResultText(THREE_PROPOSALS))]);
   await assert.rejects(
-    () => createAligningStub({ forge, state, cfg, runner: firstRunner }).run({ roundId: 216, phase: "aligning", marker: null }),
+    () =>
+      createAligningStub({ now: realClock, forge, state, cfg, runner: firstRunner }).run({ roundId: 216, phase: "aligning", marker: null }),
     /crash before create/,
   );
   assert.equal(forge.createdIssues.length, 0);
@@ -824,7 +826,7 @@ test("createAligningStub #216: crash before the first creation leaves a durable 
   // The scripted result deliberately differs, but must never be consumed: externalization
   // replays the already-persisted validated set without starting another align session.
   const rerun = new ScriptedRunner([doneResult("po-align-2", alignResultText([]))]);
-  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 216, phase: "aligning", marker: null });
+  await createAligningStub({ now: realClock, forge, state, cfg, runner: rerun }).run({ roundId: 216, phase: "aligning", marker: null });
   assert.equal(rerun.calls.length, 0, "a persisted proposal set bypasses the align session entirely");
   assert.deepEqual(
     forge.createdIssues.map((issue) => issue.title),
@@ -847,7 +849,8 @@ test("createAligningStub #216: crash after k of n creations reruns exactly the r
   };
   const firstRunner = new ScriptedRunner([doneResult("po-align-1", alignResultText(THREE_PROPOSALS))]);
   await assert.rejects(
-    () => createAligningStub({ forge, state, cfg, runner: firstRunner }).run({ roundId: 217, phase: "aligning", marker: null }),
+    () =>
+      createAligningStub({ now: realClock, forge, state, cfg, runner: firstRunner }).run({ roundId: 217, phase: "aligning", marker: null }),
     /crash after two/,
   );
   assert.deepEqual(
@@ -856,7 +859,7 @@ test("createAligningStub #216: crash after k of n creations reruns exactly the r
   );
 
   const rerun = new ScriptedRunner([doneResult("po-align-2", alignResultText(THREE_PROPOSALS))]);
-  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 217, phase: "aligning", marker: null });
+  await createAligningStub({ now: realClock, forge, state, cfg, runner: rerun }).run({ roundId: 217, phase: "aligning", marker: null });
   assert.equal(rerun.calls.length, 0);
   assert.deepEqual(
     forge.createdIssues.map((issue) => issue.title),
@@ -887,7 +890,8 @@ test("createAligningStub #216: lost creation receipt reconciles by body marker a
   };
   const firstRunner = new ScriptedRunner([doneResult("po-align-1", alignResultText(THREE_PROPOSALS))]);
   await assert.rejects(
-    () => createAligningStub({ forge, state, cfg, runner: firstRunner }).run({ roundId: 218, phase: "aligning", marker: null }),
+    () =>
+      createAligningStub({ now: realClock, forge, state, cfg, runner: firstRunner }).run({ roundId: 218, phase: "aligning", marker: null }),
     /receipt lost/,
   );
   assert.deepEqual(
@@ -896,7 +900,7 @@ test("createAligningStub #216: lost creation receipt reconciles by body marker a
   );
 
   const rerun = new ScriptedRunner([doneResult("po-align-2", alignResultText(THREE_PROPOSALS))]);
-  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 218, phase: "aligning", marker: null });
+  await createAligningStub({ now: realClock, forge, state, cfg, runner: rerun }).run({ roundId: 218, phase: "aligning", marker: null });
   assert.deepEqual(
     forge.createdIssues.map((issue) => issue.title),
     ["first", "second", "third"],
@@ -959,6 +963,7 @@ test("createAligningStub #216: proposal receipt lands only after reconciled gove
   await assert.rejects(
     () =>
       createAligningStub({
+        now: realClock,
         forge,
         state,
         cfg,
@@ -974,7 +979,7 @@ test("createAligningStub #216: proposal receipt lands only after reconciled gove
   assert.equal(state.eventsAfterId(0, ["proposal-created"]).length, 0, "partial governance is not terminal");
 
   const rerun = new ScriptedRunner([failedResult("must-not-run")]);
-  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 222, phase: "aligning", marker: null });
+  await createAligningStub({ now: realClock, forge, state, cfg, runner: rerun }).run({ roundId: 222, phase: "aligning", marker: null });
   assert.equal(rerun.calls.length, 0);
   assert.ok(forge.issueLabels[issue]!.includes(cfg.labels.originAgent));
   assert.ok(forge.issueLabels[issue]!.includes(cfg.labels.needsHuman));
@@ -1005,6 +1010,7 @@ test("createAligningStub #232 F3 (Codex sol high review of PR #249): crash after
   await assert.rejects(
     () =>
       createAligningStub({
+        now: realClock,
         forge,
         state,
         cfg,
@@ -1023,7 +1029,7 @@ test("createAligningStub #232 F3 (Codex sol high review of PR #249): crash after
   );
 
   const rerun = new ScriptedRunner([failedResult("must-not-run")]);
-  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 231, phase: "aligning", marker: null });
+  await createAligningStub({ now: realClock, forge, state, cfg, runner: rerun }).run({ roundId: 231, phase: "aligning", marker: null });
   assert.equal(rerun.calls.length, 0, "the persisted proposal set skips po-align entirely on rerun");
   assert.equal(forge.createdIssues.length, 1, "no re-create — reconciled via the body marker");
   assert.equal(
@@ -1048,7 +1054,7 @@ test("createAligningStub #216: divergent proposal journal records honesty and ad
   const logs: string[] = [];
   const runner = new ScriptedRunner([doneResult("must-not-run", alignResultText([]))]);
 
-  const result = await createAligningStub({ forge, state, cfg: mkCfg(), runner, log: (line) => logs.push(line) }).run({
+  const result = await createAligningStub({ now: realClock, forge, state, cfg: mkCfg(), runner, log: (line) => logs.push(line) }).run({
     roundId,
     phase: "aligning",
     marker: null,
@@ -1076,7 +1082,7 @@ test("createAligningStub #216: corrupt proposal journal records honesty and adva
   state.appendEvent("proposal-set-persisted", { round_id: 223, proposals: "not-an-array" });
   const logs: string[] = [];
   const runner = new ScriptedRunner([doneResult("must-not-run", alignResultText([]))]);
-  const result = await createAligningStub({ forge, state, cfg: mkCfg(), runner, log: (line) => logs.push(line) }).run({
+  const result = await createAligningStub({ now: realClock, forge, state, cfg: mkCfg(), runner, log: (line) => logs.push(line) }).run({
     roundId: 223,
     phase: "aligning",
     marker: null,
@@ -1105,7 +1111,7 @@ test("createAligningStub #216: normalized-title collision is skipped with a dura
   assert.equal(normalizeProposalTitle("FIX payment retry"), normalizeProposalTitle(forge.backlogIssues[0]!.title));
   const state = new State(":memory:");
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "FIX payment retry", body: PLAN_BODY }]))]);
-  await createAligningStub({ forge, state, cfg: mkCfg(), runner }).run({ roundId: 219, phase: "aligning", marker: null });
+  await createAligningStub({ now: realClock, forge, state, cfg: mkCfg(), runner }).run({ roundId: 219, phase: "aligning", marker: null });
   assert.equal(forge.createdIssues.length, 0);
   const skipped = state.eventsAfterId(0, ["proposal-skipped"]);
   assert.equal(skipped.length, 1);
@@ -1124,7 +1130,7 @@ test("createAligningStub #216: marker-null full-success rerun performs zero forg
   const state = new State(":memory:");
   const cfg = mkCfg();
   const first = new ScriptedRunner([doneResult("po-align-1", alignResultText(THREE_PROPOSALS))]);
-  await createAligningStub({ forge, state, cfg, runner: first }).run({ roundId: 220, phase: "aligning", marker: null });
+  await createAligningStub({ now: realClock, forge, state, cfg, runner: first }).run({ roundId: 220, phase: "aligning", marker: null });
   const writes = {
     creates: forge.createdIssues.length,
     labels: Object.values(forge.issueLabels).flat().length,
@@ -1132,7 +1138,7 @@ test("createAligningStub #216: marker-null full-success rerun performs zero forg
   };
 
   const rerun = new ScriptedRunner([doneResult("po-align-2", alignResultText(THREE_PROPOSALS))]);
-  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 220, phase: "aligning", marker: null });
+  await createAligningStub({ now: realClock, forge, state, cfg, runner: rerun }).run({ roundId: 220, phase: "aligning", marker: null });
   assert.deepEqual(
     {
       creates: forge.createdIssues.length,
@@ -1153,7 +1159,7 @@ test("createAligningStub: triage pass briefs a po-triage session per plan-less c
     doneResult("po-triage-50", triageResultText(50, "just a description\n## Verification\n- run npm test")),
   ]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   const { marker } = await stub.run({ roundId: 6, phase: "aligning", marker: null });
   assert.deepEqual(
@@ -1183,7 +1189,7 @@ test("createAligningStub (#410): webAccess.enabled: false falls the triage sessi
     doneResult("po-triage-50", triageResultText(50, "just a description\n## Verification\n- run npm test")),
   ]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 6, phase: "aligning", marker: null });
   assert.equal(runner.calls[0]!.allowedTools, PO_ALLOWED_TOOLS);
@@ -1204,7 +1210,7 @@ test("createAligningStub: triage processes every candidate independently", async
     doneResult("po-triage-61", triageResultText(61, "## Verification\n- b")),
   ]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 7, phase: "aligning", marker: null });
   assert.deepEqual(
@@ -1237,7 +1243,7 @@ test("createAligningStub #374 review (Codex sol-high finding 6): once an earlier
     quotaResult, // po-triage's FIRST candidate (#60) classifies quota/429 -> parks
   ]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 9, phase: "aligning", marker: null });
   // po-align (1 call) + ONLY #60's triage attempt (1 call) — #61/#62 skipped once parked.
@@ -1274,7 +1280,7 @@ test("createAligningStub #374 review (Codex sol-high verify-pass finding 1, P1):
   // outright (round.ts's own canary doctrine). If the loop guard skipped on "a park row exists"
   // (the pre-fix behavior), #90 would never even get a chance to prove recovery.
   state.enterPark("llm", "prior quota storm", null, "2026-07-24T00:00:00Z");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 10, phase: "aligning", marker: null });
   // BOTH candidates got a real session — #90's success cleared the park, so #91 proceeds
@@ -1327,7 +1333,7 @@ test("createAligningStub #374 review (Codex sol-high verify-pass finding 1, P1):
     doneResult("po-align-1", alignResultText([])), // po-align itself succeeds cleanly
     quotaResult, // po-triage's ONLY fresh candidate (#60) classifies quota/429 -> parks
   ]);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 40, phase: "aligning", marker: null });
   // po-align (1 call) + ONLY #60's fresh triage attempt (1 call) — #61 dispatches NO session at
@@ -1360,7 +1366,7 @@ test("createAligningStub: re-running the SAME round after a marker was already s
     doneResult("po-triage-70", triageResultText(70, "## Verification\n- x")),
   ]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   const first = await stub.run({ roundId: 8, phase: "aligning", marker: null });
   assert.equal(runner.calls.length, 2);
@@ -1387,7 +1393,7 @@ test("createAligningStub P2: a failed align session is retried once; a successfu
   ]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   const { marker } = await stub.run({ roundId: 10, phase: "aligning", marker: null });
   assert.equal(runner.calls.length, 2, "exactly one retry");
@@ -1411,7 +1417,7 @@ test("createAligningStub P2: two failed align sessions -> marker STILL set (next
   ]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   const { marker } = await stub.run({ roundId: 11, phase: "aligning", marker: null });
   assert.equal(marker, alignMarker(11), "the round still advances — pre-Ready, low stakes");
@@ -1438,7 +1444,7 @@ test("createAligningStub P2: a failed triage session is retried once; the succes
   ]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 12, phase: "aligning", marker: null });
   assert.deepEqual(
@@ -1464,7 +1470,7 @@ test("createAligningStub P2: two failed triage sessions -> NO success comment (n
   ]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   const { marker } = await stub.run({ roundId: 13, phase: "aligning", marker: null });
   assert.equal(marker, alignMarker(13), "the round still advances — pre-Ready, low stakes");
@@ -1488,7 +1494,7 @@ test("createAligningStub P2: a 'done' triage session whose VALID output left the
   ]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 14, phase: "aligning", marker: null });
   assert.equal(runner.calls.length, 2, "not retried — schema-valid output is a DONE attempt, even if content-checked afterward");
@@ -1514,7 +1520,7 @@ test("createAligningStub #110: a malformed align block (no sentinel at all) is r
   ]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   const { marker } = await stub.run({ roundId: 15, phase: "aligning", marker: null });
   assert.equal(runner.calls.length, 2, "one retry, per #110's isValid-driven retry contract");
@@ -1534,7 +1540,7 @@ test("createAligningStub #110: a malformed align block on the FIRST attempt is r
   ]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 16, phase: "aligning", marker: null });
   assert.equal(forge.createdIssues.length, 1, "the converged retry's declared issue IS created");
@@ -1553,7 +1559,7 @@ test("createAligningStub #110: a malformed triage block is retried once, then de
   ]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 17, phase: "aligning", marker: null });
   assert.equal(forge.updateIssueBodyCalls.length, 0);
@@ -1591,7 +1597,7 @@ test("createAligningStub #232: crash-rerun resume — a persisted triage-decisio
   // triage dispatch would be silently absorbed rather than crashing — the roleId assertion below
   // is what actually proves no po-triage session ran.
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   const { marker } = await stub.run({ roundId: 22, phase: "aligning", marker: null });
   assert.deepEqual(
@@ -1633,7 +1639,7 @@ test("createAligningStub #232: crash-rerun resume — a triage-body-committed re
   // The prior (crashed) attempt's body write already landed on the live issue before it crashed.
   forge.issueBodies[94] = draftedBody;
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 23, phase: "aligning", marker: null });
   assert.deepEqual(
@@ -1681,7 +1687,7 @@ test("createAligningStub #232 gate② F1 (Codex sol high review of PR #249): cra
   );
 
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 24, phase: "aligning", marker: null });
   assert.deepEqual(
@@ -1731,7 +1737,7 @@ test("createAligningStub #232: concurrent-edit guard — a live body change sinc
   };
   const state = new State(":memory:");
   const logged = tapEvents(state);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   const { marker } = await stub.run({ roundId: 21, phase: "aligning", marker: null });
   assert.equal(forge.updateIssueBodyCalls.length, 0, "the write is refused — old body kept");
@@ -1755,7 +1761,7 @@ test("createAligningStub #232: a triage-decision-accepted append failure aborts 
   ]);
   const state = new State(":memory:");
   const logged = tapAndPoisonEvents(state, "triage-decision-accepted");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   const { marker } = await stub.run({ roundId: 20, phase: "aligning", marker: null });
   assert.equal(marker, alignMarker(20), "round not wedged");
@@ -1782,7 +1788,7 @@ test("createAligningStub #237 finding 6: a triage concern is DROPPED (never post
   ]);
   const state = new State(":memory:");
   const logged = tapAndPoisonEvents(state, "triage-decision-accepted");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 20, phase: "aligning", marker: null });
   assert.ok(
@@ -1813,7 +1819,7 @@ test("createAligningStub #237 finding 6: a triage concern is DROPPED when the co
     },
   };
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 21, phase: "aligning", marker: null });
   assert.equal(forge.updateIssueBodyCalls.length, 0, "the write is refused");
@@ -1841,7 +1847,7 @@ test("createAligningStub #237 finding 6: a RESUMED triage decision's concern IS 
     concerns: [{ issue: 93, reason: "recovered concern" }],
   });
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 22, phase: "aligning", marker: null });
   assert.equal(forge.updateIssueBodyCalls.length, 1, "the resumed decision's body write lands");
@@ -1862,7 +1868,7 @@ test("createAligningStub #110 (Codex round 1): a duplicate-title align batch twi
   const runner = new ScriptedRunner([doneResult("po-align-0", dupText), doneResult("po-align-0-retry", dupText)]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   const { marker } = await stub.run({ roundId: 19, phase: "aligning", marker: null });
   assert.equal(runner.calls.length, 2, "invalid output is retried once, then degrades");
@@ -1881,7 +1887,7 @@ test("createAligningStub #110: an align block with a wrong number of <<<ISSUE>>>
     doneResult("po-align-0-retry", alignResultText([{ title: "a", body: "## Verification\n- x" }])),
   ]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 18, phase: "aligning", marker: null });
   assert.equal(runner.calls.length, 2, "the mismatched first attempt was retried");
@@ -1896,7 +1902,7 @@ test("createAligningStub P3: a customized labels.originAgent value is what gets 
   const cfg = mkCfg({ labels: { ...LEGACY_LABEL_CONFIG.labels, originAgent: "bot:made" } });
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "t", body: "## Verification\n- x" }]))]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 23, phase: "aligning", marker: null });
   const newIssue = forge.openIssueNumbers[0]!;
@@ -2040,7 +2046,7 @@ test("createAligningStub #215: a pre-existing custom PO prompt without {{backlog
     forge.backlogIssues = [{ number: 8, title: "Unused by this override", labels: [] }];
     const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
     const state = new State(":memory:");
-    await createAligningStub({ forge, state, cfg: mkCfg({ roles: { po: { promptFile: promptPath } } }), runner }).run({
+    await createAligningStub({ now: realClock, forge, state, cfg: mkCfg({ roles: { po: { promptFile: promptPath } } }), runner }).run({
       roundId: 1,
       phase: "aligning",
       marker: null,
@@ -2063,7 +2069,7 @@ test("#128: a real caller (deps.planMdPath omitted) renders {{plan.md}} from cfg
     const cfg = mkCfg({ goal: { file: goalPath } });
     const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
     const state = new State(":memory:");
-    const deps: AlignDeps = { forge, state, cfg, runner }; // no deps.planMdPath override
+    const deps: AlignDeps = { now: realClock, forge, state, cfg, runner }; // no deps.planMdPath override
     const stub = createAligningStub(deps);
     await stub.run({ roundId: 1, phase: "aligning", marker: null });
     assert.ok(runner.calls[0]!.prompt.includes("Only ship what advances the north star."));
@@ -2086,7 +2092,7 @@ test("createAligningStub #126: no directive file -> both the align session AND e
       doneResult("po-triage-1", triageResultText(9, PLAN_BODY)),
     ]);
     const state = new State(":memory:");
-    const deps: AlignDeps = { forge, state, cfg, runner };
+    const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
     const stub = createAligningStub(deps);
     await stub.run({ roundId: 1, phase: "aligning", marker: null });
     assert.equal(runner.calls.length, 2);
@@ -2113,7 +2119,7 @@ test("createAligningStub #126: a directive file is substituted into BOTH the ali
       doneResult("po-triage-1", triageResultText(9, PLAN_BODY)),
     ]);
     const state = new State(":memory:");
-    const deps: AlignDeps = { forge, state, cfg, runner };
+    const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
     const stub = createAligningStub(deps);
     await stub.run({ roundId: 4, phase: "aligning", marker: null });
     assert.equal(runner.calls.length, 2);
@@ -2144,7 +2150,7 @@ test("createAligningStub #126: crash-rerun — a resumed call for the SAME round
     const state = new State(":memory:");
 
     const runner1 = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
-    const deps1: AlignDeps = { forge, state, cfg, runner: runner1 };
+    const deps1: AlignDeps = { now: realClock, forge, state, cfg, runner: runner1 };
     await createAligningStub(deps1).run({ roundId: 2, phase: "aligning", marker: null });
     assert.ok(runner1.calls[0]!.prompt.includes("original steering"));
 
@@ -2154,7 +2160,7 @@ test("createAligningStub #126: crash-rerun — a resumed call for the SAME round
     writeFileSync(directiveFile, "a later, different directive", "utf8");
     forge.planTriageCandidates = [{ number: 9, title: "planless idea", labels: [] }];
     const runner2 = new ScriptedRunner([doneResult("po-triage-2", triageResultText(9, PLAN_BODY))]);
-    const deps2: AlignDeps = { forge, state, cfg, runner: runner2 };
+    const deps2: AlignDeps = { now: realClock, forge, state, cfg, runner: runner2 };
     await createAligningStub(deps2).run({ roundId: 2, phase: "aligning", marker: null });
     assert.equal(runner2.calls.length, 1, "the persisted proposal set skips po-align; triage still runs");
     assert.equal(runner2.calls[0]!.roleId, "po-triage");
@@ -2379,7 +2385,7 @@ test("runPoolSelection (#233 AC1): the deterministic DEFAULT path (roles.po.pool
   forge.ready = [mkReady(1, 3), mkReady(2, 3), mkReady(3, 3)];
   const runner = new ScriptedRunner([]);
   const state = new State(":memory:");
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 3 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 3 });
   assert.equal(runner.calls.length, 0, "no session ran on the deterministic default path");
   assert.deepEqual(
     selected.map((i) => i.number).sort((a, b) => a - b),
@@ -2396,7 +2402,7 @@ test("runPoolSelection (#233 AC1 mirror): the opt-in SESSION path (roles.po.pool
   forge.ready = [mkReady(1, 3), mkReady(2, 3)];
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
   const state = new State(":memory:");
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 4 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 4 });
   assert.equal(runner.calls.length, 1);
   assert.deepEqual(
     selected.map((i) => i.number),
@@ -2418,7 +2424,7 @@ test("runPoolSelection #232: a pool-selected append failure aborts label effects
   const state = new State(":memory:");
   const logged = tapAndPoisonEvents(state, "pool-selected");
   const runner = new ScriptedRunner([]);
-  const target = await runPoolSelection({ forge, cfg, state, runner, roundId: 9 });
+  const target = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 9 });
   assert.equal(runner.calls.length, 0, "still no session on the deterministic default path");
   assert.equal(forge.addLabelCalls.length, 0, "no label effects — the decision never durably landed (#232 fail-closed)");
   assert.deepEqual(
@@ -2441,7 +2447,7 @@ test("runPoolSelection #232: a pool-selected append failure on the SESSION path 
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
   const state = new State(":memory:");
   const logged = tapAndPoisonEvents(state, "pool-selected");
-  await runPoolSelection({ forge, cfg, state, runner, roundId: 10 });
+  await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 10 });
   assert.equal(forge.addLabelCalls.length, 0, "the validated session selection is never labelled — the decision write failed");
   assert.ok(logged.some(([kind]) => kind === "pool-selection-decision-lost"));
   assert.ok(logged.some(([kind]) => kind === "tick-error"));
@@ -2454,7 +2460,7 @@ test("runPoolSelection #231: the session path records an input-manifest row for 
   forge.ready = [mkReady(1, 3), mkReady(2, 3)];
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
   const state = new State(":memory:");
-  await runPoolSelection({ forge, cfg, state, runner, roundId: 4 });
+  await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 4 });
   const manifest = state.inputManifestRows(4);
   const row = manifest.find((r) => r.channel === "pool-candidates");
   assert.ok(row);
@@ -2471,7 +2477,7 @@ test("runPoolSelection #231: the session path records an input-manifest row for 
   const forge2 = new FakeForge();
   forge2.ready = [mkReady(1, 3)];
   const state2 = new State(":memory:");
-  await runPoolSelection({ forge: forge2, cfg: mkCfg(), state: state2, runner: new ScriptedRunner([]), roundId: 5 });
+  await runPoolSelection({ now: realClock, forge: forge2, cfg: mkCfg(), state: state2, runner: new ScriptedRunner([]), roundId: 5 });
   assert.equal(state2.inputManifestRows(5).length, 0);
   state2.close();
 });
@@ -2483,6 +2489,7 @@ test("runPoolSelection #231 gate② F2: the pool-candidates manifest version has
   forgeA.ready = [{ number: 1, title: "Original title", labels: ["sapwood:prio:3"] }];
   const stateA = new State(":memory:");
   await runPoolSelection({
+    now: realClock,
     forge: forgeA,
     cfg,
     state: stateA,
@@ -2496,6 +2503,7 @@ test("runPoolSelection #231 gate② F2: the pool-candidates manifest version has
   forgeB.ready = [{ number: 1, title: "A completely different title", labels: ["sapwood:prio:3"] }]; // SAME candidate number, different title
   const stateB = new State(":memory:");
   await runPoolSelection({
+    now: realClock,
     forge: forgeB,
     cfg,
     state: stateB,
@@ -2519,7 +2527,7 @@ test("runPoolSelection: roles.po.poolSelection=true — a fake runner's selectio
   forge.ready = [1, 2, 3, 4, 5].map((n) => mkReady(n, 3));
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1, 3]))]);
   const state = new State(":memory:");
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.deepEqual(
     selected.map((i) => i.number),
     [1, 3],
@@ -2548,7 +2556,7 @@ test("runPoolSelection: an out-of-bounds selection (an issue number outside the 
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", badSelection), doneResult("role-po-pool-2", badSelection)]);
   const state = new State(":memory:");
   const events = tapEvents(state);
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 7 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 7 });
   assert.equal(runner.calls.length, 2, "retried exactly once before degrading");
   assert.deepEqual(
     selected.map((i) => i.number).sort((a, b) => a - b),
@@ -2574,7 +2582,7 @@ test("runPoolSelection: an over-cap selection (more issues than the candidate li
   const overCap = poolResultText([1, 2, 3]);
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", overCap), doneResult("role-po-pool-2", overCap)]);
   const state = new State(":memory:");
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.equal(runner.calls.length, 2);
   assert.deepEqual(
     selected.map((i) => i.number).sort((a, b) => a - b),
@@ -2591,7 +2599,7 @@ test("runPoolSelection: default config (roles.po.poolSelection unset -> false) -
   forge.ready = [mkReady(1, 3), mkReady(2, 3), mkReady(3, 3)];
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
   const state = new State(":memory:");
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.equal(runner.calls.length, 0, "poolSelection is off by default — no session, not even an attempt");
   assert.deepEqual(
     selected.map((i) => i.number).sort((a, b) => a - b),
@@ -2606,7 +2614,7 @@ test("runPoolSelection: roles.po.enabled=false -> pool selection is UNAFFECTED �
   forge.ready = [mkReady(1, 3), mkReady(2, 3), mkReady(3, 3)];
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
   const state = new State(":memory:");
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.equal(runner.calls.length, 0, "poolSelection defaults false regardless of roles.po.enabled — no session");
   assert.deepEqual(
     selected.map((i) => i.number).sort((a, b) => a - b),
@@ -2625,7 +2633,7 @@ test("runPoolSelection: roles.po.enabled=false AND roles.po.poolSelection=true -
   forge.ready = [mkReady(1, 3), mkReady(2, 3), mkReady(3, 3)];
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
   const state = new State(":memory:");
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.equal(runner.calls.length, 1, "poolSelection=true dispatches a session even with align/triage (roles.po.enabled) off");
   assert.deepEqual(
     selected.map((i) => i.number),
@@ -2640,7 +2648,7 @@ test("runPoolSelection: zero Ready candidates -> no session dispatched (nothing 
   forge.ready = [];
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([]))]);
   const state = new State(":memory:");
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.equal(runner.calls.length, 0);
   assert.deepEqual(selected, []);
 });
@@ -2651,7 +2659,7 @@ test("runPoolSelection: roles.po.poolSelection=true with zero Ready candidates -
   forge.ready = [];
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([]))]);
   const state = new State(":memory:");
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.equal(runner.calls.length, 0, "zero candidates short-circuits before a session would ever be dispatched");
   assert.deepEqual(selected, []);
 });
@@ -2673,7 +2681,7 @@ test("runPoolSelection (gate② r2): replay path — a persisted pool-selected e
   const state = new State(":memory:");
   state.appendEvent("pool-selected", { round_id: 1, issues: [9] });
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([5]))]);
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.deepEqual(
     selected.map((i) => i.number),
     [9],
@@ -2698,7 +2706,7 @@ test("runPoolSelection (gate② r2): crash window — the event is persisted but
   const state = new State(":memory:");
   state.appendEvent("pool-selected", { round_id: 1, issues: [9, 10] });
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([]))]);
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.deepEqual(
     selected.map((i) => i.number).sort((a, b) => a - b),
     [9, 10],
@@ -2725,7 +2733,7 @@ test("runPoolSelection (gate② r2): residual healing (session path, roles.po.po
   ];
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
   const state = new State(":memory:");
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.equal(runner.calls.length, 1, "poolSelection=true actually exercises the session path this test is named for");
   assert.deepEqual(
     selected.map((i) => i.number),
@@ -2744,7 +2752,7 @@ test("runPoolSelection (gate② r2): residual healing on the DEFAULT determinist
   ];
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
   const state = new State(":memory:");
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.deepEqual(
     selected.map((i) => i.number),
     [1],
@@ -2771,7 +2779,7 @@ test("runPoolSelection (gate② r3 finding 1): a reconcile REMOVAL failure stays
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
   const state = new State(":memory:");
   const events = tapEvents(state);
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 }); // must NOT throw
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 }); // must NOT throw
   assert.deepEqual(
     selected.map((i) => i.number),
     [1],
@@ -2793,7 +2801,7 @@ test("runPoolSelection (gate② r3 finding 1): a listOpenIssues read failure dur
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
   const state = new State(":memory:");
   const events = tapEvents(state);
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.deepEqual(
     selected.map((i) => i.number),
     [1],
@@ -2819,7 +2827,7 @@ test("runPoolSelection (gate② r3 finding 3): two pool-selected events for the 
   state.appendEvent("pool-selected", { round_id: 1, issues: [1] });
   state.appendEvent("pool-selected", { round_id: 1, issues: [2] });
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([]))]);
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.deepEqual(
     selected.map((i) => i.number),
     [2],
@@ -2836,7 +2844,7 @@ test("runPoolSelection (gate② r3 finding 3): the LAST pool-selected event for 
   state.appendEvent("pool-selected", { round_id: 1, issues: [9] }); // an earlier, well-formed event
   state.appendEvent("pool-selected", { round_id: 1, malformed: true }); // the LAST one — fails the schema
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([5]))]);
-  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
   assert.deepEqual(
     selected.map((i) => i.number),
     [5],
@@ -2953,7 +2961,7 @@ test("createAligningStub #237: an align-mode concern about an existing backlog i
     doneResult("po-align-1", sapwoodResult({ issues: [], concerns: [{ issue: 42, reason: "this contradicts the goal file" }] })),
   ]);
   const state = new State(":memory:");
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 1, phase: "aligning", marker: null });
 
@@ -2979,7 +2987,7 @@ test("createAligningStub #237: a concern naming an issue outside the injected vi
   ]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 1, phase: "aligning", marker: null });
 
@@ -2998,13 +3006,13 @@ test("createAligningStub #237: the SAME worded concern re-arms after a human edi
   const concernOutput = sapwoodResult({ issues: [], concerns: [{ issue: 42, reason: "same worded concern" }] });
   const runner = new ScriptedRunner([doneResult("po-align-1", concernOutput)]);
   const state = new State(":memory:");
-  const stub1 = createAligningStub({ forge, state, cfg, runner });
+  const stub1 = createAligningStub({ now: realClock, forge, state, cfg, runner });
   await stub1.run({ roundId: 1, phase: "aligning", marker: null });
   assert.equal(forge.comments[42]?.length, 1);
 
   // A different round raises the EXACT SAME worded concern with NO edit in between — no repost.
   const runnerSame = new ScriptedRunner([doneResult("po-align-2", concernOutput)]);
-  const stub2 = createAligningStub({ forge, state, cfg, runner: runnerSame });
+  const stub2 = createAligningStub({ now: realClock, forge, state, cfg, runner: runnerSame });
   await stub2.run({ roundId: 2, phase: "aligning", marker: null });
   assert.equal(forge.comments[42]?.length, 1, "no repost — same wording, same (unedited) body");
 
@@ -3012,7 +3020,7 @@ test("createAligningStub #237: the SAME worded concern re-arms after a human edi
   forge.issueBodies[42] = "EDITED body";
   forge.backlogIssues = [{ number: 42, title: "Existing issue", labels: [], body: "EDITED body" }];
   const runnerAfterEdit = new ScriptedRunner([doneResult("po-align-3", concernOutput)]);
-  const stub3 = createAligningStub({ forge, state, cfg, runner: runnerAfterEdit });
+  const stub3 = createAligningStub({ now: realClock, forge, state, cfg, runner: runnerAfterEdit });
   await stub3.run({ roundId: 3, phase: "aligning", marker: null });
   assert.equal(forge.comments[42]?.length, 2, "the same worded concern re-arms once the issue's body changed");
   state.close();
@@ -3032,7 +3040,7 @@ test("createAligningStub #237: crash-rerun replay recovers a previously-validate
     concerns: [{ issue: 42, reason: "recovered concern" }],
   });
   const runner = new ScriptedRunner([doneResult("po-align-should-not-run", sapwoodResult({ issues: [] }))]);
-  const deps: AlignDeps = { forge, state, cfg, runner };
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 5, phase: "aligning", marker: null });
 

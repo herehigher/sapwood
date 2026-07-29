@@ -382,7 +382,7 @@ test("tick dispatch: claim happens before launch; a claim failure spawns no work
   forge.claimIssue = async () => {
     throw new Error("board claim failed");
   };
-  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }));
+  await assert.rejects(() => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }));
   assert.deepEqual(sup.dispatched, []); // claim threw first -> nothing launched, no untracked worker
   assert.equal(st.runningWorkers().length, 0);
   st.close();
@@ -396,7 +396,7 @@ test("tick dispatch: a launch failure rolls the board back to Ready", async () =
   sup.dispatch = async () => {
     throw new Error("spawn failed");
   };
-  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }));
+  await assert.rejects(() => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }));
   assert.deepEqual(forge.claimed, [7]); // claimed first
   assert.ok(forge.boardSet.some(([n, s]) => n === 7 && s === "ready")); // then rolled back
   assert.equal(st.runningWorkers().length, 0);
@@ -420,7 +420,7 @@ test("tick dispatch: an AC snapshot is persisted BEFORE the worker ever spawns, 
     snapshotSeenAtSpawn = st.getAcSnapshot(issue.number);
     return originalDispatch(issue);
   };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.ok(snapshotSeenAtSpawn, "the AC snapshot must already be persisted by the time dispatch() (the spawn) is called");
   assert.equal(snapshotSeenAtSpawn!.body, body);
   assert.equal(snapshotSeenAtSpawn!.manifest.length, 2);
@@ -436,7 +436,7 @@ test("tick dispatch: the snapshotted body survives a live mid-flight edit — la
   const forge = new FakeForge();
   const originalBody = "## Acceptance criteria\n\n- [ ] original criterion\n\n## Verification plan\nrun tests";
   forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: originalBody }];
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.equal(st.getAcSnapshot(7)?.body, originalBody);
   // Simulate a human/producer editing the LIVE issue body after dispatch.
   forge.issueBodies[7] = "## Acceptance criteria\n\n- [ ] EDITED criterion\n\n## Verification plan\nrun tests";
@@ -460,7 +460,7 @@ test("tick DRIVE: AC-snapshot drift routes to needs-human with a drift-explainin
   // Dispatch normally so the AC snapshot lands through the real DISPATCH path.
   forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: originalBody }];
   forge.issueBodies[7] = originalBody;
-  const firstTick = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   const dispatchedOutcome = firstTick.dispatched.find((d) => d.kind === "dispatched");
   assert.ok(dispatchedOutcome);
   const workerName = (dispatchedOutcome as { worker: string }).worker;
@@ -469,7 +469,7 @@ test("tick DRIVE: AC-snapshot drift routes to needs-human with a drift-explainin
   // A human (or the producer, who holds `gh issue edit`) edits the issue body mid-flight.
   forge.issueBodies[7] = "## Acceptance criteria\n\n- [ ] one EDITED\n\n## Verification plan\nrun tests";
   const gate = new FakeMergeGate();
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(gate.calls.length, 0, "driveOne must never be called once drift is detected");
   assert.ok(forge.labelsAdded.some(([n, l]) => n === 7 && l === "needs-human"));
   assert.ok(
@@ -489,7 +489,7 @@ test("tick DRIVE: a driving lane with NO recorded AC snapshot (predates #283, ac
   sup.probes["lane-legacy"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending" };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(gate.calls.length, 1, "no snapshot recorded for issue 4 -> not drift -> driveOne runs normally");
   assert.equal(st.getWorker("lane-legacy")?.state, "driving");
   st.close();
@@ -524,7 +524,7 @@ test("tick DRIVE (#301 P1#1): a lane whose ac_body_hash is set but whose ac_snap
   });
   assert.equal(st.getAcSnapshot(8), null, "precondition: no snapshot exists for issue 8");
   const gate = new FakeMergeGate();
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(gate.calls.length, 0, "driveOne must never be called for a lane whose expected snapshot cannot be verified");
   assert.equal(st.getWorker("lane-crashed")?.state, "failed", "the lane re-escalates instead of driving unprotected");
   assert.ok(forge.labelsAdded.some(([n, l]) => n === 8 && l === "needs-human"));
@@ -552,7 +552,7 @@ test("tick DRIVE (#301 review, P2): a needs-human LABEL WRITE FAILURE never clai
   });
   forge.throwOnAddLabel = true;
   const gate = new FakeMergeGate();
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(gate.calls.length, 0);
   const comment = forge.issueComments.find(([n]) => n === 9)?.[1] ?? "";
   assert.ok(!/has been applied/.test(comment), "must never claim the label landed when the write failed");
@@ -586,7 +586,7 @@ test("tick DRIVE (#301 review round 3, P2 regression fix): the durable ac-snapsh
   });
   forge.throwOnAddIssueComment = true;
   const gate = new FakeMergeGate();
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(gate.calls.length, 0);
   const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["ac-snapshot-drift"]);
   assert.equal(
@@ -617,7 +617,7 @@ test("tick GATED RECLAIM/DRIVE (#301 P1#3): a reclaimed lane's stale ac_body_has
   // Lane A dispatches issue 7 with bodyA.
   const bodyA = "## Acceptance criteria\n\n- [ ] A's criterion\n\n## Verification plan\nrun tests";
   forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: bodyA }];
-  await tick({ forge, state: st, supervisor: sup, cfg });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
   const laneA = st.runningWorkers().find((w) => w.issue === 7)!;
   assert.ok(laneA);
   const hashA = st.getAcSnapshot(7)!.bodyHash;
@@ -633,7 +633,7 @@ test("tick GATED RECLAIM/DRIVE (#301 P1#3): a reclaimed lane's stale ac_body_has
   // DISPATCH does not consider issue 7 in-flight; bodyB overwrites the issue-keyed snapshot.
   const bodyB = "## Acceptance criteria\n\n- [ ] B's DIFFERENT criterion\n\n## Verification plan\nrun tests";
   forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: bodyB }];
-  await tick({ forge, state: st, supervisor: sup, cfg });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
   const laneB = st.runningWorkers().find((w) => w.issue === 7 && w.name !== laneA.name);
   assert.ok(laneB, "a second, independent lane was dispatched for the same issue");
   const hashB = st.getAcSnapshot(7)!.bodyHash;
@@ -643,7 +643,7 @@ test("tick GATED RECLAIM/DRIVE (#301 P1#3): a reclaimed lane's stale ac_body_has
   forge.issueLabelsByIssue[7] = [];
   forge.ready = []; // lane B already dispatched this tick; nothing new to dispatch
   const gate = new FakeMergeGate();
-  const r = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.ok(r.gatedReclaimed.some((g) => g.kind === "reclaimed" && g.worker === laneA.name));
   // Lane A's OWN snapshot hash no longer matches the CURRENT issue-keyed snapshot (now lane B's)
   // -> the drift check must treat this as an ownership mismatch, NEVER silently drive lane A's PR
@@ -679,7 +679,7 @@ test("tick dispatch: dispatch AND rollback both fail -> pending rollback persist
   // Tick 1: dispatch throws; the rollback attempt (also transient-failing) is caught and
   // durably persisted instead of a bare `.catch(() => {})` swallow — but the ORIGINAL
   // dispatch error is still what propagates (existing contract, unchanged).
-  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }), /spawn failed/);
+  await assert.rejects(() => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }), /spawn failed/);
   assert.deepEqual(forge.boardSet, []); // rollback attempt failed -> no successful mutation
   const pending = st.pendingRollbacks();
   assert.equal(pending.length, 1);
@@ -693,7 +693,7 @@ test("tick dispatch: dispatch AND rollback both fail -> pending rollback persist
   // persisted row up and clears it on success.
   boardFails = false;
   forge.ready = [];
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(r2.rollbacks, [{ kind: "recovered", issue: 7, target: "ready", reason: "dispatch-rollback" }]);
   assert.equal(st.pendingRollbacks().length, 0);
   assert.deepEqual(forge.boardSet, [[7, "ready"]]);
@@ -714,14 +714,14 @@ test("tick dispatch: rollback keeps failing past the retry cap -> bounded escala
   const cfg = mkCfg({ recovery: { rollbackRetryCap: 2 } });
 
   // Tick 1: dispatch fails; rollback attempt #1 fails -> persisted, attempts=1 (under cap=2).
-  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg }));
+  await assert.rejects(() => tick({ now: realClock, forge, state: st, supervisor: sup, cfg }));
   assert.equal(st.pendingRollbacks().length, 1);
   assert.equal(st.pendingRollbacks()[0]?.attempts, 1);
 
   // Tick 2: no Ready issues (isolates the retry). Attempt #2 hits the cap -> escalate: cleared,
   // needs-human label attempted, a structured "escalated" outcome — no zombie retry loop.
   forge.ready = [];
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
   assert.deepEqual(r2.rollbacks, [{ kind: "escalated", issue: 7, attempts: 2, reason: "dispatch-rollback" }]);
   assert.equal(st.pendingRollbacks().length, 0);
   assert.deepEqual(forge.labelsAdded, [[7, "needs-human"]]);
@@ -741,7 +741,7 @@ test("tick reclaim: DEAD lane no-PR requeue failure does not throw or strand the
   // Unlike the dispatch-rollback path, this one must NOT throw (there's no analogous existing
   // "tick rejects" contract here) — a throw would abort the whole tick over an unrelated dead
   // lane's board mutation, and the worker row is already terminal (`failed`) either way.
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.equal(st.getWorker("lane-dead")?.state, "failed");
   assert.equal(st.pendingRollbacks().length, 1);
   assert.deepEqual(r.rollbacks, [{ kind: "retrying", issue: 4, attempts: 1, reason: "dead-lane-requeue" }]);
@@ -751,7 +751,7 @@ test("tick reclaim: DEAD lane no-PR requeue failure does not throw or strand the
   forge.setBoardStatus = async (n, s) => {
     forge.boardSet.push([n, s]);
   };
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(r2.rollbacks, [{ kind: "recovered", issue: 4, target: "ready", reason: "dead-lane-requeue" }]);
   assert.equal(st.pendingRollbacks().length, 0);
   assert.deepEqual(forge.boardSet, [[4, "ready"]]);
@@ -764,7 +764,7 @@ test("tick reclaim: DEAD lane no-PR requeue succeeding on the first try leaves n
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-dead", 4);
   sup.probes["lane-dead"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-dead", issue: 4, rescued: false, costUsd: 0, modelUsage: [] });
   assert.deepEqual(r.rollbacks, [{ kind: "recovered", issue: 4, target: "ready", reason: "dead-lane-requeue" }]);
   assert.deepEqual(forge.boardSet, [[4, "ready"]]);
@@ -782,7 +782,7 @@ test("tick reclaim: KEEP stays, DONE+PR -> done/DRIVING, DONE+noPR -> escalate+n
   sup.probes["lane-keep"] = { ...DEFAULT_PROBE };
   sup.probes["lane-donepr"] = { ...DEFAULT_PROBE, done: true, hasPr: true };
   sup.probes["lane-donenopr"] = { ...DEFAULT_PROBE, done: true, hasPr: false };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   const byWorker = Object.fromEntries(r.reclaimed.map((o) => [o.worker, o]));
   assert.equal(byWorker["lane-keep"]!.kind, "kept");
@@ -821,14 +821,14 @@ test("#223: recordSpend throwing rolls back the WHOLE terminal transition — th
   st.recordSpend = () => {
     throw new Error("simulated recordSpend failure");
   };
-  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }), /simulated recordSpend failure/);
+  await assert.rejects(() => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }), /simulated recordSpend failure/);
   assert.equal(st.getWorker("lane-x")?.state, "running", "terminal transition rolled back with the failed spend write");
   assert.equal(st.spentUsdForWorker("lane-x"), 0);
   assert.deepEqual(forge.labelsAdded, [], "the transaction never committed, so the (now-correctly-ordered) label write never ran");
 
   // Rerun: recordSpend recovers — the SAME still-`running` lane reclaims and records exactly once.
   st.recordSpend = realRecordSpend;
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.equal(st.getWorker("lane-x")?.state, "done");
   assert.equal(st.spentUsdForWorker("lane-x"), 4.5, "recorded exactly once — the failed attempt left no partial row to double up on");
   assert.deepEqual(forge.labelsAdded, [[30, "needs-human"]]);
@@ -844,7 +844,7 @@ test("#223: a forge label write throwing AFTER the atomic transition leaves the 
   sup.probes["lane-y"] = { ...DEFAULT_PROBE, done: true, hasPr: false, costUsd: 6 };
   forge.throwOnAddLabel = true;
 
-  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }), /simulated forge failure/);
+  await assert.rejects(() => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }), /simulated forge failure/);
   // The #223 fix: state+spend commit BEFORE the forge write now, so a thrown label call can
   // only cost the (cosmetic) label — never the (money) ledger row.
   assert.equal(st.getWorker("lane-y")?.state, "done");
@@ -854,7 +854,7 @@ test("#223: a forge label write throwing AFTER the atomic transition leaves the 
   // The worker is already terminal, so it never re-enters runningWorkers() — a rerun cannot
   // re-reclaim it and cannot double-record its spend.
   forge.throwOnAddLabel = false;
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.equal(st.spentUsdForWorker("lane-y"), 6, "recorded exactly once — the retry never re-touches an already-terminal lane");
   assert.deepEqual(r.reclaimed, []);
   st.close();
@@ -872,7 +872,7 @@ test("#223 crash-simulation: a State reopened after a mid-transaction spend fail
     before.recordSpend = () => {
       throw new Error("simulated crash mid-transaction");
     };
-    await assert.rejects(() => tick({ forge, state: before, supervisor: sup, cfg: mkCfg() }));
+    await assert.rejects(() => tick({ now: realClock, forge, state: before, supervisor: sup, cfg: mkCfg() }));
     before.close();
 
     // Reopen — the crash/restart boundary. On-disk state must show the terminal transition
@@ -885,7 +885,7 @@ test("#223 crash-simulation: a State reopened after a mid-transaction spend fail
     const sup2 = new FakeSupervisor();
     sup2.probes["lane-z"] = { ...DEFAULT_PROBE, done: true, hasPr: false, costUsd: 9 };
     const forge2 = new FakeForge();
-    const r = await tick({ forge: forge2, state: after, supervisor: sup2, cfg: mkCfg() });
+    const r = await tick({ now: realClock, forge: forge2, state: after, supervisor: sup2, cfg: mkCfg() });
     assert.equal(after.getWorker("lane-z")?.state, "done");
     assert.equal(after.spentUsdForWorker("lane-z"), 9);
     assert.deepEqual(r.reclaimed, [{ kind: "done", worker: "lane-z", issue: 32, next: "ESCALATE_NOPR", costUsd: 9, modelUsage: [] }]);
@@ -976,7 +976,7 @@ test("#223 table: EVERY terminal reclaim outcome — a throwing recordSpend leav
       throw new Error("simulated recordSpend failure");
     };
     await assert.rejects(
-      () => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }),
+      () => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }),
       /simulated recordSpend failure/,
       `[${c.label}] tick should propagate the injected recordSpend failure`,
     );
@@ -1000,7 +1000,7 @@ test("tick reclaim: a KEEP lane's probe-carried liveTelemetry is persisted onto 
     tokenComposition: { inputTokens: 12000, outputTokens: 3000, cacheReadTokens: 90000, cacheCreationTokens: 4000 },
   };
   sup.probes["lane-keep"] = { ...DEFAULT_PROBE, liveTelemetry: telemetry };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   const row = st.getWorker("lane-keep");
   assert.equal(row?.state, "running");
   assert.equal(row?.est_cost_usd, 0.42);
@@ -1016,7 +1016,7 @@ test("tick reclaim: a KEEP lane's probe-carried liveTelemetry is persisted onto 
       tokenComposition: { inputTokens: 12500, outputTokens: 3100, cacheReadTokens: 90000, cacheCreationTokens: 4000 },
     },
   };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   const after = st.getWorker("lane-keep");
   assert.equal(after?.est_cost_usd, 0.5);
   assert.equal(after?.context_tokens, 500, "contextTokens dropped — never smoothed into a running max");
@@ -1038,7 +1038,7 @@ test("tick reclaim: a KEEP lane whose probe carries NO liveTelemetry (detached p
     tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 },
   });
   sup.probes["lane-keep"] = { ...DEFAULT_PROBE }; // no liveTelemetry field at all
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.equal(r.reclaimed[0]!.kind, "kept");
   const row = st.getWorker("lane-keep");
   assert.equal(row?.state, "running"); // the lane itself is untouched — only the trio is cleared
@@ -1055,7 +1055,7 @@ test("#287 (E4b, AC#1) tick reclaim: a KEEP lane's probe-carried actualModel is 
   seedRunning(st, "lane-keep", 1);
   assert.deepEqual(st.getWorkerActualModels(1), [], "nothing observed yet");
   sup.probes["lane-keep"] = { ...DEFAULT_PROBE, actualModel: "claude-opus-4-8" };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(
     st.getWorkerActualModels(1),
     ["claude-opus-4-8"],
@@ -1070,7 +1070,7 @@ test("#287 tick reclaim: a KEEP lane's probe carrying NO actualModel yet (sessio
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-keep", 1);
   sup.probes["lane-keep"] = { ...DEFAULT_PROBE }; // no actualModel field
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(st.getWorkerActualModels(1), []);
   st.close();
 });
@@ -1086,7 +1086,7 @@ test("tick reclaim: DONE+PR (-> driving) clears any previously-persisted live te
     tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 },
   });
   sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, costUsd: 1.23 };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   const row = st.getWorker("lane-a");
   assert.equal(row?.state, "driving");
   assert.equal(row?.est_cost_usd, null, "live telemetry cleared on leaving `running`");
@@ -1111,7 +1111,7 @@ test("tick reclaim: a DEAD lane (rescued to driving, or torn down failed) clears
     tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 },
   });
   sup.probes["lane-deadpr"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0, hasPr: true };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   const row = st.getWorker("lane-deadpr");
   assert.equal(row?.state, "driving");
   assert.equal(row?.est_cost_usd, null);
@@ -1126,7 +1126,7 @@ test("tick reclaim: DEAD lane with NO PR is torn down, board handed back to read
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-dead", 4);
   sup.probes["lane-dead"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-dead", issue: 4, rescued: false, costUsd: 0, modelUsage: [] });
   assert.deepEqual(sup.reclaimed, ["lane-dead"]);
   assert.deepEqual(forge.boardSet, [[4, "ready"]]);
@@ -1140,7 +1140,7 @@ test("tick reclaim: DEAD lane WITH a PR is rescued to driving, not requeued (Cod
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-deadpr", 6);
   sup.probes["lane-deadpr"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0, hasPr: true };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-deadpr", issue: 6, rescued: true, costUsd: 0, modelUsage: [] });
   assert.deepEqual(sup.reclaimed, ["lane-deadpr"]); // orphan still killed
   assert.deepEqual(forge.boardSet, []); // NOT handed back to Ready (would race the open PR)
@@ -1160,7 +1160,7 @@ test("tick reclaim: DEAD lane whose dirty worktree was RETAINED -> needs-human l
   sup.probes["lane-dirty"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
   sup.reclaimResults["lane-dirty"] = { worktreePath: "/abs/worktrees/lane-dirty", worktreeRetained: true };
   const cfg = mkCfg({ labels: { needsHuman: "Human-Hold" }, escalation: { humanLabels: ["human-hold", "sapwood:blocked"] } });
-  const r = await tick({ forge, state: st, supervisor: sup, cfg });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
   assert.deepEqual(sup.reclaimed, ["lane-dirty"]);
   assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-dirty", issue: 7, rescued: false, costUsd: 0, modelUsage: [] });
   assert.deepEqual(forge.labelsAdded, [[7, "Human-Hold"]]); // human salvages or discards
@@ -1179,7 +1179,7 @@ test("tick reclaim: DEAD lane whose worktree was clean (deleted by reclaim) -> n
   seedRunning(st, "lane-clean", 8);
   sup.probes["lane-clean"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
   sup.reclaimResults["lane-clean"] = { worktreePath: "/abs/worktrees/lane-clean", worktreeRetained: false };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(forge.issueComments, []);
   assert.deepEqual(forge.labelsAdded, []); // requeued to Ready, nothing to triage
   assert.deepEqual(forge.boardSet, [[8, "ready"]]);
@@ -1194,7 +1194,7 @@ test("tick capacity: a reclaimed DONE+PR (driving) lane still occupies a lane (C
   seedRunning(st, "lane-driving", 2);
   sup.probes["lane-driving"] = { ...DEFAULT_PROBE, done: true, hasPr: true };
   forge.ready = [{ number: 9, title: "", labels: ["prio:3-feature"] }];
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 5 } }) });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 5 } }) });
   assert.equal(st.getWorker("lane-driving")?.state, "driving");
   assert.deepEqual(sup.dispatched, []); // the driving lane keeps capacity full -> #9 not launched
   assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 9 && d.reason === "no-lane"));
@@ -1252,7 +1252,7 @@ test("#69 P1 (Codex PR #72): DEAD lane with an open PR AND a retained dirty work
   sup.reclaimResults["lane-wip"] = { worktreePath: "/abs/worktrees/lane-wip", worktreeRetained: true };
   const gate = new FakeMergeGate();
   gate.outcomes[77] = { kind: "merged", pr: 77, headOid: "H" }; // would auto-merge if driven
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
 
   // The lane is taken OUT of the auto-drive path: failed, not driving.
   assert.equal(st.getWorker("lane-wip")?.state, "failed");
@@ -1274,7 +1274,7 @@ test("tick DRIVE: omitted mergeGate -> driving lanes stay driving untouched, dri
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-a", 2);
   sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.equal(st.getWorker("lane-a")?.state, "driving");
   assert.equal(st.getWorker("lane-a")?.pr, 55);
   assert.deepEqual(r.driven, []);
@@ -1289,7 +1289,7 @@ test("tick DRIVE: merged -> worker done, board set to done, driven records it", 
   sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.getWorker("lane-a")?.state, "done");
   assert.deepEqual(forge.boardSet, [[2, "done"]]);
   assert.equal(st.pendingRollbacks().length, 0);
@@ -1312,7 +1312,7 @@ test("#250 merged Done write failure is durable and contained, then drains on th
     forge.boardSet.push([issue, status]);
   };
 
-  const first = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const first = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.getWorker("lane-a")?.state, "done");
   assert.deepEqual(first.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
   assert.deepEqual(first.rollbacks, [{ kind: "retrying", issue: 2, attempts: 1, reason: "merged-board-done" }]);
@@ -1323,7 +1323,7 @@ test("#250 merged Done write failure is durable and contained, then drains on th
   );
 
   failDone = false;
-  const second = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const second = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.deepEqual(second.rollbacks, [{ kind: "recovered", issue: 2, target: "done", reason: "merged-board-done" }]);
   assert.deepEqual(forge.boardSet, [[2, "done"]]);
   assert.equal(st.pendingRollbacks().length, 0);
@@ -1343,9 +1343,9 @@ test("#250 merged Done write honors the #31 retry cap and escalates with evidenc
   };
   const cfg = mkCfg({ recovery: { rollbackRetryCap: 2 } });
 
-  const first = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const first = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(first.rollbacks, [{ kind: "retrying", issue: 2, attempts: 1, reason: "merged-board-done" }]);
-  const second = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const second = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(second.rollbacks, [{ kind: "escalated", issue: 2, attempts: 2, reason: "merged-board-done" }]);
   assert.equal(st.pendingRollbacks().length, 0);
   assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
@@ -1388,7 +1388,7 @@ test("#250 merge during a forge park queues Done at attempts 0, then drains afte
   );
 
   st.clearPark("forge");
-  const recovered = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const recovered = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(recovered.rollbacks, [{ kind: "recovered", issue: 2, target: "done", reason: "merged-board-done" }]);
   assert.equal(boardAttempts, 1);
   assert.deepEqual(forge.boardSet, [[2, "done"]]);
@@ -1415,7 +1415,7 @@ test("#250 crash window after terminal upsert but before pending persist remains
     const afterRestart = new State(dbPath);
     const forge = new FakeForge();
     const sup = new FakeSupervisor();
-    const result = await tick({ forge, state: afterRestart, supervisor: sup, cfg: mkCfg() });
+    const result = await tick({ now: realClock, forge, state: afterRestart, supervisor: sup, cfg: mkCfg() });
     assert.equal(afterRestart.getWorker("lane-a")?.state, "done");
     assert.equal(afterRestart.pendingRollbacks().length, 0);
     assert.deepEqual(forge.boardSet, []);
@@ -1434,7 +1434,7 @@ test("tick DRIVE: needs-human -> worker failed + needs-human label", async () =>
   sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "needs-human", pr: 55, reason: "gate:HUMAN" };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.getWorker("lane-a")?.state, "failed");
   assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
   assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-a", issue: 2, pr: 55, reason: "gate:HUMAN" }]);
@@ -1449,7 +1449,7 @@ test("tick DRIVE: queued -> stays driving (retried next tick), no board/label si
   sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW" };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.getWorker("lane-a")?.state, "driving"); // untouched
   assert.deepEqual(forge.boardSet, []);
   assert.deepEqual(forge.labelsAdded, []);
@@ -1465,7 +1465,7 @@ test("tick DRIVE: stopped (produce-pr-and-stop) -> stays driving, never treated 
   sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "stopped", pr: 55, reason: "gates-passed:MERGE_OK" };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.getWorker("lane-a")?.state, "driving");
   assert.deepEqual(r.driven, [{ kind: "stopped", worker: "lane-a", issue: 2, pr: 55, reason: "gates-passed:MERGE_OK" }]);
   st.close();
@@ -1490,7 +1490,7 @@ test("tick DRIVE (#294): an absent -> held -> held -> absent -> held-again label
   const observe = (holdObservation: DriveOutcome["holdObservation"]) => {
     gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW", holdObservation };
   };
-  const runTick = () => tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const runTick = () => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   const heldEvents = () => st.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]);
 
   observe({ held: false }); // 1. no hold yet — nothing to announce
@@ -1529,13 +1529,13 @@ test("tick DRIVE (#294): two lanes hold and release independently — one lane's
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "queued", pr: 55, reason: "q", holdObservation: { held: true, label: "sapwood:hold" } };
   gate.outcomes[56] = { kind: "queued", pr: 56, reason: "q", holdObservation: { held: false } };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.lastHoldEvent("lane-a", 55), "pr-held");
   assert.equal(st.lastHoldEvent("lane-b", 56), null, "lane-b was never held — lane-a's event must not speak for it");
 
   // Now lane-b is held while lane-a stays held: lane-b announces, lane-a stays deduped.
   gate.outcomes[56] = { kind: "queued", pr: 56, reason: "q", holdObservation: { held: true, label: "sapwood:hold" } };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   const kinds = st.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]);
   assert.deepEqual(
     kinds.map((e) => (e.payload as { worker: string }).worker),
@@ -1553,7 +1553,7 @@ test("tick DRIVE (#294): an outcome carrying NO hold observation emits nothing �
   // Every pre-#294 outcome shape, and the engine-agent path (which never wraps the signal),
   // reaches this branch with holdObservation undefined — it must be a no-op, not a release.
   gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW" };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]), []);
   st.close();
 });
@@ -1572,7 +1572,7 @@ test("tick DRIVE (#294) crash-rerun: a kill -9 between the hold observation and 
     seedDriving(before, "lane-a", 2, 55);
     const gate = new FakeMergeGate();
     gate.outcomes[55] = held;
-    await tick({ forge: new FakeForge(), state: before, supervisor: new FakeSupervisor(), cfg: mkCfg(), mergeGate: gate });
+    await tick({ now: realClock, forge: new FakeForge(), state: before, supervisor: new FakeSupervisor(), cfg: mkCfg(), mergeGate: gate });
     assert.equal(before.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held"]).length, 1);
     before.close(); // kill -9 — no in-memory dedupe flag survives this
 
@@ -1581,7 +1581,7 @@ test("tick DRIVE (#294) crash-rerun: a kill -9 between the hold observation and 
     const after = new State(path);
     const gate2 = new FakeMergeGate();
     gate2.outcomes[55] = held;
-    await tick({ forge: new FakeForge(), state: after, supervisor: new FakeSupervisor(), cfg: mkCfg(), mergeGate: gate2 });
+    await tick({ now: realClock, forge: new FakeForge(), state: after, supervisor: new FakeSupervisor(), cfg: mkCfg(), mergeGate: gate2 });
     assert.deepEqual(
       after.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]).map((e) => e.kind),
       ["pr-held"],
@@ -1610,7 +1610,15 @@ test("tick DRIVE (#246): fixable + under cap + fixLegResume configured -> dispat
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
   const renderFixPrompt = (issueNumber: number, pr: number) => `fix #${issueNumber} pr #${pr}`;
   const mintProxy = async () => ({}) as never;
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, fixLegResume: { renderFixPrompt, mintProxy } });
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt, mintProxy },
+  });
   const row = st.getWorker("lane-a")!;
   assert.equal(row.state, "fixing");
   assert.equal(row.fix_rounds, 1);
@@ -1633,6 +1641,7 @@ test("tick DRIVE (#270): conflict FIXABLE uses the existing lane/counter with a 
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" };
   const r = await tick({
+    now: realClock,
     forge,
     state: st,
     supervisor: sup,
@@ -1656,7 +1665,7 @@ test("tick DRIVE (#270): conflict at the shared fix-round cap preserves label + 
   seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 });
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
   assert.match(forge.issueComments[0]![1], /merge-conflict/);
   assert.equal(st.getWorker("lane-a")?.state, "failed");
@@ -1672,7 +1681,7 @@ test("tick DRIVE (#246 review round 1, C1): fixable but NO fixLegResume dep conf
   seedDriving(st, "lane-a", 2, 55);
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // no fixLegResume
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // no fixLegResume
   const row = st.getWorker("lane-a")!;
   // Same terminal shape the plain gate===HUMAN case produces (escalateNeedsHuman, shared code):
   // failed + pr retained + label applied + gated_escalation_labeled=1 — an operator sees
@@ -1698,7 +1707,7 @@ test("tick DRIVE (#246 review round 1, C1): the fixLegResume-unwired degrade's l
   seedDriving(st, "lane-a", 2, 55);
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   const row = st.getWorker("lane-a")!;
   assert.equal(row.state, "failed");
   assert.equal(row.gated_escalation_labeled, 0);
@@ -1733,6 +1742,7 @@ test("tick DRIVE (#375 review round 2, P1): forceDispatchPause ALONE (no human P
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
   const r = await tick({
+    now: realClock,
     forge,
     state: st,
     supervisor: sup,
@@ -1760,6 +1770,7 @@ test("tick DRIVE (#375 review round 2, P1): a GENUINE human PAUSE sentinel (data
     gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
     writeFileSync(join(dir, "PAUSE"), ""); // a human touches data/PAUSE — no forceDispatchPause involved
     const r = await tick({
+      now: realClock,
       forge,
       state: st,
       supervisor: sup,
@@ -1788,6 +1799,7 @@ test("tick DRIVE (#246 C2): an engine-wide ceiling breach (daily budget) blocks 
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
   const r = await tick({
+    now: realClock,
     forge,
     state: st,
     supervisor: sup,
@@ -1813,6 +1825,7 @@ test("tick DRIVE (#246 C2): an active environment park blocks a FIXUP dispatch �
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
   const r = await tick({
+    now: realClock,
     forge,
     state: st,
     supervisor: sup,
@@ -1836,6 +1849,7 @@ test("tick DRIVE (#246 C2): a run-level spend stop blocks a FIXUP dispatch — s
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
   const r = await tick({
+    now: realClock,
     forge,
     state: st,
     supervisor: sup,
@@ -1860,6 +1874,7 @@ test("tick DRIVE (#246 C2): with EVERY admission gate clear and fixLegResume con
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
   const r = await tick({
+    now: realClock,
     forge,
     state: st,
     supervisor: sup,
@@ -1933,6 +1948,7 @@ test("tick DRIVE (#246): fixable + FIXUP but startFixLeg's resume() throws -> st
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
   const r = await tick({
+    now: realClock,
     forge,
     state: st,
     supervisor: sup,
@@ -1970,6 +1986,7 @@ test("tick DRIVE (#375): fixable + round budget exceeded -> the fix leg is EXEMP
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
   const r = await tick({
+    now: realClock,
     forge,
     state: st,
     supervisor: sup,
@@ -1994,7 +2011,7 @@ test("tick DRIVE (#246): fix_rounds cap reached (not over budget) -> needs-human
   seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // == default cfg.lanes.prFixCap (2): cap reached
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   const row = st.getWorker("lane-a")!;
   assert.equal(row.state, "failed");
   assert.equal(row.pr, 55);
@@ -2015,7 +2032,7 @@ test("tick DRIVE (#246): fix_rounds cap reached but the needs-human label write 
   seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 });
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   const row = st.getWorker("lane-a")!;
   assert.equal(row.state, "driving", "no latch — untouched, so the next tick's FIXABLE-at-cap re-derivation retries the label write");
   assert.equal(row.fix_rounds, 2);
@@ -2033,7 +2050,7 @@ test("tick DRIVE (#246 review round 1, C3): fix_rounds cap reached, LABEL succee
   seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 });
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   const row = st.getWorker("lane-a")!;
   assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]], "the label write itself DID succeed");
   assert.equal(
@@ -2085,12 +2102,12 @@ test("#147 gated-PR reentry (#246): a PR that hit its FIX-ROUNDS CAP (not a plai
   };
   forge.issueLabelsByIssue[10] = []; // human removed needs-human — the reentry signal
 
-  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r1.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-a", issue: 10, pr: 99, attempt: 1 }]);
   assert.equal(st.getWorker("lane-a")?.state, "driving");
   assert.equal(st.getWorker("lane-a")?.fix_rounds, 2, "fix_rounds is untouched by GATED RECLAIM — #147 owns gated_reentry_attempts only");
 
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r2.driven, [{ kind: "merged", worker: "lane-a", issue: 10, pr: 99 }]);
   assert.equal(st.getWorker("lane-a")?.state, "done");
   assert.deepEqual(forge.merged, [[99, "H1"]]);
@@ -2106,9 +2123,9 @@ test("tick DRIVE: driveOne is called every tick with the lane's issue number (#4
   sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "queued", pr: 55, reason: "waiting" };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 1st tick: DONE -> driving
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 2nd tick: still driving
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 3rd tick: still driving
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 1st tick: DONE -> driving
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 2nd tick: still driving
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 3rd tick: still driving
   // Called once per tick (the trigger-once invariant now lives INSIDE MergeDriver.driveOne,
   // covered by merge-driver.test.ts) — every call carries issue #2 and a null pin (never
   // triggered, per this test's fresh lane).
@@ -2138,12 +2155,12 @@ test("tick DRIVE: driveOne's recordTrigger callback persists the pin into State,
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "queued", pr: 55, reason: "review-triggered" };
   gate.recordOnCall = ["HEAD1", "2026-07-07T08:00:00.000Z"];
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 1st tick: records the pin
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 1st tick: records the pin
   assert.equal(st.getWorker("lane-a")?.review_triggered_head, "HEAD1");
   assert.equal(st.getWorker("lane-a")?.review_triggered_at, "2026-07-07T08:00:00.000Z");
 
   gate.recordOnCall = null; // 2nd tick: driveOne doesn't re-record (simulating a matched pin)
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.deepEqual(gate.calls[1]!.triggerPin, {
     head: "HEAD1",
     at: "2026-07-07T08:00:00.000Z",
@@ -2165,11 +2182,11 @@ test("tick DRIVE #273: generation-attributable trusted verdict persists covered 
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "queued", pr: 55, reason: "waiting-ci" };
   gate.recordOnCall = ["HEAD1", "2026-07-07T08:00:00.000Z"];
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
 
   gate.recordOnCall = null;
   gate.recordVerdictOnCall = ["HEAD1", 1, true];
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   const row = st.getWorker("lane-a")!;
   assert.equal(row.review_trigger_in_flight, 0);
   assert.equal(row.review_covered_head, "HEAD1");
@@ -2187,16 +2204,16 @@ test("tick DRIVE: driveOne's recordFallback callback persists the reviewer-failo
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "queued", pr: 55, reason: "waiting" };
   assert.equal(gate.calls.length, 0);
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 1st tick: no lock yet
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 1st tick: no lock yet
   assert.deepEqual(gate.calls[0]!.fallbackLock, { head: null, kind: null });
 
   gate.recordFallbackOnCall = { head: "HEAD1", kind: "same-model-trusted" };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 2nd tick: records the lock
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 2nd tick: records the lock
   assert.equal(st.getWorker("lane-a")?.review_fallback_head, "HEAD1");
   assert.equal(st.getWorker("lane-a")?.review_fallback_kind, "same-model-trusted");
 
   gate.recordFallbackOnCall = null; // 3rd tick: driveOne doesn't re-record
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.deepEqual(gate.calls[2]!.fallbackLock, { head: "HEAD1", kind: "same-model-trusted" }); // read back
   st.close();
 });
@@ -2229,7 +2246,7 @@ test("tick DRIVE: reviewerTransition -> structured switch/revert events + PR com
       reason: "waiting",
       reviewerTransition: { kind: "switch", mode: "same-model-trusted", head: "H1" },
     };
-    const r1 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
     assert.equal(st.getWorker("lane-a")?.state, "driving"); // an audit-only announcement, no state change
     assert.deepEqual(r1.driven, [{ kind: "queued", worker: "lane-a", issue: 2, pr: 55, reason: "waiting" }]);
     assert.equal(forge.prComments.length, 1);
@@ -2238,7 +2255,7 @@ test("tick DRIVE: reviewerTransition -> structured switch/revert events + PR com
     // Tick 2: the SAME transition reported again (stateless per-tick signal) -> deduped, no
     // second event, no second comment (a produce-pr-and-stop lane would otherwise spam one
     // comment per tick forever).
-    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
     assert.equal(forge.prComments.length, 1);
     assert.equal(rawEventKinds(path).filter((k) => k === "reviewer-fallback-switch").length, 1);
 
@@ -2249,12 +2266,12 @@ test("tick DRIVE: reviewerTransition -> structured switch/revert events + PR com
       reason: "waiting",
       reviewerTransition: { kind: "revert", mode: "different-model-codex", head: "H1" },
     };
-    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
     assert.equal(forge.prComments.length, 2);
     assert.match(forge.prComments[1]![1], /available again/);
 
     // Tick 4: the revert reported again -> deduped.
-    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
     st.close();
 
     const kinds = rawEventKinds(path);
@@ -2282,14 +2299,14 @@ test("tick DRIVE: a NEW head re-announces the same transition kind (a new episod
       reason: "waiting",
       reviewerTransition: { kind: "switch", mode: "human", head: "H1" },
     };
-    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
     gate.outcomes[55] = {
       kind: "queued",
       pr: 55,
       reason: "waiting",
       reviewerTransition: { kind: "switch", mode: "human", head: "H2" }, // pushed -> new episode
     };
-    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
     st.close();
     assert.equal(rawEventKinds(path).filter((k) => k === "reviewer-fallback-switch").length, 2);
     assert.equal(forge.prComments.length, 2);
@@ -2306,17 +2323,17 @@ test("tick DRIVE: a forged/unknown review_fallback_kind in the state DB fails cl
   sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "queued", pr: 55, reason: "waiting" };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 1st tick: lane -> driving
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 1st tick: lane -> driving
 
   // Simulate a forged/corrupt row: the TEXT column holds a kind no Reviewer implements.
   st.recordReviewFallback("lane-a", "HEAD", "totally-bogus-kind");
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   // The gate must see NO lock at all — head nulled too, never a half-valid lock.
   assert.deepEqual(gate.calls[1]!.fallbackLock, { head: null, kind: null });
 
   // Sanity: a VALID kind round-trips (validation rejects unknowns, not legitimate episodes).
   st.recordReviewFallback("lane-a", "HEAD", "same-model-trusted");
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.deepEqual(gate.calls[2]!.fallbackLock, { head: "HEAD", kind: "same-model-trusted" });
   st.close();
 });
@@ -2328,7 +2345,7 @@ test("tick DRIVE: a driving lane with no known PR number fails safe to needs-hum
   // Seed a driving lane directly with pr=null (as if rescued from a probe with no prNumber).
   st.upsertWorker({ name: "lane-a", issue: 2, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: null });
   const gate = new FakeMergeGate();
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.getWorker("lane-a")?.state, "failed");
   assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
   assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-a", issue: 2, pr: -1, reason: "driving-lane-missing-pr" }]);
@@ -2357,7 +2374,7 @@ test("tick: kill switch active -> DRAIN + TERMINAL-RECLAIM only: no rollback ret
     gate.outcomes[56] = { kind: "merged", pr: 56, headOid: "H" };
     writeFileSync(join(dir, "KILL_SWITCH"), ""); // a human flips it — no config touched
 
-    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
 
     assert.equal(r.ceilingBreached, true);
     assert.deepEqual(r.ceilingReasons, ["kill-switch"]);
@@ -2402,7 +2419,7 @@ test("#172 kill switch adopts a confirmed-intent handoff and drains it in the sa
     sup.probes["lane-confirmed"] = { ...DEFAULT_PROBE }; // adopted child is alive/KEEP
     writeFileSync(join(dir, "KILL_SWITCH"), "");
 
-    const result = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    const result = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
     assert.deepEqual(result.resumed, [{ kind: "resumed", worker: "lane-confirmed", issue: 172, attempt: 1 }]);
     assert.equal(st.getWorker("lane-confirmed")?.state, "running");
@@ -2435,7 +2452,7 @@ test("#69 P2 (Codex PR #72): kill switch active + a lane that already wrote .han
     sup.probes["lane-keep"] = { ...DEFAULT_PROBE };
     writeFileSync(join(dir, "KILL_SWITCH"), "");
 
-    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
     // The handed-off lane's real terminal state is recorded — not left running, not failed.
     assert.equal(st.getWorker("lane-ho")?.state, "handoff");
@@ -2463,7 +2480,7 @@ test("tick DRIVE: kill switch NOT active -> driveOne called normally (no regress
     const gate = new FakeMergeGate();
     gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
     // No KILL_SWITCH file written — sentinel absent.
-    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
     assert.equal(gate.calls.length, 1);
     assert.equal(st.getWorker("lane-a")?.state, "done");
     assert.deepEqual(forge.boardSet, [[2, "done"]]);
@@ -2487,7 +2504,7 @@ test("tick: kill switch records a DONE+PR lane's terminal state under the switch
     gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
 
     writeFileSync(switchPath, "");
-    const r1 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
     assert.equal(gate.calls.length, 0); // DRIVE skipped under the switch — never merges
     assert.deepEqual(r1.driven, []);
     // #69 P2: the DONE+PR lane's terminal state IS recorded (reclaimed to driving), not drained.
@@ -2497,7 +2514,7 @@ test("tick: kill switch records a DONE+PR lane's terminal state under the switch
     assert.deepEqual(forge.boardSet, []); // not merged yet
 
     rmSync(switchPath, { force: true }); // human clears the switch
-    const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
     assert.equal(gate.calls.length, 1); // the driving lane is now driven -> merged
     assert.deepEqual(r2.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
     assert.equal(st.getWorker("lane-a")?.state, "done");
@@ -2716,6 +2733,7 @@ test("tick DRIVE (#375 regression): a driving lane's fix leg dispatches normally
     const gate = new FakeMergeGate();
     gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
     const r = await tick({
+      now: realClock,
       forge,
       state: st,
       supervisor: sup,
@@ -2817,7 +2835,7 @@ test("#75 tick: PAUSE active -> dispatch skipped entirely (no new lane, not even
     forge.ready = [{ number: 9, title: "", labels: ["prio:1-high"] }];
     writeFileSync(join(dir, "PAUSE"), ""); // a human touches data/PAUSE — no config touched
 
-    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
 
     // Dispatch: nothing happened, no "skipped" rows either — the phase never ran.
     assert.deepEqual(r.dispatched, []);
@@ -2857,7 +2875,7 @@ test("#75 tick: PAUSE + KILL_SWITCH together behaves exactly as KILL alone (stri
     writeFileSync(join(dir, "PAUSE"), "");
     writeFileSync(join(dir, "KILL_SWITCH"), "");
 
-    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
 
     // Identical to the kill-switch-alone behavior: drain + terminal-reclaim only.
     assert.equal(r.ceilingBreached, true);
@@ -2885,12 +2903,12 @@ test("#75 tick: removing the PAUSE sentinel restores dispatch on the very next t
     forge.ready = [{ number: 9, title: "", labels: ["prio:1-high"] }];
 
     writeFileSync(pausePath, "");
-    const r1 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
     assert.deepEqual(r1.dispatched, []);
     assert.equal(st.runningWorkers().length, 0);
 
     rmSync(pausePath, { force: true }); // human resumes
-    const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
     assert.deepEqual(
       r2.dispatched.map((d) => d.kind),
       ["dispatched"],
@@ -2908,7 +2926,7 @@ test("tick reclaim: handoff sentinel -> resumable, not killed", async () => {
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-ho", 5);
   sup.probes["lane-ho"] = { ...DEFAULT_PROBE, handoff: true };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.equal(r.reclaimed[0]!.kind, "handoff");
   assert.deepEqual(sup.reclaimed, []); // NOT reclaimed/killed
   assert.equal(st.getWorker("lane-ho")?.state, "handoff");
@@ -2928,7 +2946,7 @@ test("#169 restart adoption: stale confirmed-alive lane requests one graceful ha
   };
   const cfg = mkCfg({ worker: { heartbeatStaleSecs: 180, timeoutSec: 3600 } });
 
-  const r1 = await tick({ forge, state: st, supervisor: sup, cfg });
+  const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
   assert.deepEqual(r1.reclaimed, [{ kind: "kept", worker: "lane-adopt", issue: 169 }]);
   assert.deepEqual(sup.handoffRequested, ["lane-adopt"]);
   assert.deepEqual(sup.reclaimed, [], "adoption never enters the hard-kill reclaim path");
@@ -2945,7 +2963,7 @@ test("#169 restart adoption: stale confirmed-alive lane requests one graceful ha
 
   // The detached wrapper is still draining on the next tick. Persisted/in-memory handoff
   // dedup returns false, so it stays held without a second signal or honesty event.
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
   assert.deepEqual(r2.reclaimed, [{ kind: "kept", worker: "lane-adopt", issue: 169 }]);
   assert.deepEqual(sup.handoffRequested, ["lane-adopt"]);
   assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["lane-adopted"]).length, 1);
@@ -2953,12 +2971,12 @@ test("#169 restart adoption: stale confirmed-alive lane requests one graceful ha
   // probe()'s real detached path writes this sentinel once the pid is confirmed dead. The
   // conductor settles it on one tick and the existing resume path starts it on the next.
   sup.probes["lane-adopt"] = { ...DEFAULT_PROBE, handoff: true };
-  const r3 = await tick({ forge, state: st, supervisor: sup, cfg });
+  const r3 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
   assert.equal(r3.reclaimed[0]?.kind, "handoff");
   assert.equal(st.getWorker("lane-adopt")?.state, "handoff");
   assert.deepEqual(r3.resumed, []);
 
-  const r4 = await tick({ forge, state: st, supervisor: sup, cfg });
+  const r4 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
   assert.deepEqual(r4.resumed, [{ kind: "resumed", worker: "lane-adopt", issue: 169, attempt: 1 }]);
   assert.equal(st.getWorker("lane-adopt")?.state, "running");
   assert.deepEqual(forge.labelsAdded, []);
@@ -3013,7 +3031,7 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
     utimesSync(join(dir, `${name}.heartbeat`), new Date(0), new Date(0));
 
     s2 = new WorkerSupervisor({ now: realClock, cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, heartbeatMs: 60_000 });
-    const adopted = await tick({ forge, state: st, supervisor: s2, cfg });
+    const adopted = await tick({ now: realClock, forge, state: st, supervisor: s2, cfg });
     assert.deepEqual(adopted.reclaimed, [{ kind: "kept", worker: name, issue: 169 }]);
     assert.equal(st.getWorker(name)?.state, "running");
     assert.deepEqual(forge.labelsAdded, []);
@@ -3034,12 +3052,12 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
     assert.throws(() => process.kill(running.wrapper_pid, 0), "cooperative wrapper exited from the graceful SIGTERM");
     assert.ok(existsSync(termMarker), "TERM trap wrote its marker; SIGKILL cannot satisfy this assertion");
 
-    const settled = await tick({ forge, state: st, supervisor: s2, cfg });
+    const settled = await tick({ now: realClock, forge, state: st, supervisor: s2, cfg });
     assert.equal(settled.reclaimed[0]?.kind, "handoff");
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "probe wrote the detached .handoff sentinel");
     assert.equal(st.getWorker(name)?.state, "handoff");
 
-    const resumed = await tick({ forge, state: st, supervisor: s2, cfg });
+    const resumed = await tick({ now: realClock, forge, state: st, supervisor: s2, cfg });
     assert.deepEqual(resumed.resumed, [{ kind: "resumed", worker: name, issue: 169, attempt: 1 }]);
     assert.equal(st.getWorker(name)?.state, "running");
     assert.deepEqual(forge.labelsAdded, [], "the full adoption/handoff/resume path never labels needs-human");
@@ -3072,6 +3090,7 @@ test("#169 restart adoption bound: stale alive lane past timeout and confirmed-d
   };
 
   const r = await tick({
+    now: realClock,
     forge,
     state: st,
     supervisor: sup,
@@ -3100,20 +3119,20 @@ test("#172 integration: handoff settles for one tick, RESUME reuses the lane nex
   // Leg 0 reaches its soft budget. It is reclaimed to handoff but must NOT be resumed in the
   // same tick (the RESUME candidate set was snapshotted before RECLAIM).
   sup.probes["lane-ho"] = { ...DEFAULT_PROBE, handoff: true, costUsd: 3 };
-  const r1 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.getWorker("lane-ho")?.state, "handoff");
   assert.deepEqual(r1.resumed, []);
   assert.equal(st.spentUsdForWorker("lane-ho"), 3);
 
   // Next tick: RESUME gets the lane before fresh work and makes it an ordinary running lane.
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.deepEqual(r2.resumed, [{ kind: "resumed", worker: "lane-ho", issue: 172, attempt: 1 }]);
   assert.equal(st.getWorker("lane-ho")?.state, "running");
   assert.equal(st.getWorker("lane-ho")?.resume_attempts, 1);
 
   // The resumed leg finishes with a PR. Ordinary RECLAIM -> DRIVE handles it in the same tick.
   sup.probes["lane-ho"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 77, costUsd: 2 };
-  const r3 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r3 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.deepEqual(r3.driven, [{ kind: "merged", worker: "lane-ho", issue: 172, pr: 77 }]);
   assert.equal(st.getWorker("lane-ho")?.state, "done");
   assert.equal(st.spentUsdForWorker("lane-ho"), 5); // $3 initial leg + $2 resumed leg
@@ -3163,18 +3182,18 @@ test("#172 confirmed intent is adopted under PAUSE, then ordinary supervision re
     );
     writeFileSync(join(dir, "PAUSE"), "");
 
-    const result = await tick({ forge: new FakeForge(), state: st, supervisor, cfg });
+    const result = await tick({ now: realClock, forge: new FakeForge(), state: st, supervisor, cfg });
     assert.deepEqual(result.resumed, [{ kind: "resumed", worker: "lane-crash", issue: 172, attempt: 1 }]);
     assert.equal(st.getWorker("lane-crash")?.state, "running");
     assert.equal(st.getWorker("lane-crash")?.session_id, "surviving-session");
     assert.equal(existsSync(join(dir, "lane-crash.handoff.json")), false, "adoption completes stale handoff removal");
     assert.equal(st.maxSpendLedgerId(), 0, "the stale prior-leg handoff is not re-recorded");
 
-    const reclaimed = await tick({ forge: new FakeForge(), state: st, supervisor, cfg });
+    const reclaimed = await tick({ now: realClock, forge: new FakeForge(), state: st, supervisor, cfg });
     assert.equal(reclaimed.reclaimed[0]?.kind, "dead");
     assert.equal(st.getWorker("lane-crash")?.state, "failed");
     assert.equal(st.spentUsdForWorker("lane-crash"), 1.25);
-    await tick({ forge: new FakeForge(), state: st, supervisor, cfg });
+    await tick({ now: realClock, forge: new FakeForge(), state: st, supervisor, cfg });
     assert.equal(st.maxSpendLedgerId(), 1, "adoption and reclaim happen once without resume oscillation");
   } finally {
     supervisor.dispose();
@@ -3220,7 +3239,7 @@ test("#172 unconfirmed resume intent escalates and latches under PAUSE without s
     );
     writeFileSync(join(dir, "PAUSE"), "");
 
-    const result = await tick({ forge, state: st, supervisor, cfg });
+    const result = await tick({ now: realClock, forge, state: st, supervisor, cfg });
     assert.deepEqual(result.resumed, [{ kind: "capped", worker: "lane-ambiguous", issue: 1172, attempts: 0 }]);
     assert.equal(st.getWorker("lane-ambiguous")?.resume_capped, 1);
     assert.deepEqual(forge.labelsAdded, [[1172, "needs-human"]]);
@@ -3231,7 +3250,7 @@ test("#172 unconfirmed resume intent escalates and latches under PAUSE without s
     assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["resume-failed"]).length, 0);
     assert.equal(existsSync(join(dir, "lane-ambiguous.handoff.json")), true, "evidence remains for human triage");
 
-    const again = await tick({ forge, state: st, supervisor, cfg });
+    const again = await tick({ now: realClock, forge, state: st, supervisor, cfg });
     assert.deepEqual(again.resumed, []);
     assert.equal(forge.labelsAdded.length, 1);
   } finally {
@@ -3284,7 +3303,7 @@ test("#172 detached dispatch marker is not adopted: handoff spawns one real resu
     state.recordSpend("lane-detached", 172, 1, new Date().toISOString());
     assert.equal(state.maxSpendLedgerId(), 1);
 
-    const resumed = await tick({ forge: new FakeForge(), state, supervisor, cfg });
+    const resumed = await tick({ now: realClock, forge: new FakeForge(), state, supervisor, cfg });
     assert.deepEqual(resumed.resumed, [{ kind: "resumed", worker: "lane-detached", issue: 172, attempt: 1 }]);
     assert.equal(state.getWorker("lane-detached")?.state, "running");
     assert.equal(existsSync(join(dir, "lane-detached.handoff.json")), false, "normal resume consumed the handoff anchor");
@@ -3292,12 +3311,12 @@ test("#172 detached dispatch marker is not adopted: handoff spawns one real resu
 
     for (let i = 0; i < 400 && !existsSync(join(dir, "lane-detached.done.json")); i++) await sleep(20);
     assert.ok(existsSync(join(dir, "lane-detached.done.json")), "the real resumed process completed");
-    await tick({ forge: new FakeForge(), state, supervisor, cfg });
+    await tick({ now: realClock, forge: new FakeForge(), state, supervisor, cfg });
     assert.equal(state.getWorker("lane-detached")?.state, "done");
     assert.equal(state.spentUsdForWorker("lane-detached"), 3);
     assert.equal(state.maxSpendLedgerId(), 2, "exactly one ledger row per leg");
 
-    await tick({ forge: new FakeForge(), state, supervisor, cfg });
+    await tick({ now: realClock, forge: new FakeForge(), state, supervisor, cfg });
     assert.equal(state.maxSpendLedgerId(), 2, "no handoff-running oscillation can re-record spend");
   } finally {
     supervisor.dispose();
@@ -3310,7 +3329,7 @@ test("tick dispatch cap 0 is quiet and never fetches Ready issues", async () => 
   const st = new State(":memory:");
   const forge = new FakeForge();
   forge.ready = [{ number: 999, title: "must not be fetched", labels: ["prio:3-feature"] }];
-  const result = await tick({ forge, state: st, supervisor: new FakeSupervisor(), cfg: mkCfg(), dispatchCapOverride: 0 });
+  const result = await tick({ now: realClock, forge, state: st, supervisor: new FakeSupervisor(), cfg: mkCfg(), dispatchCapOverride: 0 });
   assert.equal(forge.readyReads, 0);
   assert.deepEqual(result.dispatched, []);
   st.close();
@@ -3324,18 +3343,18 @@ test("#172 cap latch: a second handoff past maxResumes escalates exactly once an
   seedRunning(st, "lane-cap", 173);
 
   sup.probes["lane-cap"] = { ...DEFAULT_PROBE, handoff: true, costUsd: 1 };
-  await tick({ forge, state: st, supervisor: sup, cfg }); // leg 0 -> handoff
-  await tick({ forge, state: st, supervisor: sup, cfg }); // resume attempt 1
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg }); // leg 0 -> handoff
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg }); // resume attempt 1
   sup.probes["lane-cap"] = { ...DEFAULT_PROBE, handoff: true, costUsd: 0.5 };
-  await tick({ forge, state: st, supervisor: sup, cfg }); // resumed leg -> handoff
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg }); // resumed leg -> handoff
 
-  const capped = await tick({ forge, state: st, supervisor: sup, cfg });
+  const capped = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
   assert.deepEqual(capped.resumed, [{ kind: "capped", worker: "lane-cap", issue: 173, attempts: 1 }]);
   assert.equal(st.getWorker("lane-cap")?.resume_capped, 1);
   assert.deepEqual(forge.labelsAdded, [[173, "needs-human"]]);
   assert.equal(sup.resumed.length, 1);
 
-  const again = await tick({ forge, state: st, supervisor: sup, cfg });
+  const again = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
   assert.deepEqual(again.resumed, []);
   assert.equal(forge.labelsAdded.length, 1);
   assert.equal(st.eventsSince("2020-01-01T00:00:00Z", ["resume-capped"]).length, 1);
@@ -3351,11 +3370,11 @@ test("#295 review round 4 (Codex P1): resume-capped preserves a fixing-origin la
   st.upsertWorker({ ...st.getWorker("lane-pr")!, pr: 4242 });
 
   sup.probes["lane-pr"] = { ...DEFAULT_PROBE, handoff: true, costUsd: 1 };
-  await tick({ forge, state: st, supervisor: sup, cfg }); // leg 0 -> handoff
-  await tick({ forge, state: st, supervisor: sup, cfg }); // resume attempt 1
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg }); // leg 0 -> handoff
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg }); // resume attempt 1
   sup.probes["lane-pr"] = { ...DEFAULT_PROBE, handoff: true, costUsd: 0.5 };
-  await tick({ forge, state: st, supervisor: sup, cfg }); // resumed leg -> handoff
-  await tick({ forge, state: st, supervisor: sup, cfg }); // cap
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg }); // resumed leg -> handoff
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg }); // cap
 
   const [event] = st.eventsSince("2020-01-01T00:00:00Z", ["resume-capped"]);
   // Without the PR, escalation-reconcile can never observe an external merge of it.
@@ -3373,11 +3392,11 @@ test("#172 pause + full hold-set: a handoff does not resume until PAUSE and conf
     forge.issueLabelsByIssue[174] = ["blocked"]; // full configured hold set, not needs-human only
     writeFileSync(join(dir, "PAUSE"), "");
 
-    assert.deepEqual((await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() })).resumed, []);
+    assert.deepEqual((await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() })).resumed, []);
     rmSync(join(dir, "PAUSE"), { force: true });
-    assert.deepEqual((await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() })).resumed, []);
+    assert.deepEqual((await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() })).resumed, []);
     forge.issueLabelsByIssue[174] = [];
-    assert.deepEqual((await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() })).resumed, [
+    assert.deepEqual((await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() })).resumed, [
       { kind: "resumed", worker: "lane-p", issue: 174, attempt: 1 },
     ]);
     st.close();
@@ -3392,7 +3411,7 @@ test("#172 ordering: with one free slot, RESUME claims it before a fresh Ready i
   const sup = new FakeSupervisor();
   st.upsertWorker({ name: "lane-old", issue: 175, session_id: "s", state: "handoff", started_at: "t", ended_at: "t" });
   forge.ready = [{ number: 176, title: "fresh", labels: ["prio:3-feature"] }];
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }) });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }) });
   assert.deepEqual(r.resumed, [{ kind: "resumed", worker: "lane-old", issue: 175, attempt: 1 }]);
   assert.deepEqual(sup.dispatched, []);
   assert.deepEqual(r.dispatched, [{ kind: "skipped", issue: 176, reason: "no-lane" }]);
@@ -3408,7 +3427,7 @@ test("tick dispatch: fills lanes by priority up to roundDispatchCap; claims + re
     { number: 2, title: "", labels: ["prio:1-high"] },
     { number: 5, title: "", labels: ["prio:3-feature"] },
   ];
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { roundDispatchCap: 2, max: 3 } }) });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { roundDispatchCap: 2, max: 3 } }) });
   const dispatched = r.dispatched.filter((d) => d.kind === "dispatched").map((d) => d.issue);
   assert.deepEqual(dispatched, [2, 5]); // #2 (prio1) first, then #5 (prio3, lower number than #8); cap=2 stops before #8
   assert.deepEqual(
@@ -3438,7 +3457,7 @@ test("tick dispatch: skips in-flight issue, respects max lanes, and over-budget 
   ];
   // over budget: roundSpend 50 > default roundBudgetUsd 30 (thunk since #124 gate② P1-2 —
   // evaluated inside tick(), post-reclaim)
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), roundSpendUsd: () => 50 });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), roundSpendUsd: () => 50 });
   assert.equal(r.overBudget, true);
   assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 2 && d.reason === "in-flight"));
   assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 3 && d.reason === "over-budget"));
@@ -3457,7 +3476,7 @@ test("tick dispatch anti-starvation: a meta issue yields a reserved coding lane 
     { number: 2, title: "", labels: ["prio:1-high"] }, // meta
     { number: 3, title: "", labels: ["prio:3-feature"] }, // coding
   ];
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 2, roundDispatchCap: 2 } }) });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 2, roundDispatchCap: 2 } }) });
   const dispatched = r.dispatched
     .filter((d) => d.kind === "dispatched")
     .map((d) => d.issue)
@@ -3629,7 +3648,7 @@ test("tick ceiling: daily budget breach freezes ALL new dispatch + drains runnin
   st.recordSpend("lane-earlier", 99, 500, new Date().toISOString());
   forge.ready = [{ number: 2, title: "", labels: ["prio:3-feature"] }];
   const cfg = mkCfg({ cost: { dailyBudgetUsd: 10 } });
-  const r = await tick({ forge, state: st, supervisor: sup, cfg });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
 
   assert.equal(r.ceilingBreached, true);
   assert.deepEqual(r.ceilingReasons, ["daily-budget"]);
@@ -3652,7 +3671,7 @@ test("tick: out-of-band kill switch (file sentinel, engine data dir) -> drain-on
     forge.ready = [{ number: 5, title: "", labels: ["prio:3-feature"] }];
     assert.equal(st.isKillSwitchActive(), false); // no sentinel yet
     writeFileSync(join(dir, "KILL_SWITCH"), ""); // a human flips it — no config touched
-    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
     assert.equal(r.ceilingBreached, true);
     assert.deepEqual(r.ceilingReasons, ["kill-switch"]);
     assert.deepEqual(r.dispatched, []); // #69 global gate: DISPATCH never even ran
@@ -3747,7 +3766,7 @@ test("#69 P3b (fable): a .failed-sentinel lane with an open PR AND a dirty workt
   sup.inspectResults["lane-fail-wip"] = { worktreePath: "/wt/lane-fail-wip", worktreeRetained: true };
   const gate = new FakeMergeGate();
   gate.outcomes[91] = { kind: "merged", pr: 91, headOid: "H" }; // would merge if driven
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
 
   assert.deepEqual(sup.inspected, ["lane-fail-wip"]); // dirty check ran on the terminal lane
   assert.equal(st.getWorker("lane-fail-wip")?.state, "failed"); // NOT driving
@@ -3767,7 +3786,7 @@ test("#69 P3b (fable): a .failed-sentinel lane with an open PR and a CLEAN workt
   seedRunning(st, "lane-fail-clean", 9);
   sup.probes["lane-fail-clean"] = { ...DEFAULT_PROBE, failed: true, hasPr: true, prNumber: 92 };
   sup.inspectResults["lane-fail-clean"] = { worktreePath: "/wt/lane-fail-clean", worktreeRetained: false };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(sup.inspected, ["lane-fail-clean"]);
   assert.equal(st.getWorker("lane-fail-clean")?.state, "driving"); // clean -> rescued as before
   assert.equal(st.getWorker("lane-fail-clean")?.pr, 92);
@@ -3853,7 +3872,7 @@ test("tick ceiling: daily spend accumulates across ticks and SURVIVES a State re
     const sup1 = new FakeSupervisor();
     seedRunning(st, "lane-a", 1);
     sup1.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, costUsd: 40 };
-    const r1 = await tick({ forge, state: st, supervisor: sup1, cfg });
+    const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup1, cfg });
     assert.equal(r1.ceilingBreached, false);
     st.close();
 
@@ -3862,7 +3881,7 @@ test("tick ceiling: daily spend accumulates across ticks and SURVIVES a State re
     const sup2 = new FakeSupervisor();
     seedRunning(st, "lane-b", 2);
     sup2.probes["lane-b"] = { ...DEFAULT_PROBE, done: true, hasPr: true, costUsd: 20 };
-    const r2 = await tick({ forge, state: st, supervisor: sup2, cfg });
+    const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup2, cfg });
     // 40 (persisted from before the restart) + 20 (this session) = 60 > 50 -> breached. If the
     // restart had reset the accumulator this would read 20 and stay under budget.
     assert.equal(r2.ceilingBreached, true);
@@ -3996,7 +4015,7 @@ test("#170 review silence: aged episode labels PR + emits once while driving; ve
       ],
     };
 
-    const silent = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    const silent = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
     assert.equal(st.getWorker("lane-silent")?.state, "driving");
     assert.deepEqual(silent.driven, [{ kind: "queued", worker: "lane-silent", issue: 170, pr: 170, reason: "gate-pending:WAIT_REVIEW" }]);
     assert.deepEqual(forge.prLabelsAdded, [[170, "needs-human"]]);
@@ -4021,7 +4040,7 @@ test("#170 review silence: aged episode labels PR + emits once while driving; ve
       ...forge.prReviewData,
       reviews: [{ author: CODEX_REVIEWER_LOGINS[0], commitOid: "H1", state: "COMMENTED", submittedAt: "2026-07-15T00:01:00Z" }],
     };
-    const held = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    const held = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
     assert.equal(st.getWorker("lane-silent")?.state, "failed");
     assert.deepEqual(held.driven, [
       { kind: "needs-human", worker: "lane-silent", issue: 170, pr: 170, reason: "gate:HUMAN:instruction-path-latch" },
@@ -4032,7 +4051,7 @@ test("#170 review silence: aged episode labels PR + emits once while driving; ve
     // a fresh trigger; only a post-trigger review can then merge.
     forge.issueLabelsByIssue[170] = [];
     forge.prReviewData = { ...forge.prReviewData, labels: [], reviews: [] };
-    const reentered = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    const reentered = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
     assert.deepEqual(reentered.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-silent", issue: 170, pr: 170, attempt: 1 }]);
     assert.deepEqual(reentered.driven, [{ kind: "queued", worker: "lane-silent", issue: 170, pr: 170, reason: "review-triggered" }]);
 
@@ -4040,7 +4059,7 @@ test("#170 review silence: aged episode labels PR + emits once while driving; ve
       ...forge.prReviewData,
       reviews: [{ author: CODEX_REVIEWER_LOGINS[0], commitOid: "H1", state: "COMMENTED", submittedAt: "2026-07-15T00:03:00Z" }],
     };
-    const merged = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    const merged = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
     assert.deepEqual(merged.driven, [{ kind: "merged", worker: "lane-silent", issue: 170, pr: 170 }]);
     assert.deepEqual(forge.merged, [[170, "H1"]]);
     assert.equal(sup.dispatched.length, 0);
@@ -4103,13 +4122,13 @@ test("tick DRIVE (#248): a hold label on the PR suppresses drive to WAIT — no 
       unresolvedThreads: 0,
     };
 
-    const held1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    const held1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
     assert.deepEqual(held1.driven, [{ kind: "queued", worker: "lane-h", issue: 50, pr: 600, reason: "gate-pending:MERGE_OK" }]);
     assert.equal(st.getWorker("lane-h")?.state, "driving"); // held, not escalated — lane keeps its slot
     assert.equal(st.getWorker("lane-h")?.gated_reentry_attempts ?? 0, 0);
 
     // A second tick while still held: same outcome, still zero writes of any kind.
-    const held2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    const held2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
     assert.deepEqual(held2.driven, [{ kind: "queued", worker: "lane-h", issue: 50, pr: 600, reason: "gate-pending:MERGE_OK" }]);
 
     // Zero-consumption AC: no gated-reentry attempt burned, no needs-human label/comment
@@ -4129,7 +4148,7 @@ test("tick DRIVE (#248): a hold label on the PR suppresses drive to WAIT — no 
     // The human removes the hold label — the very NEXT tick resumes the ordinary gate path
     // (same lane, same PR, no re-dispatch) and merges.
     forge.prReviewData = { ...forge.prReviewData, labels: [] };
-    const resumed = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    const resumed = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
     assert.deepEqual(resumed.driven, [{ kind: "merged", worker: "lane-h", issue: 50, pr: 600 }]);
     assert.equal(st.getWorker("lane-h")?.state, "done");
     assert.deepEqual(forge.merged, [[600, "H1"]]);
@@ -4162,7 +4181,7 @@ test("tick DRIVE (#248): hold + needs-human simultaneously on the SAME PR -> esc
   forge.prStatus = { number: 601, headOid: "H1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   forge.prReviewData = { ...forge.prReviewData, headOid: "H1", labels: ["hold", "needs-human"] };
 
-  const r = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r.driven, [
     { kind: "needs-human", worker: "lane-both", issue: 51, pr: 601, reason: "gate:HUMAN:instruction-path-latch" },
   ]);
@@ -4201,7 +4220,7 @@ test("tick GATED RECLAIM (#248 review round 1, G1 — the confirmed Codex scenar
   // would have mishandled (needs-human alone gone -> gatedReentryDecision would have said
   // RECLAIM, burning an attempt and letting DRIVE immediately re-escalate/re-latch).
   forge.issueLabelsByIssue[60] = ["hold"];
-  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r1.gatedReclaimed, []); // SKIP — no outcome of any kind
   assert.equal(st.getWorker("lane-capped")?.state, "failed"); // untouched
   assert.equal(st.getWorker("lane-capped")?.gated_reentry_attempts, 0); // zero attempts consumed
@@ -4211,7 +4230,7 @@ test("tick GATED RECLAIM (#248 review round 1, G1 — the confirmed Codex scenar
   assertNeverWritesHoldLabel(forge, cfg.escalation.holdLabels);
 
   // A second tick, hold still standing: same SKIP, still zero consumption (not a one-shot).
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r2.gatedReclaimed, []);
   assert.equal(st.getWorker("lane-capped")?.gated_reentry_attempts, 0);
   assert.deepEqual(forge.labelsAdded, []);
@@ -4219,7 +4238,7 @@ test("tick GATED RECLAIM (#248 review round 1, G1 — the confirmed Codex scenar
   // The human finishes investigating and removes the hold too — apply=take control,
   // remove=return it: reclaim now proceeds exactly like the ordinary #147 path.
   forge.issueLabelsByIssue[60] = [];
-  const r3 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r3 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r3.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-capped", issue: 60, pr: 700, attempt: 1 }]);
   assert.equal(st.getWorker("lane-capped")?.state, "driving");
   st.close();
@@ -4248,7 +4267,7 @@ test("tick DRIVE (#248): a `fixing` lane is invisible to the hold check entirely
   // exactly the "in-flight, untouched" state this test wants.
   forge.prReviewData = { ...forge.prReviewData, labels: ["hold"] };
 
-  const r = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r.driven, []); // the fixing lane never appears in DRIVE's outcomes at all
   assert.equal(st.getWorker("lane-fixing")?.state, "fixing"); // untouched — still mid fix-leg
   assert.equal(st.getWorker("lane-fixing")?.fix_rounds, 1); // not bumped, not reset
@@ -4312,14 +4331,14 @@ test("#147 round-4 P2 (Codex PR #151): needs-human removed but `blocked` (anothe
   // human-label veto reads the PR's labels, not the issue's, so a reclaim here would drive an
   // issue-blocked PR toward merge.
   forge.issueLabelsByIssue[50] = ["blocked"];
-  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r1.gatedReclaimed, []); // SKIP — no outcome of any kind
   assert.equal(st.getWorker("lane-h")?.state, "failed"); // untouched
   assert.equal(st.getWorker("lane-h")?.gated_reentry_attempts, 0); // no attempt burned
 
   // The human clears `blocked` too — now every hold is gone: reclaim proceeds.
   forge.issueLabelsByIssue[50] = [];
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r2.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-h", issue: 50, pr: 600, attempt: 1 }]);
   assert.equal(st.getWorker("lane-h")?.state, "driving");
   assert.equal(sup.dispatched.length, 0);
@@ -4367,7 +4386,7 @@ test("#147 gated-PR reentry: an escalated PR whose threads are resolved and labe
   };
   forge.issueLabelsByIssue[10] = [];
 
-  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   // Reclaimed straight back to `driving` — same worker row, no dispatch.
   assert.deepEqual(r1.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-a", issue: 10, pr: 99, attempt: 1 }]);
   assert.equal(st.getWorker("lane-a")?.state, "driving");
@@ -4378,7 +4397,7 @@ test("#147 gated-PR reentry: an escalated PR whose threads are resolved and labe
   assert.deepEqual(r1.driven, [{ kind: "queued", worker: "lane-a", issue: 10, pr: 99, reason: "review-triggered" }]);
   assert.equal(sup.dispatched.length, 0); // no worker spawned
 
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   // Pin now matches -> gate② evaluates the live (resolved) data; the review post-dates the
   // re-trigger, so it counts -> MERGE_OK; CI green -> merge.
   assert.deepEqual(r2.driven, [{ kind: "merged", worker: "lane-a", issue: 10, pr: 99 }]);
@@ -4427,13 +4446,13 @@ test("#147 P1 (Codex PR #151): a STALE review (submitted before the re-entry's t
   forge.issueLabelsByIssue[20] = [];
 
   // Tick 1: reclaimed + fresh re-trigger posted (pin recorded at the fixed clock, 07-02).
-  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r1.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-s", issue: 20, pr: 88, attempt: 1 }]);
   assert.deepEqual(r1.driven, [{ kind: "queued", worker: "lane-s", issue: 20, pr: 88, reason: "review-triggered" }]);
 
   // Tick 2: pin matches, but the only review predates the re-trigger (07-01 < 07-02) — it is
   // filtered out, the verdict is WAIT_REVIEW, the lane QUEUES. Never a merge.
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r2.driven, [{ kind: "queued", worker: "lane-s", issue: 20, pr: 88, reason: "gate-pending:WAIT_REVIEW" }]);
   assert.deepEqual(forge.merged, []);
   assert.equal(st.getWorker("lane-s")?.state, "driving"); // still waiting on the fresh review
@@ -4446,7 +4465,7 @@ test("#147 P1 (Codex PR #151): a STALE review (submitted before the re-entry's t
       { author: CODEX_REVIEWER_LOGINS[0], commitOid: "H1", state: "COMMENTED", submittedAt: "2026-07-02T00:10:00Z" },
     ],
   };
-  const r3 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r3 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r3.driven, [{ kind: "merged", worker: "lane-s", issue: 20, pr: 88 }]);
   assert.deepEqual(forge.merged, [[88, "H1"]]);
   assert.equal(sup.dispatched.length, 0); // no worker across the whole sequence
@@ -4493,14 +4512,14 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   forge.issueLabelsByIssue[11] = [];
 
   // Tick 1: reclaimed + re-triggered (identical shape to the happy-path test above).
-  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r1.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-b", issue: 11, pr: 199, attempt: 1 }]);
   assert.deepEqual(r1.driven, [{ kind: "queued", worker: "lane-b", issue: 11, pr: 199, reason: "review-triggered" }]);
   assert.equal(st.getWorker("lane-b")?.state, "driving");
 
   // Tick 2: pin now matches -> gate② re-evaluates the SAME standing findings -> HANDLE_THREADS
   // -> needs-human again. Never a merge.
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.equal(st.getWorker("lane-b")?.state, "failed");
   assert.equal(st.getWorker("lane-b")?.gated_reentry_attempts, 1);
   assert.equal(st.getWorker("lane-b")?.gated_reentry_capped, 0); // cap is only latched on the NEXT removal
@@ -4525,7 +4544,7 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
 
   // Human removes needs-human a SECOND time — but the cap (1) is already spent.
   forge.issueLabelsByIssue[11] = [];
-  const r3 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r3 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r3.gatedReclaimed, [{ kind: "capped", worker: "lane-b", issue: 11, pr: 199, attempts: 1 }]);
   assert.equal(st.getWorker("lane-b")?.state, "failed"); // never reclaimed this time
   assert.equal(st.getWorker("lane-b")?.gated_reentry_capped, 1);
@@ -4538,7 +4557,7 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
 
   // A THIRD removal changes nothing — the row is permanently excluded from here on.
   forge.issueLabelsByIssue[11] = [];
-  const r4 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r4 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r4.gatedReclaimed, []);
   assert.equal(st.getWorker("lane-b")?.state, "failed");
   st.close();
@@ -4632,7 +4651,7 @@ test("#147 round-3 P2 (Codex PR #151): CAPPED latches ONLY after the needs-human
   // Tick 1: the label write throws (transient forge failure) — NO latch, NO capped outcome,
   // failure recorded durably; the row stays eligible for a retry.
   forge.throwOnAddLabel = true;
-  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r1.gatedReclaimed, []); // no "capped" outcome emitted on a failed label
   assert.equal(st.getWorker("lane-z")?.gated_reentry_capped, 0); // NOT latched
   assert.equal(st.gatedFailedWorkers().length, 1); // still a candidate next tick
@@ -4643,14 +4662,14 @@ test("#147 round-3 P2 (Codex PR #151): CAPPED latches ONLY after the needs-human
 
   // Tick 2: the forge recovers — label applied FIRST, then the latch + outcome, exactly once.
   forge.throwOnAddLabel = false;
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r2.gatedReclaimed, [{ kind: "capped", worker: "lane-z", issue: 40, pr: 500, attempts: 1 }]);
   assert.deepEqual(forge.labelsAdded, [[40, "needs-human"]]); // restored where triage looks
   assert.equal(st.getWorker("lane-z")?.gated_reentry_capped, 1); // latched only now
   assert.equal(st.gatedFailedWorkers().length, 0); // permanently excluded from here on
 
   // Tick 3: nothing further — the latch holds, no duplicate outcome/label/comment.
-  const r3 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r3 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r3.gatedReclaimed, []);
   assert.equal(forge.labelsAdded.length, 1);
   st.close();
@@ -4671,7 +4690,7 @@ test("#147 gated-PR reentry: without a mergeGate configured, an eligible failed+
     gated_escalation_labeled: 1,
   });
   forge.issueLabelsByIssue[12] = []; // label already removed
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }); // no mergeGate
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }); // no mergeGate
   assert.deepEqual(r.gatedReclaimed, []);
   assert.equal(st.getWorker("lane-c")?.state, "failed"); // untouched
   st.close();
@@ -4691,7 +4710,7 @@ test("#147 P2 (Codex PR #151): a FAILED needs-human label write means label abse
   sup.probes["lane-x"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 400 };
   gate.outcomes[400] = { kind: "needs-human", pr: 400, reason: "gate:HUMAN:HANDLE_THREADS" };
   forge.throwOnAddLabel = true;
-  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.equal(st.getWorker("lane-x")?.state, "failed"); // terminal transition still landed
   assert.equal(st.getWorker("lane-x")?.gated_escalation_labeled, 0); // label write provably failed
   assert.deepEqual(forge.labelsAdded, []); // nothing landed on the issue
@@ -4701,7 +4720,7 @@ test("#147 P2 (Codex PR #151): a FAILED needs-human label write means label abse
   // failure leaves behind. Without the labeled marker this would read as an explicit human
   // removal and automation would re-admit itself with no human in the loop. It must not.
   forge.throwOnAddLabel = false;
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r2.gatedReclaimed, []);
   assert.equal(st.getWorker("lane-x")?.state, "failed"); // permanently manual-drive (pre-#147 situation)
   st.close();
@@ -4715,7 +4734,7 @@ test("#147 P2: the happy-path escalation records labeled=1 (label applied), whic
   seedRunning(st, "lane-y", 31);
   sup.probes["lane-y"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 401 };
   gate.outcomes[401] = { kind: "needs-human", pr: 401, reason: "gate:HUMAN:HANDLE_THREADS" };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.getWorker("lane-y")?.state, "failed");
   assert.equal(st.getWorker("lane-y")?.gated_escalation_labeled, 1);
   assert.deepEqual(forge.labelsAdded, [[31, "needs-human"]]);
@@ -4739,7 +4758,7 @@ test("#168: FAILED lane with an LLM env-failure signature, no PR -> classified e
     hasPr: false,
     failureText: "API Error: rate_limit_error — please retry later",
   };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   assert.deepEqual(r.reclaimed, [{ kind: "env-failure", worker: "lane-a", issue: 501, source: "llm", costUsd: 0, modelUsage: [] }]);
   assert.deepEqual(forge.labelsAdded, []); // never needs-human
@@ -4766,7 +4785,7 @@ test("#394 (F22, AC2): FAILED lane with envSignalStructured=true but UNRECOGNIZE
     failureText: "some completely novel error string nobody guessed",
     envSignalStructured: true,
   };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   assert.deepEqual(r.reclaimed, [{ kind: "env-failure", worker: "lane-rle", issue: 503, source: "llm", costUsd: 0, modelUsage: [] }]);
   assert.equal(st.isParked(), true);
@@ -4784,7 +4803,7 @@ test("#168: FAILED lane with a forge env-failure signature, no PR -> same dispos
   forge.listOpenIssueNumbers = async () => {
     throw new Error("still down");
   };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   assert.equal(r.reclaimed[0]?.kind, "env-failure");
   assert.equal((r.reclaimed[0] as { source: string }).source, "forge");
@@ -4811,7 +4830,7 @@ test("#168: FAILED lane with an env-failure signature + a CLEAN PR -> unchanged 
     prNumber: 77,
     failureText: "usage limit reached for this billing period",
   };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   // Same disposition an ordinary FAILED+PR lane always had: rescued to driving, no needs-human.
   assert.deepEqual(r.reclaimed, [{ kind: "failed", worker: "lane-c", issue: 503, next: "DRIVING", costUsd: 0, modelUsage: [] }]);
@@ -4841,7 +4860,7 @@ test("#168 P1-4: env-failure + PR + DIRTY worktree -> env precedence: preserved 
   forge.listOpenIssueNumbers = async () => {
     throw new Error("down");
   }; // forge outage, consistently
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   assert.deepEqual(r.reclaimed, [{ kind: "env-failure", worker: "lane-dirty", issue: 505, source: "forge", costUsd: 0, modelUsage: [] }]);
   assert.deepEqual(forge.labelsAdded, []); // no needs-human on the issue
@@ -4872,7 +4891,7 @@ test("#168 negative: a FAILED lane whose text merely DISCUSSES rate limits (no r
     hasPr: false,
     failureText: "AssertionError: expected the client to add rate limiting; TODO handle usage limits gracefully",
   };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   assert.deepEqual(r.reclaimed, [{ kind: "failed", worker: "lane-d", issue: 504, next: "ESCALATE", costUsd: 0, modelUsage: [] }]);
   assert.deepEqual(forge.labelsAdded, [[504, "needs-human"]]); // ordinary escalation, unchanged
@@ -4894,7 +4913,7 @@ test("#168 storm: all lanes failing with env signatures in one tick (mixed sourc
   sup.probes["lane-e1"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "rate_limit_error" };
   sup.probes["lane-e2"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "gh: Bad credentials" };
   sup.probes["lane-e3"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "overloaded_error" };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   assert.deepEqual(
     r.reclaimed.map((x) => x.kind),
@@ -5807,7 +5826,7 @@ test("startFixLeg: transitions driving -> fixing, bumps fix_rounds, resumes the 
   const row = st.getWorker("lane-9")!;
   const renderFixPrompt = (issueNumber: number, pr: number) => `fix #${issueNumber} pr #${pr}`;
 
-  const result = await startFixLeg({ state: st, supervisor: sup, renderFixPrompt }, row, fixProxy);
+  const result = await startFixLeg({ state: st, supervisor: sup, renderFixPrompt }, row, fixProxy, realClock);
 
   assert.equal(result.name, "lane-9");
   const updated = st.getWorker("lane-9")!;
@@ -5832,7 +5851,7 @@ test("startFixLeg: fix_rounds is independent of resume_attempts — starting a f
   const sup = new FakeSupervisor();
   seedDriving(st, "lane-9", 9, 90, { resume_attempts: 5 });
   const row = st.getWorker("lane-9")!;
-  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, row, fixProxy);
+  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, row, fixProxy, realClock);
   const updated = st.getWorker("lane-9")!;
   assert.equal(updated.fix_rounds, 1);
   assert.equal(updated.resume_attempts, 5, "resume_attempts must never be disturbed by a fix leg starting");
@@ -5843,11 +5862,11 @@ test("startFixLeg: a second fix leg on the same row bumps fix_rounds to 2 (rewor
   const st = new State(":memory:");
   const sup = new FakeSupervisor();
   seedDriving(st, "lane-9", 9, 90);
-  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, fixProxy);
+  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, fixProxy, realClock);
   // Simulate the fixing leg completing and landing back in driving (FIXING RECLAIM's own job,
   // tested separately below) before a second fix round starts.
   st.upsertWorker({ ...st.getWorker("lane-9")!, state: "driving" });
-  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, fixProxy);
+  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, fixProxy, realClock);
   assert.equal(st.getWorker("lane-9")?.fix_rounds, 2);
   st.close();
 });
@@ -5857,7 +5876,9 @@ test("startFixLeg: a thrown resume() leaves the row untouched — driving, fix_r
   const sup = new FakeSupervisor();
   sup.resumeShouldThrow = "mint failed";
   seedDriving(st, "lane-9", 9, 90);
-  await assert.rejects(() => startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, fixProxy));
+  await assert.rejects(() =>
+    startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, fixProxy, realClock),
+  );
   const row = st.getWorker("lane-9")!;
   assert.equal(row.state, "driving", "still driving — never transitioned on a failed resume");
   assert.equal(row.fix_rounds ?? 0, 0, "fix_rounds must not be spent on a spawn that never happened");
@@ -5869,7 +5890,7 @@ test("startFixLeg: refuses (throws) when the row has no PR — a driving lane mu
   const sup = new FakeSupervisor();
   st.upsertWorker({ name: "lane-9", issue: 9, session_id: "s", state: "driving", started_at: "t", ended_at: "t2" }); // no pr
   await assert.rejects(
-    () => startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, fixProxy),
+    () => startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, fixProxy, realClock),
     /no PR/i,
   );
   assert.deepEqual(sup.resumeCalls, []);
@@ -5881,7 +5902,7 @@ test("startFixLeg: forwards a proxy opt straight through to resume() (the fix le
   const sup = new FakeSupervisor();
   seedDriving(st, "lane-9", 9, 90);
   const proxy = { mint: async () => ({}) as never, credentialFree: true };
-  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, proxy);
+  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, proxy, realClock);
   assert.equal(sup.resumeCalls[0]!.opts?.proxy, proxy);
   st.close();
 });
@@ -5892,7 +5913,12 @@ test("startFixLeg: refuses (throws) when proxy.credentialFree is NOT true — a 
   seedDriving(st, "lane-9", 9, 90);
   await assert.rejects(
     () =>
-      startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, { mint: async () => ({}) as never }),
+      startFixLeg(
+        { state: st, supervisor: sup, renderFixPrompt: () => "p" },
+        st.getWorker("lane-9")!,
+        { mint: async () => ({}) as never },
+        realClock,
+      ),
     /credentialFree must be true/i,
   );
   assert.deepEqual(sup.resumeCalls, [], "resume() must never be called without a valid credentialFree proxy");
@@ -5907,7 +5933,7 @@ test("tick FIXING RECLAIM: activeWorkers/lane-occupancy — a `fixing` lane coun
   seedFixing(st, "lane-fixing", 2, 20);
   sup.probes["lane-fixing"] = { ...DEFAULT_PROBE }; // still running (KEEP) this tick
   forge.ready = [{ number: 9, title: "", labels: ["prio:3-feature"] }];
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 5 } }) });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 5 } }) });
   assert.deepEqual(sup.dispatched, [], "the fixing lane keeps capacity full -> #9 not launched");
   assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 9 && d.reason === "no-lane"));
   assert.equal(st.getWorker("lane-fixing")?.state, "fixing", "unchanged — still occupying the lane");
@@ -5924,7 +5950,7 @@ test("tick FIXING RECLAIM: a fixing lane reaching DONE+PR (pushed a fix) lands b
     review_trigger_generation: 2,
   });
   sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30 };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   const row = st.getWorker("lane-fix")!;
   assert.equal(row.state, "driving");
   assert.equal(row.pr, 30);
@@ -5984,7 +6010,7 @@ test("tick FIXING RECLAIM (#247): a fixing lane's valid structured threadRespons
     ],
   });
   sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30, resultText };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.equal(st.getWorker("lane-fix")?.state, "driving");
   // Harvested and queued this SAME tick (before FIX RESPONSE RETRY next runs) — but the forge
   // reply/resolve calls happen on drain, never synchronously inside the harvest itself; by the
@@ -6000,7 +6026,7 @@ test("tick FIXING RECLAIM (#247): a fixing lane's valid structured threadRespons
   assert.equal(forge.threadReplies.length, 0, "not yet executed — queued for the NEXT tick's FIX RESPONSE RETRY");
 
   // The next tick drains the queue: reply+resolve for T1 (addressed), reply-only for T2 (disputed).
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(forge.threadReplies.sort(), [
     ["T1", "fixed as suggested\n\n<!-- sapwood:fix-reply:lane-fix#30#0:T1 -->"],
     ["T2", "disagree, see PR description\n\n<!-- sapwood:fix-reply:lane-fix#30#0:T2 -->"],
@@ -6022,7 +6048,7 @@ test("tick FIXING RECLAIM (#247): a fabricated threadId (never journaled to this
     threadResponses: [{ threadId: "GHOST", reply: "fabricated", resolution: "addressed" }],
   });
   sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30, resultText };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(st.pendingThreadWrites(), [], "fail-closed — no partial execution");
   st.close();
 });
@@ -6033,7 +6059,7 @@ test("tick FIXING RECLAIM (#247): malformed/missing structured output degrades v
   const sup = new FakeSupervisor();
   seedFixing(st, "lane-fix", 3, 30);
   sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30 }; // no resultText at all
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.equal(st.getWorker("lane-fix")?.state, "driving", "the fix leg's OWN terminal transition is unaffected by invalid/absent output");
   assert.deepEqual(st.pendingThreadWrites(), []);
   assert.equal(r.fixingReclaimed.length, 1);
@@ -6056,12 +6082,12 @@ test("issue #247 AC (D8, real path): an all-disputed structured output resolves 
     ],
   });
   sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30, resultText };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // harvest + enqueue
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // drain (replies only)
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // harvest + enqueue
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // drain (replies only)
   assert.equal(forge.threadResolves.length, 0, "an all-disputed batch never calls resolveReviewThread");
   assert.equal(forge.prReviewData.unresolvedThreads, 2, "still open — resolution never touched");
   // Nothing pending anymore -> a THIRD tick actually drives gate② for real.
-  const r3 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r3 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.getWorker("lane-fix")?.pr, 30);
   const laneOutcome = r3.driven.find((d) => d.worker === "lane-fix");
   assert.ok(
@@ -6094,7 +6120,7 @@ test("tick DRIVE (#247 D5): a driving lane with a STILL-pending thread write is 
     "2026-07-19T00:00:00Z",
   );
 
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(gate.calls.length, 0, "driveOne must NEVER be called for a lane with a pending thread write");
   assert.deepEqual(r.driven, [{ kind: "thread-writes-pending", worker: "lane-fix", issue: 3, pr: 30 }]);
   assert.equal(st.pendingThreadWrites().length, 1, "the retry failed (simulated forge error) — the row is still pending");
@@ -6103,7 +6129,7 @@ test("tick DRIVE (#247 D5): a driving lane with a STILL-pending thread write is 
   // DRIVE then picks the lane back up normally.
   forge.throwOnReplyToReviewThread = false;
   gate.outcomes[30] = { kind: "merged", pr: 30, headOid: "H1" };
-  const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.deepEqual(st.pendingThreadWrites(), []);
   assert.equal(gate.calls.length, 1, "the queue drained -> DRIVE evaluates the lane normally this tick");
   assert.equal(r2.driven[0]?.kind, "merged");
@@ -6135,7 +6161,7 @@ test("issue #247 AC (D8, real path): resolving a thread via the queue never buys
   // ONE tick: FIX RESPONSE RETRY (runs before DRIVE) drains the queue — the FakeForge's
   // resolveReviewThread simulates a real GraphQL resolveReviewThread mutation by decrementing
   // unresolvedThreads — then DRIVE, seeing nothing pending anymore, evaluates gate② for real.
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.deepEqual(st.pendingThreadWrites(), []);
   assert.equal(forge.prReviewData.unresolvedThreads, 0, "the thread IS now resolved on the (fake) forge");
   assert.notEqual(
@@ -6153,13 +6179,13 @@ test("tick FIXING RECLAIM + DRIVE, same tick: once a fixing lane lands back in d
   // Start driving, spawn a fix leg (the seam #246 will call), then simulate the fix leg pushing
   // and completing — all inside one fabricated flow, then let tick() reclaim + drive it.
   seedDriving(st, "lane-fix", 3, 30, { review_triggered_head: "OLD_HEAD", review_triggered_at: "2026-07-01T00:00:00Z" });
-  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "fix it" }, st.getWorker("lane-fix")!, fixProxy);
+  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "fix it" }, st.getWorker("lane-fix")!, fixProxy, realClock);
   assert.equal(st.getWorker("lane-fix")?.state, "fixing");
 
   sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30 };
   const gate = new FakeMergeGate();
   gate.outcomes[30] = { kind: "queued", pr: 30, reason: "gate-pending:WAIT_REVIEW" };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
 
   assert.equal(st.getWorker("lane-fix")?.state, "driving");
   assert.equal(st.getWorker("lane-fix")?.fix_rounds, 1);
@@ -6177,7 +6203,7 @@ test("tick FIXING RECLAIM: DEAD (crashed, no sentinel) fixing lane with a clean 
   seedFixing(st, "lane-fix", 4, 40, { review_triggered_head: "OLD_HEAD", review_triggered_at: "2026-07-01T00:00:00Z" });
   sup.probes["lane-fix"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0, hasPr: true, prNumber: 40 };
   sup.reclaimResults["lane-fix"] = { worktreePath: "/abs/worktrees/lane-fix", worktreeRetained: false };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   const row = st.getWorker("lane-fix")!;
   assert.equal(row.state, "driving");
   assert.equal(row.review_triggered_head, null);
@@ -6193,7 +6219,7 @@ test("tick FIXING RECLAIM: DEAD fixing lane with a DIRTY (retained) worktree esc
   seedFixing(st, "lane-fix", 4, 40);
   sup.probes["lane-fix"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0, hasPr: true, prNumber: 40 };
   sup.reclaimResults["lane-fix"] = { worktreePath: "/abs/worktrees/lane-fix", worktreeRetained: true };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.equal(st.getWorker("lane-fix")?.state, "failed");
   assert.deepEqual(forge.labelsAdded, [[4, "needs-human"]]);
   assert.deepEqual(forge.prLabelsAdded, [[40, "needs-human"]]);
@@ -6213,7 +6239,7 @@ test("tick FIXING RECLAIM: a still-running (KEEP) fixing lane refreshes live tel
       tokenComposition: { inputTokens: 1, outputTokens: 1, cacheCreationTokens: 0, cacheReadTokens: 0 },
     },
   };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   const row = st.getWorker("lane-fix")!;
   assert.equal(row.state, "fixing");
   assert.equal(row.est_cost_usd, 1.5);
@@ -6234,7 +6260,7 @@ test("tick DRIVE: #170 review-silence escalation is provably NOT armed during `f
     reason: "gate-pending:WAIT_REVIEW",
     reviewSilenceEscalation: { head: "H", silenceSec: 999_999_999 },
   };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(gate.calls.length, 0, "driveOne must never be called for a fixing-state lane");
   assert.deepEqual(forge.prLabelsAdded, [], "no review-silence needs-human label — the escalation path never ran");
   assert.deepEqual(r.driven, []);
@@ -6252,7 +6278,7 @@ test("tick kill-switch: a `fixing` lane is drained (SIGTERM) exactly like a `run
     const st = new State(join(dir, "sapwood.sqlite"));
     seedFixing(st, "lane-fix", 7, 70);
     sup.probes["lane-fix"] = { ...DEFAULT_PROBE };
-    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
     assert.ok(r.ceilingBreached);
     assert.deepEqual(r.ceilingReasons, ["kill-switch"]);
     assert.ok(r.drainRequested.includes("lane-fix"), "a fixing lane must be drained during a kill-switch tick");
@@ -6291,7 +6317,7 @@ test("tick RESUME (A2): a fixing-origin handoff (fixing_handoff=1) resumes as a 
   seedFixingHandoff(st, "lane-fix", 5, 50, { fix_rounds: 1 });
   const mintProxy = async () => ({}) as never;
   const renderFixPrompt = (issueNumber: number, pr: number) => `fix #${issueNumber} pr #${pr}`;
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), fixLegResume: { renderFixPrompt, mintProxy } });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), fixLegResume: { renderFixPrompt, mintProxy } });
 
   const row = st.getWorker("lane-fix")!;
   assert.equal(row.state, "fixing", "resumes back into `fixing`, never `running`");
@@ -6310,7 +6336,7 @@ test("tick RESUME (A2): a fixing-origin handoff with NO fixLegResume dep configu
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   seedFixingHandoff(st, "lane-fix", 5, 50);
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }); // no fixLegResume
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }); // no fixLegResume
 
   assert.deepEqual(sup.resumeCalls, [], "resume() must never be called for a fix-leg-origin handoff without the dep wired");
   const row = st.getWorker("lane-fix")!;
@@ -6328,6 +6354,7 @@ test("tick RESUME (A2): a fixing-origin handoff with no PR escalates (fail-safe)
   const sup = new FakeSupervisor();
   seedFixingHandoff(st, "lane-fix", 5, null);
   await tick({
+    now: realClock,
     forge,
     state: st,
     supervisor: sup,
@@ -6355,7 +6382,7 @@ test("tick (A3): a driving row with a CONFIRMED resume intent (crash between res
   sup.resumeIntents["lane-fix"] = "confirmed";
   sup.probes["lane-fix"] = { ...DEFAULT_PROBE }; // still running (KEEP) — nothing else this tick
 
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   const row = st.getWorker("lane-fix")!;
   assert.equal(row.state, "fixing", "reconciled — the DB now matches the live confirmed-spawn reality");
@@ -6380,7 +6407,7 @@ test("tick (A3): a driving row with an UNCONFIRMED resume intent escalates to ne
   seedDriving(st, "lane-fix", 6, 60);
   sup.resumeIntents["lane-fix"] = "unconfirmed";
 
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   const row = st.getWorker("lane-fix")!;
   assert.equal(row.state, "failed");
@@ -6397,7 +6424,7 @@ test("tick (A3): a driving row with NO resume intent ('none') is left completely
   const sup = new FakeSupervisor();
   seedDriving(st, "lane-fix", 6, 60);
   // sup.resumeIntents defaults every unlisted lane to "none".
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   const row = st.getWorker("lane-fix")!;
   assert.equal(row.state, "driving");
   assert.equal(row.fix_rounds ?? 0, 0);
@@ -6414,7 +6441,7 @@ test("tick (A3): reconciliation runs BEFORE the kill-switch gate — a confirmed
     seedDriving(st, "lane-fix", 6, 60);
     sup.resumeIntents["lane-fix"] = "confirmed";
     sup.probes["lane-fix"] = { ...DEFAULT_PROBE };
-    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
     assert.equal(st.getWorker("lane-fix")?.state, "fixing", "reconciled to fixing before the kill-switch gate ran");
     // reconciliation's OWN requestHandoff call (not drainThenEscalate's — that call is a no-op
     // here since requestHandoff is idempotent and reconciliation already asked first) is what
@@ -6438,7 +6465,7 @@ test("tick (A5): the fixing->driving pin-clear is commit-ATOMIC with the state w
   st.recordSpend = () => {
     throw new Error("simulated ledger failure");
   };
-  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }), /simulated ledger failure/);
+  await assert.rejects(() => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }), /simulated ledger failure/);
   const row = st.getWorker("lane-fix")!;
   assert.equal(row.state, "fixing", "the whole transaction rolled back — state write did NOT land without its paired pin-clear");
   assert.equal(
@@ -6463,6 +6490,7 @@ test("tick RESUME (B2a): a fixing-continuation resume() that resolves to ADOPT (
   seedFixingHandoff(st, "lane-fix", 5, 50, { fix_rounds: 1 });
   sup.resumeIntents["lane-fix"] = "confirmed"; // -> resumeDecision always yields ADOPT
   const r = await tick({
+    now: realClock,
     forge,
     state: st,
     supervisor: sup,
@@ -6502,6 +6530,7 @@ test("tick RESUME (B5): the B2a ADOPT branch calls requestHandoff BEFORE the ups
 
   await assert.rejects(() =>
     tick({
+      now: realClock,
       forge,
       state: st,
       supervisor: sup,
@@ -6520,6 +6549,7 @@ test("tick RESUME (B5): the B2a ADOPT branch calls requestHandoff BEFORE the ups
   // tick's RESUME phase re-enters this exact ADOPT branch from scratch.
   st.upsertWorker = originalUpsert;
   await tick({
+    now: realClock,
     forge,
     state: st,
     supervisor: sup,
@@ -6542,7 +6572,7 @@ test("tick kill-switch (B2b): a fixing-origin handoff (fixing_handoff=1) adopted
     seedFixingHandoff(st, "lane-fix", 5, 50);
     sup.resumeIntents["lane-fix"] = "confirmed";
     sup.probes["lane-fix"] = { ...DEFAULT_PROBE };
-    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
     const row = st.getWorker("lane-fix")!;
     assert.equal(row.state, "fixing", "B2b: must NOT be written as `running` — that would silently discard its fix identity");
@@ -6571,7 +6601,7 @@ test("tick (B3): reconcileDrivingFixIntents' confirmed branch calls requestHando
     originalUpsert(row);
   };
 
-  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }));
+  await assert.rejects(() => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }));
   assert.ok(crashed, "sanity: the simulated crash actually fired");
   assert.ok(sup.handoffRequested.includes("lane-fix"), "requestHandoff is durable/idempotent and fired BEFORE the crashed upsert");
   assert.equal(st.getWorker("lane-fix")?.state, "driving", "still driving — the crashed upsert never landed");
@@ -6580,7 +6610,7 @@ test("tick (B3): reconcileDrivingFixIntents' confirmed branch calls requestHando
   // Retry: the row is STILL driving with the SAME confirmed intent, so the next tick's
   // reconciliation re-enters this exact branch from scratch.
   st.upsertWorker = originalUpsert;
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   const row = st.getWorker("lane-fix")!;
   assert.equal(row.state, "fixing");
   assert.equal(row.fix_rounds, 1, "exactly ONE bump total across both attempts — never double-counted");
@@ -6595,7 +6625,7 @@ test("tick (B4): unconfirmed-intent escalation with a FAILING label write does N
   seedDriving(st, "lane-fix", 6, 60);
   sup.resumeIntents["lane-fix"] = "unconfirmed";
 
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   const row = st.getWorker("lane-fix")!;
   assert.equal(row.state, "driving", "never terminalized without a durable, human-visible label landing first");
@@ -6606,7 +6636,7 @@ test("tick (B4): unconfirmed-intent escalation with a FAILING label write does N
 
   // Retry: label succeeds this time -> now it terminalizes correctly.
   forge.throwOnAddLabel = false;
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   const retried = st.getWorker("lane-fix")!;
   assert.equal(retried.state, "failed");
   assert.equal(retried.gated_escalation_labeled, 1);
@@ -6699,7 +6729,7 @@ test("#210: a retention with a null worktreePath is unmatchable and is never rel
   seedRunning(st, "lane-dirty", 31);
   sup.probes["lane-dirty"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
   sup.reclaimResults["lane-dirty"] = { worktreePath: "/abs/worktrees/lane-dirty", worktreeRetained: true };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
   const retained = st.eventsSince(RELEASE_SINCE, ["worktree-retained"]);
   assert.equal(retained.length, 2);
   assert.equal((retained[1]!.payload as { worktreePath: string | null }).worktreePath, "/abs/worktrees/lane-dirty");
@@ -6715,10 +6745,10 @@ test("#210: tick() itself runs the release scan — the strip clears without a d
     const sup = new FakeSupervisor();
     mkdirSync(lane);
     st.appendEvent("worktree-retained", { worker: "lane-tick", issue: 40, worktreePath: lane });
-    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
     assert.deepEqual(releasedPaths(st), [], "folder still there");
     rmSync(lane, { recursive: true, force: true });
-    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
     assert.deepEqual(releasedPaths(st), [lane]);
     st.close();
   } finally {
