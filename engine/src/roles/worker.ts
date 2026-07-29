@@ -1231,6 +1231,10 @@ export function spawnClaudeSession(
  *  Counted IN MEMORY, per supervisor instance (one per `sapwood run`), deliberately not
  *  persisted: an engine restart hands the lane a fresh budget, which is the safe direction —
  *  more retries against a preserved branch, never fewer. */
+/** #377 (gate② round 5): `<lane>.<running|done|failed|handoff>.json` — the engine-written lane
+ *  sentinels, the trusted record of which lanes exist. */
+const SENTINEL_FILE = /^(.+)\.(?:running|done|failed|handoff)\.json$/;
+
 export const MAX_INCONCLUSIVE_PR_PROBES = 3;
 
 export interface WorkerDeps {
@@ -1254,7 +1258,7 @@ export interface WorkerDeps {
    *  marker); omitted -> no lane is ever associated with a PR (hasPr false, prNumber undefined),
    *  which is the fail-closed direction: conductor.ts escalates such a lane to a human rather
    *  than driving a guessed merge target. */
-  lanePr?: (lane: { name: string; issue: number; branch: string | null; mayOpenPr: boolean }) => Promise<LanePrOutcome>;
+  lanePr?: (lane: { name: string; issue: number; branch: string | null; sessionOver: boolean }) => Promise<LanePrOutcome>;
   /** Worker prompt for an issue. Default: a minimal imperative skeleton. */
   renderPrompt?: (issue: Issue) => string;
   /** Path to the compiled guard hook (node <path>). Default: the dist sibling of this module. */
@@ -2528,9 +2532,9 @@ export class WorkerSupervisor implements Supervisor {
     if (issue != null && this.deps.lanePr) {
       // #377: the lane's PR is resolved from what THIS lane structurally produced — its own
       // worktree's branch, plus the engine-authored owner marker — never from a PR body's prose.
-      // `mayOpenPr` gates only the OPEN write: the engine must never race a still-running
-      // worker's own `gh pr create`. Patching an existing PR's body (the other engine-authored
-      // write) has no such race and is not gated.
+      // `sessionOver` gates EVERY engine-authored write on that path — opening a PR (which would
+      // race the worker's own `gh pr create`) and stamping one (an unconditional read-modify-write
+      // that would clobber a concurrent description edit; gate② round 5). Reads are never gated.
       //
       // "Nothing is left to race" has TWO structural signals, and both must count (gate② P1 on
       // PR #423): a terminal SENTINEL, or a CONFIRMED-DEAD wrapper (wrapperAlive === 0 — the same
@@ -2540,10 +2544,14 @@ export class WorkerSupervisor implements Supervisor {
       // as "no PR" and be requeued or escalated — the exact pushed-but-unPRed case this whole
       // issue exists to fix, just arrived at by a crash instead of a clean exit.
       const sessionOver = done || failed || handoff || wrapperAlive === 0;
-      const outcome = await this.deps.lanePr({ name, issue, branch: this.laneBranch(name), mayOpenPr: sessionOver });
+      const outcome = await this.deps.lanePr({ name, issue, branch: this.laneBranch(name), sessionOver });
       hasPr = outcome.pr != null;
       if (outcome.pr != null) prNumber = outcome.pr;
-      prAssociationInconclusive = this.trackInconclusiveAssociation(name, outcome);
+      // Budget only counts once settlement is actually possible (gate② round 5): while the lane
+      // is still running the conductor classifies it KEEP no matter what this says, so spending
+      // retries here could leave none for the one probe that does settle it. No write can even
+      // fail before then, so this is belt-and-braces over that guarantee, not the only guard.
+      prAssociationInconclusive = sessionOver && this.trackInconclusiveAssociation(name, outcome);
     }
     const costUsd = this.terminalCostUsd({ done, failed, handoff }, name);
     const modelUsage = this.terminalModelUsage({ done, failed, handoff }, name);
@@ -2947,6 +2955,60 @@ export class WorkerSupervisor implements Supervisor {
    *  null — meaning "unknowable, fall back to a marker scan" — for a missing/deleted worktree, a
    *  detached HEAD, or anything unparseable. Never throws. */
   private laneBranch(name: string): string | null {
+    const branch = this.laneHeadBranch(name);
+    if (branch == null) return null;
+    // #377 (gate② round 5): HEAD is WORKER-MUTABLE. The producer's own grant permits branch
+    // changes (`Bash(git *)`), so a lane can `git checkout` its way onto a branch it never
+    // produced — and a bare HEAD read would then let associateLanePr stamp and adopt THAT
+    // branch's sole unmarked PR, handing the driver an unrelated merge target. That is the same
+    // wrong-PR class this whole issue exists to close, re-entered through the branch instead of
+    // through prose.
+    //
+    // Validated against the trusted lane state the engine keeps for itself: the sentinels under
+    // `stateDir`, which live outside every worktree and which no worker can write (workers are
+    // never granted `data/` via --add-dir). A branch that ANY other known lane is also sitting
+    // on is contested and unusable as an association key — for BOTH lanes, deliberately: the
+    // engine cannot tell the thief from the victim, so it refuses rather than picking.
+    //
+    // RESIDUAL, stated rather than papered over: this closes lane-vs-lane capture, not a worker
+    // checking out some unrelated branch no lane owns (a human's feature branch, say) and having
+    // its sole unmarked PR adopted. Bounding that needs a trusted record of what the lane itself
+    // PUSHED — the engine has no seam for that today, since the worker runs its own `git push`.
+    // What still holds in that case: the PR must be the branch's ONLY open one and carry no
+    // marker, the adoption writes a marker naming this lane (so it is auditable, not silent),
+    // and gate② still demands a fresh non-author review before anything merges.
+    const rival = this.otherLaneOnBranch(name, branch);
+    if (rival) {
+      this.log(`[sapwood:worker] lane ${name}: branch ${branch} is also checked out by lane ${rival} — refusing it as an association key`);
+      return null;
+    }
+    return branch;
+  }
+
+  /** Every OTHER lane this stateDir knows about that currently sits on `branch`, if any. Lanes
+   *  are enumerated from the engine-written sentinels (never from the worktrees themselves — a
+   *  worker could create a directory, but not a sentinel). */
+  private otherLaneOnBranch(name: string, branch: string): string | null {
+    let entries: string[];
+    try {
+      entries = readdirSync(this.dir);
+    } catch {
+      return null; // unreadable state dir -> no evidence of a rival; the marker still gates adoption
+    }
+    const lanes = new Set<string>();
+    for (const entry of entries) {
+      const lane = entry.match(SENTINEL_FILE)?.[1]; // String.match, per the #69 grep-invariant
+
+      if (lane && lane !== name) lanes.add(lane);
+    }
+    for (const lane of lanes) {
+      if (this.laneHeadBranch(lane) === branch) return lane;
+    }
+    return null;
+  }
+
+  /** The raw `HEAD` read, with no cross-lane validation — see laneBranch for that. */
+  private laneHeadBranch(name: string): string | null {
     const dotGit = join(this.worktreeRoot, name, ".git");
     try {
       let gitDir = dotGit;

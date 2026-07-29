@@ -1203,7 +1203,7 @@ test("probe: #377 passes the lane's OWN branch (read from its worktree git HEAD,
     // A long-running stub keeps the lane RUNNING for the first probe; the terminal sentinel is
     // written by hand for the second, so neither probe races the child's own exit.
     const { bin, ready } = longRunningStub(dir);
-    const seen: { name: string; issue: number; branch: string | null; mayOpenPr: boolean }[] = [];
+    const seen: { name: string; issue: number; branch: string | null; sessionOver: boolean }[] = [];
     const s = new WorkerSupervisor({
       cfg,
       stateDir: dir,
@@ -1228,11 +1228,11 @@ test("probe: #377 passes the lane's OWN branch (read from its worktree git HEAD,
     writeFileSync(join(gitDir, "HEAD"), "ref: refs/heads/feat/377-pr-owner-marker\n");
 
     await s.probe(name);
-    assert.deepEqual(seen.at(-1), { name, issue: 377, branch: "feat/377-pr-owner-marker", mayOpenPr: false });
+    assert.deepEqual(seen.at(-1), { name, issue: 377, branch: "feat/377-pr-owner-marker", sessionOver: false });
 
     writeFileSync(join(dir, `${name}.done.json`), JSON.stringify({ name, issue: 377 }));
     await s.probe(name);
-    assert.equal(seen.at(-1)!.mayOpenPr, true, "once the worker has terminated the engine may open the missing PR itself");
+    assert.equal(seen.at(-1)!.sessionOver, true, "once the worker has terminated the engine may open the missing PR itself");
 
     // A detached HEAD (or a reclaimed worktree) is unknowable, not guessable -> null branch.
     writeFileSync(join(gitDir, "HEAD"), "9f1c0de0c0ffee0c0ffee0c0ffee0c0ffee0c0ff\n");
@@ -1249,7 +1249,7 @@ test("probe: #377 passes the lane's OWN branch (read from its worktree git HEAD,
 test("probe: #377 gate② P1 — a CONFIRMED-DEAD wrapper with no sentinel still permits the engine-authored PR (a pushed branch must not be requeued as unPRed)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const seen: { name: string; issue: number; branch: string | null; mayOpenPr: boolean }[] = [];
+    const seen: { name: string; issue: number; branch: string | null; sessionOver: boolean }[] = [];
     const s = new WorkerSupervisor({
       cfg,
       stateDir: dir,
@@ -1271,7 +1271,7 @@ test("probe: #377 gate② P1 — a CONFIRMED-DEAD wrapper with no sentinel still
     assert.equal(probe.done, false);
     assert.equal(probe.failed, false);
     assert.equal(probe.handoff, false);
-    assert.equal(seen.at(-1)!.mayOpenPr, true, "nothing is left alive to race the engine's own `gh pr create`");
+    assert.equal(seen.at(-1)!.sessionOver, true, "nothing is left alive to race the engine's own `gh pr create`");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1350,6 +1350,53 @@ test("probe: #377 gate② round 3 (P1) — a CONCLUSIVE answer resets the retry 
     assert.equal((await s.probe("lane-blip2")).prNumber, 42, "the forge recovered within the budget");
     inconclusive = true;
     assert.equal((await s.probe("lane-blip2")).prAssociationInconclusive, true, "budget reset by the conclusive answer");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probe: #377 gate② round 5 (P1) — a branch another LIVE lane is sitting on is never used for association (a worker can `git checkout` its way onto one)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = join(dir, "worktrees");
+  try {
+    const seen: { branch: string | null }[] = [];
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      worktreeRoot,
+      claudeBin: mkStub(dir, FAST_STUB),
+      lanePr: async (lane) => {
+        seen.push({ branch: lane.branch });
+        return { pr: null, inconclusive: false };
+      },
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+    });
+    const onBranch = (lane: string, branch: string): void => {
+      const gitDir = join(dir, "parent-git", "worktrees", lane);
+      mkdirSync(gitDir, { recursive: true });
+      mkdirSync(join(worktreeRoot, lane), { recursive: true });
+      writeFileSync(join(worktreeRoot, lane, ".git"), `gitdir: ${gitDir}\n`);
+      writeFileSync(join(gitDir, "HEAD"), `ref: refs/heads/${branch}\n`);
+    };
+    // lane-victim legitimately owns feat/294-hold. lane-thief's worker checked out the SAME
+    // branch — permitted by the producer's own git grant — which under a bare HEAD read would
+    // hand lane-thief the stamp-and-adopt of lane-victim's branch PR.
+    writeFileSync(join(dir, "lane-victim.running.json"), JSON.stringify({ issue: 294, wrapper_pid: process.pid }));
+    writeFileSync(join(dir, "lane-thief.done.json"), JSON.stringify({ issue: 999 }));
+    onBranch("lane-victim", "feat/294-hold");
+    onBranch("lane-thief", "feat/294-hold");
+
+    await s.probe("lane-thief");
+    assert.equal(seen.at(-1)!.branch, null, "a contested branch is not a usable association key");
+
+    // The victim's own probe is unaffected once the thief is gone: exclusivity, not first-come.
+    rmSync(join(worktreeRoot, "lane-thief"), { recursive: true, force: true });
+    rmSync(join(dir, "lane-thief.done.json"), { force: true });
+    await s.probe("lane-victim");
+    assert.equal(seen.at(-1)!.branch, "feat/294-hold");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

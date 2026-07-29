@@ -1978,11 +1978,20 @@ export interface LanePrRequest {
   /** The lane worktree's own current branch, read from its git HEAD (worker.ts's laneBranch), or
    *  null when unknowable (worktree gone, detached HEAD). */
   branch: string | null;
-  /** May the engine OPEN a PR on this call? True once the lane's session is over by EITHER
-   *  structural signal — a terminal sentinel, or a confirmed-dead wrapper (see worker.ts's
-   *  probe()). Opening one mid-run would race the worker's own `gh pr create`; nothing else
-   *  gates it. Patching an existing body has no such race and is done regardless. */
-  mayOpenPr: boolean;
+  /** Is the lane's session over — by EITHER structural signal, a terminal sentinel or a
+   *  confirmed-dead wrapper (see worker.ts's probe())? This gates EVERY engine-authored WRITE on
+   *  this path, both opening a PR and stamping an existing one (gate② round 5):
+   *
+   *   - Opening one mid-run would race the worker's own `gh pr create`.
+   *   - Stamping one mid-run is an unconditional read-modify-write against a body snapshot from
+   *     the preceding list call; GitHub offers no conditional PR-body update, so a worker or
+   *     human editing the description in between would silently lose those edits.
+   *
+   *  READS are never gated: a PR that already carries this lane's marker associates at any time.
+   *  Because no write can fail before the session ends, the inconclusive-retry budget also
+   *  cannot be spent during a phase where the conductor would only ever classify the lane
+   *  KEEP — the exact exhaustion the round-5 review flagged. */
+  sessionOver: boolean;
 }
 
 /** What associateLanePr concluded. The two fields answer DIFFERENT questions, and the caller
@@ -1991,7 +2000,7 @@ export interface LanePrRequest {
  *  - `pr`: the lane's PR, when one was conclusively identified.
  *  - `inconclusive`: a forge WRITE this association depended on FAILED (openPR, or the marker
  *    stamp), so the answer is UNKNOWN — not "this lane has no PR". That distinction is
- *    load-bearing (gate② round 3, P1): `mayOpenPr` only ever becomes true on the very probe the
+ *    load-bearing (gate② round 3, P1): `sessionOver` only ever becomes true on the very probe the
  *    conductor SETTLES the lane from, so collapsing a transient 502 into a definitive `null`
  *    escalated finished work to a human, or requeued a dead lane onto a FRESH worker while its
  *    pushed branch sat there — with no later probe to correct either. An inconclusive answer is
@@ -2058,6 +2067,11 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
     //    leave every later read still returning null.
     const sole = candidates.length === 1 ? candidates[0]! : null;
     if (sole && !hasPrOwnerMarker(sole.body)) {
+      // The lane's own branch, one PR, no marker — ours to claim, but only once nothing is left
+      // that could be editing that body concurrently (see LanePrRequest.sessionOver).
+      if (!lane.sessionOver) {
+        return refuse(`branch ${lane.branch}'s sole PR #${sole.number} is unmarked — deferring the stamp until the session ends`);
+      }
       const pr = sole;
       try {
         await forge.updatePRBody(pr.number, stampPrOwner(pr.body, lane.name, lane.issue));
@@ -2072,7 +2086,7 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
           `(another lane's marker, contested markers, or several candidates) — not adopting any`,
       );
     }
-    if (lane.mayOpenPr) {
+    if (lane.sessionOver) {
       // A branch check that FAILED is not a branch that is ABSENT (gate② round 4): only GitHub's
       // own 404 is evidence that nothing was pushed. Anything else leaves the answer unknown, so
       // the lane is retried rather than settled with its pushed work unPRed.
