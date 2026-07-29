@@ -2935,3 +2935,30 @@ test("hasPrOwnerMarker: true for a malformed/ambiguous marker body that readPrOw
   assert.equal(hasPrOwnerMarker("Fixes #294 — no marker anywhere"), false);
   assert.equal(hasPrOwnerMarker(prOwnerMarker("lane-1-aaaaaaaa", 1)), true);
 });
+
+test("associateLanePr (gate② round 2, P1): one unmarked PR ALONGSIDE another lane's marker-bearing PR on the same branch -> refused, not stamped", async () => {
+  // A second lane already claims a PR off this head. `unmarked.length === 1` used to fire here
+  // and stamp-and-adopt the unmarked one, making the multi-candidate refusal below unreachable —
+  // a merge target assigned against direct evidence that the branch is contested. Stamping is
+  // only ever eligible when the branch has exactly ONE open PR and it carries no marker at all.
+  const rival = `${prOwnerMarker("lane-999-bbbbbbbb", 999)}`;
+  const forge = fakeLanePrForge([
+    { number: 380, body: `Closes #999\n\n${rival}`, branch: "feat/294-hold" },
+    { number: 381, body: "## Why\n\nCloses #294", branch: "feat/294-hold" },
+  ]);
+  const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", mayOpenPr: true });
+  assert.equal(pr, null, "a contested branch fails closed");
+  assert.equal(forge.calls.filter((c) => c.kind === "updatePRBody").length, 0, "the unmarked candidate is never stamped");
+  assert.equal(forge.calls.filter((c) => c.kind === "openPR").length, 0);
+  assert.equal(forge.prs[1]!.body, "## Why\n\nCloses #294", "left exactly as found");
+});
+
+test("associateLanePr (gate② round 2, P1): TWO unmarked PRs on one branch -> refused (neither is stamped)", async () => {
+  const forge = fakeLanePrForge([
+    { number: 380, body: "first", branch: "feat/294-hold" },
+    { number: 381, body: "second", branch: "feat/294-hold" },
+  ]);
+  const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", mayOpenPr: true });
+  assert.equal(pr, null);
+  assert.equal(forge.calls.filter((c) => c.kind === "updatePRBody").length, 0);
+});

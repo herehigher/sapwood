@@ -1941,12 +1941,13 @@ export interface LanePrRequest {
  *
  *  1. Branch known -> the open PR(s) off that head.
  *     a. one carries THIS lane's marker -> that's the PR.
- *     b. exactly one carries NO marker AT ALL -> the engine stamps it (engine-authored write)
- *        and adopts it. The branch is this lane's own worktree HEAD, so head-identity is the
- *        evidence; the stamp makes the association survive the worktree's deletion.
- *     c. anything else -> no association. That covers another lane's marker, several candidates,
- *        AND a body whose own markers disagree (contested, NOT unmarked — gate② P1 on PR #423):
- *        such a PR is never adopted and never re-stamped.
+ *     b. the branch has exactly ONE open PR and it carries NO marker at all -> the engine stamps
+ *        it (engine-authored write) and adopts it. The branch is this lane's own worktree HEAD,
+ *        so head-identity is the evidence; the stamp makes the association survive the
+ *        worktree's deletion.
+ *     c. anything else -> no association. That covers another lane's marker, SEVERAL candidates
+ *        (even when only one of them is unmarked), and a body whose own markers disagree
+ *        (contested, NOT unmarked). No such PR is ever adopted or re-stamped.
  *  2. No PR off the branch, the branch IS on the forge, and the lane's session has ended -> the
  *     engine opens the PR itself (the retro.ts:406 precedent) with the marker in the body it
  *     authors.
@@ -1968,11 +1969,17 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
     const candidates = await forge.listOpenPrsForBranch(lane.branch);
     const owned = findLaneOwnedPr(candidates, lane.name, lane.issue);
     if (owned != null) return owned;
-    // `hasPrOwnerMarker`, not `readPrOwner(...) === null`: a body whose markers DISAGREE is
-    // contested, not unmarked, and must never be stamped-and-adopted (see hasPrOwnerMarker).
-    const unmarked = candidates.filter((pr) => !hasPrOwnerMarker(pr.body));
-    if (unmarked.length === 1) {
-      const pr = unmarked[0]!;
+    // Stamp-and-adopt is eligible ONLY for a branch with exactly ONE open PR that carries no
+    // marker at all. Both halves of that are load-bearing (gate② P1s on PR #423):
+    //  - ONE candidate: an unmarked PR sitting alongside a marker-bearing one used to qualify by
+    //    filtering to the unmarked subset, which adopted a merge target against direct evidence
+    //    that another lane already claims this head — and made the refusal below unreachable.
+    //  - NO marker AT ALL (`hasPrOwnerMarker`, never `readPrOwner(...) === null`): a body whose
+    //    markers DISAGREE is contested, not unmarked, and stamping a third marker onto it would
+    //    leave every later read still returning null.
+    const sole = candidates.length === 1 ? candidates[0]! : null;
+    if (sole && !hasPrOwnerMarker(sole.body)) {
+      const pr = sole;
       try {
         await forge.updatePRBody(pr.number, stampPrOwner(pr.body, lane.name, lane.issue));
       } catch (e) {
