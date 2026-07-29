@@ -82,7 +82,14 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
     const key = normalizeLabel(name);
     if (haveNames.has(key)) continue;
     haveNames.add(key);
-    holdSpecs.push({ name, color: "fbca04", description: "Human hold — WAIT tier, self-assigned while reviewing (#248)" });
+    // #400: the description carries the whole contract — purpose, carrier, what removal does, and
+    // that an issue is NOT a carrier. Kept identical in docs/configuration.md (init.test.ts pairs
+    // them) and inside GitHub's 100-char label-description limit.
+    holdSpecs.push({
+      name,
+      color: "fbca04",
+      description: "A human is reviewing this PR — automation pauses; remove to resume. No effect on issues.",
+    });
   }
   return [...base, ...holdSpecs];
 }

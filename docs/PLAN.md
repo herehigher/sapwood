@@ -491,21 +491,19 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   the same guard `labels.roundPool`'s collision check uses, generalized: collapsing tiers by
   accidental aliasing is caught at load, not discovered in production.
 
-  **Two carriers, one surface each.** The `hold` label is applied on TWO different objects
-  depending on which automation surface a human wants to take control of — **each carrier gates
-  only the surface it sits on; applying either takes control of that ONE surface, not both:**
-  - **PR-level hold** (`deriveGate`, `merge-driver.ts`) gates the drive/merge gate for a
-    currently-`driving` lane — see "Gate ordering" below.
-  - **Issue-level hold** (`gatedReentryDecision`, `conductor.ts`'s GATED RECLAIM phase) gates
-    reentry eligibility for a lane that has ALREADY been escalated to `failed`+`needs-human`
-    (#147's cap-escalation path, e.g. #246's fix-rounds-cap-reached branch) — see "GATED RECLAIM
-    interaction" below.
+  **One carrier: the PR (#400).** `hold` means one thing — *a human is looking at this PR right
+  now; pause the automation* — and it is read on exactly one surface: the PR (`deriveGate` in
+  `merge-driver.ts`, the engine-agent preflight in `review/drive.ts`, and #170's silence
+  suppression). See "Gate ordering" below. The shipped label description states the whole
+  contract, so no reader has to consult this document to use it: *"A human is reviewing this PR —
+  automation pauses; remove to resume. No effect on issues."* (identical in `loop/init.ts`'s
+  `requiredLabels` and `docs/configuration.md`, paired by a test).
 
   **Exact match, not substring (review round 1, G3).** Unlike `escalation.humanLabels` (matched
   by substring — historical, unchanged, its own accepted footgun), a hold label is a configured
   NAME, matched by exact case-insensitive identity (`labelsIncludeAny`/`hasReserveLabel`) at
-  every runtime check (`deriveGate`, `reviewSilenceDuration`'s call site, and the GATED RECLAIM
-  check below). A substring match would let a short entry (e.g. `holdLabels: ["sapwood"]`) hold
+  every runtime check (`deriveGate`, `review/drive.ts`'s preflight, and `reviewSilenceDuration`'s
+  call site). A substring match would let a short entry (e.g. `holdLabels: ["sapwood"]`) hold
   every label sharing that text, or an accidentally-empty entry hold everything unconditionally
   — `escalation.holdLabels` schema entries are also trimmed and rejected if empty, so this class
   of misconfiguration is caught at load, not silently over-broad at runtime.
@@ -527,23 +525,22 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   `driving`, at which point the still-present hold governs the next tick exactly like any other
   driving lane).
 
-  **GATED RECLAIM interaction (review round 1, G1 — PM-narrowed).** The original #248 design
-  reasoned hold was orthogonal to #147's GATED RECLAIM because a PR-level hold never produces a
-  `failed` row — true, but incomplete: it missed the confirmed scenario where a lane is ALREADY
-  `failed`+issue-`needs-human` (the fix-rounds-cap path) and a human applies an ISSUE-level
-  `hold` while investigating, then removes `needs-human` before finishing — without an explicit
-  check, `gatedReentryDecision` would RECLAIM the instant `needs-human` cleared, burning a
-  `gated_reentry_attempts` slot and letting DRIVE immediately re-escalate or re-latch at the cap,
-  violating "apply hold = take control" for that surface. Fixed minimally (marginal-complexity
-  ruling: reuse the ALREADY-fetched issue-label read, no new forge call, and do NOT extend this
-  into a new per-tick issue-label fetch inside the DRIVE loop for a rare, short-lived manual
-  state): `gatedReentryDecision` takes `issueHoldPresent` as a SEPARATE SKIP input alongside
-  `humanHoldPresent`, checked against the SAME `forge.getIssueLabels` read GATED RECLAIM already
-  performs. **Accepted, documented bounded blind spot:** an issue-level hold applied to a lane
-  that is STILL `driving` (never escalated) has no effect until/unless that lane later reaches
-  `gatedFailedWorkers()` — a `driving` lane's own hold-handling is exclusively the PR-level
-  `holdLabels` check in `deriveGate`, a different carrier on a different surface; there is no
-  single hold action that pre-emptively protects a lane against a *future* escalation.
+  **Why the issue-level carrier was deleted (#400, adjudicated 2026-07-27).** #248 review round 1
+  had made `gatedReentryDecision` take a second, issue-level `issueHoldPresent` SKIP input, for a
+  human who applies a `hold` to the ISSUE of an already-escalated (`failed`+`needs-human`) lane
+  "while investigating" and then removes `needs-human` before finishing. It was deleted: that
+  scenario is a human contradicting themselves (removing `needs-human` **is** the go-ahead
+  signal — the fix is not to remove it yet), and the carrier was a silent no-op in the state a
+  human is most likely to be in, since an issue-level hold on a still-`driving` lane was never
+  consulted at all. Two carriers also made the label undescribable — no short description could
+  be true of both surfaces. **Accepted, bounded, transitional cost, stated rather than hidden:**
+  a human who removes `needs-human` before they are actually ready burns ONE
+  `gated_reentry_attempts` slot; the cap bounds it and a re-escalation re-latches the lane. That
+  is strictly cheaper than a second carrier plus the detection machinery needed to make it safe —
+  and it is transitional: once #398 has GATED RECLAIM read the **PR's** labels for a PR-bearing
+  lane, a PR-level hold restores that SKIP on the correct carrier, from the same fetch, at zero
+  marginal cost. Deliberately no warning path for a hold applied to an issue: silence is correct
+  for a label that has no meaning there, now that its description says so.
 
   **Write-side asymmetry is the audit trail:** the engine never writes a hold label — only
   `needsHuman`/`blocked` are ever engine-applied (grep-proof: every `addLabel`/`addPRLabel` call
