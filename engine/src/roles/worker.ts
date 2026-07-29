@@ -2509,10 +2509,19 @@ export class WorkerSupervisor implements Supervisor {
     if (issue != null && this.deps.lanePr) {
       // #377: the lane's PR is resolved from what THIS lane structurally produced — its own
       // worktree's branch, plus the engine-authored owner marker — never from a PR body's prose.
-      // `mayOpenPr` is true only for a TERMINATED lane: the engine may open a missing PR once the
-      // worker is done, but must never race a still-running worker's own `gh pr create`. Patching
-      // an existing PR's body (the other engine-authored write) has no such race and is not gated.
-      const n = await this.deps.lanePr({ name, issue, branch: this.laneBranch(name), mayOpenPr: done || failed || handoff });
+      // `mayOpenPr` gates only the OPEN write: the engine must never race a still-running
+      // worker's own `gh pr create`. Patching an existing PR's body (the other engine-authored
+      // write) has no such race and is not gated.
+      //
+      // "Nothing is left to race" has TWO structural signals, and both must count (gate② P1 on
+      // PR #423): a terminal SENTINEL, or a CONFIRMED-DEAD wrapper (wrapperAlive === 0 — the same
+      // kill(pid, 0) signal finalizeDetachedHandoffIfConfirmedDead already treats as death, never
+      // -1/unknown). A detached lane that pushed its branch and then died writes no sentinel at
+      // all; without the second signal its pushed work would reach the conductor's DEAD reclaim
+      // as "no PR" and be requeued or escalated — the exact pushed-but-unPRed case this whole
+      // issue exists to fix, just arrived at by a crash instead of a clean exit.
+      const sessionOver = done || failed || handoff || wrapperAlive === 0;
+      const n = await this.deps.lanePr({ name, issue, branch: this.laneBranch(name), mayOpenPr: sessionOver });
       hasPr = n != null;
       if (n != null) prNumber = n;
     }

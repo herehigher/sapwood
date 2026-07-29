@@ -1880,6 +1880,15 @@ export function readPrOwner(body: string): { lane: string; issue: number } | nul
   return found.every((f) => f.lane === first.lane && f.issue === first.issue) ? first : null;
 }
 
+/** Does this body carry a marker AT ALL? Deliberately a SEPARATE question from readPrOwner's —
+ *  that one collapses "no marker" and "markers that disagree" into the same `null`, and a caller
+ *  that treats the second as the first would stamp its own marker onto a body whose ownership is
+ *  already contested, adopt the PR, and leave every later read still returning null (gate② P1 on
+ *  PR #423). Association uses BOTH: readPrOwner to claim a PR, this to refuse one it can't. */
+export function hasPrOwnerMarker(body: string): boolean {
+  return [...body.matchAll(PR_OWNER_MARKER_RE)].length > 0;
+}
+
 /** Appends the marker to a PR body, idempotently — the worker's own description (closing keyword
  *  included) is preserved verbatim above it. */
 export function stampPrOwner(body: string, lane: string, issue: number): string {
@@ -1918,9 +1927,10 @@ export interface LanePrRequest {
   /** The lane worktree's own current branch, read from its git HEAD (worker.ts's laneBranch), or
    *  null when unknowable (worktree gone, detached HEAD). */
   branch: string | null;
-  /** May the engine OPEN a PR on this call? True only once the lane's worker has terminated —
-   *  opening one mid-run would race the worker's own `gh pr create`. Patching an existing body
-   *  has no such race and is done regardless. */
+  /** May the engine OPEN a PR on this call? True once the lane's session is over by EITHER
+   *  structural signal — a terminal sentinel, or a confirmed-dead wrapper (see worker.ts's
+   *  probe()). Opening one mid-run would race the worker's own `gh pr create`; nothing else
+   *  gates it. Patching an existing body has no such race and is done regardless. */
   mayOpenPr: boolean;
 }
 
@@ -1931,12 +1941,13 @@ export interface LanePrRequest {
  *
  *  1. Branch known -> the open PR(s) off that head.
  *     a. one carries THIS lane's marker -> that's the PR.
- *     b. exactly one carries NO marker -> the engine stamps it (engine-authored write) and
- *        adopts it. The branch is this lane's own worktree HEAD, so head-identity is the
+ *     b. exactly one carries NO marker AT ALL -> the engine stamps it (engine-authored write)
+ *        and adopts it. The branch is this lane's own worktree HEAD, so head-identity is the
  *        evidence; the stamp makes the association survive the worktree's deletion.
- *     c. anything else (another lane's marker, several candidates) -> no association. A PR
- *        someone else owns is never adopted and never re-stamped.
- *  2. No PR off the branch, the branch IS on the forge, and the worker has terminated -> the
+ *     c. anything else -> no association. That covers another lane's marker, several candidates,
+ *        AND a body whose own markers disagree (contested, NOT unmarked — gate② P1 on PR #423):
+ *        such a PR is never adopted and never re-stamped.
+ *  2. No PR off the branch, the branch IS on the forge, and the lane's session has ended -> the
  *     engine opens the PR itself (the retro.ts:406 precedent) with the marker in the body it
  *     authors.
  *  3. Otherwise -> marker scan across open PRs (covers a reclaimed worktree).
@@ -1957,7 +1968,9 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
     const candidates = await forge.listOpenPrsForBranch(lane.branch);
     const owned = findLaneOwnedPr(candidates, lane.name, lane.issue);
     if (owned != null) return owned;
-    const unmarked = candidates.filter((pr) => readPrOwner(pr.body) === null);
+    // `hasPrOwnerMarker`, not `readPrOwner(...) === null`: a body whose markers DISAGREE is
+    // contested, not unmarked, and must never be stamped-and-adopted (see hasPrOwnerMarker).
+    const unmarked = candidates.filter((pr) => !hasPrOwnerMarker(pr.body));
     if (unmarked.length === 1) {
       const pr = unmarked[0]!;
       try {
@@ -1968,7 +1981,10 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
       return pr.number;
     }
     if (candidates.length > 0) {
-      return note(`branch ${lane.branch} has ${candidates.length} open PR(s), none owned by this lane — not adopting any`);
+      return note(
+        `branch ${lane.branch} has ${candidates.length} open PR(s), none claimable by this lane ` +
+          `(another lane's marker, contested markers, or several candidates) — not adopting any`,
+      );
     }
     if (lane.mayOpenPr && (await forge.branchExists(lane.branch))) {
       try {

@@ -1245,6 +1245,38 @@ test("probe: #377 passes the lane's OWN branch (read from its worktree git HEAD,
   }
 });
 
+test("probe: #377 gate② P1 — a CONFIRMED-DEAD wrapper with no sentinel still permits the engine-authored PR (a pushed branch must not be requeued as unPRed)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const seen: { name: string; issue: number; branch: string | null; mayOpenPr: boolean }[] = [];
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: mkStub(dir, FAST_STUB),
+      lanePr: async (lane) => {
+        seen.push(lane);
+        return null;
+      },
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+    });
+    // A detached lane that died after pushing: running.json persisted, no terminal sentinel was
+    // ever written (no attached onExit handler), and the wrapper pid is confirmed gone. An
+    // impossible pid rather than a killed real one — the death signal must not depend on timing.
+    writeFileSync(join(dir, "lane-dead.running.json"), JSON.stringify({ issue: 377, wrapper_pid: 999999999 }));
+    const probe = await s.probe("lane-dead");
+    assert.equal(probe.wrapperAlive, 0, "sanity: confirmed dead, the structured signal this gate keys on");
+    assert.equal(probe.done, false);
+    assert.equal(probe.failed, false);
+    assert.equal(probe.handoff, false);
+    assert.equal(seen.at(-1)!.mayOpenPr, true, "nothing is left alive to race the engine's own `gh pr create`");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("probe: costUsd is 0 while a lane is still running (no terminal sentinel yet)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

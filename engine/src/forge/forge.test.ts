@@ -17,6 +17,7 @@ import {
   findLaneOwnedPr,
   findOptionId,
   GithubForge,
+  hasPrOwnerMarker,
   hasVerificationPlan,
   OPEN_ISSUES_LIMIT,
   parseIssueLabels,
@@ -2912,4 +2913,25 @@ test("updatePRBody: writes through `gh pr edit --body` (a PR-scoped write, never
   await forge.updatePRBody(372, "new body");
   assert.deepEqual(seen[0]!.slice(0, 3), ["pr", "edit", "372"]);
   assert.equal(seen[0]![seen[0]!.indexOf("--body") + 1], "new body");
+});
+
+test("associateLanePr (gate② P1): a branch PR whose body carries DISAGREEING markers is NOT 'unmarked' -> never stamped a third time, never adopted", async () => {
+  // readPrOwner returns null for BOTH 'no marker' and 'ambiguous markers'. Treating the second
+  // as the first would append a third marker, adopt the PR, and hand a `driving` lane a merge
+  // target whose ownership still reads as null on every subsequent probe.
+  const ambiguous = `#294\n\n${prOwnerMarker("lane-294-a1b2c3d4", 294)}\n${prOwnerMarker("lane-999-bbbbbbbb", 999)}`;
+  const forge = fakeLanePrForge([{ number: 372, body: ambiguous, branch: "feat/294-hold" }]);
+  const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", mayOpenPr: true });
+  assert.equal(pr, null, "ambiguous ownership fails closed");
+  assert.equal(forge.calls.filter((c) => c.kind === "updatePRBody").length, 0);
+  assert.equal(forge.calls.filter((c) => c.kind === "openPR").length, 0);
+  assert.equal(forge.prs[0]!.body, ambiguous, "the PR body is left exactly as found");
+});
+
+test("hasPrOwnerMarker: true for a malformed/ambiguous marker body that readPrOwner rejects — the two questions are distinct", () => {
+  const ambiguous = `${prOwnerMarker("lane-1-aaaaaaaa", 1)}\n${prOwnerMarker("lane-2-bbbbbbbb", 2)}`;
+  assert.equal(readPrOwner(ambiguous), null);
+  assert.equal(hasPrOwnerMarker(ambiguous), true);
+  assert.equal(hasPrOwnerMarker("Fixes #294 — no marker anywhere"), false);
+  assert.equal(hasPrOwnerMarker(prOwnerMarker("lane-1-aaaaaaaa", 1)), true);
 });

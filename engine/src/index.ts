@@ -6,6 +6,7 @@ export {
   extractVerificationPlan,
   findLaneOwnedPr,
   GithubForge,
+  hasPrOwnerMarker,
   type IForge,
   type Issue,
   type LanePrForge,
