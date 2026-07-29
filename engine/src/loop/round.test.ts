@@ -311,6 +311,7 @@ const allPeripherals = (log: Array<{ phase: PeripheralPhase; marker: string | nu
 });
 
 const baseDeps = (over: Partial<RoundDeps> = {}): RoundDeps => ({
+  now: realClock,
   forge: new FakeForge(),
   state: new State(":memory:"),
   supervisor: new FakeSupervisor(),

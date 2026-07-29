@@ -35,6 +35,13 @@ import {
 import { type PeripheralPhase, type PeripheralStub, type RoundDeps, runRounds } from "./round.js";
 import { buildRoundArtifact } from "./round-artifact.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 /** Scripted fake of RoleRunner.run — captures every call's opts for assertion, returns the
  *  next scripted result (or the last one, repeated) — same pattern as plan-review.test.ts's
  *  ScriptedRunner. */
@@ -246,7 +253,7 @@ test("buildRoundArtifact (#123, ex-gatherRoundFacts): sums PRs opened/merged, sp
 test("createHarvestStub: marker present -> returns it unchanged, no facts gathered, no session run (idempotence)", async () => {
   const state = new State(":memory:");
   const runner = new ScriptedRunner(doneResult("s1"));
-  const deps: HarvestDeps = { forge: new MinimalForge(), state, cfg: mkCfg(), runner };
+  const deps: HarvestDeps = { now: realClock, forge: new MinimalForge(), state, cfg: mkCfg(), runner };
   const stub = createHarvestStub(deps);
   const { marker } = await stub.run({ roundId: 5, phase: "harvesting", marker: "prior-marker" });
   assert.equal(marker, "prior-marker");
@@ -308,7 +315,7 @@ test("createHarvestStub (#123): no needs-human issues this round -> no session r
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   state.appendEvent("merged", { worker: "lane-a", issue: 1, pr: 10, headOid: "h1" });
   const runner = new ScriptedRunner(doneResult("s1"));
-  const deps: HarvestDeps = { forge: new MinimalForge(), state, cfg: mkCfg(), runner };
+  const deps: HarvestDeps = { now: realClock, forge: new MinimalForge(), state, cfg: mkCfg(), runner };
   const stub = createHarvestStub(deps);
   const { marker, ranSession } = await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
   assert.equal(marker, harvestMarker(round.round_id));
@@ -370,7 +377,7 @@ test("createHarvestStub: a failed session is retried once — non-done then done
   const retryText = sapwoodResult({ comments: [{ issue: 42, body: "recovered on retry" }] });
   const runner = new ScriptedRunner(failedResult("s1"), doneResult("s2", retryText));
   const forge = new MinimalForge();
-  const deps: HarvestDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: HarvestDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const stub = createHarvestStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
   assert.equal(marker, harvestMarker(round.round_id));
@@ -388,7 +395,7 @@ test("createHarvestStub: two failed sessions degrade VISIBLY but never wedge the
   state.appendEvent("drive-needs-human", { worker: "lane-a", issue: 42, pr: 7, reason: "x" });
   const runner = new ScriptedRunner(failedResult("s1"), failedResult("s2"));
   const forge = new MinimalForge();
-  const deps: HarvestDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: HarvestDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const stub = createHarvestStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
   assert.equal(marker, harvestMarker(round.round_id)); // the phase still closes — run termination is never blocked
@@ -411,7 +418,7 @@ test("createHarvestStub: roles.harvest.promptFile override is honored (the #74 p
     const resultText = sapwoodResult({ comments: [{ issue: 9, body: "hi" }] });
     const runner = new ScriptedRunner(doneResult("s1", resultText));
     const cfg = mkCfg({ roles: { harvest: { promptFile: promptPath } } });
-    const deps: HarvestDeps = { forge: new MinimalForge(), state, cfg, runner };
+    const deps: HarvestDeps = { now: realClock, forge: new MinimalForge(), state, cfg, runner };
     const stub = createHarvestStub(deps);
     await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
     assert.equal(runner.calls[0]!.prompt, `custom harvest prompt for round ${round.round_id}, needs-human: #9`);
@@ -508,7 +515,7 @@ test("createHarvestStub #110: malformed structured output TWICE -> degrades exac
     doneResult("s1-retry", "still just prose, no structured output"),
   );
   const forge = new MinimalForge();
-  const deps: HarvestDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: HarvestDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const stub = createHarvestStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
   assert.equal(marker, harvestMarker(round.round_id)); // the phase still closes
@@ -534,7 +541,7 @@ test("createHarvestStub #110: an out-of-set issue number TWICE -> degrades fail-
   });
   const runner = new ScriptedRunner(doneResult("s1", poisoned), doneResult("s1-retry", poisoned));
   const forge = new MinimalForge();
-  const deps: HarvestDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: HarvestDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const stub = createHarvestStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
   assert.equal(marker, harvestMarker(round.round_id));
@@ -557,7 +564,7 @@ test("createHarvestStub #110: duplicate issue numbers TWICE -> degrades fail-clo
   });
   const runner = new ScriptedRunner(doneResult("s1", duplicated), doneResult("s1-retry", duplicated));
   const forge = new MinimalForge();
-  const deps: HarvestDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: HarvestDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const stub = createHarvestStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
   assert.equal(marker, harvestMarker(round.round_id)); // the phase still closes — never a wedged round
@@ -596,6 +603,7 @@ class MinimalSupervisor implements Supervisor {
 }
 
 const baseIntegrationDeps = (state: State, peripherals: Partial<Record<PeripheralPhase, PeripheralStub>>): RoundDeps => ({
+  now: realClock,
   forge: new MinimalForge(),
   state,
   supervisor: new MinimalSupervisor(),
@@ -615,7 +623,7 @@ test("runRounds integration: the real harvest stub runs during a normal round cl
   const resultText = sapwoodResult({ comments: [{ issue: 7, body: "round context" }] });
   const runner = new ScriptedRunner(doneResult("role-harvest-int", resultText));
   const forge = new MinimalForge();
-  const harvestStub = createHarvestStub({ forge, state, cfg: mkCfg(), runner });
+  const harvestStub = createHarvestStub({ now: realClock, forge, state, cfg: mkCfg(), runner });
   const deps = baseIntegrationDeps(state, { harvesting: harvestStub });
   deps.forge = forge; // same fake forge instance -> the assertion below sees the harvest write
   // Signal a graceful stop mid-round (round.test.ts's pattern): the in-flight round still
@@ -649,7 +657,7 @@ test("runRounds integration: KILL_SWITCH blocks harvesting entirely — the stub
     const state = new State(join(dir, "sapwood.sqlite"));
     writeFileSync(join(dir, "KILL_SWITCH"), "");
     const runner = new ScriptedRunner(doneResult("role-harvest-int"));
-    const harvestStub = createHarvestStub({ forge: new MinimalForge(), state, cfg: mkCfg(), runner });
+    const harvestStub = createHarvestStub({ now: realClock, forge: new MinimalForge(), state, cfg: mkCfg(), runner });
     const deps = baseIntegrationDeps(state, { harvesting: harvestStub });
     const result = await runRounds(deps);
     assert.equal(result.stoppedBy, "kill-switch");

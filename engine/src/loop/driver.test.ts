@@ -173,7 +173,15 @@ function mkSleepSpy(): { sleep: (ms: number) => Promise<void>; calls: number[] }
   };
 }
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert nothing
+ *  calendar-dependent. Production's `now` seams are required, not optional, precisely so this
+ *  choice is written down at each fixture instead of being an invisible default — a test that DOES
+ *  seed a date must inject that seeded clock here, not this one. Named (not inlined) so every
+ *  deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 const baseDeps = (over: Partial<DriverDeps> = {}): DriverDeps => ({
+  now: realClock,
   forge: new FakeForge(),
   state: new State(":memory:"),
   supervisor: new FakeSupervisor(),
