@@ -498,7 +498,10 @@ export interface LaneProbe {
    *  new lane state. Optional only for pre-#169 probe fixtures; stale lanes without it fail
    *  safe to DEAD. */
   dispatchedAgeSec?: number;
-  hasPr: boolean; // an open PR exists for this lane's issue
+  // #377: an open PR belonging to THIS LANE exists — resolved from the lane's own branch plus
+  // the engine-authored PR-owner marker (worker.ts's probe -> forge.ts's associateLanePr), not
+  // from any PR that merely mentions the lane's issue number.
+  hasPr: boolean;
   /** The open PR's number, when hasPr — the merge driver's gate/merge target (#13). Optional:
    *  probe fixtures that predate #13 (hasPr only, no number) still type-check; a driving lane
    *  with hasPr=true but no prNumber known keeps hasPr's rescue behavior but can't be driven

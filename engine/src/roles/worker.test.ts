@@ -63,7 +63,7 @@ const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", 
 test("WorkerSupervisor: default guard hook resolves the compiled hook in the guard directory", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const supervisor = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: "claude", hasOpenPr: async () => false });
+    const supervisor = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: "claude" });
     const guardHookPath = (supervisor as unknown as { guardHookPath: string }).guardHookPath;
     assert.equal(guardHookPath, fileURLToPath(new URL("../guard/guard-hook.js", import.meta.url)));
     supervisor.dispose();
@@ -997,13 +997,15 @@ test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no
   }
 });
 
-const sup = (dir: string, claudeBin: string, hasPr = false, worktreeRoot?: string) =>
+// #377: no PR-association dep (WorkerDeps.lanePr) — a lane built this way is never associated
+// with any PR, exactly what every test using this helper already asserted through the deleted
+// `hasOpenPr: async () => false`.
+const sup = (dir: string, claudeBin: string, worktreeRoot?: string) =>
   new WorkerSupervisor({
     cfg,
     stateDir: dir,
     ...(worktreeRoot ? { worktreeRoot } : {}),
     claudeBin,
-    hasOpenPr: async () => hasPr,
     renderPrompt: () => "test prompt",
     heartbeatMs: 50,
     guardHookPath: mkHook(dir),
@@ -1051,7 +1053,6 @@ test("#304 wiring: a completed lane records one egress-suspect event through the
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -1089,7 +1090,6 @@ test("#341 wiring: a completed lane writes at most the per-leg egress cap and lo
       log: (line) => logs.push(line),
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -1125,7 +1125,6 @@ test("#304 fail-safe: an egress event write failure is logged but cannot change 
       log: (line) => logs.push(line),
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -1148,7 +1147,7 @@ test("#304 fail-safe: an egress event write failure is logged but cannot change 
   }
 });
 
-test("probe: #13 findOpenPr (when provided) supplies prNumber and derives hasPr from it", async () => {
+test("probe: #377 lanePr supplies prNumber and derives hasPr from it (the lane's own PR, not the issue's)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
     const bin = mkStub(dir, FAST_STUB);
@@ -1156,10 +1155,7 @@ test("probe: #13 findOpenPr (when provided) supplies prNumber and derives hasPr 
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => {
-        throw new Error("legacy path must not be used when findOpenPr is provided");
-      },
-      findOpenPr: async (issue) => (issue === 8 ? 42 : null),
+      lanePr: async (lane) => (lane.issue === 8 ? 42 : null),
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -1175,7 +1171,7 @@ test("probe: #13 findOpenPr (when provided) supplies prNumber and derives hasPr 
   }
 });
 
-test("probe: #13 findOpenPr returning null -> hasPr false, prNumber undefined (no legacy fallback call)", async () => {
+test("probe: #377 lanePr returning null -> hasPr false, prNumber undefined (fail closed, never a guessed PR)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
     const bin = mkStub(dir, FAST_STUB);
@@ -1183,10 +1179,7 @@ test("probe: #13 findOpenPr returning null -> hasPr false, prNumber undefined (n
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => {
-        throw new Error("legacy path must not be used when findOpenPr is provided");
-      },
-      findOpenPr: async () => null,
+      lanePr: async () => null,
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -1196,6 +1189,56 @@ test("probe: #13 findOpenPr returning null -> hasPr false, prNumber undefined (n
     const probe = await s.probe(name);
     assert.equal(probe.hasPr, false);
     assert.equal(probe.prNumber, undefined);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probe: #377 passes the lane's OWN branch (read from its worktree git HEAD, no git subprocess) and gates PR creation on the lane having terminated", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = join(dir, "worktrees");
+  try {
+    // A long-running stub keeps the lane RUNNING for the first probe; the terminal sentinel is
+    // written by hand for the second, so neither probe races the child's own exit.
+    const { bin, ready } = longRunningStub(dir);
+    const seen: { name: string; issue: number; branch: string | null; mayOpenPr: boolean }[] = [];
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      worktreeRoot,
+      claudeBin: bin,
+      lanePr: async (lane) => {
+        seen.push(lane);
+        return null;
+      },
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+    });
+    const { name } = await s.dispatch({ number: 377, title: "t", labels: [] });
+    await waitForFile(ready);
+    // A LINKED worktree exactly as the `claude` CLI creates it: `.git` is a file pointing at the
+    // parent repo's per-worktree gitdir, whose HEAD names the branch the worker switched to.
+    const gitDir = join(dir, "parent-git", "worktrees", name);
+    mkdirSync(gitDir, { recursive: true });
+    mkdirSync(join(worktreeRoot, name), { recursive: true });
+    writeFileSync(join(worktreeRoot, name, ".git"), `gitdir: ${gitDir}\n`);
+    writeFileSync(join(gitDir, "HEAD"), "ref: refs/heads/feat/377-pr-owner-marker\n");
+
+    await s.probe(name);
+    assert.deepEqual(seen.at(-1), { name, issue: 377, branch: "feat/377-pr-owner-marker", mayOpenPr: false });
+
+    writeFileSync(join(dir, `${name}.done.json`), JSON.stringify({ name, issue: 377 }));
+    await s.probe(name);
+    assert.equal(seen.at(-1)!.mayOpenPr, true, "once the worker has terminated the engine may open the missing PR itself");
+
+    // A detached HEAD (or a reclaimed worktree) is unknowable, not guessable -> null branch.
+    writeFileSync(join(gitDir, "HEAD"), "9f1c0de0c0ffee0c0ffee0c0ffee0c0ffee0c0ff\n");
+    await s.probe(name);
+    assert.equal(seen.at(-1)!.branch, null);
+
+    await s.reclaim(name);
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1383,7 +1426,6 @@ test("#172: resumed no-result SIGTERM ignores leg 1's result and ledgers its bas
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -1531,7 +1573,6 @@ test("resume (#395 PM follow-up): resume()'s OWN spawn confirmation await — a 
       stateDir: dir,
       worktreeRoot,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -1569,7 +1610,6 @@ test("resume (#395 gate② P2-2): a merely-DELAYED (not lost) real spawn event r
       stateDir: dir,
       worktreeRoot,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -1662,7 +1702,7 @@ test("resume: also sets SAPWOOD_WORKTREE_ROOT to the same lane's resolved worktr
         "",
       ].join("\n"),
     );
-    const s = sup(dir, bin, false, worktreeRoot);
+    const s = sup(dir, bin, worktreeRoot);
     const { name } = await s.dispatch({ number: 4, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before handoff");
     assert.equal(s.requestHandoff(name), true);
@@ -1690,7 +1730,6 @@ test("resume: fails closed in hard mode when the guard hook is missing (no ungua
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       guardHookPath: join(dir, "nonexistent-hook.js"),
     });
     await assert.rejects(() => s2.resume({ number: 3, title: "t", labels: [] }, name), /guard hook not found|unguarded/i);
@@ -1756,7 +1795,6 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
       cfg: scfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -1799,7 +1837,6 @@ test("dispatch sets SAPWOOD_WORKTREE_ROOT to the resolved absolute worktree path
       stateDir: dir,
       worktreeRoot,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -1821,7 +1858,6 @@ test("dispatch fails closed in hard mode when the guard hook is missing (no ungu
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       guardHookPath: join(dir, "nonexistent-hook.js"),
     });
@@ -1858,7 +1894,6 @@ test("dispatch (#395): cfg.liveness.spawnConfirmTimeoutMs is threaded through �
       cfg: liveCfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -1887,7 +1922,6 @@ test("dispatch (#395 PM follow-up): a spawn confirmation that never arrives is b
       stateDir: dir,
       worktreeRoot,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -1924,7 +1958,6 @@ test("dispatch (#395 gate② round 3, P1): a LIVE worker leg heart-beats against
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "test prompt",
       heartbeatMs: 15, // fast cadence so this test observes several ticks quickly
       guardHookPath: mkHook(dir),
@@ -1976,7 +2009,6 @@ test("enforces worker timeout: a run past timeoutSec is killed and marked failed
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 20,
       guardHookPath: mkHook(dir),
@@ -2023,7 +2055,6 @@ test("#33: crossing worker.budgetUsdSoft mid-run triggers requestHandoff exactly
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -2063,7 +2094,6 @@ test("#33: a cache-heavy stream under budget does NOT trigger a handoff -- cache
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -2090,8 +2120,7 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
       worker: { pricingFile: "/nonexistent/rates.yaml" },
     });
     assert.throws(
-      () =>
-        new WorkerSupervisor({ cfg: badCfg, stateDir: dir, claudeBin: "claude", hasOpenPr: async () => false, guardHookPath: mkHook(dir) }),
+      () => new WorkerSupervisor({ cfg: badCfg, stateDir: dir, claudeBin: "claude", guardHookPath: mkHook(dir) }),
       /\/nonexistent\/rates\.yaml/,
     );
 
@@ -2118,7 +2147,6 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
       cfg: cfgCustom,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -2169,7 +2197,6 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -2871,7 +2898,7 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
 
     // The empirically-confirmed real CLI shape (#60): no SIGTERM trap -> dies by signal.
     const { bin, ready } = longRunningStub(dir);
-    const s = sup(dir, bin, false, worktreeRoot);
+    const s = sup(dir, bin, worktreeRoot);
     const { name: laneName, sessionId } = await s.dispatch({ number: 69, title: "t", labels: [] }, name);
     await waitForFile(ready, "stub reached its running state before drain");
     assert.equal(s.requestHandoff(laneName), true);
@@ -2996,7 +3023,6 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 20, // real timer -- but the elapsed-time MATH below is driven by fakeNowMs, not by how fast this fires
       guardHookPath: mkHook(dir),
@@ -3036,7 +3062,7 @@ test("#69: reclaim RETAINS a worktree with a file written after dispatch (possib
     mkdirSync(join(worktreePath, "src"), { recursive: true });
 
     const { bin } = longRunningStub(dir);
-    const s = sup(dir, bin, false, worktreeRoot);
+    const s = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 70, title: "t", labels: [] }, name);
     await sleep(50); // ensure the WIP write lands strictly after the recorded lane start
     writeFileSync(join(worktreePath, "src", "wip.txt"), "uncommitted work\n");
@@ -3063,7 +3089,7 @@ test("#69: reclaim DELETES a clean worktree (no file touched since dispatch) —
     await sleep(20); // strictly before the lane's recorded start
 
     const { bin, ready } = longRunningStub(dir);
-    const s = sup(dir, bin, false, worktreeRoot);
+    const s = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 71, title: "t", labels: [] }, name);
     await waitForFile(ready);
 
@@ -3101,13 +3127,13 @@ test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktr
     mkdirSync(worktreePath, { recursive: true });
 
     const { bin } = longRunningStub(dir);
-    const s1 = sup(dir, bin, false, worktreeRoot);
+    const s1 = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s1.dispatch({ number: 73, title: "t", labels: [] }, name);
     await sleep(50);
     writeFileSync(join(worktreePath, "wip.txt"), "post-dispatch work\n"); // dirty
     s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
 
-    const s2 = sup(dir, bin, false, worktreeRoot);
+    const s2 = sup(dir, bin, worktreeRoot);
     const r = await s2.reclaim(laneName);
     assert.equal(r.worktreeRetained, true);
     assert.ok(existsSync(join(worktreePath, "wip.txt")), "worktree survives a detached reclaim too");
@@ -3142,7 +3168,7 @@ test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP 
         "",
       ].join("\n"),
     );
-    const s = sup(dir, bin, false, worktreeRoot);
+    const s = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 74, title: "t", labels: [] }, name);
     await sleep(50);
     // Pre-handoff WIP: written DURING the first run, mtime after first dispatch.
@@ -3185,7 +3211,7 @@ test("#69 (fable P2b): a file whose mtime is BACKDATED before dispatch still rea
     mkdirSync(worktreePath, { recursive: true });
 
     const { bin } = longRunningStub(dir);
-    const s = sup(dir, bin, false, worktreeRoot);
+    const s = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 75, title: "t", labels: [] }, name);
     await sleep(50);
     const wip = join(worktreePath, "wip.txt");
@@ -3213,7 +3239,7 @@ test("#69 (Codex PR #72 round-2): a WIP entry whose mtime EQUALS dispatched_at e
     mkdirSync(worktreePath, { recursive: true });
 
     const { bin } = longRunningStub(dir);
-    const s = sup(dir, bin, false, worktreeRoot);
+    const s = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 76, title: "t", labels: [] }, name);
     await sleep(50);
     const wip = join(worktreePath, "wip.txt");
@@ -3259,14 +3285,14 @@ test("#63/#69: detached handoff-requested lane confirmed dead -> probe() writes 
 
     // No TERM trap -> the real CLI's empirically-confirmed shape (#60): dies by signal.
     const { bin, ready } = longRunningStub(dir);
-    const s1 = sup(dir, bin, false, worktreeRoot);
+    const s1 = sup(dir, bin, worktreeRoot);
     const { name: laneName, sessionId } = await s1.dispatch({ number: 63, title: "t", labels: [] }, name);
     await waitForFile(ready, "stub reached its running state before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
     assert.equal(alive(pid), true);
     s1.dispose(); // "restart": s2 has no in-memory lane handle for this name — only the persisted file
 
-    const s2 = sup(dir, bin, false, worktreeRoot);
+    const s2 = sup(dir, bin, worktreeRoot);
     assert.equal(s2.requestHandoff(laneName), true); // detached branch: SIGTERM via the persisted pid
     const runningAfterRequest = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8"));
     assert.equal(runningAfterRequest.handoff_requested, true, "request persisted onto running.json");
@@ -3405,14 +3431,14 @@ test("#63/#69: a lane already reclaim()'d must never also be finalized as .hando
     // Ignores TERM -> survives requestHandoff's SIGTERM; only reclaim()'s SIGKILL stops it —
     // mirroring the "reclaim kills a stubborn claude subtree via SIGKILL" pattern above.
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n");
-    const s1 = sup(dir, bin, false, worktreeRoot);
+    const s1 = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s1.dispatch({ number: 65, title: "t", labels: [] }, name);
     await waitForFile(ready, "stub installed its TERM trap before engine restart");
     writeFileSync(join(worktreePath, "wip.txt"), "uncommitted\n"); // post-dispatch WIP -> dirty
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
     s1.dispose();
 
-    const s2 = sup(dir, bin, false, worktreeRoot);
+    const s2 = sup(dir, bin, worktreeRoot);
     assert.equal(s2.requestHandoff(laneName), true); // detached SIGTERM sent (ignored by the stub)
     assert.equal(alive(pid), true, "stub ignores TERM — still alive right after the drain request");
 
@@ -3834,7 +3860,6 @@ test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals
       cfg: scfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt,
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -3900,7 +3925,6 @@ test("dispatch: a proxy opt mints a handle, widens --allowedTools with the handl
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -3944,7 +3968,6 @@ test("dispatch: no proxy opt (every ordinary caller today) -> no --mcp-config fl
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -3970,7 +3993,6 @@ test("dispatch: a proxy mint FAILURE is non-fatal — the lane still dispatches 
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -3998,7 +4020,6 @@ test("dispatch: a spawn failure with a proxy attached still tears down the minte
       cfg,
       stateDir: dir,
       claudeBin: join(dir, "does-not-exist-claude"),
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       guardHookPath: hook,
     });
@@ -4035,7 +4056,6 @@ test("dispatch: a spawn failure on a credentialFree leg (mint succeeded, spawn f
       cfg,
       stateDir: dir,
       claudeBin: join(dir, "does-not-exist-claude"),
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       guardHookPath: hook,
     });
@@ -4091,7 +4111,6 @@ test("dispatch: credentialFree opt strips forge/git credential env vars and seve
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -4202,7 +4221,6 @@ test("dispatch: credentialFree + mint FAILURE refuses the dispatch outright (fai
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -4240,7 +4258,6 @@ test("dispatch: a mint failure records a durable 'proxy-mint-failed' event (Work
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -4295,7 +4312,6 @@ test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheri
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -4346,7 +4362,6 @@ async function mkHandoffLane(
     cfg,
     stateDir: dir,
     claudeBin: bin,
-    hasOpenPr: async () => false,
     renderPrompt: () => "issue-rendered-prompt",
     heartbeatMs: 50,
     guardHookPath: hook,
@@ -4543,7 +4558,6 @@ test("resume: a mint failure records a durable 'proxy-mint-failed' event (Worker
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -4620,7 +4634,6 @@ test("resume: FIX-LEG ENTRY (opts.sessionId, no .handoff sentinel) — real Work
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => true,
       renderPrompt: () => "issue-rendered-prompt",
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -4669,7 +4682,6 @@ test("resume: fix-leg entry fails closed with NO terminal sentinel at all (never
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       guardHookPath: hook,
     });
@@ -4692,7 +4704,6 @@ test("resume: fix-leg entry fails closed when opts.sessionId is set but opts.pro
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       guardHookPath: hook,
     });
@@ -4766,7 +4777,6 @@ test("resume: FIX-LEG ENTRY consumes the stale prior-leg terminal sentinel on sp
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => true,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -4796,7 +4806,6 @@ test("resume: fix-leg entry does NOT remove the stale terminal sentinel when the
       cfg,
       stateDir: dir,
       claudeBin: bin,
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: hook,
@@ -4809,7 +4818,6 @@ test("resume: fix-leg entry does NOT remove the stale terminal sentinel when the
       cfg,
       stateDir: dir,
       claudeBin: join(dir, "does-not-exist-claude"),
-      hasOpenPr: async () => false,
       renderPrompt: () => "p",
       guardHookPath: hook,
     });

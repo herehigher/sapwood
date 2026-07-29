@@ -1233,14 +1233,14 @@ export interface WorkerDeps {
   worktreeRoot?: string;
   /** claude binary; default discoverClaudeBin(process.env). */
   claudeBin?: string;
-  /** probe()'s hasPr — engine wires this to the forge (an open PR for the issue). */
-  hasOpenPr: (issue: number) => Promise<boolean>;
-  /** probe()'s prNumber (#13 merge driver needs the actual PR number, not just "has one").
-   *  Optional and additive: when provided it also derives hasPr (a number means yes); when
-   *  omitted, probe() falls back to the legacy hasOpenPr-only boolean path (prNumber stays
-   *  undefined — a driving lane rescued that way can't be gated/merged until a number is
-   *  known, conductor.ts fails that lane safe rather than guessing). */
-  findOpenPr?: (issue: number) => Promise<number | null>;
+  /** #377: probe()'s hasPr/prNumber — resolves THIS LANE's own PR. Replaces the pre-#377
+   *  issue-number-keyed pair (`hasOpenPr`/`findOpenPr`, both deleted) that matched a PR body's
+   *  PROSE mention of the issue and, in the live F15 case, adopted an unrelated PR. The engine
+   *  wires this to forge.ts's `associateLanePr` (branch identity + the engine-authored PR-owner
+   *  marker); omitted -> no lane is ever associated with a PR (hasPr false, prNumber undefined),
+   *  which is the fail-closed direction: conductor.ts escalates such a lane to a human rather
+   *  than driving a guessed merge target. */
+  lanePr?: (lane: { name: string; issue: number; branch: string | null; mayOpenPr: boolean }) => Promise<number | null>;
   /** Worker prompt for an issue. Default: a minimal imperative skeleton. */
   renderPrompt?: (issue: Issue) => string;
   /** Path to the compiled guard hook (node <path>). Default: the dist sibling of this module. */
@@ -2506,14 +2506,15 @@ export class WorkerSupervisor implements Supervisor {
     const issue = this.laneIssue(name);
     let hasPr = false;
     let prNumber: number | undefined;
-    if (issue != null) {
-      if (this.deps.findOpenPr) {
-        const n = await this.deps.findOpenPr(issue);
-        hasPr = n != null;
-        if (n != null) prNumber = n;
-      } else {
-        hasPr = await this.deps.hasOpenPr(issue);
-      }
+    if (issue != null && this.deps.lanePr) {
+      // #377: the lane's PR is resolved from what THIS lane structurally produced — its own
+      // worktree's branch, plus the engine-authored owner marker — never from a PR body's prose.
+      // `mayOpenPr` is true only for a TERMINATED lane: the engine may open a missing PR once the
+      // worker is done, but must never race a still-running worker's own `gh pr create`. Patching
+      // an existing PR's body (the other engine-authored write) has no such race and is not gated.
+      const n = await this.deps.lanePr({ name, issue, branch: this.laneBranch(name), mayOpenPr: done || failed || handoff });
+      hasPr = n != null;
+      if (n != null) prNumber = n;
     }
     const costUsd = this.terminalCostUsd({ done, failed, handoff }, name);
     const modelUsage = this.terminalModelUsage({ done, failed, handoff }, name);
@@ -2881,6 +2882,37 @@ export class WorkerSupervisor implements Supervisor {
     const r = this.readJson(this.path(name, "running.json"));
     return typeof r?.wrapper_pid === "number" ? r.wrapper_pid : null;
   }
+  /** #377: the branch a lane's worktree is currently on — the structural "which code did THIS
+   *  lane produce" signal that lane->PR association is keyed on (see WorkerDeps.lanePr).
+   *
+   *  Read straight off git's own on-disk refs, never by shelling git: `<worktree>/.git` is a file
+   *  containing `gitdir: <path>` (a linked worktree, which is what the `claude` CLI's
+   *  `--worktree` flag creates), and that directory's `HEAD` holds `ref: refs/heads/<branch>`.
+   *  Plain file reads keep this path git-free for the same #65/#69 reason retainOrDeleteWorktree
+   *  is: the engine must never invoke git inside a directory a worker fully controlled (a
+   *  worker-set clean filter turns any git invocation into engine-side code execution). Reading
+   *  two files it wrote is data, not execution.
+   *
+   *  null — meaning "unknowable, fall back to a marker scan" — for a missing/deleted worktree, a
+   *  detached HEAD, or anything unparseable. Never throws. */
+  private laneBranch(name: string): string | null {
+    const dotGit = join(this.worktreeRoot, name, ".git");
+    try {
+      let gitDir = dotGit;
+      if (!lstatSync(dotGit).isDirectory()) {
+        // `String.match`, deliberately not the RegExp-side equivalent: worker.test.ts's #69
+        // grep-invariant bans that method's bare name anywhere in this module.
+        const link = readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+)$/m);
+        if (!link) return null;
+        gitDir = resolve(dirname(dotGit), link[1]!.trim());
+      }
+      const head = readFileSync(join(gitDir, "HEAD"), "utf8").match(/^ref:\s*refs\/heads\/(.+)$/m);
+      return head ? head[1]!.trim() : null;
+    } catch {
+      return null;
+    }
+  }
+
   private laneIssue(name: string): number | null {
     for (const ext of ["running.json", "done.json", "failed.json", "handoff.json"]) {
       const r = this.readJson(this.path(name, ext));

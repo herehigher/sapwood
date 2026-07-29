@@ -2976,7 +2976,7 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
   const forge = new FakeForge();
   const st = new State(dbPath);
   const issue = { number: 169, title: "restart adoption", labels: [] };
-  const s1 = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, heartbeatMs: 60_000 });
+  const s1 = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, heartbeatMs: 60_000 });
   let s2: WorkerSupervisor | undefined;
   try {
     const { name, sessionId } = await s1.dispatch(issue, "lane-169-integration");
@@ -2998,7 +2998,7 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
     s1.dispose(); // new engine has no in-memory ChildProcess/heartbeat timer
     utimesSync(join(dir, `${name}.heartbeat`), new Date(0), new Date(0));
 
-    s2 = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, heartbeatMs: 60_000 });
+    s2 = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, heartbeatMs: 60_000 });
     const adopted = await tick({ forge, state: st, supervisor: s2, cfg });
     assert.deepEqual(adopted.reclaimed, [{ kind: "kept", worker: name, issue: 169 }]);
     assert.equal(st.getWorker(name)?.state, "running");
@@ -3114,7 +3114,6 @@ test("#172 confirmed intent is adopted under PAUSE, then ordinary supervision re
     cfg,
     stateDir: dir,
     claudeBin: join(dir, "must-not-spawn"),
-    hasOpenPr: async () => false,
   });
   try {
     st.upsertWorker({
@@ -3176,7 +3175,6 @@ test("#172 unconfirmed resume intent escalates and latches under PAUSE without s
     cfg,
     stateDir: dir,
     claudeBin: join(dir, "must-not-spawn"),
-    hasOpenPr: async () => false,
   });
   const forge = new FakeForge();
   try {
@@ -3240,7 +3238,7 @@ test("#172 detached dispatch marker is not adopted: handoff spawns one real resu
     ].join("\n"),
     { mode: 0o755 },
   );
-  const supervisor = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false });
+  const supervisor = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin });
   try {
     state.upsertWorker({
       name: "lane-detached",
