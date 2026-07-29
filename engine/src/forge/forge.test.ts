@@ -1340,17 +1340,50 @@ test("parsePRStatus: a queued/in-progress check (null conclusion) is not green",
   assert.equal(s.ciRed, false); // #246: pending (null conclusion), not failed — must not read as CI_RED
 });
 
-test("parsePRStatus: SKIPPED/NEUTRAL count as passing", () => {
-  const s = parsePRStatus(
-    JSON.stringify({
-      number: 4,
-      headRefOid: "abc",
-      state: "OPEN",
-      mergeable: "MERGEABLE",
-      statusCheckRollup: [{ conclusion: "SKIPPED" }, { conclusion: "NEUTRAL" }, { conclusion: "SUCCESS" }],
-    }),
+// ── #401 (F26): gate① ciGreen conclusion truth table ────────────────────────────────────────
+// PRE-#401 behavior (for the record): PASSING was {SUCCESS, SKIPPED, NEUTRAL}, so a rollup of
+// [SKIPPED, NEUTRAL, SUCCESS] read ciGreen: true — a workflow whose test job was skipped merged
+// as "green". POST-#401: only a completed SUCCESS is execution evidence.
+test("parsePRStatus (#401): ciGreen conclusion truth table — only SUCCESS is green; SKIPPED/NEUTRAL no longer pass", () => {
+  const status = (conclusion: string | null) =>
+    parsePRStatus(
+      JSON.stringify({ number: 4, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [{ conclusion }] }),
+    );
+  const green = (conclusion: string | null) => status(conclusion).ciGreen;
+
+  assert.equal(green("SUCCESS"), true);
+  // The #401 change: completed-but-not-executed conclusions are not passing evidence.
+  assert.equal(green("SKIPPED"), false);
+  assert.equal(green("NEUTRAL"), false);
+  // Unchanged by #401 — never were green.
+  assert.equal(green("CANCELLED"), false);
+  assert.equal(green("STALE"), false);
+  assert.equal(green("ACTION_REQUIRED"), false);
+  assert.equal(green("FAILURE"), false);
+  assert.equal(green(null), false); // queued/in-progress
+  // #246 tri-state is untouched: SKIPPED/NEUTRAL are not-green but still NOT red — the engine
+  // must not dispatch a mechanical CI-fix leg at a job that was deliberately skipped.
+  assert.equal(status("SKIPPED").ciRed, false);
+  assert.equal(status("NEUTRAL").ciRed, false);
+
+  // Empty rollup: unchanged, fail-closed (no checks reported yet != "this repo has no CI").
+  assert.equal(
+    parsePRStatus(JSON.stringify({ number: 4, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] })).ciGreen,
+    false,
   );
-  assert.equal(s.ciGreen, true);
+  // Mixed rollup: one SKIPPED among otherwise-SUCCESS checks is enough to withhold green.
+  assert.equal(
+    parsePRStatus(
+      JSON.stringify({
+        number: 4,
+        headRefOid: "abc",
+        state: "OPEN",
+        mergeable: "MERGEABLE",
+        statusCheckRollup: [{ conclusion: "SKIPPED" }, { conclusion: "NEUTRAL" }, { conclusion: "SUCCESS" }],
+      }),
+    ).ciGreen,
+    false,
+  );
 });
 
 test("parsePRStatus: legacy StatusContext with passing state is green", () => {

@@ -184,8 +184,16 @@ false approval from one source never clears CI, human labels, or threads).
    GitHub App** [R3: the getPRChecks GraphQL query gains `checkSuite { app { slug } }`;
    a same-named check from an untrusted app is NOT evidence]. SKIPPED/NEUTRAL/
    legacy-status-context DO NOT satisfy it [closes the ciGreen SKIPPED/NEUTRAL hole
-   for this path; general gate① ciGreen semantics unchanged this round, noted as a
-   follow-up hardening candidate]. Deterministic check↔workflow-command binding is
+   for this path; general gate① ciGreen semantics were unchanged that round and noted
+   as a follow-up hardening candidate — **CLOSED by #401 (F26)**: gate① `ciGreen`
+   (`forge/forge.ts`'s `parsePRStatus`) now requires `conclusion === "SUCCESS"` from
+   every CheckRun, so SKIPPED/NEUTRAL no longer read as green on ANY path. #401
+   narrowed that existing predicate rather than promoting `requiredChecksSatisfied`
+   to the merge gate, because this function is fail-closed on an empty
+   `ci.requiredChecks` (the default) and promoting it would have wedged every repo
+   that has not configured one. See docs/configuration.md `ci` → "gate① CI evidence"
+   for the shipped behavior and the path-filtered-workflow adjustment path].
+   Deterministic check↔workflow-command binding is
    adjudicated infeasible statically [R3]: the agent reviews workflow-file changes in
    the diff (prompt-directed), and the residual is documented — not engine-proven.
 3. `ci.requiredChecks` empty ⇒ `code-verifiable` AC can at best be `claim-based`
@@ -263,7 +271,8 @@ comment).
 ## 9. Non-goals (v1)
 
 v2 list plus: codex-exec runner (D5 follow-up) · general gate① ciGreen
-SKIPPED/NEUTRAL semantics change (follow-up hardening) · producer `gh issue edit`
+SKIPPED/NEUTRAL semantics change (was a v1 non-goal — no longer open: **shipped by
+#401 (F26)**, `ciGreen` requires `SUCCESS`; see §4 item 2) · producer `gh issue edit`
 guard blocking (snapshot+drift makes it unnecessary for this design).
 
 ## 10. Execution plan (8 PRs) [R2 plan findings closed]

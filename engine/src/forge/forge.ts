@@ -2052,16 +2052,30 @@ export function parsePRStatus(json: string): PRStatus {
     statusCheckRollup?: { conclusion?: string | null; state?: string | null }[];
   };
   const checks = d.statusCheckRollup ?? [];
-  // FAIL CLOSED: green only when there is >=1 check AND every check is in a *completed*
-  // passing state. An EMPTY rollup is NOT green — on a fresh/just-pushed PR, checks may
-  // not be created yet, so empty != "this repo has no CI". A null/absent conclusion on a
-  // CheckRun means queued/in-progress (not green); SKIPPED/NEUTRAL are completed
-  // non-failing; StatusContext entries (no conclusion) pass on state==SUCCESS.
+  // FAIL CLOSED: green only when there is >=1 check AND every check CONCLUSIVELY PASSED.
+  // An EMPTY rollup is NOT green — on a fresh/just-pushed PR, checks may not be created yet,
+  // so empty != "this repo has no CI". A null/absent conclusion on a CheckRun means
+  // queued/in-progress (not green); StatusContext entries (no conclusion) pass on
+  // state==SUCCESS.
   // ponytail: genuinely CI-less repos get an explicit `ci.requireChecks: false` opt-in
   // when the merge gate is wired (M3), not a silent empty-means-green default.
   // (Codex P1/P2, PR #22.)
-  const PASSING = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
-  const ciGreen = checks.length > 0 && checks.every((c) => (c.conclusion != null ? PASSING.has(c.conclusion) : c.state === "SUCCESS"));
+  //
+  // #401 (F26), adjudicating the deferral recorded in design #279 §4 / §9: SKIPPED and NEUTRAL
+  // used to count as passing here, so a workflow whose test job never RAN (path filter, `if:`
+  // guard, a required job skipped by a bad matrix) read as gate①-green and could merge with zero
+  // execution evidence. They are completed-but-not-executed, not passing — the same stance
+  // review/ci-evidence.ts's requiredChecksSatisfied already takes on the engine-agent path
+  // ("SKIPPED/NEUTRAL/legacy-status-context DO NOT satisfy it"), now applied gate①-wide.
+  // Direction chosen: narrow this predicate, NOT adopt requiredChecksSatisfied at the merge gate
+  // — that function is fail-closed on an EMPTY `ci.requiredChecks` (the default), so making it
+  // gate① would wedge every repo that has not configured a required-check list, and it needs
+  // per-check `name`/`appSlug` this `gh pr view --json statusCheckRollup` call does not fetch.
+  // Compatibility: a repo that legitimately skips jobs on some PRs (path-filtered workflows) now
+  // stays not-green instead of merging — see docs/configuration.md `ci` for the adjustment path
+  // (make the job always run and skip its STEPS, so it reports SUCCESS). NOT routed to `ciRed`
+  // below: a skipped job is not a failure, and a mechanical CI-fix leg cannot fix one.
+  const ciGreen = checks.length > 0 && checks.every((c) => (c.conclusion != null ? c.conclusion === "SUCCESS" : c.state === "SUCCESS"));
   // #246: a completed, non-passing conclusion/state — deliberately NARROWER than "not passing"
   // (which would also match CANCELLED/ACTION_REQUIRED/STALE, ambiguous states a mechanical fix
   // leg shouldn't be dispatched against). An empty rollup is never red (checks.length > 0
