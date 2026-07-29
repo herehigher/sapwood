@@ -968,6 +968,12 @@ test("probeLlmPing: a hang past probeTimeoutSec is hard-killed and resolves fail
     const r = await probeLlmPing(bin, "haiku", 0.05, 1); // 1s timeout vs a 30s hang
     assert.equal(r.ok, false);
     assert.ok(r.detail?.includes("timed out"));
+    // #403 (F25): a DELIBERATE real-time assertion, and the margin ordering is why it is not the
+    // banned "two uncontrolled real operations race" shape (docs/REVIEW-DOCTRINE.md). The stub
+    // does zero real work — it sleeps 30s — so the only thing that can end this call inside the
+    // bound is the timeout kill under test. The three numbers are ordered by construction and by
+    // orders of magnitude, not by tuning: probe timeout 1s < this bound 10s < stub sleep 30s. A
+    // run 9x slower than expected still passes; a regression that drops the kill cannot pass.
     assert.ok(Date.now() - start < 10_000, "resolved via the timeout kill, not by waiting out the 30s sleep");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -3190,6 +3196,10 @@ test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP 
     assert.equal(typeof handoff.dispatched_at, "string", "dispatched_at persisted into the sentinel");
 
     // A long gap, then RESUME — the resumed run's started_at is now, AFTER the WIP's mtime.
+    // #403 (F25): a DELIBERATE real-clock read (this lane runs on `realClock`). The assertion
+    // below is pure MONOTONICITY — `dispatched_at` predates `started_at` — which is exactly the
+    // case the issue says to leave alone: a seeded clock would make it vacuous, and the only way
+    // it can fail is if the system clock runs backwards.
     await sleep(200);
     const resumed = await s.resume({ number: 74, title: "t", labels: [] }, name);
     assert.equal(resumed.name, name);

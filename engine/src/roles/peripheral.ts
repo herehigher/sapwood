@@ -398,6 +398,14 @@ export interface RoleRunnerDeps {
    *  overridden lower in tests that don't care about the timeout-fallback path itself. */
   preSpawnCaptureTimeoutMs?: number;
   preSpawnCapturePollMs?: number;
+  /** #403 (F25): killTree's SIGTERM -> SIGKILL grace, in ms. Default 200 — the production value,
+   *  unchanged. Injectable because a test that wants to observe what the heartbeat interval does
+   *  AFTER a timeout kill was issued otherwise has to race two real timers: this grace window
+   *  against its own `heartbeatMs` cadence, with the assertion ("several post-latch ticks ran")
+   *  decided by whichever wins. A test raises this so the SIGKILL is provably not what ends the
+   *  child, then ends the child itself on a condition it controls — the seam, not a bigger
+   *  margin (docs/REVIEW-DOCTRINE.md, "No timing-dependent assertions"). */
+  killGraceMs?: number;
   /** #253: a DEFAULT forge MCP proxy mint, applied to every session whose own RoleSessionOpts
    *  doesn't supply one. round-defaults.ts's stub factories (align.ts/architect.ts/plan-
    *  review.ts/harvest.ts/retro.ts) each build their own session object per invocation, none of
@@ -556,6 +564,7 @@ export class RoleRunner {
   private readonly guardHookPath: string;
   private readonly preSpawnCaptureTimeoutMs: number;
   private readonly preSpawnCapturePollMs: number;
+  private readonly killGraceMs: number;
 
   constructor(private readonly deps: RoleRunnerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "roles");
@@ -565,6 +574,7 @@ export class RoleRunner {
     this.guardHookPath = deps.guardHookPath ?? fileURLToPath(new URL("../guard/guard-hook.js", import.meta.url));
     this.preSpawnCaptureTimeoutMs = deps.preSpawnCaptureTimeoutMs ?? 30_000;
     this.preSpawnCapturePollMs = deps.preSpawnCapturePollMs ?? 100;
+    this.killGraceMs = deps.killGraceMs ?? 200;
     mkdirSync(this.dir, { recursive: true });
   }
 
@@ -1268,7 +1278,7 @@ export class RoleRunner {
 
   private async killTree(session: SpawnedSession): Promise<void> {
     session.killGroup("SIGTERM");
-    await sleep(200);
+    await sleep(this.killGraceMs);
     session.killGroup("SIGKILL");
   }
 
