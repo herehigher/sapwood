@@ -15,7 +15,7 @@ import { associateLanePr, GithubForge, type IForge, type Issue, type LanePrForge
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
 import { unadjudicatedConcerns } from "./loop/dissent.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
-import { InitError, init } from "./loop/init.js";
+import { InitError, init, requiredLabels } from "./loop/init.js";
 import { type EngineLogger, FileEngineLogger } from "./loop/logger.js";
 import { parseReconcileCompleted, reconcileStartup, type StartupOrphan, sweepStaleRoleSessions } from "./loop/reconcile.js";
 import { type PeripheralPhase, type RoundStopHit, type RoundsResult, runRounds } from "./loop/round.js";
@@ -802,6 +802,37 @@ export async function normalizeUnplacedBoardItems(
   }
 }
 
+/** #379 F1: provision every label the RESOLVED config names, once per engine start — the label
+ *  counterpart to normalizeUnplacedBoardItems' board normalization above, and deliberately the
+ *  same posture: idempotent, best-effort, never a startup blocker.
+ *
+ *  Live baseline (dogfood 2026-07-24): this repo was initialized before `round:pool`, `split`,
+ *  `decomposed` and `hold` existed, and NOTHING reconciles labels as the feature set grows — so
+ *  every one of the round's 8 pool-label writes failed against a label GitHub had never heard of.
+ *  A missing label is an environment condition the engine can fix itself, not a defect to die on.
+ *
+ *  The provisioning list is `requiredLabels(cfg)` — literally the one `sapwood init` uses (see
+ *  init.ts) — so a label added to the taxonomy later can never drift out of one path while
+ *  staying in the other. A failure here (no `repo` write scope, say) is logged and the engine
+ *  starts anyway: the pool-selection path downstream now parks on a total label-write failure
+ *  rather than exiting (align.ts's runPoolSelection), so a permission problem degrades to "no
+ *  pool this round", never a dead process. */
+export async function reconcileWorkflowLabels(
+  forge: Pick<IForge, "ensureRepoLabels">,
+  state: Pick<State, "appendEvent">,
+  cfg: SapwoodConfig,
+  log: (message: string) => void = console.error,
+): Promise<void> {
+  try {
+    const created = await forge.ensureRepoLabels(requiredLabels(cfg));
+    if (created.length === 0) return;
+    log(`[sapwood:startup] created ${created.length} missing workflow label(s): ${created.join(", ")}`);
+    state.appendEvent("labels-reconciled", { created });
+  } catch (error) {
+    log(`[sapwood:startup] could not reconcile the configured workflow labels; continuing: ${String(error)}`);
+  }
+}
+
 /** #410 amendment (owner ruling 2026-07-28): the tool names a `permissions.deny` entry can name
  *  to strip the #410 web-access grant — matched bare ("WebSearch") or `Tool(...)`-qualified (a
  *  "WebSearch(" prefix, e.g. "WebSearch(domain:x)"). */
@@ -1097,6 +1128,9 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // startup with zero dispatch, not silently stop the run after the first wave of workers.
   await assertStopMilestoneExists(forge, stop);
   await normalizeUnplacedBoardItems(forge, state, log);
+  // #379 F1: same best-effort startup-pass stance as the board normalization above — provisions
+  // any workflow label this repo is missing so the round's own label writes can land.
+  await reconcileWorkflowLabels(forge, state, cfg, log);
   // #410 amendment: same best-effort startup-pass stance as the board normalization above —
   // detects, never blocks, never mutates.
   checkWebAccessSettingsDenial(cfg, state, log);
@@ -1221,6 +1255,9 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // with zero dispatch, checked here identically for the round path's own FINAL stop condition.
   await assertStopMilestoneExists(forge, stop);
   await normalizeUnplacedBoardItems(forge, state, log);
+  // #379 F1: same best-effort startup-pass stance as the board normalization above — provisions
+  // any workflow label this repo is missing so the round's own label writes can land.
+  await reconcileWorkflowLabels(forge, state, cfg, log);
   // #410 amendment: same best-effort startup-pass stance as the board normalization above —
   // detects, never blocks, never mutates.
   checkWebAccessSettingsDenial(cfg, state, log);

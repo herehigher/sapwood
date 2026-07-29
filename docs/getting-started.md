@@ -57,6 +57,11 @@ sapwood init
    you've already customized. Set `labels.prefix: ""` for bare defaults; explicitly configured
    workflow-label values are used verbatim. Existing pre-#199 repositories must complete the
    [label migration before restarting sapwood](configuration.md#upgrading-from-pre-199).
+   The **engine repeats this same provisioning pass at every `sapwood run` startup**, from the
+   same list — so a repo initialized before a newer workflow label existed (say
+   `sapwood:round:pool`) simply gets that label created on the next start, with no manual
+   label-creation step. It is best-effort: if the token cannot create labels, the engine logs
+   the failure and starts anyway.
 4. **Ensures any configured milestones exist** (`config.milestones`; empty by default —
    sapwood only needs labels + board lanes, milestones are your organizational choice).
 5. **Ensures the ProjectV2 board's `Status` field has the configured lanes**

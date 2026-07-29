@@ -391,6 +391,80 @@ An empty list is legal so configuration can be adopted incrementally. With
 fail-closed because it has no trusted execution evidence; no paid review session begins until at
 least one required check is configured and satisfied.
 
+### gate① CI evidence (all reviewer modes)
+
+Independently of `requiredChecks`, every reviewer mode has a gate① CI signal derived from the
+PR's own status-check rollup. It is green only when the rollup has **at least one** check and
+**every** check conclusively passed — a modern CheckRun with conclusion `SUCCESS`, or a legacy
+commit status context with state `SUCCESS`. There is no configuration knob for this; it is not
+the `requiredChecks` list.
+
+Legacy commit status contexts still pass this gate, even though they never satisfy a
+`requiredChecks` entry. That is not an inconsistency: `requiredChecks` rejects them because a
+status context has no check suite and so its owning GitHub App cannot be verified against a
+configured `{name, app}` pair — a binding specific to that opt-in evidence chain. Gate① is the
+general "did this repo's CI pass" signal for every reviewer mode, the Status API has no
+`SKIPPED`/`NEUTRAL` concept, and rejecting status contexts here would leave any repo whose CI
+reports through that API unable to ever reach green. Repos that want the app-bound, forge-resistant
+boundary at review time configure `requiredChecks`.
+
+`SKIPPED` and `NEUTRAL` are **not** green (#401). They mean the job did not execute, so they are
+not evidence that anything was verified — a workflow whose test job is skipped used to read as
+gate①-green and could be merged with zero execution evidence. Queued/in-progress checks
+(no conclusion yet) and `CANCELLED` / `STALE` / `ACTION_REQUIRED` are not green either, and an
+empty rollup is not green (a just-pushed PR whose checks have not been created yet must not read
+as "this repo has no CI"). None of these are treated as CI *failure* either: they leave the gate
+waiting rather than dispatching a mechanical CI-fix leg, which cannot fix a job that was
+deliberately skipped.
+
+**Compatibility — repos that legitimately skip jobs.** If a workflow uses `paths:` /`paths-ignore:`
+filters or a job-level `if:` so that a check reports `SKIPPED` on some PRs, those PRs no longer
+reach gate①-green and the lane will wait instead of merging. This is the same trap GitHub's own
+required-status-checks have, and it has the same fix: **make the job always run and skip its
+steps**, so it still reports `SUCCESS`.
+
+```yaml
+# Before: the whole job is filtered out -> reports SKIPPED -> not gate①-green.
+on:
+  pull_request:
+    paths: ["engine/**"]
+
+# After: the job always runs; only the expensive steps are conditional -> reports SUCCESS.
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The default depth-1 clone has no base commit to diff against.
+          fetch-depth: 0
+      - id: changed
+        shell: bash
+        run: |
+          # set -e so a BROKEN detector fails the job. It must never fall back to
+          # "nothing changed" — that skips the tests and still reports SUCCESS, which
+          # is exactly the zero-execution-evidence hole this guidance exists to close.
+          set -euo pipefail
+          files="$(git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD)"
+          if grep -q '^engine/' <<<"$files"; then
+            echo "engine=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "engine=no" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.changed.outputs.engine == 'yes'
+        run: npm test
+```
+
+The failure direction matters more than the detector: a change detector that errors must fail
+the job loudly, never default to "no changes". A silent `|| echo no` turns an unfetched ref or a
+bad path into a green check with nothing executed — the same hole as a `SKIPPED` job, but harder
+to see.
+
+The alternative, if a check should not participate in the merge decision at all, is to not run it
+on `pull_request` — a check that never appears in the rollup does not hold the gate, whereas one
+that appears as `SKIPPED` does.
+
 ## `labels`
 
 The label taxonomy the loop reads and writes. GitHub label names are case-insensitively
@@ -797,7 +871,7 @@ that failed and degraded to local.
 | Key | Default | Meaning |
 |---|---|---|
 | `humanLabels` | `[sapwood:needs-human, sapwood:blocked]` | When omitted, derives from `labels.prefix`. Any matching label on an issue means "stop autonomy, ask a human" for that issue. An explicit array is used verbatim and must list `labels.needsHuman` case-insensitively so PR and issue holds recognize the same escalation label. |
-| `holdLabels` | `[sapwood:hold]` | (#248) The **human-applied WAIT-tier hold** — distinct from `humanLabels`' engine-written ESCALATE tier (three-tier escalation model: `hold`/`needs-human`/`blocked`, each one fact, one bit). When omitted, derives from `labels.prefix`; `sapwood init` provisions the repo-level label definition for the resolved value(s) (review round 1, G2 — the label otherwise doesn't exist for a human to pick from the PR UI). Entries are trimmed and must be non-empty, and are matched everywhere by **exact case-insensitive identity** (review round 1, G3) — never substring, unlike `humanLabels`'s historical matching — so a short/generic entry can never hold more than configured. Two distinct carriers, each gating only its own surface: a **PR-level** hold is checked in the PR gate (`deriveGate`, `merge-driver.ts`) BEFORE any review signal and before the `FIXABLE` gate — while a matching label sits on the PR, there is no merge, no new fix-leg dispatch, and the `#170` review-silence escalation is suppressed — the lane stays `driving`/`fixing`, holding its slot; an in-flight fix leg a prior tick already dispatched is never interrupted (hold gates only the NEXT drive decision). A simultaneous `humanLabels` entry always wins (fail-safe: escalation semantics, never silently masked by a hold). An **issue-level** hold is also checked by `#147`'s GATED RECLAIM phase (review round 1, G1) — it SKIPs reentry for an already-escalated (`failed`+`needs-human`) lane exactly like a standing `humanLabels` entry does, so a human can take control of the reentry decision itself without burning a `gated_reentry_attempts` slot; this reuses the SAME already-fetched issue-label read, no new forge call. An issue-level hold on a lane that is still `driving` (not yet escalated) has no effect — documented, accepted blind spot; that lane's own hold-handling is the PR-level check above. **Write-side asymmetry is the audit trail:** the engine never writes a hold label — only `needsHuman`/`blocked` are ever engine-applied; a human applies and removes `hold` themselves (a future dashboard "I'm reviewing" control is just a remote hand on the same label). Must be a value distinct from every other protected label (`needsHuman`, `blocked`, `roundPool`, …) — config load rejects the collision, same guard `labels.roundPool` uses. See `docs/PLAN.md`'s escalation-model section for the full handshake protocol and its one documented, accepted tick-scale race window. |
+| `holdLabels` | `[sapwood:hold]` | (#248) The **human-applied WAIT-tier hold** — distinct from `humanLabels`' engine-written ESCALATE tier (three-tier escalation model: `hold`/`needs-human`/`blocked`, each one fact, one bit). When omitted, derives from `labels.prefix`; `sapwood init` provisions the repo-level label definition for the resolved value(s) (review round 1, G2 — the label otherwise doesn't exist for a human to pick from the PR UI). Entries are trimmed and must be non-empty, and are matched everywhere by **exact case-insensitive identity** (review round 1, G3) — never substring, unlike `humanLabels`'s historical matching — so a short/generic entry can never hold more than configured. **One carrier: the PR** (#400). The label is provisioned with exactly this description, which is the whole contract: `A human is reviewing this PR — automation pauses; remove to resume. No effect on issues.` It is checked in the PR gate (`deriveGate`, `merge-driver.ts`) BEFORE any review signal and before the `FIXABLE` gate — while a matching label sits on the PR, there is no merge, no new fix-leg dispatch, and the `#170` review-silence escalation is suppressed — the lane stays `driving`/`fixing`, holding its slot; an in-flight fix leg a prior tick already dispatched is never interrupted (hold gates only the NEXT drive decision). A simultaneous `humanLabels` entry always wins (fail-safe: escalation semantics, never silently masked by a hold). Applying this label to an **issue** does nothing at all — no engine code reads a hold from an issue (#400 deleted the second carrier `#248` review round 1 had added to `#147`'s GATED RECLAIM phase); to pause an escalated lane, leave `needs-human`/`blocked` in place, since removing it *is* the go-ahead signal. **Write-side asymmetry is the audit trail:** the engine never writes a hold label — only `needsHuman`/`blocked` are ever engine-applied; a human applies and removes `hold` themselves (a future dashboard "I'm reviewing" control is just a remote hand on the same label). Must be a value distinct from every other protected label (`needsHuman`, `blocked`, `roundPool`, …) — config load rejects the collision, same guard `labels.roundPool` uses. See `docs/PLAN.md`'s escalation-model section for the full handshake protocol and its one documented, accepted tick-scale race window. |
 | `instructionPaths` | `[CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/**, AGENTS.md]` | (#292) Canonical repo-root-relative reviewer-instruction paths. Before either classic or engine-agent review work begins, sapwood fetches the PR's rename-aware changed-file list; an old **or** new path matching this list applies `labels.needsHuman` and posts one explanatory comment. A list at GitHub's 3,000-file API ceiling is potentially incomplete and escalates to human review without attempting to prove it safe. The exact needs-human PR label is the idempotence latch, so repeated ticks never repeat the writes or fetch files again. Matching is case-insensitive because instruction files are consumed on case-insensitive macOS/Windows checkouts; supported glob subset: `*` within one path segment and `**` across zero or more segments. Entries must be non-empty and already trimmed, must not start with `./` or `/`, contain a `..` path segment or `//`, or end with `/`. Set to `[]` to deliberately disable this mechanism; disabled runs do not fetch changed files. This is merge-gate escalation only—workers may legitimately edit instruction files. |
 
 ## `notify`

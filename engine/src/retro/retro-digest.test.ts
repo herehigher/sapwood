@@ -14,6 +14,10 @@ import { buildRetroDigest, capDigest, gatherDigestIssues, gatherTouchedPRs, PR_T
 // ── A programmable fake IForge — call-recording, per-item response tables ──────────────────
 
 class FakeForge implements IForge {
+  // #379: repo-level label provisioning — no test in this file exercises it.
+  async ensureRepoLabels(): Promise<string[]> {
+    return [];
+  }
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }

@@ -44,6 +44,10 @@ import {
 import { RoundScopedForge } from "./round.js";
 
 class FakeForge implements IForge {
+  // #379: repo-level label provisioning — no test in this file exercises it.
+  async ensureRepoLabels(): Promise<string[]> {
+    return [];
+  }
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
@@ -2846,6 +2850,30 @@ test("applyPoolLabels (gate② P2-4, via selectRoundPool): every label write fai
   })();
   forge.ready = [mkReady(1, 3), mkReady(2, 3)];
   await assert.rejects(() => selectRoundPool({ forge, cfg }), /ALL 2 label write\(s\) failed/);
+});
+
+test("#379 F2 runPoolSelection: every label write failing PARKS the round — contained, one durable pool-labels-failed event, never a thrown phase (which exited the process)", async () => {
+  const cfg = mkCfg();
+  const forge = new (class extends FakeForge {
+    override async addLabel(): Promise<void> {
+      throw new Error("simulated forge failure");
+    }
+  })();
+  forge.ready = [mkReady(1, 3), mkReady(2, 3)];
+  const state = new State(":memory:");
+  const runner = new ScriptedRunner([]);
+  const logs: string[] = [];
+  try {
+    const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 4, log: (line) => logs.push(line) });
+    assert.deepEqual(selected, [], "nothing landed in the pool, so nothing is dispatchable this round — the round parks");
+    const events = state.eventsSince("1970-01-01T00:00:00.000Z", ["pool-labels-failed"]);
+    assert.equal(events.length, 1);
+    assert.deepEqual((events[0]!.payload as { round_id: number; attempted: number }).round_id, 4);
+    assert.deepEqual((events[0]!.payload as { round_id: number; attempted: number }).attempted, 2);
+    assert.ok(logs.some((line) => /ALL 2 label write\(s\) failed/.test(line)));
+  } finally {
+    state.close();
+  }
 });
 
 test("applyPoolLabels (gate② P2-4): a validly EMPTY selection (zero candidates) never throws — 'select/have nothing' is a legitimate outcome, not a failure", async () => {

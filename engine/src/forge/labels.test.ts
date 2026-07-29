@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  createMissingLabels,
   firstMatchingLabel,
   labelsInclude,
   labelsIncludeAnySubstring,
@@ -58,4 +59,39 @@ test("priority and blocked-by matchers accept only the configured prefix", () =>
   assert.equal(matchBlockedByLabel("Sapwood:Blocked-By:17", SAPWOOD_LABEL_PREFIX), 17);
   assert.equal(matchBlockedByLabel("BLOCKED-BY:#5", ""), 5);
   assert.equal(matchBlockedByLabel("sapwood:blocked-by:nope", SAPWOOD_LABEL_PREFIX), null);
+});
+
+// ── #379 F1: label provisioning shared by `sapwood init` and the engine's startup reconcile ──
+
+test("#379 createMissingLabels: creates only what the repo lacks (case-insensitive), returns the created names", async () => {
+  const calls: string[][] = [];
+  const run = async (args: string[]): Promise<string> => {
+    calls.push(args);
+    return args[1] === "list" ? JSON.stringify([{ name: "Sapwood:In-Progress" }]) : "";
+  };
+  const created = await createMissingLabels(run, "o/r", [
+    { name: "sapwood:in-progress", color: "0e8a16", description: "already there, differently cased" },
+    { name: "sapwood:round:pool", color: "5319e7", description: "in this round's pool" },
+  ]);
+  assert.deepEqual(created, ["sapwood:round:pool"]);
+  assert.deepEqual(calls, [
+    ["label", "list", "--repo", "o/r", "--limit", "200", "--json", "name"],
+    ["label", "create", "sapwood:round:pool", "--repo", "o/r", "--color", "5319e7", "--description", "in this round's pool"],
+  ]);
+});
+
+test("#379 createMissingLabels: a lost list→create race ('already exists') is a no-op, not a failure", async () => {
+  const run = async (args: string[]): Promise<string> => {
+    if (args[1] === "list") return "[]";
+    throw Object.assign(new Error("gh failed"), { stderr: "HTTP 422: Validation Failed (label already exists)" });
+  };
+  assert.deepEqual(await createMissingLabels(run, "o/r", [{ name: "sapwood:split", color: "fbca04", description: "d" }]), []);
+});
+
+test("#379 createMissingLabels: a real create failure (no permission) propagates to the caller", async () => {
+  const run = async (args: string[]): Promise<string> => {
+    if (args[1] === "list") return "[]";
+    throw Object.assign(new Error("gh failed"), { stderr: "HTTP 403: Resource not accessible by integration" });
+  };
+  await assert.rejects(() => createMissingLabels(run, "o/r", [{ name: "sapwood:split", color: "fbca04", description: "d" }]), /gh failed/);
 });
