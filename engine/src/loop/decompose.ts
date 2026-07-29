@@ -632,7 +632,7 @@ export interface DecomposeDeps {
   state: State;
   cfg: SapwoodConfig;
   runner: Pick<RoleRunner, "run">;
-  now?: () => Date;
+  now: () => Date;
   log?: (message: string) => void;
 }
 
@@ -725,7 +725,7 @@ export async function runDecompositionPass(deps: DecomposeDeps, roundId: number,
         disallowedTools: PO_DISALLOWED_TOOLS,
       },
       issue: parent.number,
-      now: deps.now ?? (() => new Date()),
+      now: deps.now,
       ...(deps.log !== undefined ? { log: deps.log } : {}),
       contextManifest: {
         roundId,

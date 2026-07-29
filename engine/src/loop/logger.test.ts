@@ -6,6 +6,13 @@ import { test } from "node:test";
 import { State } from "../state/state.js";
 import { type EngineLogger, FileEngineLogger } from "./logger.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 const NOW = new Date("2026-07-16T01:02:03.004Z");
 const tempDir = () => mkdtempSync(join(tmpdir(), "sapwood-logger-"));
 
@@ -171,7 +178,10 @@ test("FileEngineLogger rotates current to .1 before crossing maxBytes and keeps 
 test("FileEngineLogger throws clearly when its startup open fails", () => {
   const dir = tempDir();
   try {
-    assert.throws(() => new FileEngineLogger({ path: dir, teeToStderr: false, maxBytes: 1024 }), /sapwood run: failed to open log file/);
+    assert.throws(
+      () => new FileEngineLogger({ now: realClock, path: dir, teeToStderr: false, maxBytes: 1024 }),
+      /sapwood run: failed to open log file/,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

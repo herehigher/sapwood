@@ -18,6 +18,13 @@ import { State } from "../state/state.js";
 import type { ProxyForge } from "./mcp-server.js";
 import { createProxyMint } from "./mint.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 function fakeForge(over: Partial<ProxyForge> = {}): ProxyForge {
   const meta: IssueMeta = { number: 1, title: "t", state: "OPEN", labels: [], updatedAt: "2026-07-17T00:00:00Z" };
   const comments: PRComment[] = [];
@@ -61,7 +68,7 @@ test("createProxyMint: mints a handle scoped to the caller's role — an issue-o
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const state = new State(":memory:");
   try {
-    const mint = createProxyMint({ cfg, forge: fakeForge(), state, roundId: 1, phase: "architecting" });
+    const mint = createProxyMint({ now: realClock, cfg, forge: fakeForge(), state, roundId: 1, phase: "architecting" });
     const architectHandle = await mint({ role: "architect", session: "role-architect-abc" });
     try {
       assert.deepEqual(
@@ -89,7 +96,7 @@ test("createProxyMint: an unrecognized role mints a handle with ZERO tools (deny
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const state = new State(":memory:");
   try {
-    const mint = createProxyMint({ cfg, forge: fakeForge(), state, roundId: 1, phase: "p" });
+    const mint = createProxyMint({ now: realClock, cfg, forge: fakeForge(), state, roundId: 1, phase: "p" });
     const handle = await mint({ role: "some-typo-d-role", session: "s" });
     try {
       assert.deepEqual(handle.toolNames, []);
@@ -105,7 +112,7 @@ test("createProxyMint: each mint() call is a FRESH server (distinct port + token
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const state = new State(":memory:");
   try {
-    const mint = createProxyMint({ cfg, forge: fakeForge(), state, roundId: 1, phase: "p" });
+    const mint = createProxyMint({ now: realClock, cfg, forge: fakeForge(), state, roundId: 1, phase: "p" });
     const a = await mint({ role: "worker", session: "s1" });
     const b = await mint({ role: "worker", session: "s2" });
     try {
@@ -145,7 +152,7 @@ test("integration: a real proxy minted for role 'worker' enforces the role matri
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const state = new State(":memory:");
   try {
-    const mint = createProxyMint({ cfg, forge: fakeForge(), state, roundId: 7, phase: "executing" });
+    const mint = createProxyMint({ now: realClock, cfg, forge: fakeForge(), state, roundId: 7, phase: "executing" });
     const handle = await mint({ role: "worker", session: "lane-42-abcdef" });
     try {
       // 1. Role-matrix enforcement: 'worker' gets PR_TOOLS only — an ISSUE tool is role_denied,

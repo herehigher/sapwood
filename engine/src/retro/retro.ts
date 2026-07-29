@@ -178,7 +178,7 @@ export interface RetroDeps {
   /** Injected so tests fake the underlying session directly (same "fake the collaborator, not
    *  the CLI" split as plan-review.ts's/harvest.ts's own tests). */
   runner: Pick<RoleRunner, "run">;
-  now?: () => Date;
+  now: () => Date;
   log?: (message: string) => void;
 }
 
@@ -310,7 +310,7 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
           scratchFile: RETRO_SCRATCH_FILE,
         },
         issue: 0, // round-level spend, no single associated issue — same 0 sentinel as harvest.ts
-        now: deps.now ?? (() => new Date()),
+        now: deps.now,
         ...(deps.log !== undefined ? { log: deps.log } : {}),
         // #236: record this phase's ambient-context manifest for EVERY attempt. `retro` is the
         // one role session that holds write-capable tools (Write + local git), so its recorded

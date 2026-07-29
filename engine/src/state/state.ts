@@ -1850,6 +1850,12 @@ export class State {
   }
 
   appendEvent(kind: string, payload: unknown): void {
+    // #403 (F25) per-site decision: DELIBERATE wall-clock read, left as-is. `events.ts` answers
+    // "when did the engine actually do this", so the honest source is the machine's clock at the
+    // moment of the write — a seeded clock here would make the audit trail lie. Nothing reads it
+    // back as a decision input (it is ordered by `id`, never by `ts` — see the crash-rerun
+    // doctrine's "id cursors, not timestamps"), and no assertion in the suites compares an event
+    // `ts` to a seeded date, so this is not part of the seeded-date/wall-clock intersection.
     this.db.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)").run(new Date().toISOString(), kind, JSON.stringify(payload));
   }
 
@@ -2518,6 +2524,13 @@ export class State {
 
   /** Persist a phase stub's externalized idempotency token WITHOUT changing phase — the
    *  rerun-not-resume marker a crash-and-restart hands back to that same phase's stub. */
+  /* #403 (F25) per-site decision: `now` stays OPTIONAL here, unlike every `now?: () => Date`
+   * seam this issue made required. It is not a clock DEPENDENCY — it's a caller-supplied
+   * timestamp for callers (round.ts) that already hold this round's `iso()` and want the row to
+   * agree with it. Omitted, it falls back to the same deliberate wall clock `appendEvent` above
+   * documents: "when did the engine write this row", never a decision input, never compared to a
+   * seeded date by any assertion. Making it required would thread a timestamp through nine
+   * call sites to change nothing observable. */
   setRoundMarker(id: number, marker: string, now?: string): void {
     this.db
       .prepare("UPDATE rounds SET artifact_ref = ?, updated_at = ? WHERE round_id = ?")
@@ -2861,6 +2874,8 @@ export class State {
    *  THREE-STATE (schema v16->v17): an omitted `row.truncated` (the caller has no idea whether
    *  this channel was truncated by some upstream mechanism it can't see) persists as SQL NULL,
    *  never coerced to `false` — only an EXPLICIT `true`/`false` from the caller writes 1/0. */
+  /* #403 (F25): `now` optional for the same reason as setRoundMarker's above — a caller-supplied
+   * timestamp, not a clock seam; the fallback is the deliberate audit wall-clock. */
   appendInputManifest(row: InputManifestRow, now?: string): void {
     this.db
       .prepare(

@@ -19,6 +19,13 @@ import { State } from "../state/state.js";
 import { buildMcpConfigJson, type ForgeProxyDeps, type ProxyForge, startForgeProxyServer } from "./mcp-server.js";
 import { FORGE_MCP_SERVER_NAME, ISSUE_TOOLS, PR_TOOLS, TOOL_NAMES } from "./tools.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 const CAPS = {
   maxIssuesPerCall: 10,
   defaultCommentsPerIssue: 20,
@@ -144,6 +151,7 @@ test("auth: after stop(), the token is revoked immediately -> 401 for any furthe
   const state = new State(":memory:");
   try {
     const h = await startForgeProxyServer({
+      now: realClock,
       forge: fakeForge(),
       state,
       identity: { roundId: 1, phase: "p", role: "r", session: "s", attempt: 1 },

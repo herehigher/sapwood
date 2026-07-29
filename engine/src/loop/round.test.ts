@@ -44,6 +44,13 @@ import {
 } from "./round.js";
 import { type RoundArtifact, RoundArtifactSchema } from "./round-artifact.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 class FakeForge implements IForge {
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
@@ -3176,7 +3183,11 @@ async function callProxyTool(url: string, token: string, name: string, args: unk
 test("buildFixLegResume (#253): cfg.proxy.enabled: false (the default) -> undefined regardless of renderFixPrompt being supplied", () => {
   const state = new State(":memory:");
   try {
-    const result = buildFixLegResume({ cfg: mkCfg(), state, renderFixPrompt: (i, p) => `fix #${i} for PR #${p}` }, fakeProxyForge(), 1);
+    const result = buildFixLegResume(
+      { now: realClock, cfg: mkCfg(), state, renderFixPrompt: (i, p) => `fix #${i} for PR #${p}` },
+      fakeProxyForge(),
+      1,
+    );
     assert.equal(result, undefined);
   } finally {
     state.close();
@@ -3186,7 +3197,11 @@ test("buildFixLegResume (#253): cfg.proxy.enabled: false (the default) -> undefi
 test("buildFixLegResume (#253): cfg.proxy.enabled: true, shadow: false, but NO renderFixPrompt supplied -> undefined (round.ts's own skeleton tests/callers never touch #246's FIXABLE path)", () => {
   const state = new State(":memory:");
   try {
-    const result = buildFixLegResume({ cfg: mkCfg({ proxy: { enabled: true, shadow: false } }), state }, fakeProxyForge(), 1);
+    const result = buildFixLegResume(
+      { now: realClock, cfg: mkCfg({ proxy: { enabled: true, shadow: false } }), state },
+      fakeProxyForge(),
+      1,
+    );
     assert.equal(result, undefined);
   } finally {
     state.close();
@@ -3198,7 +3213,11 @@ test("buildFixLegResume (#253 review round 2, H1): cfg.proxy.enabled: true, shad
   try {
     const cfg = mkCfg({ proxy: { enabled: true } }); // shadow defaults true
     assert.equal(cfg.proxy.shadow, true);
-    const result = buildFixLegResume({ cfg, state, renderFixPrompt: (i, p) => `fix #${i} for PR #${p}` }, fakeProxyForge(), 1);
+    const result = buildFixLegResume(
+      { now: realClock, cfg, state, renderFixPrompt: (i, p) => `fix #${i} for PR #${p}` },
+      fakeProxyForge(),
+      1,
+    );
     assert.equal(result, undefined, "shadow mode: the machinery stays mintable for a scoped harness, but never attached in production");
   } finally {
     state.close();
@@ -3210,7 +3229,7 @@ test("buildFixLegResume (#253): proxy.enabled: true, shadow: false (the go-live 
   try {
     const renderFixPrompt = (issueNumber: number, pr: number): string => `fix #${issueNumber} for PR #${pr}`;
     const result = buildFixLegResume(
-      { cfg: mkCfg({ proxy: { enabled: true, shadow: false } }), state, renderFixPrompt },
+      { now: realClock, cfg: mkCfg({ proxy: { enabled: true, shadow: false } }), state, renderFixPrompt },
       fakeProxyForge(),
       42,
     );

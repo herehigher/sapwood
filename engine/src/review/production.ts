@@ -19,7 +19,7 @@ export interface ProductionEngineAgentOptions {
   worktreeRoot?: string;
   reviewTreeRoot?: string;
   materializeOverride?: (head: string) => Promise<MaterializeResult>;
-  now?: () => Date;
+  now: () => Date;
   newRunId?: () => string;
   log?: (message: string) => void;
 }
@@ -100,7 +100,7 @@ export function makeProductionEngineAgent(
   forge: IForge,
   state: State,
   runner: Pick<RoleRunner, "run">,
-  options: ProductionEngineAgentOptions = {},
+  options: ProductionEngineAgentOptions,
 ) {
   const sourceRepoDir = options.sourceRepoDir ?? process.cwd();
   const cloneDir = options.privateCloneDir ?? defaultPrivateCloneDir(sourceRepoDir);
@@ -108,7 +108,7 @@ export function makeProductionEngineAgent(
   const treeRoot = options.reviewTreeRoot ?? join(sourceRepoDir, "data", "review", "trees");
   const artifacts = new Map<string, EngineReviewArtifact>();
   let activeWorker: string | null = null; // conductor DRIVE is single-writer serial
-  const now = options.now ?? (() => new Date());
+  const now = options.now;
   const log = options.log ?? console.error;
 
   const reviewer = makeEngineAgentReviewer({

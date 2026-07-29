@@ -71,7 +71,7 @@ export interface HarvestDeps {
    *  covers the real claude-stub spawn path (same "fake the collaborator, not the CLI" split
    *  plan-review.ts's own tests use). */
   runner: Pick<RoleRunner, "run">;
-  now?: () => Date;
+  now: () => Date;
   log?: (message: string) => void;
 }
 
@@ -296,7 +296,7 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
           // `issue` column is NOT NULL; harvest is the first role whose session isn't scoped
           // to one issue).
           issue: 0,
-          now: deps.now ?? (() => new Date()),
+          now: deps.now,
           ...(deps.log !== undefined ? { log: deps.log } : {}),
           // #236: record this phase's ambient-context manifest for EVERY attempt (round-scoped,
           // no single associated issue — same round-level shape as `issue: 0` above). See

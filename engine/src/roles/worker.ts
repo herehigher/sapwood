@@ -1246,7 +1246,7 @@ export interface WorkerDeps {
   /** Path to the compiled guard hook (node <path>). Default: the dist sibling of this module. */
   guardHookPath?: string;
   heartbeatMs?: number; // default 30_000
-  now?: () => Date;
+  now: () => Date;
   /** #395: injected timer so a test can deterministically win the spawn-confirmation watchdog
    *  race (util/spawn-confirm.ts's awaitSpawnConfirmation) without depending on real OS
    *  process-spawn timing. Default: a real, cancelable `setTimeout`. */
@@ -1445,7 +1445,7 @@ export class WorkerSupervisor implements Supervisor {
     return join(this.dir, `${name}.${ext}`);
   }
   private now(): Date {
-    return this.deps.now ? this.deps.now() : new Date();
+    return this.deps.now();
   }
   private log(message: string): void {
     (this.deps.log ?? console.error)(message);
@@ -2855,12 +2855,14 @@ export class WorkerSupervisor implements Supervisor {
 
   private touchHeartbeat(name: string): void {
     const p = this.path(name, "heartbeat");
-    if (existsSync(p)) {
-      const t = new Date();
-      utimesSync(p, t, t);
-    } else {
-      writeFileSync(p, "");
-    }
+    if (!existsSync(p)) writeFileSync(p, "");
+    // #403 (F25): stamp with the INJECTED clock, never `new Date()`. heartbeatAge() below reads
+    // this file's mtime and subtracts it from `this.now()` — both sides of that subtraction must
+    // come from the same clock, or a fixture that seeds `now` computes a nonsense age against a
+    // real filesystem timestamp. (The create branch above used to leave a real mtime behind for
+    // exactly that mismatch.)
+    const t = this.now();
+    utimesSync(p, t, t);
   }
   private heartbeatAge(name: string): number {
     const p = this.path(name, "heartbeat");

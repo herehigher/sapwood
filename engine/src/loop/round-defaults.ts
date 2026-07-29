@@ -37,7 +37,7 @@ export interface DefaultPeripheralsDeps {
   /** Injected so tests can fake the underlying session, same "fake the collaborator, not the
    *  CLI" split every other role module's Deps uses. A real caller passes a real RoleRunner. */
   runner: Pick<RoleRunner, "run">;
-  now?: () => Date;
+  now: () => Date;
   log?: (message: string) => void;
 }
 
@@ -155,7 +155,7 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
     state: deps.state,
     cfg: deps.cfg,
     runner: deps.runner,
-    ...(deps.now !== undefined ? { now: deps.now } : {}),
+    now: deps.now,
     ...(deps.log !== undefined ? { log: deps.log } : {}),
   };
 
@@ -228,7 +228,7 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
         state: deps.state,
         runner: deps.runner,
         roundId: ctx.roundId,
-        ...(deps.now !== undefined ? { now: deps.now } : {}),
+        now: deps.now,
         ...(deps.log !== undefined ? { log: deps.log } : {}),
         onSessionRan: () => {
           poolSessionRan = true;

@@ -1,0 +1,52 @@
+// #403 (F25): tsconfig.json next door is the BUILD config — it excludes `src/**/*.test.ts` so
+// `tsc` doesn't emit test files into dist/. A side effect of that exclusion was that the test
+// suites were never type-checked AT ALL (they run under tsx, which strips types without checking
+// them), so the compiler could not be the enforcement mechanism for anything a fixture got wrong.
+//
+// It has to be, for #403's required-clock seams: "a fixture that omits the clock fails to
+// compile" is only true if fixtures are compiled. This config is that check — same include set,
+// noEmit, and a NAMED legacy exclusion list below.
+//
+// The legacy list is pre-existing type debt that has nothing to do with clocks: partial
+// `FakeForge`/`FakeMergeGate` doubles declared `implements IForge` that never grew the members
+// IForge grew, plus a handful of narrowing/`unknown` slips. ~1100 errors across 24 files, all of
+// which the suites pass through at runtime because tsx never checks them. Making those fakes
+// whole is its own change, not #403's — so they stay excluded and named rather than silently
+// unchecked. Everything NOT on this list — 31 existing suites and, importantly, every test file
+// added from now on — is compiler-checked, which is where the next date bomb would be written.
+//
+// Shrink this list; never grow it. Deleting an entry (after fixing that file's errors) is always
+// a safe change; adding one is a regression to argue about in review.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": [
+    "src/loop/align.test.ts",
+    "src/loop/cli-rounds.test.ts",
+    "src/loop/cli.test.ts",
+    "src/loop/conductor.test.ts",
+    "src/loop/decompose.test.ts",
+    "src/loop/dissent.test.ts",
+    "src/loop/driver.test.ts",
+    "src/loop/escalation-reconcile.test.ts",
+    "src/loop/harvest.test.ts",
+    "src/loop/round-defaults.test.ts",
+    "src/loop/round.test.ts",
+    "src/proxy/journal.test.ts",
+    "src/proxy/mcp-server.test.ts",
+    "src/retro/retro-digest.test.ts",
+    "src/retro/retro.test.ts",
+    "src/review/drive.test.ts",
+    "src/review/engine-agent.test.ts",
+    "src/roles/architect.test.ts",
+    "src/roles/merge-driver.test.ts",
+    "src/roles/peripheral.test.ts",
+    "src/roles/plan-review.test.ts",
+    "src/roles/reviewer.test.ts",
+    "src/roles/worker.test.ts",
+    "src/state/structured-output.test.ts"
+  ]
+}

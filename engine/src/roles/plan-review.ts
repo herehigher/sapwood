@@ -63,7 +63,7 @@ export interface PlanReviewDeps {
    *  runner directly, the same "fake the collaborator, not the CLI" split conductor.test.ts
    *  uses for Supervisor). */
   runner: Pick<RoleRunner, "run">;
-  now?: () => Date;
+  now: () => Date;
   log?: (message: string) => void;
 }
 
@@ -438,7 +438,7 @@ async function reviewOneIssue(
 ): Promise<boolean> {
   const l = deps.cfg.labels;
   const maxCycles = deps.cfg.roles.planReviewer.maxDraftCycles;
-  const now = deps.now ?? ((): Date => new Date());
+  const now = deps.now;
   const marker = planReviewMarker(roundId);
   const trail: string[] = [];
 
@@ -752,7 +752,7 @@ async function confirmOneIssue(
   drafterTemplate: string,
   roundId: number,
 ): Promise<boolean> {
-  const now = deps.now ?? ((): Date => new Date());
+  const now = deps.now;
   const currentBody = await deps.forge.getIssueBody(issue.number);
 
   // #214 gate② review (delta P2): a schema-valid "confirm" over a planless body is a real,

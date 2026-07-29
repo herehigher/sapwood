@@ -43,6 +43,13 @@ import {
 } from "./align.js";
 import { RoundScopedForge } from "./round.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 class FakeForge implements IForge {
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
@@ -917,6 +924,7 @@ test("createAligningStub #216: milestone-scoped lost receipt sees an unassigned 
   await assert.rejects(
     () =>
       createAligningStub({
+        now: realClock,
         forge,
         state,
         cfg,
@@ -928,7 +936,7 @@ test("createAligningStub #216: milestone-scoped lost receipt sees an unassigned 
   assert.equal(innerForge.backlogIssues[0]!.milestone, undefined, "createIssue assigns no milestone");
 
   const rerun = new ScriptedRunner([failedResult("must-not-run")]);
-  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 221, phase: "aligning", marker: null });
+  await createAligningStub({ now: realClock, forge, state, cfg, runner: rerun }).run({ roundId: 221, phase: "aligning", marker: null });
   assert.equal(rerun.calls.length, 0);
   assert.equal(innerForge.createdIssues.length, 1, "the full-backlog marker scan reconciles instead of recreating");
   assert.equal(state.eventsAfterId(0, ["proposal-created"]).length, 1);
@@ -2012,7 +2020,7 @@ test("createAligningStub #215: the align prompt receives only the milestone-scop
   const forge = new RoundScopedForge(innerForge, "M4");
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
   const state = new State(":memory:");
-  await createAligningStub({ forge, state, cfg: mkCfg({ round: { milestone: "M4" } }), runner }).run({
+  await createAligningStub({ now: realClock, forge, state, cfg: mkCfg({ round: { milestone: "M4" } }), runner }).run({
     roundId: 1,
     phase: "aligning",
     marker: null,

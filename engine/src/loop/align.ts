@@ -1173,7 +1173,7 @@ export interface PoolSelectionRunDeps extends PoolSelectionDeps {
   state: State;
   runner: Pick<RoleRunner, "run">;
   roundId: number;
-  now?: () => Date;
+  now: () => Date;
   /** #394 (F23 gate② fix): fired synchronously, exactly once, iff this call actually dispatches
    *  the po-pool session (never on the replay/deterministic/zero-candidates no-session paths) —
    *  round-defaults.ts's aligning wrapper uses this to fold pool-selection's own dispatch status
@@ -1280,7 +1280,7 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
       decisionPersisted = persistPoolSelection(deps.state, deps.roundId, candidates, log);
       target = candidates;
     } else {
-      const now = deps.now ?? ((): Date => new Date());
+      const now = deps.now;
       const role = cfg.roles.po;
       const template = loadRolePromptTemplate(role.poolPromptFile, defaultPoolPromptPath());
       const candidateNumbers = candidates.map((c) => c.number);
@@ -1407,7 +1407,7 @@ export interface AlignDeps {
    *  real `claude` stub binary in peripheral.test.ts — this orchestrator's own tests fake the
    *  runner directly, same split as plan-review.ts's PlanReviewDeps). */
   runner: Pick<RoleRunner, "run">;
-  now?: () => Date;
+  now: () => Date;
   log?: (message: string) => void;
   /** Override for readPlanMd's path — tests inject a fixed string via a temp file. A real
    *  caller omits this and gets `cfg.goal.file` (#128, promoted out of the #104-era
@@ -1429,7 +1429,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       const role = deps.cfg.roles.po;
       const l = deps.cfg.labels;
       const mark = alignMarker(roundId);
-      const now = deps.now ?? ((): Date => new Date());
+      const now = deps.now;
 
       // #126: this round's directive (human steering, why/what) — resolved ONCE per run() call
       // and threaded into BOTH prompt renders below (align + every triage session). aligning IS

@@ -58,12 +58,19 @@ import {
   workerCredentialFreeEnv,
 } from "./worker.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 
 test("WorkerSupervisor: default guard hook resolves the compiled hook in the guard directory", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const supervisor = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: "claude", hasOpenPr: async () => false });
+    const supervisor = new WorkerSupervisor({ now: realClock, cfg, stateDir: dir, claudeBin: "claude", hasOpenPr: async () => false });
     const guardHookPath = (supervisor as unknown as { guardHookPath: string }).guardHookPath;
     assert.equal(guardHookPath, fileURLToPath(new URL("../guard/guard-hook.js", import.meta.url)));
     supervisor.dispose();
@@ -999,6 +1006,7 @@ test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no
 
 const sup = (dir: string, claudeBin: string, hasPr = false, worktreeRoot?: string) =>
   new WorkerSupervisor({
+    now: realClock,
     cfg,
     stateDir: dir,
     ...(worktreeRoot ? { worktreeRoot } : {}),
@@ -1048,6 +1056,7 @@ test("#304 wiring: a completed lane records one egress-suspect event through the
     const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${toolLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
     state = new State(join(dir, "state.sqlite"));
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1085,6 +1094,7 @@ test("#341 wiring: a completed lane writes at most the per-leg egress cap and lo
     const logs: string[] = [];
     state = new State(join(dir, "state.sqlite"));
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       log: (line) => logs.push(line),
       stateDir: dir,
@@ -1121,6 +1131,7 @@ test("#304 fail-safe: an egress event write failure is logged but cannot change 
     const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${toolLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
     const logs: string[] = [];
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       log: (line) => logs.push(line),
       stateDir: dir,
@@ -1153,6 +1164,7 @@ test("probe: #13 findOpenPr (when provided) supplies prNumber and derives hasPr 
   try {
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1180,6 +1192,7 @@ test("probe: #13 findOpenPr returning null -> hasPr false, prNumber undefined (n
   try {
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1380,6 +1393,7 @@ test("#172: resumed no-result SIGTERM ignores leg 1's result and ledgers its bas
       ].join("\n"),
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1527,6 +1541,7 @@ test("resume (#395 PM follow-up): resume()'s OWN spawn confirmation await — a 
       liveness: { spawnConfirmTimeoutMs: 1 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: liveCfg,
       stateDir: dir,
       worktreeRoot,
@@ -1565,6 +1580,7 @@ test("resume (#395 gate② P2-2): a merely-DELAYED (not lost) real spawn event r
       liveness: { spawnConfirmTimeoutMs: 1 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: liveCfg,
       stateDir: dir,
       worktreeRoot,
@@ -1687,6 +1703,7 @@ test("resume: fails closed in hard mode when the guard hook is missing (no ungua
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     // A supervisor whose guard hook path doesn't exist, same as dispatch()'s hard-mode guard.
     const s2 = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1753,6 +1770,7 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
     );
     const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: scfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1795,6 +1813,7 @@ test("dispatch sets SAPWOOD_WORKTREE_ROOT to the resolved absolute worktree path
     );
     const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "hard" } });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: scfg,
       stateDir: dir,
       worktreeRoot,
@@ -1818,6 +1837,7 @@ test("dispatch fails closed in hard mode when the guard hook is missing (no ungu
   try {
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1855,6 +1875,7 @@ test("dispatch (#395): cfg.liveness.spawnConfirmTimeoutMs is threaded through �
       liveness: { spawnConfirmTimeoutMs: 5_000 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: liveCfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1883,6 +1904,7 @@ test("dispatch (#395 PM follow-up): a spawn confirmation that never arrives is b
       liveness: { spawnConfirmTimeoutMs: 1 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: liveCfg,
       stateDir: dir,
       worktreeRoot,
@@ -1921,6 +1943,7 @@ test("dispatch (#395 gate② round 3, P1): a LIVE worker leg heart-beats against
   try {
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> only SIGKILL ends it
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -2020,6 +2043,7 @@ test("#33: crossing worker.budgetUsdSoft mid-run triggers requestHandoff exactly
       worker: { budgetUsdSoft: 0.01 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
@@ -2060,6 +2084,7 @@ test("#33: a cache-heavy stream under budget does NOT trigger a handoff -- cache
       worker: { budgetUsdSoft: 2 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
@@ -2091,7 +2116,14 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
     });
     assert.throws(
       () =>
-        new WorkerSupervisor({ cfg: badCfg, stateDir: dir, claudeBin: "claude", hasOpenPr: async () => false, guardHookPath: mkHook(dir) }),
+        new WorkerSupervisor({
+          now: realClock,
+          cfg: badCfg,
+          stateDir: dir,
+          claudeBin: "claude",
+          hasOpenPr: async () => false,
+          guardHookPath: mkHook(dir),
+        }),
       /\/nonexistent\/rates\.yaml/,
     );
 
@@ -2115,6 +2147,7 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
       worker: { budgetUsdSoft: 1, pricingFile: ratesPath },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: cfgCustom,
       stateDir: dir,
       claudeBin: bin,
@@ -2166,6 +2199,7 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
       worker: { budgetUsdSoft: 0.01 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
@@ -3831,6 +3865,7 @@ test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: scfg,
       stateDir: dir,
       claudeBin: bin,
@@ -3897,6 +3932,7 @@ test("dispatch: a proxy opt mints a handle, widens --allowedTools with the handl
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -3941,6 +3977,7 @@ test("dispatch: no proxy opt (every ordinary caller today) -> no --mcp-config fl
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -3967,6 +4004,7 @@ test("dispatch: a proxy mint FAILURE is non-fatal — the lane still dispatches 
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -3995,6 +4033,7 @@ test("dispatch: a spawn failure with a proxy attached still tears down the minte
   try {
     const hook = mkHook(dir);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: join(dir, "does-not-exist-claude"),
@@ -4032,6 +4071,7 @@ test("dispatch: a spawn failure on a credentialFree leg (mint succeeded, spawn f
   try {
     const hook = mkHook(dir);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: join(dir, "does-not-exist-claude"),
@@ -4088,6 +4128,7 @@ test("dispatch: credentialFree opt strips forge/git credential env vars and seve
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen.tmp")}"\nmv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\nfor _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4199,6 +4240,7 @@ test("dispatch: credentialFree + mint FAILURE refuses the dispatch outright (fai
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4237,6 +4279,7 @@ test("dispatch: a mint failure records a durable 'proxy-mint-failed' event (Work
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4292,6 +4335,7 @@ test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheri
       `#!/usr/bin/env bash\necho "$GH_TOKEN" > "${join(dir, "token.seen.tmp")}"\nmv "${join(dir, "token.seen.tmp")}" "${join(dir, "token.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4343,6 +4387,7 @@ async function mkHandoffLane(
     ].join("\n"),
   );
   const s = new WorkerSupervisor({
+    now: realClock,
     cfg,
     stateDir: dir,
     claudeBin: bin,
@@ -4540,6 +4585,7 @@ test("resume: a mint failure records a durable 'proxy-mint-failed' event (Worker
       ].join("\n"),
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4617,6 +4663,7 @@ test("resume: FIX-LEG ENTRY (opts.sessionId, no .handoff sentinel) — real Work
       ].join("\n"),
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4666,6 +4713,7 @@ test("resume: fix-leg entry fails closed with NO terminal sentinel at all (never
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4689,6 +4737,7 @@ test("resume: fix-leg entry fails closed when opts.sessionId is set but opts.pro
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4763,6 +4812,7 @@ test("resume: FIX-LEG ENTRY consumes the stale prior-leg terminal sentinel on sp
       ].join("\n"),
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4793,6 +4843,7 @@ test("resume: fix-leg entry does NOT remove the stale terminal sentinel when the
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4806,6 +4857,7 @@ test("resume: fix-leg entry does NOT remove the stale terminal sentinel when the
     assert.ok(existsSync(join(dir, `${name}.done.json`)));
 
     const s2 = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: join(dir, "does-not-exist-claude"),

@@ -451,7 +451,9 @@ export async function startFixLeg(
   deps: FixLegDeps,
   w: WorkerRow,
   proxy: WorkerProxyOpts,
-  now: () => Date = () => new Date(),
+  // #403 (F25): REQUIRED, not `= () => new Date()`. A default-valued clock is the same trap as an
+  // optional one — the unsafe path is what a fixture gets for free.
+  now: () => Date,
   prescription: FixPrescription = "findings",
 ): Promise<{ name: string; sessionId: string }> {
   if (w.pr == null) {
@@ -785,7 +787,7 @@ export interface TickDeps {
    *  (gate② PR #41 P2). The M4 loop driver MUST pass its cadence here. Omitted -> the base
    *  gap (only safe for callers ticking faster than ENGINE_SESSION_GAP_SEC). */
   tickIntervalSec?: number;
-  now?: () => Date;
+  now: () => Date;
   /** #13: the review + merge gate for driving lanes. Omitted -> driving lanes stay driving with
    *  no gate/merge activity this tick (pre-#13 behavior — M2 dogfood / callers that haven't
    *  wired a reviewer yet keep working unchanged). */
@@ -1375,11 +1377,11 @@ export async function escalatePark(
       // The channel-ladder's "forge reachable" premise proved wrong (a race, or an llm-sourced
       // park whose forge turns out to ALSO be down) — never lose the escalation silently.
       actualChannel = "local";
-      writeLocalEscalation(state, park, message, log);
+      writeLocalEscalation(state, park, message, iso, log);
     }
   } else {
     actualChannel = "local";
-    writeLocalEscalation(state, park, message, log);
+    writeLocalEscalation(state, park, message, iso, log);
   }
   // ACCEPTED RESIDUAL (PR #180 review P2, documented not machined-away): a crash in the window
   // between the successful comment above and the recordParkEscalation latch below re-escalates
@@ -1398,14 +1400,17 @@ export async function escalatePark(
 /** #168: the local-fallback escalation write (CTO directive: sapwood status surface + a marker
  *  file in the engine data dir, written by the ENGINE, read-only informational, never a control
  *  input — see State.escalationMarkerPath's doc comment — + a log line). Zero forge writes. */
-function writeLocalEscalation(state: State, park: ParkRow, message: string, log?: (message: string) => void): void {
+function writeLocalEscalation(state: State, park: ParkRow, message: string, iso: () => string, log?: (message: string) => void): void {
   state.writeEscalationMarker({
     source: park.source,
     reason: park.reason,
     triggerIssue: park.triggerIssue,
     enteredAt: park.enteredAt,
     message,
-    at: new Date().toISOString(),
+    // #403 (F25): the caller's injected clock, not `new Date()`. This stamp and the
+    // `recordParkEscalation(iso())` latch a few lines below in escalatePark describe the SAME
+    // escalation — reading two different clocks for one event was the bug waiting to happen.
+    at: iso(),
   });
   (log ?? ((line) => process.stderr.write(`${line}\n`)))(`[sapwood:park] ${message}`);
 }
@@ -1952,7 +1957,7 @@ async function checkAcDriftBeforeDrive(
 
 export async function tick(deps: TickDeps): Promise<TickResult> {
   const { forge, state, supervisor, cfg } = deps;
-  const now = deps.now ?? (() => new Date());
+  const now = deps.now;
   const iso = () => now().toISOString();
   const threshold = cfg.worker.heartbeatStaleSecs;
 

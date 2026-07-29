@@ -31,12 +31,19 @@ import {
 } from "./peripheral.js";
 import { validateReviewerOutput } from "./plan-review.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 
 test("RoleRunner: default guard hook resolves the compiled hook in the guard directory", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
-    const runner = new RoleRunner({ cfg, stateDir: dir, worktreeRoot: join(dir, "worktrees"), claudeBin: "claude" });
+    const runner = new RoleRunner({ now: realClock, cfg, stateDir: dir, worktreeRoot: join(dir, "worktrees"), claudeBin: "claude" });
     const guardHookPath = (runner as unknown as { guardHookPath: string }).guardHookPath;
     assert.equal(guardHookPath, fileURLToPath(new URL("../guard/guard-hook.js", import.meta.url)));
   } finally {
@@ -59,6 +66,7 @@ const mkHook = (dir: string): string => {
 
 const mkRunner = (dir: string, claudeBin: string, over: Partial<RoleRunnerDeps> = {}): RoleRunner =>
   new RoleRunner({
+    now: realClock,
     cfg,
     stateDir: dir,
     worktreeRoot: join(dir, "worktrees"),
@@ -511,6 +519,7 @@ test("run: wall-clock timeout kills the tree -> outcome timeout, tagged as a .fa
       worker: { timeoutSec: 1 }, // fires on the first heartbeat tick after 1s elapsed
     });
     const runner = new RoleRunner({
+      now: realClock,
       cfg: tcfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -579,6 +588,7 @@ test("run: guard hook missing in hard mode -> throws, refuses to spawn an unguar
   try {
     const bin = mkStub(dir, FAST_STUB);
     const runner = new RoleRunner({
+      now: realClock,
       cfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -602,6 +612,7 @@ test("run: soft guard mode tolerates a missing hook (no fail-closed refusal)", a
     const bin = mkStub(dir, FAST_STUB);
     const softCfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
     const runner = new RoleRunner({
+      now: realClock,
       cfg: softCfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -1017,6 +1028,7 @@ exit 0
 `,
     );
     const runner = new RoleRunner({
+      now: realClock,
       cfg,
       stateDir: dir,
       worktreeRoot,
@@ -1058,6 +1070,7 @@ exit 0
 `,
     );
     const runner = new RoleRunner({
+      now: realClock,
       cfg,
       stateDir: dir,
       worktreeRoot,
@@ -1116,6 +1129,7 @@ test("run: a ../-escaping scratchFile is refused — the outside file is NOT rea
     writeFileSync(join(dir, "secret"), "engine-private content");
     const bin = mkStub(dir, FAST_STUB);
     const runner = new RoleRunner({
+      now: realClock,
       cfg,
       stateDir: dir,
       worktreeRoot,
@@ -1717,6 +1731,7 @@ test("run: proxy teardown (stop()) happens on EVERY outcome, including a timed-o
     const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`);
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
     const runner = new RoleRunner({
+      now: realClock,
       cfg: tcfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -2172,6 +2187,7 @@ test("run (#285, Codex sol-high PR #300 review, P2): reviewCwd FORCES the guard 
     );
     const softCfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
     const runner = new RoleRunner({
+      now: realClock,
       cfg: softCfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -2208,6 +2224,7 @@ test("run (#285, Codex sol-high PR #300 review, P2): under a configured soft gua
     const bin = mkStub(dir, FAST_STUB);
     const softCfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
     const runner = new RoleRunner({
+      now: realClock,
       cfg: softCfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -2415,6 +2432,7 @@ test("run (#395 item 1): TWO CONSECUTIVE dead pid readings with no real exit eve
     };
     let probeCalls = 0;
     const runner = new RoleRunner({
+      now: realClock,
       cfg, // default worker.timeoutSec is generous — must never race the exit-loss path below
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -2456,6 +2474,7 @@ test("run (#395 item 1): an isPidAlive that always reports alive never resolves 
     const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`); // real child stays alive for the whole test
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } }); // wall-clock ceiling ends the test, not a real 30s wait
     const runner = new RoleRunner({
+      now: realClock,
       cfg: tcfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -2531,6 +2550,7 @@ test("run (#395 gate② follow-up, P1): once timedOut latches, role-session-hear
       maxEventId: () => events.length,
     };
     const runner = new RoleRunner({
+      now: realClock,
       cfg: tcfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),

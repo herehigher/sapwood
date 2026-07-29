@@ -363,7 +363,7 @@ export interface RoleRunnerDeps {
   /** Path to the compiled guard hook. Default: the dist sibling of this module. */
   guardHookPath?: string;
   heartbeatMs?: number;
-  now?: () => Date;
+  now: () => Date;
   /** #395: injected timer so a test can deterministically win the spawn-confirmation watchdog
    *  race (util/spawn-confirm.ts's awaitSpawnConfirmation) without depending on real OS
    *  process-spawn timing. Default: a real, cancelable `setTimeout`. */
@@ -569,7 +569,7 @@ export class RoleRunner {
   }
 
   private now(): Date {
-    return this.deps.now ? this.deps.now() : new Date();
+    return this.deps.now();
   }
   private path(name: string, ext: string): string {
     return join(this.dir, `${name}.${ext}`);

@@ -108,7 +108,7 @@ export interface ForgeProxyDeps {
    *  to the same subset, but that's noise reduction only — same stance as every other
    *  allowed/disallowedTools pair in this codebase, see peripheral.ts's doc). */
   allowedTools?: readonly ToolName[];
-  now?: () => Date;
+  now: () => Date;
   log?: (message: string) => void;
 }
 
@@ -141,7 +141,7 @@ interface JsonRpcRequest {
 class JsonRpcMethodNotFound extends Error {}
 
 export async function startForgeProxyServer(deps: ForgeProxyDeps): Promise<ForgeProxyHandle> {
-  const now = deps.now ?? ((): Date => new Date());
+  const now = deps.now;
   const log = deps.log ?? ((): void => {});
   const token = randomBytes(32).toString("hex");
   let revoked = false;

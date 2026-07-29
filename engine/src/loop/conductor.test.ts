@@ -47,6 +47,13 @@ import {
   tick,
 } from "./conductor.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 // ── tick test doubles (real State, fake forge + supervisor — no claude, no gh) ──
 const DEFAULT_PROBE: LaneProbe = {
   done: false,
@@ -2976,7 +2983,14 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
   const forge = new FakeForge();
   const st = new State(dbPath);
   const issue = { number: 169, title: "restart adoption", labels: [] };
-  const s1 = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, heartbeatMs: 60_000 });
+  const s1 = new WorkerSupervisor({
+    now: realClock,
+    cfg,
+    stateDir: dir,
+    claudeBin: bin,
+    hasOpenPr: async () => false,
+    heartbeatMs: 60_000,
+  });
   let s2: WorkerSupervisor | undefined;
   try {
     const { name, sessionId } = await s1.dispatch(issue, "lane-169-integration");
@@ -2998,7 +3012,7 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
     s1.dispose(); // new engine has no in-memory ChildProcess/heartbeat timer
     utimesSync(join(dir, `${name}.heartbeat`), new Date(0), new Date(0));
 
-    s2 = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, heartbeatMs: 60_000 });
+    s2 = new WorkerSupervisor({ now: realClock, cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, heartbeatMs: 60_000 });
     const adopted = await tick({ forge, state: st, supervisor: s2, cfg });
     assert.deepEqual(adopted.reclaimed, [{ kind: "kept", worker: name, issue: 169 }]);
     assert.equal(st.getWorker(name)?.state, "running");
@@ -3111,6 +3125,7 @@ test("#172 confirmed intent is adopted under PAUSE, then ordinary supervision re
   const st = new State(join(dir, "sapwood.sqlite"));
   const cfg = mkCfg({ guard: { mode: "soft" } });
   const supervisor = new WorkerSupervisor({
+    now: realClock,
     cfg,
     stateDir: dir,
     claudeBin: join(dir, "must-not-spawn"),
@@ -3173,6 +3188,7 @@ test("#172 unconfirmed resume intent escalates and latches under PAUSE without s
   const st = new State(join(dir, "sapwood.sqlite"));
   const cfg = mkCfg({ guard: { mode: "soft" } });
   const supervisor = new WorkerSupervisor({
+    now: realClock,
     cfg,
     stateDir: dir,
     claudeBin: join(dir, "must-not-spawn"),
@@ -3240,7 +3256,7 @@ test("#172 detached dispatch marker is not adopted: handoff spawns one real resu
     ].join("\n"),
     { mode: 0o755 },
   );
-  const supervisor = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false });
+  const supervisor = new WorkerSupervisor({ now: realClock, cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false });
   try {
     state.upsertWorker({
       name: "lane-detached",
