@@ -41,6 +41,8 @@ test("DecomposeOutputMetadataSchema trims accepted title/coverage/evidence strin
     ],
     coverage: { mappings: [{ parentIntent: "  intent  ", children: [0] }], remainders: [0] },
   });
+  // Narrow the parse union — `assert.equal` on `outcome` reads at runtime but doesn't narrow.
+  if (parsed.outcome !== "decomposed") throw new Error(`expected a decomposed parse, got ${parsed.outcome}`);
   assert.equal(parsed.children[0]!.title, "child");
   assert.equal(parsed.children[0]!.unresolvedContext!.reason, "missing fact");
   assert.equal(parsed.children[0]!.informationNeeded, "owner name");

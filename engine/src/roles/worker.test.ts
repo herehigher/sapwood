@@ -1427,11 +1427,12 @@ test("#172: resumed no-result SIGTERM ignores leg 1's result and ledgers its bas
     assert.equal(s.requestHandoff(name), true);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     const resumedProbe = await s.probe(name);
+    const resumedCost = resumedProbe.costUsd ?? Number.NaN;
     assert.ok(
-      Math.abs(resumedProbe.costUsd - resumedExpected) < 1e-12,
-      `resumed no-result leg cost ${resumedProbe.costUsd} should equal baseline-adjusted estimate ${resumedExpected}`,
+      Math.abs(resumedCost - resumedExpected) < 1e-12,
+      `resumed no-result leg cost ${resumedCost} should equal baseline-adjusted estimate ${resumedExpected}`,
     );
-    state.recordSpend(name, 172, resumedProbe.costUsd, new Date().toISOString());
+    state.recordSpend(name, 172, resumedCost, new Date().toISOString());
     assert.ok(Math.abs(state.spentUsdForWorker(name) - (1 + resumedExpected)) < 1e-12);
     assert.equal(logs.filter((line) => line.includes("source=assistant-usage-estimate")).length, 1);
     s.dispose();
@@ -2603,23 +2604,28 @@ test("extractFailureText: an unparseable {-prefixed line (mid-write stream fragm
 
 // ── #374: extractRateLimitResetAt — the Claude CLI's structured rate_limit_event telemetry ────
 
+/** #403 (F25): the seeded "now" every extractRateLimitResetAt case below is judged against. The
+ *  function's sanity horizon compares the parsed hint to this value, so leaving it to the real
+ *  clock would make each case's verdict a function of the day the suite runs. */
+const RL_NOW_MS = Date.parse("2026-07-24T00:00:00Z");
+
 test("extractRateLimitResetAt: a real captured rate_limit_event line yields resetsAt in epoch MILLISECONDS", () => {
   const jsonl = [
     `{"type":"system","subtype":"init","model":"opus"}`,
     `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1784885400,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false},"session_id":"s1"}`,
     `{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You've hit your session limit · resets 6:30pm (Asia/Tokyo)","total_cost_usd":0}`,
   ].join("\n");
-  assert.equal(extractRateLimitResetAt(jsonl), 1784885400 * 1000);
+  assert.equal(extractRateLimitResetAt(jsonl, RL_NOW_MS), 1784885400 * 1000);
 });
 
 test("extractRateLimitResetAt: no rate_limit_event line -> null (an absent hint, never a fabricated one)", () => {
   const jsonl = [`{"type":"system","subtype":"init"}`, `gh: Bad credentials (HTTP 401)`].join("\n");
-  assert.equal(extractRateLimitResetAt(jsonl), null);
+  assert.equal(extractRateLimitResetAt(jsonl, RL_NOW_MS), null);
 });
 
 test("extractRateLimitResetAt: a non-'rejected' status (e.g. an 'allowed' telemetry line) is ignored", () => {
   const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1784885400,"rateLimitType":"five_hour"}}`;
-  assert.equal(extractRateLimitResetAt(jsonl), null);
+  assert.equal(extractRateLimitResetAt(jsonl, RL_NOW_MS), null);
 });
 
 test("extractRateLimitResetAt: the LAST rejected record wins when more than one appears", () => {
@@ -2627,17 +2633,17 @@ test("extractRateLimitResetAt: the LAST rejected record wins when more than one 
     `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1000}}`,
     `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":2000}}`,
   ].join("\n");
-  assert.equal(extractRateLimitResetAt(jsonl), 2000 * 1000);
+  assert.equal(extractRateLimitResetAt(jsonl, RL_NOW_MS), 2000 * 1000);
 });
 
 test("extractRateLimitResetAt: malformed/truncated JSON lines and a missing rate_limit_info are tolerated, never throw", () => {
   const jsonl = [`{"type":"rate_limit_event"`, `{"type":"rate_limit_event","rate_limit_info":null}`, "not json at all"].join("\n");
-  assert.doesNotThrow(() => extractRateLimitResetAt(jsonl));
-  assert.equal(extractRateLimitResetAt(jsonl), null);
+  assert.doesNotThrow(() => extractRateLimitResetAt(jsonl, RL_NOW_MS));
+  assert.equal(extractRateLimitResetAt(jsonl, RL_NOW_MS), null);
 });
 
 test("extractRateLimitResetAt: empty input -> null", () => {
-  assert.equal(extractRateLimitResetAt(""), null);
+  assert.equal(extractRateLimitResetAt("", RL_NOW_MS), null);
 });
 
 // ── #374 review (PM P2): the sanity horizon — an untrusted third-party timestamp must never be
@@ -2738,7 +2744,7 @@ test("hasRejectedRateLimitEvent: true EVEN WITHOUT a resetsAt field — the reje
 test("hasRejectedRateLimitEvent: true even when resetsAt is malformed/out-of-range — extractRateLimitResetAt's sanity horizon is a SCHEDULING concern, not a classification one", () => {
   const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":-1e20}}`;
   assert.equal(hasRejectedRateLimitEvent(jsonl), true);
-  assert.equal(extractRateLimitResetAt(jsonl), null, "sanity check: the scheduling hint itself IS rejected as out-of-range");
+  assert.equal(extractRateLimitResetAt(jsonl, RL_NOW_MS), null, "sanity check: the scheduling hint itself IS rejected as out-of-range");
 });
 
 test("hasRejectedRateLimitEvent: malformed/truncated JSON lines and a missing rate_limit_info are tolerated, never throw", () => {
@@ -2936,7 +2942,7 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
 
 test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285): the ONLY child_process importers are worker.ts (spawn), gh.ts (execFile), and review/materializer.ts (execFile) — and the ONLY subprocess call site that may ever pass a cwd is spawnClaudeSession's own OPTIONAL, caller-supplied opt (#285 review session mode) — WorkerSupervisor's own dispatch()/resume() spawn() calls stay cwd-less, so the engine structurally CANNOT exec git in a worker worktree", () => {
   const srcDir = new URL("../", import.meta.url);
-  const files = readdirSync(srcDir, { recursive: true }).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+  const files = readdirSync(srcDir, { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
   // Sanity: the three known subprocess modules are present in the scan set.
   assert.ok(files.includes("roles/worker.ts") && files.includes("forge/gh.ts") && files.includes("review/materializer.ts"));
   for (const f of files) {

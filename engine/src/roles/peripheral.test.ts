@@ -1506,6 +1506,8 @@ const mkManifest = (tag: string): ContextManifest => ({
   worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
   settingsHash: "hash",
   hookHash: null,
+  toolUsage: [],
+  readPaths: [],
   recordedAt: "2026-07-17T00:00:01Z",
 });
 

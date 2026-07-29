@@ -490,6 +490,11 @@ function listMarkdownFileNames(dirPath: string): string[] {
  *  on every poll tick (the same tolerant, still-growing-file reader every other jsonl consumer
  *  in this codebase uses); a file that doesn't exist yet reads as `""`, not an error. */
 async function waitForInitLine(jsonlPath: string, timeoutMs: number, pollMs: number): Promise<boolean> {
+  // #403 (F25) per-site decision: DELIBERATE wall-clock read, kept. This is elapsed-time
+  // arithmetic over a REAL polling loop against a REAL file a REAL subprocess is writing —
+  // measuring how long that has actually taken is the whole job, and a seeded clock would either
+  // never expire or expire instantly. Nothing here is asserted against a seeded date; the only
+  // caller-visible output is a boolean whose timeout bound tests set explicitly.
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     let content = "";
@@ -1018,7 +1023,7 @@ export class RoleRunner {
       // (runSessionWithRetry's optional envFailure hook) plus a scheduling hint, computed from
       // the SAME jsonl this method already reads, never a new capture mechanism.
       const failureText = outcome !== "done" ? extractFailureText(jsonl) : undefined;
-      const rateLimitResetAtMs = outcome !== "done" ? extractRateLimitResetAt(jsonl) : null;
+      const rateLimitResetAtMs = outcome !== "done" ? extractRateLimitResetAt(jsonl, this.now().getTime()) : null;
       // #394 (F22) / gate② round 3: same "only for a non-done outcome" gating, same jsonl, the
       // primary text-free classification signal(s) for runSessionWithRetry's envFailure hook
       // below — true if EITHER structured signal fired (see env-failure.ts's own module doc for

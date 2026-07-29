@@ -1019,9 +1019,11 @@ const JS_DATE_VALID_RANGE_MS = 8_640_000_000_000_000;
  *  that constant's own doc) — tolerant by construction (never throws): an absent hint simply
  *  means the ordinary bounded backoff schedule applies, exactly the pre-#374 behavior. A value
  *  merely far in the PAST (but still Date-valid) is honored unchanged — that just means "probe
- *  immediately", never a reason to reject. `nowMs` defaults to the real current time; overridable
- *  for tests. */
-export function extractRateLimitResetAt(jsonl: string, nowMs: number = Date.now()): number | null {
+ *  immediately", never a reason to reject. `nowMs` is REQUIRED (#403/F25: it used to default to
+ *  `Date.now()`, which made the horizon check silently wall-clock-relative — a fixture seeding a
+ *  reset hint got a verdict that depended on the day the suite ran). Both production callers pass
+ *  their own injected clock. */
+export function extractRateLimitResetAt(jsonl: string, nowMs: number): number | null {
   let resetAtMs: number | null = null;
   for (const line of jsonl.split("\n")) {
     const t = line.trim();
@@ -2623,7 +2625,7 @@ export class WorkerSupervisor implements Supervisor {
    *  writes, feeding conductor.ts's env-park entry with a reset-time SCHEDULING hint when the
    *  CLI's own structured rate-limit telemetry names one. */
   private terminalRateLimitResetAtMs(name: string): number | null {
-    return extractRateLimitResetAt(this.readJsonl(this.path(name, "jsonl")));
+    return extractRateLimitResetAt(this.readJsonl(this.path(name, "jsonl")), this.now().getTime());
   }
 
   /** #394 (F22) / gate② round 3 (Codex sol-high BLOCK finding, P2): same shape as

@@ -54,7 +54,15 @@ class Runner {
   constructor(private readonly text: string) {}
   async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
     this.calls.push(opts);
-    return { outcome: "done", name: `session-${this.calls.length}`, costUsd: 0, costKnown: true, modelUsage: [], resultText: this.text };
+    return {
+      outcome: "done",
+      name: `session-${this.calls.length}`,
+      costUsd: 0,
+      costKnown: true,
+      modelUsage: [],
+      exitCode: 0,
+      resultText: this.text,
+    };
   }
 }
 
@@ -839,7 +847,9 @@ test("transient live fetch failure propagates before receipt admission and rerun
       runDecompositionPass({ now: realClock, forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") }, 22, fake.issues),
     /transient issue fetch failure/,
   );
-  assert.deepEqual(fake.order, []);
+  // Copy, not `fake.order` itself: node:assert's `asserts actual is T` signature would otherwise
+  // narrow the live array to `never[]` for the rest of the test.
+  assert.deepEqual([...fake.order], []);
   assert.equal(state.eventsAfterId(0, ["proposal-skipped"]).length, 0);
 
   await runDecompositionPass(

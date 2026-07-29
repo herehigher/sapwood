@@ -482,6 +482,10 @@ export function formatStatus(s: StatusSnapshot): string {
   );
   if (s.parked.length > 0) {
     for (const p of s.parked) {
+      // #403 (F25) per-site decision: DELIBERATE wall-clock read, kept. `sapwood status` is a
+      // human-facing print of how long the park has ACTUALLY been standing, right now, on this
+      // machine — the operator's wall clock is the correct source, and no assertion in the suites
+      // reads this string's duration (they assert the park's own fields, not the rendered "Ns").
       const durationSec = Math.max(0, Math.floor((Date.now() - Date.parse(p.enteredAt)) / 1000));
       lines.push(
         `park: PARKED (${p.source}) since ${p.enteredAt} (${durationSec}s) — ` +

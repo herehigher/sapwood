@@ -396,7 +396,9 @@ test("normalizeUnplacedBoardItems: moves every issue to backlog and records one 
   await normalizeUnplacedBoardItems(
     {
       listUnplacedIssues: async () => ({ issues: [17, 18], skipped: 0 }),
-      setBoardStatus: async (issue, status) => moves.push([issue, status]),
+      setBoardStatus: async (issue, status) => {
+        moves.push([issue, status]);
+      },
       listIssuesAbsentFromBoard: async () => [],
     },
     { appendEvent: (kind, payload) => events.push([kind, payload]) },
@@ -566,7 +568,9 @@ test("normalizeUnplacedBoardItems: the No-Status normalization loop and the abse
       // A real No-Status item DOES get moved (existing behavior, unchanged) — proves the two
       // passes coexist — while the absent-issue report itself performs zero additional writes.
       listUnplacedIssues: async () => ({ issues: [7], skipped: 0 }),
-      setBoardStatus: async (issue, status) => writes.push([issue, status]),
+      setBoardStatus: async (issue, status) => {
+        writes.push([issue, status]);
+      },
       listIssuesAbsentFromBoard: async () => [201, 202],
     },
     { appendEvent: (kind, payload) => events.push([kind, payload]) },
@@ -1340,6 +1344,7 @@ test("formatStatus: parked (llm) renders source/reason/duration/no-escalation", 
         probeAttempts: 0,
         escalatedAt: null,
         canaryWorker: null,
+        resetHintAt: null,
       },
     ],
   };
@@ -1372,6 +1377,7 @@ test("formatStatus: parked + escalated renders the escalation timestamp", () => 
         probeAttempts: 4,
         escalatedAt: "2026-07-14T01:00:00.000Z",
         canaryWorker: null,
+        resetHintAt: null,
       },
     ],
   };
@@ -1498,6 +1504,7 @@ test("formatStatus: a mixed storm renders BOTH episodes (one line per source), c
         probeAttempts: 2,
         escalatedAt: null,
         canaryWorker: "lane-3",
+        resetHintAt: null,
       },
       {
         source: "forge",
@@ -1508,6 +1515,7 @@ test("formatStatus: a mixed storm renders BOTH episodes (one line per source), c
         probeAttempts: 0,
         escalatedAt: null,
         canaryWorker: null,
+        resetHintAt: null,
       },
     ],
   };
@@ -1689,13 +1697,22 @@ function fakeProxyForgeForCli(): ProxyForge {
     getIssueComments: async () => [],
     getIssueRelations: async () => ({ linkedPRs: [], crossReferences: [], truncated: false }),
     searchIssues: async () => [],
-    getPRDetails: async () => ({ number: 1, headOid: "abc", state: "OPEN", draft: false, labels: [], mergeable: "MERGEABLE" }),
+    getPRDetails: async () => ({
+      number: 1,
+      headOid: "abc",
+      baseRefName: "main",
+      state: "OPEN" as const,
+      draft: false,
+      labels: [],
+      mergeable: "MERGEABLE" as const,
+    }),
     getPRReviews: async () => ({ reviews: [], total: 0 }),
     getPRReviewThreads: async () => ({
       threads: [{ id: "T1", isResolved: false, comments: [], commentsComplete: true }],
       pageCapped: false,
     }),
     getPRChecks: async () => ({ checks: [], total: 0 }),
+    getPRComments: async () => ({ comments: [], total: 0 }),
   };
 }
 
