@@ -224,40 +224,21 @@ export type GatedReentryDecision = "RECLAIM" | "CAPPED" | "SKIP";
  *    reclaim that re-escalated; fail closed rather than retry forever — re-escalate + latch
  *    permanently).
  *
- * #248 review round 1 (G1, Codex sol-high PR #266, PM-narrowed): `issueHoldPresent` — ANY of
- * the issue's `escalation.holdLabels` present — is a SEPARATE, ADDITIONAL SKIP input alongside
- * `humanHoldPresent`, not folded into it. The original #248 doc comment here reasoned that a
- * `hold` label is orthogonal to GATED RECLAIM because it only ever gates a `driving` lane's
- * `deriveGate` (PR-level) — true, but incomplete: it missed the confirmed scenario where a
- * fix-round-capped lane is ALREADY `failed` + issue-`needs-human` (via #147's cap-escalation
- * path, not #248's PR-level WAIT), and a human applies an ISSUE-level `hold` while
- * investigating — intending to "take control" of the reentry decision itself — then removes
- * `needs-human` before finishing that investigation. Without this check, `humanHoldPresent`
- * alone would go false the instant `needs-human` clears, RECLAIM would fire, burn a
- * `gated_reentry_attempts` slot, and DRIVE would immediately re-escalate or re-latch at the cap
- * — exactly the "apply hold = take control" handshake failing, and a non-zero-consumption
- * round-trip. The PM-narrowed fix keeps this cheap and local: this phase ALREADY fetches the
- * issue's labels once per lane (`forge.getIssueLabels`) for the `humanHoldPresent` check above —
- * `issueHoldPresent` reads the SAME already-fetched array, no new forge call. Deliberately NOT
- * plumbed into the DRIVE loop's per-tick PR-label hold check (merge-driver.ts's `deriveGate`) —
- * that would mean a NEW per-lane issue-label fetch on every DRIVE tick for a rare, short-lived
- * manual state, which is the per-tick forge-read inflation the PM ruling rejected. The
- * consequence (documented, accepted, bounded — see docs/PLAN.md's escalation-model section): an
- * issue-level `hold` applied to a lane that is STILL `driving` (never escalated) has no effect
- * here at all — it isn't consulted until/unless the lane reaches `gatedFailedWorkers()`, and a
- * `driving` lane's own hold-handling is the PR-level `holdLabels` check in `deriveGate`, a
- * DIFFERENT carrier on a DIFFERENT surface. Each of the two hold carriers (issue label, PR
- * label) gates only the automation surface it sits on: issue-level hold = gated-reentry
- * eligibility; PR-level hold = the drive/merge gate. Applying either takes control of that one
- * surface only, by design (one fact, one bit, per surface).
+ * #400: hold has ONE carrier, the PR. #248 review round 1 (G1) had added a second, issue-level
+ * `issueHoldPresent` SKIP input here, for the case where a human puts a `hold` on the ISSUE of an
+ * already-escalated lane "while investigating" and then removes `needs-human` before finishing.
+ * That input is gone: removing `needs-human` IS the go-ahead signal, so the scenario is a human
+ * contradicting themselves, and the carrier was a silent no-op in the state a human is most
+ * likely to be in (an issue-level hold on a still-`driving` lane never reached this function at
+ * all). Accepted, bounded, and TRANSITIONAL cost: a human who removes `needs-human` before they
+ * are actually ready burns ONE `gated_reentry_attempts` slot — the cap bounds it and a
+ * re-escalation re-latches the lane; once #398 makes this phase read the PR's labels for a
+ * PR-bearing lane, a PR-level hold restores that SKIP on the correct carrier at zero marginal
+ * cost. `hold` is read on the PR only (`deriveGate`, `review/drive.ts`'s preflight, and #170's
+ * silence suppression).
  */
-export function gatedReentryDecision(
-  humanHoldPresent: boolean,
-  issueHoldPresent: boolean,
-  attempts: number,
-  cap: number,
-): GatedReentryDecision {
-  if (humanHoldPresent || issueHoldPresent) return "SKIP";
+export function gatedReentryDecision(humanHoldPresent: boolean, attempts: number, cap: number): GatedReentryDecision {
+  if (humanHoldPresent) return "SKIP";
   return attempts < cap ? "RECLAIM" : "CAPPED";
 }
 
@@ -2392,17 +2373,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // orderForDispatch. needsHuman alone would let an issue still carrying `blocked` reclaim
       // and drive to merge (the merge driver's human-label veto reads the PR's labels, not the
       // issue's) the moment needs-human was removed.
-      // #248 review round 1 (G1): ALSO require ZERO of cfg.escalation.holdLabels on the issue —
-      // reusing the SAME already-fetched `labels` array (no new forge read) and the SAME exact-
-      // match hasReserveLabel helper. See gatedReentryDecision's own doc for the full rationale
-      // (a fix-round-capped, needs-human-escalated lane that a human puts an issue-level hold on
-      // while investigating must not reclaim just because needs-human clears first).
-      const decision = gatedReentryDecision(
-        hasReserveLabel(labels, cfg.escalation.humanLabels),
-        hasReserveLabel(labels, cfg.escalation.holdLabels),
-        attempts,
-        cfg.lanes.gatedReentryCap,
-      );
+      // #400: hold labels are NOT consulted here — hold's one carrier is the PR. See
+      // gatedReentryDecision's own doc for the removal rationale and its bounded cost.
+      const decision = gatedReentryDecision(hasReserveLabel(labels, cfg.escalation.humanLabels), attempts, cfg.lanes.gatedReentryCap);
       if (decision === "SKIP") continue; // a human hold still stands — no complete human act yet
       if (decision === "CAPPED") {
         // The cap was already spent on a prior reclaim that re-escalated, and a human removed
