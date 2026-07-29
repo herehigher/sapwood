@@ -2063,16 +2063,48 @@ export function parsePRStatus(json: string): PRStatus {
     statusCheckRollup?: { conclusion?: string | null; state?: string | null }[];
   };
   const checks = d.statusCheckRollup ?? [];
-  // FAIL CLOSED: green only when there is >=1 check AND every check is in a *completed*
-  // passing state. An EMPTY rollup is NOT green — on a fresh/just-pushed PR, checks may
-  // not be created yet, so empty != "this repo has no CI". A null/absent conclusion on a
-  // CheckRun means queued/in-progress (not green); SKIPPED/NEUTRAL are completed
-  // non-failing; StatusContext entries (no conclusion) pass on state==SUCCESS.
+  // FAIL CLOSED: green only when there is >=1 check AND every check CONCLUSIVELY PASSED.
+  // An EMPTY rollup is NOT green — on a fresh/just-pushed PR, checks may not be created yet,
+  // so empty != "this repo has no CI". A null/absent conclusion on a CheckRun means
+  // queued/in-progress (not green); StatusContext entries (no conclusion) pass on
+  // state==SUCCESS.
   // ponytail: genuinely CI-less repos get an explicit `ci.requireChecks: false` opt-in
   // when the merge gate is wired (M3), not a silent empty-means-green default.
   // (Codex P1/P2, PR #22.)
-  const PASSING = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
-  const ciGreen = checks.length > 0 && checks.every((c) => (c.conclusion != null ? PASSING.has(c.conclusion) : c.state === "SUCCESS"));
+  //
+  // #401 (F26), adjudicating the deferral recorded in design #279 §4 / §9: SKIPPED and NEUTRAL
+  // used to count as passing here, so a workflow whose test job never RAN (path filter, `if:`
+  // guard, a required job skipped by a bad matrix) read as gate①-green and could merge with zero
+  // execution evidence. They are completed-but-not-executed, not passing — the CONCLUSION half of
+  // the stance review/ci-evidence.ts's requiredChecksSatisfied takes on the engine-agent path,
+  // now applied gate①-wide.
+  //
+  // The legacy `state === "SUCCESS"` fallback below is DELIBERATELY KEPT and is READJUDICATED,
+  // not a documented deviation: #401's AC named two directions ("conclusion === SUCCESS only" or
+  // app-bound evidence), and PR #422's review twice read the retained legacy path as a third one.
+  // The repo owner adjudicated it on 2026-07-29 (PR #422, supervising session): dispute ACCEPTED,
+  // the AC's SUCCESS-only requirement is scoped to CHECKRUN CONCLUSIONS, and the legacy
+  // status-context path stays. Reasoning upheld there, and why it is not a third path:
+  // requiredChecksSatisfied rejects a legacy commit StatusContext
+  // for a reason that is specific to `ci.requiredChecks` — a status context carries no check
+  // suite, so its owning App cannot be verified against a configured `{name, app}` pair
+  // (docs/security.md "CI execution evidence for engine-agent review" scopes that rejection to
+  // that chain, not to gate①). Gate① is the general "did this repo's CI pass" signal for EVERY
+  // reviewer mode, and the Status API has no SKIPPED/NEUTRAL concept at all (states are
+  // error|failure|pending|success), so the hole this change closes cannot exist on that path.
+  // Dropping it would leave every repo whose CI reports via the Status API (Jenkins, Buildkite,
+  // classic CircleCI) unable to EVER reach gate①-green — a permanent wedge, the same F26 class
+  // #401 exists to remove. Repos wanting the app-bound, forge-resistant evidence boundary opt in
+  // via `ci.requiredChecks`; that is the mechanism for it, and it is unchanged here.
+  // Direction chosen: narrow this predicate, NOT adopt requiredChecksSatisfied at the merge gate
+  // — that function is fail-closed on an EMPTY `ci.requiredChecks` (the default), so making it
+  // gate① would wedge every repo that has not configured a required-check list, and it needs
+  // per-check `name`/`appSlug` this `gh pr view --json statusCheckRollup` call does not fetch.
+  // Compatibility: a repo that legitimately skips jobs on some PRs (path-filtered workflows) now
+  // stays not-green instead of merging — see docs/configuration.md `ci` for the adjustment path
+  // (make the job always run and skip its STEPS, so it reports SUCCESS). NOT routed to `ciRed`
+  // below: a skipped job is not a failure, and a mechanical CI-fix leg cannot fix one.
+  const ciGreen = checks.length > 0 && checks.every((c) => (c.conclusion != null ? c.conclusion === "SUCCESS" : c.state === "SUCCESS"));
   // #246: a completed, non-passing conclusion/state — deliberately NARROWER than "not passing"
   // (which would also match CANCELLED/ACTION_REQUIRED/STALE, ambiguous states a mechanical fix
   // leg shouldn't be dispatched against). An empty rollup is never red (checks.length > 0

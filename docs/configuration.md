@@ -391,6 +391,80 @@ An empty list is legal so configuration can be adopted incrementally. With
 fail-closed because it has no trusted execution evidence; no paid review session begins until at
 least one required check is configured and satisfied.
 
+### gate① CI evidence (all reviewer modes)
+
+Independently of `requiredChecks`, every reviewer mode has a gate① CI signal derived from the
+PR's own status-check rollup. It is green only when the rollup has **at least one** check and
+**every** check conclusively passed — a modern CheckRun with conclusion `SUCCESS`, or a legacy
+commit status context with state `SUCCESS`. There is no configuration knob for this; it is not
+the `requiredChecks` list.
+
+Legacy commit status contexts still pass this gate, even though they never satisfy a
+`requiredChecks` entry. That is not an inconsistency: `requiredChecks` rejects them because a
+status context has no check suite and so its owning GitHub App cannot be verified against a
+configured `{name, app}` pair — a binding specific to that opt-in evidence chain. Gate① is the
+general "did this repo's CI pass" signal for every reviewer mode, the Status API has no
+`SKIPPED`/`NEUTRAL` concept, and rejecting status contexts here would leave any repo whose CI
+reports through that API unable to ever reach green. Repos that want the app-bound, forge-resistant
+boundary at review time configure `requiredChecks`.
+
+`SKIPPED` and `NEUTRAL` are **not** green (#401). They mean the job did not execute, so they are
+not evidence that anything was verified — a workflow whose test job is skipped used to read as
+gate①-green and could be merged with zero execution evidence. Queued/in-progress checks
+(no conclusion yet) and `CANCELLED` / `STALE` / `ACTION_REQUIRED` are not green either, and an
+empty rollup is not green (a just-pushed PR whose checks have not been created yet must not read
+as "this repo has no CI"). None of these are treated as CI *failure* either: they leave the gate
+waiting rather than dispatching a mechanical CI-fix leg, which cannot fix a job that was
+deliberately skipped.
+
+**Compatibility — repos that legitimately skip jobs.** If a workflow uses `paths:` /`paths-ignore:`
+filters or a job-level `if:` so that a check reports `SKIPPED` on some PRs, those PRs no longer
+reach gate①-green and the lane will wait instead of merging. This is the same trap GitHub's own
+required-status-checks have, and it has the same fix: **make the job always run and skip its
+steps**, so it still reports `SUCCESS`.
+
+```yaml
+# Before: the whole job is filtered out -> reports SKIPPED -> not gate①-green.
+on:
+  pull_request:
+    paths: ["engine/**"]
+
+# After: the job always runs; only the expensive steps are conditional -> reports SUCCESS.
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The default depth-1 clone has no base commit to diff against.
+          fetch-depth: 0
+      - id: changed
+        shell: bash
+        run: |
+          # set -e so a BROKEN detector fails the job. It must never fall back to
+          # "nothing changed" — that skips the tests and still reports SUCCESS, which
+          # is exactly the zero-execution-evidence hole this guidance exists to close.
+          set -euo pipefail
+          files="$(git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD)"
+          if grep -q '^engine/' <<<"$files"; then
+            echo "engine=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "engine=no" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.changed.outputs.engine == 'yes'
+        run: npm test
+```
+
+The failure direction matters more than the detector: a change detector that errors must fail
+the job loudly, never default to "no changes". A silent `|| echo no` turns an unfetched ref or a
+bad path into a green check with nothing executed — the same hole as a `SKIPPED` job, but harder
+to see.
+
+The alternative, if a check should not participate in the merge decision at all, is to not run it
+on `pull_request` — a check that never appears in the rollup does not hold the gate, whereas one
+that appears as `SKIPPED` does.
+
 ## `labels`
 
 The label taxonomy the loop reads and writes. GitHub label names are case-insensitively

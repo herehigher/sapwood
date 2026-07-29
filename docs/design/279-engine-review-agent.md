@@ -184,8 +184,31 @@ false approval from one source never clears CI, human labels, or threads).
    GitHub App** [R3: the getPRChecks GraphQL query gains `checkSuite { app { slug } }`;
    a same-named check from an untrusted app is NOT evidence]. SKIPPED/NEUTRAL/
    legacy-status-context DO NOT satisfy it [closes the ciGreen SKIPPED/NEUTRAL hole
-   for this path; general gate① ciGreen semantics unchanged this round, noted as a
-   follow-up hardening candidate]. Deterministic check↔workflow-command binding is
+   for this path; general gate① ciGreen semantics were unchanged that round and noted
+   as a follow-up hardening candidate — **CLOSED by #401 (F26)**: gate① `ciGreen`
+   (`forge/forge.ts`'s `parsePRStatus`) now requires `conclusion === "SUCCESS"` from
+   every CheckRun, so SKIPPED/NEUTRAL no longer read as green on ANY path. #401
+   carried across the CONCLUSION half of this item's stance only: a legacy commit
+   status context with state `SUCCESS` still passes gate①, because the reason THIS
+   item rejects one is app-ownership binding (a status context has no check suite, so
+   it can never match a configured `{name, app}` pair) — a `ci.requiredChecks`-specific
+   requirement, not a gate①-wide one. The Status API has no SKIPPED/NEUTRAL concept
+   for the closed hole to reappear through, and rejecting it gate①-wide would
+   permanently wedge every Status-API CI repo — the F26 class #401 exists to remove,
+   and something #401's own AC forbids the fix from doing silently. **Readjudicated,
+   not deviated:** PR #422's review read the retained legacy path as a third
+   adjudication direction outside #401's two-way AC, twice. The repo owner ruled on
+   2026-07-29 (PR #422, supervising session): dispute ACCEPTED, scope call upheld —
+   #401's "SUCCESS-only" requirement is scoped to CHECKRUN CONCLUSIONS, the legacy
+   status-context path is unchanged, and the strict app-bound boundary remains the
+   opt-in `ci.requiredChecks` chain. Recorded here because that ruling is durable
+   knowledge; the PR thread is only where it happened. #401
+   narrowed that existing predicate rather than promoting `requiredChecksSatisfied`
+   to the merge gate, because this function is fail-closed on an empty
+   `ci.requiredChecks` (the default) and promoting it would have wedged every repo
+   that has not configured one. See docs/configuration.md `ci` → "gate① CI evidence"
+   for the shipped behavior and the path-filtered-workflow adjustment path].
+   Deterministic check↔workflow-command binding is
    adjudicated infeasible statically [R3]: the agent reviews workflow-file changes in
    the diff (prompt-directed), and the residual is documented — not engine-proven.
 3. `ci.requiredChecks` empty ⇒ `code-verifiable` AC can at best be `claim-based`
@@ -263,7 +286,8 @@ comment).
 ## 9. Non-goals (v1)
 
 v2 list plus: codex-exec runner (D5 follow-up) · general gate① ciGreen
-SKIPPED/NEUTRAL semantics change (follow-up hardening) · producer `gh issue edit`
+SKIPPED/NEUTRAL semantics change (was a v1 non-goal — no longer open: **shipped by
+#401 (F26)**, `ciGreen` requires `SUCCESS`; see §4 item 2) · producer `gh issue edit`
 guard blocking (snapshot+drift makes it unnecessary for this design).
 
 ## 10. Execution plan (8 PRs) [R2 plan findings closed]
