@@ -489,11 +489,11 @@ Six, each independently reviewable, each with its own executable verification pl
 **None touches a human-merge-only path** (§0). Dependency: `#378 → R2 → R3`;
 `R2 → R5`; `R1` independent; `R4` independent; `R6` last (round-close doc gate).
 
-| # | Scope | Files |
-|---|---|---|
-| **R1** | Finding axes + severity gate: key allowlist + closed enums, `deriveApprovalResult` blocking split, D3 kind allowlist + `severityOverridden` record, artifact carries axes, audit-comment advisory section, prompt emits the axes | `review/finding-axes.ts` (new), `review/agent-output.ts`, `review/audit.ts`, `engine/prompts/engine-reviewer.md` |
-| **R2** | Per-round finding record: identity key derivation (path validated against the reviewed diff), `drive-fixup` payload gains `findings` + `fixDiffPaths` | `review/finding-key.ts` (new), `loop/conductor.ts`, `review/production.ts` |
-| **R3** | Convergence classifier + stop: pure classifier, `driveDecision` input, `review-non-convergent` event + escalation reason and comment, `lanes.prFixCap` default 2→4, docs | `review/convergence.ts` (new), `loop/conductor.ts`, `config/config.ts`, `docs/configuration.md` |
-| **R4** | Dispute costs zero fix legs: escalate `review-disputed` when every unresolved current-head thread is disputed, with the §4 evidence set | `loop/conductor.ts`, `loop/fix-response.ts` |
-| **R5** | Tendency in retro: finding-class table over K rounds in the digest, `roles.retro.tendencyRounds`, retro prompt points at it | `retro/retro-digest.ts`, `config/config.ts`, `engine/prompts/retro.md` |
-| **R6** | Reviewer prompt as a designed artifact: §6a enforced-vs-judged table, §6b triage doctrine; round-close docs | `engine/prompts/engine-reviewer.md`, `docs/role-paradigm.md`, `docs/configuration.md`, `docs/PLAN.md` |
+| # | Issue | Scope | Files |
+|---|---|---|---|
+| **R1** | #448 | Finding axes + severity gate: key allowlist + closed enums, `deriveApprovalResult` blocking split, D3 kind allowlist + `severityOverridden` record, artifact carries axes, audit-comment advisory section, prompt emits the axes | `review/finding-axes.ts` (new), `review/agent-output.ts`, `review/audit.ts`, `engine/prompts/engine-reviewer.md` |
+| **R2** | #449 | Per-round finding record: identity key derivation (path validated against the reviewed diff), `drive-fixup` payload gains `findings` + `fixDiffPaths` | `review/finding-key.ts` (new), `loop/conductor.ts`, `review/production.ts` |
+| **R3** | #450 | Convergence classifier + stop: pure classifier, `driveDecision` input, `review-non-convergent` event + escalation reason and comment, `lanes.prFixCap` default 2→4, docs | `review/convergence.ts` (new), `loop/conductor.ts`, `config/config.ts`, `docs/configuration.md` |
+| **R4** | #451 | Dispute costs zero fix legs: escalate `review-disputed` when every unresolved current-head thread is disputed, with the §4 evidence set | `loop/conductor.ts`, `loop/fix-response.ts` |
+| **R5** | #453 | Tendency in retro: finding-class table over K rounds in the digest, `roles.retro.tendencyRounds`, retro prompt points at it | `retro/retro-digest.ts`, `config/config.ts`, `engine/prompts/retro.md` |
+| **R6** | #454 | Reviewer prompt as a designed artifact: §6a enforced-vs-judged table, §6b triage doctrine; round-close docs | `engine/prompts/engine-reviewer.md`, `docs/role-paradigm.md`, `docs/configuration.md`, `docs/PLAN.md` |
