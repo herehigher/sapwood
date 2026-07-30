@@ -375,6 +375,16 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   exhausted or the round count is malformed. Of those two, both are terminal — they
   escalate to `needs-human`, the same escalation #147's GATED RECLAIM below can then
   reclaim once a human clears the label.
+  **`prFixCap` is a COST ceiling being used as a quality ceiling — the known gap, designed
+  (#402, proposed).** "Rounds spent" and "no longer making progress" are different facts
+  sharing one signal today: every round looks identical to the engine, so a lane still
+  finding real defects escalates at the cap while a lane going nowhere pays the full cap
+  first. [`design/402-review-layering-convergence-tendency.md`](design/402-review-layering-convergence-tendency.md)
+  is the adjudicated-design deliverable for that: finding severity layering (only a
+  blocking/advisory bit reaches the gate), a per-round convergence definition over the
+  event ledger, immediate human routing for a `disputed` thread, and cross-PR finding-class
+  tendency accounting in retro. Nothing there is implemented yet — its §11 names the
+  follow-up issues, and §8 the `prFixCap` migration (semantics unchanged, default 2→4).
   **Round budget paces new work; it never blocks finishing an open PR (#375, fixing two
   dogfood-observed permanent wedges, F7/F8).** A driving lane's fix leg is exempt from
   `cost.roundBudgetUsd` outright — an already-open PR has no other completion path (merge
