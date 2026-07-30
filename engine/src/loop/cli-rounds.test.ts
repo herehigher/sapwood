@@ -16,6 +16,7 @@ import { type EngineOverrides, runCli, runDryRun, runEngine, tickOnlyFlagError }
 import { ConfigSchema, configHash, dashboardConfigSubset, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus, StartupReconcileData } from "../forge/forge.js";
 import type { LabelSpec } from "../forge/labels.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import { State } from "../state/state.js";
 import type { PeripheralPhase } from "./round.js";
 
@@ -55,7 +56,7 @@ const mkHook = (dir: string): string => {
 // it (that file's FakeForge is a private test fixture, not an exported module) — kept minimal:
 // only the methods the aligning/architecting/plan_review/harvesting/retro peripherals + tick()'s
 // dispatch-eligibility path actually call.
-class FakeForge implements IForge {
+class FakeForge extends UnstubbedForge implements IForge {
   planReviewCandidates: Issue[] = [];
   issueLabels: Record<number, string[]> = {};
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
@@ -68,67 +69,67 @@ class FakeForge implements IForge {
 
   ensureRepoLabelsCalls: LabelSpec[][] = [];
   labelWriteError: Error | null = null;
-  async ensureRepoLabels(specs: readonly LabelSpec[]): Promise<string[]> {
+  override async ensureRepoLabels(specs: readonly LabelSpec[]): Promise<string[]> {
     this.ensureRepoLabelsCalls.push([...specs]);
     if (this.labelWriteError) throw this.labelWriteError;
     return specs.filter((spec) => spec.name === "sapwood:round:pool").map((spec) => spec.name);
   }
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     this.boardCalls.push("list-unplaced");
     return this.unplaced;
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     this.boardCalls.push("list-absent");
     return this.absentIssues;
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     this.reconcileReads++;
     if (this.reconcileError) throw this.reconcileError;
     return this.reconcileData;
   }
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return [];
   }
-  async getPoolEligibleIssues(): Promise<Issue[]> {
+  override async getPoolEligibleIssues(): Promise<Issue[]> {
     return [];
   }
-  async claimIssue(): Promise<void> {}
-  async setBoardStatus(issue: number, status: Parameters<IForge["setBoardStatus"]>[1]): Promise<void> {
+  override async claimIssue(): Promise<void> {}
+  override async setBoardStatus(issue: number, status: Parameters<IForge["setBoardStatus"]>[1]): Promise<void> {
     this.boardCalls.push(`set-${issue}-${status}`);
   }
-  async addSubIssue(): Promise<void> {
+  override async addSubIssue(): Promise<void> {
     throw new Error("FakeForge.addSubIssue is not used by this test");
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
-  async addLabel(n: number, l: string): Promise<void> {
+  override async addLabel(n: number, l: string): Promise<void> {
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
   }
-  async removeLabel(n: number, l: string): Promise<void> {
+  override async removeLabel(n: number, l: string): Promise<void> {
     this.issueLabels[n] = (this.issueLabels[n] ?? []).filter((x) => x !== l);
   }
-  async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> {
+  override async addPRLabel(): Promise<void> {}
+  override async openPR(): Promise<number> {
     return 1;
   }
-  async getPRStatus(n: number): Promise<PRStatus> {
+  override async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
-  async mergePR(): Promise<void> {}
-  async addPRComment(): Promise<void> {}
-  async addIssueComment(): Promise<void> {}
-  async getIssueBody(): Promise<string> {
+  override async mergePR(): Promise<void> {}
+  override async addPRComment(): Promise<void> {}
+  override async addIssueComment(): Promise<void> {}
+  override async getIssueBody(): Promise<string> {
     return "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> {
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x",
       author: "producer",
@@ -141,43 +142,43 @@ class FakeForge implements IForge {
       unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }
-  async branchExists(): Promise<boolean> {
+  override async branchExists(): Promise<boolean> {
     return false;
   }
-  async countOpenIssuesInMilestone(): Promise<number> {
+  override async countOpenIssuesInMilestone(): Promise<number> {
     return 0;
   }
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return this.planReviewCandidates;
   }
-  async getIssueLabels(issue: number): Promise<string[]> {
+  override async getIssueLabels(issue: number): Promise<string[]> {
     return this.issueLabels[issue] ?? [];
   }
-  async getIssueComments(issue: number) {
+  override async getIssueComments(issue: number) {
     return this.issueComments[issue] ?? [];
   }
-  async createIssue(): Promise<number> {
+  override async createIssue(): Promise<number> {
     return 0;
   }
-  async listOpenIssueNumbers(): Promise<number[]> {
+  override async listOpenIssueNumbers(): Promise<number[]> {
     return [];
   }
-  async listOpenIssues(): Promise<Issue[]> {
+  override async listOpenIssues(): Promise<Issue[]> {
     return [];
   }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return [];
   }
 }

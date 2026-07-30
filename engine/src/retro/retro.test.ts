@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { LaneProbe, Supervisor } from "../loop/conductor.js";
 import { type PeripheralPhase, type PeripheralStub, type RoundDeps, runRounds } from "../loop/round.js";
 import type { ContextManifest } from "../roles/context-manifest.js";
@@ -103,6 +104,8 @@ const mkFakeManifest = (tag: string): ContextManifest => ({
   worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: true, dirtyBasis: "unknown-write-capable-session" },
   settingsHash: "hash",
   hookHash: null,
+  toolUsage: [],
+  readPaths: [],
   recordedAt: "2026-07-17T00:00:01Z",
 });
 
@@ -644,65 +647,65 @@ test("prompts/retro.md never instructs a direct merge/approve — the PR-only pa
 
 // ── Integration: wired as round.ts's real `retro` peripheral ────────────────────────────────
 
-class MinimalForge implements IForge {
+class MinimalForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return [];
   }
-  async claimIssue(): Promise<void> {}
-  async setBoardStatus(): Promise<void> {}
-  async addSubIssue(): Promise<void> {
+  override async claimIssue(): Promise<void> {}
+  override async setBoardStatus(): Promise<void> {}
+  override async addSubIssue(): Promise<void> {
     throw new Error("MinimalForge.addSubIssue is not used by this test");
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
-  async addLabel(): Promise<void> {}
-  async removeLabel(): Promise<void> {}
-  async addPRLabel(): Promise<void> {}
+  override async addLabel(): Promise<void> {}
+  override async removeLabel(): Promise<void> {}
+  override async addPRLabel(): Promise<void> {}
   // #111 PR-B: recording + programmable — the engine-side PR-creation tests drive these.
   openPRCalls: Array<[string, string, string]> = [];
   openPRError: Error | null = null;
-  async openPR(branch: string, title: string, body: string): Promise<number> {
+  override async openPR(branch: string, title: string, body: string): Promise<number> {
     this.openPRCalls.push([branch, title, body]);
     if (this.openPRError) throw this.openPRError;
     return 77;
   }
   branchExistsCalls: string[] = [];
   branchExistsResult = false;
-  async branchExists(branch: string): Promise<boolean> {
+  override async branchExists(branch: string): Promise<boolean> {
     this.branchExistsCalls.push(branch);
     return this.branchExistsResult;
   }
-  async getPRStatus(n: number): Promise<PRStatus> {
+  override async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
-  async mergePR(): Promise<void> {}
-  async addPRComment(): Promise<void> {}
-  async addIssueComment(): Promise<void> {}
-  async getIssueBody(): Promise<string> {
+  override async mergePR(): Promise<void> {}
+  override async addPRComment(): Promise<void> {}
+  override async addIssueComment(): Promise<void> {}
+  override async getIssueBody(): Promise<string> {
     return "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> {
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x",
       author: "producer",
@@ -715,28 +718,28 @@ class MinimalForge implements IForge {
       unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(_pr: number): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(_sinceIso: string): Promise<CommitInfo[]> {
     return [];
   }
-  async countOpenIssuesInMilestone(): Promise<number> {
+  override async countOpenIssuesInMilestone(): Promise<number> {
     return 0;
   }
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return [];
   }
-  async getIssueLabels(): Promise<string[]> {
+  override async getIssueLabels(): Promise<string[]> {
     return [];
   }
-  async getIssueComments() {
+  override async getIssueComments() {
     return [];
   }
 }

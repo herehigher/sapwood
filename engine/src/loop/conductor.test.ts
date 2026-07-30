@@ -19,8 +19,9 @@ import {
   type PRStatus,
   readPrOwner,
 } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import { type DriveOutcome, MergeDriver } from "../roles/merge-driver.js";
-import { CODEX_REVIEWER_LOGINS, CodexReviewer } from "../roles/reviewer.js";
+import { CODEX_REVIEWER_LOGINS, CodexReviewer, type ReviewFallbackLock, type ReviewTriggerPin } from "../roles/reviewer.js";
 import { WorkerSupervisor } from "../roles/worker.js";
 import { State, type WorkerRow } from "../state/state.js";
 import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
@@ -73,18 +74,18 @@ const DEFAULT_PROBE: LaneProbe = {
   hasPr: false,
 };
 
-class FakeForge implements IForge {
+class FakeForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
   ready: Issue[] = [];
@@ -119,50 +120,50 @@ class FakeForge implements IForge {
     reviews: [],
     unresolvedThreads: 0,
   };
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     this.readyReads++;
     return this.ready;
   }
-  async claimIssue(n: number): Promise<void> {
+  override async claimIssue(n: number): Promise<void> {
     this.claimed.push(n);
   }
-  async setBoardStatus(n: number, s: "backlog" | "ready" | "inProgress" | "done"): Promise<void> {
+  override async setBoardStatus(n: number, s: "backlog" | "ready" | "inProgress" | "done"): Promise<void> {
     this.boardSet.push([n, s]);
   }
-  async addSubIssue(): Promise<void> {
+  override async addSubIssue(): Promise<void> {
     throw new Error("FakeForge.addSubIssue is not used by this test");
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
-  async addLabel(n: number, l: string): Promise<void> {
+  override async addLabel(n: number, l: string): Promise<void> {
     if (this.throwOnAddLabel) throw new Error("simulated forge failure");
     this.labelsAdded.push([n, l]);
     const cur = this.issueLabelsByIssue[n] ?? [];
     if (!cur.includes(l)) this.issueLabelsByIssue[n] = [...cur, l];
   }
   labelsRemoved: Array<[number, string]> = [];
-  async removeLabel(n: number, l: string): Promise<void> {
+  override async removeLabel(n: number, l: string): Promise<void> {
     this.labelsRemoved.push([n, l]);
     this.issueLabelsByIssue[n] = (this.issueLabelsByIssue[n] ?? []).filter((x) => x !== l);
   }
-  async addPRLabel(n: number, l: string): Promise<void> {
+  override async addPRLabel(n: number, l: string): Promise<void> {
     this.prLabelsAdded.push([n, l]);
     if (!this.prReviewData.labels.includes(l)) this.prReviewData = { ...this.prReviewData, labels: [...this.prReviewData.labels, l] };
   }
-  async openPR(): Promise<number> {
+  override async openPR(): Promise<number> {
     return 1;
   }
-  async getPRStatus(n: number): Promise<PRStatus> {
+  override async getPRStatus(n: number): Promise<PRStatus> {
     return { ...this.prStatus, number: n };
   }
-  async mergePR(pr: number, headOid: string): Promise<void> {
+  override async mergePR(pr: number, headOid: string): Promise<void> {
     this.merged.push([pr, headOid]);
   }
-  async addPRComment(pr: number, body: string): Promise<void> {
+  override async addPRComment(pr: number, body: string): Promise<void> {
     this.prComments.push([pr, body]);
   }
   /** #246 review round 1 (C3): lets a test simulate a transient issue-comment-post failure
@@ -170,7 +171,7 @@ class FakeForge implements IForge {
    *  as a label failure, not a bare best-effort `.catch(() => {})` right before a terminal
    *  upsert that would otherwise permanently lose the adjudication context. */
   throwOnAddIssueComment = false;
-  async addIssueComment(n: number, body: string): Promise<void> {
+  override async addIssueComment(n: number, body: string): Promise<void> {
     if (this.throwOnAddIssueComment) throw new Error("simulated forge failure");
     this.issueComments.push([n, body]);
   }
@@ -178,53 +179,53 @@ class FakeForge implements IForge {
   // dispatch and a later DRIVE-phase drift check. Defaults to "" (byte-for-byte the pre-#283
   // behavior for any test that never populates it).
   issueBodies: Record<number, string> = {};
-  async getIssueBody(n: number): Promise<string> {
+  override async getIssueBody(n: number): Promise<string> {
     return this.issueBodies[n] ?? "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> {
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     return this.prReviewData;
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }
-  async branchExists(): Promise<boolean> {
+  override async branchExists(): Promise<boolean> {
     return false;
   }
-  async countOpenIssuesInMilestone(): Promise<number> {
+  override async countOpenIssuesInMilestone(): Promise<number> {
     return 0;
   }
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return [];
   }
-  async getIssueLabels(n: number): Promise<string[]> {
+  override async getIssueLabels(n: number): Promise<string[]> {
     return this.issueLabelsByIssue[n] ?? [];
   }
-  async getIssueComments() {
+  override async getIssueComments() {
     return [];
   }
-  async createIssue(): Promise<number> {
+  override async createIssue(): Promise<number> {
     return 0;
   }
-  async listOpenIssueNumbers(): Promise<number[]> {
+  override async listOpenIssueNumbers(): Promise<number[]> {
     return [];
   }
-  async listOpenIssues(): Promise<Issue[]> {
+  override async listOpenIssues(): Promise<Issue[]> {
     return [];
   }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return [];
   }
   // #247: fix-leg thread-response writes — recorded for tests to assert the exact call
@@ -234,24 +235,24 @@ class FakeForge implements IForge {
   /** #247 D5: simulates a transient forge failure on the reply half so a pending row survives
    *  a FIX RESPONSE RETRY attempt — proves DRIVE skips a lane that STILL has a pending write. */
   throwOnReplyToReviewThread = false;
-  async replyToReviewThread(threadId: string, body: string): Promise<void> {
+  override async replyToReviewThread(threadId: string, body: string): Promise<void> {
     if (this.throwOnReplyToReviewThread) throw new Error("simulated forge failure");
     this.threadReplies.push([threadId, body]);
   }
-  async resolveReviewThread(threadId: string): Promise<void> {
+  override async resolveReviewThread(threadId: string): Promise<void> {
     this.threadResolves.push(threadId);
     this.prReviewData = { ...this.prReviewData, unresolvedThreads: Math.max(0, this.prReviewData.unresolvedThreads - 1) };
   }
   /** #247 D3/F2(b): attemptThreadWrite's crash-safety marker check reads this back before every
    *  reply-post attempt — simulate GitHub's own live state from every reply already recorded
    *  above (single global bucket by threadId). */
-  async getReviewThreadCommentsTail(threadId: string, cap: number): Promise<string[]> {
+  override async getReviewThreadCommentsTail(threadId: string, cap: number): Promise<string[]> {
     return this.threadReplies
       .filter(([tid]) => tid === threadId)
       .map(([, body]) => body)
       .slice(-cap);
   }
-  async getPRReviewThreads(_pr: number, _commentsCap: number) {
+  override async getPRReviewThreads(_pr: number, _commentsCap: number) {
     const byThread: Record<string, string[]> = {};
     for (const [tid, body] of this.threadReplies) {
       byThread[tid] ??= [];
@@ -290,7 +291,7 @@ class FakeSupervisor implements Supervisor {
   }
   /** #245: records the opts a caller passed (prompt/proxy) so tests can assert startFixLeg's
    *  own shape without a real forge MCP proxy or a spawned claude process. */
-  resumeCalls: Array<{ issue: Issue; worker: string; opts?: { proxy?: unknown; prompt?: string; sessionId?: string } }> = [];
+  resumeCalls: Array<{ issue: Issue; worker: string; opts: { proxy?: unknown; prompt?: string; sessionId?: string } | undefined }> = [];
   resumeShouldThrow: string | null = null;
   async resume(
     issue: Issue,
@@ -395,7 +396,7 @@ test("tick dispatch: claim happens before launch; a claim failure spawns no work
     throw new Error("board claim failed");
   };
   await assert.rejects(() => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }));
-  assert.deepEqual(sup.dispatched, []); // claim threw first -> nothing launched, no untracked worker
+  assert.deepEqual(sup.dispatched, [] as Issue[]); // claim threw first -> nothing launched, no untracked worker
   assert.equal(st.runningWorkers().length, 0);
   st.close();
 });
@@ -425,17 +426,20 @@ test("tick dispatch: an AC snapshot is persisted BEFORE the worker ever spawns, 
   const forge = new FakeForge();
   const body = "## Acceptance criteria\n\n- [ ] one\n- [ ] two\n\n## Verification plan\nrun tests";
   forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body }];
-  let snapshotSeenAtSpawn: ReturnType<State["getAcSnapshot"]> = null;
+  // #403 (F25): held on an object rather than in a `let`. A `let x: T | null = null` only ever
+  // assigned INSIDE a callback stays narrowed to `null` at the assertions below, which makes
+  // `x!` `never` and the property reads uncheckable; a property keeps its declared type.
+  const seenAtSpawn: { snapshot: ReturnType<State["getAcSnapshot"]> } = { snapshot: null };
   const originalDispatch = sup.dispatch.bind(sup);
   sup.dispatch = async (issue: Issue) => {
     // Proves ordering: by the moment the worker is spawned, the snapshot already exists.
-    snapshotSeenAtSpawn = st.getAcSnapshot(issue.number);
+    seenAtSpawn.snapshot = st.getAcSnapshot(issue.number);
     return originalDispatch(issue);
   };
   await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
-  assert.ok(snapshotSeenAtSpawn, "the AC snapshot must already be persisted by the time dispatch() (the spawn) is called");
-  assert.equal(snapshotSeenAtSpawn!.body, body);
-  assert.equal(snapshotSeenAtSpawn!.manifest.length, 2);
+  assert.ok(seenAtSpawn.snapshot, "the AC snapshot must already be persisted by the time dispatch() (the spawn) is called");
+  assert.equal(seenAtSpawn.snapshot.body, body);
+  assert.equal(seenAtSpawn.snapshot.manifest.length, 2);
   // And it's still there (unchanged) after the tick completes.
   const snap = st.getAcSnapshot(7);
   assert.equal(snap?.body, body);
@@ -1353,7 +1357,7 @@ test("tick capacity: a reclaimed DONE+PR (driving) lane still occupies a lane (C
   forge.ready = [{ number: 9, title: "", labels: ["prio:3-feature"] }];
   const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 5 } }) });
   assert.equal(st.getWorker("lane-driving")?.state, "driving");
-  assert.deepEqual(sup.dispatched, []); // the driving lane keeps capacity full -> #9 not launched
+  assert.deepEqual(sup.dispatched, [] as Issue[]); // the driving lane keeps capacity full -> #9 not launched
   assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 9 && d.reason === "no-lane"));
   st.close();
 });
@@ -1367,8 +1371,8 @@ class FakeMergeGate implements MergeGate {
   calls: Array<{
     pr: number;
     issue: number;
-    triggerPin: { head: string | null; at: string | null };
-    fallbackLock?: { head: string | null; kind: string | null };
+    triggerPin: ReviewTriggerPin;
+    fallbackLock: ReviewFallbackLock | undefined;
   }> = [];
   outcomes: Record<number, DriveOutcome> = {};
   defaultOutcome: DriveOutcome = { kind: "queued", pr: 0, reason: "default" };
@@ -1377,16 +1381,21 @@ class FakeMergeGate implements MergeGate {
   recordOnCall: [string, string] | null = null;
   /** When set, driveOne invokes the caller-supplied recordFallback with this lock (#54) —
    *  simulates resolveReviewVerdict returning a new lock. */
-  recordFallbackOnCall: { head: string | null; kind: string | null } | null = null;
+  recordFallbackOnCall: ReviewFallbackLock | null = null;
   recordVerdictOnCall: [string, number, boolean] | null = null;
+  // #403 (F25), PR #430 gate② P1: these parameter types are the REAL `ReviewTriggerPin` /
+  // `ReviewFallbackLock`, not structural look-alikes. The look-alike (`kind: string | null`
+  // where the interface says `ReviewerKind | null`) is precisely why this fake was not
+  // assignable to MergeGate — 87 of this file's errors — which is why the file sat on the
+  // typecheck exclusion list where a missing clock could hide.
   async driveOne(
     pr: number,
     issue: number,
-    triggerPin: { head: string | null; at: string | null },
+    triggerPin: ReviewTriggerPin,
     recordTrigger: (head: string, at: string) => void,
     fallback?: {
-      lock: { head: string | null; kind: string | null };
-      recordFallback: (lock: { head: string | null; kind: string | null }) => void;
+      lock: ReviewFallbackLock;
+      recordFallback: (lock: ReviewFallbackLock) => void;
     },
     _reentered?: boolean,
     recordVerdict?: (head: string, generation: number, coverageEstablished: boolean) => void,
@@ -1645,7 +1654,7 @@ test("tick DRIVE (#294): an absent -> held -> held -> absent -> held-again label
   // Every pass returns the SAME gate outcome — only the observation changes, so any emitted
   // event can only have come from the hold transition, never from the gate verdict.
   const observe = (holdObservation: DriveOutcome["holdObservation"]) => {
-    gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW", holdObservation };
+    gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW", ...(holdObservation ? { holdObservation } : {}) };
   };
   const runTick = () => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   const heldEvents = () => st.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]);
@@ -1780,7 +1789,7 @@ test("tick DRIVE (#246): fixable + under cap + fixLegResume configured -> dispat
   assert.equal(row.state, "fixing");
   assert.equal(row.fix_rounds, 1);
   assert.equal(row.pr, 55, "same PR — never a new dispatch");
-  assert.deepEqual(sup.dispatched, []);
+  assert.deepEqual(sup.dispatched, [] as Issue[]);
   assert.equal(sup.resumeCalls.length, 1);
   assert.equal(sup.resumeCalls[0]!.opts?.prompt, "fix #2 pr #55");
   assert.deepEqual(r.driven, [
@@ -2544,7 +2553,7 @@ test("tick: kill switch active -> DRAIN + TERMINAL-RECLAIM only: no rollback ret
     assert.deepEqual(r.dispatched, []); // dispatch phase skipped (not even "skipped" rows)
     assert.deepEqual(r.rollbacks, []); // rollback retry skipped
     assert.equal(gate.calls.length, 0); // no possibility of forge.mergePR firing
-    assert.deepEqual(sup.dispatched, []);
+    assert.deepEqual(sup.dispatched, [] as Issue[]);
     assert.deepEqual(sup.reclaimed, []);
     assert.deepEqual(forge.claimed, []);
     assert.deepEqual(forge.boardSet, []);
@@ -2588,7 +2597,7 @@ test("#172 kill switch adopts a confirmed-intent handoff and drains it in the sa
     assert.deepEqual(result.drainRequested, ["lane-confirmed"]);
     assert.deepEqual(sup.handoffRequested, ["lane-confirmed"]);
     assert.deepEqual(result.reclaimed, []);
-    assert.deepEqual(sup.dispatched, []);
+    assert.deepEqual(sup.dispatched, [] as Issue[]);
     st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2997,7 +3006,7 @@ test("#75 tick: PAUSE active -> dispatch skipped entirely (no new lane, not even
     // Dispatch: nothing happened, no "skipped" rows either — the phase never ran.
     assert.deepEqual(r.dispatched, []);
     assert.deepEqual(forge.claimed, []);
-    assert.deepEqual(sup.dispatched, []);
+    assert.deepEqual(sup.dispatched, [] as Issue[]);
     // Not a ceiling/kill-switch condition: pause is invisible to those fields.
     assert.equal(r.ceilingBreached, false);
     assert.deepEqual(r.ceilingReasons, []);
@@ -3561,7 +3570,7 @@ test("#172 ordering: with one free slot, RESUME claims it before a fresh Ready i
   forge.ready = [{ number: 176, title: "fresh", labels: ["prio:3-feature"] }];
   const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }) });
   assert.deepEqual(r.resumed, [{ kind: "resumed", worker: "lane-old", issue: 175, attempt: 1 }]);
-  assert.deepEqual(sup.dispatched, []);
+  assert.deepEqual(sup.dispatched, [] as Issue[]);
   assert.deepEqual(r.dispatched, [{ kind: "skipped", issue: 176, reason: "no-lane" }]);
   st.close();
 });
@@ -3609,7 +3618,7 @@ test("tick dispatch: skips in-flight issue, respects max lanes, and over-budget 
   assert.equal(r.overBudget, true);
   assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 2 && d.reason === "in-flight"));
   assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 3 && d.reason === "over-budget"));
-  assert.deepEqual(sup.dispatched, []); // nothing dispatched
+  assert.deepEqual(sup.dispatched, [] as Issue[]); // nothing dispatched
   st.close();
 });
 
@@ -3801,7 +3810,7 @@ test("tick ceiling: daily budget breach freezes ALL new dispatch + drains runnin
   assert.equal(r.ceilingBreached, true);
   assert.deepEqual(r.ceilingReasons, ["daily-budget"]);
   assert.deepEqual(r.dispatched, [{ kind: "skipped", issue: 2, reason: "ceiling" }]);
-  assert.deepEqual(sup.dispatched, []); // nothing launched
+  assert.deepEqual(sup.dispatched, [] as Issue[]); // nothing launched
   assert.deepEqual(r.drainRequested, ["lane-run"]); // the running worker was asked to hand off
   assert.deepEqual(sup.handoffRequested, ["lane-run"]);
   assert.deepEqual(r.escalated, []); // drain window not yet elapsed on first detection
@@ -3823,7 +3832,7 @@ test("tick: out-of-band kill switch (file sentinel, engine data dir) -> drain-on
     assert.equal(r.ceilingBreached, true);
     assert.deepEqual(r.ceilingReasons, ["kill-switch"]);
     assert.deepEqual(r.dispatched, []); // #69 global gate: DISPATCH never even ran
-    assert.deepEqual(sup.dispatched, []);
+    assert.deepEqual(sup.dispatched, [] as Issue[]);
     assert.deepEqual(sup.handoffRequested, ["lane-run"]);
     st.close();
   } finally {
@@ -5093,7 +5102,7 @@ test("#168 dispatch gate: parked -> dispatch skipped entirely (mirrors PAUSE: no
 
   assert.deepEqual(r.dispatched, []);
   assert.deepEqual(forge.claimed, []);
-  assert.deepEqual(sup.dispatched, []);
+  assert.deepEqual(sup.dispatched, [] as Issue[]);
   assert.equal(gate.calls.length, 1); // DRIVE unaffected by park, exactly like PAUSE
   assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-drv", issue: 3, pr: 56 }]);
   st.close();
@@ -5157,7 +5166,7 @@ test("#168 P2-B auto-resume (forge): a successful probe clears the episode, but 
   });
   assert.equal(st.isParked(), false); // cleared within the recovery tick
   assert.deepEqual(r1.dispatched, []); // ...but no dispatch until the next tick
-  assert.deepEqual(sup.dispatched, []);
+  assert.deepEqual(sup.dispatched, [] as Issue[]);
 
   // Next tick: fully resumed.
   const r2 = await tick({
@@ -5212,7 +5221,7 @@ test("#168 P2-B fairness: the outage VICTIM's suspended requeue drains before a 
   const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 2_000) });
   assert.equal(st.isParked(), false);
   assert.deepEqual(r2.dispatched, []);
-  assert.deepEqual(sup.dispatched, []);
+  assert.deepEqual(sup.dispatched, [] as Issue[]);
 
   // Tick 3: ROLLBACK RETRY drains the victim's requeue FIRST (tick-top ordering), so dispatch
   // sees both 900 and 901 — and priority/number order admits the VICTIM into the single lane.
@@ -5354,12 +5363,12 @@ test("#168 P1-1 oscillation regression: provider stays down while the ping alway
   sup.probes["lane-w"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "rate_limit_error" };
   await tick({ ...deps, now: () => t0 });
   assert.equal(st.parkRow("llm")?.enteredAt, t0.toISOString());
-  assert.deepEqual(sup.dispatched, []); // parked from this tick's own reclaim -> no dispatch
+  assert.deepEqual(sup.dispatched, [] as Issue[]); // parked from this tick's own reclaim -> no dispatch
 
   // t0+5: backoff (10s) not yet elapsed -> NO canary, NO full dispatch. The old design cleared
   // park here (probe success) and re-dispatched the full queue — the oscillation.
   await tick({ ...deps, now: () => new Date(t0.getTime() + 5_000) });
-  assert.deepEqual(sup.dispatched, []);
+  assert.deepEqual(sup.dispatched, [] as Issue[]);
   assert.equal(st.isParked(), true);
 
   // t0+11: due -> canary #1 (exactly one lane).
@@ -5420,7 +5429,7 @@ test("#168 P1-1a mixed storm end-to-end: llm episode + forge failure -> BOTH row
   // even claim an issue) — both episodes persist, zero dispatch.
   await tick({ ...deps, now: () => new Date(t0.getTime() + 11_000) });
   assert.equal(st.parkedSources().length, 2);
-  assert.deepEqual(sup.dispatched, []);
+  assert.deepEqual(sup.dispatched, [] as Issue[]);
 
   // Forge recovers: its probe clears the forge episode — but the llm episode still blocks.
   forgeUp = true;
@@ -6434,7 +6443,7 @@ const seedFixingHandoff = (st: State, name: string, issue: number, pr: number | 
     state: "handoff",
     started_at: "t",
     ended_at: "t2",
-    pr: pr ?? undefined,
+    ...(pr === null ? {} : { pr }),
     fixing_handoff: 1,
     ...over,
   });

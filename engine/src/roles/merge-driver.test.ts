@@ -7,8 +7,18 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+import type { AuditDeliveryResult } from "../review/drive.js";
 import { type DriveOutcome, deriveGate, MergeDriver, mergeDecision, reviewSilenceDuration } from "./merge-driver.js";
-import type { ApprovalResult, ReviewAction, Reviewer, ReviewTriggerContext, ReviewVerdict } from "./reviewer.js";
+import type {
+  ApprovalResult,
+  ReviewAction,
+  Reviewer,
+  ReviewFallbackLock,
+  ReviewTriggerContext,
+  ReviewTriggerPin,
+  ReviewVerdict,
+} from "./reviewer.js";
 import { CODEX_REVIEWER_LOGINS, CodexReviewer, HumanReviewer, SameModelTrustedReviewer } from "./reviewer.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -248,18 +258,18 @@ test("#248 review round 1 (G3): reviewSilenceDuration's holdLabelPresent input i
 // 3) MergeDriver.driveOne — end-to-end with fakes (no real gh calls)
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
-class FakeForge implements IForge {
+class FakeForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
   merged: Array<[number, string]> = [];
@@ -285,97 +295,97 @@ class FakeForge implements IForge {
   statusSequence: PRStatus[] = [];
   mergeErr: Error | null = null;
 
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return [];
   }
-  async claimIssue(): Promise<void> {}
-  async setBoardStatus(): Promise<void> {}
-  async addSubIssue(): Promise<void> {
+  override async claimIssue(): Promise<void> {}
+  override async setBoardStatus(): Promise<void> {}
+  override async addSubIssue(): Promise<void> {
     throw new Error("FakeForge.addSubIssue is not used by this test");
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
-  async addLabel(n: number, l: string): Promise<void> {
+  override async addLabel(n: number, l: string): Promise<void> {
     this.labelsAdded.push([n, l]);
   }
-  async removeLabel(): Promise<void> {}
-  async addPRLabel(pr: number, label: string): Promise<void> {
+  override async removeLabel(): Promise<void> {}
+  override async addPRLabel(pr: number, label: string): Promise<void> {
     this.calls.push("add-pr-label");
     this.prLabelsAdded.push([pr, label]);
     this.reviewData = { ...this.reviewData, labels: [...this.reviewData.labels, label] };
   }
-  async openPR(): Promise<number> {
+  override async openPR(): Promise<number> {
     return 1;
   }
-  async getPRStatus(): Promise<PRStatus> {
+  override async getPRStatus(): Promise<PRStatus> {
     this.calls.push("status");
     if (this.statusErr) throw this.statusErr;
     return this.statusSequence.shift() ?? this.status;
   }
-  async mergePR(pr: number, headOid: string): Promise<void> {
+  override async mergePR(pr: number, headOid: string): Promise<void> {
     this.calls.push("merge");
     if (this.mergeErr) throw this.mergeErr;
     this.merged.push([pr, headOid]);
   }
-  async addPRComment(pr: number, body: string): Promise<void> {
+  override async addPRComment(pr: number, body: string): Promise<void> {
     this.calls.push("comment");
     this.comments.push([pr, body]);
   }
-  async addIssueComment(): Promise<void> {}
-  async getIssueBody(): Promise<string> {
+  override async addIssueComment(): Promise<void> {}
+  override async getIssueBody(): Promise<string> {
     return "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> {
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     this.calls.push("review-data");
     return this.reviewData;
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     this.calls.push("changed-files");
     if (this.changedFilesErr) throw this.changedFilesErr;
     return { files: this.changedFiles, complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }
-  async branchExists(): Promise<boolean> {
+  override async branchExists(): Promise<boolean> {
     return false;
   }
-  async countOpenIssuesInMilestone(): Promise<number> {
+  override async countOpenIssuesInMilestone(): Promise<number> {
     return 0;
   }
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return [];
   }
-  async getIssueLabels(): Promise<string[]> {
+  override async getIssueLabels(): Promise<string[]> {
     return [];
   }
-  async getIssueComments() {
+  override async getIssueComments() {
     return [];
   }
-  async createIssue(): Promise<number> {
+  override async createIssue(): Promise<number> {
     return 0;
   }
-  async listOpenIssueNumbers(): Promise<number[]> {
+  override async listOpenIssueNumbers(): Promise<number[]> {
     return [];
   }
-  async listOpenIssues(): Promise<Issue[]> {
+  override async listOpenIssues(): Promise<Issue[]> {
     return [];
   }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return [];
   }
 }
@@ -422,6 +432,10 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
 // below ("review-trigger pin (#55 P1-B)").
 const ALREADY_TRIGGERED = { head: "HEAD", at: "2020-01-01T00:00:00Z" };
 const noopRecord = (_head: string, _at: string): void => {};
+/** #403 (F25): a never-triggered lane's pin. driveOne takes a `ReviewTriggerPin`, not `null` —
+ *  the engine reads these two null fields straight off the WorkerRow (conductor.ts), so this is
+ *  the shape production actually passes, not a stand-in for it. */
+const NEVER_TRIGGERED: ReviewTriggerPin = { head: null, at: null };
 
 test("#292 MergeDriver: instruction-path change escalates once before review, then the exact PR-label latch suppresses all repeat writes", async () => {
   const forge = new FakeForge();
@@ -452,7 +466,7 @@ test("#292 MergeDriver: an existing needs-human label returns HUMAN before file 
 
   // For a needs-human-labeled PR that does not touch instruction paths, the terminal outcome is
   // unchanged from pre-#292 (needs-human); the latch deliberately avoids the wasted trigger.
-  const outcome = await new MergeDriver({ forge, reviewer, cfg: mkCfg() }).driveOne(7, 46, null, noopRecord);
+  const outcome = await new MergeDriver({ forge, reviewer, cfg: mkCfg() }).driveOne(7, 46, NEVER_TRIGGERED, noopRecord);
   assert.deepEqual(outcome, { kind: "needs-human", pr: 7, reason: "gate:HUMAN:instruction-path-latch", holdObservation: { held: false } });
   assert.equal(forge.calls.includes("changed-files"), false);
   assert.deepEqual(reviewer.triggered, []);
@@ -1434,7 +1448,7 @@ test("MergeDriver.driveOne: a trigger-post failure (rate-limit/network) -> queue
   const outcome = await driver.driveOne(7, 46, { head: null, at: null }, (h, a) => recorded.push([h, a]));
   assert.equal(outcome.kind, "queued");
   assert.match((outcome as { reason: string }).reason, /review-trigger-failed/);
-  assert.deepEqual(recorded, []); // no pin recorded for a trigger that never posted
+  assert.deepEqual(recorded, [] as ReviewFallbackLock[]); // no pin recorded for a trigger that never posted
   assert.deepEqual(forge.merged, []);
 });
 
@@ -1486,7 +1500,7 @@ class ScriptedReviewer implements Reviewer {
   }
 }
 
-const NO_LOCK = { head: null as string | null, kind: null as string | null };
+const NO_LOCK: ReviewFallbackLock = { head: null, kind: null };
 const noopRecordFallback = (_lock: { head: string | null; kind: string | null }): void => {};
 // Triggered long before "now" (2026-07-07T09:00:00Z, 1h later — well past the default
 // failoverAfterSec, and past every explicit failoverAfterSec used below).
@@ -1524,7 +1538,7 @@ test("MergeDriver.driveOne: threshold crossed -> gates via the fallback's OWN ve
   reviewer.verdict = { action: "WAIT_REVIEW", headOid: "HEAD" }; // primary still down
   const fallbackReviewers = [new ScriptedReviewer("same-model-trusted", "MERGE_OK")];
   const cfg = mkCfg({ reviewer: { trustedReviewers: ["trusted-bot"], fallback: ["same-model-trusted"], failoverAfterSec: 1200 } }); // 20min, elapsed 1h
-  const recorded: Array<{ head: string | null; kind: string | null }> = [];
+  const recorded: ReviewFallbackLock[] = [];
   const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers, now: NOW });
   const outcome = await driver.driveOne(7, 46, TRIGGERED_LONG_AGO, noopRecord, {
     lock: NO_LOCK,
@@ -1550,7 +1564,7 @@ test("MergeDriver.driveOne R2: the lock SURVIVES primary non-decisiveness — re
   // failoverAfterSec 7200 (elapsed 1h) -> BELOW threshold: this exercises the lock re-verify
   // path specifically, not the ordinary failover chain.
   const cfg = mkCfg({ reviewer: { trustedReviewers: ["trusted-bot"], fallback: ["same-model-trusted"], failoverAfterSec: 7200 } });
-  const recorded: Array<{ head: string | null; kind: string | null }> = [];
+  const recorded: ReviewFallbackLock[] = [];
   const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [new SameModelTrustedReviewer(["trusted-bot"])], now: NOW });
   const outcome = await driver.driveOne(7, 46, TRIGGERED_LONG_AGO, noopRecord, {
     lock: { head: "HEAD", kind: "same-model-trusted" },
@@ -1558,7 +1572,7 @@ test("MergeDriver.driveOne R2: the lock SURVIVES primary non-decisiveness — re
   });
   assert.equal(outcome.kind, "merged");
   assert.deepEqual(forge.merged, [[7, "HEAD"]]);
-  assert.deepEqual(recorded, []); // lock unchanged — never re-written, never cleared here
+  assert.deepEqual(recorded, [] as ReviewFallbackLock[]); // lock unchanged — never re-written, never cleared here
 });
 
 test("MergeDriver.driveOne R2: the lock does NOT override fresh blocking signals — a standing human CHANGES_REQUESTED on the locked head blocks (fable-review P1)", async () => {
@@ -1580,7 +1594,7 @@ test("MergeDriver.driveOne R2: the lock does NOT override fresh blocking signals
     reviewer: { trustedReviewers: ["trusted-bot"], fallback: ["same-model-trusted"], failoverAfterSec: 1200 },
     lanes: { prFixCap: 0 },
   });
-  const recorded: Array<{ head: string | null; kind: string | null }> = [];
+  const recorded: ReviewFallbackLock[] = [];
   const driver = new MergeDriver({
     forge,
     reviewer: primary,
@@ -1594,7 +1608,7 @@ test("MergeDriver.driveOne R2: the lock does NOT override fresh blocking signals
   });
   assert.equal(outcome.kind, "needs-human"); // HANDLE_THREADS gates HUMAN — never merged
   assert.deepEqual(forge.merged, []);
-  assert.deepEqual(recorded, []); // and the block does not clear the lock either (head unchanged)
+  assert.deepEqual(recorded, [] as ReviewFallbackLock[]); // and the block does not clear the lock either (head unchanged)
 });
 
 test("MergeDriver.driveOne R2: transient non-merge outcomes leave the lock in place — cleared only on merge or head change (Codex PR #71 P2)", async () => {
@@ -1602,18 +1616,18 @@ test("MergeDriver.driveOne R2: transient non-merge outcomes leave the lock in pl
   forge.status = { ...forge.status, ciGreen: false }; // gate① pending -> MERGE_OK still queues
   const reviewer = new FakeReviewer(); // primary decisive MERGE_OK (recovered)
   const cfg = mkCfg({ reviewer: { trustedReviewers: ["trusted-bot"], fallback: ["same-model-trusted"], failoverAfterSec: 1200 } });
-  const recorded: Array<{ head: string | null; kind: string | null }> = [];
+  const recorded: ReviewFallbackLock[] = [];
   const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [new SameModelTrustedReviewer(["trusted-bot"])], now: NOW });
-  const lock = { head: "HEAD", kind: "same-model-trusted" };
+  const lock: ReviewFallbackLock = { head: "HEAD", kind: "same-model-trusted" };
   const t1 = await driver.driveOne(7, 46, TRIGGERED_LONG_AGO, noopRecord, { lock, recordFallback: (l) => recorded.push(l) });
   assert.equal(t1.kind, "queued"); // CI not green — no merge this tick
-  assert.deepEqual(recorded, []); // the lock is NOT cleared on a transient non-merge tick
+  assert.deepEqual(recorded, [] as ReviewFallbackLock[]); // the lock is NOT cleared on a transient non-merge tick
   assert.deepEqual(t1.reviewerTransition, { kind: "revert", mode: "different-model-codex", head: "HEAD" });
 
   forge.status = { ...forge.status, ciGreen: true }; // next tick: CI green
   const t2 = await driver.driveOne(7, 46, TRIGGERED_LONG_AGO, noopRecord, { lock, recordFallback: (l) => recorded.push(l) });
   assert.equal(t2.kind, "merged");
-  assert.deepEqual(recorded, []); // still never cleared at resolution time
+  assert.deepEqual(recorded, [] as ReviewFallbackLock[]); // still never cleared at resolution time
 });
 
 test("MergeDriver.driveOne R2: a FORGED lock row (no matching approval on the PR) synthesizes nothing — the PR just keeps queuing (fable-review P2)", async () => {
@@ -1634,7 +1648,7 @@ test("MergeDriver.driveOne R2: a head change clears the (now stale) lock in the 
   const forge = new FakeForge(); // live head is "HEAD"
   const reviewer = new FakeReviewer();
   const cfg = mkCfg({ reviewer: { fallback: ["human"], failoverAfterSec: 1200 } });
-  const recorded: Array<{ head: string | null; kind: string | null }> = [];
+  const recorded: ReviewFallbackLock[] = [];
   const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [new HumanReviewer()], now: NOW });
   const outcome = await driver.driveOne(
     7,
@@ -1716,7 +1730,7 @@ interface EARecorded {
 
 function mkEngineAgentDeps(
   recorded: EARecorded,
-  overrides: { auditDelivery?: (r: ApprovalResult) => Promise<{ delivered: boolean; reason?: string }>; now?: () => Date } = {},
+  overrides: { auditDelivery?: (r: ApprovalResult) => Promise<AuditDeliveryResult>; now?: () => Date } = {},
 ) {
   let runIdCursor = 0;
   return {
@@ -1742,14 +1756,15 @@ function mkEngineAgentDeps(
     },
     auditDelivery: async (result: ApprovalResult) => {
       const delivered = await (
-        overrides.auditDelivery ?? (async () => ({ delivered: false, reason: "#288 not implemented in this test" }))
+        overrides.auditDelivery ??
+        (async (): Promise<AuditDeliveryResult> => ({ delivered: false, reason: "#288 not implemented in this test" }))
       )(result);
       if (delivered.delivered && recorded.wal) {
         recorded.wal = { ...recorded.wal, reviewArtifactJson: "{}", auditCommentId: "C1", auditDeliveredAt: "2026-01-01T00:00:01.000Z" };
       }
       return delivered;
     },
-    reconcileAuditDelivery: async () => ({ delivered: false, reason: "nothing to reconcile" }),
+    reconcileAuditDelivery: async (): Promise<AuditDeliveryResult> => ({ delivered: false, reason: "nothing to reconcile" }),
     ciChecksCap: 20,
   };
 }
@@ -1809,7 +1824,7 @@ test("MergeDriver.driveOne (engine-agent): rejected + delivered -> FIXABLE (cond
   const forge = new EngineAgentFakeForge();
   const reviewer = {
     kind: "engine-agent" as const,
-    evaluate: async () => ({ kind: "rejected" as const, headOid: "HEAD", findings: [{ id: "f1", body: "bug found" }] }),
+    evaluate: async (): Promise<ApprovalResult> => ({ kind: "rejected", headOid: "HEAD", findings: [{ id: "f1", body: "bug found" }] }),
   };
   const cfg = mkEngineAgentCfg({ lanes: { prFixCap: 2 } });
   const recorded: EARecorded = { pin: null, wal: null };
@@ -2025,6 +2040,9 @@ test("MergeDriver.driveOne (engine-agent, produce-pr-and-stop human-merge transi
       treeManifestHash: null,
       attemptStart: "2026-01-01T00:00:00.000Z",
       decisiveOutcome: "approved",
+      reviewArtifactJson: null,
+      auditCommentId: null,
+      auditDeliveredAt: null,
     },
   };
   const cfg = mkEngineAgentCfg({ merge: { mode: "produce-pr-and-stop" } });

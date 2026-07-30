@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
@@ -43,18 +44,18 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
     ...over,
   });
 
-class FakeForge implements IForge {
+class FakeForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
   planReviewCandidates: Issue[] = [];
@@ -63,44 +64,44 @@ class FakeForge implements IForge {
   issueCommentsPosted: Array<[number, string]> = [];
   openIssueNumbers: number[] = [];
 
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
   ready: Issue[] = [];
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return this.ready;
   }
   // #214: aliases the same `ready` backing array — this file's pool-digest/pool-selection tests
   // use `ready` (+ cfg.labels.roundPool on the fixture issues) as the widened pool-eligible set
   // too; none of them are testing gate⓪'s narrower-vs-wider distinction specifically (that's
   // plan-review.test.ts's job).
-  async getPoolEligibleIssues(): Promise<Issue[]> {
+  override async getPoolEligibleIssues(): Promise<Issue[]> {
     return this.ready;
   }
-  async claimIssue(): Promise<void> {}
-  async setBoardStatus(): Promise<void> {}
-  async addSubIssue(): Promise<void> {
+  override async claimIssue(): Promise<void> {}
+  override async setBoardStatus(): Promise<void> {}
+  override async addSubIssue(): Promise<void> {
     throw new Error("FakeForge.addSubIssue is not used by this test");
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
-  async addLabel(n: number, l: string): Promise<void> {
+  override async addLabel(n: number, l: string): Promise<void> {
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
   }
-  async removeLabel(n: number, l: string): Promise<void> {
+  override async removeLabel(n: number, l: string): Promise<void> {
     this.issueLabels[n] = (this.issueLabels[n] ?? []).filter((x) => x !== l);
   }
-  async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> {
+  override async addPRLabel(): Promise<void> {}
+  override async openPR(): Promise<number> {
     return 1;
   }
-  async getPRStatus(n: number): Promise<PRStatus> {
+  override async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
-  async mergePR(): Promise<void> {}
-  async addPRComment(): Promise<void> {}
-  async addIssueComment(n: number, body: string): Promise<void> {
+  override async mergePR(): Promise<void> {}
+  override async addPRComment(): Promise<void> {}
+  override async addIssueComment(n: number, body: string): Promise<void> {
     this.issueCommentsPosted.push([n, body]);
     // #237: mirror align.test.ts/dissent.test.ts's fakes — getIssueComments (below) must reflect
     // what was actually posted, or dissent.ts's own marker-check-before-post idempotency can
@@ -108,14 +109,14 @@ class FakeForge implements IForge {
     // prior comment).
     this.issueComments[n] = [...(this.issueComments[n] ?? []), { login: "sapwood-engine", createdAt: new Date().toISOString(), body }];
   }
-  async getIssueBody(): Promise<string> {
+  override async getIssueBody(): Promise<string> {
     return "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> {
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x",
       author: "producer",
@@ -128,48 +129,48 @@ class FakeForge implements IForge {
       unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }
-  async branchExists(): Promise<boolean> {
+  override async branchExists(): Promise<boolean> {
     return false;
   }
-  async countOpenIssuesInMilestone(): Promise<number> {
+  override async countOpenIssuesInMilestone(): Promise<number> {
     return 0;
   }
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return this.planReviewCandidates;
   }
-  async getIssueLabels(issue: number): Promise<string[]> {
+  override async getIssueLabels(issue: number): Promise<string[]> {
     return this.issueLabels[issue] ?? [];
   }
-  async getIssueComments(issue: number) {
+  override async getIssueComments(issue: number) {
     return this.issueComments[issue] ?? [];
   }
-  async createIssue(): Promise<number> {
+  override async createIssue(): Promise<number> {
     return 0;
   }
-  async listOpenIssueNumbers(): Promise<number[]> {
+  override async listOpenIssueNumbers(): Promise<number[]> {
     return this.openIssueNumbers;
   }
-  async listOpenIssues(): Promise<Issue[]> {
+  override async listOpenIssues(): Promise<Issue[]> {
     return [];
   }
   planTriageCandidates: Issue[] = [];
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return this.planTriageCandidates;
   }
   issueMetaState: Record<number, "OPEN" | "CLOSED"> = {};
-  async getIssueMeta(issue: number) {
+  override async getIssueMeta(issue: number) {
     return {
       number: issue,
       title: "",

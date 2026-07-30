@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import { ROLE_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "../roles/peripheral.js";
 import { State } from "../state/state.js";
 import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
@@ -64,57 +65,57 @@ class ScriptedRunner {
  *  which capture their calls for assertion. #110 PR3: addIssueComment is now the ONLY channel
  *  a validated harvest decision reaches GitHub through (the session itself has no gh grant it
  *  acts on), so this capture is what every "the engine posted X" assertion below reads. */
-class MinimalForge implements IForge {
+class MinimalForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
   comments: Array<[number, string]> = [];
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return [];
   }
-  async claimIssue(): Promise<void> {}
-  async setBoardStatus(): Promise<void> {}
-  async addSubIssue(): Promise<void> {
+  override async claimIssue(): Promise<void> {}
+  override async setBoardStatus(): Promise<void> {}
+  override async addSubIssue(): Promise<void> {
     throw new Error("MinimalForge.addSubIssue is not used by this test");
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
-  async addLabel(): Promise<void> {}
-  async removeLabel(): Promise<void> {}
-  async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> {
+  override async addLabel(): Promise<void> {}
+  override async removeLabel(): Promise<void> {}
+  override async addPRLabel(): Promise<void> {}
+  override async openPR(): Promise<number> {
     return 1;
   }
-  async getPRStatus(n: number): Promise<PRStatus> {
+  override async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
-  async mergePR(): Promise<void> {}
-  async addPRComment(): Promise<void> {}
-  async addIssueComment(issue: number, body: string): Promise<void> {
+  override async mergePR(): Promise<void> {}
+  override async addPRComment(): Promise<void> {}
+  override async addIssueComment(issue: number, body: string): Promise<void> {
     this.comments.push([issue, body]);
   }
-  async getIssueBody(): Promise<string> {
+  override async getIssueBody(): Promise<string> {
     return "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> {
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x",
       author: "producer",
@@ -127,31 +128,31 @@ class MinimalForge implements IForge {
       unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }
-  async branchExists(): Promise<boolean> {
+  override async branchExists(): Promise<boolean> {
     return false;
   }
-  async countOpenIssuesInMilestone(): Promise<number> {
+  override async countOpenIssuesInMilestone(): Promise<number> {
     return 0;
   }
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return [];
   }
-  async getIssueLabels(): Promise<string[]> {
+  override async getIssueLabels(): Promise<string[]> {
     return [];
   }
-  async getIssueComments() {
+  override async getIssueComments() {
     return [];
   }
 }

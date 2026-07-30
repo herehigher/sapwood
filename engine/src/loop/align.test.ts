@@ -17,6 +17,7 @@ import { after, test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { ContextManifest } from "../roles/context-manifest.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import { PO_ALIGN_ALLOWED_TOOLS, PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, PO_TRIAGE_ALLOWED_TOOLS } from "../roles/peripheral.js";
@@ -50,18 +51,18 @@ import { RoundScopedForge } from "./round.js";
  *  so every deliberate real-clock read in this suite greps as one decision. */
 const realClock = (): Date => new Date();
 
-class FakeForge implements IForge {
+class FakeForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
   issueLabels: Record<number, string[]> = {};
@@ -74,11 +75,11 @@ class FakeForge implements IForge {
   boardStatusCalls: Array<[number, string]> = [];
   planTriageCandidates: Issue[] = [];
 
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
   ready: Issue[] = [];
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return this.ready;
   }
   // #214: this file's own tests are about POOL SELECTION mechanics (capacity/priority/reconcile/
@@ -86,52 +87,52 @@ class FakeForge implements IForge {
   // aliases the SAME `ready` backing array by default. Tests that specifically need the two to
   // diverge (or to fail independently) override this method directly, same pattern as the
   // getReadyIssues override below.
-  async getPoolEligibleIssues(): Promise<Issue[]> {
+  override async getPoolEligibleIssues(): Promise<Issue[]> {
     return this.ready;
   }
-  async claimIssue(): Promise<void> {}
-  async setBoardStatus(n: number, s: "backlog" | "ready" | "inProgress" | "done"): Promise<void> {
+  override async claimIssue(): Promise<void> {}
+  override async setBoardStatus(n: number, s: "backlog" | "ready" | "inProgress" | "done"): Promise<void> {
     this.boardStatusCalls.push([n, s]);
   }
-  async addSubIssue(): Promise<void> {
+  override async addSubIssue(): Promise<void> {
     throw new Error("FakeForge.addSubIssue is not used by this test");
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
   addLabelCalls: Array<[number, string]> = [];
-  async addLabel(n: number, l: string): Promise<void> {
+  override async addLabel(n: number, l: string): Promise<void> {
     this.addLabelCalls.push([n, l]);
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
   }
   removeLabelCalls: Array<[number, string]> = [];
-  async removeLabel(n: number, l: string): Promise<void> {
+  override async removeLabel(n: number, l: string): Promise<void> {
     this.removeLabelCalls.push([n, l]);
     this.issueLabels[n] = (this.issueLabels[n] ?? []).filter((x) => x !== l);
   }
-  async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> {
+  override async addPRLabel(): Promise<void> {}
+  override async openPR(): Promise<number> {
     return 1;
   }
-  async getPRStatus(n: number): Promise<PRStatus> {
+  override async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
-  async mergePR(): Promise<void> {}
-  async addPRComment(): Promise<void> {}
+  override async mergePR(): Promise<void> {}
+  override async addPRComment(): Promise<void> {}
   // #237: per-issue comment store — dissent.ts's postConcernIfNew/scanForAdjudication read this
   // back via getIssueComments(issue) to check the marker and detect a human reply. Preset an
   // issue's entry directly in a test that needs to simulate a pre-existing (e.g. human-authored)
   // comment; addIssueComment below always appends to it too, same as real GitHub would.
   comments: Record<number, Array<{ login: string; createdAt: string; body: string }>> = {};
-  async addIssueComment(n: number, body: string): Promise<void> {
+  override async addIssueComment(n: number, body: string): Promise<void> {
     this.issueCommentsPosted.push([n, body]);
     this.comments[n] = [...(this.comments[n] ?? []), { login: "sapwood-engine", createdAt: new Date().toISOString(), body }];
   }
-  async getIssueComments(issue: number) {
+  override async getIssueComments(issue: number) {
     return this.comments[issue] ?? [];
   }
   issueState: Record<number, "OPEN" | "CLOSED"> = {};
-  async getIssueMeta(issue: number) {
+  override async getIssueMeta(issue: number) {
     return {
       number: issue,
       title: this.backlogIssues.find((i) => i.number === issue)?.title ?? "",
@@ -140,15 +141,15 @@ class FakeForge implements IForge {
       updatedAt: "2026-01-01T00:00:00Z",
     };
   }
-  async getIssueBody(issue: number): Promise<string> {
+  override async getIssueBody(issue: number): Promise<string> {
     return this.issueBodies[issue] ?? "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> {
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
     this.issueBodies[issue] = body;
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x",
       author: "producer",
@@ -161,31 +162,31 @@ class FakeForge implements IForge {
       unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }
-  async branchExists(): Promise<boolean> {
+  override async branchExists(): Promise<boolean> {
     return false;
   }
-  async countOpenIssuesInMilestone(): Promise<number> {
+  override async countOpenIssuesInMilestone(): Promise<number> {
     return 0;
   }
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return [];
   }
-  async getIssueLabels(issue: number): Promise<string[]> {
+  override async getIssueLabels(issue: number): Promise<string[]> {
     return this.issueLabels[issue] ?? [];
   }
-  async createIssue(title: string, body: string): Promise<number> {
+  override async createIssue(title: string, body: string): Promise<number> {
     const n = this.nextIssueNumber++;
     this.createdIssues.push({ title, body });
     this.issueBodies[n] = body;
@@ -193,13 +194,13 @@ class FakeForge implements IForge {
     this.backlogIssues.push({ number: n, title, labels: [], body });
     return n;
   }
-  async listOpenIssueNumbers(): Promise<number[]> {
+  override async listOpenIssueNumbers(): Promise<number[]> {
     return this.openIssueNumbers;
   }
-  async listOpenIssues(): Promise<Issue[]> {
+  override async listOpenIssues(): Promise<Issue[]> {
     return this.backlogIssues;
   }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     // #232: getIssueBody/updateIssueBody read/write `issueBodies`, a store independent of this
     // array by construction (tests build candidates directly) — but on REAL GitHub both calls
     // hit the SAME issue, so the concurrent-edit guard's fresh getIssueBody() re-read must see
@@ -331,6 +332,8 @@ const mkFakeManifest = (tag: string): ContextManifest => ({
   worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
   settingsHash: "hash",
   hookHash: null,
+  toolUsage: [],
+  readPaths: [],
   recordedAt: "2026-07-17T00:00:01Z",
 });
 
@@ -2880,7 +2883,7 @@ test("#379 F2 runPoolSelection: every label write failing PARKS the round — co
   const runner = new ScriptedRunner([]);
   const logs: string[] = [];
   try {
-    const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 4, log: (line) => logs.push(line) });
+    const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 4, log: (line) => logs.push(line) });
     assert.deepEqual(selected, [], "nothing landed in the pool, so nothing is dispatchable this round — the round parks");
     const events = state.eventsSince("1970-01-01T00:00:00.000Z", ["pool-labels-failed"]);
     assert.equal(events.length, 1);

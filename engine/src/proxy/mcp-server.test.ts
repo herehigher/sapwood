@@ -100,6 +100,17 @@ async function withServer(
   }
 }
 
+/** #403 (F25): `Response.json()` is typed `unknown`, so every assertion below that reads a
+ *  protocol field off it (`json.result.serverInfo.name`, `body.error.code`, …) is a type error —
+ *  which is why this file sat on the typecheck exclusion list. Read the body through `JSON.parse`
+ *  instead: same loose read this file already does for `h.mcpConfigJson`, one place instead of
+ *  ~50 inline casts, and no `any` annotation. These are MCP wire-protocol responses asserted
+ *  positionally against the spec; a recursive-JSON type would turn every assertion into narrowing
+ *  noise that says nothing about the protocol. */
+async function readJson(res: Response) {
+  return JSON.parse(await res.text());
+}
+
 async function rpc(url: string, token: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
   return fetch(url, {
     method: "POST",
@@ -189,7 +200,7 @@ test("a notification (no id, e.g. notifications/initialized) gets 202 and no JSO
 test("initialize echoes the client's protocolVersion and reports serverInfo/capabilities.tools", async () => {
   await withServer({}, async (h) => {
     const res = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } });
-    const json = await res.json();
+    const json = await readJson(res);
     assert.equal(json.result.protocolVersion, "2025-06-18");
     assert.equal(json.result.serverInfo.name, "forge");
     assert.deepEqual(json.result.capabilities, { tools: {} });
@@ -200,7 +211,7 @@ test("initialize echoes the client's protocolVersion and reports serverInfo/capa
 test("tools/list returns the 9 fixed tools (including #288 audit transport) with strict object schemas", async () => {
   await withServer({}, async (h) => {
     const res = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
-    const json = await res.json();
+    const json = await readJson(res);
     assert.equal(json.result.tools.length, 9);
     assert.deepEqual(json.result.tools.map((t: { name: string }) => t.name).sort(), [...TOOL_NAMES].sort());
   });
@@ -209,7 +220,7 @@ test("tools/list returns the 9 fixed tools (including #288 audit transport) with
 test("an unknown JSON-RPC method -> -32601 method-not-found", async () => {
   await withServer({}, async (h) => {
     const res = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "not/a/real/method" });
-    const json = await res.json();
+    const json = await readJson(res);
     assert.equal(json.error.code, -32601);
   });
 });
@@ -221,7 +232,7 @@ test("malformed JSON body -> -32700 parse error", async () => {
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${h.token}` },
       body: "{not json",
     });
-    const json = await res.json();
+    const json = await readJson(res);
     assert.equal(json.error.code, -32700);
   });
 });
@@ -230,7 +241,7 @@ test("malformed JSON body -> -32700 parse error", async () => {
 
 async function callTool(url: string, token: string, name: string, args: unknown) {
   const res = await rpc(url, token, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
-  const body = await res.json();
+  const body = await readJson(res);
   return { status: res.status, body };
 }
 
@@ -468,7 +479,7 @@ test("tools/call: pr_reviews upstream error is sanitized before reaching the res
 test("allowedTools omitted (default) -> every fixed tool callable, tools/list advertises all 9", async () => {
   await withServer({}, async (h) => {
     const list = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
-    const listJson = await list.json();
+    const listJson = await readJson(list);
     assert.equal(listJson.result.tools.length, 9);
     const { body } = await callTool(h.url, h.token, "pr_details", { pr: 1 });
     assert.equal(body.result.isError, false);
@@ -478,7 +489,7 @@ test("allowedTools omitted (default) -> every fixed tool callable, tools/list ad
 test("allowedTools scoped to ISSUE_TOOLS -> a PR tool is role_denied, never even advertised in tools/list", async () => {
   await withServer({ allowedTools: ISSUE_TOOLS }, async (h) => {
     const list = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
-    const listJson = await list.json();
+    const listJson = await readJson(list);
     assert.deepEqual(listJson.result.tools.map((t: { name: string }) => t.name).sort(), [...ISSUE_TOOLS].sort());
     const { body } = await callTool(h.url, h.token, "pr_details", { pr: 1 });
     assert.equal(body.result.isError, true);
@@ -502,7 +513,7 @@ test("allowedTools scoped to PR_TOOLS -> an issue tool is role_denied (the fix-l
 test("allowedTools = [] (an unlisted role's deny-by-default resolution, proxy/access.ts) -> EVERY tool is role_denied, tools/list is empty", async () => {
   await withServer({ allowedTools: [] }, async (h) => {
     const list = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
-    const listJson = await list.json();
+    const listJson = await readJson(list);
     assert.deepEqual(listJson.result.tools, []);
     // Schema-valid args per tool — role_denied must be provable independent of arg validity.
     const validArgsByTool: Record<string, unknown> = {
