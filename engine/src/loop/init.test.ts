@@ -145,7 +145,10 @@ test("preflight is not fooled by a second, unauthenticated host", async () => {
 // for whatever id the real API assigned when the option was first created) or explicit
 // {name, id} pairs when a test needs to assert a *specific* id survives the round trip.
 function fakeRun(opts: {
-  labels?: string[];
+  // #397: a bare name models a label whose description already MATCHES the shipped spec (the
+  // ordinary case — `sapwood init` created it); an explicit {name, description} pair models a
+  // repo whose text has drifted, which is what the drift report exists to surface.
+  labels?: (string | { name: string; description: string })[];
   milestones?: string[];
   boardExists?: boolean;
   boardOptions?: (string | { name: string; id: string })[];
@@ -156,7 +159,12 @@ function fakeRun(opts: {
   const run: GhRunner = async (args) => {
     calls.push(args);
     if (args[0] === "label" && args[1] === "list") {
-      return JSON.stringify((opts.labels ?? []).map((name) => ({ name })));
+      const shipped = new Map(requiredLabels(cfg).map((spec) => [spec.name, spec.description]));
+      return JSON.stringify(
+        (opts.labels ?? []).map((entry) =>
+          typeof entry === "string" ? { name: entry, description: shipped.get(entry.toLowerCase()) ?? "" } : entry,
+        ),
+      );
     }
     if (args[0] === "label" && args[1] === "create") {
       const error = opts.labelCreateErrors?.[args[2] ?? ""];
@@ -194,6 +202,45 @@ test("init is idempotent: a fully-provisioned repo creates nothing", async () =>
     assert.ok(actions.some((a) => /labels already present/.test(a)));
     assert.ok(!calls.some((c) => c[0] === "label" && c[1] === "create"), "no label creates");
     assert.ok(!calls.some((c) => c.join(" ").includes("mutation")), "no board mutation");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#397: init REPORTS a drifted label description and modifies nothing — the no-`--force` default stays, the silence does not", async () => {
+  const specs = requiredLabels(cfg);
+  const drifted = specs.map((spec) =>
+    spec.name === cfg.labels.needsHuman ? { name: spec.name, description: "Escalated — stop autonomy, ask a human" } : spec.name,
+  );
+  const { run, calls } = fakeRun({ labels: drifted, boardExists: true, boardOptions: ["Todo", "Ready", "In Progress", "Done"] });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    const report = actions.filter((a) => a.startsWith("label description drift"));
+    assert.equal(report.length, 1, `exactly the one drifted label is reported, got: ${report.join(" | ")}`);
+    assert.match(report[0]!, /sapwood:needs-human/);
+    assert.match(report[0]!, /Escalated — stop autonomy, ask a human/); // what the repo has
+    assert.ok(report[0]!.includes(specs.find((s) => s.name === cfg.labels.needsHuman)!.description)); // what ships
+    // ...and NOTHING was written: no create (the label exists), and above all no edit/--force.
+    assert.ok(!calls.some((c) => c[0] === "label" && c[1] !== "list"), "drift is reported, never rewritten");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#397: a repo whose descriptions all match the shipped spec reports no drift at all", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+  });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    assert.deepEqual(
+      actions.filter((a) => a.startsWith("label description drift")),
+      [],
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

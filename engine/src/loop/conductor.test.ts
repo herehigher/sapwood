@@ -4220,7 +4220,10 @@ test("#170 review silence: aged episode labels PR + emits once while driving; ve
     const held = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
     assert.equal(st.getWorker("lane-silent")?.state, "failed");
     assert.deepEqual(held.driven, [
-      { kind: "needs-human", worker: "lane-silent", issue: 170, pr: 170, reason: "gate:HUMAN:instruction-path-latch" },
+      // #397: a `needs-human` PR no longer satisfies the instruction-path latch (that latch is
+      // keyed on `human-merge-only` now), so the escalation reason is the ordinary human-label
+      // veto it always actually was — a bucket-1 escalation, honestly attributed.
+      { kind: "needs-human", worker: "lane-silent", issue: 170, pr: 170, reason: "gate:HUMAN:MERGE_OK" },
     ]);
     assert.equal(rawEventKinds(path).filter((k) => k === "review-silence-escalated").length, 1);
 
@@ -4360,7 +4363,8 @@ test("tick DRIVE (#248): hold + needs-human simultaneously on the SAME PR -> esc
 
   const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r.driven, [
-    { kind: "needs-human", worker: "lane-both", issue: 51, pr: 601, reason: "gate:HUMAN:instruction-path-latch" },
+    // #397: reason is deriveGate's own human-label veto now, not the instruction-path latch.
+    { kind: "needs-human", worker: "lane-both", issue: 51, pr: 601, reason: "gate:HUMAN:WAIT_REVIEW" },
   ]);
   assert.equal(st.getWorker("lane-both")?.state, "failed");
   // #248 review round 1 (G4): the escalation DOES write needs-human (asserted above via the
@@ -4903,6 +4907,66 @@ test("#147 P2: the happy-path escalation records labeled=1 (label applied), whic
   assert.equal(st.getWorker("lane-y")?.state, "failed");
   assert.equal(st.getWorker("lane-y")?.gated_escalation_labeled, 1);
   assert.deepEqual(forge.labelsAdded, [[31, "needs-human"]]);
+  st.close();
+});
+
+test("#397 AC2 lane shape: a failed worker + PR settling on a HUMAN-MERGE-ONLY verdict never enters gatedFailedWorkers(), so no tick can ever re-escalate it to needs-human", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const gate = new FakeMergeGate();
+  const cfg = mkCfg({ lanes: { gatedReentryCap: 1 } });
+  seedRunning(st, "lane-ipe", 397);
+  sup.probes["lane-ipe"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 397 };
+  // The exact verdict the #292 instruction-path chain produces once it has already written
+  // `human-merge-only` on the PR itself.
+  gate.outcomes[397] = { kind: "needs-human", pr: 397, reason: "gate:HUMAN:instruction-path-change:CLAUDE.md" };
+  // The issue carries NO human label — which is precisely the state that makes an ORDINARY
+  // escalated lane reclaim-eligible. Only the terminal row's shape keeps this one out.
+  forge.issueLabelsByIssue[397] = [];
+
+  const first = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(first.driven, [
+    { kind: "needs-human", worker: "lane-ipe", issue: 397, pr: 397, reason: "gate:HUMAN:instruction-path-change:CLAUDE.md" },
+  ]);
+  assert.equal(st.getWorker("lane-ipe")?.state, "failed");
+  assert.equal(st.getWorker("lane-ipe")?.pr, 397);
+  // The P1 mechanism: never labelled => permanently invisible to GATED RECLAIM.
+  assert.equal(st.getWorker("lane-ipe")?.gated_escalation_labeled, 0);
+  assert.equal(st.gatedFailedWorkers().length, 0);
+  assert.equal(st.latestEvent("drive-human-merge-only") != null, true, "the bucket is recorded durably, not only in a label");
+  assert.equal(st.latestEvent("drive-needs-human") == null, true, "never the bucket-1 escalation event");
+
+  // Repeated ticks — including one that re-runs every reclaim/escalation phase with the cap
+  // already spent, the exact conditions that drive an ORDINARY lane into the CAPPED branch's
+  // `addLabel(needsHuman)` — still produce nothing at all for this lane.
+  st.upsertWorker({ ...st.getWorker("lane-ipe")!, gated_reentry_attempts: 1 });
+  for (let i = 0; i < 3; i++) {
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    assert.deepEqual(r.gatedReclaimed, []);
+    assert.deepEqual(r.driven, []);
+  }
+  assert.equal(st.gatedFailedWorkers().length, 0);
+  assert.equal(st.getWorker("lane-ipe")?.gated_escalation_labeled, 0);
+  // AC2's headline assertion: `needs-human` is never written to the issue OR the PR for this lane.
+  assert.deepEqual(forge.labelsAdded, []);
+  assert.deepEqual(forge.prLabelsAdded, []);
+  st.close();
+});
+
+test("#397: the SAME lane shape with an ordinary bucket-1 verdict still escalates needs-human and stays gate-reclaimable — the split is by reason, not by lane shape", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const gate = new FakeMergeGate();
+  seedRunning(st, "lane-ord", 398);
+  sup.probes["lane-ord"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 398 };
+  gate.outcomes[398] = { kind: "needs-human", pr: 398, reason: "merge-decision:ESCALATE" };
+  forge.issueLabelsByIssue[398] = [];
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-ord")?.gated_escalation_labeled, 1);
+  assert.equal(st.gatedFailedWorkers().length, 1);
+  assert.deepEqual(forge.labelsAdded, [[398, "needs-human"]]);
   st.close();
 });
 

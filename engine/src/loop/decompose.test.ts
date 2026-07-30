@@ -401,7 +401,7 @@ test("unresolved feasibility is advisory-only; invalid or over-bound output land
   );
 });
 
-test("mixed decomposition: fence and journal precede creates; children stay outside Ready; remainder uses planless needs-human; coverage posts once", async () => {
+test("mixed decomposition: fence and journal precede creates; children stay outside Ready; remainder uses the #397 planless fence; coverage posts once", async () => {
   const parent: Issue = {
     number: 10,
     title: "Oversized",
@@ -422,7 +422,10 @@ test("mixed decomposition: fence and journal precede creates; children stay outs
   assert.ok(fenceIndex < firstCreate);
   assert.equal(state.eventsAfterId(0, ["proposal-set-persisted"]).length, 1);
   assert.deepEqual(fake.labels.get(100), [cfg.labels.originAgent]);
-  assert.ok(fake.labels.get(101)!.includes(cfg.labels.needsHuman));
+  // #397 class 6: a coarse remainder child is fenced off every queue, but it is NOT an
+  // escalation — nobody owes a decision on an issue the PO just created.
+  assert.ok(fake.labels.get(101)!.includes(cfg.labels.planless));
+  assert.ok(!fake.labels.get(101)!.includes(cfg.labels.needsHuman));
   assert.ok(fake.labels.get(101)!.includes(`${cfg.labels.prefix}blocked-by:#100`));
   assert.deepEqual(
     fake.subIssues.map((item) => item.number),

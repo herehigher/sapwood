@@ -1806,12 +1806,15 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         // Labels are idempotent and load-bearing — always safe to re-apply on any rerun,
         // regardless of `alreadyCommented`.
         await deps.forge.addLabel(issueNumber, l.originAgent);
-        if (!hasPlan) await deps.forge.addLabel(issueNumber, l.needsHuman);
+        // #397 class 6: a PO-created issue with no verification plan is a routing fence, not an
+        // escalation — a human owes nothing here, a plan does. `planless` keeps it off exactly the
+        // queues `needsHuman` kept it off (forge.ts's isPlanless) without entering the human queue.
+        if (!hasPlan) await deps.forge.addLabel(issueNumber, l.planless);
         if (alreadyCommented) return; // the receipt-less remainder is empty — nothing left to do
         const note = hasPlan
           ? `Created by sapwood's round ${roundId} PO alignment pass (goal decomposition).`
           : `Created by sapwood's round ${roundId} PO alignment pass, but with no verification ` +
-            `plan detected — applying \`${l.needsHuman}\` so it is never dispatched ` +
+            `plan detected — applying \`${l.planless}\` so it is never dispatched ` +
             `planless. A human (or a future triage pass) needs to supply one.`;
         await deps.forge.addIssueComment(issueNumber, `${note}\n\n${mark}`);
         try {

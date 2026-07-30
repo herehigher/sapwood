@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { OwnerKind } from "../forge/forge.js";
 import { type GhRunner, gh, ghText } from "../forge/gh.js";
-import { createMissingLabels, type LabelSpec, normalizeLabel, taxonomyLabels } from "../forge/labels.js";
+import { createMissingLabels, describeLabelDrift, type LabelSpec, normalizeLabel, taxonomyLabels } from "../forge/labels.js";
 
 export interface InitDeps {
   run: GhRunner; // generic gh runner (label/milestone/api/graphql)
@@ -52,9 +52,13 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
   const base: LabelSpec[] = [
     ...taxonomyLabels(l.prefix),
     { name: l.inProgress, color: "0e8a16", description: "Claimed by a worker (in flight)" },
-    { name: l.needsHuman, color: "5319e7", description: "Escalated — stop autonomy, ask a human" },
-    { name: l.blocked, color: "5319e7", description: "Blocked — held out of the main lane" },
-    { name: l.reserve, color: "5319e7", description: "Reserve — not in the main dispatch lane" },
+    // #397: every escalation-tier description answers the same three questions a human staring at
+    // the label needs — WHO writes it / WHAT the human must do / WHAT removing it does — inside
+    // GitHub's 100-char description limit, and identical to the row in docs/configuration.md
+    // (init.test.ts pairs them, the same check #400 introduced for `hold`).
+    { name: l.needsHuman, color: "5319e7", description: "Engine-applied: autonomy stopped, a human decides; remove to hand it back." },
+    { name: l.blocked, color: "5319e7", description: "Engine- or human-applied: an external wait; remove once it clears." },
+    { name: l.reserve, color: "5319e7", description: "Human-applied: parked out of dispatch; remove to make it dispatchable again." },
     { name: l.verifyNa, color: "c5def5", description: "Verification N/A — skips the Decision #8 gate" },
     { name: l.planApproved, color: "0e8a16", description: "Verification plan approved by gate zero" },
     { name: l.originAgent, color: "bfd4f2", description: "Issue was created by an agent, not a human" },
@@ -63,6 +67,21 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
     // #212: round-pool membership — applied by the aligning phase's pool-selection pass,
     // cleared by the engine at round close (never by a session — see removeRoundPoolLabel).
     { name: l.roundPool, color: "5319e7", description: "In this round's dispatch-eligible pool" },
+    // #397 bucket 2 — the ONE meaning `needs-human` could never express: not "the machine is
+    // stuck", but "this PR's merge decision belongs to a human." Written once, on the PR, and
+    // never re-evaluated, so the description says the loop will not take it back.
+    {
+      name: l.humanMergeOnly,
+      color: "b60205",
+      description: "Engine-applied on the PR: a human must merge it. The loop never removes or re-decides this.",
+    },
+    // #397 class 6 — explicitly NOT an escalation, so the description says so: nobody is on the
+    // hook, it just keeps a plan-less issue off every queue until a plan exists.
+    {
+      name: l.planless,
+      color: "6e7781",
+      description: "Engine-applied: no verification plan — off every queue. Not an escalation; add one, then remove.",
+    },
   ];
   // #248 review round 1 (G2): the shipped `escalation.holdLabels` default (sapwood:hold) is
   // otherwise unusable on a clean repo — nothing ever creates the GitHub label itself, so a
@@ -380,6 +399,14 @@ export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Pr
 
   const newLabels = await ensureLabels(cfg, run, repo);
   actions.push(newLabels.length ? `created ${newLabels.length} label(s): ${newLabels.join(", ")}` : "labels already present");
+
+  // #397 item 6: REPORT description drift, never rewrite it. The no-`--force` default protects a
+  // user's own customization and stays; the failure it hides is that our own repo silently kept
+  // pre-#248 label text for months, so the drift now has to say itself out loud. Reported AFTER
+  // creation so a label this run just created (with the shipped text) can never read as drifted.
+  for (const drift of await describeLabelDrift(run, repo, requiredLabels(cfg))) {
+    actions.push(`label description drift (not modified): ${drift}`);
+  }
 
   const newMs = await ensureMilestones(cfg, run, repo);
   if (cfg.milestones.length) {

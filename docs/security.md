@@ -802,6 +802,37 @@ position-independently so a wrapper can't hide the write) — but the human-merg
 rule is also a process rule: even a PR that touches these files and somehow passes CI
 and review is not something the conductor should be configured to auto-merge.
 
+### The `sapwood:human-merge-only` label (#397)
+
+The same phrase now also names a **label**, deliberately — one fact, one term. Where the
+list above is the *static* set of paths a human must merge, `sapwood:human-merge-only` is
+the *runtime verdict* that a particular PR must be merged by a human. Today the
+instruction-path escalation above (#292) is its only writer: a PR that edits the reviewer
+instruction graph is not broken and nothing is stuck, but its merge decision is not the
+loop's to take.
+
+Its contract:
+
+- **Engine-written, on the PR, exactly once.** No automated act ever removes it or
+  re-decides it — unlike `sapwood:needs-human`, whose removal *is* the #147 gated-reentry
+  handshake that hands the lane back to automation.
+- **Not a member of `escalation.humanLabels`.** That array is checked against *issue*-side
+  labels (the reclaim fence, `orderForDispatch`, the standby probe), which a PR-only label
+  could never satisfy; adding it there would be a no-op for those checks while widening
+  `deriveGate`'s veto set for no benefit. The merge veto does not depend on it either — both
+  gate paths return their `needs-human` outcome from the escalation result itself, before
+  `deriveGate` is consulted.
+- **The lane is excluded from reclaim structurally, not by a label fence.** A worker settling
+  on this verdict terminates *without* `gated_escalation_labeled`, the same mechanism
+  `state.ts` already uses to keep no-PR-failed and label-write-failed rows permanently
+  invisible to `State.gatedFailedWorkers()`. A row that never enters `gatedFailedWorkers()`
+  can never be gate-reclaimed, so nothing can re-escalate it or re-apply `needs-human`.
+
+There is deliberately **no** static human-merge-only *path scan* on PRs. Three layers already
+keep an engine PR off those paths (gate⓪ AC screening #376, the `guard.ts` write-path block
+above, and #292); a fourth scanner would be redundant machinery. The label carries the
+**verdict**, not a new detection.
+
 ### The review-doctrine file is trusted prompt input (#167)
 
 The review-doctrine file (`doctrine.file`, default `docs/REVIEW-DOCTRINE.md`) is

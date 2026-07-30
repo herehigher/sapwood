@@ -23,6 +23,20 @@ export function workflowLabelDefaults(prefix: string) {
     // #212: round-pool membership — applied by the aligning phase's pool-selection pass,
     // consumed by the executing phase's dispatch-scoping wrapper (round.ts's PoolScopedForge).
     roundPool: `${normalizedPrefix}round:pool`,
+    // #397 bucket 2: the gate verdict "a human must MERGE this PR" — as opposed to needsHuman's
+    // "the machine stopped and a human owes the next decision". Engine-written, on the PR,
+    // exactly once, never removed or re-evaluated by any automated act. Deliberately NOT a
+    // member of `escalation.humanLabels` (see config.ts's collision guard and #397's P1
+    // decision): a lane settling on this verdict terminates without `gated_escalation_labeled`,
+    // so it is structurally invisible to gated reclaim rather than fenced out by a label check.
+    humanMergeOnly: `${normalizedPrefix}human-merge-only`,
+    // #397 class 6: NOT an escalation at all — a routing fence for an issue that has no
+    // verification plan yet (decompose's coarse remainder children, align's planless PO
+    // creations). It used to borrow `needsHuman`, which put items a human never owed a decision
+    // on into the human queue. Excluded from every queue `needsHuman` is excluded from
+    // (isPoolEligible / needsPlanReview / needsPlanTriage / the standby probe), so behavior is
+    // byte-for-byte what it was — only the name is now honest.
+    planless: `${normalizedPrefix}planless`,
   };
 }
 
@@ -89,6 +103,29 @@ export async function createMissingLabels(run: GhRunner, repo: string, specs: re
     }
   }
   return created;
+}
+
+/** #397 item 6: report which EXISTING labels carry a description that differs from the shipped
+ *  spec — and change nothing. `createMissingLabels` above deliberately never rewrites an existing
+ *  label (that default protects a user's customization and stays), which is exactly why drift
+ *  goes unnoticed: our own repo carried pre-#248 description text for months. This makes the
+ *  drift visible at `sapwood init` time without taking the write decision away from the human.
+ *  Comparison is on the description only (color drift is cosmetic and often deliberate), against
+ *  the same case-insensitive name identity every other label read uses. A label the repo doesn't
+ *  have yet is not drift — `createMissingLabels` will create it with the right text. */
+export async function describeLabelDrift(run: GhRunner, repo: string, specs: readonly LabelSpec[]): Promise<string[]> {
+  const existing = JSON.parse(await run(["label", "list", "--repo", repo, "--limit", "200", "--json", "name,description"])) as {
+    name: string;
+    description?: string | null;
+  }[];
+  const byName = new Map(existing.map((e) => [normalizeLabel(e.name), e.description ?? ""]));
+  const drifted: string[] = [];
+  for (const spec of specs) {
+    const have = byName.get(normalizeLabel(spec.name));
+    if (have === undefined || have === spec.description) continue;
+    drifted.push(`${normalizeLabel(spec.name)}: repo has "${have}" — shipped spec is "${spec.description}"`);
+  }
+  return drifted;
 }
 
 const PRIORITY_LABEL = /^prio:([0-4])(?:-|$)/;

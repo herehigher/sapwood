@@ -329,7 +329,9 @@ test("#292 driveEngineAgentReview: instruction edit labels/comments once before 
   let evaluated = false;
   const { deps, recorded } = makeDeps({
     forge: {
-      getPRReviewData: async () => data({ labels: latched ? ["sapwood:needs-human"] : [] }),
+      // #397: the latch is `human-merge-only` now, not `needs-human` — this path's verdict is
+      // "a human must merge this PR", never "the machine got stuck".
+      getPRReviewData: async () => data({ labels: latched ? ["sapwood:human-merge-only"] : [] }),
       getPRChangedFiles: async () => {
         fileReads++;
         return { files: [{ filename }], complete: true };

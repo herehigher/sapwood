@@ -192,6 +192,15 @@ reviewer:
 #   originAgent: sapwood:origin:agent
 #   split: sapwood:split       # human firing signal; the engine only reads it
 #   decomposed: sapwood:decomposed # engine fence on a retired tracking parent; human removal only
+#   humanMergeOnly: sapwood:human-merge-only
+#                              # #397 bucket 2: the gate verdict "a human must MERGE this
+#                              # PR". Engine-written on the PR, exactly once, never removed
+#                              # or re-decided by the loop. Deliberately NOT an
+#                              # escalation.humanLabels member — see docs/configuration.md.
+#   planless: sapwood:planless # #397: NOT an escalation — a routing fence for an issue with
+#                              # no verification plan yet. Excluded from the pool, plan
+#                              # review, plan triage, and the standby probe, exactly as
+#                              # needsHuman is; nobody owes a decision on it.
 #   roundPool: sapwood:round:pool
 #                              # #212: round-pool membership (applied by the aligning phase's
 #                              # selection pass, cleared by the engine at round close — see
@@ -504,7 +513,8 @@ doctrine:
 # escalation:
 #   humanLabels: [sapwood:needs-human, sapwood:blocked]
 #   # #292: reviewer instruction files are human-vetted authority. A PR changing any old or
-#   # new path matched here receives labels.needsHuman before either review gate can proceed.
+#   # new path matched here receives labels.humanMergeOnly (#397) before either review gate
+#   # can proceed.
 #   # Matching is case-insensitive; supported glob subset: `*` within one path segment and
 #   # recursive `**`. Paths must be trimmed canonical repo-relative forms (no ./, /, .. segment,
 #   # //, or trailing /). A list at GitHub's 3,000-file ceiling escalates as unverifiable. Set

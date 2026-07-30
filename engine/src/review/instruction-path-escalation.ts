@@ -84,7 +84,7 @@ function sanitizePathForComment(path: string): string {
 /**
  * #292: enforce the human-vetted standing-instructions trust chain at merge-gate time. An empty
  * `escalation.instructionPaths` list is a deliberate off-switch: no forge read occurs. The exact,
- * case-insensitive needs-human label is the idempotence latch. On escalation the label is written
+ * case-insensitive human-merge-only label is the idempotence latch. On escalation the label is written
  * BEFORE the comment; if comment delivery then fails, the label remains the latch and the comment
  * is not retried forever (the crash window between those writes is an accepted bounded audit
  * blind spot; human authority is preserved by the label). The changed-files read is bounded by
@@ -98,7 +98,13 @@ export async function escalateInstructionPathChanges(input: {
 }): Promise<InstructionPathEscalationResult> {
   const patterns = input.cfg.escalation.instructionPaths;
   if (patterns.length === 0) return { kind: "clear" };
-  if (labelsInclude(input.labels, input.cfg.labels.needsHuman)) return { kind: "latched" };
+  // #397 bucket 2: this path's verdict is "a human must MERGE this PR", never "the machine got
+  // stuck" — so both the latch and the write are `humanMergeOnly`, and `needsHuman` is not written
+  // anywhere on this path. The merge veto does not depend on the label being in
+  // `escalation.humanLabels`: both call sites (merge-driver.ts's driveOne, review/drive.ts's
+  // engine-agent preflight) return `needs-human` from THIS result before deriveGate is ever
+  // consulted, so the label carries the verdict for a human reader, not the gate.
+  if (labelsInclude(input.labels, input.cfg.labels.humanMergeOnly)) return { kind: "latched" };
 
   let changedFiles: Awaited<ReturnType<IForge["getPRChangedFiles"]>>;
   try {
@@ -111,7 +117,7 @@ export async function escalateInstructionPathChanges(input: {
   if (!incomplete && matchedPaths.length === 0) return { kind: "clear" };
 
   try {
-    await input.forge.addPRLabel(input.pr, input.cfg.labels.needsHuman);
+    await input.forge.addPRLabel(input.pr, input.cfg.labels.humanMergeOnly);
   } catch (error) {
     return { kind: "unavailable", reason: `instruction-path-label-failed: ${String(error)}` };
   }

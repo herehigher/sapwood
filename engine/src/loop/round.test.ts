@@ -3187,6 +3187,10 @@ test("runRounds standby (#212 probe residual fix): a milestone whose open issues
   forge.openIssues = [
     { number: 1, title: "held a", labels: [cfg.labels.needsHuman], milestone: "M4" },
     { number: 2, title: "held b", labels: [cfg.labels.blocked], milestone: "M4" },
+    // #397: the class-6 fence is unconsumable for exactly the same reason (every triage/review/
+    // pool predicate excludes it), so it must not pin the probe true either. It used to be
+    // covered incidentally by borrowing needs-human; under its own name the probe says so.
+    { number: 3, title: "fenced", labels: [cfg.labels.planless], milestone: "M4" },
   ];
   const state = new State(":memory:");
   const events = spyOnEvents(state);
