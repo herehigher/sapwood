@@ -1126,6 +1126,24 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // so an outstanding row counts as work, or standby would starve the retry indefinitely.
       // Local SQLite read: the cheapest signal, checked first.
       if (deps.state.pendingRollbacks().length > 0) return true;
+      // #433 (F33): a CARRIED lane is work. Rounds are dispatch windows and lanes cross them by
+      // design, but every phase that finishes a lane — reclaim, resume, drive, gated reentry —
+      // only ever runs inside a round's own executing tick. So withholding the next round over an
+      // empty BACKLOG orphans whatever the last round left in flight: the lane's remaining work is
+      // not on the board at all, and no probe below can see it. Local SQLite reads, so they sit
+      // with pendingRollbacks above as the cheap signals checked before any network call.
+      //
+      // Each set is exactly what its consumer can still act on (disabled-consumer rule — an
+      // unconsumable signal here would pin the probe true forever and defeat standby):
+      //  - activeWorkers(): running/driving/fixing — reclaim/drain/drive continuation, always live.
+      //  - handoffWorkers(): resume candidates, ALREADY excluding resume_capped rows (terminal to
+      //    the scheduler, never resumed again).
+      //  - gatedFailedWorkers(): #147 gated-reentry candidates, already excluding capped/unlabelled
+      //    rows — but consumed ONLY by tick()'s GATED RECLAIM phase, which is skipped entirely
+      //    without a mergeGate, so this one is gated on the gate being configured.
+      if (deps.state.activeWorkers().length > 0) return true;
+      if (deps.state.handoffWorkers().length > 0) return true;
+      if (deps.mergeGate !== undefined && deps.state.gatedFailedWorkers().length > 0) return true;
       if ((await forge.getReadyIssues()).length > 0) return true;
       // #127 gate② F2: each candidate signal below only counts as work when the role that
       // CONSUMES it is enabled. A plan-review candidate is only ever consumed by the
