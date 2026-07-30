@@ -346,8 +346,16 @@ fix leg with nothing it could act on. This is §1 and §4 failing *together*, an
 sharpest available evidence for both: layering would have made the note advisory and
 merged, and a dispute channel would have let the producer say so once.
 
-**What closes it** — needs its own issue, which a fix leg cannot open (no forge
-credentials in that session); flagged in §11 for a human to file:
+**What closes it.** ⚠️ **ACTION REQUIRED — a human must file a defect issue for this.**
+It is *not* one of this design's implementation issues (§11) and is deliberately not
+listed there: the gap is a pre-existing hole in the **engine-agent review path** as
+already shipped (design #279's findings-transport decision), which this design's own PR
+merely surfaced — not a piece of work #402 asked for or specified. Filing it is therefore
+**not a precondition for closing #402**, whose follow-up set is complete at R1–R6; it is a
+separate defect against the review path, on its own clock. A fix leg cannot open it (no
+forge credentials in that session), which is exactly why it is written down here instead
+of quietly dropped. Two candidate fixes, already adjudicated so the eventual issue starts
+from a decision rather than a blank page:
 
 - **Preferred: extend the fix-leg report contract with an audit-finding response**, keyed
   on `(finding id, head OID)` — both already engine-verifiable (finding ids come from the
@@ -547,10 +555,10 @@ changed** (`lanes.prFixCap`).
 
 ## 11. Implementation issues
 
-Six filed, each independently reviewable, each with its own executable verification plan,
-plus one (R7) that a human must file — see its row. **None touches a human-merge-only
-path** (§0). Dependency: `#378 → R2 → R3`; `R2 → R5`; `R1` independent; `R4` independent;
-`R7` independent; `R6` last (round-close doc gate).
+Six, all filed, each independently reviewable, each with its own executable verification
+plan. This set is **complete** — it covers every item #402 asked this design to decide.
+**None touches a human-merge-only path** (§0). Dependency: `#378 → R2 → R3`; `R2 → R5`;
+`R1` independent; `R4` independent; `R6` last (round-close doc gate).
 
 | # | Issue | Scope | Files |
 |---|---|---|---|
@@ -560,4 +568,11 @@ path** (§0). Dependency: `#378 → R2 → R3`; `R2 → R5`; `R1` independent; `
 | **R4** | #451 | Dispute costs zero fix legs: escalate `review-disputed` when every unresolved current-head thread is disputed, with the §4 evidence set | `loop/conductor.ts`, `loop/fix-response.ts` |
 | **R5** | #453 | Tendency in retro: finding-class table over K rounds in the digest, `roles.retro.tendencyRounds`, retro prompt points at it | `retro/retro-digest.ts`, `config/config.ts`, `engine/prompts/retro.md` |
 | **R6** | #454 | Reviewer prompt as a designed artifact: §6a enforced-vs-judged table, §6b triage doctrine; round-close docs | `engine/prompts/engine-reviewer.md`, `docs/role-paradigm.md`, `docs/configuration.md`, `docs/PLAN.md` |
-| **R7** | **not yet filed** | §4a's audit-finding response contract — the engine-agent path's missing dispute channel, keyed on `(finding id, head OID)`. **A human must open this one:** it was found by a fix leg on this PR, and a fix-leg session holds no forge credentials, so it could not be filed from where it was discovered. | fix-leg report contract (`loop/fix-response.ts`), `loop/conductor.ts`, `engine/prompts/fix.md` |
+
+**Not in this table, on purpose:** §4a's missing dispute channel on the engine-agent path.
+That is a **pre-existing defect** in the review path as already shipped, surfaced by this
+PR rather than specified by #402, so it is not an implementation issue of this design and
+filing it is not a precondition for #402's closure. It carries its own ⚠️ action-required
+note and its adjudicated fix in §4a, for a human to file against the review path. Recorded
+in the design rather than in an issue because the session that found it had no forge
+credentials — the alternative was losing it.
