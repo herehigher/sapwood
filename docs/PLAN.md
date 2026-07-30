@@ -928,6 +928,27 @@ marker idempotency, output schema, escalation path) see
   label plus a structured event. The label is the latch and routes through the existing
   human hold/re-entry behavior; the lane remains driving, polling continues, and gate②
   is never softened. Configured failover receives its full evaluation window first.
+  **Adjudicated findings stop re-consuming fix rounds (#378, F14):** gate② used to see
+  review threads only as an aggregate unresolved COUNT, so a finding that had already
+  been human-adjudicated and thread-resolved re-entered the FIXABLE gate every time a
+  re-review raised it again — on PR #366 the same config-YAML finding cost five fix-round
+  evaluations, two of them from reviews against a stale head. `PRReviewData` now carries
+  each thread's span (`path`/`line`/`originalLine`), GitHub's own `isOutdated` staleness
+  field, and the commit the thread was last anchored to, all from the SAME paged read
+  that already produced the count. An unresolved thread landing on the span of an
+  already-resolved thread whose code has not moved since is an *adjudicated re-raise* and
+  is excluded from the blocking count — matched by SPAN, not thread id, because a
+  re-raise always arrives as a brand-new thread. Nothing always-blocking is weakened: a
+  resolved thread whose code CHANGED after resolution reads as outdated and its re-raise
+  still blocks, an unresolved thread with no prior adjudication on its span still blocks,
+  a standing `CHANGES_REQUESTED` still blocks, and absent thread data filters nothing at
+  all. A review submitted against a non-current head was already excluded from both
+  halves of the gate; that exclusion is now counted and reported rather than emergent.
+  Both exclusions are named in the FIXABLE outcome's reason — a filter that silently
+  shrank gate② input would be the invisible weakening this project refuses. Delivered in
+  two halves because the consuming code is human-merge-only: the `forge.ts` data plumbing
+  through the normal loop, the `reviewer.ts`/`merge-driver.ts` consumption as a
+  human-apply patch (`docs/patches/378-resolved-thread-head-freshness.patch`).
   **Commands + status CLI + first-run trust ramp delivered
   (#15, PR TBD):** `sapwood status [db-path]` reads the SQLite state DB directly (no
   live engine session) and reports active lanes, PRs awaiting the review gate, spend
