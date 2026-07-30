@@ -41,7 +41,7 @@ import {
 import { issuesMergedThisTick, prsOpenedThisTick, type StopConditionHit, type StopConfig } from "./driver.js";
 import { emptySpinBreached, parkDurationExceededSec, probeBackoffSec, probeDueWithHint } from "./env-failure.js";
 import { buildRoundArtifact, persistRoundArtifact, type RoundArtifact } from "./round-artifact.js";
-import { startProgressWatchdog } from "./watchdog.js";
+import { startProgressWatchdog, systemWatchdogTimer } from "./watchdog.js";
 
 export type { RoundPhase, RoundRow } from "../state/state.js";
 
@@ -786,6 +786,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   // alongside `unregister()`. Same contract as driver.ts's runDriver — see watchdog.ts's own
   // doc for why this is progress-based, never raced against any single tick() call.
   const watchdog = startProgressWatchdog({
+    timer: systemWatchdogTimer,
     windowMs: deps.tickIntervalSec * 1000 * cfg.liveness.watchdogTickMultiplier,
     state: deps.state,
     exit: deps.watchdogExit ?? ((code: number) => process.exit(code)),

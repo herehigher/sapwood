@@ -30,7 +30,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { startProgressWatchdog } from "./watchdog.js";
+import { SAMPLES_PER_WINDOW, startProgressWatchdog, systemWatchdogTimer } from "./watchdog.js";
 
 /** #403 (F25): wait until `predicate` holds, polling on a short cadence, and reject with a NAMED
  *  message if it never does. This replaces every `await sleep(N); assert(fired)` in this file.
@@ -48,6 +48,52 @@ async function waitFor(predicate: () => boolean, message: string, timeoutMs = 5_
     if (Date.now() > deadline) throw new Error(`hang guard (${timeoutMs}ms): ${message}`);
     await sleep(2);
   }
+}
+
+/** #403 (F25), PR #430 gate② round 3 (P2): a fully controlled scheduling seam. Records every
+ *  delay the watchdog REQUESTS and fires the pending callback only when this test says so, so the
+ *  cadence contract is checkable in the units it is written in (ms) with zero real time elapsing.
+ *
+ *  Why this exists: the previous rewrite of the one-window test measured detection latency in
+ *  SAMPLE COUNTS, which removed the wall-clock race but also removed the test's ability to catch
+ *  the exact regression it was written for — a watchdog that schedules once per FULL window still
+ *  fires after four samples, so a sample-count bound passes while real detection takes ~4x too
+ *  long. Recording the requested delay closes that: `windowMs / SAMPLES_PER_WINDOW` is asserted
+ *  directly. */
+function fakeTimer(): {
+  timer: { setTimeout(fn: () => void, ms: number): unknown; clearTimeout(handle: unknown): void };
+  /** Every delay the watchdog has asked for, in order. */
+  requested: number[];
+  clears: () => number;
+  /** Fire the currently-pending callback (one sample). Throws by name if nothing is scheduled. */
+  fire: () => void;
+  pending: () => boolean;
+} {
+  let scheduled: (() => void) | null = null;
+  let clears = 0;
+  const requested: number[] = [];
+  return {
+    timer: {
+      setTimeout(fn: () => void, ms: number): unknown {
+        requested.push(ms);
+        scheduled = fn;
+        return requested.length;
+      },
+      clearTimeout(): void {
+        scheduled = null;
+        clears++;
+      },
+    },
+    requested,
+    clears: () => clears,
+    pending: () => scheduled !== null,
+    fire: () => {
+      const fn = scheduled;
+      if (!fn) throw new Error("fake timer: nothing scheduled — the watchdog stopped rescheduling when it should not have");
+      scheduled = null;
+      fn();
+    },
+  };
 }
 
 function fakeState(startId = 0): {
@@ -95,6 +141,7 @@ test("startProgressWatchdog: no progress at all (both signals frozen) -> fires a
   const state = fakeState();
   const exitCalls: number[] = [];
   const handle = startProgressWatchdog({
+    timer: systemWatchdogTimer,
     windowMs: 20,
     state,
     exit: (code) => exitCalls.push(code),
@@ -140,6 +187,7 @@ test("startProgressWatchdog (#395 item 2): with `enrich` supplied, the fired eng
       >,
   };
   const handle = startProgressWatchdog({
+    timer: systemWatchdogTimer,
     windowMs: 20,
     state,
     exit: (code) => exitCalls.push(code),
@@ -174,7 +222,14 @@ test("startProgressWatchdog (#395 item 2): no open round (enrich.openRound() ret
     lastEventKind: () =>
       undefined as unknown as ReturnType<NonNullable<Parameters<typeof startProgressWatchdog>[0]["enrich"]>["lastEventKind"]>,
   };
-  const handle = startProgressWatchdog({ windowMs: 20, state, exit: (code) => exitCalls.push(code), eventPayload: {}, enrich });
+  const handle = startProgressWatchdog({
+    timer: systemWatchdogTimer,
+    windowMs: 20,
+    state,
+    exit: (code) => exitCalls.push(code),
+    eventPayload: {},
+    enrich,
+  });
   await waitFor(() => exitCalls.length > 0, "both signals frozen — the watchdog never fired at all");
   assert.deepEqual(exitCalls, [1]);
   const [, payload] = state.appended[0]!;
@@ -212,6 +267,7 @@ test("startProgressWatchdog (#395 gate② follow-up, P3): a THROWING enrich read
       >,
   };
   const handle = startProgressWatchdog({
+    timer: systemWatchdogTimer,
     windowMs: 20,
     state,
     exit: (code) => exitCalls.push(code),
@@ -269,7 +325,13 @@ test("startProgressWatchdog: event-log progress before the window elapses resets
     },
   };
   const exitCalls: number[] = [];
-  const handle = startProgressWatchdog({ windowMs: 20, state, exit: (code) => exitCalls.push(code), eventPayload: {} });
+  const handle = startProgressWatchdog({
+    timer: systemWatchdogTimer,
+    windowMs: 20,
+    state,
+    exit: (code) => exitCalls.push(code),
+    eventPayload: {},
+  });
   // #403 (F25), PR #430 gate② round 3 (P1, same class the reviewer flagged one instance of): this
   // was `await sleep(400)` followed by a `sampleCalls >= 6` sanity check, so the CHECK's own
   // precondition rode on elapsed real time — under load the process can be descheduled for the
@@ -284,7 +346,13 @@ test("startProgressWatchdog: event-log progress before the window elapses resets
 test("startProgressWatchdog: stop() prevents any firing, even well past the window", async () => {
   const state = fakeState();
   const exitCalls: number[] = [];
-  const handle = startProgressWatchdog({ windowMs: 15, state, exit: (code) => exitCalls.push(code), eventPayload: {} });
+  const handle = startProgressWatchdog({
+    timer: systemWatchdogTimer,
+    windowMs: 15,
+    state,
+    exit: (code) => exitCalls.push(code),
+    eventPayload: {},
+  });
   const samplesAtStop = state.samples();
   handle.stop();
   await sleep(80); // several windows' worth, if it were (wrongly) still armed
@@ -299,7 +367,13 @@ test("startProgressWatchdog: stop() prevents any firing, even well past the wind
 test("startProgressWatchdog: fires exactly once and does not reschedule after firing", async () => {
   const state = fakeState();
   const exitCalls: number[] = [];
-  const handle = startProgressWatchdog({ windowMs: 15, state, exit: (code) => exitCalls.push(code), eventPayload: {} });
+  const handle = startProgressWatchdog({
+    timer: systemWatchdogTimer,
+    windowMs: 15,
+    state,
+    exit: (code) => exitCalls.push(code),
+    eventPayload: {},
+  });
   await waitFor(() => exitCalls.length > 0, "both signals frozen — the watchdog never fired at all");
   const samplesAtFire = state.samples();
   await sleep(120); // several more windows' worth of continued quiet, if it were re-arming
@@ -308,24 +382,31 @@ test("startProgressWatchdog: fires exactly once and does not reschedule after fi
   handle.stop();
 });
 
-test("startProgressWatchdog (#395 gate② round 3, P2): fires within roughly ONE window of actual silence, not two — the worst case (the last real event lands right after arming) is bounded, not ~2x", async () => {
-  // #403 (F25) rebuild: the original measured this in WALL-CLOCK milliseconds — "not fired by
-  // 0.5x windowMs, fired by 1.6x" — which makes the verdict a race between the test's own sleeps
-  // and the watchdog's sampling timer. Under concurrent load either sleep can overshoot by more
-  // than the margin separating the two checkpoints, and the test flips for reasons that have
-  // nothing to do with the property under test.
+test("startProgressWatchdog (#395 gate② round 3, P2): fires within roughly ONE window of actual silence, not two — the REQUESTED sample cadence is windowMs/SAMPLES_PER_WINDOW, and firing needs SAMPLES_PER_WINDOW consecutive unchanged samples", () => {
+  // #403 (F25) history, twice over. The original measured this in WALL-CLOCK milliseconds ("not
+  // fired by 0.5x windowMs, fired by 1.6x"), a race between the test's own sleeps and the
+  // watchdog's sampling timer. The rebuild measured it in SAMPLE COUNTS, which killed the race but
+  // also killed the test: a watchdog that regressed to scheduling once per FULL window still fires
+  // after four samples, so the count bound passed while real detection took ~4x too long — exactly
+  // the round-2 bug this test exists to catch (PR #430 gate② round 3, P2).
   //
-  // The property is not about milliseconds at all: it is "detection takes ~SAMPLES_PER_WINDOW
-  // samples after the last progress, not ~2x that". Measured in SAMPLES it is exact and
-  // scheduler-independent — the watchdog's own sampling is the only clock either side reads.
-  const SAMPLES_PER_WINDOW = 4; // watchdog.ts's own constant — the bound below is stated in its terms
+  // Both halves of the contract are now checked through the injected timer seam, with no real time
+  // elapsing at all:
+  //   1. every delay the watchdog REQUESTS is windowMs / SAMPLES_PER_WINDOW — a once-per-window
+  //      regression fails here, immediately and by value;
+  //   2. firing takes SAMPLES_PER_WINDOW..SAMPLES_PER_WINDOW+1 samples after the last progress.
+  // Multiplying (1) by (2) is the latency bound the module's own doc states, in milliseconds,
+  // derived rather than raced.
+  const windowMs = 40;
+  const clock = fakeTimer();
+  const state = fakeState();
+  const exitCalls: number[] = [];
   let reads = 0;
   let samplesAtBump = 0;
   let samplesAtFire = 0;
-  const state = fakeState();
-  const exitCalls: number[] = [];
   const handle = startProgressWatchdog({
-    windowMs: 40,
+    timer: clock.timer,
+    windowMs,
     state: {
       maxEventId: () => {
         reads++;
@@ -348,7 +429,19 @@ test("startProgressWatchdog (#395 gate② round 3, P2): fires within roughly ONE
     },
     eventPayload: {},
   });
-  await waitFor(() => exitCalls.length > 0, "silence after a single early bump never produced a stall at all");
+
+  // Drive samples until it fires. The loop bound is a structural guard, not a timing margin: at
+  // SAMPLES_PER_WINDOW+2 samples of silence the round-2 bug would already have been proven.
+  for (let i = 0; i < SAMPLES_PER_WINDOW * 3 && exitCalls.length === 0; i++) clock.fire();
+  assert.deepEqual(exitCalls, [1], "silence after a single early bump never produced a stall at all");
+
+  const sampleMs = windowMs / SAMPLES_PER_WINDOW;
+  assert.deepEqual(
+    [...new Set(clock.requested)],
+    [sampleMs],
+    `the watchdog must request EVERY sample at windowMs/${SAMPLES_PER_WINDOW} (${sampleMs}ms); a single ${windowMs}ms request here is the ` +
+      "round-2 once-per-window regression, which a sample-count-only assertion cannot see",
+  );
   const samplesOfSilence = samplesAtFire - samplesAtBump;
   assert.ok(
     samplesOfSilence <= SAMPLES_PER_WINDOW + 1,
@@ -359,6 +452,15 @@ test("startProgressWatchdog (#395 gate② round 3, P2): fires within roughly ONE
     samplesOfSilence >= SAMPLES_PER_WINDOW,
     `fired after only ${samplesOfSilence} samples of silence — it must require a FULL window (${SAMPLES_PER_WINDOW} consecutive unchanged samples) first`,
   );
+  // The bound the module documents, in ITS units, derived from the two facts above rather than
+  // measured against a real clock: between one window and 1.25 windows, never approaching two.
+  const detectionMs = samplesOfSilence * sampleMs;
+  assert.ok(
+    detectionMs >= windowMs && detectionMs <= windowMs * 1.25,
+    `detection latency ${detectionMs}ms is outside the documented one-window..1.25-window band for windowMs=${windowMs}`,
+  );
+  // Firing must DISARM: nothing rescheduled, and stop() is then a no-op on an empty timer.
+  assert.equal(clock.pending(), false, "the watchdog rescheduled after firing — it must disarm itself");
   handle.stop();
 });
 
@@ -377,6 +479,7 @@ test("startProgressWatchdog (#395 gate② round 4, P1): maxEventId() frozen but 
   const state = fakeState();
   const exitCalls: number[] = [];
   const handle = startProgressWatchdog({
+    timer: systemWatchdogTimer,
     windowMs: 40,
     state: {
       maxEventId: state.maxEventId, // frozen — the event log never moves in this scenario
@@ -416,7 +519,13 @@ test("startProgressWatchdog (#395 gate② round 4, P1): BOTH maxEventId() and la
   const state = fakeState();
   const exitCalls: number[] = [];
   const windowMs = 40;
-  const handle = startProgressWatchdog({ windowMs, state, exit: (code) => exitCalls.push(code), eventPayload: {} });
+  const handle = startProgressWatchdog({
+    timer: systemWatchdogTimer,
+    windowMs,
+    state,
+    exit: (code) => exitCalls.push(code),
+    eventPayload: {},
+  });
   // Neither .bump() nor .tick() is ever called — both signals sit frozen at their starting value,
   // exactly the genuine-stall shape (a wedged tick reaches neither the appendEvent call nor the
   // engineSessionStart call that writes last_tick_at).

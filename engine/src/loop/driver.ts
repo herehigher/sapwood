@@ -16,7 +16,7 @@
 // than needing its own cancellation machinery.
 import { type TickDeps, type TickResult, tick } from "./conductor.js";
 import { reconcileEscalations } from "./escalation-reconcile.js";
-import { startProgressWatchdog } from "./watchdog.js";
+import { startProgressWatchdog, systemWatchdogTimer } from "./watchdog.js";
 
 /** How the loop decides to stop ticking. Default ("forever") is the normal daemon mode — only a
  *  signal stops it. "once": run exactly one tick then stop (scripting / cron / a manual poke).
@@ -202,6 +202,7 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
   // doc for why). Started before the loop below ever runs, stopped in this function's `finally`
   // alongside `unregister()`.
   const watchdog = startProgressWatchdog({
+    timer: systemWatchdogTimer,
     windowMs: deps.tickIntervalSec * 1000 * deps.cfg.liveness.watchdogTickMultiplier,
     state: deps.state,
     exit: deps.watchdogExit ?? ((code: number) => process.exit(code)),

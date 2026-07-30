@@ -39,6 +39,21 @@ import { validateReviewerOutput } from "./plan-review.js";
  *  so every deliberate real-clock read in this suite greps as one decision. */
 const realClock = (): Date => new Date();
 
+/** #403 (F25), PR #430 gate② round 3: the `waitForInitLine` ceiling for every fixture whose
+ *  assertions depend on the child's `system/init` line having been OBSERVED (`captureBasis:
+ *  "init-observed"`), including the two timeout tests whose whole timing-safety argument rests on
+ *  the TERM trap being provably armed first.
+ *
+ *  It is a HANG-GUARD ceiling, not a margin. `waitForInitLine` polls and returns the instant the
+ *  line appears — typically single-digit milliseconds after spawn — so a large value costs a
+ *  passing run nothing at all; it only bounds the case where the line never appears. The old
+ *  values (2000ms, 3000ms) read as generous but were not: both expired under concurrent load
+ *  (measured at load average ~110 during this PR's load evidence), and when the poll expires
+ *  `captureBasis` degrades to the fallback and the assertion fails — "the child was slow" reported
+ *  as "the barrier did not hold". That is the banned shape: a real subprocess racing a fixed
+ *  budget, with the budget's expiry deciding the verdict. 30s matches production's own default. */
+const INIT_OBSERVED_GUARD_MS = 30_000;
+
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 
 test("RoleRunner: default guard hook resolves the compiled hook in the guard directory", () => {
@@ -183,7 +198,7 @@ echo '{"type":"result","subtype":"success","total_cost_usd":0.0005,"model":"clau
 exit 0
 `,
     );
-    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
     const prompt = "assemble manifest test";
     const result = await runner.run({ roleId: "test-role", prompt, model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "done");
@@ -283,7 +298,7 @@ echo '{"type":"result","subtype":"success","total_cost_usd":0.0005,"model":"clau
 exit 0
 `,
     );
-    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
     const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "done");
     const manifest = result.contextManifest;
@@ -328,7 +343,7 @@ echo '{"type":"result","subtype":"success","total_cost_usd":0}'
 exit 0
 `,
     );
-    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
 
     const readOnly = await runner.run({
       roleId: "plan-reviewer-confirm",
@@ -434,7 +449,7 @@ exit 0
     // The init line (emitted right after the worktree is created, same script) anchors the
     // capture deterministically — no race, no need for a large timeout, but kept generous
     // anyway since the point of this test is the dirty/dirtyBasis derivation, not timing.
-    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
     const result = await runner.run({
       roleId: "retro",
       prompt: "p",
@@ -478,7 +493,7 @@ echo '{"type":"result","subtype":"success","total_cost_usd":0.0005}'
 exit 0
 `,
     );
-    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
     const result = await runner.run({ roleId: "test-role", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     const manifest = result.contextManifest;
     assert.ok(manifest);
@@ -2384,7 +2399,7 @@ echo '{"type":"result","subtype":"success","total_cost_usd":0.0005,"model":"clau
 exit 0
 `,
     );
-    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
     const result = await runner.run({
       roleId: "engine-reviewer",
       prompt: "review this diff",
@@ -2595,9 +2610,9 @@ test("run (#395 gate② follow-up, P1): once timedOut latches, role-session-hear
       claudeBin: bin,
       heartbeatMs: HEARTBEAT_MS,
       guardHookPath: mkHook(dir),
-      // A generous FAILURE bound, not a timing assumption — see the P2 test's own comment for
-      // the full waitForInitLine rationale this test reuses unchanged.
-      preSpawnCaptureTimeoutMs: 2000,
+      // A HANG-GUARD ceiling, not a timing assumption — see INIT_OBSERVED_GUARD_MS and the P2
+      // test's own comment for the full waitForInitLine rationale this test reuses unchanged.
+      preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS,
       preSpawnCapturePollMs: 5,
       state: fakeState,
       // Far past this test's own lifetime: the SIGKILL is provably not what ends the child, so
@@ -2727,10 +2742,10 @@ test("run (#395 gate② follow-up, P2): a timeout kill whose own exit notificati
       claudeBin: bin,
       heartbeatMs: 20,
       guardHookPath: mkHook(dir),
-      // A generous FAILURE bound, not a timing assumption — waitForInitLine below returns the
-      // instant the real init line is observed (typically single-digit ms after spawn); this
-      // ceiling only matters if that line never shows up at all.
-      preSpawnCaptureTimeoutMs: 2000,
+      // A HANG-GUARD ceiling, not a timing assumption — waitForInitLine below returns the instant
+      // the real init line is observed (typically single-digit ms after spawn); this ceiling only
+      // matters if that line never shows up at all. See INIT_OBSERVED_GUARD_MS.
+      preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS,
       preSpawnCapturePollMs: 5,
       state: fakeState,
       now: () => new Date(fakeMs),
