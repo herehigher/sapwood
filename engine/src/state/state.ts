@@ -1852,10 +1852,18 @@ export class State {
   appendEvent(kind: string, payload: unknown): void {
     // #403 (F25) per-site decision: DELIBERATE wall-clock read, left as-is. `events.ts` answers
     // "when did the engine actually do this", so the honest source is the machine's clock at the
-    // moment of the write — a seeded clock here would make the audit trail lie. Nothing reads it
-    // back as a decision input (it is ordered by `id`, never by `ts` — see the crash-rerun
-    // doctrine's "id cursors, not timestamps"), and no assertion in the suites compares an event
-    // `ts` to a seeded date, so this is not part of the seeded-date/wall-clock intersection.
+    // moment of the write — a seeded clock here would make the audit trail lie.
+    //
+    // PR #430 gate② P2 corrected the reasoning that used to sit here. Round 1 of this PR claimed
+    // the `ts` was "never read back as a decision input"; that was FALSE. `eventsSince` filters
+    // `WHERE ts >= ?`, and retro.ts/retro-digest.ts passed `round.started_at` — an INJECTED-clock
+    // value — into it, so the two clocks were in fact compared, and a divergence between them
+    // (a seeded round date, a backward host clock step) silently emptied the round's retro.
+    // The fix was not to seed this write but to stop comparing clocks at all: those three readers
+    // now use `eventsAfterId(round.start_event_id)`, the id cursor #123 added for precisely this
+    // reason. So the claim holds now BY CONSTRUCTION rather than by assertion — every round-scoped
+    // event read is id-ordered and id-bounded, and the remaining `eventsSince` callers pass an
+    // epoch/"all time" sentinel that compares nothing. See eventsSince's own doc below.
     this.db.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)").run(new Date().toISOString(), kind, JSON.stringify(payload));
   }
 
@@ -2547,13 +2555,20 @@ export class State {
 
   // ── #91: harvest/retro round-ledger reads ─────────────────────────────────────────────
 
-  /** Durable event-log rows at or after `sinceIso`, restricted to `kinds` — the harvest/retro
-   *  peripherals' round-ledger source (conductor.ts's DRIVE/RECLAIM phases already append every
-   *  event these two roles summarize; see harvest.ts's gatherRoundFacts / retro.ts's
-   *  gatherRetroFacts for the specific kinds each reads). Chronological (by id) order, parsed
-   *  payload. `kinds` must be non-empty — an empty SQL `IN ()` is invalid, so this throws rather
-   *  than silently returning everything or nothing (a caller bug, not a runtime condition to
-   *  degrade gracefully from). */
+  /** Durable event-log rows at or after `sinceIso`, restricted to `kinds`. Chronological (by id)
+   *  order, parsed payload. `kinds` must be non-empty — an empty SQL `IN ()` is invalid, so this
+   *  throws rather than silently returning everything or nothing (a caller bug, not a runtime
+   *  condition to degrade gracefully from).
+   *
+   *  NOT A ROUND-WINDOW READ (#403, F25 — PR #430 gate② P2). `events.ts` is stamped by
+   *  `appendEvent` from the MACHINE clock, while a round's `started_at` comes from the round's
+   *  INJECTED clock; passing one to the other compares two different clocks, and any divergence
+   *  (a fixture that seeds a round date, a host whose clock steps backward mid-round) silently
+   *  drops the round's own events. `eventsAfterId` + `RoundRow.start_event_id` is the round-window
+   *  read — the #123 mechanism, for exactly this reason (see the v9->v10 migration comment).
+   *  gatherRetroFacts / gatherTouchedPRs / gatherDigestIssues used to call THIS and now don't.
+   *  What is left is legitimate: callers passing an epoch/"all time" sentinel, where no clock is
+   *  being compared at all. Keep it that way. */
   eventsSince(sinceIso: string, kinds: string[]): { kind: string; payload: unknown }[] {
     if (kinds.length === 0) throw new Error("eventsSince: kinds must be non-empty");
     const placeholders = kinds.map(() => "?").join(",");

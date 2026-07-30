@@ -135,6 +135,20 @@ class FakeForge extends UnstubbedForge implements IForge {
 
 // ── gatherTouchedPRs ─────────────────────────────────────────────────────────────────────────
 
+test("gatherTouchedPRs / gatherDigestIssues (#403, F25): the round window is id-cursor-bounded — a round clock AHEAD of the machine clock still sees the round's own events", () => {
+  const state = new State(":memory:");
+  // Same seeded-vs-wall-clock mismatch gatherRetroFacts covers in retro.test.ts: `started_at`
+  // comes from the round's INJECTED clock, `appendEvent` stamps the machine clock, so a
+  // `ts >= started_at` read reports an empty round. DELIBERATE real-clock read — the OFFSET
+  // between the two clocks is the point, not either absolute value.
+  const round = state.startRound(new Date(Date.now() + 3_600_000).toISOString());
+  state.appendEvent("merged", { worker: "a", issue: 1, pr: 30, headOid: "x" });
+  state.appendEvent("drive-needs-human", { worker: "b", issue: 2, pr: 10, reason: "r" });
+  assert.deepEqual(gatherTouchedPRs(state, round), [10, 30]);
+  assert.deepEqual(gatherDigestIssues(state, round, ["drive-needs-human"]), [2]);
+  state.close();
+});
+
 test("gatherTouchedPRs: collects pr numbers from merged/drive-needs-human/drive-queued/drive-stopped, deduped and sorted", () => {
   const state = new State(":memory:");
   const round = state.startRound(new Date().toISOString());

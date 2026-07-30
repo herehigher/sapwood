@@ -222,7 +222,17 @@ export interface RetroFacts {
 const RETRO_EVENT_KINDS = ["handoff", "drive-needs-human", "plan-review-escalated", "ceiling-escalated"];
 
 export function gatherRetroFacts(state: State, round: RoundRow): RetroFacts {
-  const events = state.eventsSince(round.started_at, RETRO_EVENT_KINDS);
+  // #403 (F25), PR #430 gate② P2: the round window is the id cursor `startRound` stamps, NOT
+  // `started_at`. `eventsSince` compares against `events.ts`, which `appendEvent` writes from the
+  // MACHINE clock, while `started_at` comes from the round's INJECTED clock — so any divergence
+  // between the two (a fixture that seeds a round date, a host clock that steps backward
+  // mid-round) silently drops this round's own events and retro reports a round in which nothing
+  // happened. The id cursor is the mechanism #123 already added for exactly this, for exactly
+  // this reason (see state.ts's v9->v10 migration comment: "the round's ledger WINDOW is
+  // id-cursor-bounded, not timestamp-bounded"); the round-artifact read was converted then and
+  // these three retro/digest readers were the ones left behind. `?? 0` covers a legacy
+  // pre-migration row, same as every other start_event_id read.
+  const events = state.eventsAfterId(round.start_event_id ?? 0, RETRO_EVENT_KINDS);
   const count = (kind: string): number => events.filter((e) => e.kind === kind).length;
   return {
     roundId: round.round_id,

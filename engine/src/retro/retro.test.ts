@@ -213,10 +213,10 @@ test("createRetroStub: marker present -> returns it unchanged, no session run (i
 
 test("gatherRetroFacts: counts handoffs, drive-needs-human escalations, and ceiling escalations since round start only", async () => {
   const state = new State(":memory:");
-  // appendEvent stamps the REAL clock, so the excluded "before round start" event must land
-  // strictly before a real-clock started_at (the small sleep guarantees a later millisecond).
+  // #403 (F25), PR #430 gate② P2: no sleep needed any more. The round window is id-cursor-bounded
+  // (state.start_event_id, the #123 mechanism), so "before round start" means a lower event id —
+  // not an earlier wall-clock millisecond that a real sleep had to manufacture.
   state.appendEvent("handoff", { worker: "lane-x", issue: 99 }); // before round start
-  await new Promise((r) => setTimeout(r, 5));
   const round = state.startRound(new Date().toISOString());
   state.appendEvent("handoff", { worker: "lane-a", issue: 1 });
   state.appendEvent("handoff", { worker: "lane-b", issue: 2 });
@@ -225,6 +225,26 @@ test("gatherRetroFacts: counts handoffs, drive-needs-human escalations, and ceil
   const facts = gatherRetroFacts(state, round);
   assert.equal(facts.roundId, round.round_id);
   assert.equal(facts.handoffs, 2); // the pre-round-start handoff is excluded
+  assert.equal(facts.needsHumanEscalations, 1);
+  assert.equal(facts.ceilingEscalations, 1);
+  state.close();
+});
+
+test("gatherRetroFacts (#403, F25): the round window is id-cursor-bounded — a round clock AHEAD of the machine clock still counts the round's own events", () => {
+  const state = new State(":memory:");
+  // The exact seeded-vs-wall-clock mismatch #403 exists to eliminate, in the one place it was
+  // still load-bearing: `started_at` comes from the round's INJECTED clock while `appendEvent`
+  // stamps the machine clock. Seed the round an hour ahead (a fixture with a seeded clock, or a
+  // real host whose clock stepped backward mid-round) and a `ts >= started_at` read drops every
+  // event below — the retro then reports a round in which nothing happened. DELIBERATE real-clock
+  // read here: what matters is the OFFSET between the two clocks, not either absolute value.
+  const roundClockAhead = new Date(Date.now() + 3_600_000).toISOString();
+  const round = state.startRound(roundClockAhead);
+  state.appendEvent("handoff", { worker: "lane-a", issue: 1 });
+  state.appendEvent("drive-needs-human", { worker: "lane-c", issue: 3, pr: 5, reason: "flaky" });
+  state.appendEvent("ceiling-escalated", { worker: "lane-d", issue: 4, reasons: ["dailyBudgetUsd"] });
+  const facts = gatherRetroFacts(state, round);
+  assert.equal(facts.handoffs, 1);
   assert.equal(facts.needsHumanEscalations, 1);
   assert.equal(facts.ceilingEscalations, 1);
   state.close();

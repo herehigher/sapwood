@@ -41,7 +41,10 @@ export const PR_TOUCHED_EVENT_KINDS = ["merged", "drive-needs-human", "drive-que
  *  current contents — exported so tests can assert on it directly, same convention as
  *  harvest.ts's gatherRoundFacts / retro.ts's gatherRetroFacts. */
 export function gatherTouchedPRs(state: State, round: RoundRow): number[] {
-  const events = state.eventsSince(round.started_at, PR_TOUCHED_EVENT_KINDS);
+  // #403 (F25), PR #430 gate② P2: id cursor, not `started_at` — see gatherRetroFacts's own
+  // comment (retro.ts) for why comparing an injected-clock round boundary against a machine-clock
+  // event `ts` silently empties the round.
+  const events = state.eventsAfterId(round.start_event_id ?? 0, PR_TOUCHED_EVENT_KINDS);
   const prs = new Set<number>();
   for (const e of events) {
     const pr = (e.payload as { pr?: number }).pr;
@@ -58,7 +61,8 @@ export function gatherTouchedPRs(state: State, round: RoundRow): number[] {
  *  (prompts/retro.md: bounced plans, review rejections, budget overruns); duplicating it here
  *  would be two sources of truth for the same list. */
 export function gatherDigestIssues(state: State, round: RoundRow, kinds: string[]): number[] {
-  const events = state.eventsSince(round.started_at, kinds);
+  // #403 (F25), PR #430 gate② P2: id cursor, not `started_at` — same reason as gatherTouchedPRs.
+  const events = state.eventsAfterId(round.start_event_id ?? 0, kinds);
   const issues = new Set<number>();
   for (const e of events) {
     const issue = (e.payload as { issue?: number }).issue;
