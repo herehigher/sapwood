@@ -2,8 +2,10 @@ export { ConfigSchema, loadConfig, parseConfig, type SapwoodConfig } from "./con
 export {
   assemblePRReviewData,
   associateLanePr,
+  collectReviewThreads,
   countUnresolvedThreads,
   extractVerificationPlan,
+  findingDigest,
   findLaneOwnedPr,
   GithubForge,
   hasPrOwnerMarker,
@@ -21,6 +23,7 @@ export {
   parsePRStatus,
   parseReviewThreadsPage,
   prOwnerMarker,
+  type ReviewThreadSpan,
   readPrOwner,
   stampPrOwner,
 } from "./forge/forge.js";

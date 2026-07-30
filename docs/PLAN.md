@@ -375,6 +375,16 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   exhausted or the round count is malformed. Of those two, both are terminal — they
   escalate to `needs-human`, the same escalation #147's GATED RECLAIM below can then
   reclaim once a human clears the label.
+  **`prFixCap` is a COST ceiling being used as a quality ceiling — the known gap, designed
+  (#402, proposed).** "Rounds spent" and "no longer making progress" are different facts
+  sharing one signal today: every round looks identical to the engine, so a lane still
+  finding real defects escalates at the cap while a lane going nowhere pays the full cap
+  first. [`design/402-review-layering-convergence-tendency.md`](design/402-review-layering-convergence-tendency.md)
+  is the adjudicated-design deliverable for that: finding severity layering (only a
+  blocking/advisory bit reaches the gate), a per-round convergence definition over the
+  event ledger, immediate human routing for a `disputed` thread, and cross-PR finding-class
+  tendency accounting in retro. Nothing there is implemented yet — its §11 names the
+  follow-up issues, and §8 the `prFixCap` migration (semantics unchanged, default 2→4).
   **Round budget paces new work; it never blocks finishing an open PR (#375, fixing two
   dogfood-observed permanent wedges, F7/F8).** A driving lane's fix leg is exempt from
   `cost.roundBudgetUsd` outright — an already-open PR has no other completion path (merge
@@ -968,6 +978,35 @@ marker idempotency, output schema, escalation path) see
   label plus a structured event. The label is the latch and routes through the existing
   human hold/re-entry behavior; the lane remains driving, polling continues, and gate②
   is never softened. Configured failover receives its full evaluation window first.
+  **Adjudicated findings stop re-consuming fix rounds (#378, F14):** gate② used to see
+  review threads only as an aggregate unresolved COUNT, so a finding that had already
+  been human-adjudicated and thread-resolved re-entered the FIXABLE gate every time a
+  re-review raised it again — on PR #366 the same config-YAML finding cost five fix-round
+  evaluations, two of them from reviews against a stale head. `PRReviewData` now carries
+  each thread's span (`path`/`line`/`originalLine`), GitHub's own `isOutdated` staleness
+  field, a digest of the originating comment identifying WHICH finding the thread is
+  about, and the commit that comment was anchored to, all from the SAME paged read that
+  already produced the count. An unresolved thread carrying the same finding at the same
+  span as an already-resolved thread whose code has not moved since is an *adjudicated
+  re-raise* and is excluded from the blocking count. The key is deliberately (finding,
+  span) and never a thread id — a re-raise always arrives as a brand-new thread — and
+  never a span alone: two unrelated findings can share a line, and a span-only key would
+  drop the second, never-adjudicated one out of gate② input (the defect PR #445's review
+  caught in the first revision of this work). Because a review bot emits prose rather
+  than a typed rule id, the finding comparison is a last-resort text digest, kept at
+  whitespace normalization only so it fails toward *not* recognizing a reworded re-raise
+  (one more fix round) rather than toward collapsing two distinct findings (a suppressed
+  finding). Nothing always-blocking is weakened: a
+  resolved thread whose code CHANGED after resolution reads as outdated and its re-raise
+  still blocks, an unresolved thread with no prior adjudication on its span still blocks,
+  a standing `CHANGES_REQUESTED` still blocks, and absent thread data filters nothing at
+  all. A review submitted against a non-current head was already excluded from both
+  halves of the gate; that exclusion is now counted and reported rather than emergent.
+  Both exclusions are named in the FIXABLE outcome's reason — a filter that silently
+  shrank gate② input would be the invisible weakening this project refuses. Delivered in
+  two halves because the consuming code is human-merge-only: the `forge.ts` data plumbing
+  through the normal loop, the `reviewer.ts`/`merge-driver.ts` consumption as a
+  human-apply patch (`docs/patches/378-resolved-thread-head-freshness.patch`).
   **Commands + status CLI + first-run trust ramp delivered
   (#15, PR TBD):** `sapwood status [db-path]` reads the SQLite state DB directly (no
   live engine session) and reports active lanes, PRs awaiting the review gate, spend

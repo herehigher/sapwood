@@ -44,7 +44,11 @@ label explaining what happened).
 
 To clear it: investigate and resolve whatever's described, then remove the configured
 `labels.needsHuman` label by hand. Removing it does not automatically re-dispatch anything —
-if the issue should re-enter the loop, move it back to `Ready` on the board yourself.
+if the issue should re-enter the loop, move it back to `Ready` on the board yourself. The one
+exception is a lane escalated while holding a PR: removing the label is enough on its own, and
+the engine reclaims it straight back to the merge gate (see
+[Startup residue](#startup-residue-after-a-crash-or-quota-storm) for how a restart repairs the
+bookkeeping that makes this work).
 
 Both `escalation.humanLabels` (default `[sapwood:needs-human, sapwood:blocked]`) hold an issue out of
 the main dispatch lane — any issue carrying either label is skipped by dispatch
@@ -271,6 +275,48 @@ any issue still carrying a pool label from an earlier round, since that label is
 round's selection. In-flight lanes still drain and a handed-off lane still resumes; only new
 dispatch is withheld. The next round re-selects and the engine stays alive throughout. Fix the
 token's permissions, or create the labels manually, and the following round proceeds normally.
+
+## Startup residue after a crash or quota storm
+
+A run that dies mid-flight (an OOM kill, a provider quota storm, a hard restart) leaves lanes
+behind whose board/label state no longer matches reality. Every `sapwood run` startup now
+**repairs** that residue instead of only reporting it, so the only manual step left is the one
+that needs judgment: removing `labels.needsHuman`.
+
+What startup does, in order, and the state events it names each repair with:
+
+| Residue | What startup does | Event |
+| --- | --- | --- |
+| An issue stuck in the `In Progress` column with a stale `labels.inProgress` label, whose lane is gone and which has **no open PR** | Moves it back to `Ready` and strips the label, restoring pool eligibility | `orphan-healed` (and `orphan-heal-failed` if a write is refused) |
+| A `failed` lane holding a PR whose escalation never recorded that its `needs-human` write landed | If the hold label is **observably present**, records it, so removing the label later triggers gated reentry | `gated-flag-healed` |
+| The same lane with **no** hold label present | Left alone and surfaced — the engine cannot tell "never labelled" from "already cleared", and guessing would re-dispatch a lane nobody has looked at | `gated-flag-unprovable` |
+
+Two deliberate limits:
+
+- **An orphan whose lane still holds an open PR is never healed.** That issue belongs to the
+  gated-reentry path; returning it to `Ready` would let a second worker start work on an issue
+  that already has a producer's PR open. Merge or close the PR (or remove the hold label to let
+  reentry drive it), rather than moving the issue by hand.
+- **A `gated-flag-unprovable` lane needs you.** It is a standing alarm, re-emitted once per
+  engine start until the PR is merged/closed or the lane is retired.
+
+Repairs are idempotent — a startup that fails partway simply retries on the next start, and a
+forge failure on one issue never aborts the pass or the run.
+
+### Empty rounds over a backlog that can't move
+
+Rounds churn (and burn paid role sessions) only while there is work an **enabled role can
+actually consume**. An issue that is claimed (carrying `labels.inProgress`) or held (carrying
+any `escalation.humanLabels` label) counts as neither: it is off the `Ready` lane, so no pool,
+gate⓪, or triage pass can reach it. A milestone whose entire open backlog is claimed or held
+therefore puts the run into **standby** rather than opening round after empty round. The
+startup repairs above are what return such a backlog to work: once a dead lane's stale label is
+stripped, its issue is `Ready` again and counts as work on the very next probe.
+
+If a run is in standby and you believe there *is* work: check that the issues aren't still
+carrying a stale `labels.inProgress` from a lane that died before this feature landed (remove
+it and move them back to `Ready`), and see
+[Where to look after an unattended run](#where-to-look-after-an-unattended-run).
 
 ## See also
 

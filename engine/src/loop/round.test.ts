@@ -1960,6 +1960,54 @@ test("runRounds standby: round.milestone open issues count as work even with Rea
   state.close();
 });
 
+test("runRounds standby (#391 F21): a milestone backlog whose every open issue is CLAIMED by a dead lane's in-progress label does NOT count as work — standby engages instead of churning empty rounds", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // nothing dispatchable…
+  forge.planReviewCandidates = []; // …nothing awaiting gate⓪…
+  forge.planTriageCandidates = []; // …nothing to triage…
+  forge.milestoneOpenCounts = [3]; // …but the milestone still LOOKS busy
+  // The 2026-07-24 quota-storm residue: every open milestone issue is either claimed (a stale
+  // in-progress label left by a lane that died) or latched needs-human. Neither is pool-eligible
+  // and no enabled role consumes either, so pre-fix this pinned the probe true and 16 rounds
+  // burned paid role sessions on a provably empty pool.
+  const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 144, title: "claimed by a dead lane", labels: [cfg.labels.inProgress], milestone: "M4" },
+    { number: 145, title: "also claimed", labels: [cfg.labels.inProgress], milestone: "M4" },
+    { number: 207, title: "latched", labels: [cfg.labels.needsHuman], milestone: "M4" },
+  ];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop(); // bounded safety net, same as the standby tests above
+  };
+  const deps = baseDeps({
+    forge,
+    state,
+    sleep,
+    tickIntervalSec: 5,
+    cfg,
+    peripherals: allPeripherals(log),
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby actually engaged",
+  );
+  assert.equal(state.getRound(2), undefined, "no paid role session was burned on the un-dispatchable backlog");
+  state.close();
+});
+
 test("runRounds standby: an open PLAN-TRIAGE candidate (plan-less, not Ready, no milestone scoping) counts as work — the PO exists to draft its plan, so no standby (Codex P1 on PR #150)", async () => {
   const forge = new FakeForge();
   forge.ready = []; // nothing dispatchable…
@@ -3706,5 +3754,115 @@ test("runRounds (#395 gate② round 4): a WAIT-gated lane (PR on pending CI) nev
   // of leaving background activity running past this test.
   stillWaiting = false;
   await runPromise;
+  state.close();
+});
+
+// ── #433 (F33): a round is a DISPATCH window; lanes carry ACROSS rounds. A round whose own pool
+// ── is empty must still run its tick loop for whatever lanes it inherited — reclaim/drive/resume
+// ── everything but dispatch — or a carried lane is orphaned for the whole round (the 2026-07-29
+// ── live shape: PR #423's verdict arrived mid-round and was consumed by nobody for six rounds).
+// ── Empty pool + ZERO lanes still fast-closes (the very first test in this file). ───────────────
+
+test("runRounds (#433): a DRIVING lane carried into a round with an EMPTY dispatch pool is driven EVERY tick — a verdict arriving mid-round reaches merge inside that same round, no human, no next round", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge(); // ready = [] — this round's pool is empty
+  const sup = new FakeSupervisor();
+  const state = new State(":memory:");
+  // The carried lane: PR open, awaiting its Codex verdict (the #433 live shape, lane-377/PR #423).
+  state.upsertWorker({ name: "lane-377", issue: 377, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 423 });
+  // The verdict lands on the THIRD drive pass — i.e. mid-round, after the round's first tick.
+  const gate = new ScriptedMergeGate([
+    { kind: "queued", pr: 423, reason: "awaiting-review" },
+    { kind: "queued", pr: 423, reason: "awaiting-review" },
+    { kind: "merged", pr: 423, headOid: "H" },
+  ]);
+  const deps = baseDeps({ forge, state, supervisor: sup, sleep, mergeGate: gate, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }) });
+  const stopSafety = boundedStopOnPhase(deps, 5); // round 1's five peripheral phases only
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 1, "the merge happened inside the FIRST (empty-pool) round — no later round needed");
+  assert.ok(gate.calls >= 3, `the carried lane must be driven every tick of the empty round, not once (drive passes: ${gate.calls})`);
+  assert.equal(state.getWorker("lane-377")?.state, "done", "the verdict was consumed and the PR merged");
+  state.close();
+});
+
+test("runRounds (#433): a carried lane whose fix rounds are EXHAUSTED gets its needs-human escalation evaluated in the empty-pool round, not silently skipped", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const cfg = mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } });
+  // fix_rounds already AT the cap: the next FIXABLE gate can only escalate (driveDecision's
+  // ESCALATE), which is exactly the path the six empty rounds never re-evaluated.
+  state.upsertWorker({
+    name: "lane-377",
+    issue: 377,
+    session_id: "s",
+    state: "driving",
+    started_at: "t",
+    ended_at: "t2",
+    pr: 423,
+    fix_rounds: cfg.lanes.prFixCap,
+  });
+  const gate = new ScriptedMergeGate([{ kind: "fixable", pr: 423, reason: "ci-red" }]);
+  const deps = baseDeps({ forge, state, supervisor: sup, sleep, mergeGate: gate, cfg });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  await runRounds(deps);
+  stopSafety();
+  assert.ok(
+    events.some(([kind, payload]) => kind === "fix-rounds-capped" && (payload as { issue: number }).issue === 377),
+    "the cap-exhausted escalation must be evaluated in the empty round",
+  );
+  assert.ok(
+    forge.addLabelCalls.some(([n, l]) => n === 377 && l === cfg.labels.needsHuman),
+    "the needs-human label reached GitHub — an operator can actually see it",
+  );
+  assert.equal(state.getWorker("lane-377")?.state, "failed");
+  state.close();
+});
+
+test("runRounds (#433): standby must never withhold the next round while a CARRIED lane still needs the tick loop — a gated-reentry candidate a human unlabelled AFTER the round closed is picked up by the next round, not orphaned in backoff forever", async () => {
+  const forge = new FakeForge(); // ready/planReview/triage all [] — an empty backlog, so standby engages
+  const state = new State(":memory:");
+  const cfg = mkCfg({ round: { standby: { enabled: true } } });
+  // The carried lane: the fix-round cap escalated it to needs-human with its PR still open (the
+  // ONLY producer of a `failed`+pr row, #147/#246) — invisible to activeWorkers(), so its round
+  // closed as "idle" with this lane still awaiting the engine's GATED RECLAIM.
+  state.upsertWorker({
+    name: "lane-377",
+    issue: 377,
+    session_id: "s",
+    state: "failed",
+    started_at: "t",
+    ended_at: "t2",
+    pr: 423,
+    gated_escalation_labeled: 1,
+  });
+  forge.issueLabels[377] = [cfg.labels.needsHuman];
+  const gate = new ScriptedMergeGate([{ kind: "merged", pr: 423, headOid: "H" }]);
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    // Bounded, so the pre-fix behavior (standby backing off forever over a carried lane nobody
+    // drives) FAILS these assertions instead of hanging the suite — same stance as the standby
+    // tests above.
+    if (sleepCalls.length >= 8) stop();
+  };
+  const deps = baseDeps({ forge, state, sleep, mergeGate: gate, tickIntervalSec: 5, cfg });
+  // The human's explicit act — removing needs-human — lands only AFTER the first round has
+  // closed, exactly like PR #423's verdict arriving between rounds. Nothing else changes: the
+  // backlog stays empty, so this lane is the ONLY work left in the whole system.
+  deps.onRoundPhase = (_roundId, phase) => {
+    if (phase === "retro") forge.issueLabels[377] = [];
+  };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  await runRounds(deps);
+  assert.ok(state.getRound(2) != null, "a second round must open — a carried lane is work, so standby must not engage");
+  assert.equal(state.getWorker("lane-377")?.state, "done", "the carried lane was reclaimed, re-driven and merged without a human merge");
   state.close();
 });

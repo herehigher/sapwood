@@ -1126,6 +1126,24 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // so an outstanding row counts as work, or standby would starve the retry indefinitely.
       // Local SQLite read: the cheapest signal, checked first.
       if (deps.state.pendingRollbacks().length > 0) return true;
+      // #433 (F33): a CARRIED lane is work. Rounds are dispatch windows and lanes cross them by
+      // design, but every phase that finishes a lane — reclaim, resume, drive, gated reentry —
+      // only ever runs inside a round's own executing tick. So withholding the next round over an
+      // empty BACKLOG orphans whatever the last round left in flight: the lane's remaining work is
+      // not on the board at all, and no probe below can see it. Local SQLite reads, so they sit
+      // with pendingRollbacks above as the cheap signals checked before any network call.
+      //
+      // Each set is exactly what its consumer can still act on (disabled-consumer rule — an
+      // unconsumable signal here would pin the probe true forever and defeat standby):
+      //  - activeWorkers(): running/driving/fixing — reclaim/drain/drive continuation, always live.
+      //  - handoffWorkers(): resume candidates, ALREADY excluding resume_capped rows (terminal to
+      //    the scheduler, never resumed again).
+      //  - gatedFailedWorkers(): #147 gated-reentry candidates, already excluding capped/unlabelled
+      //    rows — but consumed ONLY by tick()'s GATED RECLAIM phase, which is skipped entirely
+      //    without a mergeGate, so this one is gated on the gate being configured.
+      if (deps.state.activeWorkers().length > 0) return true;
+      if (deps.state.handoffWorkers().length > 0) return true;
+      if (deps.mergeGate !== undefined && deps.state.gatedFailedWorkers().length > 0) return true;
       if ((await forge.getReadyIssues()).length > 0) return true;
       // #127 gate② F2: each candidate signal below only counts as work when the role that
       // CONSUMES it is enabled. A plan-review candidate is only ever consumed by the
@@ -1162,10 +1180,28 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         // (forge.ts's isPlanless), so nothing enabled can consume it either. It used to be
         // covered incidentally because the fence borrowed `needsHuman` (a humanLabels member);
         // spelling it out keeps this probe's behavior byte-for-byte identical under the new name.
+        //
+        // #391 (F21): a CLAIMED issue (cfg.labels.inProgress) doesn't count either — same "only
+        // a consumable signal counts" rule as the human-hold exclusion above, applied to the
+        // other way an issue leaves the Ready lane. A claimed issue is off the Ready column, so
+        // it is invisible to getReadyIssues/getPoolEligibleIssues/getIssuesNeedingPlanReview, and
+        // it has a plan already so triage skips it: no enabled role can consume it. Live claims
+        // are harmless to exclude (an occupied lane means the round wasn't idle, and standby
+        // needs lastRoundIdle); STALE ones — a lane that died leaving the label behind — are
+        // exactly the residue that churned 16 empty rounds on 2026-07-24, pinning this probe true
+        // over a backlog with a provably empty pool. Startup's own F20 heal strips the stale
+        // label and returns the issue to Ready, at which point it counts again, legitimately.
+        //
+        // Residual, stated rather than overclaimed: the label is the only claim signal available
+        // here (listOpenIssues carries labels, not board status), so an issue whose claim landed
+        // as a board write but whose addLabel failed still pins this probe. That direction is the
+        // deliberate one — it errs toward opening a round, the same fail-toward-more-work stance
+        // this probe's own catch uses.
         const openIssues = await forge.listOpenIssues();
         return openIssues.some(
           (i) =>
             i.milestone === cfg.round.milestone &&
+            !labelsInclude(i.labels, cfg.labels.inProgress) &&
             !cfg.escalation.humanLabels.some((label) => labelsInclude(i.labels, label)) &&
             !labelsInclude(i.labels, cfg.labels.planless),
         );

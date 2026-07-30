@@ -1849,6 +1849,23 @@ export class State {
       .all() as unknown as WorkerRow[];
   }
 
+  /** #391 (F19): rows that would be gated-reentry candidates but for `gated_escalation_labeled
+   *  = 0` — the 2026-07-24 quota-storm residue. The reclaim-failed/env-era escalation paths
+   *  never set that marker, so `gatedFailedWorkers()` excludes these forever and NO human action
+   *  (including removing needs-human) can ever wake them; recovery took a direct sqlite UPDATE.
+   *  Startup's audit (loop/reconcile.ts's auditGatedEscalationFlags) reads this set, checks each
+   *  issue's LIVE labels, and corrects the marker only where the hold is observably present —
+   *  never fabricating the "the engine provably applied the label" proof gatedFailedWorkers
+   *  depends on. Deliberately the exact complement of gatedFailedWorkers' predicate on that one
+   *  column, so a row is in exactly one of the two sets. */
+  unlabeledGatedWorkers(): WorkerRow[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM workers WHERE state = 'failed' AND pr IS NOT NULL AND gated_reentry_capped = 0 AND gated_escalation_labeled = 0 ORDER BY name",
+      )
+      .all() as unknown as WorkerRow[];
+  }
+
   appendEvent(kind: string, payload: unknown): void {
     // #403 (F25) per-site decision: DELIBERATE wall-clock read, left as-is. `events.ts` answers
     // "when did the engine actually do this", so the honest source is the machine's clock at the

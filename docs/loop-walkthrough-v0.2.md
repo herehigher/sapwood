@@ -18,8 +18,10 @@ promptFile, stop-milestone validation — any failure aborts with **zero
 dispatch**):
 
 1. **Loop top.** Signal or final `stop.*` already hit? → wind down (§3).
-2. **Standby probe** (#125). One local SQLite read + pure GitHub API calls,
-   no LLM: Ready issues? gate⓪ candidates? open milestone work? plan-doc
+2. **Standby probe** (#125). Local SQLite reads + pure GitHub API calls,
+   no LLM: any **carried lane** still needing the tick loop (in-flight,
+   resumable handoff, or gated-reentry candidate — #433)? Ready issues?
+   gate⓪ candidates? open milestone work? plan-doc
    goals? All empty *and* the last round was idle → **standby**: withhold the
    round, wait `tickIntervalSec × 2^n` (capped at
    `round.standby.backoffCapSec`), emit `standby-wait`, re-probe. Any hit →
