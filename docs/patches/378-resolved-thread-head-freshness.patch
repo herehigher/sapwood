@@ -9,8 +9,8 @@ itself gated by. So issue #378's ACs #2-#4 ship as this patch artifact instead
 of as a branch, per the issue's own "Human-owned remainder" section.
 
 DEPENDS ON: the forge.ts data-plumbing PR for #378 (AC #1), which must be merged
-first. This patch consumes `ReviewThreadSpan` / `PRReviewData.threads`, which do
-not exist before it.
+first. This patch consumes `ReviewThreadSpan` / `PRReviewData.threads` /
+`findingDigest`, none of which exist before it.
 
 APPLY:
     git apply -p1 docs/patches/378-resolved-thread-head-freshness.patch
@@ -24,13 +24,14 @@ Each re-flag re-entered the FIXABLE gate and consumed a fix-round evaluation,
 contributing to the lane hitting prFixCap and gatedReentryCap.
 
 WHAT IT DOES:
-  - reviewer.ts `adjudicatedDuplicateThreads`: an unresolved thread that lands on
-    the same file:line as an already-RESOLVED thread whose span has not moved
-    since (GitHub's own `isOutdated` is false) is an adjudicated re-raise and is
-    removed from `deriveBlockingSignal`'s count, so it never routes the lane into
-    another fix round. Matching is by SPAN, not by thread id — a re-raise comes
-    back as a brand-new thread id, which is exactly why "is this id resolved?"
-    answered no five times in a row on PR #366.
+  - reviewer.ts `adjudicatedDuplicateThreads`: an unresolved thread carrying the
+    SAME finding (`findingDigest`) at the SAME span (path + line) as an
+    already-RESOLVED thread whose code has not moved since (GitHub's own
+    `isOutdated` is false) is an adjudicated re-raise, and is removed from
+    `deriveBlockingSignal`'s count so it never routes the lane into another fix
+    round. Matching is NOT by thread id — a re-raise always arrives as a new
+    thread id, which is exactly why "is this id resolved?" answered no five
+    times running on PR #366.
   - reviewer.ts `staleHeadReviewCount`: makes the already-existing exclusion of
     non-current-head reviews COUNTABLE. This adds no new filtering — both halves
     of the gate already bind to the current head (`freshHeadReviewCount` for
@@ -42,7 +43,26 @@ WHAT IT DOES:
     silently shrinks gate② input would be precisely the kind of invisible
     weakening this repo's doctrine refuses.
 
+WHY THE KEY IS (finding, span) AND NOT SPAN ALONE:
+The engine-agent review of PR #445 found a real defect in the first revision of
+this patch, which keyed adjudication on file:line only. Two unrelated findings
+can share a line — "missing required key `foo`" adjudicated in round 1, "wrong
+indentation" raised fresh in round 2 on that same still-current line — and a
+span-only key would treat the second, never-adjudicated finding as a duplicate
+and silently drop it from gate② input. That is a gate weakening, not a saved fix
+round. The key now includes `findingDigest`, and the collision case is a test.
+`findingDigest` is a last-resort text comparison (a review bot emits prose, not
+a typed event with a rule id), so per this repo's authoritative-signals doctrine
+it is kept as narrow as possible — whitespace-run normalization only, no case
+folding, no fuzzy matching — and it favours the FALSE-NEGATIVE direction: a
+reworded re-raise goes unrecognized and keeps blocking (one more fix round, the
+bounded waste #378 set out to reduce), rather than two distinct findings
+collapsing into one (a suppressed finding).
+
 WHAT IT DELIBERATELY DOES NOT WEAKEN (pinned by the tests in this patch):
+  - a DIFFERENT finding on an already-adjudicated span still blocks;
+  - the SAME finding at a different span still blocks;
+  - a thread with no readable finding body is unkeyable and never filtered;
   - an unresolved thread with no prior adjudication on its span still blocks;
   - a resolved thread whose code CHANGED after resolution reads as outdated, does
     not adjudicate anything, and its re-raise still blocks;
@@ -52,11 +72,27 @@ WHAT IT DELIBERATELY DOES NOT WEAKEN (pinned by the tests in this patch):
   - absent thread data (any pre-#378 fixture or forge fake) filters nothing at
     all — byte-for-byte the pre-#378 gate.
 
-VERIFIED BEFORE SUBMISSION: this exact content was type-checked, linted and run
-as a sibling module tree (engine/src/roles378/, deleted before commit), since the
-producing worker is forbidden from writing the real paths. 270 tests pass across
-reviewer.test.ts + merge-driver.test.ts; `git apply --check -p1` is clean against
-the branch this patch ships on.
+REPRODUCING THE PRE-SUBMISSION VERIFICATION (do not take the numbers on trust —
+the engine-agent review of PR #445 correctly noted that a deleted dry-run tree
+is not independently checkable). The producing worker is forbidden from writing
+the real paths, so it type-checked, linted and RAN this exact content as a
+sibling module tree. To reproduce that on the PR branch without applying
+anything to the protected files:
+
+    mkdir -p engine/src/roles378
+    cp engine/src/roles/{reviewer,merge-driver,reviewer.test,merge-driver.test}.ts \
+       engine/src/roles378/
+    sed 's|engine/src/roles/|engine/src/roles378/|g' \
+       docs/patches/378-resolved-thread-head-freshness.patch > /tmp/378re.patch
+    git apply -p1 /tmp/378re.patch
+    (cd engine && npm run typecheck && npx biome ci src/roles378 \
+       && node --import tsx --test src/roles378/reviewer.test.ts \
+                                  src/roles378/merge-driver.test.ts)
+    rm -rf engine/src/roles378
+
+Expected: 273 tests pass, 0 fail; typecheck and lint clean. `git apply --check
+-p1` against the real paths is likewise clean. Applying the patch for real is
+still the human step.
 
 --- a/engine/src/roles/reviewer.ts
 +++ b/engine/src/roles/reviewer.ts
@@ -69,7 +105,7 @@ the branch this patch ships on.
  import { extractVerificationPlan } from "../forge/forge.js";
  
  export type ReviewAction =
-@@ -392,14 +392,96 @@
+@@ -392,14 +392,110 @@
    blocked: boolean;
    unresolvedThreads: number;
    changesRequestedOnHead: boolean;
@@ -81,13 +117,24 @@ the branch this patch ships on.
 +  adjudicatedDuplicates: number;
 +}
 +
-+/** #378 (F14): the span an adjudication decision is keyed on — `path` plus the line the thread
-+ *  targets. `line` is null once GitHub marks a thread outdated, so `originalLine` is the
-+ *  fallback. No path or no line at all -> null, i.e. NOT keyable: a file-level or PR-level thread
-+ *  can never be matched against a prior adjudication and therefore can never be filtered. */
-+function threadSpanKey(t: ReviewThreadSpan): string | null {
++/** #378 (F14): the key an adjudication decision is made on — WHICH finding (`findingDigest`) at
++ *  WHICH span (`path` plus the line the thread targets). `line` is null once GitHub marks a
++ *  thread outdated, so `originalLine` is the fallback.
++ *
++ *  The digest is part of the key, not decoration, and leaving it out was a real defect (found by
++ *  the engine-agent review of PR #445): a span alone is NOT a finding identity. Two entirely
++ *  unrelated findings can land on the same file:line — "missing required key `foo`" adjudicated
++ *  in round 1, "wrong indentation" raised fresh in round 2 on the same still-current line — and
++ *  a span-only key would treat the second as a duplicate of the first and silently subtract a
++ *  REAL, never-adjudicated finding from the blocking count. That is a gate weakening, not a
++ *  saved fix round.
++ *
++ *  Any missing component -> null, i.e. NOT keyable: a file-level or PR-level thread, or one whose
++ *  originating comment could not be read, can never be matched against a prior adjudication and
++ *  therefore can never be filtered. */
++function threadAdjudicationKey(t: ReviewThreadSpan): string | null {
 +  const line = t.line ?? t.originalLine;
-+  return t.path && line != null ? `${t.path}:${line}` : null;
++  return t.path && line != null && t.findingDigest ? `${t.path}:${line}:${t.findingDigest}` : null;
 +}
 +
 +/**
@@ -96,43 +143,46 @@ the branch this patch ships on.
 + * had been human-adjudicated, thread-resolved, and its remedy merged elsewhere (PR #367). Each
 + * re-flag re-entered the FIXABLE gate and burned a fix-round evaluation.
 + *
-+ * The match is by SPAN, not by thread id, and that is the whole point: a re-raised finding comes
-+ * back as a BRAND-NEW review thread with a new id, so "is this thread id in the resolved set"
-+ * answers no every single time — which is precisely why the loop kept paying for it. What
-+ * actually identifies the re-raise is that it lands on the same file and line as a thread that
-+ * was already resolved and whose code has not moved since.
++ * The match is NOT by thread id, and that is the whole point: a re-raised finding comes back as a
++ * BRAND-NEW review thread with a new id, so "is this thread id in the resolved set" answers no
++ * every single time — which is precisely why the loop kept paying for it. What identifies a
++ * re-raise is that the SAME finding lands on the SAME span as a thread that was already resolved
++ * and whose code has not moved since. Both halves of that key are load-bearing: span alone is not
++ * a finding identity (two unrelated findings can share a line), and finding text alone is not a
++ * location (the same class of finding at a different site is a different finding).
 + *
 + * A thread is treated as an adjudicated duplicate only when ALL of these hold:
 + *  - it is unresolved and not itself outdated (an outdated thread's span already moved);
-+ *  - it has a keyable span (path + line) — a file-level thread is never filtered;
-+ *  - some RESOLVED thread on the same span is NOT outdated, i.e. GitHub itself still anchors
-+ *    that resolved thread to the current diff, so the code it was adjudicated against is
++ *  - it has a complete key — path + line + a readable finding digest (see
++ *    threadAdjudicationKey); anything missing makes it unfilterable;
++ *  - some RESOLVED thread carries the IDENTICAL key and is NOT outdated, i.e. GitHub itself still
++ *    anchors that resolved thread to the current diff, so the code it was adjudicated against is
 + *    unchanged. A resolved thread whose span DID change reads as outdated and is deliberately
 + *    excluded from the adjudicated set — its re-raise is then genuinely fresh signal and keeps
 + *    blocking, which is the always-blocking invariant this filter must not weaken.
 + *
 + * Everything degrades toward BLOCKING: no thread data at all (`data.threads` absent — every
 + * pre-#378 fixture and forge fake), unknown staleness (parseReviewThreadsPage reads a missing
-+ * `isOutdated` as true), or an unkeyable span all yield zero duplicates and therefore the exact
-+ * pre-#378 count.
++ * `isOutdated` as true), an unreadable finding body, or an unkeyable span all yield zero
++ * duplicates and therefore the exact pre-#378 count.
 + */
 +export function adjudicatedDuplicateThreads(data: PRReviewData): ReviewThreadSpan[] {
 +  const threads = data.threads;
 +  if (!threads?.length) return [];
-+  const adjudicatedSpans = new Set<string>();
++  const adjudicated = new Set<string>();
 +  for (const t of threads) {
 +    if (!t.isResolved || t.isOutdated) continue;
-+    const key = threadSpanKey(t);
-+    if (key) adjudicatedSpans.add(key);
++    const key = threadAdjudicationKey(t);
++    if (key) adjudicated.add(key);
 +  }
-+  if (adjudicatedSpans.size === 0) return [];
++  if (adjudicated.size === 0) return [];
 +  return threads.filter((t) => {
 +    if (t.isResolved || t.isOutdated) return false;
-+    const key = threadSpanKey(t);
-+    return key !== null && adjudicatedSpans.has(key);
++    const key = threadAdjudicationKey(t);
++    return key !== null && adjudicated.has(key);
 +  });
-+}
-+
+ }
+ 
 +/**
 + * #378 (F14): reviews EXCLUDED from gate②'s input because they were submitted against a head
 + * that is no longer the PR's head — the "review submitted against a non-current head is
@@ -149,8 +199,8 @@ the branch this patch ships on.
 + */
 +export function staleHeadReviewCount(reviews: PRReview[], headOid: string): number {
 +  return reviews.filter((r) => r.commitOid !== headOid).length;
- }
- 
++}
++
  export function deriveBlockingSignal(data: PRReviewData): BlockingSignal {
    const changesRequested = changesRequestedOnHead(data.reviews, data.headOid, data.author);
 -  return {
@@ -202,16 +252,17 @@ the branch this patch ships on.
      }
 --- a/engine/src/roles/reviewer.test.ts
 +++ b/engine/src/roles/reviewer.test.ts
-@@ -9,7 +9,7 @@
+@@ -9,7 +9,8 @@
  import { fileURLToPath } from "node:url";
  import { ConfigSchema } from "../config/config.js";
  import { NO_DOCTRINE } from "../config/doctrine.js";
 -import type { IForge, PRReview, PRReviewData } from "../forge/forge.js";
 +import type { IForge, PRReview, PRReviewData, ReviewThreadSpan } from "../forge/forge.js";
++import { findingDigest } from "../forge/forge.js";
  import type {
    ApprovalResult,
    Finding,
-@@ -22,6 +22,7 @@
+@@ -22,6 +23,7 @@
    ReviewVerdict,
  } from "./reviewer.js";
  import {
@@ -219,7 +270,7 @@ the branch this patch ships on.
    buildReviewerByKind,
    buildReviewTriggerComment,
    CodexReviewer,
-@@ -41,6 +42,7 @@
+@@ -41,6 +43,7 @@
    REVIEWER_KINDS,
    resolveReviewVerdict,
    SameModelTrustedReviewer,
@@ -227,7 +278,7 @@ the branch this patch ships on.
    validateFindings,
  } from "./reviewer.js";
  
-@@ -1560,9 +1562,149 @@
+@@ -1560,9 +1563,188 @@
  // -- deriveBlockingSignal: the ONE shared pure blocking function every kind routes through --
  
  test("deriveBlockingSignal: no unresolved threads, no standing change request -> not blocked", () => {
@@ -247,14 +298,53 @@ the branch this patch ships on.
 +// FIXABLE gate and consumed a fix-round evaluation, contributing to the lane hitting prFixCap
 +// and gatedReentryCap.
 +
++const FINDING = "missing required key `foo`";
++
 +const mkThread = (over: Partial<ReviewThreadSpan> & { id: string }): ReviewThreadSpan => ({
 +  isResolved: false,
 +  isOutdated: false,
 +  path: "sapwood.config.yaml",
 +  line: 12,
 +  originalLine: 12,
-+  resolvedAtCommitOid: "RESOLVED_AT",
++  findingDigest: findingDigest(FINDING),
++  anchorCommitOid: "ANCHOR",
 +  ...over,
++});
++
++test("#378 (PR #445 review): a DIFFERENT finding on an already-adjudicated span is NOT a duplicate", () => {
++  // The span-collision defect: round 1 adjudicates "missing required key `foo`" on
++  // sapwood.config.yaml:12 and resolves it; round 2 raises "wrong indentation" as a brand-new
++  // thread on that same, still-current line. Keying on file:line alone would misclassify the
++  // second — a real, never-adjudicated finding — as a duplicate and drop it from gate② input.
++  const data = mkData({
++    unresolvedThreads: 1,
++    threads: [
++      mkThread({ id: "T_ADJUDICATED", isResolved: true }),
++      mkThread({ id: "T_DIFFERENT_FINDING", findingDigest: findingDigest("wrong indentation") }),
++    ],
++  });
++  assert.deepEqual(adjudicatedDuplicateThreads(data), []);
++  assert.equal(deriveBlockingSignal(data).unresolvedThreads, 1);
++  assert.equal(deriveBlockingSignal(data).blocked, true);
++  assert.equal(new CodexReviewer().verdictFromData(data).action, "HANDLE_THREADS");
++});
++
++test("#378: the SAME finding at a DIFFERENT span is not a duplicate either — both halves of the key are load-bearing", () => {
++  const data = mkData({
++    unresolvedThreads: 1,
++    threads: [mkThread({ id: "T_OLD", isResolved: true }), mkThread({ id: "T_ELSEWHERE", line: 88, originalLine: 88 })],
++  });
++  assert.deepEqual(adjudicatedDuplicateThreads(data), []);
++  assert.equal(deriveBlockingSignal(data).blocked, true);
++});
++
++test("#378: a thread with NO readable finding body is unkeyable and never filtered, in either role", () => {
++  const data = mkData({
++    unresolvedThreads: 1,
++    threads: [mkThread({ id: "T_OLD", isResolved: true, findingDigest: null }), mkThread({ id: "T_NEW", findingDigest: null })],
++  });
++  assert.deepEqual(adjudicatedDuplicateThreads(data), []);
++  assert.equal(deriveBlockingSignal(data).blocked, true);
 +});
 +
 +test("#378: a re-raised finding on a RESOLVED, unchanged span is filtered out of gate② input", () => {
@@ -328,8 +418,8 @@ the branch this patch ships on.
 +  assert.deepEqual(adjudicatedDuplicateThreads(data), []);
 +  assert.equal(deriveBlockingSignal(data).unresolvedThreads, 2);
 +  assert.equal(deriveBlockingSignal(data).blocked, true);
-+});
-+
+ });
+ 
 +test("#378: the filter never drives the count below zero when `threads` is a partial view of the paged total", () => {
 +  // unresolvedThreads is the authoritative paged total; `threads` can be short of it if the
 +  // 50-page ceiling cut the fetch. Subtracting must not underflow into a negative count.
@@ -339,8 +429,8 @@ the branch this patch ships on.
 +  });
 +  assert.equal(adjudicatedDuplicateThreads(data).length, 2);
 +  assert.equal(deriveBlockingSignal(data).unresolvedThreads, 0);
- });
- 
++});
++
 +test("#378: a standing CHANGES_REQUESTED still blocks even when every thread is an adjudicated duplicate", () => {
 +  const data = mkData({
 +    unresolvedThreads: 1,
@@ -380,7 +470,15 @@ the branch this patch ships on.
    assert.equal(signal.blocked, true);
 --- a/engine/src/roles/merge-driver.test.ts
 +++ b/engine/src/roles/merge-driver.test.ts
-@@ -942,8 +942,52 @@
+@@ -7,6 +7,7 @@
+ import { test } from "node:test";
+ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+ import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
++import { findingDigest } from "../forge/forge.js";
+ import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+ import type { AuditDeliveryResult } from "../review/drive.js";
+ import { type DriveOutcome, deriveGate, MergeDriver, mergeDecision, reviewSilenceDuration } from "./merge-driver.js";
+@@ -942,6 +943,57 @@
    assert.match((outcome as { reason: string }).reason, /HANDLE_THREADS/);
    assert.deepEqual(forge.merged, []);
    assert.deepEqual(forge.labelsAdded, []); // driveOne itself never labels — the caller (conductor.ts) owns escalation
@@ -392,7 +490,14 @@ the branch this patch ships on.
 +
 +test("#378 MergeDriver.driveOne: the FIXABLE reason reports the ACTED-ON thread count plus what was excluded (never a silent filter)", async () => {
 +  const forge = new FakeForge();
-+  const span = { path: "sapwood.config.yaml", line: 12, originalLine: 12, isOutdated: false, resolvedAtCommitOid: "R" };
++  const span = {
++    path: "sapwood.config.yaml",
++    line: 12,
++    originalLine: 12,
++    isOutdated: false,
++    anchorCommitOid: "R",
++    findingDigest: findingDigest("missing required key `foo`"),
++  };
 +  forge.reviewData = {
 +    ...forge.reviewData,
 +    unresolvedThreads: 2,
@@ -417,8 +522,8 @@ the branch this patch ships on.
 +  assert.match(reason, /unresolvedThreads=1/); // 2 raw - 1 adjudicated duplicate
 +  assert.match(reason, /adjudicatedDuplicates=1/);
 +  assert.match(reason, /staleHeadReviews=2/);
- });
- 
++});
++
 +test("#378 MergeDriver.driveOne: with no thread data (pre-#378 fixtures) the reason still carries the raw count and zero exclusions", async () => {
 +  const forge = new FakeForge();
 +  forge.reviewData = { ...forge.reviewData, unresolvedThreads: 3 };
@@ -428,8 +533,6 @@ the branch this patch ships on.
 +  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
 +  const { reason } = outcome as { reason: string };
 +  assert.match(reason, /unresolvedThreads=3:ciRed=false:adjudicatedDuplicates=0:staleHeadReviews=0/);
-+});
-+
+ });
+ 
  test("MergeDriver.driveOne (#246): prFixCap: 0 -> unresolved findings (HANDLE_THREADS) still needs-human, byte-for-byte the pre-#246 path", async () => {
-   const forge = new FakeForge();
-   const reviewer = new FakeReviewer();

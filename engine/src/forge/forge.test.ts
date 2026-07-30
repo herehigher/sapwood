@@ -15,6 +15,7 @@ import {
   extractVerificationSection,
   fetchAllReviewThreads,
   findItemId,
+  findingDigest,
   findLaneOwnedPr,
   findOptionId,
   GithubForge,
@@ -1555,6 +1556,7 @@ const richThreadsPage = (
     line?: number | null;
     originalLine?: number | null;
     oid?: string;
+    body?: string;
   }[],
   pageInfo?: { hasNextPage: boolean; endCursor: string | null },
 ): string =>
@@ -1571,7 +1573,7 @@ const richThreadsPage = (
               path: n.path ?? null,
               line: n.line ?? null,
               originalLine: n.originalLine ?? null,
-              comments: { nodes: n.oid ? [{ commit: { oid: n.oid } }] : [] },
+              comments: { nodes: n.oid || n.body ? [{ body: n.body ?? null, commit: { oid: n.oid } }] : [] },
             })),
           },
         },
@@ -1579,10 +1581,10 @@ const richThreadsPage = (
     },
   });
 
-test("#378 parseReviewThreadsPage: parses each thread's span, isOutdated and resolution-commit oid", () => {
+test("#378 parseReviewThreadsPage: parses each thread's span, isOutdated, anchor commit and finding digest", () => {
   const p = parseReviewThreadsPage(
     richThreadsPage([
-      { id: "T1", isResolved: true, path: "sapwood.config.yaml", line: 12, originalLine: 12, oid: "RESOLVED_AT" },
+      { id: "T1", isResolved: true, path: "sapwood.config.yaml", line: 12, originalLine: 12, oid: "ANCHOR", body: "missing key `foo`" },
       { id: "T2", isResolved: false, isOutdated: true, path: "engine/src/a.ts", line: null, originalLine: 40, oid: "OLD" },
     ]),
   );
@@ -1595,7 +1597,8 @@ test("#378 parseReviewThreadsPage: parses each thread's span, isOutdated and res
       path: "sapwood.config.yaml",
       line: 12,
       originalLine: 12,
-      resolvedAtCommitOid: "RESOLVED_AT",
+      anchorCommitOid: "ANCHOR",
+      findingDigest: findingDigest("missing key `foo`"),
     },
     {
       id: "T2",
@@ -1604,9 +1607,31 @@ test("#378 parseReviewThreadsPage: parses each thread's span, isOutdated and res
       path: "engine/src/a.ts",
       line: null,
       originalLine: 40,
-      resolvedAtCommitOid: "OLD",
+      anchorCommitOid: "OLD",
+      findingDigest: null, // no body -> no digest, so nothing can ever match it
     },
   ]);
+});
+
+test("#378 findingDigest: identical finding text digests identically; DIFFERENT text on the same span never collides", () => {
+  // The defect this closes (engine-agent review of PR #445): keying adjudication on file:line
+  // alone let a DIFFERENT, never-adjudicated finding landing on an already-adjudicated line be
+  // silently subtracted from the blocking count. Span is not finding identity.
+  assert.equal(findingDigest("missing required key `foo`"), findingDigest("missing required key `foo`"));
+  assert.notEqual(findingDigest("missing required key `foo`"), findingDigest("wrong indentation"));
+});
+
+test("#378 findingDigest: normalizes only whitespace runs — a markdown re-wrap of the SAME finding still matches", () => {
+  assert.equal(findingDigest("missing required\n  key `foo`"), findingDigest("  missing required key `foo`  "));
+  // Deliberately NOT case-folded or punctuation-stripped: every widening of this comparison
+  // trades toward the dangerous failure direction (suppressing a distinct finding), so the
+  // normalization stays at the narrowest thing that survives a re-wrap.
+  assert.notEqual(findingDigest("Missing required key `foo`"), findingDigest("missing required key `foo`"));
+});
+
+test("#378 parseReviewThreadsPage: an empty/whitespace-only body yields NO digest — an unkeyable thread is never filterable", () => {
+  const p = parseReviewThreadsPage(richThreadsPage([{ id: "T1", isResolved: true, path: "a.ts", line: 1, body: "   \n  " }]));
+  assert.equal(p.threads[0]!.findingDigest, null);
 });
 
 test("#378 parseReviewThreadsPage: an older/field-less response degrades safely — span null, isOutdated fails CLOSED (true)", () => {
@@ -1616,10 +1641,10 @@ test("#378 parseReviewThreadsPage: an older/field-less response degrades safely 
   const p = parseReviewThreadsPage(threadsPage([false, true]));
   assert.equal(p.unresolved, 1);
   assert.deepEqual(
-    p.threads.map((t) => [t.id, t.isOutdated, t.path, t.line, t.originalLine, t.resolvedAtCommitOid]),
+    p.threads.map((t) => [t.id, t.isOutdated, t.path, t.line, t.originalLine, t.anchorCommitOid, t.findingDigest]),
     [
-      ["", true, null, null, null, null],
-      ["", true, null, null, null, null],
+      ["", true, null, null, null, null, null],
+      ["", true, null, null, null, null, null],
     ],
   );
 });

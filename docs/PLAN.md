@@ -934,11 +934,19 @@ marker idempotency, output schema, escalation path) see
   re-review raised it again — on PR #366 the same config-YAML finding cost five fix-round
   evaluations, two of them from reviews against a stale head. `PRReviewData` now carries
   each thread's span (`path`/`line`/`originalLine`), GitHub's own `isOutdated` staleness
-  field, and the commit the thread was last anchored to, all from the SAME paged read
-  that already produced the count. An unresolved thread landing on the span of an
-  already-resolved thread whose code has not moved since is an *adjudicated re-raise* and
-  is excluded from the blocking count — matched by SPAN, not thread id, because a
-  re-raise always arrives as a brand-new thread. Nothing always-blocking is weakened: a
+  field, a digest of the originating comment identifying WHICH finding the thread is
+  about, and the commit that comment was anchored to, all from the SAME paged read that
+  already produced the count. An unresolved thread carrying the same finding at the same
+  span as an already-resolved thread whose code has not moved since is an *adjudicated
+  re-raise* and is excluded from the blocking count. The key is deliberately (finding,
+  span) and never a thread id — a re-raise always arrives as a brand-new thread — and
+  never a span alone: two unrelated findings can share a line, and a span-only key would
+  drop the second, never-adjudicated one out of gate② input (the defect PR #445's review
+  caught in the first revision of this work). Because a review bot emits prose rather
+  than a typed rule id, the finding comparison is a last-resort text digest, kept at
+  whitespace normalization only so it fails toward *not* recognizing a reworded re-raise
+  (one more fix round) rather than toward collapsing two distinct findings (a suppressed
+  finding). Nothing always-blocking is weakened: a
   resolved thread whose code CHANGED after resolution reads as outdated and its re-raise
   still blocks, an unresolved thread with no prior adjudication on its span still blocks,
   a standing `CHANGES_REQUESTED` still blocks, and absent thread data filters nothing at

@@ -5,6 +5,7 @@ export {
   collectReviewThreads,
   countUnresolvedThreads,
   extractVerificationPlan,
+  findingDigest,
   findLaneOwnedPr,
   GithubForge,
   hasPrOwnerMarker,

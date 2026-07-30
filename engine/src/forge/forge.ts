@@ -2452,12 +2452,14 @@ export function parsePRChangedFiles(json: string): PRChangedFile[] {
 // impure part is GithubForge.getPRReviewData's 3 gh calls above.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// #378 (F14): the node selection carries the thread's SPAN and GitHub's own staleness field on
-// top of the `isResolved` flag the unresolved COUNT needs. Rationale: gate② used to see nothing
-// but an aggregate count, so an already-adjudicated, thread-resolved finding re-raised as a NEW
-// thread on the same unchanged lines was indistinguishable from a genuinely fresh one (PR #366:
-// the same config-YAML finding re-consumed five fix-round evaluations). `comments(last: 1)`
-// yields the commit the thread was most recently anchored to — the resolution-time reference.
+// #378 (F14): the node selection carries the thread's SPAN, GitHub's own staleness field, and the
+// thread's ORIGINATING comment on top of the `isResolved` flag the unresolved COUNT needs.
+// Rationale: gate② used to see nothing but an aggregate count, so an already-adjudicated,
+// thread-resolved finding re-raised as a NEW thread on the same unchanged lines was
+// indistinguishable from a genuinely fresh one (PR #366: the same config-YAML finding
+// re-consumed five fix-round evaluations). `comments(first: 1)` is the comment that RAISED the
+// finding — its body identifies WHICH finding this thread is about (span alone does not, see
+// findingDigest) and its `commit.oid` is the code state the finding was raised against.
 export const REVIEW_THREADS_QUERY = `
 query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
@@ -2471,7 +2473,7 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
           path
           line
           originalLine
-          comments(last: 1) { nodes { commit { oid } } }
+          comments(first: 1) { nodes { body commit { oid } } }
         }
       }
     }
@@ -2494,11 +2496,18 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
  *  - `path`/`line`/`originalLine` are the span itself. `line` is null once a thread goes
  *    outdated (GitHub drops the current-diff position), which is why `originalLine` is carried
  *    alongside rather than instead.
- *  - `resolvedAtCommitOid` is the commit the thread's MOST RECENT comment is anchored to — the
- *    nearest available "state of the code when this thread was last adjudicated" reference.
- *    GitHub's `PullRequestReviewThread` exposes no resolving-commit field at all (`resolvedBy`
- *    is a User, not a commit), so this is deliberately named for what it is and used for audit /
- *    logging; the load-bearing staleness decision binds to `isOutdated`, not to this oid.
+ *  - `findingDigest` identifies WHICH finding the thread is about (see findingDigest). A span
+ *    alone does NOT: two entirely unrelated findings can land on the same file:line, and keying
+ *    adjudication on the span alone would let the second, never-adjudicated one be silently
+ *    treated as a duplicate of the first — a REAL finding dropped from gate② input. null when
+ *    the thread has no readable originating comment, which makes it unkeyable and therefore
+ *    never filterable.
+ *  - `anchorCommitOid` is the commit the thread's ORIGINATING comment was left against — the
+ *    state of the code the finding was raised, and subsequently adjudicated, against. Note this
+ *    is NOT literally a "resolving commit": GitHub's `PullRequestReviewThread` exposes no such
+ *    field at all (`resolvedBy` is a User, not a commit), so this is deliberately named for what
+ *    it actually is and used for audit / logging; the load-bearing staleness decision binds to
+ *    `isOutdated`, not to this oid.
  */
 export interface ReviewThreadSpan {
   id: string;
@@ -2507,7 +2516,31 @@ export interface ReviewThreadSpan {
   path: string | null;
   line: number | null;
   originalLine: number | null;
-  resolvedAtCommitOid: string | null;
+  findingDigest: string | null;
+  anchorCommitOid: string | null;
+}
+
+/**
+ * #378 (F14): a stable fingerprint of a review finding's TEXT, for deciding whether two threads
+ * are about the same finding. Empty/whitespace-only -> null (unkeyable, never matchable).
+ *
+ * This is deliberately the narrowest comparison that still works. There is no structured finding
+ * identity to bind to — a review bot emits prose, not a typed event with a rule id — so per this
+ * repo's authoritative-signals doctrine this is a last-resort text comparison, and the doctrine's
+ * requirement is to keep it narrow and name which failure direction it favours. Normalization is
+ * whitespace-runs only: no case folding, no punctuation stripping, no fuzzy/substring matching.
+ *
+ * The two directions are not symmetric. A too-WIDE comparison collapses two distinct findings
+ * into one and drops a real, never-adjudicated finding out of gate② input — a silent gate
+ * weakening, the worst outcome available here. A too-NARROW comparison merely fails to recognize
+ * a re-raise that was reworded, so the duplicate keeps blocking and costs one more fix-round
+ * evaluation — exactly the bounded waste #378 set out to reduce, never a suppressed finding.
+ * Every widening trades toward the first. Whitespace collapsing is included only because a
+ * markdown re-wrap of byte-identical prose is not a different finding by any reading.
+ */
+export function findingDigest(body: string | null | undefined): string | null {
+  const normalized = (body ?? "").trim().replace(/\s+/g, " ");
+  return normalized === "" ? null : createHash("sha256").update(normalized).digest("hex");
 }
 
 /** One page of the reviewThreads connection: unresolved count + this page's threads + cursor.
@@ -2532,7 +2565,7 @@ export function parseReviewThreadsPage(json: string): {
               path?: string | null;
               line?: number | null;
               originalLine?: number | null;
-              comments?: { nodes?: { commit?: { oid?: string } }[] };
+              comments?: { nodes?: { body?: string | null; commit?: { oid?: string } }[] };
             }[];
           };
         };
@@ -2543,17 +2576,22 @@ export function parseReviewThreadsPage(json: string): {
   const nodes = conn?.nodes ?? [];
   return {
     unresolved: nodes.filter((n) => !n.isResolved).length,
-    threads: nodes.map((n) => ({
-      id: n.id ?? "",
-      isResolved: n.isResolved ?? false,
-      // Fail-closed (see ReviewThreadSpan): unknown staleness reads as "the span moved", which
-      // can only ever keep a finding in gate② input, never remove one from it.
-      isOutdated: n.isOutdated ?? true,
-      path: n.path ?? null,
-      line: n.line ?? null,
-      originalLine: n.originalLine ?? null,
-      resolvedAtCommitOid: n.comments?.nodes?.at(-1)?.commit?.oid ?? null,
-    })),
+    threads: nodes.map((n) => {
+      const origin = n.comments?.nodes?.[0];
+      return {
+        id: n.id ?? "",
+        isResolved: n.isResolved ?? false,
+        // Fail-closed (see ReviewThreadSpan): unknown staleness reads as "the span moved", which
+        // can only ever keep a finding in gate② input, never remove one from it.
+        isOutdated: n.isOutdated ?? true,
+        path: n.path ?? null,
+        line: n.line ?? null,
+        originalLine: n.originalLine ?? null,
+        // Absent body -> null digest -> unkeyable -> never filterable. Same fail-closed shape.
+        findingDigest: findingDigest(origin?.body),
+        anchorCommitOid: origin?.commit?.oid ?? null,
+      };
+    }),
     hasNextPage: conn?.pageInfo?.hasNextPage ?? false,
     endCursor: conn?.pageInfo?.endCursor ?? null,
   };
