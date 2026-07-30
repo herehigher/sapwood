@@ -13,6 +13,7 @@ import type { ParkRow } from "../state/state.js";
 import type { ContextManifest } from "./context-manifest.js";
 import {
   ARCHITECT_ALLOWED_TOOLS,
+  awaitKillGrace,
   CONFIRM_ALLOWED_TOOLS,
   CONFIRM_DISALLOWED_TOOLS,
   PLAN_DRAFTER_DISALLOWED_TOOLS,
@@ -2600,7 +2601,11 @@ test("run (#395 gate② follow-up, P1): once timedOut latches, role-session-hear
       preSpawnCapturePollMs: 5,
       state: fakeState,
       // Far past this test's own lifetime: the SIGKILL is provably not what ends the child, so
-      // nothing about the assertions below depends on killTree's real grace window.
+      // nothing about the assertions below depends on killTree's real grace window. Nothing
+      // lingers either (PR #430 gate② P1): the grace is a cancelable wait on the child's own exit
+      // (awaitKillGrace, unit-tested at the bottom of this file), so once the release file below
+      // lets the child go, the wait ends with it — no 60s referenced timer holding this process
+      // open, and no SIGKILL delivered to a recycled pid afterwards.
       killGraceMs: 60_000,
       now: () => new Date(fakeMs),
       // ALWAYS "alive" — simulates killTree failing to make the pid read dead (a stuck kill, a
@@ -2775,4 +2780,48 @@ test("run (#395 gate② follow-up, P2): a timeout kill whose own exit notificati
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── #403 (F25), PR #430 gate② P1: killTree's grace window is cancelable ──────────────────────
+//
+// The finding: `void this.killTree(session)` awaits a plain `setTimeout(killGraceMs)`, and
+// releasing the child does not cancel it. With this file's timeout tests raising `killGraceMs`
+// to 60s (so a real SIGKILL provably isn't what ends the child), that pending timer is
+// REFERENCED — it holds the test-runner process open for the rest of the window after the
+// assertions are done, and then delivers SIGKILL to a pid/process-group the OS may have recycled.
+//
+// Both tests below drive the seam directly with an injected timer, so neither waits on a real
+// clock: the verdict is decided by which side of the seam completes, not by elapsed time.
+test("awaitKillGrace (#403, F25): a child that exits inside the window resolves 'exited' AND cancels the pending wait — no stray timer, no SIGKILL at a recycled pid", async () => {
+  let exitCb: (() => void) | undefined;
+  let waitCancelled = false;
+  const session = {
+    onExit: (cb: (code: number | null) => void) => {
+      exitCb = () => cb(0);
+    },
+  };
+  // Models an UNEXPIRED grace window: resolves only when the wait is cancelled, never on its own.
+  const timer = (_ms: number, signal: AbortSignal): Promise<void> =>
+    new Promise((resolve) => {
+      signal.addEventListener(
+        "abort",
+        () => {
+          waitCancelled = true;
+          resolve();
+        },
+        { once: true },
+      );
+    });
+
+  const settled = awaitKillGrace(session, 60_000, timer);
+  assert.ok(exitCb, "awaitKillGrace must subscribe to the child's own exit, not just start a timer");
+  exitCb();
+  assert.equal(await settled, "exited");
+  assert.equal(waitCancelled, true, "the grace wait must be cancelled once the child is gone — otherwise it keeps the process alive");
+});
+
+test("awaitKillGrace (#403, F25): a child still alive when the window elapses resolves 'grace' — the SIGKILL is warranted", async () => {
+  const session = { onExit: () => {} }; // never exits
+  const elapsedImmediately = async (): Promise<void> => {};
+  assert.equal(await awaitKillGrace(session, 60_000, elapsedImmediately), "grace");
 });

@@ -404,7 +404,11 @@ export interface RoleRunnerDeps {
    *  against its own `heartbeatMs` cadence, with the assertion ("several post-latch ticks ran")
    *  decided by whichever wins. A test raises this so the SIGKILL is provably not what ends the
    *  child, then ends the child itself on a condition it controls — the seam, not a bigger
-   *  margin (docs/REVIEW-DOCTRINE.md, "No timing-dependent assertions"). */
+   *  margin (docs/REVIEW-DOCTRINE.md, "No timing-dependent assertions").
+   *
+   *  Raising it costs nothing, in a test or in production: the wait is CANCELABLE (see
+   *  awaitKillGrace) — it ends the instant the child exits, leaves no pending timer behind, and
+   *  never fires a SIGKILL at a pid/process-group that has already been reaped. */
   killGraceMs?: number;
   /** #253: a DEFAULT forge MCP proxy mint, applied to every session whose own RoleSessionOpts
    *  doesn't supply one. round-defaults.ts's stub factories (align.ts/architect.ts/plan-
@@ -1283,7 +1287,11 @@ export class RoleRunner {
 
   private async killTree(session: SpawnedSession): Promise<void> {
     session.killGroup("SIGTERM");
-    await sleep(this.killGraceMs);
+    // #403 (F25), PR #430 gate② P1: the grace is a CANCELABLE wait on the child's own exit, not a
+    // fixed sleep — see awaitKillGrace. A tree that dies inside the window is never SIGKILLed
+    // (nothing left to signal, and the pid/group may since have been recycled), and no pending
+    // timer outlives the call.
+    if ((await awaitKillGrace(session, this.killGraceMs)) === "exited") return;
     session.killGroup("SIGKILL");
   }
 
@@ -1337,6 +1345,49 @@ export class RoleRunner {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Like `sleep`, but stops waiting (and CLEARS the timer, so it stops holding the process open)
+ *  the moment `signal` aborts. Resolves either way — the caller distinguishes the two outcomes by
+ *  reading `signal.aborted`, so there is no rejection path to handle at a site whose whole job is
+ *  best-effort cleanup. */
+function cancelableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
+/** #403 (F25), PR #430 gate② P1: wait out killTree's SIGTERM->SIGKILL grace, but stop waiting the
+ *  instant the child actually exits. `"exited"` means there is nothing left to signal; `"grace"`
+ *  means the window elapsed with the child still alive, so the SIGKILL is warranted.
+ *
+ *  Two defects this closes, both surfaced by the peripheral timeout tests that raise
+ *  `killGraceMs` far past their own lifetime (the seam that keeps those tests off a real-timer
+ *  race): (1) the pending `setTimeout` is REFERENCED, so a long grace kept the whole process
+ *  alive for the rest of the window after everything else had finished; (2) when it finally fired
+ *  it sent SIGKILL to a pid/process-group the OS may already have recycled. It is a production
+ *  improvement for the same reason — the engine no longer signals a group it has already reaped,
+ *  and killTree returns as soon as the tree is gone instead of always burning the full grace.
+ *
+ *  Exported for its own unit tests; `timer` is injectable so those tests decide the outcome at the
+ *  seam instead of waiting on a real clock. */
+export function awaitKillGrace(
+  session: Pick<SpawnedSession, "onExit">,
+  graceMs: number,
+  timer: (ms: number, signal: AbortSignal) => Promise<void> = cancelableSleep,
+): Promise<"exited" | "grace"> {
+  const exited = new AbortController();
+  session.onExit(() => exited.abort());
+  return timer(graceMs, exited.signal).then(() => (exited.signal.aborted ? "exited" : "grace"));
 }
 
 // ── #104: shared session-retry helper ───────────────────────────────────────────────────────
