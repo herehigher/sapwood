@@ -1157,9 +1157,28 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         // (RoundScopedForge deliberately does not milestone-scope it — see its own doc comment),
         // so the milestone filter is applied here, matching what countOpenIssuesInMilestone
         // itself counts.
+        // #391 (F21): a CLAIMED issue (cfg.labels.inProgress) doesn't count either — same "only
+        // a consumable signal counts" rule as the human-hold exclusion above, applied to the
+        // other way an issue leaves the Ready lane. A claimed issue is off the Ready column, so
+        // it is invisible to getReadyIssues/getPoolEligibleIssues/getIssuesNeedingPlanReview, and
+        // it has a plan already so triage skips it: no enabled role can consume it. Live claims
+        // are harmless to exclude (an occupied lane means the round wasn't idle, and standby
+        // needs lastRoundIdle); STALE ones — a lane that died leaving the label behind — are
+        // exactly the residue that churned 16 empty rounds on 2026-07-24, pinning this probe true
+        // over a backlog with a provably empty pool. Startup's own F20 heal strips the stale
+        // label and returns the issue to Ready, at which point it counts again, legitimately.
+        //
+        // Residual, stated rather than overclaimed: the label is the only claim signal available
+        // here (listOpenIssues carries labels, not board status), so an issue whose claim landed
+        // as a board write but whose addLabel failed still pins this probe. That direction is the
+        // deliberate one — it errs toward opening a round, the same fail-toward-more-work stance
+        // this probe's own catch uses.
         const openIssues = await forge.listOpenIssues();
         return openIssues.some(
-          (i) => i.milestone === cfg.round.milestone && !cfg.escalation.humanLabels.some((label) => labelsInclude(i.labels, label)),
+          (i) =>
+            i.milestone === cfg.round.milestone &&
+            !labelsInclude(i.labels, cfg.labels.inProgress) &&
+            !cfg.escalation.humanLabels.some((label) => labelsInclude(i.labels, label)),
         );
       }
       return false;

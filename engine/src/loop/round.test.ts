@@ -1960,6 +1960,54 @@ test("runRounds standby: round.milestone open issues count as work even with Rea
   state.close();
 });
 
+test("runRounds standby (#391 F21): a milestone backlog whose every open issue is CLAIMED by a dead lane's in-progress label does NOT count as work — standby engages instead of churning empty rounds", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // nothing dispatchable…
+  forge.planReviewCandidates = []; // …nothing awaiting gate⓪…
+  forge.planTriageCandidates = []; // …nothing to triage…
+  forge.milestoneOpenCounts = [3]; // …but the milestone still LOOKS busy
+  // The 2026-07-24 quota-storm residue: every open milestone issue is either claimed (a stale
+  // in-progress label left by a lane that died) or latched needs-human. Neither is pool-eligible
+  // and no enabled role consumes either, so pre-fix this pinned the probe true and 16 rounds
+  // burned paid role sessions on a provably empty pool.
+  const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 144, title: "claimed by a dead lane", labels: [cfg.labels.inProgress], milestone: "M4" },
+    { number: 145, title: "also claimed", labels: [cfg.labels.inProgress], milestone: "M4" },
+    { number: 207, title: "latched", labels: [cfg.labels.needsHuman], milestone: "M4" },
+  ];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop(); // bounded safety net, same as the standby tests above
+  };
+  const deps = baseDeps({
+    forge,
+    state,
+    sleep,
+    tickIntervalSec: 5,
+    cfg,
+    peripherals: allPeripherals(log),
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby actually engaged",
+  );
+  assert.equal(state.getRound(2), undefined, "no paid role session was burned on the un-dispatchable backlog");
+  state.close();
+});
+
 test("runRounds standby: an open PLAN-TRIAGE candidate (plan-less, not Ready, no milestone scoping) counts as work — the PO exists to draft its plan, so no standby (Codex P1 on PR #150)", async () => {
   const forge = new FakeForge();
   forge.ready = []; // nothing dispatchable…

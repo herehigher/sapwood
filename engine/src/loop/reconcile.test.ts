@@ -3,9 +3,15 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { referencedIssue, type StartupReconcileData } from "../forge/forge.js";
+import { type IssueMeta, referencedIssue, type StartupReconcileData } from "../forge/forge.js";
 import { State, type WorkerRow } from "../state/state.js";
-import { diffStartupOrphans, reconcileStartup, sweepStaleRoleSessions } from "./reconcile.js";
+import {
+  auditGatedEscalationFlags,
+  diffStartupOrphans,
+  type ReconcileForge,
+  reconcileStartup,
+  sweepStaleRoleSessions,
+} from "./reconcile.js";
 
 function worker(issue: number, state: WorkerRow["state"], pr?: number): WorkerRow {
   return {
@@ -16,6 +22,35 @@ function worker(issue: number, state: WorkerRow["state"], pr?: number): WorkerRo
     started_at: "2026-07-15T00:00:00.000Z",
     ended_at: null,
     ...(pr === undefined ? {} : { pr }),
+  };
+}
+
+const cfg = {
+  board: { owner: "acme", repo: "sapwood", status: { inProgress: "In Progress" } },
+  labels: { inProgress: "in-progress" },
+};
+
+/** A reconcile-shaped forge whose issues are all OPEN and unlabelled unless `meta` says
+ *  otherwise; every write is recorded rather than performed. */
+function mkForge(
+  read: () => Promise<StartupReconcileData>,
+  meta: Record<number, Partial<IssueMeta>> = {},
+): ReconcileForge & { removed: Array<[number, string]>; statuses: Array<[number, string]> } {
+  const removed: Array<[number, string]> = [];
+  const statuses: Array<[number, string]> = [];
+  return {
+    removed,
+    statuses,
+    readStartupReconcileData: read,
+    async getIssueMeta(issue) {
+      return { number: issue, title: `#${issue}`, state: "OPEN", labels: [], updatedAt: "2026-07-25T00:00:00.000Z", ...meta[issue] };
+    },
+    async removeLabel(issue, label) {
+      removed.push([issue, label]);
+    },
+    async setBoardStatus(issue, status) {
+      statuses.push([issue, status]);
+    },
   };
 }
 
@@ -72,7 +107,7 @@ test("diffStartupOrphans treats running, driving, and handoff rows as owners", (
   );
 });
 
-test("reconcileStartup emits orphans then one bounded completion and performs reads only", async () => {
+test("reconcileStartup emits orphans then one bounded completion, and touches nothing it cannot prove is dead", async () => {
   const root = mkdtempSync(join(tmpdir(), "sapwood-reconcile-"));
   const state = new State(join(root, "state.sqlite"));
   let reads = 0;
@@ -82,14 +117,12 @@ test("reconcileStartup emits orphans then one bounded completion and performs re
   };
   try {
     const result = await reconcileStartup(
-      {
-        async readStartupReconcileData() {
-          reads++;
-          return input;
-        },
-      },
+      mkForge(async () => {
+        reads++;
+        return input;
+      }),
       state,
-      { board: { owner: "acme", repo: "sapwood", status: { inProgress: "In Progress" } } },
+      cfg,
     );
     assert.equal(reads, 1);
     assert.equal(result.length, 2);
@@ -110,29 +143,151 @@ test("reconcileStartup is quiet when healthy and forge failure is non-fatal", as
   const logs: string[] = [];
   try {
     const healthy = await reconcileStartup(
-      {
-        async readStartupReconcileData() {
-          return { placements: [{ number: 171, repo: "acme/sapwood", status: "In Progress" }], openPrs: [] };
-        },
-      },
+      mkForge(async () => ({ placements: [{ number: 171, repo: "acme/sapwood", status: "In Progress" }], openPrs: [] })),
       state,
-      { board: { owner: "acme", repo: "sapwood", status: { inProgress: "In Progress" } } },
+      cfg,
     );
     assert.deepEqual(healthy, []);
     assert.equal(state.eventsSince("1970-01-01T00:00:00.000Z", ["orphan-detected"]).length, 0);
     await assert.doesNotReject(() =>
       reconcileStartup(
-        {
-          async readStartupReconcileData() {
-            throw new Error("forge down");
-          },
-        },
+        mkForge(async () => {
+          throw new Error("forge down");
+        }),
         state,
-        { board: { owner: "acme", repo: "sapwood", status: { inProgress: "In Progress" } } },
+        cfg,
         (message) => logs.push(message),
       ),
     );
     assert.match(logs[0] ?? "", /forge down/);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── #391 (F19/F20): quota-storm residue — reconcile HEALS instead of only reporting ─────────
+
+test("#391 F20: reconcileStartup heals a dead PR-less lane's issue — board back to Ready, in-progress label stripped, both named in the events", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-reconcile-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    const forge = mkForge(async () => ({
+      placements: [
+        { number: 145, repo: "acme/sapwood", status: "In Progress" }, // dead PR-less lane
+        { number: 144, repo: "acme/sapwood", status: "In Progress" }, // lane still holds a PR
+        { number: 146, repo: "acme/sapwood", status: null }, // unplaced — a different residue class
+      ],
+      openPrs: [{ number: 373, body: "Closes #144" }],
+    }));
+    const orphans = await reconcileStartup(forge, state, cfg);
+    assert.equal(orphans.length, 4, "detection is unchanged — 3 issue orphans + the engine PR");
+    // Board FIRST, then the label: a partial failure must leave the issue dispatchable rather
+    // than invisible to both the pool and the standby probe.
+    assert.deepEqual(forge.statuses, [[145, "ready"]]);
+    assert.deepEqual(forge.removed, [[145, "in-progress"]]);
+    const events = state.eventsSince("1970-01-01T00:00:00.000Z", ["orphan-healed", "reconcile-completed"]);
+    assert.deepEqual(events[0]?.payload, { issue: 145, actions: ["board-ready", "label-removed"] });
+    assert.deepEqual((events[1]?.payload as { healed?: number[] })?.healed, [145]);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#391 F20: a CLOSED orphaned issue is never resurrected, and a heal failure is reported without failing startup", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-reconcile-"));
+  const state = new State(join(root, "state.sqlite"));
+  const logs: string[] = [];
+  try {
+    const forge = mkForge(
+      async () => ({
+        placements: [
+          { number: 145, repo: "acme/sapwood", status: "In Progress" },
+          { number: 147, repo: "acme/sapwood", status: "In Progress" },
+        ],
+        openPrs: [],
+      }),
+      { 147: { state: "CLOSED" } },
+    );
+    forge.setBoardStatus = async () => {
+      throw new Error("board write refused");
+    };
+    await assert.doesNotReject(() => reconcileStartup(forge, state, cfg, (m) => logs.push(m)));
+    assert.deepEqual(forge.removed, [], "the label is only stripped once the board write landed");
+    const failed = state.eventsSince("1970-01-01T00:00:00.000Z", ["orphan-heal-failed"]);
+    assert.equal(failed.length, 1, "only the OPEN orphan was even attempted");
+    assert.match(JSON.stringify(failed[0]?.payload), /board write refused/);
+    assert.match(logs.join("\n"), /board write refused/);
+    const completed = state.eventsSince("1970-01-01T00:00:00.000Z", ["reconcile-completed"])[0]?.payload as { healed: number[] };
+    assert.deepEqual(completed.healed, []);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#391 F19: the gated-flag audit sets gated_escalation_labeled=1 for a lane whose issue still carries the hold, and surfaces the unprovable rest", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-reconcile-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    // Both lanes are the storm's residue shape: failed + PR + flag 0 (the reclaim-failed/env-era
+    // escalation path never set it), so gatedFailedWorkers() excludes them and gated reentry can
+    // never fire, no matter what a human does with the label.
+    state.upsertWorker({ ...worker(294, "failed", 372), gated_escalation_labeled: 0 });
+    state.upsertWorker({ ...worker(295, "failed", 371), gated_escalation_labeled: 0 });
+    assert.deepEqual(state.gatedFailedWorkers(), []);
+    const forge = {
+      async getIssueMeta(issue: number): Promise<IssueMeta> {
+        return {
+          number: issue,
+          title: `#${issue}`,
+          state: "OPEN",
+          labels: issue === 294 ? ["needs-human"] : [],
+          updatedAt: "2026-07-25T00:00:00.000Z",
+        };
+      },
+    };
+    await auditGatedEscalationFlags(forge, state, { escalation: { humanLabels: ["needs-human", "blocked"] } });
+    assert.equal(state.getWorker("lane-294")?.gated_escalation_labeled, 1, "the hold is live — the flag is provably correctable");
+    assert.equal(state.getWorker("lane-295")?.gated_escalation_labeled, 0, "no live hold — never fabricate the proof");
+    assert.deepEqual(
+      state.eventsSince("1970-01-01T00:00:00.000Z", ["gated-flag-healed", "gated-flag-unprovable"]).map((e) => [e.kind, e.payload]),
+      [
+        ["gated-flag-healed", { worker: "lane-294", issue: 294, pr: 372 }],
+        ["gated-flag-unprovable", { worker: "lane-295", issue: 295, pr: 371 }],
+      ],
+    );
+    // Removing the label is now the ONLY manual step: lane-294 is a reentry candidate.
+    assert.deepEqual(
+      state.gatedFailedWorkers().map((w) => w.name),
+      ["lane-294"],
+    );
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#391 F19: a per-issue read failure leaves that lane's flag untouched and never aborts the audit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-reconcile-"));
+  const state = new State(join(root, "state.sqlite"));
+  const logs: string[] = [];
+  try {
+    state.upsertWorker({ ...worker(294, "failed", 372), gated_escalation_labeled: 0 });
+    state.upsertWorker({ ...worker(295, "failed", 371), gated_escalation_labeled: 0 });
+    const forge = {
+      async getIssueMeta(issue: number): Promise<IssueMeta> {
+        if (issue === 294) throw new Error("gh rate limited");
+        return { number: issue, title: `#${issue}`, state: "OPEN", labels: ["needs-human"], updatedAt: "2026-07-25T00:00:00.000Z" };
+      },
+    };
+    await assert.doesNotReject(() =>
+      auditGatedEscalationFlags(forge, state, { escalation: { humanLabels: ["needs-human"] } }, (m) => logs.push(m)),
+    );
+    assert.equal(state.getWorker("lane-294")?.gated_escalation_labeled, 0);
+    assert.equal(state.getWorker("lane-295")?.gated_escalation_labeled, 1, "the second lane is still audited");
+    assert.match(logs.join("\n"), /gh rate limited/);
   } finally {
     state.close();
     rmSync(root, { recursive: true, force: true });
