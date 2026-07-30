@@ -9,7 +9,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema } from "../config/config.js";
 import { NO_DOCTRINE } from "../config/doctrine.js";
-import type { IForge, PRReview, PRReviewData } from "../forge/forge.js";
+import type { IForge, PRReview, PRReviewData, ReviewThreadSpan } from "../forge/forge.js";
+import { findingDigest } from "../forge/forge.js";
 import type {
   ApprovalResult,
   Finding,
@@ -22,6 +23,7 @@ import type {
   ReviewVerdict,
 } from "./reviewer.js";
 import {
+  adjudicatedDuplicateThreads,
   buildReviewerByKind,
   buildReviewTriggerComment,
   CodexReviewer,
@@ -41,6 +43,7 @@ import {
   REVIEWER_KINDS,
   resolveReviewVerdict,
   SameModelTrustedReviewer,
+  staleHeadReviewCount,
   validateFindings,
 } from "./reviewer.js";
 
@@ -1560,7 +1563,186 @@ test("ApprovalResult: `rejected` carries a validated, NON-EMPTY findings array f
 // -- deriveBlockingSignal: the ONE shared pure blocking function every kind routes through --
 
 test("deriveBlockingSignal: no unresolved threads, no standing change request -> not blocked", () => {
-  assert.deepEqual(deriveBlockingSignal(mkData()), { blocked: false, unresolvedThreads: 0, changesRequestedOnHead: false });
+  assert.deepEqual(deriveBlockingSignal(mkData()), {
+    blocked: false,
+    unresolvedThreads: 0,
+    changesRequestedOnHead: false,
+    adjudicatedDuplicates: 0,
+  });
+});
+
+// ── #378 (F14): resolved-thread + head-freshness awareness ──────────────────────────────────
+// Reference case: PR #366, dogfood run 2026-07-24. The same config-YAML finding was raised FIVE
+// times across re-reviews — twice against a stale head — after it had been human-adjudicated,
+// thread-resolved, and its remedy merged elsewhere (PR #367). Each re-flag re-entered the
+// FIXABLE gate and consumed a fix-round evaluation, contributing to the lane hitting prFixCap
+// and gatedReentryCap.
+
+const FINDING = "missing required key `foo`";
+
+const mkThread = (over: Partial<ReviewThreadSpan> & { id: string }): ReviewThreadSpan => ({
+  isResolved: false,
+  isOutdated: false,
+  path: "sapwood.config.yaml",
+  line: 12,
+  originalLine: 12,
+  findingDigest: findingDigest(FINDING),
+  anchorCommitOid: "ANCHOR",
+  ...over,
+});
+
+test("#378 (PR #445 review): a DIFFERENT finding on an already-adjudicated span is NOT a duplicate", () => {
+  // The span-collision defect: round 1 adjudicates "missing required key `foo`" on
+  // sapwood.config.yaml:12 and resolves it; round 2 raises "wrong indentation" as a brand-new
+  // thread on that same, still-current line. Keying on file:line alone would misclassify the
+  // second — a real, never-adjudicated finding — as a duplicate and drop it from gate② input.
+  const data = mkData({
+    unresolvedThreads: 1,
+    threads: [
+      mkThread({ id: "T_ADJUDICATED", isResolved: true }),
+      mkThread({ id: "T_DIFFERENT_FINDING", findingDigest: findingDigest("wrong indentation") }),
+    ],
+  });
+  assert.deepEqual(adjudicatedDuplicateThreads(data), []);
+  assert.equal(deriveBlockingSignal(data).unresolvedThreads, 1);
+  assert.equal(deriveBlockingSignal(data).blocked, true);
+  assert.equal(new CodexReviewer().verdictFromData(data).action, "HANDLE_THREADS");
+});
+
+test("#378: the SAME finding at a DIFFERENT span is not a duplicate either — both halves of the key are load-bearing", () => {
+  const data = mkData({
+    unresolvedThreads: 1,
+    threads: [mkThread({ id: "T_OLD", isResolved: true }), mkThread({ id: "T_ELSEWHERE", line: 88, originalLine: 88 })],
+  });
+  assert.deepEqual(adjudicatedDuplicateThreads(data), []);
+  assert.equal(deriveBlockingSignal(data).blocked, true);
+});
+
+test("#378: a thread with NO readable finding body is unkeyable and never filtered, in either role", () => {
+  const data = mkData({
+    unresolvedThreads: 1,
+    threads: [mkThread({ id: "T_OLD", isResolved: true, findingDigest: null }), mkThread({ id: "T_NEW", findingDigest: null })],
+  });
+  assert.deepEqual(adjudicatedDuplicateThreads(data), []);
+  assert.equal(deriveBlockingSignal(data).blocked, true);
+});
+
+test("#378: a re-raised finding on a RESOLVED, unchanged span is filtered out of gate② input", () => {
+  // The PR #366 shape: T_OLD was adjudicated and resolved; T_NEW is the same finding re-raised
+  // on the same file:line as a BRAND-NEW thread. Matching on thread id would never catch this —
+  // that is exactly why the loop kept paying for it.
+  const data = mkData({
+    unresolvedThreads: 1,
+    threads: [mkThread({ id: "T_OLD", isResolved: true }), mkThread({ id: "T_NEW" })],
+  });
+  assert.deepEqual(
+    adjudicatedDuplicateThreads(data).map((t) => t.id),
+    ["T_NEW"],
+  );
+  const signal = deriveBlockingSignal(data);
+  assert.equal(signal.unresolvedThreads, 0);
+  assert.equal(signal.adjudicatedDuplicates, 1);
+  assert.equal(signal.blocked, false); // no fix round consumed
+  assert.equal(new CodexReviewer().verdictFromData(data).action, "WAIT_REVIEW"); // not HANDLE_THREADS
+});
+
+test("#378 regression guard: an unresolved thread with NO prior adjudication on its span still blocks", () => {
+  const data = mkData({
+    unresolvedThreads: 1,
+    threads: [
+      mkThread({ id: "T_OLD", isResolved: true, line: 12, originalLine: 12 }),
+      mkThread({ id: "T_NEW", line: 99, originalLine: 99 }),
+    ],
+  });
+  assert.deepEqual(adjudicatedDuplicateThreads(data), []);
+  assert.equal(deriveBlockingSignal(data).blocked, true);
+  assert.equal(new CodexReviewer().verdictFromData(data).action, "HANDLE_THREADS");
+});
+
+test("#378 regression guard: a resolved thread whose span CHANGED after resolution (isOutdated) does not adjudicate anything", () => {
+  // GitHub marks a thread outdated the moment its diff position stops existing in the current
+  // diff — i.e. the code it was adjudicated against moved. The re-raise is then genuinely fresh.
+  const data = mkData({
+    unresolvedThreads: 1,
+    threads: [mkThread({ id: "T_OLD", isResolved: true, isOutdated: true, line: null }), mkThread({ id: "T_NEW" })],
+  });
+  assert.deepEqual(adjudicatedDuplicateThreads(data), []);
+  assert.equal(deriveBlockingSignal(data).blocked, true);
+  assert.equal(deriveBlockingSignal(data).unresolvedThreads, 1);
+});
+
+test("#378: an unresolved thread that is ITSELF outdated is never filtered (its span moved too)", () => {
+  const data = mkData({
+    unresolvedThreads: 1,
+    threads: [mkThread({ id: "T_OLD", isResolved: true }), mkThread({ id: "T_NEW", isOutdated: true })],
+  });
+  assert.deepEqual(adjudicatedDuplicateThreads(data), []);
+  assert.equal(deriveBlockingSignal(data).blocked, true);
+});
+
+test("#378: a file-level thread (no keyable span) is never filtered, in either role", () => {
+  const data = mkData({
+    unresolvedThreads: 1,
+    threads: [
+      mkThread({ id: "T_OLD", isResolved: true, path: null, line: null, originalLine: null }),
+      mkThread({ id: "T_NEW", path: null, line: null, originalLine: null }),
+    ],
+  });
+  assert.deepEqual(adjudicatedDuplicateThreads(data), []);
+  assert.equal(deriveBlockingSignal(data).blocked, true);
+});
+
+test("#378: absent thread data (every pre-#378 fixture / forge fake) filters nothing — exact pre-#378 gating", () => {
+  const data = mkData({ unresolvedThreads: 2 });
+  assert.equal(data.threads, undefined);
+  assert.deepEqual(adjudicatedDuplicateThreads(data), []);
+  assert.equal(deriveBlockingSignal(data).unresolvedThreads, 2);
+  assert.equal(deriveBlockingSignal(data).blocked, true);
+});
+
+test("#378: the filter never drives the count below zero when `threads` is a partial view of the paged total", () => {
+  // unresolvedThreads is the authoritative paged total; `threads` can be short of it if the
+  // 50-page ceiling cut the fetch. Subtracting must not underflow into a negative count.
+  const data = mkData({
+    unresolvedThreads: 1,
+    threads: [mkThread({ id: "A", isResolved: true }), mkThread({ id: "B" }), mkThread({ id: "C" })],
+  });
+  assert.equal(adjudicatedDuplicateThreads(data).length, 2);
+  assert.equal(deriveBlockingSignal(data).unresolvedThreads, 0);
+});
+
+test("#378: a standing CHANGES_REQUESTED still blocks even when every thread is an adjudicated duplicate", () => {
+  const data = mkData({
+    unresolvedThreads: 1,
+    threads: [mkThread({ id: "T_OLD", isResolved: true }), mkThread({ id: "T_NEW" })],
+    reviews: [mkReview("some-human", "HEAD", "CHANGES_REQUESTED")],
+  });
+  const signal = deriveBlockingSignal(data);
+  assert.equal(signal.unresolvedThreads, 0);
+  assert.equal(signal.blocked, true); // the OTHER always-blocking signal is untouched
+});
+
+// -- staleHeadReviewCount: a review of a non-current head is advisory, never gate input --
+
+test("#378: a review on a stale head counts toward NEITHER the approval signal nor the blocking one", () => {
+  const data = mkData({
+    reviews: [
+      mkReview("chatgpt-codex-connector[bot]", "OLD_HEAD", "COMMENTED"), // would have approved
+      mkReview("some-human", "OLD_HEAD", "CHANGES_REQUESTED"), // would have blocked
+    ],
+  });
+  assert.equal(staleHeadReviewCount(data.reviews, data.headOid), 2);
+  assert.equal(freshHeadReviewCount(data.reviews, data.headOid, data.author, ["COMMENTED", "APPROVED"]), 0);
+  assert.equal(deriveBlockingSignal(data).changesRequestedOnHead, false);
+  assert.equal(deriveBlockingSignal(data).blocked, false);
+  // Excluded from the ACTION entirely: neither MERGE_OK nor HANDLE_THREADS — nothing decisive.
+  assert.equal(new CodexReviewer().verdictFromData(data).action, "WAIT_REVIEW");
+});
+
+test("#378: the SAME reviews on the CURRENT head are gate input again — the exclusion is head-bound, not identity-bound", () => {
+  const data = mkData({ reviews: [mkReview("some-human", "HEAD", "CHANGES_REQUESTED")] });
+  assert.equal(staleHeadReviewCount(data.reviews, data.headOid), 0);
+  assert.equal(deriveBlockingSignal(data).blocked, true);
 });
 
 test("deriveBlockingSignal: unresolved threads alone block", () => {

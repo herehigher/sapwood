@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { findingDigest } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { AuditDeliveryResult } from "../review/drive.js";
 import { type DriveOutcome, deriveGate, MergeDriver, mergeDecision, reviewSilenceDuration } from "./merge-driver.js";
@@ -942,6 +943,57 @@ test("MergeDriver.driveOne (#246): unresolved findings (HANDLE_THREADS) -> fixab
   assert.match((outcome as { reason: string }).reason, /HANDLE_THREADS/);
   assert.deepEqual(forge.merged, []);
   assert.deepEqual(forge.labelsAdded, []); // driveOne itself never labels — the caller (conductor.ts) owns escalation
+});
+
+// ── #378 (F14): what reaches deriveGate, and what the audit trail says was excluded ─────────
+// Reference case: PR #366 (dogfood run 2026-07-24) — the same config-YAML finding re-raised five
+// times, twice against a stale head, each re-flag re-entering the FIXABLE gate.
+
+test("#378 MergeDriver.driveOne: the FIXABLE reason reports the ACTED-ON thread count plus what was excluded (never a silent filter)", async () => {
+  const forge = new FakeForge();
+  const span = {
+    path: "sapwood.config.yaml",
+    line: 12,
+    originalLine: 12,
+    isOutdated: false,
+    anchorCommitOid: "R",
+    findingDigest: findingDigest("missing required key `foo`"),
+  };
+  forge.reviewData = {
+    ...forge.reviewData,
+    unresolvedThreads: 2,
+    // T_DUP re-raises an already-adjudicated finding on an unchanged span; T_REAL is fresh.
+    threads: [
+      { id: "T_ADJUDICATED", isResolved: true, ...span },
+      { id: "T_DUP", isResolved: false, ...span },
+      { id: "T_REAL", isResolved: false, ...span, line: 99, originalLine: 99 },
+    ],
+    // Two reviews on a head that is no longer current — advisory only, never gate input.
+    reviews: [
+      { author: "chatgpt-codex-connector", commitOid: "OLD_HEAD", state: "COMMENTED" },
+      { author: "chatgpt-codex-connector", commitOid: "OLD_HEAD", state: "COMMENTED" },
+    ],
+  };
+  const reviewer = new FakeReviewer();
+  reviewer.verdict = { action: "HANDLE_THREADS", headOid: "HEAD" };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "fixable");
+  const { reason } = outcome as { reason: string };
+  assert.match(reason, /unresolvedThreads=1/); // 2 raw - 1 adjudicated duplicate
+  assert.match(reason, /adjudicatedDuplicates=1/);
+  assert.match(reason, /staleHeadReviews=2/);
+});
+
+test("#378 MergeDriver.driveOne: with no thread data (pre-#378 fixtures) the reason still carries the raw count and zero exclusions", async () => {
+  const forge = new FakeForge();
+  forge.reviewData = { ...forge.reviewData, unresolvedThreads: 3 };
+  const reviewer = new FakeReviewer();
+  reviewer.verdict = { action: "HANDLE_THREADS", headOid: "HEAD" };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  const { reason } = outcome as { reason: string };
+  assert.match(reason, /unresolvedThreads=3:ciRed=false:adjudicatedDuplicates=0:staleHeadReviews=0/);
 });
 
 test("MergeDriver.driveOne (#246): prFixCap: 0 -> unresolved findings (HANDLE_THREADS) still needs-human, byte-for-byte the pre-#246 path", async () => {

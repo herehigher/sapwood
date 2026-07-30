@@ -15,7 +15,7 @@
 
 import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine, NO_DOCTRINE } from "../config/doctrine.js";
-import type { IForge, PRReview, PRReviewData } from "../forge/forge.js";
+import type { IForge, PRReview, PRReviewData, ReviewThreadSpan } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
 
 export type ReviewAction =
@@ -392,14 +392,110 @@ export interface BlockingSignal {
   blocked: boolean;
   unresolvedThreads: number;
   changesRequestedOnHead: boolean;
+  /** #378 (F14): how many of the PR's unresolved threads were EXCLUDED from `unresolvedThreads`
+   *  as already-adjudicated re-raises (see adjudicatedDuplicateThreads). 0 whenever the data to
+   *  decide that is absent. Carried so the exclusion is auditable — a filter that silently
+   *  shrinks gate② input would be exactly the kind of invisible weakening this repo's doctrine
+   *  refuses; merge-driver.ts puts this number in the FIXABLE outcome's reason. */
+  adjudicatedDuplicates: number;
+}
+
+/** #378 (F14): the key an adjudication decision is made on — WHICH finding (`findingDigest`) at
+ *  WHICH span (`path` plus the line the thread targets). `line` is null once GitHub marks a
+ *  thread outdated, so `originalLine` is the fallback.
+ *
+ *  The digest is part of the key, not decoration, and leaving it out was a real defect (found by
+ *  the engine-agent review of PR #445): a span alone is NOT a finding identity. Two entirely
+ *  unrelated findings can land on the same file:line — "missing required key `foo`" adjudicated
+ *  in round 1, "wrong indentation" raised fresh in round 2 on the same still-current line — and
+ *  a span-only key would treat the second as a duplicate of the first and silently subtract a
+ *  REAL, never-adjudicated finding from the blocking count. That is a gate weakening, not a
+ *  saved fix round.
+ *
+ *  Any missing component -> null, i.e. NOT keyable: a file-level or PR-level thread, or one whose
+ *  originating comment could not be read, can never be matched against a prior adjudication and
+ *  therefore can never be filtered. */
+function threadAdjudicationKey(t: ReviewThreadSpan): string | null {
+  const line = t.line ?? t.originalLine;
+  return t.path && line != null && t.findingDigest ? `${t.path}:${line}:${t.findingDigest}` : null;
+}
+
+/**
+ * #378 (F14): the unresolved threads that are RE-RAISES of an already-adjudicated finding —
+ * dogfood run 2026-07-24, PR #366: the same config-YAML finding was raised five times after it
+ * had been human-adjudicated, thread-resolved, and its remedy merged elsewhere (PR #367). Each
+ * re-flag re-entered the FIXABLE gate and burned a fix-round evaluation.
+ *
+ * The match is NOT by thread id, and that is the whole point: a re-raised finding comes back as a
+ * BRAND-NEW review thread with a new id, so "is this thread id in the resolved set" answers no
+ * every single time — which is precisely why the loop kept paying for it. What identifies a
+ * re-raise is that the SAME finding lands on the SAME span as a thread that was already resolved
+ * and whose code has not moved since. Both halves of that key are load-bearing: span alone is not
+ * a finding identity (two unrelated findings can share a line), and finding text alone is not a
+ * location (the same class of finding at a different site is a different finding).
+ *
+ * A thread is treated as an adjudicated duplicate only when ALL of these hold:
+ *  - it is unresolved and not itself outdated (an outdated thread's span already moved);
+ *  - it has a complete key — path + line + a readable finding digest (see
+ *    threadAdjudicationKey); anything missing makes it unfilterable;
+ *  - some RESOLVED thread carries the IDENTICAL key and is NOT outdated, i.e. GitHub itself still
+ *    anchors that resolved thread to the current diff, so the code it was adjudicated against is
+ *    unchanged. A resolved thread whose span DID change reads as outdated and is deliberately
+ *    excluded from the adjudicated set — its re-raise is then genuinely fresh signal and keeps
+ *    blocking, which is the always-blocking invariant this filter must not weaken.
+ *
+ * Everything degrades toward BLOCKING: no thread data at all (`data.threads` absent — every
+ * pre-#378 fixture and forge fake), unknown staleness (parseReviewThreadsPage reads a missing
+ * `isOutdated` as true), an unreadable finding body, or an unkeyable span all yield zero
+ * duplicates and therefore the exact pre-#378 count.
+ */
+export function adjudicatedDuplicateThreads(data: PRReviewData): ReviewThreadSpan[] {
+  const threads = data.threads;
+  if (!threads?.length) return [];
+  const adjudicated = new Set<string>();
+  for (const t of threads) {
+    if (!t.isResolved || t.isOutdated) continue;
+    const key = threadAdjudicationKey(t);
+    if (key) adjudicated.add(key);
+  }
+  if (adjudicated.size === 0) return [];
+  return threads.filter((t) => {
+    if (t.isResolved || t.isOutdated) return false;
+    const key = threadAdjudicationKey(t);
+    return key !== null && adjudicated.has(key);
+  });
+}
+
+/**
+ * #378 (F14): reviews EXCLUDED from gate②'s input because they were submitted against a head
+ * that is no longer the PR's head — the "review submitted against a non-current head is
+ * advisory, never gate input" half of the issue.
+ *
+ * This adds NO new filtering: both halves of the gate already bind to the current head —
+ * `freshHeadReviewCount` counts only `commitOid === headOid` for the approval signal, and
+ * `changesRequestedOnHead` skips `commitOid !== headOid` for the blocking signal — so a stale
+ * review can neither block nor unblock today. What was missing is that the exclusion was
+ * INVISIBLE: PR #366 took two of its five duplicate re-flags against a stale head with nothing
+ * in the audit trail saying so. This function makes the count observable (merge-driver.ts puts
+ * it in the FIXABLE reason) and gives the always-advisory property a regression pin instead of
+ * leaving it as an emergent consequence of two independent filters.
+ */
+export function staleHeadReviewCount(reviews: PRReview[], headOid: string): number {
+  return reviews.filter((r) => r.commitOid !== headOid).length;
 }
 
 export function deriveBlockingSignal(data: PRReviewData): BlockingSignal {
   const changesRequested = changesRequestedOnHead(data.reviews, data.headOid, data.author);
+  // #378: adjudicated re-raises come OFF the count before it reaches deriveReviewAction, so they
+  // never route the lane into another FIXABLE fix round. Never below zero: `unresolvedThreads` is
+  // the authoritative paged total and `threads` can be a partial view of it (page ceiling).
+  const duplicates = adjudicatedDuplicateThreads(data).length;
+  const unresolvedThreads = Math.max(0, data.unresolvedThreads - duplicates);
   return {
-    blocked: data.unresolvedThreads > 0 || changesRequested,
-    unresolvedThreads: data.unresolvedThreads,
+    blocked: unresolvedThreads > 0 || changesRequested,
+    unresolvedThreads,
     changesRequestedOnHead: changesRequested,
+    adjudicatedDuplicates: duplicates,
   };
 }
 
