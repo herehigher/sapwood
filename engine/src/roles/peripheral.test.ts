@@ -1,6 +1,7 @@
 // peripheral.test.ts (#87): the role runner — a stub `claude` binary (zero token, same
 // integration style as worker.test.ts) drives the real spawn/sentinel/timeout/cost-parse path.
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,6 +30,7 @@ import {
   type RoleSessionOpts,
   type RoleSessionResult,
   runSessionWithRetry,
+  sessionTreeIsGone,
 } from "./peripheral.js";
 import { validateReviewerOutput } from "./plan-review.js";
 
@@ -53,6 +55,8 @@ const realClock = (): Date => new Date();
  *  as "the barrier did not hold". That is the banned shape: a real subprocess racing a fixed
  *  budget, with the budget's expiry deciding the verdict. 30s matches production's own default. */
 const INIT_OBSERVED_GUARD_MS = 30_000;
+
+const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 
@@ -2807,9 +2811,55 @@ test("run (#395 gate② follow-up, P2): a timeout kill whose own exit notificati
 //
 // Both tests below drive the seam directly with an injected timer, so neither waits on a real
 // clock: the verdict is decided by which side of the seam completes, not by elapsed time.
-test("awaitKillGrace (#403, F25): a child that exits inside the window resolves 'exited' AND cancels the pending wait — no stray timer, no SIGKILL at a recycled pid", async () => {
+// ── #403 (F25) — killTree's grace, and what "the tree is gone" is allowed to mean ────────────
+//
+// PR #430 gate② round 5 (P1) corrected the authority here, and it matters: `killGroup` signals the
+// whole detached process GROUP, but `SpawnedSession.onExit` is `child.once("exit")` — it proves the
+// session LEADER exited, nothing about descendants still in that group. Round 4's version treated
+// leader exit as proof and skipped the SIGKILL, so a descendant that traps or ignores SIGTERM could
+// outlive the session entirely. The verdict now comes from GROUP liveness (`sessionTreeIsGone`,
+// i.e. `kill(-pid, 0)` -> ESRCH), and leader exit is only a WAKE — a good moment to re-ask the
+// kernel, never an answer on its own.
+
+test("sessionTreeIsGone (#403, F25 — PR #430 gate② round 5, P1): an absent pid and a definitely-dead group read as gone", () => {
+  assert.equal(sessionTreeIsGone(undefined), true, "a session that never got a pid has no group to signal");
+  assert.equal(sessionTreeIsGone(999_999_999), true, "ESRCH on a nonexistent group means there is nothing left to kill");
+});
+
+test("sessionTreeIsGone (#403, F25 — PR #430 gate② round 5, P1): a LIVE detached group reads as alive, and only reads gone once it is actually gone", async () => {
+  // A real detached group, because that is the thing the probe is about. The assertions are on the
+  // probe's answer, never on how long anything took: the wait below is a named hang guard.
+  const child = spawn("/bin/sh", ["-c", "sleep 30"], { detached: true, stdio: "ignore" });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.once("spawn", () => resolve());
+      child.once("error", reject);
+    });
+    assert.equal(
+      sessionTreeIsGone(child.pid),
+      false,
+      "a live detached group must never read as gone — that would skip the SIGKILL escalation",
+    );
+    child.kill("SIGKILL");
+    const deadline = Date.now() + 30_000;
+    while (!sessionTreeIsGone(child.pid)) {
+      if (Date.now() > deadline) throw new Error("hang guard (30000ms): the SIGKILLed detached group never became unsignalable");
+      await sleepMs(10);
+    }
+    assert.equal(sessionTreeIsGone(child.pid), true);
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
+});
+
+test("awaitKillGrace (#403, F25): the tree dying inside the window resolves 'gone' AND cancels the pending wait — no stray timer, no SIGKILL at a recycled pid", async () => {
   let exitCb: (() => void) | undefined;
   let waitCancelled = false;
+  let groupEmpty = false;
   const session = {
     onExit: (cb: (code: number | null) => void) => {
       exitCb = () => cb(0);
@@ -2828,25 +2878,51 @@ test("awaitKillGrace (#403, F25): a child that exits inside the window resolves 
       );
     });
 
-  const settled = awaitKillGrace(session, 60_000, () => false, timer);
+  const settled = awaitKillGrace(session, 60_000, () => groupEmpty, timer);
   assert.ok(exitCb, "awaitKillGrace must subscribe to the child's own exit, not just start a timer");
+  groupEmpty = true; // the leader exited AND took the whole group with it
   exitCb();
-  assert.equal(await settled, "exited");
-  assert.equal(waitCancelled, true, "the grace wait must be cancelled once the child is gone — otherwise it keeps the process alive");
+  assert.equal(await settled, "gone");
+  assert.equal(waitCancelled, true, "the grace wait must be cancelled once the tree is gone — otherwise it keeps the process alive");
 });
 
-test("awaitKillGrace (#403, F25): a child still alive when the window elapses resolves 'grace' — the SIGKILL is warranted", async () => {
-  const session = { onExit: () => {} }; // never exits
-  const elapsedImmediately = async (): Promise<void> => {};
-  assert.equal(await awaitKillGrace(session, 60_000, () => false, elapsedImmediately), "grace");
+test("awaitKillGrace (#403, F25 — PR #430 gate② round 5, P1): the LEADER exiting while a descendant survives does NOT short-circuit — the grace runs out and 'grace' authorises the SIGKILL", async () => {
+  // The regression this pins: a descendant that traps SIGTERM stays in the group after the leader
+  // is gone. Treating leader exit as proof skipped the escalation and orphaned that descendant.
+  let exitCb: (() => void) | undefined;
+  let waitCancelled = false;
+  let expire: (() => void) | undefined;
+  const session = {
+    onExit: (cb: (code: number | null) => void) => {
+      exitCb = () => cb(0);
+    },
+  };
+  const timer = (_ms: number, signal: AbortSignal): Promise<void> =>
+    new Promise((resolve) => {
+      expire = () => resolve(); // the window elapsing, on this test's terms
+      signal.addEventListener(
+        "abort",
+        () => {
+          waitCancelled = true;
+          resolve();
+        },
+        { once: true },
+      );
+    });
+
+  const settled = awaitKillGrace(session, 60_000, () => false, timer); // group NEVER empty
+  assert.ok(exitCb);
+  exitCb(); // leader exit — must NOT cancel the wait, because the group still has a member
+  assert.equal(waitCancelled, false, "leader exit cancelled the grace even though the group was not empty — the descendant would survive");
+  assert.ok(expire);
+  expire();
+  assert.equal(await settled, "grace", "a surviving descendant must still reach the SIGKILL escalation");
 });
 
-test("awaitKillGrace (#403, F25 — PR #430 gate② round 4, P2): a child that ALREADY exited before the kill path started resolves 'exited' immediately — Node never replays `exit` to a late listener, so the caller's own observed state is the authority", async () => {
-  // The gap this closes: on the spawn-confirmation-timeout path, run() has often ALREADY seen the
-  // child's exit event (`exitNotified`) by the time killTree runs. A freshly-registered
-  // `once("exit")` listener never fires for an event that already happened, so the grace would be
-  // burned in full and a SIGKILL then delivered to a pid/process-group the OS may have recycled —
-  // exactly the behaviour the cancelable grace exists to remove.
+test("awaitKillGrace (#403, F25 — PR #430 gate② round 4, P2): a tree that was ALREADY gone before the kill path started resolves 'gone' immediately — no timer, no listener, no signal", async () => {
+  // Node never replays `exit` to a late listener, so on the spawn-confirmation-timeout path (where
+  // run() has usually already seen the leader go) a freshly-registered listener would never fire.
+  // The group probe answers directly instead, and authoritatively: no members, nothing to kill.
   let subscribed = false;
   const session = {
     onExit: () => {
@@ -2854,21 +2930,20 @@ test("awaitKillGrace (#403, F25 — PR #430 gate② round 4, P2): a child that A
     },
   };
   const timerMustNotRun = (): Promise<void> => {
-    throw new Error("the grace timer must never start when the child is already known to be gone");
+    throw new Error("the grace timer must never start when the group is already known to be empty");
   };
-  assert.equal(await awaitKillGrace(session, 60_000, () => true, timerMustNotRun), "exited");
-  assert.equal(subscribed, false, "no listener is needed for an exit that has already been observed");
+  assert.equal(await awaitKillGrace(session, 60_000, () => true, timerMustNotRun), "gone");
+  assert.equal(subscribed, false, "no listener is needed when the kernel already says the group is empty");
 });
 
-test("awaitKillGrace (#403, F25 — PR #430 gate② round 4, P2): an exit observed only via the caller's state while the window is open still resolves 'exited', never 'grace'", async () => {
-  // The lost-notification direction of the same gap: the callback route never fires (a missed
-  // `exit` event, the #395 scenario this module already models elsewhere), but run()'s own
-  // exitNotified flips. The grace must then still report "exited" rather than authorising a
-  // SIGKILL, because the caller has authoritative evidence the tree is gone.
-  let exited = false;
+test("awaitKillGrace (#403, F25 — PR #430 gate② round 4, P2): a tree that empties while the window is open, with no exit callback at all, still resolves 'gone' rather than authorising a SIGKILL", async () => {
+  // The lost-notification direction (#395's scenario, which this module models elsewhere): the
+  // callback route never fires, but the kernel's answer changes. The settle-time re-probe is what
+  // keeps that from becoming a SIGKILL at a pid that may since have been recycled.
+  let groupEmpty = false;
   const session = { onExit: () => {} }; // the callback route is deliberately dead here
   const windowElapses = async (): Promise<void> => {
-    exited = true; // the exit landed while the window was open, observed only by the caller
+    groupEmpty = true; // the tree went away while the window was open, unobserved by any callback
   };
-  assert.equal(await awaitKillGrace(session, 60_000, () => exited, windowElapses), "exited");
+  assert.equal(await awaitKillGrace(session, 60_000, () => groupEmpty, windowElapses), "gone");
 });

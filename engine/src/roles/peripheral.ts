@@ -807,7 +807,7 @@ export class RoleRunner {
         }
         // Best-effort: the child may actually be alive despite the lost notification. killTree
         // itself never throws (peripheral.ts's own SpawnedSession.killGroup swallows kill errors).
-        await this.killTree(session, () => exitNotified);
+        await this.killTree(session);
       }
       if (spawnErr) {
         try {
@@ -965,7 +965,7 @@ export class RoleRunner {
         // one more heartbeat "for the road" at the exact moment we've given up on it).
         if (!timedOut && elapsedSec > this.deps.cfg.worker.timeoutSec) {
           timedOut = true;
-          void this.killTree(session, () => exitNotified);
+          void this.killTree(session);
           return; // also skips the exit-loss check this SAME tick — see the block comment above
         }
         if (!timedOut) {
@@ -987,7 +987,7 @@ export class RoleRunner {
           } catch {
             /* best-effort — the synthetic resolution below is still the operative signal */
           }
-          void this.killTree(session, () => exitNotified); // best-effort: the child may somehow still be alive
+          void this.killTree(session); // best-effort: the child may somehow still be alive
           resolveExit(null);
         }
       }, this.hbMs);
@@ -1285,20 +1285,22 @@ export class RoleRunner {
     });
   }
 
-  private async killTree(session: SpawnedSession, hasExited: () => boolean): Promise<void> {
-    // #403 (F25), PR #430 gate② P1: the grace is a CANCELABLE wait on the child's own exit, not a
-    // fixed sleep — see awaitKillGrace. A tree that dies inside the window is never SIGKILLed
-    // (nothing left to signal, and the pid/group may since have been recycled), and no pending
-    // timer outlives the call.
+  private async killTree(session: SpawnedSession): Promise<void> {
+    // #403 (F25), PR #430 gate② P1: the grace is a CANCELABLE wait, not a fixed sleep — see
+    // awaitKillGrace. A tree that is gone inside the window is never SIGKILLed (nothing left to
+    // signal, and the pid/group may since have been recycled), and no pending timer outlives the
+    // call.
     //
-    // Round 4 (P2): SUBSCRIBE BEFORE SIGNALLING, and pass the caller's already-observed exit state
-    // (`exitNotified`) through. Starting the grace first closes the window where the child dies
-    // between the SIGTERM and the listener registration, and `hasExited` covers the case where it
-    // was already gone before this method ran at all — the spawn-confirmation-timeout path
-    // routinely is.
-    const grace = awaitKillGrace(session, this.killGraceMs, hasExited);
+    // Round 4 (P2): SUBSCRIBE BEFORE SIGNALLING — starting the grace first closes the window where
+    // the child dies between the SIGTERM and the listener registration.
+    //
+    // Round 5 (P1): the short-circuit is gated on GROUP liveness (`sessionTreeIsGone`), never on
+    // the leader's `exit` event. `killGroup` signals the whole detached group; a descendant that
+    // traps SIGTERM outlives the leader, and skipping the escalation on leader exit alone would
+    // leave it running after the session is over.
+    const grace = awaitKillGrace(session, this.killGraceMs, () => sessionTreeIsGone(session.pid));
     session.killGroup("SIGTERM");
-    if ((await grace) === "exited") return;
+    if ((await grace) === "gone") return;
     session.killGroup("SIGKILL");
   }
 
@@ -1373,46 +1375,73 @@ function cancelableSleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/** #403 (F25), PR #430 gate② round 5 (P1): is there anything left for `killGroup` to signal?
+ *
+ *  The authoritative answer, and the reason this exists as its own function: `killGroup` targets the
+ *  whole DETACHED PROCESS GROUP (`kill(-pid, …)`), while `SpawnedSession.onExit` is
+ *  `child.once("exit")` — that event proves the session LEADER exited and says nothing about
+ *  descendants still in the group. A descendant that traps or ignores SIGTERM survives leader exit,
+ *  and treating leader exit as "the tree is gone" would skip the SIGKILL escalation and orphan it.
+ *
+ *  `kill(-pid, 0)` sends no signal at all; it asks the kernel whether that group can be signalled.
+ *  ESRCH is the structured answer "no members" (a group id outlives its leader for exactly as long
+ *  as the group still has one). Any OTHER error — EPERM, i.e. the group exists but is not ours — is
+ *  read as ALIVE, so the ambiguous direction fails toward escalation rather than toward leaving a
+ *  live worker session behind. That is the deliberate trade: the residual risk is a SIGKILL to a
+ *  process group whose id was recycled inside the grace window (which requires a brand-new session
+ *  leader to take that exact pid), and it is the behaviour that shipped before this PR; the
+ *  alternative failure — an orphaned role session that keeps spending — is worse and unbounded. */
+export function sessionTreeIsGone(pid: number | undefined): boolean {
+  if (pid === undefined) return true; // never spawned / no group to signal
+  try {
+    process.kill(-pid, 0);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
 /** #403 (F25), PR #430 gate② P1: wait out killTree's SIGTERM->SIGKILL grace, but stop waiting the
- *  instant the child actually exits. `"exited"` means there is nothing left to signal; `"grace"`
- *  means the window elapsed with the child still alive, so the SIGKILL is warranted.
+ *  instant the whole TREE is gone. `"gone"` means the process group has no members left, so there
+ *  is nothing to escalate to; `"grace"` means the window elapsed with something still in the group,
+ *  so the SIGKILL is warranted.
  *
- *  Two defects this closes, both surfaced by the peripheral timeout tests that raise
- *  `killGraceMs` far past their own lifetime (the seam that keeps those tests off a real-timer
- *  race): (1) the pending `setTimeout` is REFERENCED, so a long grace kept the whole process
- *  alive for the rest of the window after everything else had finished; (2) when it finally fired
- *  it sent SIGKILL to a pid/process-group the OS may already have recycled. It is a production
- *  improvement for the same reason — the engine no longer signals a group it has already reaped,
- *  and killTree returns as soon as the tree is gone instead of always burning the full grace.
- *
- *  `hasExited` is the CALLER's own already-observed exit state (run()'s `exitNotified`) — see the
- *  body for why a fresh listener alone is not enough.
+ *  What this closes, in the order the review found it:
+ *  - (round 1) the pending `setTimeout` was REFERENCED, so a long grace kept the whole process alive
+ *    for the rest of the window after everything else had finished, and then fired a SIGKILL at a
+ *    pid/process-group the OS may already have recycled;
+ *  - (round 4) a freshly-registered `once("exit")` listener never fires for an exit that ALREADY
+ *    happened — Node does not replay it — so on the spawn-confirmation-timeout path the
+ *    cancellation could never come and the full grace burned regardless;
+ *  - (round 5) leader exit is NOT proof the group is empty, so it must not short-circuit the
+ *    escalation. `treeIsGone` is therefore the verdict at every decision point, and `onExit` is
+ *    only a WAKE: a good moment to re-ask the kernel, never an answer.
  *
  *  Exported for its own unit tests; `timer` is injectable so those tests decide the outcome at the
  *  seam instead of waiting on a real clock. */
 export function awaitKillGrace(
   session: Pick<SpawnedSession, "onExit">,
   graceMs: number,
-  hasExited: () => boolean,
+  treeIsGone: () => boolean,
   timer: (ms: number, signal: AbortSignal) => Promise<void> = cancelableSleep,
-): Promise<"exited" | "grace"> {
-  // PR #430 gate② round 4 (P2): the caller's ALREADY-OBSERVED exit state is checked first, and it
-  // is the authority. Node does not replay `exit` to a listener registered after the fact, so on
-  // any path where run() has already seen the child go (the spawn-confirmation-timeout path
-  // routinely has: `exitNotified` is set by then), a freshly-subscribed `once("exit")` would never
-  // fire — the full grace would burn and the SIGKILL would land on a pid/process-group the OS may
-  // since have recycled, which is the exact behaviour this function exists to prevent.
-  if (hasExited()) return Promise.resolve("exited");
-  const exited = new AbortController();
-  session.onExit(() => exited.abort());
-  // Re-checked after subscribing: an exit landing between the check above and the registration
-  // would otherwise be missed the same way. Both are synchronous today — the point is that the
-  // ordering is a stated contract, not an accident of the current code.
-  if (hasExited()) return Promise.resolve("exited");
-  // `hasExited()` is consulted again at settle time so a LOST exit notification (the #395
-  // scenario) still reads as "exited" from the caller's own evidence rather than authorising a
-  // SIGKILL at a stale pid.
-  return timer(graceMs, exited.signal).then(() => (exited.signal.aborted || hasExited() ? "exited" : "grace"));
+): Promise<"gone" | "grace"> {
+  // Already empty before the kill path even started (the spawn-confirmation-timeout path routinely
+  // is): no timer, no listener, no signal.
+  if (treeIsGone()) return Promise.resolve("gone");
+  const gone = new AbortController();
+  // Leader exit is a WAKE, not a verdict: cancel the wait ONLY if the group is empty by then. If a
+  // descendant is still in it, the grace deliberately keeps running so the SIGKILL below still
+  // happens — that is round 5's requirement.
+  session.onExit(() => {
+    if (treeIsGone()) gone.abort();
+  });
+  // Re-checked after subscribing: a group that emptied between the check above and the registration
+  // would otherwise be missed the same way an already-fired `exit` is.
+  if (treeIsGone()) return Promise.resolve("gone");
+  // Re-probed at settle time so a LOST exit notification (the #395 scenario this module models
+  // elsewhere) still reads as "gone" from the kernel's own answer rather than authorising a SIGKILL
+  // at a pid that may since have been recycled.
+  return timer(graceMs, gone.signal).then(() => (treeIsGone() ? "gone" : "grace"));
 }
 
 // ── #104: shared session-retry helper ───────────────────────────────────────────────────────
