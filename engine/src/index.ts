@@ -1,12 +1,16 @@
 export { ConfigSchema, loadConfig, parseConfig, type SapwoodConfig } from "./config/config.js";
 export {
   assemblePRReviewData,
+  associateLanePr,
   countUnresolvedThreads,
   extractVerificationPlan,
-  findOpenPrNumber,
+  findLaneOwnedPr,
   GithubForge,
+  hasPrOwnerMarker,
   type IForge,
   type Issue,
+  type LanePrForge,
+  type LanePrRequest,
   type OwnerKind,
   type PRReaction,
   type PRReview,
@@ -16,6 +20,9 @@ export {
   parsePRReviewView,
   parsePRStatus,
   parseReviewThreadsPage,
+  prOwnerMarker,
+  readPrOwner,
+  stampPrOwner,
 } from "./forge/forge.js";
 export { type GhRunner, gh, ghText } from "./forge/gh.js";
 export { type Decision, type GuardInput, guardDecision, safeSplit } from "./guard/guard.js";

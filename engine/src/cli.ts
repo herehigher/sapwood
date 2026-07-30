@@ -11,7 +11,15 @@ import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import { configHash, DEFAULT_CONFIG_PATHS, dashboardConfigSubset, loadConfig, type SapwoodConfig } from "./config/config.js";
 import { loadPricingTable } from "./config/pricing.js";
-import { GithubForge, type IForge, type Issue } from "./forge/forge.js";
+import {
+  associateLanePr,
+  GithubForge,
+  type IForge,
+  type Issue,
+  type LanePrForge,
+  type LanePrOutcome,
+  type LanePrRequest,
+} from "./forge/forge.js";
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
 import { unadjudicatedConcerns } from "./loop/dissent.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
@@ -1008,16 +1016,26 @@ export function roundsExitCode(result: Pick<RoundsResult, "stoppedBy">): number 
   return result.stoppedBy === "kill-switch" ? 1 : 0;
 }
 
-/** #106: `WorkerSupervisor`'s hasOpenPr/findOpenPr need `GithubForge`'s own
- *  `findOpenPrForIssue` — not part of the narrower `IForge` interface every fake forge in tests
- *  (round-defaults.test.ts's FakeForge, etc.) implements. Production `forge` is always a real
- *  GithubForge (EngineOverrides.forge is unset), so this always resolves to the real method
- *  there; a test-injected bare-IForge fake falls back to "no open PR found", which is fine
- *  because those tests never dispatch a worker (no ready issues) — this only exists so
- *  EngineOverrides can type `forge` as the general `IForge` interface. */
-function findOpenPrForIssue(forge: IForge, issue: number): Promise<number | null> {
-  const withPr = forge as Partial<Pick<GithubForge, "findOpenPrForIssue">>;
-  return typeof withPr.findOpenPrForIssue === "function" ? withPr.findOpenPrForIssue(issue) : Promise.resolve(null);
+/** #377 (was #106): `WorkerSupervisor.lanePr` needs `GithubForge`'s branch-keyed reads and PR-body
+ *  write, which are not part of the narrower `IForge` interface every fake forge in tests
+ *  (round-defaults.test.ts's FakeForge, etc.) implements — the same duck-typing the deleted
+ *  `findOpenPrForIssue` wiring used, for the same reason. Production `forge` is always a real
+ *  GithubForge (EngineOverrides.forge is unset), so this always resolves to the real methods
+ *  there; a test-injected bare-IForge fake falls back to "no association", which is fine because
+ *  those tests never dispatch a worker (no ready issues). */
+function buildLanePrAssociator(forge: IForge, log: (message: string) => void): (lane: LanePrRequest) => Promise<LanePrOutcome> {
+  const candidate = forge as Partial<LanePrForge>;
+  const complete =
+    typeof candidate.listOpenPrsForBranch === "function" &&
+    typeof candidate.listOpenPrBodies === "function" &&
+    typeof candidate.updatePRBody === "function" &&
+    typeof candidate.openPR === "function" &&
+    typeof candidate.probePushedBranch === "function" &&
+    typeof candidate.getIssueMeta === "function";
+  // No branch-keyed forge surface -> a CONCLUSIVE "no association" (nothing failed, so
+  // nothing to retry) rather than an inconclusive one that would defer every lane forever.
+  if (!complete) return () => Promise.resolve({ pr: null, inconclusive: false });
+  return (lane) => associateLanePr(candidate as LanePrForge, lane, log);
 }
 
 /** #253: builds the tick-driver's TickDeps.fixLegResume — round 0 / phase "tick" is this
@@ -1120,11 +1138,10 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
     cfg,
     log,
     now: systemClock,
-    // #46: a first-pass live findOpenPr wiring (GithubForge.findOpenPrForIssue) — see its
-    // doc comment for the heuristic and its known limits; hardening it is part of the live
-    // merge-gate run (#46 scope 3), not this PR.
-    hasOpenPr: async (issue) => (await findOpenPrForIssue(forge, issue)) != null,
-    findOpenPr: (issue) => findOpenPrForIssue(forge, issue),
+    // #377: lane->PR association keyed on the lane's own branch + the engine-authored PR-owner
+    // marker (forge.ts's associateLanePr) — never a PR body's prose mention of the issue number,
+    // which is what handed lane-294 a stranger's PR in the 2026-07-24 F15 case.
+    lanePr: buildLanePrAssociator(forge, log),
     renderPrompt,
     // #244 (Codex sol-high PR #260 review round 2, P2): wires the durable `proxy-mint-failed`
     // event into the REAL tick-driver run — without this, a mint failure on a live proxy-
@@ -1237,8 +1254,8 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
     cfg,
     log,
     now: systemClock,
-    hasOpenPr: async (issue) => (await findOpenPrForIssue(forge, issue)) != null,
-    findOpenPr: (issue) => findOpenPrForIssue(forge, issue),
+    // #377: same branch+marker association as the tick driver above.
+    lanePr: buildLanePrAssociator(forge, log),
     renderPrompt,
     // #244 (Codex sol-high PR #260 review round 2, P2): same durable mint-failure observability
     // as the tick-driver path above, wired into the round-orchestrator's own WorkerSupervisor.

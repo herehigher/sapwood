@@ -10,7 +10,15 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ConfigSchema, loadConfig, type SapwoodConfig } from "../config/config.js";
-import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import {
+  associateLanePr,
+  type CommitInfo,
+  type IForge,
+  type Issue,
+  type PRReviewData,
+  type PRStatus,
+  readPrOwner,
+} from "../forge/forge.js";
 import { type DriveOutcome, MergeDriver } from "../roles/merge-driver.js";
 import { CODEX_REVIEWER_LOGINS, CodexReviewer } from "../roles/reviewer.js";
 import { WorkerSupervisor } from "../roles/worker.js";
@@ -774,6 +782,151 @@ test("tick reclaim: DEAD lane no-PR requeue succeeding on the first try leaves n
   assert.deepEqual(forge.boardSet, [[4, "ready"]]);
   assert.equal(st.pendingRollbacks().length, 0);
   st.close();
+});
+
+// ── #377 gate② round 4 (P2): the F15 fixture END-TO-END ─────────────────────────────────────
+// The unit fixture calls associateLanePr() directly and the probe tests stub `lanePr`, so a
+// WIRING regression between them — probe not reading the real branch, mayOpenPr wrong, the
+// conductor not persisting the association — would leave every one of those green. This runs the
+// live 2026-07-24 scenario through the REAL WorkerSupervisor.probe (real worktree HEAD, real
+// terminal sentinel) into the REAL associateLanePr and out through the conductor's reclaim.
+test("#377 F15 end-to-end: real probe -> real associateLanePr -> conductor reclaim lands on the lane's OWN branch PR, never the prose PR", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-f15-"));
+  try {
+    const stateDir = join(dir, "state");
+    const worktreeRoot = join(dir, "worktrees");
+    const lane = "lane-294-a1b2c3d4";
+    const branch = "feat/294-hold-visibility-events";
+    mkdirSync(stateDir, { recursive: true });
+
+    // The lane's real worktree, exactly as the `claude` CLI leaves one: `.git` is a FILE
+    // pointing at the parent repo's per-worktree gitdir, whose HEAD names the lane's branch.
+    const gitDir = join(dir, "parent-git", "worktrees", lane);
+    mkdirSync(gitDir, { recursive: true });
+    mkdirSync(join(worktreeRoot, lane), { recursive: true });
+    writeFileSync(join(worktreeRoot, lane, ".git"), `gitdir: ${gitDir}\n`);
+    writeFileSync(join(gitDir, "HEAD"), `ref: refs/heads/${branch}\n`);
+    // Terminal sentinel: the worker finished (so mayOpenPr is derived, not stubbed).
+    writeFileSync(join(stateDir, `${lane}.done.json`), JSON.stringify({ name: lane, issue: 294, total_cost_usd: 0 }));
+
+    // PR #368's analog: a retro digest whose PROSE cites the issue, on some OTHER branch, with
+    // no owner marker. Under the pre-#377 prose match this is what the lane adopted.
+    const prosePr = { number: 368, body: "Round 7 retro digest — covers #294 and #295", branch: "retro/round-7" };
+    const openPrs = [prosePr];
+    const laneForge = {
+      async listOpenPrsForBranch(b: string) {
+        return openPrs.filter((pr) => pr.branch === b).map((pr) => ({ number: pr.number, body: pr.body }));
+      },
+      async listOpenPrBodies() {
+        return openPrs.map((pr) => ({ number: pr.number, body: pr.body }));
+      },
+      async updatePRBody(n: number, body: string) {
+        openPrs.find((pr) => pr.number === n)!.body = body;
+      },
+      async openPR(b: string, _title: string, body: string) {
+        openPrs.push({ number: 372, body, branch: b });
+        return 372;
+      },
+      async probePushedBranch(b: string): Promise<"present" | "absent" | "unknown"> {
+        return b === branch ? "present" : "absent";
+      },
+      async getIssueMeta(issue: number) {
+        return { title: `issue ${issue} title` };
+      },
+    };
+
+    const supervisor = new WorkerSupervisor({
+      now: realClock,
+      cfg: mkCfg(),
+      stateDir,
+      worktreeRoot,
+      claudeBin: "claude",
+      heartbeatMs: 60_000,
+      // The REAL association function — the only seam between probe and the forge.
+      lanePr: (l) => associateLanePr(laneForge, l),
+    });
+
+    const st = new State(":memory:");
+    const forge = new FakeForge();
+    seedRunning(st, lane, 294);
+    const r = await tick({ now: realClock, forge, state: st, supervisor, cfg: mkCfg() });
+
+    const settled = st.getWorker(lane);
+    assert.equal(settled?.state, "driving", "the lane was rescued to driving, not escalated as no-PR");
+    assert.equal(settled?.pr, 372, "the engine opened and adopted the lane's OWN branch PR");
+    assert.notEqual(settled?.pr, 368, "never the PR that merely cites #294 in prose");
+    assert.deepEqual(r.reclaimed, [{ kind: "done", worker: lane, issue: 294, next: "DRIVING", costUsd: 0, modelUsage: [] }]);
+    assert.equal(prosePr.body, "Round 7 retro digest — covers #294 and #295", "the unrelated PR is never touched");
+    // The PR the engine authored carries the structural marker naming THIS lane.
+    assert.deepEqual(readPrOwner(openPrs.find((pr) => pr.number === 372)!.body), { lane, issue: 294 });
+    assert.deepEqual(forge.labelsAdded, [], "no needs-human escalation");
+    st.close();
+    supervisor.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#377 gate② round 3 (P1): a DONE lane whose PR association is UNKNOWN is DEFERRED, not escalated — and settles normally once the forge answers", async () => {
+  // The harm: mayOpenPr only becomes true on the very probe the reclaim settles from, so a
+  // transient `gh pr create` 502 used to escalate finished work to a human with no later probe
+  // to notice the PR that a retry would have opened.
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-blip", 3);
+  sup.probes["lane-blip"] = { ...DEFAULT_PROBE, done: true, hasPr: false, prAssociationInconclusive: true };
+
+  const deferred = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(deferred.reclaimed, [], "nothing settled from an unknown association");
+  assert.deepEqual(forge.labelsAdded, [], "no premature needs-human escalation");
+  assert.equal(st.getWorker("lane-blip")?.state, "running", "the lane is held for the next tick's retry");
+  assert.deepEqual(sup.reclaimed, [], "and never torn down as if it were DEAD");
+
+  // Next tick: the forge recovered and the engine's retry opened/found the PR.
+  sup.probes["lane-blip"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 372 };
+  const settled = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(settled.reclaimed, [{ kind: "done", worker: "lane-blip", issue: 3, next: "DRIVING", costUsd: 0, modelUsage: [] }]);
+  assert.equal(st.getWorker("lane-blip")?.state, "driving");
+  assert.equal(st.getWorker("lane-blip")?.pr, 372);
+  st.close();
+});
+
+test("#377 gate② round 3 (P1): a DEAD lane whose PR association is UNKNOWN is never requeued — no duplicate worker racing its pushed branch", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-dead", 4);
+  // Confirmed-dead wrapper, no sentinel: without the deferral this requeues issue 4 to Ready and
+  // a fresh worker is dispatched onto an issue whose branch is already pushed.
+  sup.probes["lane-dead"] = { ...DEFAULT_PROBE, wrapperAlive: 0, hasPr: false, prAssociationInconclusive: true };
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(r.reclaimed, []);
+  assert.deepEqual(sup.reclaimed, [], "no teardown");
+  assert.equal(st.getWorker("lane-dead")?.state, "running");
+  assert.deepEqual(forge.boardSet, [], "the issue is NOT handed back to Ready");
+  st.close();
+});
+
+test("#377 gate② round 3 (P1): the deferral does NOT apply under a kill switch — a drain must still settle every lane", async () => {
+  // Safety-layer cross-check: a lane that refuses to settle would fight the very layer whose job
+  // is to stop the engine. The drain path keeps the ordinary no-PR disposition.
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-conductor-"));
+  try {
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const st = new State(join(dir, "sapwood.sqlite"));
+    seedRunning(st, "lane-drain", 5);
+    sup.probes["lane-drain"] = { ...DEFAULT_PROBE, done: true, hasPr: false, prAssociationInconclusive: true };
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+    assert.ok(r.ceilingBreached);
+    assert.equal(st.getWorker("lane-drain")?.state, "done", "a drain settles the lane by the ordinary no-PR rules");
+    assert.ok(r.reclaimed.some((o) => o.worker === "lane-drain"));
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("tick reclaim: KEEP stays, DONE+PR -> done/DRIVING, DONE+noPR -> escalate+needs-human", async () => {
@@ -3005,14 +3158,7 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
   const forge = new FakeForge();
   const st = new State(dbPath);
   const issue = { number: 169, title: "restart adoption", labels: [] };
-  const s1 = new WorkerSupervisor({
-    now: realClock,
-    cfg,
-    stateDir: dir,
-    claudeBin: bin,
-    hasOpenPr: async () => false,
-    heartbeatMs: 60_000,
-  });
+  const s1 = new WorkerSupervisor({ now: realClock, cfg, stateDir: dir, claudeBin: bin, heartbeatMs: 60_000 });
   let s2: WorkerSupervisor | undefined;
   try {
     const { name, sessionId } = await s1.dispatch(issue, "lane-169-integration");
@@ -3034,7 +3180,7 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
     s1.dispose(); // new engine has no in-memory ChildProcess/heartbeat timer
     utimesSync(join(dir, `${name}.heartbeat`), new Date(0), new Date(0));
 
-    s2 = new WorkerSupervisor({ now: realClock, cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, heartbeatMs: 60_000 });
+    s2 = new WorkerSupervisor({ now: realClock, cfg, stateDir: dir, claudeBin: bin, heartbeatMs: 60_000 });
     const adopted = await tick({ now: realClock, forge, state: st, supervisor: s2, cfg });
     assert.deepEqual(adopted.reclaimed, [{ kind: "kept", worker: name, issue: 169 }]);
     assert.equal(st.getWorker(name)?.state, "running");
@@ -3152,7 +3298,6 @@ test("#172 confirmed intent is adopted under PAUSE, then ordinary supervision re
     cfg,
     stateDir: dir,
     claudeBin: join(dir, "must-not-spawn"),
-    hasOpenPr: async () => false,
   });
   try {
     st.upsertWorker({
@@ -3215,7 +3360,6 @@ test("#172 unconfirmed resume intent escalates and latches under PAUSE without s
     cfg,
     stateDir: dir,
     claudeBin: join(dir, "must-not-spawn"),
-    hasOpenPr: async () => false,
   });
   const forge = new FakeForge();
   try {
@@ -3279,7 +3423,7 @@ test("#172 detached dispatch marker is not adopted: handoff spawns one real resu
     ].join("\n"),
     { mode: 0o755 },
   );
-  const supervisor = new WorkerSupervisor({ now: realClock, cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false });
+  const supervisor = new WorkerSupervisor({ now: realClock, cfg, stateDir: dir, claudeBin: bin });
   try {
     state.upsertWorker({
       name: "lane-detached",

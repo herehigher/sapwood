@@ -6,6 +6,7 @@ import { defaultIssueTemplatePath } from "../loop/init.js";
 import {
   ADD_SUB_ISSUE_MUTATION,
   assemblePRReviewData,
+  associateLanePr,
   countUnresolvedThreads,
   ENGINE_COMMENT_MARKER,
   extractAcceptanceCriteria,
@@ -13,9 +14,10 @@ import {
   extractVerificationSection,
   fetchAllReviewThreads,
   findItemId,
-  findOpenPrNumber,
+  findLaneOwnedPr,
   findOptionId,
   GithubForge,
+  hasPrOwnerMarker,
   hasVerificationPlan,
   OPEN_ISSUES_LIMIT,
   parseIssueLabels,
@@ -37,7 +39,9 @@ import {
   parseReviewThreadsPage,
   parseSearchIssues,
   parseSubIssues,
+  prOwnerMarker,
   projectQuery,
+  readPrOwner,
   SUB_ISSUE_IDS_QUERY,
   SUB_ISSUES_QUERY,
   selectIssuesAbsentFromBoard,
@@ -46,6 +50,7 @@ import {
   selectPoolEligibleIssues,
   selectReadyIssues,
   selectUnplacedIssues,
+  stampPrOwner,
 } from "./forge.js";
 
 const SUB_ISSUE_IDS_JSON = JSON.stringify({
@@ -680,95 +685,6 @@ test("extractAcceptanceCriteria corpus: duplicate identical criterion text at di
   assert.equal(items.length, 2);
   assert.notEqual(items[0]!.id, items[1]!.id);
   assert.equal(items[0]!.text, items[1]!.text);
-});
-
-// ── findOpenPrNumber (#46: the live findOpenPr wiring's pure match; PR #50 P2 #2 hardening —
-//   this selects gate②'s MERGE target, so ambiguity is fail-closed, never guessed) ──────────
-
-test("findOpenPrNumber: a single bare #<issue> mention is still found (the unambiguous fallback)", () => {
-  const prs = [
-    { number: 10, body: "unrelated" },
-    { number: 11, body: "Part of #46" },
-  ];
-  assert.equal(findOpenPrNumber(prs, 46), 11);
-});
-
-test("findOpenPrNumber: no match -> null", () => {
-  assert.equal(findOpenPrNumber([{ number: 10, body: "Part of #45" }], 46), null);
-});
-
-test("findOpenPrNumber: does not match a longer number containing the issue as a prefix (#460 != #46)", () => {
-  assert.equal(findOpenPrNumber([{ number: 10, body: "Part of #460" }], 46), null);
-  assert.equal(findOpenPrNumber([{ number: 10, body: "Fixes #460" }], 46), null);
-});
-
-test("findOpenPrNumber: a closing keyword outranks a newer PR's bare mention (never merge the wrong PR)", () => {
-  // Newest-first order: the newer PR (20) merely mentions #46 in passing; the older PR (21)
-  // declares it closes #46. First-match-wins would pick 20 — the exact wrong-merge-target
-  // hazard PR #50 P2 #2 flagged. Closing semantics must win regardless of recency.
-  const prs = [
-    { number: 20, body: "related to #46, but this PR is for issue #12" },
-    { number: 21, body: "Fixes #46" },
-  ];
-  assert.equal(findOpenPrNumber(prs, 46), 21);
-});
-
-test("findOpenPrNumber: all GitHub closing-keyword inflections count, case-insensitive, optional colon", () => {
-  for (const kw of ["Fixes", "fixed", "fix", "Closes", "closed", "close", "Resolves", "resolved", "resolve", "Fixes:"]) {
-    assert.equal(findOpenPrNumber([{ number: 9, body: `${kw} #46` }], 46), 9, kw);
-  }
-  // Word-bounded: "unfixes"/"prefixes" are not closing keywords.
-  assert.equal(
-    findOpenPrNumber(
-      [
-        { number: 9, body: "unfixes #46" },
-        { number: 8, body: "also #46" },
-      ],
-      46,
-    ),
-    null,
-  );
-});
-
-test("findOpenPrNumber: several closing-keyword matches -> the OLDEST wins (the lane's original PR, not a newer duplicate)", () => {
-  // Newest-first order: 30 is a newer duplicate/rescue PR also claiming to close #46;
-  // 31 is the original. The original must keep the merge target.
-  const prs = [
-    { number: 30, body: "Closes #46 (superseding attempt)" },
-    { number: 31, body: "Fixes #46" },
-  ];
-  assert.equal(findOpenPrNumber(prs, 46), 31);
-});
-
-test("findOpenPrNumber: multiple bare-mention-only candidates are ambiguous -> null (queued, never a guessed merge target)", () => {
-  const prs = [
-    { number: 20, body: "Part of #46" },
-    { number: 21, body: "Part of #46" },
-  ];
-  assert.equal(findOpenPrNumber(prs, 46), null);
-});
-
-test("findOpenPrForIssue: passes an explicit high --limit (gh's default 30 would drop later PRs) and finds a PR past the 30th (Codex PR #50)", async () => {
-  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
-  const forge = new GithubForge(cfg);
-  const seen: string[][] = [];
-  // 40 open PRs, newest-first; the ONLY match ("Fixes #46") is the 35th — a page gh's default
-  // --limit 30 would drop, making probe() report hasPr=false and wrongly escalate the lane.
-  const prs = Array.from({ length: 40 }, (_, i) => ({
-    number: 100 - i,
-    body: i === 34 ? "Fixes #46" : `unrelated PR body ${i}`,
-  }));
-  // Stub the one gh choke point (instance property shadows the private prototype method) —
-  // no real gh call; we assert on the exact argv findOpenPrForIssue builds.
-  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    seen.push(args);
-    return JSON.stringify(prs);
-  };
-  assert.equal(await forge.findOpenPrForIssue(46), 100 - 34); // the 35th PR is found, not dropped
-  assert.equal(seen.length, 1);
-  const limitIdx = seen[0]!.indexOf("--limit");
-  assert.ok(limitIdx >= 0, "an explicit --limit is passed (never gh's default 30)");
-  assert.ok(Number(seen[0]![limitIdx + 1]) >= 200, "limit is high enough to cover deep PR lists");
 });
 
 test("readStartupReconcileData returns board placements plus open PR bodies using read-only gh calls", async () => {
@@ -2827,6 +2743,337 @@ test("addIssueComment: a body that ALREADY carries its own specific sapwood mark
   assert.ok(posted.includes(ENGINE_COMMENT_MARKER));
 });
 
+// ── #377 (F15): the PR-OWNER MARKER contract — a NET-NEW structural block (no PR-body marker
+// of any kind existed in this codebase before it), and the lane->PR association keyed on it.
+// The live failure it replaces: lane-294's reclaim adopted retro PR #368 because that PR's
+// PROSE said "#294", while the lane's own pushed branch sat PR-less. ────────────────────────
+
+test("readPrOwner: adversarial prose-only bodies never satisfy the marker (bare mention, code fence, link, closing keyword)", () => {
+  for (const body of [
+    "Part of #294",
+    "Fixes #294",
+    "Closes: #294",
+    "see [#294](https://github.com/o/r/issues/294)",
+    "```\nsapwood:pr-owner issue 294\n```",
+    "retro digest for round 7 — touched #294, #295",
+    "",
+  ]) {
+    assert.equal(readPrOwner(body), null, body);
+  }
+});
+
+test("readPrOwner: reads back exactly what prOwnerMarker writes", () => {
+  const marker = prOwnerMarker("lane-294-a1b2c3d4", 294);
+  assert.deepEqual(readPrOwner(`## Why\n\nFixes #294\n\n${marker}\n`), { lane: "lane-294-a1b2c3d4", issue: 294 });
+});
+
+test("readPrOwner: two DISAGREEING markers in one body -> null (ambiguous ownership is never guessed)", () => {
+  const body = `${prOwnerMarker("lane-294-aaaaaaaa", 294)}\n${prOwnerMarker("lane-999-bbbbbbbb", 999)}`;
+  assert.equal(readPrOwner(body), null);
+  // ...but a duplicate of the SAME marker (a double stamp) is unambiguous.
+  const dup = `${prOwnerMarker("lane-294-aaaaaaaa", 294)}\n${prOwnerMarker("lane-294-aaaaaaaa", 294)}`;
+  assert.deepEqual(readPrOwner(dup), { lane: "lane-294-aaaaaaaa", issue: 294 });
+});
+
+test("prOwnerMarker: refuses a lane name that could not be read back verbatim (trust-boundary check)", () => {
+  for (const lane of ['a" issue="1', "lane 294", "lane<294>", ""]) {
+    assert.throws(() => prOwnerMarker(lane, 294), /lane name/, lane);
+  }
+});
+
+test("stampPrOwner: appends once and is idempotent (re-stamping an already-marked body is a no-op)", () => {
+  const once = stampPrOwner("## Why\n\nFixes #294", "lane-294-a1b2c3d4", 294);
+  assert.ok(once.includes(prOwnerMarker("lane-294-a1b2c3d4", 294)));
+  assert.equal(stampPrOwner(once, "lane-294-a1b2c3d4", 294), once);
+  assert.ok(once.startsWith("## Why\n\nFixes #294"), "the human-facing body (including its closing keyword) is preserved verbatim");
+});
+
+test("findLaneOwnedPr: another lane's marker-bearing PR mentioning this issue in prose is NEVER adopted", () => {
+  const prs = [
+    { number: 368, body: `retro digest touching #294\n\n${prOwnerMarker("lane-368-ffffffff", 368)}` },
+    { number: 372, body: `Closes #294\n\n${prOwnerMarker("lane-294-a1b2c3d4", 294)}` },
+  ];
+  assert.equal(findLaneOwnedPr(prs, "lane-294-a1b2c3d4", 294), 372);
+  assert.equal(findLaneOwnedPr(prs, "lane-294-deadbeef", 294), null, "a DIFFERENT lane on the same issue gets nothing");
+  assert.equal(findLaneOwnedPr([{ number: 368, body: "Fixes #294" }], "lane-294-a1b2c3d4", 294), null, "prose alone is never enough");
+});
+
+// ── #377: associateLanePr — the branch-keyed, marker-keyed association itself ────────────────
+
+type FakeCall = { kind: string; args: unknown[] };
+
+function fakeLanePrForge(prs: { number: number; body: string; branch?: string }[], opts: { branches?: string[]; nextPr?: number } = {}) {
+  const calls: FakeCall[] = [];
+  const forge = {
+    calls,
+    prs,
+    async listOpenPrsForBranch(branch: string) {
+      calls.push({ kind: "listOpenPrsForBranch", args: [branch] });
+      return prs.filter((pr) => pr.branch === branch).map((pr) => ({ number: pr.number, body: pr.body }));
+    },
+    async listOpenPrBodies() {
+      calls.push({ kind: "listOpenPrBodies", args: [] });
+      return prs.map((pr) => ({ number: pr.number, body: pr.body }));
+    },
+    async updatePRBody(pr: number, body: string) {
+      calls.push({ kind: "updatePRBody", args: [pr, body] });
+      const target = prs.find((p) => p.number === pr)!;
+      target.body = body;
+    },
+    async openPR(branch: string, title: string, body: string) {
+      calls.push({ kind: "openPR", args: [branch, title, body] });
+      const number = opts.nextPr ?? 500;
+      prs.push({ number, body, branch });
+      return number;
+    },
+    async probePushedBranch(branch: string): Promise<"present" | "absent" | "unknown"> {
+      calls.push({ kind: "probePushedBranch", args: [branch] });
+      return (opts.branches ?? []).includes(branch) ? "present" : "absent";
+    },
+    async getIssueMeta(issue: number) {
+      calls.push({ kind: "getIssueMeta", args: [issue] });
+      return { number: issue, title: `issue ${issue} title`, state: "OPEN" as const, labels: [], updatedAt: "2026-07-24T00:00:00Z" };
+    },
+  };
+  return forge;
+}
+
+test("associateLanePr (a): the branch's PR already carries THIS lane's marker -> associated, no write", async () => {
+  const forge = fakeLanePrForge([{ number: 372, body: prOwnerMarker("lane-294-a1b2c3d4", 294), branch: "feat/294-hold" }]);
+  const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.equal(pr.pr, 372);
+  assert.deepEqual(
+    forge.calls.map((c) => c.kind),
+    ["listOpenPrsForBranch"],
+  );
+});
+
+test("associateLanePr (b): the branch has an UNMARKED PR -> the engine patches the body, then associates", async () => {
+  // sessionOver: gate② round 5 moved the STAMP behind it too (it was previously ungated, on the
+  // reasoning that only `openPR` could race the worker) — an unconditional read-modify-write
+  // against a live PR body can drop a concurrent description edit. AC#3's behavior is unchanged
+  // in substance: the engine, never a worker prompt, authors the marker onto the branch's PR.
+  const forge = fakeLanePrForge([{ number: 372, body: "## Why\n\nCloses #294", branch: "feat/294-hold" }]);
+  const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.equal(pr.pr, 372);
+  const patch = forge.calls.find((c) => c.kind === "updatePRBody");
+  assert.ok(patch, "the engine authored the marker itself (never a worker-prompt instruction)");
+  assert.deepEqual(readPrOwner(patch.args[1] as string), { lane: "lane-294-a1b2c3d4", issue: 294 });
+  assert.ok((patch.args[1] as string).includes("Closes #294"), "the worker's own description survives the patch");
+});
+
+test("associateLanePr (c): the branch is pushed with NO PR -> the engine opens one carrying the marker", async () => {
+  const forge = fakeLanePrForge([], { branches: ["feat/294-hold"], nextPr: 372 });
+  const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.equal(pr.pr, 372);
+  const opened = forge.calls.find((c) => c.kind === "openPR");
+  assert.ok(opened);
+  assert.equal(opened.args[0], "feat/294-hold");
+  const body = opened.args[2] as string;
+  assert.deepEqual(readPrOwner(body), { lane: "lane-294-a1b2c3d4", issue: 294 });
+  assert.ok(body.includes("Closes #294"), "GitHub's own closing-keyword semantics are still written for humans");
+});
+
+test("associateLanePr (c'): a branch that is not pushed to the forge -> nothing opened, no association", async () => {
+  const forge = fakeLanePrForge([], { branches: [] });
+  const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.equal(pr.pr, null);
+  assert.equal(forge.calls.filter((c) => c.kind === "openPR").length, 0);
+});
+
+test("associateLanePr: sessionOver=false (the lane's worker is still running) -> the engine never opens a PR that would race it", async () => {
+  const forge = fakeLanePrForge([], { branches: ["feat/294-hold"], nextPr: 372 });
+  const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: false });
+  assert.equal(pr.pr, null);
+  assert.equal(forge.calls.filter((c) => c.kind === "openPR").length, 0);
+});
+
+test("associateLanePr (d): the branch's PR carries a DIFFERENT lane's marker -> never adopted, never re-stamped", async () => {
+  const forge = fakeLanePrForge([
+    { number: 368, body: `#294 mentioned\n\n${prOwnerMarker("lane-368-ffffffff", 368)}`, branch: "feat/294-hold" },
+  ]);
+  const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.equal(pr.pr, null);
+  assert.equal(forge.calls.filter((c) => c.kind === "updatePRBody").length, 0);
+});
+
+test("associateLanePr: no branch known (the lane's worktree is gone) -> marker scan only, prose never matches", async () => {
+  const forge = fakeLanePrForge([
+    { number: 368, body: "retro digest mentioning #294" },
+    { number: 372, body: `Closes #294\n\n${prOwnerMarker("lane-294-a1b2c3d4", 294)}` },
+  ]);
+  assert.equal((await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: null, sessionOver: true })).pr, 372);
+  const proseOnly = fakeLanePrForge([{ number: 368, body: "Fixes #294" }]);
+  assert.equal((await associateLanePr(proseOnly, { name: "lane-294-a1b2c3d4", issue: 294, branch: null, sessionOver: true })).pr, null);
+});
+
+test("#377 F15 regression: a prose-only PR citing the issue coexists with the lane's pushed, unPRed branch -> the engine lands on the BRANCH's PR, never the prose PR", async () => {
+  // The live 2026-07-24 case: retro PR #368's body mentioned "#294"; lane-294's real branch
+  // (feat/294-hold-visibility-events) was pushed with no PR of its own. The old prose match
+  // adopted #368 and shepherded someone else's PR through review.
+  const forge = fakeLanePrForge([{ number: 368, body: "Round 7 retro digest — covers #294 and #295" }], {
+    branches: ["feat/294-hold-visibility-events"],
+    nextPr: 372,
+  });
+  const pr = await associateLanePr(forge, {
+    name: "lane-294-a1b2c3d4",
+    issue: 294,
+    branch: "feat/294-hold-visibility-events",
+    sessionOver: true,
+  });
+  assert.equal(pr.pr, 372, "the engine opened the lane's OWN PR");
+  assert.notEqual(pr.pr, 368);
+  assert.equal(forge.calls.filter((c) => c.kind === "updatePRBody").length, 0, "the unrelated PR's body is never touched");
+});
+
+// ── #377 gate② round 3 (P1): a forge WRITE failure is INCONCLUSIVE, never "no PR" ───────────
+// mayOpenPr is true only once the lane is terminal/confirmed-dead — the same probe the
+// conductor SETTLES the lane from. Collapsing a transient openPR/updatePRBody failure into a
+// definitive `null` therefore escalated finished work, or requeued a dead lane onto a fresh
+// worker while its pushed branch sat there. The outcome now carries that distinction.
+
+test("associateLanePr (gate② round 3, P1): openPR throwing is INCONCLUSIVE, not 'no PR' — the pushed branch stays retryable", async () => {
+  const forge = fakeLanePrForge([], { branches: ["feat/294-hold"], nextPr: 372 });
+  forge.openPR = async () => {
+    throw new Error("gh pr create: 502 Bad Gateway");
+  };
+  const logs: string[] = [];
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true }, (line) =>
+    logs.push(line),
+  );
+  assert.deepEqual(out, { pr: null, inconclusive: true });
+  assert.ok(logs.some((l) => l.includes("502")));
+});
+
+test("associateLanePr (gate② round 3, P1): updatePRBody throwing is INCONCLUSIVE too — the branch's PR exists, we just could not claim it yet", async () => {
+  const forge = fakeLanePrForge([{ number: 372, body: "Closes #294", branch: "feat/294-hold" }]);
+  forge.updatePRBody = async () => {
+    throw new Error("gh pr edit: 403");
+  };
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.deepEqual(out, { pr: null, inconclusive: true });
+});
+
+test("associateLanePr (gate② round 3, P1): a DEFINITIVE no-association is conclusive — never mistaken for a forge failure", async () => {
+  // Each of these is a real answer about the world, not a failed write: nothing to retry.
+  const unpushed = await associateLanePr(fakeLanePrForge([], { branches: [] }), {
+    name: "lane-294-a1b2c3d4",
+    issue: 294,
+    branch: "feat/294-hold",
+    sessionOver: true,
+  });
+  assert.deepEqual(unpushed, { pr: null, inconclusive: false }, "branch not on the forge");
+
+  const contested = await associateLanePr(
+    fakeLanePrForge([{ number: 368, body: prOwnerMarker("lane-368-ffffffff", 368), branch: "feat/294-hold" }]),
+    { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true },
+  );
+  assert.deepEqual(contested, { pr: null, inconclusive: false }, "another lane's PR");
+
+  const stillRunning = await associateLanePr(fakeLanePrForge([], { branches: ["feat/294-hold"] }), {
+    name: "lane-294-a1b2c3d4",
+    issue: 294,
+    branch: "feat/294-hold",
+    sessionOver: false,
+  });
+  assert.deepEqual(stillRunning, { pr: null, inconclusive: false }, "not yet allowed to open one");
+
+  const found = await associateLanePr(
+    fakeLanePrForge([{ number: 372, body: prOwnerMarker("lane-294-a1b2c3d4", 294), branch: "feat/294-hold" }]),
+    { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true },
+  );
+  assert.deepEqual(found, { pr: 372, inconclusive: false });
+});
+
+test("associateLanePr: a failed engine-side write degrades visibly (logged) instead of throwing out of probe()", async () => {
+  const forge = fakeLanePrForge([{ number: 372, body: "Closes #294", branch: "feat/294-hold" }]);
+  forge.updatePRBody = async () => {
+    throw new Error("gh pr edit: 403");
+  };
+  const logs: string[] = [];
+  const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true }, (line) =>
+    logs.push(line),
+  );
+  assert.equal(pr.pr, null);
+  assert.ok(logs.some((l) => l.includes("lane-294-a1b2c3d4") && l.includes("403")));
+});
+
+test("listOpenPrsForBranch: branch-keyed gh read (--head), never an issue-number match", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify([{ number: 372, body: "b" }]);
+  };
+  assert.deepEqual(await forge.listOpenPrsForBranch("feat/294-hold"), [{ number: 372, body: "b" }]);
+  const argv = seen[0]!;
+  assert.equal(argv[argv.indexOf("--head") + 1], "feat/294-hold");
+  assert.equal(argv[argv.indexOf("--state") + 1], "open");
+  assert.ok(argv.includes("number,body"));
+});
+
+test("updatePRBody: writes through `gh pr edit --body` (a PR-scoped write, never `gh issue edit`)", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return "";
+  };
+  await forge.updatePRBody(372, "new body");
+  assert.deepEqual(seen[0]!.slice(0, 3), ["pr", "edit", "372"]);
+  assert.equal(seen[0]![seen[0]!.indexOf("--body") + 1], "new body");
+});
+
+test("associateLanePr (gate② P1): a branch PR whose body carries DISAGREEING markers is NOT 'unmarked' -> never stamped a third time, never adopted", async () => {
+  // readPrOwner returns null for BOTH 'no marker' and 'ambiguous markers'. Treating the second
+  // as the first would append a third marker, adopt the PR, and hand a `driving` lane a merge
+  // target whose ownership still reads as null on every subsequent probe.
+  const ambiguous = `#294\n\n${prOwnerMarker("lane-294-a1b2c3d4", 294)}\n${prOwnerMarker("lane-999-bbbbbbbb", 999)}`;
+  const forge = fakeLanePrForge([{ number: 372, body: ambiguous, branch: "feat/294-hold" }]);
+  const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.equal(pr.pr, null, "ambiguous ownership fails closed");
+  assert.equal(forge.calls.filter((c) => c.kind === "updatePRBody").length, 0);
+  assert.equal(forge.calls.filter((c) => c.kind === "openPR").length, 0);
+  assert.equal(forge.prs[0]!.body, ambiguous, "the PR body is left exactly as found");
+});
+
+test("hasPrOwnerMarker: true for a malformed/ambiguous marker body that readPrOwner rejects — the two questions are distinct", () => {
+  const ambiguous = `${prOwnerMarker("lane-1-aaaaaaaa", 1)}\n${prOwnerMarker("lane-2-bbbbbbbb", 2)}`;
+  assert.equal(readPrOwner(ambiguous), null);
+  assert.equal(hasPrOwnerMarker(ambiguous), true);
+  assert.equal(hasPrOwnerMarker("Fixes #294 — no marker anywhere"), false);
+  assert.equal(hasPrOwnerMarker(prOwnerMarker("lane-1-aaaaaaaa", 1)), true);
+});
+
+test("associateLanePr (gate② round 2, P1): one unmarked PR ALONGSIDE another lane's marker-bearing PR on the same branch -> refused, not stamped", async () => {
+  // A second lane already claims a PR off this head. `unmarked.length === 1` used to fire here
+  // and stamp-and-adopt the unmarked one, making the multi-candidate refusal below unreachable —
+  // a merge target assigned against direct evidence that the branch is contested. Stamping is
+  // only ever eligible when the branch has exactly ONE open PR and it carries no marker at all.
+  const rival = `${prOwnerMarker("lane-999-bbbbbbbb", 999)}`;
+  const forge = fakeLanePrForge([
+    { number: 380, body: `Closes #999\n\n${rival}`, branch: "feat/294-hold" },
+    { number: 381, body: "## Why\n\nCloses #294", branch: "feat/294-hold" },
+  ]);
+  const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.equal(pr.pr, null, "a contested branch fails closed");
+  assert.equal(forge.calls.filter((c) => c.kind === "updatePRBody").length, 0, "the unmarked candidate is never stamped");
+  assert.equal(forge.calls.filter((c) => c.kind === "openPR").length, 0);
+  assert.equal(forge.prs[1]!.body, "## Why\n\nCloses #294", "left exactly as found");
+});
+
+test("associateLanePr (gate② round 2, P1): TWO unmarked PRs on one branch -> refused (neither is stamped)", async () => {
+  const forge = fakeLanePrForge([
+    { number: 380, body: "first", branch: "feat/294-hold" },
+    { number: 381, body: "second", branch: "feat/294-hold" },
+  ]);
+  const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.equal(pr.pr, null);
+  assert.equal(forge.calls.filter((c) => c.kind === "updatePRBody").length, 0);
+});
+
 test("#379 GithubForge.ensureRepoLabels: lists the configured repo's labels once, creates only the missing ones, returns their names", async () => {
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
@@ -2854,4 +3101,108 @@ test("#379 GithubForge.ensureRepoLabels: lists the configured repo's labels once
       "In this round's dispatch-eligible pool",
     ],
   ]);
+});
+
+// ── #377 gate② round 4 (P1): a branch check that FAILED is not a branch that is ABSENT ───────
+// branchExists collapses 404/network/auth into `false` by design (retro's fail-closed contract).
+// On the lane-association path that collapse re-created the round-3 harm one call earlier: a
+// transient blip read as "not pushed", fell through to the marker scan, and returned a
+// CONCLUSIVE null — settling the lane with its pushed branch still unPRed.
+
+test("probePushedBranch: a genuine 404 is ABSENT — GitHub's own status, surfaced by gh, is the signal", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+    throw new Error("Command failed: gh api repos/o/r/branches/nope\ngh: Not Found (HTTP 404)\n");
+  };
+  assert.equal(await forge.probePushedBranch("nope"), "absent");
+  assert.equal(await forge.branchExists("nope"), false, "branchExists' own fail-closed contract is unchanged");
+});
+
+test("probePushedBranch: anything WITHOUT a 404 status is UNKNOWN — network, auth, 5xx, timeout", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  for (const message of [
+    "getaddrinfo ENOTFOUND api.github.com",
+    "gh: Bad credentials (HTTP 401)",
+    "gh: Must have admin rights (HTTP 403)",
+    "gh: Server Error (HTTP 502)",
+    "Command failed: gh api ... \nsocket hang up",
+  ]) {
+    (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+      throw new Error(message);
+    };
+    assert.equal(await forge.probePushedBranch("feat/x"), "unknown", message);
+    // The legacy boolean still reads every one of these as "not verifiably pushed" — retro.ts
+    // depends on that fail direction and #377 does not change it.
+    assert.equal(await forge.branchExists("feat/x"), false, message);
+  }
+});
+
+test("probePushedBranch: a 404 mentioned in an unrelated position still counts only via the HTTP status token", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+    throw new Error("gh: could not resolve branch 404-error-handling (HTTP 500)");
+  };
+  assert.equal(await forge.probePushedBranch("404-error-handling"), "unknown", "a branch NAMED 404 is not a 404 status");
+});
+
+test("probePushedBranch: present on success, and issues the same per-segment-encoded read branchExists does", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return "{}";
+  };
+  assert.equal(await forge.probePushedBranch("feat/111-pr-b#x"), "present");
+  assert.deepEqual(seen[0], ["api", "repos/o/r/branches/feat/111-pr-b%23x"]);
+});
+
+test("associateLanePr (gate② round 4, P1): an UNKNOWN branch check is inconclusive — never a conclusive 'no PR' that settles the lane", async () => {
+  const forge = fakeLanePrForge([{ number: 368, body: "retro digest — covers #294" }], { branches: ["feat/294-hold"] });
+  forge.probePushedBranch = async () => "unknown";
+  const logs: string[] = [];
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true }, (line) =>
+    logs.push(line),
+  );
+  assert.deepEqual(out, { pr: null, inconclusive: true });
+  assert.equal(forge.calls.filter((c) => c.kind === "openPR").length, 0, "never opened against an unverified head");
+  assert.ok(logs.some((l) => l.includes("feat/294-hold")));
+});
+
+test("associateLanePr (gate② round 4, P1): an ABSENT branch stays CONCLUSIVE — nothing was pushed, so there is nothing to retry", async () => {
+  const forge = fakeLanePrForge([], { branches: [] });
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.deepEqual(out, { pr: null, inconclusive: false });
+});
+
+// ── #377 gate② round 5 (P1/P2): EVERY engine-authored write waits for the session to end ─────
+// Stamping a still-running worker's PR is an unconditional read-modify-write against a body
+// snapshot from the preceding list call: the worker (or a human) editing the description in
+// between loses those edits. It also burned the inconclusive-retry budget during a phase where
+// the conductor only ever classifies the lane KEEP, so the budget could be spent before the one
+// probe that actually settles the lane.
+
+test("associateLanePr (gate② round 5): a still-running lane's unmarked branch PR is NOT stamped — no read-modify-write against a live body", async () => {
+  const forge = fakeLanePrForge([{ number: 372, body: "## Why\n\nCloses #294", branch: "feat/294-hold" }]);
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: false });
+  assert.deepEqual(out, { pr: null, inconclusive: false }, "conclusive: nothing failed, the write is simply not due yet");
+  assert.equal(forge.calls.filter((c) => c.kind === "updatePRBody").length, 0);
+  assert.equal(forge.prs[0]!.body, "## Why\n\nCloses #294", "the worker's live description is untouched");
+});
+
+test("associateLanePr (gate② round 5): a still-running lane whose PR ALREADY carries its marker is still associated — reads never needed the session to end", async () => {
+  const forge = fakeLanePrForge([{ number: 372, body: prOwnerMarker("lane-294-a1b2c3d4", 294), branch: "feat/294-hold" }]);
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: false });
+  assert.deepEqual(out, { pr: 372, inconclusive: false });
+  assert.equal(forge.calls.filter((c) => c.kind === "updatePRBody").length, 0);
+});
+
+test("associateLanePr (gate② round 5): once the session IS over the same unmarked PR is stamped and adopted", async () => {
+  const forge = fakeLanePrForge([{ number: 372, body: "## Why\n\nCloses #294", branch: "feat/294-hold" }]);
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.deepEqual(out, { pr: 372, inconclusive: false });
+  assert.deepEqual(readPrOwner(forge.prs[0]!.body), { lane: "lane-294-a1b2c3d4", issue: 294 });
 });

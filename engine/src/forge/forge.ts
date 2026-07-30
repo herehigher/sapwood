@@ -33,6 +33,31 @@ export function stampEngineComment(body: string): string {
 
 export type OwnerKind = "user" | "org";
 
+/** #377 (gate② round 4): what a branch read on the forge actually established.
+ *  `absent` is GitHub's own answer (404); `unknown` means the CHECK failed and nothing was
+ *  established at all. See GithubForge.probePushedBranch. */
+export type BranchProbe = "present" | "absent" | "unknown";
+
+/** Did this `gh` failure carry GitHub's own 404 status?
+ *
+ *  The status code is the provider-authoritative signal; `gh` surfaces it in its error text
+ *  (`gh: Not Found (HTTP 404)`), which node's execFile rejection carries on `stderr` and in
+ *  `message`. There is no richer channel available here — `gh api` exits 1 for every HTTP error
+ *  and for network failure alike — so this reads the status token and nothing else: no "not
+ *  found" prose matching, and `\b404\b` alone is deliberately NOT accepted (a branch literally
+ *  named `404-error-handling` appears in gh's message for unrelated failures).
+ *
+ *  FAILURE DIRECTION, stated deliberately: this errs toward UNKNOWN. A real 404 whose wording we
+ *  fail to match costs at most MAX_INCONCLUSIVE_PR_PROBES deferred ticks before the lane settles
+ *  by the ordinary rules — bounded and mild. The opposite error (a network blip misread as
+ *  "absent") is the harm this exists to prevent: it settles a lane whose pushed branch never got
+ *  a PR, with no later probe to correct it. */
+function isHttpNotFound(e: unknown): boolean {
+  const err = e as { stderr?: unknown; message?: unknown };
+  const text = `${typeof err?.stderr === "string" ? err.stderr : ""}\n${typeof err?.message === "string" ? err.message : ""}`;
+  return /HTTP 404\b/.test(text);
+}
+
 export interface Issue {
   number: number;
   title: string;
@@ -180,7 +205,7 @@ export interface IForge {
   listIssuesAbsentFromBoard(): Promise<number[]>;
   /** One startup-only, read-only view used to surface management-side orphans after local
    *  state loss. It is observability input only: callers must never rebuild workers from it.
-   *  PR orphan detection shares findOpenPrForIssue's 200-open-PR bound (#50 residual), so PRs
+   *  PR orphan detection shares listOpenPrBodies' 200-open-PR bound (#50 residual), so PRs
    *  beyond it are not reported. */
   readStartupReconcileData(): Promise<StartupReconcileData>;
   getReadyIssues(): Promise<Issue[]>;
@@ -663,7 +688,10 @@ export class GithubForge implements IForge {
     return { placements: project.placements, openPrs: await this.listOpenPrBodies() };
   }
 
-  private async listOpenPrBodies(): Promise<OpenPrBody[]> {
+  // #377: no longer private — associateLanePr's marker-scan fallback (for a lane whose worktree,
+  // and therefore whose branch, is already gone) reads the same bounded open-PR list startup
+  // reconciliation uses. The residual >200-open-PR fail-safe documented in #50 remains.
+  async listOpenPrBodies(): Promise<OpenPrBody[]> {
     const out = await this.gh([
       "pr",
       "list",
@@ -795,18 +823,31 @@ export class GithubForge implements IForge {
   }
 
   async branchExists(branch: string): Promise<boolean> {
-    // Per-SEGMENT encoding: branch names routinely contain "/" (feat/x), which must survive as
-    // a path separator for GitHub's greedy branch route, while any other reserved character in
-    // a segment must not be able to reshape the API path (the branch name originates from a
-    // SESSION-written scratch file — treated as data, same stance as every other session-text
-    // input in this file). gh exits non-zero on a 404 (and on any network/auth failure) — both
-    // read as "not verifiably pushed", the fail direction the IForge doc requires.
+    // Unchanged contract (retro.ts depends on it): ANY failure — 404, network, auth — reads as
+    // "not verifiably pushed", so a PR is never opened against an unverified head. Implemented
+    // on top of the tri-state probe below so the two can't drift; "unknown" collapses to false
+    // exactly as it always did.
+    return (await this.probePushedBranch(branch)) === "present";
+  }
+
+  /** #377 (gate② round 4): branchExists' answer, WITHOUT the lossy collapse — the lane-association
+   *  path needs to tell "GitHub says this branch does not exist" apart from "the check itself
+   *  failed". Collapsing the two re-created the round-3 harm one call earlier: a transient blip
+   *  read as `false` -> fell through to the marker scan -> a CONCLUSIVE "no PR" -> the conductor
+   *  settled a lane whose pushed branch never got its PR (see LanePrOutcome).
+   *
+   *  Per-SEGMENT encoding: branch names routinely contain "/" (feat/x), which must survive as a
+   *  path separator for GitHub's greedy branch route, while any other reserved character in a
+   *  segment must not be able to reshape the API path (the branch name originates from a
+   *  SESSION-written scratch file — treated as data, same stance as every other session-text
+   *  input in this file). */
+  async probePushedBranch(branch: string): Promise<BranchProbe> {
     const path = branch.split("/").map(encodeURIComponent).join("/");
     try {
       await this.gh(["api", `repos/${this.cfg.board.owner}/${this.repo()}/branches/${path}`]);
-      return true;
-    } catch {
-      return false;
+      return "present";
+    } catch (e) {
+      return isHttpNotFound(e) ? "absent" : "unknown";
     }
   }
 
@@ -889,16 +930,36 @@ export class GithubForge implements IForge {
     await this.gh(["issue", "edit", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--body", body]);
   }
 
-  /** #46: maps an issue to its already-open PR, for the live `sapwood run` wiring
-   *  (WorkerDeps.hasOpenPr/findOpenPr) — the "live findOpenPr forge wiring" PLAN.md's M3
-   *  deferred list flagged. The selected PR becomes the driving lane's gate/MERGE target, so
-   *  selection is fail-closed on ambiguity — see findOpenPrNumber for the full precedence
-   *  (closing keywords > oldest-among-closing > a single unambiguous bare `#N` mention;
-   *  multiple bare mentions -> null, the lane queues rather than gating a guessed PR). */
-  async findOpenPrForIssue(issue: number): Promise<number | null> {
-    // listOpenPrBodies owns the shared --state open/--limit 200 read used by startup
-    // reconciliation too. The residual >200-open-PR fail-safe documented in #50 remains.
-    return findOpenPrNumber(await this.listOpenPrBodies(), issue);
+  /** #377: every OPEN PR whose HEAD is exactly `branch` — the branch-keyed read that replaced
+   *  the deleted issue-number-keyed `findOpenPrForIssue` on the lane-association path (see
+   *  associateLanePr). A branch is a structural fact about which lane produced the code; a PR
+   *  body's prose mention of "#N" is not. Returns every match (GitHub permits several open PRs
+   *  off one head against different bases) — the caller disambiguates by marker, never by
+   *  picking one arbitrarily. */
+  async listOpenPrsForBranch(branch: string): Promise<OpenPrBody[]> {
+    const out = await this.gh([
+      "pr",
+      "list",
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--head",
+      branch,
+      "--state",
+      "open",
+      "--limit",
+      "20",
+      "--json",
+      "number,body",
+    ]);
+    const prs = JSON.parse(out) as { number: number; body?: string }[];
+    return prs.map((pr) => ({ number: pr.number, body: pr.body ?? "" }));
+  }
+
+  /** #377: overwrite a PR's body — the WRITE half of the marker contract (the engine stamps the
+   *  owner marker onto a PR its worker opened without one). `gh pr edit`, never `gh issue edit`,
+   *  for the same number-namespace reason addPRLabel gives. */
+  async updatePRBody(pr: number, body: string): Promise<void> {
+    await this.gh(["pr", "edit", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--body", body]);
   }
 
   async getPRReviewData(pr: number): Promise<PRReviewData> {
@@ -1794,29 +1855,20 @@ export function extractAcceptanceCriteria(body: string): AcceptanceCriterion[] |
   }));
 }
 
-/**
- * Pure match for GithubForge.findOpenPrForIssue. Selecting a lane's PR here decides gate②'s
- * MERGE TARGET, so ambiguity must never be guessed away (gate② PR #50 P2 #2 — a newer PR
- * merely *mentioning* the issue must not out-rank / silently replace the issue's own PR):
- *
- *  1. PREFERRED: closing-keyword semantics — `Fixes/Closes/Resolves #N` (all GitHub-recognized
- *     inflections, case-insensitive, word-bounded, optional colon). A PR that declares it
- *     closes the issue is claiming to BE its PR, not just referencing it.
- *  2. Tiebreak among several closing-keyword matches: the OLDEST open PR (the last element —
- *     the caller passes gh's default newest-first order). Rationale: the issue's original PR
- *     is the one the lane's worker opened first; any newer PR also carrying a closing keyword
- *     for the same issue is a duplicate/rescue attempt and must not silently steal the merge
- *     target from the PR already being driven.
- *  3. FALLBACK: a bare `#N` token (not part of a longer number — `#460` never matches issue
- *     46), accepted ONLY when exactly one candidate matches. Multiple bare-mention candidates
- *     are ambiguous -> null (the lane stays undrivable/queued rather than gating a guessed PR).
- */
 const CLOSING_ISSUE_PREFIX = String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#`;
 const BARE_ISSUE_PREFIX = `(^|[^0-9])#`;
 const ISSUE_NUMBER_END = String.raw`(?!\d)`;
 
-/** Paired with findOpenPrNumber below: both PR-body readers derive their closing-keyword and
- *  bare-reference regexes from the fragments above so their accepted syntax cannot drift. */
+/** The single ambiguous issue a PR body REFERENCES, by prose (closing keyword first, then a lone
+ *  bare `#N`). Startup reconciliation (loop/reconcile.ts) is the only consumer: an observability
+ *  read that reports "this open PR looks related to that issue" to a human.
+ *
+ *  #377 deliberately removed the OTHER caller this pair once had — `findOpenPrNumber` /
+ *  `GithubForge.findOpenPrForIssue`, which SELECTED a worker lane's PR by the same prose match
+ *  and, in the live 2026-07-24 F15 case, handed lane-294 an unrelated retro PR whose body merely
+ *  said "#294". Prose is fine for a human-facing hint; it is not an ownership signal. Lane->PR
+ *  association is keyed on the structural PR-owner marker below instead — do not reintroduce a
+ *  prose match on that path. */
 export function referencedIssue(body: string): number | null {
   const closing = [...body.matchAll(new RegExp(`${CLOSING_ISSUE_PREFIX}(\\d+)`, "gi"))].map((match) => Number(match[1]));
   const closingIssues = [...new Set(closing)];
@@ -1826,13 +1878,249 @@ export function referencedIssue(body: string): number | null {
   return issues.length === 1 ? issues[0]! : null;
 }
 
-export function findOpenPrNumber(prs: { number: number; body: string }[], issue: number): number | null {
-  const closing = new RegExp(`${CLOSING_ISSUE_PREFIX}${issue}${ISSUE_NUMBER_END}`, "i");
-  const closingMatches = prs.filter((pr) => closing.test(pr.body));
-  if (closingMatches.length > 0) return closingMatches[closingMatches.length - 1]!.number; // oldest
-  const mention = new RegExp(`${BARE_ISSUE_PREFIX}${issue}${ISSUE_NUMBER_END}`);
-  const mentions = prs.filter((pr) => mention.test(pr.body));
-  return mentions.length === 1 ? mentions[0]!.number : null;
+// ─────────────────────────────────────────────────────────────────────────────
+// #377 — PR-OWNER MARKER: a NEW contract, introduced here from scratch. Before this there was
+// no engine-authored PR-body marker of any kind (the only PR body the engine ever wrote was
+// retro.ts's digest prose). It is NOT an extension of ENGINE_COMMENT_MARKER (that stamps ISSUE
+// COMMENTS) and NOT an extension of any prior PR-body convention, because none existed.
+//
+// WHAT it encodes: which WORKER LANE owns a PR, and for which issue — the on-the-forge
+// counterpart to the on-disk lane sentinels (`<lane>.running.json` etc.) that record the same
+// identity locally. WHY: a lane's PR decides gate②'s merge target, so it must be selected from a
+// signal the engine itself wrote about THIS lane, never from free text an untrusted worker
+// happened to type (doctrine: authoritative signals over inferred text).
+//
+// WHO writes it: the ENGINE only (associateLanePr below — it stamps a PR the worker opened, or
+// authors the body itself when it opens the PR). Never a worker-prompt instruction: asking the
+// worker's LLM to include the marker would leave the marker as agent-authored prose, carrying
+// exactly the omission/malformation risk this contract exists to remove.
+//
+// NOT a replacement for `Fixes #N`: GitHub's own closing-keyword semantics still belong in the
+// human-facing description (and the engine writes one when it authors a body). The marker is for
+// engine association only.
+//
+// RESIDUAL, stated honestly: a worker has `gh` and could paste another lane's marker into a PR
+// body it controls. That requires knowing the other lane's random 8-hex suffix (a lane only ever
+// learns its OWN name, via its worktree path), and a disagreeing second marker in one body reads
+// as null (fail closed) rather than resolving to either lane. This is a narrowing, not a proof.
+const PR_OWNER_MARKER_RE = /<!--\s*sapwood:pr-owner\s+lane="([^"]+)"\s+issue="(\d+)"\s*-->/g;
+
+/** Lane names are engine-generated (`lane-<issue>-<8 hex>`), so this always passes in practice;
+ *  it exists so a name that could NOT be read back verbatim can never be written in the first
+ *  place (a marker that doesn't round-trip is worse than no marker — it reads as "owned by
+ *  someone" while matching nobody). */
+const LANE_NAME_RE = /^[A-Za-z0-9._-]+$/;
+
+/** The marker block itself. Throws on a lane name outside LANE_NAME_RE — see its doc. */
+export function prOwnerMarker(lane: string, issue: number): string {
+  if (!LANE_NAME_RE.test(lane)) throw new Error(`prOwnerMarker: unusable lane name ${JSON.stringify(lane)}`);
+  return `<!-- sapwood:pr-owner lane="${lane}" issue="${issue}" -->`;
+}
+
+/** The pure read-back — paired with prOwnerMarker so the written and accepted syntax cannot
+ *  drift (the same pairing discipline referencedIssue keeps with its own regex fragments).
+ *  Returns null for ANY body without a well-formed marker (prose mentions, closing keywords,
+ *  links and code fences citing the issue number are all just text here), and also for a body
+ *  carrying two markers that DISAGREE — ambiguous ownership is never guessed. */
+export function readPrOwner(body: string): { lane: string; issue: number } | null {
+  const found = [...body.matchAll(PR_OWNER_MARKER_RE)].map((m) => ({ lane: m[1]!, issue: Number(m[2]) }));
+  if (found.length === 0) return null;
+  const first = found[0]!;
+  return found.every((f) => f.lane === first.lane && f.issue === first.issue) ? first : null;
+}
+
+/** Does this body carry a marker AT ALL? Deliberately a SEPARATE question from readPrOwner's —
+ *  that one collapses "no marker" and "markers that disagree" into the same `null`, and a caller
+ *  that treats the second as the first would stamp its own marker onto a body whose ownership is
+ *  already contested, adopt the PR, and leave every later read still returning null (gate② P1 on
+ *  PR #423). Association uses BOTH: readPrOwner to claim a PR, this to refuse one it can't. */
+export function hasPrOwnerMarker(body: string): boolean {
+  return [...body.matchAll(PR_OWNER_MARKER_RE)].length > 0;
+}
+
+/** Appends the marker to a PR body, idempotently — the worker's own description (closing keyword
+ *  included) is preserved verbatim above it. */
+export function stampPrOwner(body: string, lane: string, issue: number): string {
+  const marker = prOwnerMarker(lane, issue);
+  return body.includes(marker) ? body : `${body.trimEnd()}\n\n${marker}\n`;
+}
+
+/** Marker-only selection over a list of open PRs — the fallback for a lane whose branch is no
+ *  longer knowable (its worktree was reclaimed). Several PRs claiming the same lane+issue is
+ *  ambiguous -> null, the same fail-closed stance the rest of this file takes on merge targets. */
+export function findLaneOwnedPr(prs: readonly OpenPrBody[], lane: string, issue: number): number | null {
+  const owned = prs.filter((pr) => {
+    const owner = readPrOwner(pr.body);
+    return owner !== null && owner.lane === lane && owner.issue === issue;
+  });
+  return owned.length === 1 ? owned[0]!.number : null;
+}
+
+/** The forge surface associateLanePr needs. Deliberately NOT folded into IForge — same rationale
+ *  the deleted findOpenPrForIssue wiring carried: every fake forge in this repo's tests
+ *  implements IForge, and this association path is only ever wired to the real GithubForge
+ *  (cli.ts duck-types it and degrades to "no association" otherwise). */
+export interface LanePrForge {
+  listOpenPrsForBranch(branch: string): Promise<OpenPrBody[]>;
+  listOpenPrBodies(): Promise<OpenPrBody[]>;
+  updatePRBody(pr: number, body: string): Promise<void>;
+  openPR(branch: string, title: string, body: string): Promise<number>;
+  /** #377 round 4: the TRI-STATE read, not IForge's lossy `branchExists` boolean — a check that
+   *  failed must not read as "nothing was pushed" on this path. */
+  probePushedBranch(branch: string): Promise<BranchProbe>;
+  getIssueMeta(issue: number): Promise<Pick<IssueMeta, "title">>;
+}
+
+export interface LanePrRequest {
+  /** The lane name — the same one the on-disk sentinels use. */
+  name: string;
+  issue: number;
+  /** The lane worktree's own current branch, read from its git HEAD (worker.ts's laneBranch), or
+   *  null when unknowable (worktree gone, detached HEAD). */
+  branch: string | null;
+  /** Is the lane's session over — by EITHER structural signal, a terminal sentinel or a
+   *  confirmed-dead wrapper (see worker.ts's probe())? This gates EVERY engine-authored WRITE on
+   *  this path, both opening a PR and stamping an existing one (gate② round 5):
+   *
+   *   - Opening one mid-run would race the worker's own `gh pr create`.
+   *   - Stamping one mid-run is an unconditional read-modify-write against a body snapshot from
+   *     the preceding list call; GitHub offers no conditional PR-body update, so a worker or
+   *     human editing the description in between would silently lose those edits.
+   *
+   *  READS are never gated: a PR that already carries this lane's marker associates at any time.
+   *  Because no write can fail before the session ends, the inconclusive-retry budget also
+   *  cannot be spent during a phase where the conductor would only ever classify the lane
+   *  KEEP — the exact exhaustion the round-5 review flagged. */
+  sessionOver: boolean;
+}
+
+/** What associateLanePr concluded. The two fields answer DIFFERENT questions, and the caller
+ *  (worker.ts's probe -> the conductor's reclaim) needs both:
+ *
+ *  - `pr`: the lane's PR, when one was conclusively identified.
+ *  - `inconclusive`: a forge WRITE this association depended on FAILED (openPR, or the marker
+ *    stamp), so the answer is UNKNOWN — not "this lane has no PR". That distinction is
+ *    load-bearing (gate② round 3, P1): `sessionOver` only ever becomes true on the very probe the
+ *    conductor SETTLES the lane from, so collapsing a transient 502 into a definitive `null`
+ *    escalated finished work to a human, or requeued a dead lane onto a FRESH worker while its
+ *    pushed branch sat there — with no later probe to correct either. An inconclusive answer is
+ *    retried on a later tick instead of being settled.
+ *
+ *  A definitive refusal (branch not pushed, another lane's marker, a contested body, not yet
+ *  allowed to open one) is `{ pr: null, inconclusive: false }` — a real answer about the world,
+ *  with nothing to retry. */
+export interface LanePrOutcome {
+  pr: number | null;
+  inconclusive: boolean;
+}
+
+/**
+ * #377: resolve a worker lane to ITS OWN PR. Two structural signals, in order — the lane
+ * worktree's branch (which PR was opened off the code this lane actually produced), then the
+ * engine-authored owner marker. Never prose.
+ *
+ *  1. Branch known -> the open PR(s) off that head.
+ *     a. one carries THIS lane's marker -> that's the PR.
+ *     b. the branch has exactly ONE open PR and it carries NO marker at all -> the engine stamps
+ *        it (engine-authored write) and adopts it. The branch is this lane's own worktree HEAD,
+ *        so head-identity is the evidence; the stamp makes the association survive the
+ *        worktree's deletion.
+ *     c. anything else -> no association. That covers another lane's marker, SEVERAL candidates
+ *        (even when only one of them is unmarked), and a body whose own markers disagree
+ *        (contested, NOT unmarked). No such PR is ever adopted or re-stamped.
+ *  2. No PR off the branch, the branch IS on the forge, and the lane's session has ended -> the
+ *     engine opens the PR itself (the retro.ts:406 precedent) with the marker in the body it
+ *     authors.
+ *  3. Otherwise -> marker scan across open PRs (covers a reclaimed worktree).
+ *
+ * FAIL DIRECTION: no association (null) rather than a guessed one. A lane whose PR can't be
+ * identified escalates to a human (conductor's ESCALATE_NOPR) — the F15 failure, by contrast,
+ * silently drove a stranger's PR through review.
+ *
+ * A forge WRITE that fails (403, network) degrades visibly through `log` and yields an
+ * INCONCLUSIVE outcome — never a definitive "no PR" (see LanePrOutcome), and never a throw out
+ * of the caller's probe() that would wedge the tick.
+ */
+export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, log?: (message: string) => void): Promise<LanePrOutcome> {
+  const say = (message: string): void => log?.(`[sapwood:forge] lane ${lane.name}: ${message}`);
+  /** A real answer about the world: nothing to retry. */
+  const refuse = (message: string): LanePrOutcome => {
+    say(message);
+    return { pr: null, inconclusive: false };
+  };
+  /** A forge write failed: the answer is UNKNOWN, so the caller must retry rather than settle. */
+  const unknown = (message: string): LanePrOutcome => {
+    say(message);
+    return { pr: null, inconclusive: true };
+  };
+  if (lane.branch) {
+    const candidates = await forge.listOpenPrsForBranch(lane.branch);
+    const owned = findLaneOwnedPr(candidates, lane.name, lane.issue);
+    if (owned != null) return { pr: owned, inconclusive: false };
+    // Stamp-and-adopt is eligible ONLY for a branch with exactly ONE open PR that carries no
+    // marker at all. Both halves of that are load-bearing (gate② P1s on PR #423):
+    //  - ONE candidate: an unmarked PR sitting alongside a marker-bearing one used to qualify by
+    //    filtering to the unmarked subset, which adopted a merge target against direct evidence
+    //    that another lane already claims this head — and made the refusal below unreachable.
+    //  - NO marker AT ALL (`hasPrOwnerMarker`, never `readPrOwner(...) === null`): a body whose
+    //    markers DISAGREE is contested, not unmarked, and stamping a third marker onto it would
+    //    leave every later read still returning null.
+    const sole = candidates.length === 1 ? candidates[0]! : null;
+    if (sole && !hasPrOwnerMarker(sole.body)) {
+      // The lane's own branch, one PR, no marker — ours to claim, but only once nothing is left
+      // that could be editing that body concurrently (see LanePrRequest.sessionOver).
+      if (!lane.sessionOver) {
+        return refuse(`branch ${lane.branch}'s sole PR #${sole.number} is unmarked — deferring the stamp until the session ends`);
+      }
+      const pr = sole;
+      try {
+        await forge.updatePRBody(pr.number, stampPrOwner(pr.body, lane.name, lane.issue));
+      } catch (e) {
+        return unknown(`could not stamp the owner marker on PR #${pr.number} (${String(e)}) — association UNKNOWN, retried later`);
+      }
+      return { pr: pr.number, inconclusive: false };
+    }
+    if (candidates.length > 0) {
+      return refuse(
+        `branch ${lane.branch} has ${candidates.length} open PR(s), none claimable by this lane ` +
+          `(another lane's marker, contested markers, or several candidates) — not adopting any`,
+      );
+    }
+    if (lane.sessionOver) {
+      // A branch check that FAILED is not a branch that is ABSENT (gate② round 4): only GitHub's
+      // own 404 is evidence that nothing was pushed. Anything else leaves the answer unknown, so
+      // the lane is retried rather than settled with its pushed work unPRed.
+      const pushed = await forge.probePushedBranch(lane.branch);
+      if (pushed === "unknown") {
+        return unknown(`could not verify whether ${lane.branch} is pushed — association UNKNOWN, retried later`);
+      }
+      if (pushed === "present") {
+        try {
+          const title = await forge.getIssueMeta(lane.issue).then((m) => m.title);
+          const opened = await forge.openPR(lane.branch, title, engineAuthoredPrBody(lane.name, lane.issue, lane.branch));
+          return { pr: opened, inconclusive: false };
+        } catch (e) {
+          return unknown(`could not open a PR for pushed branch ${lane.branch} (${String(e)}) — branch preserved, retried later`);
+        }
+      }
+    }
+  }
+  return { pr: findLaneOwnedPr(await forge.listOpenPrBodies(), lane.name, lane.issue), inconclusive: false };
+}
+
+/** The body the engine writes when IT opens a lane's PR. Carries the human-facing closing keyword
+ *  (GitHub's own auto-close semantics, unchanged by #377) plus the owner marker, and says plainly
+ *  that only this description — not the code — is engine-authored. */
+function engineAuthoredPrBody(lane: string, issue: number, branch: string): string {
+  return [
+    `Closes #${issue}`,
+    "",
+    `Opened by the sapwood engine: lane \`${lane}\` pushed \`${branch}\` but ended without opening a PR itself.`,
+    "The commits are the worker's; this description is the engine's.",
+    "",
+    prOwnerMarker(lane, issue),
+    "",
+  ].join("\n");
 }
 
 type ReadyCfg = {
