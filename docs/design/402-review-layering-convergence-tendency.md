@@ -271,6 +271,10 @@ a lane-history fact, which belongs where fix rounds are already counted).
 **Decision: a dispute reaches a human at the earliest moment it is the only thing left,
 and costs zero further paid fix legs.**
 
+**Scope, corrected after live operation: this section covers the CLASSIC reviewer path
+(threads) only.** The `engine-agent` path has no review threads and therefore no dispute
+channel at all — see §4a, which was written from evidence this design's own PR produced.
+
 Precisely: on a DRIVE tick where the gate is `FIXABLE` and every unresolved thread on
 the current head has a recorded `disputed` resolution for that head, the lane escalates
 to `needs-human` with reason `review-disputed` instead of dispatching a fix leg. Both
@@ -304,6 +308,64 @@ attrition — a direct non-negotiable violation). Auto-reject a dispute (makes `
 a no-op and destroys the dissent channel PLAN.md's dissent doctrine exists for).
 Route disputes to a second reviewer (that is quorum, out of scope per §7 — and a second
 LLM's opinion is not adjudication).
+
+## 4a. Scope correction: on the engine-agent path there is no dispute channel at all
+
+**Discovered in live operation, on this design's own PR (#455), and it corrects §4.**
+§4 above is written over *review threads*. On the `engine-agent` reviewer path there
+are none, so §4's mechanism — and the producer's dissent channel generally — does not
+exist there today. The chain, each link verified in source rather than inferred:
+
+1. A `rejected` engine-agent verdict does not come from threads. It is mapped to a
+   **synthetic** action: `syntheticVerdictAction` (`review/drive.ts:172`) returns
+   `HANDLE_THREADS` for `rejected`, so the existing `finalizeVerdict`/`deriveGate` path
+   can be reused unchanged.
+2. Findings reach the fix leg through the bounded audit channel only —
+   `getPRAuditComments` (`proxy/tools.ts:38`), a **top-level PR comment**, per design
+   #279 §1's findings-transport decision.
+3. **The engine has no thread-CREATING forge write.** `IForge` exposes
+   `replyToReviewThread` and `resolveReviewThread` (both require an existing thread id)
+   and, at the GraphQL layer, only `addPullRequestReviewThreadReply` — there is no
+   `addPullRequestReviewThread` / `addPullRequestReview` / `createReview` anywhere.
+4. Therefore `pr_review_threads` is legitimately EMPTY on an engine-agent-reviewed PR.
+5. The fix leg's only report contract is `threadResponses`, and every entry is keyed on
+   a thread id the engine can verify the producer actually saw.
+
+⇒ **On the engine-agent path a fix leg can express neither `addressed` nor `disputed`
+for any finding.** Not "it is awkward" — there is no id to key an entry on, and
+inventing one voids the whole report by design. The dissent doctrine PLAN.md states, and
+§4 above prices correctly, is structurally unreachable in the mode this repo actually
+runs.
+
+**Observed consequence, this PR:** the sole finding on #455 was `ac5-issue-linkage` — an
+explanatory note recording *why* the reviewer marked AC5 `claim-accepted`, alongside
+four `confirmed` and two `claim-accepted` criteria and zero defect claims. Because
+`deriveApprovalResult` is binary (§1), that note became a `rejected` disposition; because
+of this section, the producer could not answer it; so the lane re-dispatched an identical
+fix leg with nothing it could act on. This is §1 and §4 failing *together*, and it is the
+sharpest available evidence for both: layering would have made the note advisory and
+merged, and a dispute channel would have let the producer say so once.
+
+**What closes it** — needs its own issue, which a fix leg cannot open (no forge
+credentials in that session); flagged in §11 for a human to file:
+
+- **Preferred: extend the fix-leg report contract with an audit-finding response**, keyed
+  on `(finding id, head OID)` — both already engine-verifiable (finding ids come from the
+  validated artifact; the head is in the audit marker). The engine posts the reply as a
+  top-level comment and applies §4's escalation on `disputed`. Adds no forge write the
+  engine lacks, and keeps verification on structured data the engine already holds.
+- Rejected alternative: **have the engine open a real review thread per blocking
+  finding.** It would unify both paths on one channel, but it adds a
+  producer-visible forge write surface the engine deliberately does not have today, and
+  it converts every finding into a durable GitHub thread — including the advisories §2
+  exists to keep cheap.
+
+Until it lands, state the residual honestly rather than implying §4 covers both modes:
+**an engine-agent finding is answerable only by changing code, never by disagreeing with
+it**, and a non-defect finding therefore costs the full `prFixCap` before a human is
+asked. §3's convergence stop is what bounds that today — on this path the per-round
+finding record (R2) is the *only* signal a lane emits about progress, since the fix leg
+itself cannot report anything, which strengthens §3's case for recording it.
 
 ## 5. Tendency — cross-PR finding-class accounting
 
@@ -485,9 +547,10 @@ changed** (`lanes.prFixCap`).
 
 ## 11. Implementation issues
 
-Six, each independently reviewable, each with its own executable verification plan.
-**None touches a human-merge-only path** (§0). Dependency: `#378 → R2 → R3`;
-`R2 → R5`; `R1` independent; `R4` independent; `R6` last (round-close doc gate).
+Six filed, each independently reviewable, each with its own executable verification plan,
+plus one (R7) that a human must file — see its row. **None touches a human-merge-only
+path** (§0). Dependency: `#378 → R2 → R3`; `R2 → R5`; `R1` independent; `R4` independent;
+`R7` independent; `R6` last (round-close doc gate).
 
 | # | Issue | Scope | Files |
 |---|---|---|---|
@@ -497,3 +560,4 @@ Six, each independently reviewable, each with its own executable verification pl
 | **R4** | #451 | Dispute costs zero fix legs: escalate `review-disputed` when every unresolved current-head thread is disputed, with the §4 evidence set | `loop/conductor.ts`, `loop/fix-response.ts` |
 | **R5** | #453 | Tendency in retro: finding-class table over K rounds in the digest, `roles.retro.tendencyRounds`, retro prompt points at it | `retro/retro-digest.ts`, `config/config.ts`, `engine/prompts/retro.md` |
 | **R6** | #454 | Reviewer prompt as a designed artifact: §6a enforced-vs-judged table, §6b triage doctrine; round-close docs | `engine/prompts/engine-reviewer.md`, `docs/role-paradigm.md`, `docs/configuration.md`, `docs/PLAN.md` |
+| **R7** | **not yet filed** | §4a's audit-finding response contract — the engine-agent path's missing dispute channel, keyed on `(finding id, head OID)`. **A human must open this one:** it was found by a fix leg on this PR, and a fix-leg session holds no forge credentials, so it could not be filed from where it was discovered. | fix-leg report contract (`loop/fix-response.ts`), `loop/conductor.ts`, `engine/prompts/fix.md` |
