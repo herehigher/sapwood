@@ -807,7 +807,7 @@ export class RoleRunner {
         }
         // Best-effort: the child may actually be alive despite the lost notification. killTree
         // itself never throws (peripheral.ts's own SpawnedSession.killGroup swallows kill errors).
-        await this.killTree(session);
+        await this.killTree(session, () => exitNotified);
       }
       if (spawnErr) {
         try {
@@ -965,7 +965,7 @@ export class RoleRunner {
         // one more heartbeat "for the road" at the exact moment we've given up on it).
         if (!timedOut && elapsedSec > this.deps.cfg.worker.timeoutSec) {
           timedOut = true;
-          void this.killTree(session);
+          void this.killTree(session, () => exitNotified);
           return; // also skips the exit-loss check this SAME tick — see the block comment above
         }
         if (!timedOut) {
@@ -987,7 +987,7 @@ export class RoleRunner {
           } catch {
             /* best-effort — the synthetic resolution below is still the operative signal */
           }
-          void this.killTree(session); // best-effort: the child may somehow still be alive
+          void this.killTree(session, () => exitNotified); // best-effort: the child may somehow still be alive
           resolveExit(null);
         }
       }, this.hbMs);
@@ -1285,13 +1285,20 @@ export class RoleRunner {
     });
   }
 
-  private async killTree(session: SpawnedSession): Promise<void> {
-    session.killGroup("SIGTERM");
+  private async killTree(session: SpawnedSession, hasExited: () => boolean): Promise<void> {
     // #403 (F25), PR #430 gate② P1: the grace is a CANCELABLE wait on the child's own exit, not a
     // fixed sleep — see awaitKillGrace. A tree that dies inside the window is never SIGKILLed
     // (nothing left to signal, and the pid/group may since have been recycled), and no pending
     // timer outlives the call.
-    if ((await awaitKillGrace(session, this.killGraceMs)) === "exited") return;
+    //
+    // Round 4 (P2): SUBSCRIBE BEFORE SIGNALLING, and pass the caller's already-observed exit state
+    // (`exitNotified`) through. Starting the grace first closes the window where the child dies
+    // between the SIGTERM and the listener registration, and `hasExited` covers the case where it
+    // was already gone before this method ran at all — the spawn-confirmation-timeout path
+    // routinely is.
+    const grace = awaitKillGrace(session, this.killGraceMs, hasExited);
+    session.killGroup("SIGTERM");
+    if ((await grace) === "exited") return;
     session.killGroup("SIGKILL");
   }
 
@@ -1378,16 +1385,34 @@ function cancelableSleep(ms: number, signal: AbortSignal): Promise<void> {
  *  improvement for the same reason — the engine no longer signals a group it has already reaped,
  *  and killTree returns as soon as the tree is gone instead of always burning the full grace.
  *
+ *  `hasExited` is the CALLER's own already-observed exit state (run()'s `exitNotified`) — see the
+ *  body for why a fresh listener alone is not enough.
+ *
  *  Exported for its own unit tests; `timer` is injectable so those tests decide the outcome at the
  *  seam instead of waiting on a real clock. */
 export function awaitKillGrace(
   session: Pick<SpawnedSession, "onExit">,
   graceMs: number,
+  hasExited: () => boolean,
   timer: (ms: number, signal: AbortSignal) => Promise<void> = cancelableSleep,
 ): Promise<"exited" | "grace"> {
+  // PR #430 gate② round 4 (P2): the caller's ALREADY-OBSERVED exit state is checked first, and it
+  // is the authority. Node does not replay `exit` to a listener registered after the fact, so on
+  // any path where run() has already seen the child go (the spawn-confirmation-timeout path
+  // routinely has: `exitNotified` is set by then), a freshly-subscribed `once("exit")` would never
+  // fire — the full grace would burn and the SIGKILL would land on a pid/process-group the OS may
+  // since have recycled, which is the exact behaviour this function exists to prevent.
+  if (hasExited()) return Promise.resolve("exited");
   const exited = new AbortController();
   session.onExit(() => exited.abort());
-  return timer(graceMs, exited.signal).then(() => (exited.signal.aborted ? "exited" : "grace"));
+  // Re-checked after subscribing: an exit landing between the check above and the registration
+  // would otherwise be missed the same way. Both are synchronous today — the point is that the
+  // ordering is a stated contract, not an accident of the current code.
+  if (hasExited()) return Promise.resolve("exited");
+  // `hasExited()` is consulted again at settle time so a LOST exit notification (the #395
+  // scenario) still reads as "exited" from the caller's own evidence rather than authorising a
+  // SIGKILL at a stale pid.
+  return timer(graceMs, exited.signal).then(() => (exited.signal.aborted || hasExited() ? "exited" : "grace"));
 }
 
 // ── #104: shared session-retry helper ───────────────────────────────────────────────────────

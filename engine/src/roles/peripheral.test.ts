@@ -2828,7 +2828,7 @@ test("awaitKillGrace (#403, F25): a child that exits inside the window resolves 
       );
     });
 
-  const settled = awaitKillGrace(session, 60_000, timer);
+  const settled = awaitKillGrace(session, 60_000, () => false, timer);
   assert.ok(exitCb, "awaitKillGrace must subscribe to the child's own exit, not just start a timer");
   exitCb();
   assert.equal(await settled, "exited");
@@ -2838,5 +2838,37 @@ test("awaitKillGrace (#403, F25): a child that exits inside the window resolves 
 test("awaitKillGrace (#403, F25): a child still alive when the window elapses resolves 'grace' — the SIGKILL is warranted", async () => {
   const session = { onExit: () => {} }; // never exits
   const elapsedImmediately = async (): Promise<void> => {};
-  assert.equal(await awaitKillGrace(session, 60_000, elapsedImmediately), "grace");
+  assert.equal(await awaitKillGrace(session, 60_000, () => false, elapsedImmediately), "grace");
+});
+
+test("awaitKillGrace (#403, F25 — PR #430 gate② round 4, P2): a child that ALREADY exited before the kill path started resolves 'exited' immediately — Node never replays `exit` to a late listener, so the caller's own observed state is the authority", async () => {
+  // The gap this closes: on the spawn-confirmation-timeout path, run() has often ALREADY seen the
+  // child's exit event (`exitNotified`) by the time killTree runs. A freshly-registered
+  // `once("exit")` listener never fires for an event that already happened, so the grace would be
+  // burned in full and a SIGKILL then delivered to a pid/process-group the OS may have recycled —
+  // exactly the behaviour the cancelable grace exists to remove.
+  let subscribed = false;
+  const session = {
+    onExit: () => {
+      subscribed = true;
+    },
+  };
+  const timerMustNotRun = (): Promise<void> => {
+    throw new Error("the grace timer must never start when the child is already known to be gone");
+  };
+  assert.equal(await awaitKillGrace(session, 60_000, () => true, timerMustNotRun), "exited");
+  assert.equal(subscribed, false, "no listener is needed for an exit that has already been observed");
+});
+
+test("awaitKillGrace (#403, F25 — PR #430 gate② round 4, P2): an exit observed only via the caller's state while the window is open still resolves 'exited', never 'grace'", async () => {
+  // The lost-notification direction of the same gap: the callback route never fires (a missed
+  // `exit` event, the #395 scenario this module already models elsewhere), but run()'s own
+  // exitNotified flips. The grace must then still report "exited" rather than authorising a
+  // SIGKILL, because the caller has authoritative evidence the tree is gone.
+  let exited = false;
+  const session = { onExit: () => {} }; // the callback route is deliberately dead here
+  const windowElapses = async (): Promise<void> => {
+    exited = true; // the exit landed while the window was open, observed only by the caller
+  };
+  assert.equal(await awaitKillGrace(session, 60_000, () => exited, windowElapses), "exited");
 });
