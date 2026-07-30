@@ -8,12 +8,23 @@ The suite uses colocated `node:test` files loaded through `tsx`. The source carr
 | --- | --- | --- |
 | repository root | `npm test` | `npm run -ws test`; currently the engine's `node --import tsx --test "src/**/*.test.ts"`. |
 | repository root | `npm run lint` | `biome ci .` using `biome.json`. |
-| repository root | `npm run typecheck` | `npm run -ws typecheck`; currently `tsc --noEmit` in the engine. |
+| repository root | `npm run typecheck` | `npm run -ws typecheck`; currently `tsc -p tsconfig.typecheck.json` in the engine. |
 | repository root | `npm run build` | `npm run -ws build`; currently `tsc` into `engine/dist/`. |
 | `engine/` | `npm test` | All `src/**/*.test.ts` through `node:test` and `tsx`. |
 | `engine/` | `npm run lint` | `biome ci src`. |
-| `engine/` | `npm run typecheck` | `tsc --noEmit`. |
+| `engine/` | `npm run typecheck` | `tsc -p tsconfig.typecheck.json`. |
 | `engine/` | `npm run build` | `tsc`. |
+
+`engine/tsconfig.json` is the BUILD config and excludes `src/**/*.test.ts` (and
+`src/**/*.test-support.ts`) so `tsc` does not emit test files into `dist/`.
+`engine/tsconfig.typecheck.json` extends it, drops that exclusion, and is what `npm run typecheck`
+runs — so **every** fixture is type-checked, not merely stripped by `tsx`. It excludes nothing, and
+must stay that way: an excluded test file is one where a fixture can drop a required dependency —
+a required `now` clock, for instance — and still compile, which is the coverage hole the compiler
+check exists to close. If a test file stops compiling, fix the file rather than excluding it.
+A partial `IForge` double is the usual cause; `src/forge/unstubbed-forge.test-support.ts` exists so
+a fixture can stub only the slice it drives (`class FakeForge extends UnstubbedForge`) without
+restating the rest of the interface.
 
 The root lint command and engine lint command are not identical: the root invokes Biome at the repository root, while `biome.json` limits included files to `engine/src/**/*.ts`.
 
@@ -49,6 +60,19 @@ existing suite:
 - **Subprocess realism is bounded.** `worker.test.ts` exercises real local
   process/filesystem behavior around the spawn seam and can be
   contention-sensitive; everything else stays hermetic.
+- **No assertion may depend on real time.** A test that seeds a timestamp
+  injects that same clock into the code under test, and no assertion's
+  pass/fail may turn on real timer ordering, real subprocess duration, or
+  scheduler order — inject the seam, don't widen the margin. Every production
+  `now` dependency is a *required* constructor/deps field precisely so the
+  compiler catches a fixture that forgot; the exceptions that genuinely want
+  the wall clock (monotonicity checks, a documented order-of-magnitude
+  passthrough bound) say so in a comment at the site. A test that can hang on
+  regression carries a hang guard with a named failure message
+  (`materializer.test.ts`'s `withHangGuard`, `watchdog.test.ts`'s `waitFor`).
+  This class has reddened `main` three times — see
+  [REVIEW-DOCTRINE.md](../REVIEW-DOCTRINE.md#technical-invariants), "No
+  timing-dependent assertions", for the worked examples.
 
 ## CI
 

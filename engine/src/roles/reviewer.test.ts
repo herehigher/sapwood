@@ -18,6 +18,7 @@ import type {
   Reviewer,
   ReviewerAdapter,
   ReviewFallbackLock,
+  ReviewTriggerPin,
   ReviewVerdict,
 } from "./reviewer.js";
 import {

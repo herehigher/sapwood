@@ -1,6 +1,7 @@
 // peripheral.test.ts (#87): the role runner — a stub `claude` binary (zero token, same
 // integration style as worker.test.ts) drives the real spawn/sentinel/timeout/cost-parse path.
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,6 +14,7 @@ import type { ParkRow } from "../state/state.js";
 import type { ContextManifest } from "./context-manifest.js";
 import {
   ARCHITECT_ALLOWED_TOOLS,
+  awaitKillGrace,
   CONFIRM_ALLOWED_TOOLS,
   CONFIRM_DISALLOWED_TOOLS,
   PLAN_DRAFTER_DISALLOWED_TOOLS,
@@ -28,15 +30,40 @@ import {
   type RoleSessionOpts,
   type RoleSessionResult,
   runSessionWithRetry,
+  sessionTreeIsGone,
 } from "./peripheral.js";
 import { validateReviewerOutput } from "./plan-review.js";
+
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
+/** #403 (F25), PR #430 gate② round 3: the `waitForInitLine` ceiling for every fixture whose
+ *  assertions depend on the child's `system/init` line having been OBSERVED (`captureBasis:
+ *  "init-observed"`), including the two timeout tests whose whole timing-safety argument rests on
+ *  the TERM trap being provably armed first.
+ *
+ *  It is a HANG-GUARD ceiling, not a margin. `waitForInitLine` polls and returns the instant the
+ *  line appears — typically single-digit milliseconds after spawn — so a large value costs a
+ *  passing run nothing at all; it only bounds the case where the line never appears. The old
+ *  values (2000ms, 3000ms) read as generous but were not: both expired under concurrent load
+ *  (measured at load average ~110 during this PR's load evidence), and when the poll expires
+ *  `captureBasis` degrades to the fallback and the assertion fails — "the child was slow" reported
+ *  as "the barrier did not hold". That is the banned shape: a real subprocess racing a fixed
+ *  budget, with the budget's expiry deciding the verdict. 30s matches production's own default. */
+const INIT_OBSERVED_GUARD_MS = 30_000;
+
+const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 
 test("RoleRunner: default guard hook resolves the compiled hook in the guard directory", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
-    const runner = new RoleRunner({ cfg, stateDir: dir, worktreeRoot: join(dir, "worktrees"), claudeBin: "claude" });
+    const runner = new RoleRunner({ now: realClock, cfg, stateDir: dir, worktreeRoot: join(dir, "worktrees"), claudeBin: "claude" });
     const guardHookPath = (runner as unknown as { guardHookPath: string }).guardHookPath;
     assert.equal(guardHookPath, fileURLToPath(new URL("../guard/guard-hook.js", import.meta.url)));
   } finally {
@@ -59,6 +86,7 @@ const mkHook = (dir: string): string => {
 
 const mkRunner = (dir: string, claudeBin: string, over: Partial<RoleRunnerDeps> = {}): RoleRunner =>
   new RoleRunner({
+    now: realClock,
     cfg,
     stateDir: dir,
     worktreeRoot: join(dir, "worktrees"),
@@ -174,7 +202,7 @@ echo '{"type":"result","subtype":"success","total_cost_usd":0.0005,"model":"clau
 exit 0
 `,
     );
-    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
     const prompt = "assemble manifest test";
     const result = await runner.run({ roleId: "test-role", prompt, model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "done");
@@ -274,7 +302,7 @@ echo '{"type":"result","subtype":"success","total_cost_usd":0.0005,"model":"clau
 exit 0
 `,
     );
-    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
     const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "done");
     const manifest = result.contextManifest;
@@ -319,7 +347,7 @@ echo '{"type":"result","subtype":"success","total_cost_usd":0}'
 exit 0
 `,
     );
-    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
 
     const readOnly = await runner.run({
       roleId: "plan-reviewer-confirm",
@@ -425,7 +453,7 @@ exit 0
     // The init line (emitted right after the worktree is created, same script) anchors the
     // capture deterministically — no race, no need for a large timeout, but kept generous
     // anyway since the point of this test is the dirty/dirtyBasis derivation, not timing.
-    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
     const result = await runner.run({
       roleId: "retro",
       prompt: "p",
@@ -469,7 +497,7 @@ echo '{"type":"result","subtype":"success","total_cost_usd":0.0005}'
 exit 0
 `,
     );
-    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
     const result = await runner.run({ roleId: "test-role", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     const manifest = result.contextManifest;
     assert.ok(manifest);
@@ -511,6 +539,7 @@ test("run: wall-clock timeout kills the tree -> outcome timeout, tagged as a .fa
       worker: { timeoutSec: 1 }, // fires on the first heartbeat tick after 1s elapsed
     });
     const runner = new RoleRunner({
+      now: realClock,
       cfg: tcfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -579,6 +608,7 @@ test("run: guard hook missing in hard mode -> throws, refuses to spawn an unguar
   try {
     const bin = mkStub(dir, FAST_STUB);
     const runner = new RoleRunner({
+      now: realClock,
       cfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -602,6 +632,7 @@ test("run: soft guard mode tolerates a missing hook (no fail-closed refusal)", a
     const bin = mkStub(dir, FAST_STUB);
     const softCfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
     const runner = new RoleRunner({
+      now: realClock,
       cfg: softCfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -1017,6 +1048,7 @@ exit 0
 `,
     );
     const runner = new RoleRunner({
+      now: realClock,
       cfg,
       stateDir: dir,
       worktreeRoot,
@@ -1058,6 +1090,7 @@ exit 0
 `,
     );
     const runner = new RoleRunner({
+      now: realClock,
       cfg,
       stateDir: dir,
       worktreeRoot,
@@ -1116,6 +1149,7 @@ test("run: a ../-escaping scratchFile is refused — the outside file is NOT rea
     writeFileSync(join(dir, "secret"), "engine-private content");
     const bin = mkStub(dir, FAST_STUB);
     const runner = new RoleRunner({
+      now: realClock,
       cfg,
       stateDir: dir,
       worktreeRoot,
@@ -1492,6 +1526,8 @@ const mkManifest = (tag: string): ContextManifest => ({
   worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
   settingsHash: "hash",
   hookHash: null,
+  toolUsage: [],
+  readPaths: [],
   recordedAt: "2026-07-17T00:00:01Z",
 });
 
@@ -1717,6 +1753,7 @@ test("run: proxy teardown (stop()) happens on EVERY outcome, including a timed-o
     const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`);
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
     const runner = new RoleRunner({
+      now: realClock,
       cfg: tcfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -2172,6 +2209,7 @@ test("run (#285, Codex sol-high PR #300 review, P2): reviewCwd FORCES the guard 
     );
     const softCfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
     const runner = new RoleRunner({
+      now: realClock,
       cfg: softCfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -2208,6 +2246,7 @@ test("run (#285, Codex sol-high PR #300 review, P2): under a configured soft gua
     const bin = mkStub(dir, FAST_STUB);
     const softCfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
     const runner = new RoleRunner({
+      now: realClock,
       cfg: softCfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -2364,7 +2403,7 @@ echo '{"type":"result","subtype":"success","total_cost_usd":0.0005,"model":"clau
 exit 0
 `,
     );
-    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
     const result = await runner.run({
       roleId: "engine-reviewer",
       prompt: "review this diff",
@@ -2415,6 +2454,7 @@ test("run (#395 item 1): TWO CONSECUTIVE dead pid readings with no real exit eve
     };
     let probeCalls = 0;
     const runner = new RoleRunner({
+      now: realClock,
       cfg, // default worker.timeoutSec is generous — must never race the exit-loss path below
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),
@@ -2454,7 +2494,14 @@ test("run (#395 item 1): an isPidAlive that always reports alive never resolves 
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`); // real child stays alive for the whole test
-    const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } }); // wall-clock ceiling ends the test, not a real 30s wait
+    const TIMEOUT_SEC = 1; // config schema requires a positive integer; the fake clock below makes the real value irrelevant to real test timing
+    const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: TIMEOUT_SEC } });
+    // #403 (F25): the ceiling crossing is driven by a FAKE clock the test jumps, not by a real
+    // one-second wait — same seam as the two #395 tests below. The property here ("an always-alive
+    // probe never resolves synthetically; the wall-clock ceiling is what ends it") is about which
+    // MECHANISM ends the session, and that must not be decided by real elapsed time.
+    let fakeMs = Date.now();
+    let bumped = false;
     const runner = new RoleRunner({
       cfg: tcfg,
       stateDir: dir,
@@ -2464,7 +2511,16 @@ test("run (#395 item 1): an isPidAlive that always reports alive never resolves 
       guardHookPath: mkHook(dir),
       preSpawnCaptureTimeoutMs: 150,
       preSpawnCapturePollMs: 10,
-      isPidAlive: () => true, // always "alive" — a real, ordinary (if slow) session, never exit-lost
+      now: () => new Date(fakeMs),
+      isPidAlive: () => {
+        // Always "alive" — a real, ordinary (if slow) session, never exit-lost. The first probe
+        // also jumps the clock past the ceiling so the NEXT tick crosses it deterministically.
+        if (!bumped) {
+          bumped = true;
+          fakeMs += TIMEOUT_SEC * 1000 + 1000;
+        }
+        return true;
+      },
     });
     const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(
@@ -2510,15 +2566,34 @@ test("run (#395 item 1): an isPidAlive that always reports alive never resolves 
 // removed, this same assertion goes RED (the gap collapses to 1, since a heartbeat re-fires on
 // every tick including the last one that manages to run before the real SIGKILL lands); restoring
 // the gate turns it GREEN again.
+//
+// #403 (F25) rebuild — this test was one of the class's live instances. Two things decided its
+// verdict by real-time race, neither of them the property under test:
+//   1. `worker.timeoutSec: 1` against `now: () => new Date()` — the crossing landed after a real
+//      one-second wait, on whichever heartbeat tick happened to be running when it elapsed.
+//   2. `callsAfterLastHeartbeat >= 3` — an empirically-tuned floor on how many 20ms heartbeat
+//      ticks fit inside killTree's real 200ms SIGTERM-to-SIGKILL grace. Both are real timers in
+//      the same event loop; under concurrent load the ratio is not the 10:1 the floor assumed.
+// Both are now seams, following the P2 sibling below: a FAKE CLOCK pins exactly which tick
+// crosses the ceiling, and `killGraceMs` is raised far past the test's own lifetime so the
+// SIGKILL provably is not what ends the child — the TEST ends it, by touching a release file the
+// stub polls for, once it has counted the post-latch ticks it wants. The floor below is therefore
+// satisfied by construction, not by a margin.
 test("run (#395 gate② follow-up, P1): once timedOut latches, role-session-heartbeat STOPS — even when the pid probe keeps reading ALIVE forever (a stuck/failed kill), so the engine-wide watchdog is never blinded", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
-    // Same survivable stub as the P2 test below: trap FIRST, then a real init-line write (the
-    // observable readiness barrier), THEN exec into `sleep` — see this test's own block comment
-    // above and the P2 test's block comment below for the full rationale.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\necho '{"type":"system","subtype":"init"}'\nexec sleep 30\n`);
-    const TIMEOUT_SEC = 1; // worker.timeoutSec must be a positive integer (config schema)
+    // Same trap-then-observable-init-line barrier as the P2 test below, but the child now ends on
+    // a condition THIS TEST controls (the release file) instead of on killTree's SIGKILL timer.
+    const releasePath = join(dir, "release");
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\ntrap '' TERM\necho '{"type":"system","subtype":"init"}'\nwhile [ ! -f ${JSON.stringify(releasePath)} ]; do sleep 0.01; done\n`,
+    );
+    const TIMEOUT_SEC = 1; // worker.timeoutSec must be a positive integer (config schema) — the fake clock below makes the real value irrelevant to real test timing
     const HEARTBEAT_MS = 20;
+    // Post-latch ticks to observe before releasing the child. Any value >= the assertion's floor
+    // works; the test decides it, so no timer race can make it come out lower.
+    const POST_LATCH_TICKS = 5;
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: TIMEOUT_SEC } });
     const events: Array<[string, unknown]> = [];
     let callIndex = 0;
@@ -2530,6 +2605,8 @@ test("run (#395 gate② follow-up, P1): once timedOut latches, role-session-hear
       },
       maxEventId: () => events.length,
     };
+    let fakeMs = Date.now();
+    let bumped = false;
     const runner = new RoleRunner({
       cfg: tcfg,
       stateDir: dir,
@@ -2537,17 +2614,36 @@ test("run (#395 gate② follow-up, P1): once timedOut latches, role-session-hear
       claudeBin: bin,
       heartbeatMs: HEARTBEAT_MS,
       guardHookPath: mkHook(dir),
-      // A generous FAILURE bound, not a timing assumption — see the P2 test's own comment for
-      // the full waitForInitLine rationale this test reuses unchanged.
-      preSpawnCaptureTimeoutMs: 2000,
+      // A HANG-GUARD ceiling, not a timing assumption — see INIT_OBSERVED_GUARD_MS and the P2
+      // test's own comment for the full waitForInitLine rationale this test reuses unchanged.
+      preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS,
       preSpawnCapturePollMs: 5,
       state: fakeState,
+      // Far past this test's own lifetime: the SIGKILL is provably not what ends the child, so
+      // nothing about the assertions below depends on killTree's real grace window. Nothing
+      // lingers either (PR #430 gate② P1): the grace is a cancelable wait on the child's own exit
+      // (awaitKillGrace, unit-tested at the bottom of this file), so once the release file below
+      // lets the child go, the wait ends with it — no 60s referenced timer holding this process
+      // open, and no SIGKILL delivered to a recycled pid afterwards.
+      killGraceMs: 60_000,
+      now: () => new Date(fakeMs),
       // ALWAYS "alive" — simulates killTree failing to make the pid read dead (a stuck kill, a
       // zombie, a false-positive probe). The exit-loss detector correctly never fires here (it
-      // needs two CONSECUTIVE dead readings, never satisfied by an always-alive probe) — this
-      // test is purely about heartbeat gating, bounded only by the real kill eventually landing.
+      // needs two CONSECUTIVE dead readings, never satisfied by an always-alive probe), so this
+      // test is purely about heartbeat gating.
       isPidAlive: () => {
         callIndex++;
+        if (!bumped) {
+          // Deterministically forces the NEXT tick's elapsedSec past worker.timeoutSec — the same
+          // fake-clock trick the P2 sibling below uses, and for the same reason: which tick
+          // crosses the ceiling is pinned, never decided by a real one-second wait.
+          bumped = true;
+          fakeMs += TIMEOUT_SEC * 1000 + 1000;
+        } else if (lastHeartbeatCallIndex >= 0 && callIndex - lastHeartbeatCallIndex >= POST_LATCH_TICKS) {
+          // Enough post-latch ticks have provably run with no heartbeat following them — end the
+          // child now, on our own terms, so run() resolves.
+          writeFileSync(releasePath, "");
+        }
         return true;
       },
     });
@@ -2558,14 +2654,14 @@ test("run (#395 gate② follow-up, P1): once timedOut latches, role-session-hear
     assert.equal(
       result.contextManifest?.captureBasis,
       "init-observed",
-      "the real init line must have been OBSERVED before any signal was ever sent — otherwise the real child might not have reached `exec` yet when killTree's SIGTERM arrives",
+      "the real init line must have been OBSERVED before any signal was ever sent — otherwise the real child might not have reached its wait loop yet when killTree's SIGTERM arrives",
     );
     assert.equal(result.outcome, "timeout");
     assert.ok(lastHeartbeatCallIndex >= 0, "sanity: at least one PRE-latch heartbeat fired normally");
     const callsAfterLastHeartbeat = callIndex - lastHeartbeatCallIndex;
     assert.ok(
       callsAfterLastHeartbeat >= 3,
-      `only ${callsAfterLastHeartbeat} isPidAlive call(s) happened after the last heartbeat (total calls=${callIndex}) — too few to prove real post-latch ticks actually ran; the survivable stub should give killTree's real SIGTERM-to-SIGKILL window several ${HEARTBEAT_MS}ms ticks to exercise the gate`,
+      `only ${callsAfterLastHeartbeat} isPidAlive call(s) happened after the last heartbeat (total calls=${callIndex}) — too few to prove real post-latch ticks actually ran; the release-file gate above should have held the child open for ${POST_LATCH_TICKS} of them`,
     );
     // No role-session-exit-lost either: the always-alive probe means the exit-loss detector
     // correctly never got two consecutive dead readings — this scenario is bounded ONLY by the
@@ -2650,10 +2746,10 @@ test("run (#395 gate② follow-up, P2): a timeout kill whose own exit notificati
       claudeBin: bin,
       heartbeatMs: 20,
       guardHookPath: mkHook(dir),
-      // A generous FAILURE bound, not a timing assumption — waitForInitLine below returns the
-      // instant the real init line is observed (typically single-digit ms after spawn); this
-      // ceiling only matters if that line never shows up at all.
-      preSpawnCaptureTimeoutMs: 2000,
+      // A HANG-GUARD ceiling, not a timing assumption — waitForInitLine below returns the instant
+      // the real init line is observed (typically single-digit ms after spawn); this ceiling only
+      // matters if that line never shows up at all. See INIT_OBSERVED_GUARD_MS.
+      preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS,
       preSpawnCapturePollMs: 5,
       state: fakeState,
       now: () => new Date(fakeMs),
@@ -2703,4 +2799,151 @@ test("run (#395 gate② follow-up, P2): a timeout kill whose own exit notificati
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── #403 (F25), PR #430 gate② P1: killTree's grace window is cancelable ──────────────────────
+//
+// The finding: `void this.killTree(session)` awaits a plain `setTimeout(killGraceMs)`, and
+// releasing the child does not cancel it. With this file's timeout tests raising `killGraceMs`
+// to 60s (so a real SIGKILL provably isn't what ends the child), that pending timer is
+// REFERENCED — it holds the test-runner process open for the rest of the window after the
+// assertions are done, and then delivers SIGKILL to a pid/process-group the OS may have recycled.
+//
+// Both tests below drive the seam directly with an injected timer, so neither waits on a real
+// clock: the verdict is decided by which side of the seam completes, not by elapsed time.
+// ── #403 (F25) — killTree's grace, and what "the tree is gone" is allowed to mean ────────────
+//
+// PR #430 gate② round 5 (P1) corrected the authority here, and it matters: `killGroup` signals the
+// whole detached process GROUP, but `SpawnedSession.onExit` is `child.once("exit")` — it proves the
+// session LEADER exited, nothing about descendants still in that group. Round 4's version treated
+// leader exit as proof and skipped the SIGKILL, so a descendant that traps or ignores SIGTERM could
+// outlive the session entirely. The verdict now comes from GROUP liveness (`sessionTreeIsGone`,
+// i.e. `kill(-pid, 0)` -> ESRCH), and leader exit is only a WAKE — a good moment to re-ask the
+// kernel, never an answer on its own.
+
+test("sessionTreeIsGone (#403, F25 — PR #430 gate② round 5, P1): an absent pid and a definitely-dead group read as gone", () => {
+  assert.equal(sessionTreeIsGone(undefined), true, "a session that never got a pid has no group to signal");
+  assert.equal(sessionTreeIsGone(999_999_999), true, "ESRCH on a nonexistent group means there is nothing left to kill");
+});
+
+test("sessionTreeIsGone (#403, F25 — PR #430 gate② round 5, P1): a LIVE detached group reads as alive, and only reads gone once it is actually gone", async () => {
+  // A real detached group, because that is the thing the probe is about. The assertions are on the
+  // probe's answer, never on how long anything took: the wait below is a named hang guard.
+  const child = spawn("/bin/sh", ["-c", "sleep 30"], { detached: true, stdio: "ignore" });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.once("spawn", () => resolve());
+      child.once("error", reject);
+    });
+    assert.equal(
+      sessionTreeIsGone(child.pid),
+      false,
+      "a live detached group must never read as gone — that would skip the SIGKILL escalation",
+    );
+    child.kill("SIGKILL");
+    const deadline = Date.now() + 30_000;
+    while (!sessionTreeIsGone(child.pid)) {
+      if (Date.now() > deadline) throw new Error("hang guard (30000ms): the SIGKILLed detached group never became unsignalable");
+      await sleepMs(10);
+    }
+    assert.equal(sessionTreeIsGone(child.pid), true);
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
+});
+
+test("awaitKillGrace (#403, F25): the tree dying inside the window resolves 'gone' AND cancels the pending wait — no stray timer, no SIGKILL at a recycled pid", async () => {
+  let exitCb: (() => void) | undefined;
+  let waitCancelled = false;
+  let groupEmpty = false;
+  const session = {
+    onExit: (cb: (code: number | null) => void) => {
+      exitCb = () => cb(0);
+    },
+  };
+  // Models an UNEXPIRED grace window: resolves only when the wait is cancelled, never on its own.
+  const timer = (_ms: number, signal: AbortSignal): Promise<void> =>
+    new Promise((resolve) => {
+      signal.addEventListener(
+        "abort",
+        () => {
+          waitCancelled = true;
+          resolve();
+        },
+        { once: true },
+      );
+    });
+
+  const settled = awaitKillGrace(session, 60_000, () => groupEmpty, timer);
+  assert.ok(exitCb, "awaitKillGrace must subscribe to the child's own exit, not just start a timer");
+  groupEmpty = true; // the leader exited AND took the whole group with it
+  exitCb();
+  assert.equal(await settled, "gone");
+  assert.equal(waitCancelled, true, "the grace wait must be cancelled once the tree is gone — otherwise it keeps the process alive");
+});
+
+test("awaitKillGrace (#403, F25 — PR #430 gate② round 5, P1): the LEADER exiting while a descendant survives does NOT short-circuit — the grace runs out and 'grace' authorises the SIGKILL", async () => {
+  // The regression this pins: a descendant that traps SIGTERM stays in the group after the leader
+  // is gone. Treating leader exit as proof skipped the escalation and orphaned that descendant.
+  let exitCb: (() => void) | undefined;
+  let waitCancelled = false;
+  let expire: (() => void) | undefined;
+  const session = {
+    onExit: (cb: (code: number | null) => void) => {
+      exitCb = () => cb(0);
+    },
+  };
+  const timer = (_ms: number, signal: AbortSignal): Promise<void> =>
+    new Promise((resolve) => {
+      expire = () => resolve(); // the window elapsing, on this test's terms
+      signal.addEventListener(
+        "abort",
+        () => {
+          waitCancelled = true;
+          resolve();
+        },
+        { once: true },
+      );
+    });
+
+  const settled = awaitKillGrace(session, 60_000, () => false, timer); // group NEVER empty
+  assert.ok(exitCb);
+  exitCb(); // leader exit — must NOT cancel the wait, because the group still has a member
+  assert.equal(waitCancelled, false, "leader exit cancelled the grace even though the group was not empty — the descendant would survive");
+  assert.ok(expire);
+  expire();
+  assert.equal(await settled, "grace", "a surviving descendant must still reach the SIGKILL escalation");
+});
+
+test("awaitKillGrace (#403, F25 — PR #430 gate② round 4, P2): a tree that was ALREADY gone before the kill path started resolves 'gone' immediately — no timer, no listener, no signal", async () => {
+  // Node never replays `exit` to a late listener, so on the spawn-confirmation-timeout path (where
+  // run() has usually already seen the leader go) a freshly-registered listener would never fire.
+  // The group probe answers directly instead, and authoritatively: no members, nothing to kill.
+  let subscribed = false;
+  const session = {
+    onExit: () => {
+      subscribed = true;
+    },
+  };
+  const timerMustNotRun = (): Promise<void> => {
+    throw new Error("the grace timer must never start when the group is already known to be empty");
+  };
+  assert.equal(await awaitKillGrace(session, 60_000, () => true, timerMustNotRun), "gone");
+  assert.equal(subscribed, false, "no listener is needed when the kernel already says the group is empty");
+});
+
+test("awaitKillGrace (#403, F25 — PR #430 gate② round 4, P2): a tree that empties while the window is open, with no exit callback at all, still resolves 'gone' rather than authorising a SIGKILL", async () => {
+  // The lost-notification direction (#395's scenario, which this module models elsewhere): the
+  // callback route never fires, but the kernel's answer changes. The settle-time re-probe is what
+  // keeps that from becoming a SIGKILL at a pid that may since have been recycled.
+  let groupEmpty = false;
+  const session = { onExit: () => {} }; // the callback route is deliberately dead here
+  const windowElapses = async (): Promise<void> => {
+    groupEmpty = true; // the tree went away while the window was open, unobserved by any callback
+  };
+  assert.equal(await awaitKillGrace(session, 60_000, () => groupEmpty, windowElapses), "gone");
 });

@@ -5,23 +5,24 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import { State } from "../state/state.js";
 import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
 import { type DriverDeps, runDriver } from "./driver.js";
 
-class FakeForge implements IForge {
+class FakeForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
   ready: Issue[] = [];
@@ -29,40 +30,40 @@ class FakeForge implements IForge {
    *  the count changing across calls (shift() per call; last value repeats once exhausted). */
   milestoneOpenCounts: number[] = [0];
   milestoneQueries: string[] = [];
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return this.ready;
   }
-  async claimIssue(): Promise<void> {}
-  async setBoardStatus(): Promise<void> {}
-  async addSubIssue(): Promise<void> {
+  override async claimIssue(): Promise<void> {}
+  override async setBoardStatus(): Promise<void> {}
+  override async addSubIssue(): Promise<void> {
     throw new Error("FakeForge.addSubIssue is not used by this test");
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
-  async addLabel(): Promise<void> {}
-  async removeLabel(): Promise<void> {}
-  async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> {
+  override async addLabel(): Promise<void> {}
+  override async removeLabel(): Promise<void> {}
+  override async addPRLabel(): Promise<void> {}
+  override async openPR(): Promise<number> {
     return 1;
   }
-  async getPRStatus(n: number): Promise<PRStatus> {
+  override async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
-  async mergePR(): Promise<void> {}
-  async addPRComment(): Promise<void> {}
-  async addIssueComment(): Promise<void> {}
-  async getIssueBody(): Promise<string> {
+  override async mergePR(): Promise<void> {}
+  override async addPRComment(): Promise<void> {}
+  override async addIssueComment(): Promise<void> {}
+  override async getIssueBody(): Promise<string> {
     return "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> {
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x",
       author: "producer",
@@ -75,21 +76,21 @@ class FakeForge implements IForge {
       unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }
-  async branchExists(): Promise<boolean> {
+  override async branchExists(): Promise<boolean> {
     return false;
   }
   /** Set to make countOpenIssuesInMilestone throw ONCE (then clear) — the P1 containment test. */
   milestoneErrOnce: Error | null = null;
-  async countOpenIssuesInMilestone(milestone: string): Promise<number> {
+  override async countOpenIssuesInMilestone(milestone: string): Promise<number> {
     this.milestoneQueries.push(milestone);
     if (this.milestoneErrOnce) {
       const e = this.milestoneErrOnce;
@@ -99,28 +100,28 @@ class FakeForge implements IForge {
     return this.milestoneOpenCounts.length > 1 ? this.milestoneOpenCounts.shift()! : this.milestoneOpenCounts[0]!;
   }
   milestoneTitles: string[] = [];
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return this.milestoneTitles;
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return [];
   }
-  async getIssueLabels(): Promise<string[]> {
+  override async getIssueLabels(): Promise<string[]> {
     return [];
   }
-  async getIssueComments() {
+  override async getIssueComments() {
     return [];
   }
-  async createIssue(): Promise<number> {
+  override async createIssue(): Promise<number> {
     return 0;
   }
-  async listOpenIssueNumbers(): Promise<number[]> {
+  override async listOpenIssueNumbers(): Promise<number[]> {
     return [];
   }
-  async listOpenIssues(): Promise<Issue[]> {
+  override async listOpenIssues(): Promise<Issue[]> {
     return [];
   }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return [];
   }
 }
@@ -173,7 +174,15 @@ function mkSleepSpy(): { sleep: (ms: number) => Promise<void>; calls: number[] }
   };
 }
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert nothing
+ *  calendar-dependent. Production's `now` seams are required, not optional, precisely so this
+ *  choice is written down at each fixture instead of being an invisible default — a test that DOES
+ *  seed a date must inject that seeded clock here, not this one. Named (not inlined) so every
+ *  deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 const baseDeps = (over: Partial<DriverDeps> = {}): DriverDeps => ({
+  now: realClock,
   forge: new FakeForge(),
   state: new State(":memory:"),
   supervisor: new FakeSupervisor(),

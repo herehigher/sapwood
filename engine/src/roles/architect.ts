@@ -77,7 +77,7 @@ export interface ArchitectDeps {
   /** Injected so tests can fake the underlying session (same "fake the collaborator, not the
    *  CLI" split plan-review.ts/conductor.test.ts use). */
   runner: Pick<RoleRunner, "run">;
-  now?: () => Date;
+  now: () => Date;
   log?: (message: string) => void;
   /** Path to the repo's north-star goal file — the architecture-chapter source. Override for
    *  tests; a real caller omits this and gets `cfg.goal.file` (#128, promoted out of the
@@ -778,7 +778,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
           allowedTools: deps.cfg.webAccess.enabled ? ARCHITECT_ALLOWED_TOOLS : ROLE_ALLOWED_TOOLS,
         },
         issue: 0, // round-scoped, not tied to any single issue (spend_ledger's documented sentinel)
-        now: deps.now ?? (() => new Date()),
+        now: deps.now,
         ...(deps.log !== undefined ? { log: deps.log } : {}),
         // #236: record this phase's ambient-context manifest for EVERY attempt — same round-level
         // shape as `issue: 0` above. See peripheral.ts's RetriedSession.contextManifest doc for

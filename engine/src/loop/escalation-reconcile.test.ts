@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, IssueMeta, PRReviewData, PRStatus } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import { State } from "../state/state.js";
 import { openEscalations, reconcileEscalations } from "./escalation-reconcile.js";
 
@@ -15,9 +16,9 @@ import { openEscalations, reconcileEscalations } from "./escalation-reconcile.js
  *  three stores this module's getIssueMeta/getPRStatus reads come from; tests seed them directly
  *  to script a scenario. Every WRITE method records into `writes` so the read-only assertion
  *  (#295 AC3) can be made structurally rather than by inspection. */
-class FakeForge implements IForge {
+class FakeForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
   issueStates: Record<number, "OPEN" | "CLOSED"> = {};
@@ -36,7 +37,7 @@ class FakeForge implements IForge {
   /** Placements from OTHER repos on the same multi-repo Project board (round 8 P1). */
   foreignPlacements: Array<{ number: number | null; repo: string | null; status: string | null }> = [];
 
-  async getIssueMeta(issue: number): Promise<IssueMeta> {
+  override async getIssueMeta(issue: number): Promise<IssueMeta> {
     this.reads.push(`getIssueMeta:${issue}`);
     if (this.failReadsFor.has(issue)) throw new Error("forge exploded");
     return {
@@ -47,65 +48,65 @@ class FakeForge implements IForge {
       updatedAt: "2026-01-01T00:00:00Z",
     };
   }
-  async getPRStatus(pr: number): Promise<PRStatus> {
+  override async getPRStatus(pr: number): Promise<PRStatus> {
     this.reads.push(`getPRStatus:${pr}`);
     return { number: pr, headOid: "x", state: this.prStates[pr] ?? "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
 
   // ── writes: every one records, so AC3 ("zero writes to GitHub") is structurally checkable ──
-  async claimIssue(): Promise<void> {
+  override async claimIssue(): Promise<void> {
     this.writes.push("claimIssue");
   }
-  async setBoardStatus(): Promise<void> {
+  override async setBoardStatus(): Promise<void> {
     this.writes.push("setBoardStatus");
   }
-  async addLabel(): Promise<void> {
+  override async addLabel(): Promise<void> {
     this.writes.push("addLabel");
   }
-  async removeLabel(): Promise<void> {
+  override async removeLabel(): Promise<void> {
     this.writes.push("removeLabel");
   }
-  async addPRLabel(): Promise<void> {
+  override async addPRLabel(): Promise<void> {
     this.writes.push("addPRLabel");
   }
-  async openPR(): Promise<number> {
+  override async openPR(): Promise<number> {
     this.writes.push("openPR");
     return 1;
   }
-  async mergePR(): Promise<void> {
+  override async mergePR(): Promise<void> {
     this.writes.push("mergePR");
   }
-  async addPRComment(): Promise<void> {
+  override async addPRComment(): Promise<void> {
     this.writes.push("addPRComment");
   }
-  async addIssueComment(): Promise<void> {
+  override async addIssueComment(): Promise<void> {
     this.writes.push("addIssueComment");
   }
-  async updateIssueBody(): Promise<void> {
+  override async updateIssueBody(): Promise<void> {
     this.writes.push("updateIssueBody");
   }
-  async createIssue(): Promise<number> {
+  override async createIssue(): Promise<number> {
     this.writes.push("createIssue");
     return 1;
   }
-  async addSubIssue(): Promise<void> {
+  override async addSubIssue(): Promise<void> {
     this.writes.push("addSubIssue");
   }
-  async replyToReviewThread(): Promise<void> {
+  override async replyToReviewThread(): Promise<void> {
     this.writes.push("replyToReviewThread");
   }
-  async resolveReviewThread(): Promise<void> {
+  override async resolveReviewThread(): Promise<void> {
     this.writes.push("resolveReviewThread");
   }
 
   // ── unused reads ────────────────────────────────────────────────────────────────────────
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     this.reads.push("readStartupReconcileData");
     if (this.failBoardRead) throw new Error("board read exploded");
     return {
@@ -116,19 +117,19 @@ class FakeForge implements IForge {
       openPrs: [],
     };
   }
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return [];
   }
-  async getPoolEligibleIssues(): Promise<Issue[]> {
+  override async getPoolEligibleIssues(): Promise<Issue[]> {
     return [];
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x",
       author: "producer",
@@ -141,52 +142,52 @@ class FakeForge implements IForge {
       unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }
-  async branchExists(): Promise<boolean> {
+  override async branchExists(): Promise<boolean> {
     return false;
   }
-  async countOpenIssuesInMilestone(): Promise<number> {
+  override async countOpenIssuesInMilestone(): Promise<number> {
     return 0;
   }
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return [];
   }
-  async getIssueLabels(issue: number): Promise<string[]> {
+  override async getIssueLabels(issue: number): Promise<string[]> {
     return this.issueLabels[issue] ?? [];
   }
-  async getIssueComments() {
+  override async getIssueComments() {
     return [];
   }
-  async getIssueBody(): Promise<string> {
+  override async getIssueBody(): Promise<string> {
     return "";
   }
-  async listOpenIssueNumbers(): Promise<number[]> {
+  override async listOpenIssueNumbers(): Promise<number[]> {
     return [];
   }
-  async listOpenIssues(): Promise<Issue[]> {
+  override async listOpenIssues(): Promise<Issue[]> {
     return [];
   }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return [];
   }
-  async getIssueRelations() {
+  override async getIssueRelations() {
     return { linkedPRs: [], crossReferences: [], truncated: false };
   }
-  async searchIssues() {
+  override async searchIssues() {
     return [];
   }
-  async getPRDetails() {
+  override async getPRDetails() {
     return {
       number: 1,
       headOid: "x",
@@ -197,16 +198,16 @@ class FakeForge implements IForge {
       mergeable: "MERGEABLE" as const,
     };
   }
-  async getPRReviews() {
+  override async getPRReviews() {
     return { reviews: [], total: 0 };
   }
-  async getPRReviewThreads() {
+  override async getPRReviewThreads() {
     return { threads: [], pageCapped: false };
   }
-  async getPRChecks() {
+  override async getPRChecks() {
     return { checks: [], total: 0 };
   }
-  async getReviewThreadCommentsTail(): Promise<string[]> {
+  override async getReviewThreadCommentsTail(): Promise<string[]> {
     return [];
   }
 }

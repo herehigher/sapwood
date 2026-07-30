@@ -41,7 +41,7 @@ import {
 import { issuesMergedThisTick, prsOpenedThisTick, type StopConditionHit, type StopConfig } from "./driver.js";
 import { emptySpinBreached, parkDurationExceededSec, probeBackoffSec, probeDueWithHint } from "./env-failure.js";
 import { buildRoundArtifact, persistRoundArtifact, type RoundArtifact } from "./round-artifact.js";
-import { startProgressWatchdog } from "./watchdog.js";
+import { startProgressWatchdog, systemWatchdogTimer } from "./watchdog.js";
 
 export type { RoundPhase, RoundRow } from "../state/state.js";
 
@@ -254,7 +254,7 @@ export interface RoundDeps {
   tickIntervalSec: number;
   mergeGate?: MergeGate;
   engineAgentDriveDeps?: TickDeps["engineAgentDriveDeps"];
-  now?: () => Date;
+  now: () => Date;
   /** Injected sleep so tests can drive the loop without real wall-clock waits (same contract
    *  as driver.ts's DriverDeps.sleep). */
   sleep?: (ms: number) => Promise<void>;
@@ -353,7 +353,7 @@ export function buildFixLegResume(
       state: deps.state,
       roundId,
       phase: "executing",
-      ...(deps.now !== undefined ? { now: deps.now } : {}),
+      now: deps.now,
       ...(deps.log !== undefined ? { log: deps.log } : {}),
     }),
   };
@@ -768,7 +768,7 @@ export async function removeRoundPoolLabel(forge: IForge, cfg: SapwoodConfig, is
  * `aligning` — earlier, already-completed phases are never re-run.
  */
 export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
-  const now = deps.now ?? (() => new Date());
+  const now = deps.now;
   const iso = () => now().toISOString();
   const cfg = deps.cfg;
   const forge: IForge = cfg.round.milestone ? new RoundScopedForge(deps.forge, cfg.round.milestone) : deps.forge;
@@ -786,6 +786,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   // alongside `unregister()`. Same contract as driver.ts's runDriver — see watchdog.ts's own
   // doc for why this is progress-based, never raced against any single tick() call.
   const watchdog = startProgressWatchdog({
+    timer: systemWatchdogTimer,
     windowMs: deps.tickIntervalSec * 1000 * cfg.liveness.watchdogTickMultiplier,
     state: deps.state,
     exit: deps.watchdogExit ?? ((code: number) => process.exit(code)),
@@ -1189,7 +1190,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // explicit `undefined` is not the same as an omitted key under this tsconfig setting.
     ...(deps.mergeGate !== undefined ? { mergeGate: deps.mergeGate } : {}),
     ...(deps.engineAgentDriveDeps !== undefined ? { engineAgentDriveDeps: deps.engineAgentDriveDeps } : {}),
-    ...(deps.now !== undefined ? { now: deps.now } : {}),
+    now: deps.now,
     ...(deps.log !== undefined ? { log: deps.log } : {}),
     ...(over.forceDispatchPause !== undefined ? { forceDispatchPause: over.forceDispatchPause } : {}),
     ...(over.roundSpendUsd !== undefined ? { roundSpendUsd: over.roundSpendUsd } : {}),

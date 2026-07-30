@@ -18,7 +18,7 @@ export interface FileEngineLoggerOptions {
   path: string;
   teeToStderr: boolean;
   maxBytes: number;
-  now?: () => Date;
+  now: () => Date;
   stderr?: (line: string) => void;
   write?: (fd: number, buffer: Buffer, offset: number, length: number) => number;
 }
@@ -33,7 +33,7 @@ export class FileEngineLogger implements EngineLogger {
   private readonly write: (fd: number, buffer: Buffer, offset: number, length: number) => number;
 
   constructor(private readonly options: FileEngineLoggerOptions) {
-    this.now = options.now ?? (() => new Date());
+    this.now = options.now;
     this.stderr = options.stderr ?? ((line) => process.stderr.write(line));
     this.write = options.write ?? ((fd, buffer, offset, length) => writeSync(fd, buffer, offset, length));
     try {
@@ -86,6 +86,11 @@ export class FileEngineLogger implements EngineLogger {
     try {
       return this.now().toISOString();
     } catch {
+      // #403 (F25) per-site decision: DELIBERATE wall-clock read, kept. This is the last-resort
+      // arm of an observability boundary that must not throw (see log()'s own non-throwing
+      // contract) — reached only when the INJECTED clock itself throws, i.e. when there is no
+      // other clock left to read. A seeded fixture never lands here; if one did, the seam is
+      // broken and a real timestamp beats a lost log line.
       return new Date().toISOString();
     }
   }

@@ -22,6 +22,7 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import { NO_ROUND_DIRECTIVE } from "../config/directive.js";
 import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import {
@@ -44,18 +45,25 @@ import {
 } from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
 
-class FakeForge implements IForge {
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
+class FakeForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
   planReviewCandidates: Issue[] = [];
@@ -65,48 +73,48 @@ class FakeForge implements IForge {
   labelsRemoved: Array<[number, string]> = [];
   issueCommentsPosted: Array<[number, string]> = [];
 
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return [];
   }
-  async claimIssue(): Promise<void> {}
-  async setBoardStatus(): Promise<void> {}
-  async addSubIssue(): Promise<void> {
+  override async claimIssue(): Promise<void> {}
+  override async setBoardStatus(): Promise<void> {}
+  override async addSubIssue(): Promise<void> {
     throw new Error("FakeForge.addSubIssue is not used by this test");
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
-  async addLabel(n: number, l: string): Promise<void> {
+  override async addLabel(n: number, l: string): Promise<void> {
     this.labelsAdded.push([n, l]);
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
   }
-  async removeLabel(n: number, l: string): Promise<void> {
+  override async removeLabel(n: number, l: string): Promise<void> {
     this.labelsRemoved.push([n, l]);
     this.issueLabels[n] = (this.issueLabels[n] ?? []).filter((x) => x !== l);
   }
-  async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> {
+  override async addPRLabel(): Promise<void> {}
+  override async openPR(): Promise<number> {
     return 1;
   }
-  async getPRStatus(n: number): Promise<PRStatus> {
+  override async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
-  async mergePR(): Promise<void> {}
-  async addPRComment(): Promise<void> {}
-  async addIssueComment(n: number, body: string): Promise<void> {
+  override async mergePR(): Promise<void> {}
+  override async addPRComment(): Promise<void> {}
+  override async addIssueComment(n: number, body: string): Promise<void> {
     this.issueCommentsPosted.push([n, body]);
   }
-  async getIssueBody(): Promise<string> {
+  override async getIssueBody(): Promise<string> {
     return "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> {
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x",
       author: "producer",
@@ -119,31 +127,31 @@ class FakeForge implements IForge {
       unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }
-  async branchExists(): Promise<boolean> {
+  override async branchExists(): Promise<boolean> {
     return false;
   }
-  async countOpenIssuesInMilestone(): Promise<number> {
+  override async countOpenIssuesInMilestone(): Promise<number> {
     return 0;
   }
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return this.planReviewCandidates;
   }
-  async getIssueLabels(issue: number): Promise<string[]> {
+  override async getIssueLabels(issue: number): Promise<string[]> {
     return this.issueLabels[issue] ?? [];
   }
-  async getIssueComments(issue: number) {
+  override async getIssueComments(issue: number) {
     return this.issueComments[issue] ?? [];
   }
 }
@@ -228,6 +236,8 @@ const mkFakeManifest = (tag: string): ContextManifest => ({
   worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
   settingsHash: "hash",
   hookHash: null,
+  toolUsage: [],
+  readPaths: [],
   recordedAt: "2026-07-17T00:00:01Z",
 });
 
@@ -238,7 +248,7 @@ test("createArchitectStub: marker present -> returns it unchanged, no forge call
   forge.planReviewCandidates = [{ number: 1, title: "t", labels: [] }];
   const runner = new ScriptedRunner([{ result: doneResult("s1", architectResult("note")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const stub = createArchitectStub(deps);
   const { marker } = await stub.run({ roundId: 5, phase: "architecting", marker: "prior-marker" });
   assert.equal(marker, "prior-marker");
@@ -251,7 +261,7 @@ test("createArchitectStub: no candidates -> returns the round's marker, no sessi
   const forge = new FakeForge();
   const runner = new ScriptedRunner([{ result: doneResult("s1", architectResult("note")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const stub = createArchitectStub(deps);
   const { marker, ranSession } = await stub.run({ roundId: 5, phase: "architecting", marker: null });
   assert.equal(marker, architectMarker(5));
@@ -269,7 +279,7 @@ test("createArchitectStub: runs exactly ONE session for the whole round regardle
   ];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("Round design note.")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   const { marker, ranSession } = await stub.run({ roundId: 9, phase: "architecting", marker: null });
   assert.equal(runner.calls.length, 1);
@@ -287,7 +297,7 @@ test("createArchitectStub (#236): a done session's context manifest is persisted
   const manifest = mkFakeManifest("architect-attempt");
   const runner = new ScriptedRunner([{ result: { ...doneResult("architect-1", architectResult("note")), contextManifest: manifest } }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 9, phase: "architecting", marker: null });
   const rows = state.listContextManifestsForRound(9);
@@ -331,6 +341,7 @@ test("createArchitectStub #251: a real session dispatch records an input-manifes
   // fixture every other test in this file uses.
   const realPlanPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "docs", "PLAN.md");
   const deps: ArchitectDeps = {
+    now: realClock,
     forge,
     state,
     cfg: mkCfg(),
@@ -405,7 +416,7 @@ test("createArchitectStub #251: a missing/unreadable PLAN.md yields architecture
   forge.planReviewCandidates = [{ number: 10, title: "a", labels: [] }];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   await createArchitectStub(deps).run({ roundId: 23, phase: "architecting", marker: null });
   const rows = state.inputManifestRows(23);
   const architectureRow = rows.find((r) => r.channel === "architecture-chapter");
@@ -427,7 +438,7 @@ test("createArchitectStub #251: zero drift-review candidates but a NON-EMPTY poo
     { number: 30, title: "pool member A", labels: [] },
     { number: 31, title: "pool member B", labels: [] },
   ];
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
   await createArchitectStub(deps).run({ roundId: 24, phase: "architecting", marker: null });
   const rows = state.inputManifestRows(24);
   const poolDigestRow = rows.find((r) => r.channel === "pool-digest");
@@ -452,6 +463,7 @@ test("createArchitectStub #251: pool-digest truncated:true when capDigest actual
     { number: 41, title: "b", labels: [], body: "y".repeat(500) },
   ];
   const deps: ArchitectDeps = {
+    now: realClock,
     forge,
     state,
     cfg: mkCfg({ roles: { architect: { poolDigestMaxChars: 50 } } }),
@@ -474,6 +486,7 @@ test("createArchitectStub #251: the candidate-issues manifest version changes on
     const forge = new FakeForge();
     forge.planReviewCandidates = [{ number: 10, title, labels: [] }];
     return {
+      now: realClock,
       forge,
       state: new State(":memory:"),
       cfg: mkCfg(),
@@ -499,7 +512,7 @@ test("createArchitectStub #251: no candidates AND no pool -> no session dispatch
   const forge = new FakeForge();
   const runner = new ScriptedRunner([{ result: doneResult("s1", architectResult("note")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   await createArchitectStub(deps).run({ roundId: 21, phase: "architecting", marker: null });
   assert.equal(runner.calls.length, 0, "no session dispatched");
   assert.equal(state.inputManifestRows(21).length, 0, "a phase call that never dispatches a session never mints a phantom attempt");
@@ -511,7 +524,7 @@ test("createArchitectStub #251: already-externalized round (marker present) -> n
   forge.planReviewCandidates = [{ number: 10, title: "a", labels: [] }];
   const runner = new ScriptedRunner([{ result: doneResult("s1", architectResult("note")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   await createArchitectStub(deps).run({ roundId: 22, phase: "architecting", marker: architectMarker(22) });
   assert.equal(runner.calls.length, 0);
   assert.equal(state.inputManifestRows(22).length, 0);
@@ -534,7 +547,7 @@ test("createArchitectStub P2: a failed session is retried once; a successful ret
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   const { marker } = await stub.run({ roundId: 8, phase: "architecting", marker: null });
   assert.equal(runner.calls.length, 2, "exactly one retry");
@@ -559,7 +572,7 @@ test("createArchitectStub P2: two failed sessions -> marker STILL set (advisory 
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   const { marker } = await stub.run({ roundId: 8, phase: "architecting", marker: null });
   assert.equal(runner.calls.length, 2, "one retry, never a third attempt");
@@ -594,7 +607,7 @@ test("createArchitectStub #110: no structured output block at all, TWICE -> degr
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   const { marker } = await stub.run({ roundId: 11, phase: "architecting", marker: null });
   assert.equal(runner.calls.length, 2);
@@ -616,7 +629,7 @@ test("createArchitectStub #110: metadata declares a contradiction with no matchi
     `${BODY_BLOCK_START}\nJust a design note, no contradiction marker at all.\n${BODY_BLOCK_END}`;
   const runner = new ScriptedRunner([{ result: doneResult("architect-0", badText) }, { result: doneResult("architect-0-retry", badText) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 12, phase: "architecting", marker: null });
   assert.equal(forge.issueCommentsPosted.length, 0);
@@ -632,7 +645,7 @@ test("createArchitectStub #110: an empty design note (BODY is only contradiction
     `${BODY_BLOCK_START}\n<<<CONTRADICTION #72>>>\nexplanation text\n${BODY_BLOCK_END}`;
   const runner = new ScriptedRunner([{ result: doneResult("architect-0", badText) }, { result: doneResult("architect-0-retry", badText) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 13, phase: "architecting", marker: null });
   assert.equal(forge.issueCommentsPosted.length, 0, "no design note text before the first marker -> whole output invalid");
@@ -667,7 +680,7 @@ test("createArchitectStub #110: one valid + one out-of-candidate-set flag -> the
     { result: doneResult("architect-0-retry", mixedText) },
   ]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   const { marker } = await stub.run({ roundId: 14, phase: "architecting", marker: null });
   // Advisory degrade: marker still set, round not wedged.
@@ -693,7 +706,7 @@ test("createArchitectStub: a contradicting issue gets an explanatory comment; se
   ]);
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 1, phase: "architecting", marker: null });
   assert.ok(forge.issueCommentsPosted.some(([n, body]) => n === 20 && body.includes(architectMarker(1))));
@@ -716,7 +729,7 @@ test("createArchitectStub: a non-severe contradiction gets a comment but NOT the
   ]);
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 1, phase: "architecting", marker: null });
   assert.ok(forge.issueCommentsPosted.some(([n]) => n === 23));
@@ -733,7 +746,7 @@ test("createArchitectStub: the anchor for the round design note is the LOWEST-nu
   ];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("Round design note.")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 2, phase: "architecting", marker: null });
   assert.equal(runner.calls.length, 1);
@@ -771,7 +784,7 @@ test("createArchitectStub #126: no directive file -> the rendered prompt carries
     const cfg = mkCfg({ round: { directiveFile: join(dir, "DIRECTIVE.md") } });
     const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
     const state = new State(":memory:");
-    const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+    const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
     await createArchitectStub(deps).run({ roundId: 3, phase: "architecting", marker: null });
     assert.ok(runner.calls[0]!.prompt.includes("No round directive was provided for this round."));
     assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 0);
@@ -791,7 +804,7 @@ test("createArchitectStub #126: with the PO role DISABLED (#127, aligning never 
     const cfg = mkCfg({ round: { directiveFile }, roles: { po: { enabled: false } } });
     const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
     const state = new State(":memory:");
-    const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+    const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
     await createArchitectStub(deps).run({ roundId: 6, phase: "architecting", marker: null });
     assert.ok(runner.calls[0]!.prompt.includes("Weigh the payments-module candidates first."));
     const events = state.eventsAfterId(0, ["directive-applied"]);
@@ -818,7 +831,7 @@ test("createArchitectStub #126 gate② I2: with the PO role ENABLED, a directive
     const cfg = mkCfg({ round: { directiveFile } }); // po enabled (default)
     const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
     const state = new State(":memory:");
-    const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+    const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
     await createArchitectStub(deps).run({ roundId: 6, phase: "architecting", marker: null });
     assert.ok(runner.calls[0]!.prompt.includes("No round directive was provided for this round."));
     assert.ok(!runner.calls[0]!.prompt.includes("dropped between aligning and architecting"), "never a half-round apply");
@@ -845,7 +858,7 @@ test("createArchitectStub #126: when aligning already consumed this round's dire
     state.appendEvent("directive-applied", payload);
 
     const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
-    const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+    const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
     await createArchitectStub(deps).run({ roundId: 10, phase: "architecting", marker: null });
     assert.ok(runner.calls[0]!.prompt.includes("steer toward payments"));
     assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 1, "no duplicate event");
@@ -881,7 +894,7 @@ test("createArchitectStub: cfg.roles.architect.promptFile override is actually l
     const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
     const state = new State(":memory:");
     const cfg = mkCfg({ roles: { architect: { promptFile: customPath } } });
-    const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+    const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
     const stub = createArchitectStub(deps);
     await stub.run({ roundId: 3, phase: "architecting", marker: null });
     assert.ok(runner.calls[0]!.prompt.startsWith("CUSTOM PROMPT round=3 anchor=7"));
@@ -898,7 +911,7 @@ test("createArchitectStub: the architect session runs under the base issues-only
   forge.planReviewCandidates = [{ number: 8, title: "t", labels: [] }];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 4, phase: "architecting", marker: null });
   assert.equal(runner.calls[0]!.roleId, "architect");
@@ -918,7 +931,7 @@ test("createArchitectStub (#410): the architect session's allowedTools is widene
   forge.planReviewCandidates = [{ number: 8, title: "t", labels: [] }];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 4, phase: "architecting", marker: null });
   assert.equal(runner.calls[0]!.allowedTools, ARCHITECT_ALLOWED_TOOLS);
@@ -930,7 +943,7 @@ test("createArchitectStub (#410): webAccess.enabled: false falls the architect s
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
   const cfg = mkCfg({ webAccess: { enabled: false } });
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 4, phase: "architecting", marker: null });
   assert.equal(runner.calls[0]!.allowedTools, ROLE_ALLOWED_TOOLS);
@@ -999,7 +1012,7 @@ test("#128: a real caller (deps.planMdPath omitted) renders {{plan.architectureC
     const cfg = mkCfg({ goal: { file: goalPath } });
     const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
     const state = new State(":memory:");
-    const deps: ArchitectDeps = { forge, state, cfg, runner }; // no deps.planMdPath override
+    const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner }; // no deps.planMdPath override
     const stub = createArchitectStub(deps);
     await stub.run({ roundId: 1, phase: "architecting", marker: null });
     assert.ok(runner.calls[0]!.prompt.includes("Only the engine performs GitHub writes."));
@@ -1020,7 +1033,7 @@ test("createArchitectStub: the rendered prompt carries the aligned-goals placeho
   forge.planReviewCandidates = [{ number: 9, title: "t", labels: [] }];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 6, phase: "architecting", marker: null });
   assert.ok(/has not shipped/.test(runner.calls[0]!.prompt));
@@ -1032,6 +1045,7 @@ test("createArchitectStub: an explicitly supplied alignedGoals string reaches th
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
   const deps: ArchitectDeps = {
+    now: realClock,
     forge,
     state,
     cfg: mkCfg(),
@@ -1049,7 +1063,7 @@ test("createArchitectStub (#132): the rendered prompt carries the no-prior-round
   forge.planReviewCandidates = [{ number: 9, title: "t", labels: [] }];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 6, phase: "architecting", marker: null });
   assert.match(runner.calls[0]!.prompt, /no prior round/i);
@@ -1061,6 +1075,7 @@ test("createArchitectStub (#132): an explicitly supplied lastMerged string reach
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
   const deps: ArchitectDeps = {
+    now: realClock,
     forge,
     state,
     cfg: mkCfg(),
@@ -1080,7 +1095,7 @@ test("createArchitectStub (#167): the rendered prompt carries the explicit NO_DO
   forge.planReviewCandidates = [{ number: 9, title: "t", labels: [] }];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 6, phase: "architecting", marker: null });
   assert.ok(runner.calls[0]!.prompt.includes(NO_DOCTRINE));
@@ -1092,6 +1107,7 @@ test("createArchitectStub (#167): an explicitly supplied doctrine string reaches
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
   const deps: ArchitectDeps = {
+    now: realClock,
     forge,
     state,
     cfg: mkCfg(),
@@ -1330,7 +1346,7 @@ test("createArchitectStub #213: `drop` removes exactly cfg.labels.roundPool from
   );
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
   await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
   assert.deepEqual(forge.labelsRemoved, [[55, cfg.labels.roundPool]]);
   assert.equal(forge.labelsAdded.length, 0, "drop never adds a label — only removes the pool label");
@@ -1345,7 +1361,7 @@ test("createArchitectStub #213: `needs-human` ADDS cfg.labels.needsHuman and pos
   const text = architectResult("Design note.", [], [{ issue: 56, verdict: "needs-human", reason: "scope is genuinely ambiguous." }]);
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
   await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
   assert.deepEqual(forge.labelsAdded, [[56, cfg.labels.needsHuman]]);
   assert.equal(forge.labelsRemoved.length, 0, "needs-human never removes the pool label");
@@ -1366,7 +1382,7 @@ test("createArchitectStub #213: `pass` (an unlisted pool member) triggers ZERO w
   const text = architectResult("Design note.", [], []); // no verdicts at all -> every pool member passes
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
   await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
   assert.equal(forge.labelsRemoved.length, 0);
   assert.equal(forge.labelsAdded.length, 0);
@@ -1391,7 +1407,7 @@ test("createArchitectStub #213: verdict schema carries NO label field — the ma
   );
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
   await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
   // The CONFIGURED custom label names are what actually got applied — proof the mapping is
   // engine-side config-driven, not something the session's JSON could ever have named.
@@ -1407,7 +1423,7 @@ test("createArchitectStub #213: candidates EMPTY but pool NON-EMPTY still runs t
   const poolIssues: Issue[] = [{ number: 80, title: "already approved", labels: [cfg.labels.roundPool] }];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("Design note.")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
   await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
   assert.equal(runner.calls.length, 1, "the session ran despite zero candidates");
   // With zero candidates, the lowest-numbered POOL member is the design-note anchor fallback.
@@ -1430,7 +1446,7 @@ test("createArchitectStub (#214): an issue that is BOTH a drift-review candidate
   );
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
   await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
   // The contradiction half: a comment naming the interface break, plus `blocked` (severe: true).
   assert.ok(forge.issueCommentsPosted.some(([n, body]) => n === 90 && body.includes("breaks the locked interface boundary")));
@@ -1448,7 +1464,7 @@ test("createArchitectStub #213: candidates AND pool BOTH empty -> the early retu
   const forge = new FakeForge();
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const { marker } = await createArchitectStub(deps).run({ roundId: 5, phase: "architecting", marker: null });
   assert.equal(runner.calls.length, 0);
   assert.equal(marker, architectMarker(5));
@@ -1465,7 +1481,7 @@ test("createArchitectStub #213: exactly ONE session runs regardless of pool size
   ];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
   await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
   assert.equal(runner.calls.length, 1);
   for (const i of poolIssues) {
@@ -1481,7 +1497,7 @@ test("createArchitectStub #213: an omitted deps.poolIssues renders the explicit 
   forge.planReviewCandidates = [{ number: 9, title: "t", labels: [] }];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" }; // no poolIssues
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" }; // no poolIssues
   await createArchitectStub(deps).run({ roundId: 6, phase: "architecting", marker: null });
   assert.match(runner.calls[0]!.prompt, /pool is empty/);
 });
@@ -1501,7 +1517,7 @@ test("createArchitectStub #213: degrade OPEN — an invalid session (twice) with
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
   const { marker } = await createArchitectStub(deps).run({ roundId: 8, phase: "architecting", marker: null });
   assert.equal(marker, architectMarker(8), "the round is never wedged");
   assert.equal(forge.labelsRemoved.length, 0);
@@ -1530,7 +1546,7 @@ test("createArchitectStub #213: degrade with an EMPTY pool never fires `architec
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };
-  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" }; // no poolIssues -> empty
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" }; // no poolIssues -> empty
   await createArchitectStub(deps).run({ roundId: 8, phase: "architecting", marker: null });
   assert.ok(logged.some(([kind]) => kind === "architect-degraded"));
   assert.ok(!logged.some(([kind]) => kind === "architect-review-degraded"), "vacuous with an empty pool — never fired");
@@ -1549,7 +1565,7 @@ test("createArchitectStub #213: a FIRST-attempt success that still fails validat
   const badText = "no structured block, ever";
   const runner = new ScriptedRunner([{ result: doneResult("architect-0", badText) }, { result: doneResult("architect-0-retry", badText) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
   await createArchitectStub(deps).run({ roundId: 9, phase: "architecting", marker: null });
   const ev = state.eventsAfterId(0, ["architect-review-degraded"]);
   assert.equal(ev.length, 1);
@@ -1569,7 +1585,7 @@ test("createArchitectStub #213 crash-rerun guard: two consecutive runs of the ph
     { result: doneResult("architect-2", text) }, // a FRESH session on the "rerun" — same verdict
   ]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
   const stub = createArchitectStub(deps);
   // First "attempt" — writes land, but (simulating the crash) the marker is never persisted
   // anywhere durable this test can see (round.ts's own persistence is outside this stub).
@@ -1621,7 +1637,7 @@ test("createArchitectStub #213 P2 fix: a transient forge failure on ONE verdict'
   );
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
   const { marker } = await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
   // The phase completed normally — one lost verdict never wedges it or aborts the rest.
   assert.equal(marker, architectMarker(1));
@@ -1661,7 +1677,7 @@ test("createArchitectStub #213 P1 fix (Codex review round 2): a TRANSIENT label-
   const text = architectResult("Design note.", [], [{ issue: 55, verdict: "drop", reason: "conflicts with another task." }]);
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }, { result: doneResult("architect-2", text) }]);
   const state = new State(":memory:");
-  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
   const stub = createArchitectStub(deps);
   // First pass: the label write throws -> no receipt, an architect-verdict-lost event instead.
   await stub.run({ roundId: 1, phase: "architecting", marker: null });

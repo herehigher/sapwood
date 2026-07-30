@@ -36,7 +36,7 @@ export interface ProxyMintDeps {
   >;
   roundId: number;
   phase: string;
-  now?: () => Date;
+  now: () => Date;
   log?: (message: string) => void;
 }
 
@@ -55,7 +55,7 @@ export function createProxyMint(deps: ProxyMintDeps): (session: { role: string; 
       budget: { ...proxyCfg.budget },
       timeoutMs: proxyCfg.timeoutMs,
       allowedTools: allowedToolsForRole(session.role),
-      ...(deps.now ? { now: deps.now } : {}),
+      now: deps.now,
       ...(deps.log ? { log: deps.log } : {}),
     });
   };

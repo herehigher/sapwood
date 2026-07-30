@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, IssueMeta, PRReviewData, PRStatus } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import { State } from "../state/state.js";
 import {
   type Concern,
@@ -32,58 +33,58 @@ import {
  *  (same shape as harvest.test.ts's MinimalForge). `bodies`/`comments`/`states` are the three
  *  per-issue stores dissent.ts's getIssueBody/getIssueComments/getIssueMeta read from; tests
  *  seed them directly to script a scenario. */
-class FakeForge implements IForge {
+class FakeForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
   bodies: Record<number, string> = {};
   comments: Record<number, Array<{ login: string; createdAt: string; body: string }>> = {};
   states: Record<number, "OPEN" | "CLOSED"> = {};
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return [];
   }
-  async getPoolEligibleIssues(): Promise<Issue[]> {
+  override async getPoolEligibleIssues(): Promise<Issue[]> {
     return [];
   }
-  async claimIssue(): Promise<void> {}
-  async setBoardStatus(): Promise<void> {}
-  async addSubIssue(): Promise<void> {
+  override async claimIssue(): Promise<void> {}
+  override async setBoardStatus(): Promise<void> {}
+  override async addSubIssue(): Promise<void> {
     throw new Error("FakeForge.addSubIssue is not used by this test");
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
   addLabelCalls: Array<[number, string]> = [];
-  async addLabel(n: number, l: string): Promise<void> {
+  override async addLabel(n: number, l: string): Promise<void> {
     this.addLabelCalls.push([n, l]);
   }
   removeLabelCalls: Array<[number, string]> = [];
-  async removeLabel(n: number, l: string): Promise<void> {
+  override async removeLabel(n: number, l: string): Promise<void> {
     this.removeLabelCalls.push([n, l]);
   }
-  async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> {
+  override async addPRLabel(): Promise<void> {}
+  override async openPR(): Promise<number> {
     return 1;
   }
-  async getPRStatus(n: number): Promise<PRStatus> {
+  override async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
-  async mergePR(): Promise<void> {}
-  async addPRComment(): Promise<void> {}
-  async addIssueComment(issue: number, body: string): Promise<void> {
+  override async mergePR(): Promise<void> {}
+  override async addPRComment(): Promise<void> {}
+  override async addIssueComment(issue: number, body: string): Promise<void> {
     // #237 finding 2: production stamps ENGINE_COMMENT_MARKER at the forge.ts write boundary
     // (GithubForge.addIssueComment) — this fake stands in for that boundary too, so isSapwoodComment
     // recognizes every engine-posted comment here exactly like it would against real GitHub.
@@ -92,11 +93,11 @@ class FakeForge implements IForge {
       { login: "sapwood-engine", createdAt: new Date().toISOString(), body: `${body}\n\n<!-- sapwood:engine -->` },
     ];
   }
-  async getIssueBody(issue: number): Promise<string> {
+  override async getIssueBody(issue: number): Promise<string> {
     return this.bodies[issue] ?? "";
   }
-  async updateIssueBody(): Promise<void> {}
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async updateIssueBody(): Promise<void> {}
+  override async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x",
       author: "producer",
@@ -109,46 +110,46 @@ class FakeForge implements IForge {
       unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }
-  async branchExists(): Promise<boolean> {
+  override async branchExists(): Promise<boolean> {
     return false;
   }
-  async countOpenIssuesInMilestone(): Promise<number> {
+  override async countOpenIssuesInMilestone(): Promise<number> {
     return 0;
   }
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return [];
   }
-  async getIssueLabels(): Promise<string[]> {
+  override async getIssueLabels(): Promise<string[]> {
     return [];
   }
-  async getIssueComments(issue: number) {
+  override async getIssueComments(issue: number) {
     return this.comments[issue] ?? [];
   }
-  async createIssue(): Promise<number> {
+  override async createIssue(): Promise<number> {
     return 1;
   }
-  async listOpenIssueNumbers(): Promise<number[]> {
+  override async listOpenIssueNumbers(): Promise<number[]> {
     return [];
   }
-  async listOpenIssues(): Promise<Issue[]> {
+  override async listOpenIssues(): Promise<Issue[]> {
     return [];
   }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return [];
   }
-  async getIssueMeta(issue: number): Promise<IssueMeta> {
+  override async getIssueMeta(issue: number): Promise<IssueMeta> {
     return { number: issue, title: "", state: this.states[issue] ?? "OPEN", labels: [], updatedAt: "2026-01-01T00:00:00Z" };
   }
 }

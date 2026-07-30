@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
@@ -20,6 +21,13 @@ import { concernHash } from "./dissent.js";
 import { noopPeripheralStub, type RoundDeps, runRounds } from "./round.js";
 import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
 import { createDefaultPeripherals, renderAlignedGoalsFromSummary, renderLastMergedFromArtifact } from "./round-defaults.js";
+
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
 
 // #231: createAligningStub now treats an unreadable goal file as an EXPLICIT align-creation
 // failure (no session dispatched) rather than the pre-#231 silent "" — every test here that
@@ -36,18 +44,18 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
     ...over,
   });
 
-class FakeForge implements IForge {
+class FakeForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
   planReviewCandidates: Issue[] = [];
@@ -56,44 +64,44 @@ class FakeForge implements IForge {
   issueCommentsPosted: Array<[number, string]> = [];
   openIssueNumbers: number[] = [];
 
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
   ready: Issue[] = [];
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return this.ready;
   }
   // #214: aliases the same `ready` backing array — this file's pool-digest/pool-selection tests
   // use `ready` (+ cfg.labels.roundPool on the fixture issues) as the widened pool-eligible set
   // too; none of them are testing gate⓪'s narrower-vs-wider distinction specifically (that's
   // plan-review.test.ts's job).
-  async getPoolEligibleIssues(): Promise<Issue[]> {
+  override async getPoolEligibleIssues(): Promise<Issue[]> {
     return this.ready;
   }
-  async claimIssue(): Promise<void> {}
-  async setBoardStatus(): Promise<void> {}
-  async addSubIssue(): Promise<void> {
+  override async claimIssue(): Promise<void> {}
+  override async setBoardStatus(): Promise<void> {}
+  override async addSubIssue(): Promise<void> {
     throw new Error("FakeForge.addSubIssue is not used by this test");
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
-  async addLabel(n: number, l: string): Promise<void> {
+  override async addLabel(n: number, l: string): Promise<void> {
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
   }
-  async removeLabel(n: number, l: string): Promise<void> {
+  override async removeLabel(n: number, l: string): Promise<void> {
     this.issueLabels[n] = (this.issueLabels[n] ?? []).filter((x) => x !== l);
   }
-  async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> {
+  override async addPRLabel(): Promise<void> {}
+  override async openPR(): Promise<number> {
     return 1;
   }
-  async getPRStatus(n: number): Promise<PRStatus> {
+  override async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
-  async mergePR(): Promise<void> {}
-  async addPRComment(): Promise<void> {}
-  async addIssueComment(n: number, body: string): Promise<void> {
+  override async mergePR(): Promise<void> {}
+  override async addPRComment(): Promise<void> {}
+  override async addIssueComment(n: number, body: string): Promise<void> {
     this.issueCommentsPosted.push([n, body]);
     // #237: mirror align.test.ts/dissent.test.ts's fakes — getIssueComments (below) must reflect
     // what was actually posted, or dissent.ts's own marker-check-before-post idempotency can
@@ -101,14 +109,14 @@ class FakeForge implements IForge {
     // prior comment).
     this.issueComments[n] = [...(this.issueComments[n] ?? []), { login: "sapwood-engine", createdAt: new Date().toISOString(), body }];
   }
-  async getIssueBody(): Promise<string> {
+  override async getIssueBody(): Promise<string> {
     return "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> {
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x",
       author: "producer",
@@ -121,48 +129,48 @@ class FakeForge implements IForge {
       unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }
-  async branchExists(): Promise<boolean> {
+  override async branchExists(): Promise<boolean> {
     return false;
   }
-  async countOpenIssuesInMilestone(): Promise<number> {
+  override async countOpenIssuesInMilestone(): Promise<number> {
     return 0;
   }
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return this.planReviewCandidates;
   }
-  async getIssueLabels(issue: number): Promise<string[]> {
+  override async getIssueLabels(issue: number): Promise<string[]> {
     return this.issueLabels[issue] ?? [];
   }
-  async getIssueComments(issue: number) {
+  override async getIssueComments(issue: number) {
     return this.issueComments[issue] ?? [];
   }
-  async createIssue(): Promise<number> {
+  override async createIssue(): Promise<number> {
     return 0;
   }
-  async listOpenIssueNumbers(): Promise<number[]> {
+  override async listOpenIssueNumbers(): Promise<number[]> {
     return this.openIssueNumbers;
   }
-  async listOpenIssues(): Promise<Issue[]> {
+  override async listOpenIssues(): Promise<Issue[]> {
     return [];
   }
   planTriageCandidates: Issue[] = [];
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return this.planTriageCandidates;
   }
   issueMetaState: Record<number, "OPEN" | "CLOSED"> = {};
-  async getIssueMeta(issue: number) {
+  override async getIssueMeta(issue: number) {
     return {
       number: issue,
       title: "",
@@ -252,7 +260,7 @@ test("createDefaultPeripherals: every PeripheralPhase key is present and none of
   const forge = new FakeForge();
   const cfg = mkCfg();
   const runner = new ScriptedRunner(forge, cfg);
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   for (const phase of ["aligning", "architecting", "plan_review", "harvesting", "retro"] as const) {
     assert.ok(peripherals[phase], `expected a real stub for ${phase}`);
     assert.notEqual(peripherals[phase], noopPeripheralStub, `${phase} must not be the noop stub`);
@@ -288,7 +296,7 @@ test("architecting stub (#123, Codex round-7 P2): resuming directly at architect
   const forge = new FakeForge();
   const cfg = mkCfg();
   const runner = new ScriptedRunner(forge, cfg);
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   // A gate⓪ candidate so the architect actually dispatches (it short-circuits on none).
   forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
   // Simulate the crash-resume shape: the round + the aligning phase's summary exist in durable
@@ -420,7 +428,7 @@ test("architecting stub (#132): the architect prompt carries the prior round's m
   state.closeRound(round1.round_id, "2026-07-10T01:00:00.000Z");
   const artifact = buildRoundArtifact(state, round1, 30, "2026-07-10T01:00:00.000Z");
   persistRoundArtifact(state, artifact, "2026-07-10T01:00:00.000Z");
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
   const round2 = state.startRound("2026-07-10T02:00:00.000Z");
   await peripherals.architecting!.run({ roundId: round2.round_id, phase: "architecting", marker: null });
@@ -440,7 +448,7 @@ test("architecting stub (#167): the architect prompt carries this repo's review-
     const forge = new FakeForge();
     const cfg = mkCfg({ doctrine: { file: doctrinePath } });
     const runner = new ScriptedRunner(forge, cfg);
-    const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+    const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
     forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
     const round = state.startRound("2026-07-10T00:00:00.000Z");
     await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
@@ -472,7 +480,7 @@ test("createDefaultPeripherals (#109 gate② P2): with round.milestone set, the 
     { number: 8, title: "out-of-scope triage candidate", labels: [] },
   ];
   const runner = new ScriptedRunner(forge, cfg);
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
 
   // Drive the two candidate-consuming stubs directly (round.ts's SEQUENCE order is round.test.ts
   // territory; the scoping property under test is per-stub).
@@ -500,9 +508,10 @@ test("runRounds integration: wired with createDefaultPeripherals's output, a def
   // once aligning's pool selection runs (a no-op add — the label is already there).
   forge.ready = [{ number: 5, title: "candidate", labels: [cfg.labels.roundPool] }];
   const runner = new ScriptedRunner(forge, cfg);
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
 
   const deps: RoundDeps = {
+    now: realClock,
     forge,
     state,
     supervisor: new MinimalSupervisor(),
@@ -554,7 +563,7 @@ test("createDefaultPeripherals (#127): roles.<role>.enabled=false omits that pha
   const forge = new FakeForge();
   const cfg = mkCfg({ roles: { retro: { enabled: false } } });
   const runner = new ScriptedRunner(forge, cfg);
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   assert.equal(peripherals.retro, undefined, "the disabled phase's stub is omitted entirely");
   for (const phase of ["aligning", "architecting", "plan_review", "harvesting"] as const) {
     assert.ok(peripherals[phase], `${phase} stays wired when only retro is disabled`);
@@ -576,7 +585,7 @@ test("createDefaultPeripherals (#127): all five roles.<role>.enabled=false omits
     },
   });
   const runner = new ScriptedRunner(forge, cfg);
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   for (const phase of ["architecting", "plan_review", "harvesting", "retro"] as const) {
     assert.equal(peripherals[phase], undefined, `${phase} omitted when disabled`);
   }
@@ -595,7 +604,7 @@ test("createDefaultPeripherals (#394 F23 gate② fix): roles.po.enabled=false bu
   forge.ready = [{ number: 1, title: "a", labels: [] }];
   const cfg = mkCfg({ roles: { po: { enabled: false, poolSelection: true } } });
   const runner = new ScriptedRunner(forge, cfg);
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   const { ranSession } = await peripherals.aligning!.run({ roundId: 1, phase: "aligning", marker: null });
   assert.equal(
     runner.calls.some((c) => c.roleId === "po-pool"),
@@ -619,7 +628,7 @@ test("createDefaultPeripherals (#379 F2, superseding #212 gate② P2-4's fatal t
   // deterministic path also routes every write through it) rather than session scripting.
   const cfg = mkCfg({ roles: { po: { enabled: false } } });
   const runner = new ScriptedRunner(forge, cfg);
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   await assert.doesNotReject(() => peripherals.aligning!.run({ roundId: 1, phase: "aligning", marker: null }));
   const events = state.eventsSince("1970-01-01T00:00:00.000Z", ["pool-labels-failed"]);
   assert.equal(events.length, 1, "the failure is recorded durably instead of thrown");
@@ -640,8 +649,9 @@ test("runRounds (#379 F2): every pool-label write failing keeps the ENGINE ALIVE
   forge.ready = [{ number: 1, title: "t", labels: [] }];
   const cfg = mkCfg({ roles: { po: { enabled: false } } });
   const runner = new ScriptedRunner(forge, cfg);
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   const deps: RoundDeps = {
+    now: realClock,
     forge,
     state,
     supervisor: new MinimalSupervisor(),
@@ -682,7 +692,7 @@ test("architecting stub (#127 gate② F3): with roles.po.enabled=false the archi
   forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
   const cfg = mkCfg({ roles: { po: { enabled: false } } });
   const runner = new ScriptedRunner(forge, cfg);
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   // #212 AC7: aligning is no longer omitted when the PO is disabled — it still runs the
   // engine-computed round-pool selection every round (no session); only the PO's OWN
   // decomposition/triage session is skipped (see the architect-context assertions below).
@@ -714,7 +724,7 @@ test("createDefaultPeripherals #237 finding 5 (2026-07-18 adjudication): the PO-
   forge.issueMetaState[42] = "CLOSED"; // the issue closed since — this is what the scan should detect
   const cfg = mkCfg({ roles: { po: { enabled: false } } });
   const runner = new ScriptedRunner(forge, cfg);
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
 
   await peripherals.aligning!.run({ roundId: 2, phase: "aligning", marker: null });
 
@@ -759,7 +769,7 @@ test("createDefaultPeripherals #237 round-2 adjudication (2026-07-19, finding 1+
     if (kind === "concern-posted") throw new Error("simulated crash: concern-posted append lost");
     realAppend(kind, payload);
   };
-  const peripheralsRound5 = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripheralsRound5 = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   await peripheralsRound5.aligning!.run({ roundId: 5, phase: "aligning", marker: null });
   state.appendEvent = realAppend; // un-poison — the "crash" is over
 
@@ -789,7 +799,7 @@ test("createDefaultPeripherals #237 round-2 adjudication (2026-07-19, finding 1+
       return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: `role-${opts.roleId}-1`, resultText };
     },
   };
-  const peripheralsRound6 = createDefaultPeripherals({ forge, state, cfg, runner: runnerRound6 });
+  const peripheralsRound6 = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner: runnerRound6 });
   await peripheralsRound6.aligning!.run({ roundId: 6, phase: "aligning", marker: null });
 
   assert.equal(
@@ -823,7 +833,14 @@ test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exac
       roles: { planReviewer: { enabled: false }, retro: { enabled: false } },
       labels: { planApproved: "ok-to-build", verifyNa: "no-verify" },
     });
-    createDefaultPeripherals({ forge, state, cfg, runner: new ScriptedRunner(forge, cfg), log: (line) => logged.push(line) });
+    createDefaultPeripherals({
+      now: realClock,
+      forge,
+      state,
+      cfg,
+      runner: new ScriptedRunner(forge, cfg),
+      log: (line) => logged.push(line),
+    });
     assert.equal(logged.length, 1, "exactly one startup log line for two disabled roles");
     assert.match(logged[0]!, /^\[sapwood:round\]/);
     assert.match(logged[0]!, /plan_review/);
@@ -836,7 +853,14 @@ test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exac
     assert.match(logged[0]!, /no-verify/, "the configured verifyNa label too");
     assert.doesNotMatch(logged[0]!, /plan:approved/, "never the hardcoded default label name");
     const allOn = mkCfg();
-    createDefaultPeripherals({ forge, state, cfg: allOn, runner: new ScriptedRunner(forge, allOn), log: (line) => logged.push(line) });
+    createDefaultPeripherals({
+      now: realClock,
+      forge,
+      state,
+      cfg: allOn,
+      runner: new ScriptedRunner(forge, allOn),
+      log: (line) => logged.push(line),
+    });
     assert.equal(logged.length, 1, "an all-enabled factory logs nothing");
   } finally {
     state.close();
@@ -850,9 +874,10 @@ test("runRounds integration (#127): a disabled role spawns no session for its ph
   // #214: pre-labelled round-pool member, see the other runRounds integration test's own comment.
   forge.ready = [{ number: 5, title: "candidate", labels: [cfg.labels.roundPool] }];
   const runner = new ScriptedRunner(forge, cfg);
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
 
   const deps: RoundDeps = {
+    now: realClock,
     forge,
     state,
     supervisor: new MinimalSupervisor(),
@@ -902,8 +927,9 @@ test("runRounds integration: KILL_SWITCH blocks every real peripheral — none o
     const forge = new FakeForge();
     const cfg = mkCfg();
     const runner = new ScriptedRunner(forge, cfg);
-    const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+    const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
     const deps: RoundDeps = {
+      now: realClock,
       forge,
       state,
       supervisor: new MinimalSupervisor(),
@@ -934,7 +960,7 @@ test("architecting stub (#213): only cfg.labels.roundPool-labeled, dispatchable 
     { number: 40, title: "pool member A", labels: [cfg.labels.roundPool], body: "body of pool member A" },
     { number: 41, title: "NOT a pool member", labels: [], body: "body of a dispatchable-but-unpooled issue" },
   ];
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   const round = state.startRound("2026-07-17T00:00:00.000Z");
   await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
   const architectCall = runner.calls.find((c) => c.roleId === "architect");
@@ -952,7 +978,7 @@ test("architecting stub (#213): the pool is computed FRESH at every invocation (
   const runner = new ScriptedRunner(forge, cfg);
   forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
   forge.ready = [{ number: 50, title: "first-round pool member", labels: [cfg.labels.roundPool] }];
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   const round1 = state.startRound("2026-07-17T00:00:00.000Z");
   await peripherals.architecting!.run({ roundId: round1.round_id, phase: "architecting", marker: null });
   const firstCall = runner.calls.find((c) => c.roleId === "architect")!;
@@ -989,7 +1015,7 @@ test("architecting stub (#213): {{round.pool}} is deterministically capped at cf
     labels: [cfg.labels.roundPool],
     body: "x".repeat(50),
   }));
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   const round = state.startRound("2026-07-17T00:00:00.000Z");
   await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
   const architectCall = runner.calls.find((c) => c.roleId === "architect")!;
@@ -1009,7 +1035,7 @@ test("architecting stub (#213): a pool-member forge read failure degrades to an 
   const runner = new ScriptedRunner(forge, cfg);
   forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
   const logged: string[] = [];
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner, log: (line) => logged.push(line) });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner, log: (line) => logged.push(line) });
   const round = state.startRound("2026-07-17T00:00:00.000Z");
   await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
   const architectCall = runner.calls.find((c) => c.roleId === "architect")!;
@@ -1030,7 +1056,7 @@ test("architecting stub (#213 Codex review round 2, finding 3): a pool-member fo
   const cfg = mkCfg();
   const runner = new ScriptedRunner(forge, cfg);
   forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   const round = state.startRound("2026-07-17T00:00:00.000Z");
   await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
   const events = state.eventsAfterId(0, ["architect-review-degraded"]);
@@ -1047,7 +1073,7 @@ test("createDefaultPeripherals (#213 / #127): roles.architect.enabled=false -> t
   const cfg = mkCfg({ roles: { architect: { enabled: false } } });
   forge.ready = [{ number: 40, title: "pool member", labels: [cfg.labels.roundPool] }];
   const runner = new ScriptedRunner(forge, cfg);
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
   assert.equal(peripherals.architecting, undefined, "the phase is omitted, not a degraded no-op");
   state.close();
 });

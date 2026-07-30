@@ -40,6 +40,12 @@ const require = createRequire(import.meta.url);
 // ponytail: runtime require avoids JSON-import assertion syntax differences across Node versions
 const { version } = require("../package.json") as { version: string };
 
+/** #403 (F25): the ONE place the real wall clock enters the engine's production wiring. Every
+ *  module's `now` dependency is REQUIRED, not optional — so a fixture that seeds a date cannot
+ *  silently fall back to the real clock (the compiler refuses), and every real-clock read is
+ *  traceable to this constant instead of being scattered across defaults. */
+const systemClock = (): Date => new Date();
+
 const USAGE = `\
 usage: sapwood <command> [options]
 
@@ -484,6 +490,10 @@ export function formatStatus(s: StatusSnapshot): string {
   );
   if (s.parked.length > 0) {
     for (const p of s.parked) {
+      // #403 (F25) per-site decision: DELIBERATE wall-clock read, kept. `sapwood status` is a
+      // human-facing print of how long the park has ACTUALLY been standing, right now, on this
+      // machine — the operator's wall clock is the correct source, and no assertion in the suites
+      // reads this string's duration (they assert the park's own fields, not the rendered "Ns").
       const durationSec = Math.max(0, Math.floor((Date.now() - Date.parse(p.enteredAt)) / 1000));
       lines.push(
         `park: PARKED (${p.source}) since ${p.enteredAt} (${durationSec}s) — ` +
@@ -558,7 +568,10 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
       killSwitchActive: state.isKillSwitchActive(),
       pauseActive: state.isPauseActive(),
       ceilingBreach: state.ceilingBreach(),
-      dailySpendUsd: state.dailySpendUsd(new Date()),
+      // #403: deliberate wall-clock read. `sapwood status` reports TODAY's spend as of the
+      // moment the operator runs it; there is no seeded date anywhere on this path and no
+      // caller that would want a different day. This is a composition root, hence systemClock.
+      dailySpendUsd: state.dailySpendUsd(systemClock()),
       lanesMax: cfg?.lanes.max ?? null,
       dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
       parked: state.parkedSources(),
@@ -980,7 +993,8 @@ function createRunLogger(cfg: SapwoodConfig, override?: EngineLogger): { logger:
   const path = resolve(cfg.logging.path);
   return {
     path,
-    logger: override ?? new FileEngineLogger({ path, teeToStderr: cfg.logging.teeToStderr, maxBytes: cfg.logging.maxBytes }),
+    logger:
+      override ?? new FileEngineLogger({ path, teeToStderr: cfg.logging.teeToStderr, maxBytes: cfg.logging.maxBytes, now: systemClock }),
   };
 }
 
@@ -1060,12 +1074,13 @@ export function buildTickFixLegResume(
   forge: IForge,
   state: State,
   renderFixPrompt: (issueNumber: number, pr: number) => string,
+  now: () => Date,
   log?: (message: string) => void,
 ): FixLegResumeDeps | undefined {
   if (!cfg.proxy.enabled || cfg.proxy.shadow) return undefined;
   return {
     renderFixPrompt,
-    mintProxy: createProxyMint({ cfg, forge, state, roundId: 0, phase: "tick", ...(log !== undefined ? { log } : {}) }),
+    mintProxy: createProxyMint({ cfg, forge, state, roundId: 0, phase: "tick", now, ...(log !== undefined ? { log } : {}) }),
   };
 }
 
@@ -1105,10 +1120,12 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // write/argv change on any production session — see buildTickFixLegResume's own doc for the
   // exact observable guarantee) unless cfg.proxy is in its production-attach state (enabled:
   // true, shadow: false).
-  const fixLegResume = buildTickFixLegResume(cfg, forge, state, renderFixPrompt, log);
-  const engineReviewRunner = cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state }) : null;
+  const fixLegResume = buildTickFixLegResume(cfg, forge, state, renderFixPrompt, systemClock, log);
+  const engineReviewRunner =
+    cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state, now: systemClock }) : null;
   const engineAgent = engineReviewRunner
     ? makeProductionEngineAgent(cfg, forge, state, engineReviewRunner, {
+        now: systemClock,
         ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
       })
     : null;
@@ -1120,6 +1137,7 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   const supervisor = new WorkerSupervisor({
     cfg,
     log,
+    now: systemClock,
     // #377: lane->PR association keyed on the lane's own branch + the engine-authored PR-owner
     // marker (forge.ts's associateLanePr) — never a PR body's prose mention of the issue number,
     // which is what handed lane-294 a stranger's PR in the 2026-07-24 F15 case.
@@ -1175,6 +1193,7 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
     supervisor,
     cfg,
     mergeGate,
+    now: systemClock,
     tickIntervalSec: cfg.engine.tickIntervalSec,
     stopMode,
     stop,
@@ -1220,9 +1239,11 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg);
   const forge = overrides.forge ?? new GithubForge(cfg);
-  const engineReviewRunner = cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state }) : null;
+  const engineReviewRunner =
+    cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state, now: systemClock }) : null;
   const engineAgent = engineReviewRunner
     ? makeProductionEngineAgent(cfg, forge, state, engineReviewRunner, {
+        now: systemClock,
         ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
       })
     : null;
@@ -1232,6 +1253,7 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   const supervisor = new WorkerSupervisor({
     cfg,
     log,
+    now: systemClock,
     // #377: same branch+marker association as the tick driver above.
     lanePr: buildLanePrAssociator(forge, log),
     renderPrompt,
@@ -1256,10 +1278,17 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // constructs one. `enabled: false` (the default): unchanged, today's behavior.
   const defaultProxy =
     cfg.proxy.enabled && !cfg.proxy.shadow
-      ? { mint: createProxyMint({ cfg, forge, state, roundId: 0, phase: "peripheral", log }) }
+      ? { mint: createProxyMint({ cfg, forge, state, roundId: 0, phase: "peripheral", now: systemClock, log }) }
       : undefined;
-  const runner = new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state, ...(defaultProxy !== undefined ? { defaultProxy } : {}) });
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner, log });
+  const runner = new RoleRunner({
+    cfg,
+    ...overrides.roleRunnerDeps,
+    log,
+    state,
+    now: systemClock,
+    ...(defaultProxy !== undefined ? { defaultProxy } : {}),
+  });
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner, now: systemClock, log });
   const stop = resolveStopConfig(argv, cfg);
   // #76: same fail-fast stance as the tick driver — a typo'd milestone goal must abort startup
   // with zero dispatch, checked here identically for the round path's own FINAL stop condition.
@@ -1292,6 +1321,7 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
     supervisor,
     cfg,
     mergeGate,
+    now: systemClock,
     ...(engineAgent !== null ? { engineAgentDriveDeps: engineAgent.driveDepsForLane } : {}),
     tickIntervalSec: cfg.engine.tickIntervalSec,
     peripherals,

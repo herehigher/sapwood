@@ -18,6 +18,7 @@ import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { ContextManifest } from "./context-manifest.js";
@@ -42,18 +43,25 @@ import {
   validateReviewerOutput,
 } from "./plan-review.js";
 
-class FakeForge implements IForge {
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
+class FakeForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
   /** #214: createPlanReviewStub's candidate set is now the round pool (forge.getPoolEligibleIssues
@@ -75,53 +83,53 @@ class FakeForge implements IForge {
    *  ordering invariant read this log instead. */
   writeLog: Array<{ kind: "add-label" | "remove-label" | "comment"; issue: number; detail: string }> = [];
 
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return [];
   }
-  async claimIssue(): Promise<void> {}
-  async setBoardStatus(): Promise<void> {}
-  async addSubIssue(): Promise<void> {
+  override async claimIssue(): Promise<void> {}
+  override async setBoardStatus(): Promise<void> {}
+  override async addSubIssue(): Promise<void> {
     throw new Error("FakeForge.addSubIssue is not used by this test");
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
-  async addLabel(n: number, l: string): Promise<void> {
+  override async addLabel(n: number, l: string): Promise<void> {
     this.labelsAdded.push([n, l]);
     this.writeLog.push({ kind: "add-label", issue: n, detail: l });
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
   }
   removeLabelCalls: Array<[number, string]> = [];
-  async removeLabel(n: number, l: string): Promise<void> {
+  override async removeLabel(n: number, l: string): Promise<void> {
     this.removeLabelCalls.push([n, l]);
     this.writeLog.push({ kind: "remove-label", issue: n, detail: l });
     this.issueLabels[n] = (this.issueLabels[n] ?? []).filter((x) => x !== l);
   }
-  async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> {
+  override async addPRLabel(): Promise<void> {}
+  override async openPR(): Promise<number> {
     return 1;
   }
-  async getPRStatus(n: number): Promise<PRStatus> {
+  override async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
-  async mergePR(): Promise<void> {}
-  async addPRComment(): Promise<void> {}
-  async addIssueComment(n: number, body: string): Promise<void> {
+  override async mergePR(): Promise<void> {}
+  override async addPRComment(): Promise<void> {}
+  override async addIssueComment(n: number, body: string): Promise<void> {
     this.issueCommentsPosted.push([n, body]);
     this.writeLog.push({ kind: "comment", issue: n, detail: body });
   }
-  async getIssueBody(issue: number): Promise<string> {
+  override async getIssueBody(issue: number): Promise<string> {
     return this.issueBodies[issue] ?? "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> {
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
     this.issueBodies[issue] = body;
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x",
       author: "producer",
@@ -134,44 +142,44 @@ class FakeForge implements IForge {
       unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }
-  async branchExists(): Promise<boolean> {
+  override async branchExists(): Promise<boolean> {
     return false;
   }
-  async countOpenIssuesInMilestone(): Promise<number> {
+  override async countOpenIssuesInMilestone(): Promise<number> {
     return 0;
   }
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getPoolEligibleIssues(): Promise<Issue[]> {
+  override async getPoolEligibleIssues(): Promise<Issue[]> {
     return this.poolEligibleIssues;
   }
-  async getIssueLabels(issue: number): Promise<string[]> {
+  override async getIssueLabels(issue: number): Promise<string[]> {
     return this.issueLabels[issue] ?? [];
   }
-  async getIssueComments(issue: number) {
+  override async getIssueComments(issue: number) {
     this.getIssueCommentsCallCount++;
     return this.issueComments[issue] ?? [];
   }
-  async createIssue(): Promise<number> {
+  override async createIssue(): Promise<number> {
     return 0;
   }
-  async listOpenIssueNumbers(): Promise<number[]> {
+  override async listOpenIssueNumbers(): Promise<number[]> {
     return [];
   }
-  async listOpenIssues(): Promise<Issue[]> {
+  override async listOpenIssues(): Promise<Issue[]> {
     return [];
   }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return [];
   }
 }
@@ -257,6 +265,8 @@ const mkFakeManifest = (tag: string): ContextManifest => ({
   worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
   settingsHash: "hash",
   hookHash: null,
+  toolUsage: [],
+  readPaths: [],
   recordedAt: "2026-07-17T00:00:01Z",
 });
 
@@ -279,7 +289,7 @@ test("createPlanReviewStub: marker present -> returns it unchanged, no forge cal
   forge.poolEligibleIssues = [{ number: 1, title: "t", labels: [ROUND_POOL_LABEL] }];
   const runner = new ScriptedRunner([{ result: doneResult("s1") }]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const stub = createPlanReviewStub(deps);
   const { marker } = await stub.run({ roundId: 5, phase: "plan_review", marker: "prior-marker" });
   assert.equal(marker, "prior-marker");
@@ -291,7 +301,7 @@ test("createPlanReviewStub: no candidates -> returns the round's marker, no sess
   const forge = new FakeForge();
   const runner = new ScriptedRunner([{ result: doneResult("s1") }]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const stub = createPlanReviewStub(deps);
   const { marker, ranSession } = await stub.run({ roundId: 5, phase: "plan_review", marker: null });
   assert.equal(marker, planReviewMarker(5));
@@ -307,7 +317,7 @@ test("createPlanReviewStub: outcome 1 (approve, no body revision) — engine app
   const cfg = mkCfg();
   const runner = new ScriptedRunner([{ result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 10 })) }]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   const { ranSession } = await stub.run({ roundId: 1, phase: "plan_review", marker: null });
   assert.equal(runner.calls.length, 1);
@@ -327,7 +337,7 @@ test("createPlanReviewStub: outcome 1 (approve WITH a body revision) — the rev
   const cfg = mkCfg();
   const runner = new ScriptedRunner([{ result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 50 }, PLAN_BODY)) }]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 1, phase: "plan_review", marker: null });
   assert.deepEqual(forge.updateIssueBodyCalls, [[50, PLAN_BODY]]);
@@ -349,7 +359,7 @@ test("createPlanReviewStub: outcome 3 (propose verify:n/a) — engine applies ve
     },
   ]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 1, phase: "plan_review", marker: null });
   assert.equal(runner.calls.length, 1); // no drafter, no further reviewer pass
@@ -381,7 +391,7 @@ test("createPlanReviewStub: outcome 2 (request draft) end-to-end self-heal — r
     { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 12 })) },
   ]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 1, phase: "plan_review", marker: null });
   assert.equal(runner.calls.length, 3);
@@ -422,7 +432,7 @@ test("createPlanReviewStub (#236): both the reviewer AND the drafter session's c
     { result: { ...doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 12 })), contextManifest: reviewerManifest1 } },
   ]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg: mkCfg(), runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 7, phase: "plan_review", marker: null });
   const rows = state.listContextManifestsForRound(7);
@@ -453,7 +463,7 @@ test("createPlanReviewStub P1: after the drafter's body is applied, the NEXT rev
     { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 30 })) },
   ]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 1, phase: "plan_review", marker: null });
   assert.ok(runner.calls[2]!.prompt.includes("NEW PLAN — concrete criteria"), "cycle-1 reviewer's prompt embedded the drafter's NEW body");
@@ -468,7 +478,7 @@ test("createPlanReviewStub P2: a reviewer SESSION failure is retried once; a sec
   const cfg = mkCfg();
   const runner = new ScriptedRunner([{ result: failedResult("reviewer-0") }, { result: failedResult("reviewer-0-retry") }]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 2, phase: "plan_review", marker: null });
   assert.deepEqual(
@@ -493,7 +503,7 @@ test("createPlanReviewStub P2: a reviewer failure followed by a successful+valid
     { result: doneResult("reviewer-0-retry", sapwoodResult({ decision: "approve", issue: 32 })) },
   ]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 2, phase: "plan_review", marker: null });
   assert.equal(runner.calls.length, 2);
@@ -513,7 +523,7 @@ test("createPlanReviewStub #110: reviewer output with no structured block at all
     { result: doneResult("reviewer-0-retry", "still just prose, no structured output") },
   ]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 3, phase: "plan_review", marker: null });
   assert.deepEqual(
@@ -546,7 +556,7 @@ test("createPlanReviewStub #110: reviewer 'draft_request' with NO BODY block, TW
     { result: doneResult("reviewer-0-retry", sapwoodResult({ decision: "draft_request", issue: 34 }, "   \n  ")) }, // whitespace-only
   ]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 3, phase: "plan_review", marker: null });
   assert.deepEqual(
@@ -569,7 +579,7 @@ test("createPlanReviewStub #110: an 'approve' whose body has no verification pla
     { result: doneResult("reviewer-0-retry", sapwoodResult({ decision: "approve", issue: 35 })) },
   ]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 3, phase: "plan_review", marker: null });
   assert.ok(!(forge.issueLabels[35] ?? []).includes("plan:approved"), "the approve claim was never honored");
@@ -590,7 +600,7 @@ test("createPlanReviewStub #110: a plan-drafter session that produces invalid ou
     { result: doneResult("drafter-0-retry", "garbage, no structured block") },
   ]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 4, phase: "plan_review", marker: null });
   assert.deepEqual(
@@ -632,7 +642,7 @@ test("createPlanReviewStub: exhausted after maxDraftCycles — applies needs-hum
     { result: doneResult("reviewer-1", sapwoodResult({ decision: "draft_request", issue: 13 }, "still bad again")) },
   ]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 7, phase: "plan_review", marker: null });
   // maxDraftCycles=1 -> at most 1 draft cycle: reviewer(cycle0) -> drafter(cycle0) -> reviewer(cycle1) -> exhausted.
@@ -657,7 +667,7 @@ test("createPlanReviewStub #104: escalate() (maxDraftCycles exhausted) appends a
     { result: doneResult("reviewer-1", sapwoodResult({ decision: "draft_request", issue: 13 }, "still bad again")) },
   ]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 7, phase: "plan_review", marker: null });
   const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
@@ -679,7 +689,7 @@ test("createPlanReviewStub #104: escalate() from a reviewer-session-failed-twice
   const cfg = mkCfg();
   const runner = new ScriptedRunner([{ result: failedResult("reviewer-0") }, { result: failedResult("reviewer-0-retry") }]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 2, phase: "plan_review", marker: null });
   const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
@@ -703,7 +713,7 @@ test("createPlanReviewStub #104: a state-write failure on escalate() is containe
   state.appendEvent = () => {
     throw new Error("simulated disk failure");
   };
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await assert.doesNotReject(() => stub.run({ roundId: 3, phase: "plan_review", marker: null }));
   assert.ok((forge.issueLabels[33] ?? []).includes(cfg.labels.needsHuman), "the forge escalation still landed");
@@ -724,7 +734,7 @@ test("createPlanReviewStub: processes every candidate issue, independently", asy
     { result: doneResult("r-21", sapwoodResult({ decision: "approve", issue: 21 })) },
   ]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   const { marker } = await stub.run({ roundId: 3, phase: "plan_review", marker: null });
   assert.equal(runner.calls.length, 2);
@@ -755,7 +765,7 @@ test("createPlanReviewStub #374 review (Codex sol-high finding 6): once an earli
   };
   const runner = new ScriptedRunner([{ result: quotaResult }]);
   const state = new State(":memory:");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 5, phase: "plan_review", marker: null });
   // Issue #30's session dispatched normally (it IS this pass's canary) and classified; #31/#32
@@ -791,7 +801,7 @@ test("createPlanReviewStub #374 review (Codex sol-high verify-pass finding 1, P1
   // outright (round.ts's own canary doctrine). If the loop guard skipped on "a park row exists"
   // (the pre-fix behavior), #40 would never even get a chance to prove recovery.
   state.enterPark("llm", "prior quota storm", null, "2026-07-24T00:00:00Z");
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 6, phase: "plan_review", marker: null });
   // BOTH issues got a real session — #40's success cleared the park, so #41 proceeds normally
@@ -978,7 +988,7 @@ test("createPlanReviewStub (#214): a pool with all four member classes gets exac
     { result: doneResult("reviewer-100", sapwoodResult({ decision: "approve", issue: 100 })) },
     { result: doneResult("confirm-101", sapwoodResult({ decision: "confirm", issue: 101 })) },
   ]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
 
@@ -1022,7 +1032,7 @@ test("createPlanReviewStub (#214 gate② review delta P2): an approved-but-planl
     { result: doneResult("drafter-220", sapwoodResult({ issue: 220 }, NEW_BODY)) },
     { result: doneResult("reviewer-220", sapwoodResult({ decision: "approve", issue: 220 })) },
   ]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
 
@@ -1054,7 +1064,7 @@ test("createPlanReviewStub (#283/#301 review, P2 F6): an approved-but-AC-less or
     { result: doneResult("drafter-221", sapwoodResult({ issue: 221 }, NEW_BODY)) },
     { result: doneResult("reviewer-221", sapwoodResult({ decision: "approve", issue: 221 })) },
   ]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
 
@@ -1092,7 +1102,7 @@ test("createPlanReviewStub (#214): confirm 'invalidate' feeds the SAME draft-cyc
     { result: doneResult("drafter-200", sapwoodResult({ issue: 200 }, NEW_BODY)) },
     { result: doneResult("reviewer-200", sapwoodResult({ decision: "approve", issue: 200 })) },
   ]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
 
@@ -1150,7 +1160,7 @@ test("createPlanReviewStub (#214 gate② review P2): confirm 'invalidate' -> see
       ),
     },
   ]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
 
@@ -1188,7 +1198,7 @@ test("createPlanReviewStub (#214 gate② review P2): an ORDINARY (never-approved
       ),
     },
   ]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
   const comment = lastComment(forge, 202);
@@ -1214,7 +1224,7 @@ test("createPlanReviewStub (#214 gate② review delta P2): verify_na write order
   const runner = new ScriptedRunner([
     { result: doneResult("reviewer-210", sapwoodResult({ decision: "verify_na", issue: 210 }, "Pure docs work.")) },
   ]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
   const log = forge.writeLog.filter((e) => e.issue === 210);
@@ -1242,7 +1252,7 @@ test("createPlanReviewStub (#296): a verify_na proposal appends verify-na-propos
   const runner = new ScriptedRunner([
     { result: doneResult("reviewer-212", sapwoodResult({ decision: "verify_na", issue: 212 }, "Pure docs work.")) },
   ]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
 
@@ -1266,7 +1276,7 @@ test("createPlanReviewStub (#296): a FAILED verifyNa label write appends nothing
   const runner = new ScriptedRunner([
     { result: doneResult("reviewer-213", sapwoodResult({ decision: "verify_na", issue: 213 }, "Pure docs work.")) },
   ]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await assert.rejects(() => stub.run({ roundId: round.round_id, phase: "plan_review", marker: null }), /simulated forge failure/);
 
@@ -1286,7 +1296,7 @@ test("createPlanReviewStub (#296): a state-write failure on the verify-na-propos
   const runner = new ScriptedRunner([
     { result: doneResult("reviewer-214", sapwoodResult({ decision: "verify_na", issue: 214 }, "Pure docs work.")) },
   ]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await assert.doesNotReject(() => stub.run({ roundId: round.round_id, phase: "plan_review", marker: null }));
   assert.ok(forge.issueLabels[214]!.includes(cfg.labels.needsHuman));
@@ -1312,7 +1322,7 @@ test("createPlanReviewStub (#214 gate② review delta P2): verify_na write order
     },
     { result: doneResult("reviewer-211", sapwoodResult({ decision: "verify_na", issue: 211 }, "Turns out unverifiable.")) },
   ]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
   // #211's full write log: the seed's own draft_request brief is posted as a comment FIRST
@@ -1339,7 +1349,7 @@ test("createPlanReviewStub (#214): a confirm session that fails TWICE escalates 
   // #214 gate② review (delta P2): a real plan section, or the confirm session is skipped outright.
   forge.issueBodies[300] = PLAN_BODY;
   const runner = new ScriptedRunner([{ result: failedResult("confirm-0") }, { result: failedResult("confirm-0-retry") }]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
 
@@ -1379,7 +1389,7 @@ test("createPlanReviewStub (#214): a confirm session producing invalid structure
     { result: doneResult("confirm-0", "no structured output at all") },
     { result: doneResult("confirm-0-retry", "still just prose") },
   ]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
   assert.ok(forge.issueLabels[301]!.includes(cfg.labels.needsHuman));
@@ -1396,7 +1406,7 @@ test("createPlanReviewStub (#214) same-round detection: an issue approved earlie
   forge.issueBodies[400] = PLAN_BODY;
   forge.poolEligibleIssues = [{ number: 400, title: "t", labels: [ROUND_POOL_LABEL] }]; // class 1, first pass
   const runner = new ScriptedRunner([{ result: doneResult("reviewer-400", sapwoodResult({ decision: "approve", issue: 400 })) }]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
 
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null }); // approves #400
@@ -1423,7 +1433,7 @@ test("createPlanReviewStub (#214) same-round detection: an issue approved in a P
   // #214 gate② review (delta P2): a real plan section, or the confirm session is skipped outright.
   forge.issueBodies[500] = PLAN_BODY;
   const runner = new ScriptedRunner([{ result: doneResult("confirm-500", sapwoodResult({ decision: "confirm", issue: 500 })) }]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: round2.round_id, phase: "plan_review", marker: null });
   assert.deepEqual(
@@ -1443,7 +1453,7 @@ test("createPlanReviewStub (#214): a pre-#214 approval with NO plan-approved eve
   // #214 gate② review (delta P2): a real plan section, or the confirm session is skipped outright.
   forge.issueBodies[600] = PLAN_BODY;
   const runner = new ScriptedRunner([{ result: doneResult("confirm-600", sapwoodResult({ decision: "confirm", issue: 600 })) }]);
-  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
   assert.deepEqual(

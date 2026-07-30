@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { LaneProbe, Supervisor } from "../loop/conductor.js";
 import { type PeripheralPhase, type PeripheralStub, type RoundDeps, runRounds } from "../loop/round.js";
 import type { ContextManifest } from "../roles/context-manifest.js";
@@ -33,6 +34,13 @@ import {
   type RetroDeps,
   retroMarker,
 } from "./retro.js";
+
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
 
 class ScriptedRunner {
   calls: RoleSessionOpts[] = [];
@@ -96,6 +104,8 @@ const mkFakeManifest = (tag: string): ContextManifest => ({
   worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: true, dirtyBasis: "unknown-write-capable-session" },
   settingsHash: "hash",
   hookHash: null,
+  toolUsage: [],
+  readPaths: [],
   recordedAt: "2026-07-17T00:00:01Z",
 });
 
@@ -158,7 +168,7 @@ test("createRetroStub: every dispatched session carries RETRO_ALLOWED_TOOLS/RETR
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   const runner = new ScriptedRunner(doneResult("role-retro-1"));
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
   assert.equal(runner.calls.length, 1);
@@ -175,7 +185,7 @@ test("createRetroStub (#236): a done session's context manifest is persisted, ke
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   const manifest = mkFakeManifest("retro-attempt");
   const runner = new ScriptedRunner({ ...doneResult("role-retro-1"), contextManifest: manifest });
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
   const rows = state.listContextManifestsForRound(round.round_id);
@@ -193,7 +203,7 @@ test("createRetroStub (#236): a done session's context manifest is persisted, ke
 test("createRetroStub: marker present -> returns it unchanged, no session run (idempotence)", async () => {
   const state = new State(":memory:");
   const runner = new ScriptedRunner(doneResult("s1"));
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   const { marker } = await stub.run({ roundId: 3, phase: "retro", marker: "prior-marker" });
   assert.equal(marker, "prior-marker");
@@ -203,10 +213,10 @@ test("createRetroStub: marker present -> returns it unchanged, no session run (i
 
 test("gatherRetroFacts: counts handoffs, drive-needs-human escalations, and ceiling escalations since round start only", async () => {
   const state = new State(":memory:");
-  // appendEvent stamps the REAL clock, so the excluded "before round start" event must land
-  // strictly before a real-clock started_at (the small sleep guarantees a later millisecond).
+  // #403 (F25), PR #430 gate② P2: no sleep needed any more. The round window is id-cursor-bounded
+  // (state.start_event_id, the #123 mechanism), so "before round start" means a lower event id —
+  // not an earlier wall-clock millisecond that a real sleep had to manufacture.
   state.appendEvent("handoff", { worker: "lane-x", issue: 99 }); // before round start
-  await new Promise((r) => setTimeout(r, 5));
   const round = state.startRound(new Date().toISOString());
   state.appendEvent("handoff", { worker: "lane-a", issue: 1 });
   state.appendEvent("handoff", { worker: "lane-b", issue: 2 });
@@ -215,6 +225,26 @@ test("gatherRetroFacts: counts handoffs, drive-needs-human escalations, and ceil
   const facts = gatherRetroFacts(state, round);
   assert.equal(facts.roundId, round.round_id);
   assert.equal(facts.handoffs, 2); // the pre-round-start handoff is excluded
+  assert.equal(facts.needsHumanEscalations, 1);
+  assert.equal(facts.ceilingEscalations, 1);
+  state.close();
+});
+
+test("gatherRetroFacts (#403, F25): the round window is id-cursor-bounded — a round clock AHEAD of the machine clock still counts the round's own events", () => {
+  const state = new State(":memory:");
+  // The exact seeded-vs-wall-clock mismatch #403 exists to eliminate, in the one place it was
+  // still load-bearing: `started_at` comes from the round's INJECTED clock while `appendEvent`
+  // stamps the machine clock. Seed the round an hour ahead (a fixture with a seeded clock, or a
+  // real host whose clock stepped backward mid-round) and a `ts >= started_at` read drops every
+  // event below — the retro then reports a round in which nothing happened. DELIBERATE real-clock
+  // read here: what matters is the OFFSET between the two clocks, not either absolute value.
+  const roundClockAhead = new Date(Date.now() + 3_600_000).toISOString();
+  const round = state.startRound(roundClockAhead);
+  state.appendEvent("handoff", { worker: "lane-a", issue: 1 });
+  state.appendEvent("drive-needs-human", { worker: "lane-c", issue: 3, pr: 5, reason: "flaky" });
+  state.appendEvent("ceiling-escalated", { worker: "lane-d", issue: 4, reasons: ["dailyBudgetUsd"] });
+  const facts = gatherRetroFacts(state, round);
+  assert.equal(facts.handoffs, 1);
   assert.equal(facts.needsHumanEscalations, 1);
   assert.equal(facts.ceilingEscalations, 1);
   state.close();
@@ -231,6 +261,7 @@ test("createRetroStub: renders the round facts into the prompt and dispatches ex
     cfg: mkCfg(),
     runner,
     forge: new MinimalForge(),
+    // Seeded, not realClock: this fixture also seeds the round's own dates below.
     now: () => new Date("2026-07-10T02:00:00.000Z"),
   };
   const stub = createRetroStub(deps);
@@ -272,7 +303,7 @@ test("createRetroStub: uses deps.forge to build the digest (PR diff + review dat
     commitsCalledWith = sinceIso;
     return [{ sha: "abc1234def", message: "fix: something", author: "alice", date: "2026-07-10T01:00:00Z" }];
   };
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
   const stub = createRetroStub(deps);
   await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
 
@@ -290,7 +321,7 @@ test("createRetroStub: an empty round (no touched PRs, no escalated issues) stil
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   const runner = new ScriptedRunner(doneResult("s1"));
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
   const prompt = runner.calls[0]!.prompt;
@@ -307,7 +338,7 @@ test("createRetroStub: roles.retro.digestMaxChars is honored — a tiny cap trun
   const forge = new MinimalForge();
   forge.getPRDiff = async () => "x".repeat(5000);
   const cfg = mkCfg({ roles: { retro: { digestMaxChars: 200 } } });
-  const deps: RetroDeps = { state, cfg, runner, forge };
+  const deps: RetroDeps = { now: realClock, state, cfg, runner, forge };
   const stub = createRetroStub(deps);
   await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
   const prompt = runner.calls[0]!.prompt;
@@ -366,7 +397,7 @@ test("createRetroStub: happy path — session writes a proposal scratch; engine 
   const runner = new ScriptedRunner(doneResult("s1", PROPOSAL_SCRATCH));
   const forge = new MinimalForge();
   forge.branchExistsResult = true;
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
   const stub = createRetroStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
 
@@ -385,7 +416,7 @@ test("createRetroStub: quiet round ('none' scratch) — no branch check, no open
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   const runner = new ScriptedRunner(doneResult("s1", "none"));
   const forge = new MinimalForge();
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
   const stub = createRetroStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
   assert.equal(marker, retroMarker(round.round_id));
@@ -400,7 +431,7 @@ test("createRetroStub: push verification fails (branch absent on the forge) — 
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   const runner = new ScriptedRunner(doneResult("s1", PROPOSAL_SCRATCH));
   const forge = new MinimalForge(); // branchExistsResult defaults to false
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
   const stub = createRetroStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
 
@@ -423,7 +454,7 @@ test("createRetroStub: openPR throws AFTER a verified push — retro-pr-degraded
   const forge = new MinimalForge();
   forge.branchExistsResult = true;
   forge.openPRError = new Error("boom: PR already exists");
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
   const stub = createRetroStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
 
@@ -454,7 +485,7 @@ test("createRetroStub: missing scratch file is an INVALID attempt — retried on
   const runner = new ScriptedRunner(noScratch("s1"), noScratch("s2"));
   const forge = new MinimalForge();
   forge.branchExistsResult = true;
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
   const stub = createRetroStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
 
@@ -473,7 +504,7 @@ test("createRetroStub: malformed scratch on the first attempt, valid on the retr
   const runner = new ScriptedRunner(doneResult("s1", "garbage that is not a proposal"), doneResult("s2", PROPOSAL_SCRATCH));
   const forge = new MinimalForge();
   forge.branchExistsResult = true;
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
   const stub = createRetroStub(deps);
   await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
   assert.equal(runner.calls.length, 2);
@@ -495,7 +526,7 @@ test("createRetroStub: a failed session is retried once — non-done then done m
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   const runner = new ScriptedRunner(timeoutResult("s1"), doneResult("s2"));
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
   assert.equal(marker, retroMarker(round.round_id));
@@ -508,7 +539,7 @@ test("createRetroStub: two failed sessions degrade VISIBLY but never wedge the r
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   const runner = new ScriptedRunner(timeoutResult("s1"), timeoutResult("s2"));
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
   assert.equal(marker, retroMarker(round.round_id)); // the phase still closes — never wedges the run
@@ -527,7 +558,7 @@ test("createRetroStub: everyNRounds > 1 skips a round whose id isn't a multiple 
   const round2 = state.startRound("2026-07-10T01:00:00.000Z"); // round_id 2
   const runner = new ScriptedRunner(doneResult("s1"));
   const cfg = mkCfg({ roles: { retro: { everyNRounds: 3 } } });
-  const deps: RetroDeps = { state, cfg, runner, forge: new MinimalForge() };
+  const deps: RetroDeps = { now: realClock, state, cfg, runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
 
   const r1 = await stub.run({ roundId: round1.round_id, phase: "retro", marker: null });
@@ -547,7 +578,7 @@ test("createRetroStub: everyNRounds > 1 runs on a round whose id IS a multiple o
   const round3 = state.startRound("2026-07-10T03:00:00.000Z"); // round_id 3
   const runner = new ScriptedRunner(doneResult("role-retro-3"));
   const cfg = mkCfg({ roles: { retro: { everyNRounds: 3 } } });
-  const deps: RetroDeps = { state, cfg, runner, forge: new MinimalForge() };
+  const deps: RetroDeps = { now: realClock, state, cfg, runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   const { marker, ranSession } = await stub.run({ roundId: round3.round_id, phase: "retro", marker: null });
   assert.equal(marker, retroMarker(round3.round_id));
@@ -560,7 +591,7 @@ test("createRetroStub: everyNRounds default (1) runs every round, unchanged from
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   const runner = new ScriptedRunner(doneResult("s1"));
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
   assert.equal(runner.calls.length, 1);
@@ -588,7 +619,7 @@ test("createRetroStub: roles.retro.promptFile override is honored (the #74 promp
     const round = state.startRound("2026-07-10T00:00:00.000Z");
     const runner = new ScriptedRunner(doneResult("s1"));
     const cfg = mkCfg({ roles: { retro: { promptFile: promptPath } } });
-    const deps: RetroDeps = { state, cfg, runner, forge: new MinimalForge() };
+    const deps: RetroDeps = { now: realClock, state, cfg, runner, forge: new MinimalForge() };
     const stub = createRetroStub(deps);
     await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
     assert.equal(runner.calls[0]!.prompt, `custom retro prompt: round ${round.round_id} handoffs=0`);
@@ -636,65 +667,65 @@ test("prompts/retro.md never instructs a direct merge/approve — the PR-only pa
 
 // ── Integration: wired as round.ts's real `retro` peripheral ────────────────────────────────
 
-class MinimalForge implements IForge {
+class MinimalForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return [];
   }
-  async claimIssue(): Promise<void> {}
-  async setBoardStatus(): Promise<void> {}
-  async addSubIssue(): Promise<void> {
+  override async claimIssue(): Promise<void> {}
+  override async setBoardStatus(): Promise<void> {}
+  override async addSubIssue(): Promise<void> {
     throw new Error("MinimalForge.addSubIssue is not used by this test");
   }
-  async getSubIssues() {
+  override async getSubIssues() {
     return [];
   }
-  async addLabel(): Promise<void> {}
-  async removeLabel(): Promise<void> {}
-  async addPRLabel(): Promise<void> {}
+  override async addLabel(): Promise<void> {}
+  override async removeLabel(): Promise<void> {}
+  override async addPRLabel(): Promise<void> {}
   // #111 PR-B: recording + programmable — the engine-side PR-creation tests drive these.
   openPRCalls: Array<[string, string, string]> = [];
   openPRError: Error | null = null;
-  async openPR(branch: string, title: string, body: string): Promise<number> {
+  override async openPR(branch: string, title: string, body: string): Promise<number> {
     this.openPRCalls.push([branch, title, body]);
     if (this.openPRError) throw this.openPRError;
     return 77;
   }
   branchExistsCalls: string[] = [];
   branchExistsResult = false;
-  async branchExists(branch: string): Promise<boolean> {
+  override async branchExists(branch: string): Promise<boolean> {
     this.branchExistsCalls.push(branch);
     return this.branchExistsResult;
   }
-  async getPRStatus(n: number): Promise<PRStatus> {
+  override async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
-  async mergePR(): Promise<void> {}
-  async addPRComment(): Promise<void> {}
-  async addIssueComment(): Promise<void> {}
-  async getIssueBody(): Promise<string> {
+  override async mergePR(): Promise<void> {}
+  override async addPRComment(): Promise<void> {}
+  override async addIssueComment(): Promise<void> {}
+  override async getIssueBody(): Promise<string> {
     return "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> {
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x",
       author: "producer",
@@ -707,28 +738,28 @@ class MinimalForge implements IForge {
       unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(_pr: number): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(_sinceIso: string): Promise<CommitInfo[]> {
     return [];
   }
-  async countOpenIssuesInMilestone(): Promise<number> {
+  override async countOpenIssuesInMilestone(): Promise<number> {
     return 0;
   }
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return [];
   }
-  async getIssueLabels(): Promise<string[]> {
+  override async getIssueLabels(): Promise<string[]> {
     return [];
   }
-  async getIssueComments() {
+  override async getIssueComments() {
     return [];
   }
 }
@@ -759,6 +790,7 @@ class MinimalSupervisor implements Supervisor {
 }
 
 const baseIntegrationDeps = (state: State, peripherals: Partial<Record<PeripheralPhase, PeripheralStub>>): RoundDeps => ({
+  now: realClock,
   forge: new MinimalForge(),
   state,
   supervisor: new MinimalSupervisor(),
@@ -774,7 +806,7 @@ const baseIntegrationDeps = (state: State, peripherals: Partial<Record<Periphera
 test("runRounds integration: the real retro stub runs during a normal round close and persists a marker", async () => {
   const state = new State(":memory:");
   const runner = new ScriptedRunner(doneResult("role-retro-int"));
-  const retroStub = createRetroStub({ state, cfg: mkCfg(), runner, forge: new MinimalForge() });
+  const retroStub = createRetroStub({ now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() });
   const deps = baseIntegrationDeps(state, { retro: retroStub });
   // Graceful stop mid-round (round.test.ts's pattern): the in-flight round still finishes
   // every phase — retro included — and only the NEXT round is withheld.
@@ -801,7 +833,7 @@ test("runRounds integration: KILL_SWITCH blocks retro entirely — the stub neve
     const state = new State(join(dir, "sapwood.sqlite"));
     writeFileSync(join(dir, "KILL_SWITCH"), "");
     const runner = new ScriptedRunner(doneResult("role-retro-int"));
-    const retroStub = createRetroStub({ state, cfg: mkCfg(), runner, forge: new MinimalForge() });
+    const retroStub = createRetroStub({ now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() });
     const deps = baseIntegrationDeps(state, { retro: retroStub });
     const result = await runRounds(deps);
     assert.equal(result.stoppedBy, "kill-switch");

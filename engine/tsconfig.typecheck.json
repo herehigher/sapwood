@@ -1,0 +1,48 @@
+// #403 (F25): tsconfig.json next door is the BUILD config — it excludes `src/**/*.test.ts` (and
+// `src/**/*.test-support.ts`) so `tsc` doesn't emit test files into dist/. A side effect of that
+// exclusion was that the test suites were never type-checked AT ALL (they run under tsx, which
+// strips types without checking them), so the compiler could not be the enforcement mechanism for
+// anything a fixture got wrong.
+//
+// It has to be, for #403's required-clock seams: "a fixture that omits the clock fails to compile"
+// is only true if fixtures are compiled. This config is that check — same include set, noEmit, and
+// (since PR #430 gate② round 1) NO EXCLUSIONS AT ALL.
+//
+// Round 1 of this PR shipped a named legacy exclusion list of 16 suites instead, on the reasoning
+// that their pre-existing type debt (~1091 errors) was unrelated to clocks and therefore somebody
+// else's change. The reviewer's P1 was correct and that reasoning was wrong: an excluded file is a
+// file where deleting a required `now` still compiles, so the enforcement claim was only true for
+// the suites that happened not to be excluded. The debt is gone instead:
+//
+//   - 795 of the 1091 errors were ONE mistake repeated — a per-suite partial `FakeForge`/
+//     `MinimalForge` declared `implements IForge` that never grew the members IForge grew (14 on
+//     the class declarations, 781 at the call sites that passed such a double as an `IForge`).
+//     Fixed at the source: `src/forge/unstubbed-forge.test-support.ts` provides the completeness,
+//     each double `extends UnstubbedForge`, and a compile-time guard in that file rejects it if
+//     `IForge` ever grows a member the list there doesn't name.
+//   - 486 follow-on `noImplicitOverride` errors: each stubbed member now carries `override`, which
+//     also documents which members a given fixture actually drives.
+//   - 87: `FakeMergeGate.driveOne` re-declared `ReviewTriggerPin`/`ReviewFallbackLock` as
+//     structural look-alikes (`kind: string | null` where the interface says `ReviewerKind | null`).
+//     It uses the real types now, so the fake is checked against the real contract.
+//   - the rest were per-site and small: 4 `ContextManifest` fixtures missing `toolUsage`/
+//     `readPaths`, `exactOptionalPropertyTypes` violations where a recorder stored an absent
+//     optional as an explicit `undefined`, `assert.deepEqual(x, [])` narrowing `x` to `never[]`
+//     via its own `asserts actual is T` signature, `Response.json()` being `unknown` in
+//     mcp-server.test.ts (one documented `readJson` helper, not ~50 inline casts), and a handful
+//     of fixture literals that were simply missing fields or using a widened `kind`.
+//
+// One of those errors was itself a live instance of the very thing #403 is about: align.test.ts's
+// `runPoolSelection` fixture had no `now` at all, and the compiler said so the moment the file was
+// checked.
+//
+// Keep this list empty. If a future change makes a test file uncompilable, fix the file — an
+// exclusion here is a hole in the only mechanism that enforces the clock contract.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": []
+}

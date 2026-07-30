@@ -11,6 +11,11 @@ itself.
   `npm run typecheck` green (CI runs these on every PR — see
   [dev-guide 04](docs/dev-guide/04-commands.md)). New behavior ships with
   colocated `*.test.ts` coverage.
+- **No test assertion depends on real time.** A test that seeds a timestamp
+  injects that same clock into the code under test, and no assertion's
+  pass/fail may turn on real timer ordering, real subprocess duration, or
+  scheduler order — deliberate exceptions carry a comment saying so. See
+  [dev-guide 04](docs/dev-guide/04-commands.md#how-tests-are-written-here).
 - **Some paths are human-merge-only.** Changes touching the guard, reviewer,
   merge driver, security-relevant config, `.claude/settings*.json`, or
   `.github/workflows/**` are never auto-merged, regardless of review outcome —

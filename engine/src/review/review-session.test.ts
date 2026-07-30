@@ -22,6 +22,13 @@ import { RoleRunner, type RoleRunnerDeps, type RoleSessionOpts, type RoleSession
 import { createPrivateClone, type MaterializeResult, materialize } from "./materializer.js";
 import { runReviewSession } from "./review-session.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 
 // ── fixture plumbing (mirrors materializer.test.ts's own local helpers) ────────────────────
@@ -155,6 +162,7 @@ const mkHook = (dir: string): string => {
 };
 const mkRunner = (dir: string, claudeBin: string, over: Partial<RoleRunnerDeps> = {}): RoleRunner =>
   new RoleRunner({
+    now: realClock,
     cfg,
     stateDir: dir,
     worktreeRoot: join(dir, "worktrees"),
@@ -454,6 +462,7 @@ test("LIVE containment (Codex sol-high PR #300 review, P2): under a configured s
     );
     const softCfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
     const runner = new RoleRunner({
+      now: realClock,
       cfg: softCfg,
       stateDir: dir,
       worktreeRoot: join(dir, "worktrees"),

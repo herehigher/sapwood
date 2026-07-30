@@ -59,12 +59,19 @@ import {
   workerCredentialFreeEnv,
 } from "./worker.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 
 test("WorkerSupervisor: default guard hook resolves the compiled hook in the guard directory", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const supervisor = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: "claude" });
+    const supervisor = new WorkerSupervisor({ now: realClock, cfg, stateDir: dir, claudeBin: "claude" });
     const guardHookPath = (supervisor as unknown as { guardHookPath: string }).guardHookPath;
     assert.equal(guardHookPath, fileURLToPath(new URL("../guard/guard-hook.js", import.meta.url)));
     supervisor.dispose();
@@ -861,9 +868,18 @@ test("spawnClaudeSession (#285): opts.cwd OMITTED -> the spawned process inherit
   }
 });
 
-const waitFor = async (predicate: () => boolean, message: string): Promise<void> => {
-  for (let i = 0; i < 400 && !predicate(); i++) await sleep(20);
-  assert.ok(predicate(), message);
+/** #403 (F25), PR #430 gate② round 3: a NAMED HANG GUARD, not a real-time budget. This used to be
+ *  a fixed 400x20ms poll whose expiry WAS the assertion, so under concurrent load a merely-slow
+ *  real subprocess failed the test for scheduler reasons (the same shape that failed live in
+ *  conductor.test.ts's #169 integration test during this PR's load evidence). The bound is now
+ *  deliberately generous — orders of magnitude above the real work being waited on — so it bounds
+ *  a genuinely wedged child rather than deciding any verdict, and it fails by name when it fires. */
+const waitFor = async (predicate: () => boolean, message: string, timeoutMs = 30_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`hang guard (${timeoutMs}ms): ${message}`);
+    await sleep(20);
+  }
 };
 const waitForFile = (path: string, message = `timed out waiting for ${path}`): Promise<void> => waitFor(() => existsSync(path), message);
 const waitForHeartbeatTick = async (path: string): Promise<void> => {
@@ -962,6 +978,12 @@ test("probeLlmPing: a hang past probeTimeoutSec is hard-killed and resolves fail
     const r = await probeLlmPing(bin, "haiku", 0.05, 1); // 1s timeout vs a 30s hang
     assert.equal(r.ok, false);
     assert.ok(r.detail?.includes("timed out"));
+    // #403 (F25): a DELIBERATE real-time assertion, and the margin ordering is why it is not the
+    // banned "two uncontrolled real operations race" shape (docs/REVIEW-DOCTRINE.md). The stub
+    // does zero real work — it sleeps 30s — so the only thing that can end this call inside the
+    // bound is the timeout kill under test. The three numbers are ordered by construction and by
+    // orders of magnitude, not by tuning: probe timeout 1s < this bound 10s < stub sleep 30s. A
+    // run 9x slower than expected still passes; a regression that drops the kill cannot pass.
     assert.ok(Date.now() - start < 10_000, "resolved via the timeout kill, not by waiting out the 30s sleep");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1003,6 +1025,7 @@ test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no
 // `hasOpenPr: async () => false`.
 const sup = (dir: string, claudeBin: string, worktreeRoot?: string) =>
   new WorkerSupervisor({
+    now: realClock,
     cfg,
     stateDir: dir,
     ...(worktreeRoot ? { worktreeRoot } : {}),
@@ -1051,6 +1074,7 @@ test("#304 wiring: a completed lane records one egress-suspect event through the
     const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${toolLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
     state = new State(join(dir, "state.sqlite"));
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1087,6 +1111,7 @@ test("#341 wiring: a completed lane writes at most the per-leg egress cap and lo
     const logs: string[] = [];
     state = new State(join(dir, "state.sqlite"));
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       log: (line) => logs.push(line),
       stateDir: dir,
@@ -1122,6 +1147,7 @@ test("#304 fail-safe: an egress event write failure is logged but cannot change 
     const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${toolLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
     const logs: string[] = [];
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       log: (line) => logs.push(line),
       stateDir: dir,
@@ -1153,6 +1179,7 @@ test("probe: #377 lanePr supplies prNumber and derives hasPr from it (the lane's
   try {
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1177,6 +1204,7 @@ test("probe: #377 lanePr returning null -> hasPr false, prNumber undefined (fail
   try {
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1205,6 +1233,7 @@ test("probe: #377 passes the lane's OWN branch (read from its worktree git HEAD,
     const { bin, ready } = longRunningStub(dir);
     const seen: { name: string; issue: number; branch: string | null; sessionOver: boolean }[] = [];
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       worktreeRoot,
@@ -1251,6 +1280,7 @@ test("probe: #377 gate② P1 — a CONFIRMED-DEAD wrapper with no sentinel still
   try {
     const seen: { name: string; issue: number; branch: string | null; sessionOver: boolean }[] = [];
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: mkStub(dir, FAST_STUB),
@@ -1282,6 +1312,7 @@ test("probe: #377 gate② round 3 (P1) — an INCONCLUSIVE association (forge wr
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: mkStub(dir, FAST_STUB),
@@ -1306,6 +1337,7 @@ test("probe: #377 gate② round 3 (P1) — the inconclusive deferral is BOUNDED:
   try {
     const logs: string[] = [];
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       log: (line) => logs.push(line),
       stateDir: dir,
@@ -1336,6 +1368,7 @@ test("probe: #377 gate② round 3 (P1) — a CONCLUSIVE answer resets the retry 
   try {
     let inconclusive = true;
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: mkStub(dir, FAST_STUB),
@@ -1362,6 +1395,7 @@ test("probe: #377 gate② round 5 (P1) — a branch another LIVE lane is sitting
   try {
     const seen: { branch: string | null }[] = [];
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       worktreeRoot,
@@ -1581,6 +1615,7 @@ test("#172: resumed no-result SIGTERM ignores leg 1's result and ledgers its bas
       ].join("\n"),
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1607,11 +1642,12 @@ test("#172: resumed no-result SIGTERM ignores leg 1's result and ledgers its bas
     assert.equal(s.requestHandoff(name), true);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     const resumedProbe = await s.probe(name);
+    const resumedCost = resumedProbe.costUsd ?? Number.NaN;
     assert.ok(
-      Math.abs(resumedProbe.costUsd - resumedExpected) < 1e-12,
-      `resumed no-result leg cost ${resumedProbe.costUsd} should equal baseline-adjusted estimate ${resumedExpected}`,
+      Math.abs(resumedCost - resumedExpected) < 1e-12,
+      `resumed no-result leg cost ${resumedCost} should equal baseline-adjusted estimate ${resumedExpected}`,
     );
-    state.recordSpend(name, 172, resumedProbe.costUsd, new Date().toISOString());
+    state.recordSpend(name, 172, resumedCost, new Date().toISOString());
     assert.ok(Math.abs(state.spentUsdForWorker(name) - (1 + resumedExpected)) < 1e-12);
     assert.equal(logs.filter((line) => line.includes("source=assistant-usage-estimate")).length, 1);
     s.dispose();
@@ -1727,6 +1763,7 @@ test("resume (#395 PM follow-up): resume()'s OWN spawn confirmation await — a 
       liveness: { spawnConfirmTimeoutMs: 1 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: liveCfg,
       stateDir: dir,
       worktreeRoot,
@@ -1764,6 +1801,7 @@ test("resume (#395 gate② P2-2): a merely-DELAYED (not lost) real spawn event r
       liveness: { spawnConfirmTimeoutMs: 1 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: liveCfg,
       stateDir: dir,
       worktreeRoot,
@@ -1885,6 +1923,7 @@ test("resume: fails closed in hard mode when the guard hook is missing (no ungua
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     // A supervisor whose guard hook path doesn't exist, same as dispatch()'s hard-mode guard.
     const s2 = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1950,6 +1989,7 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
     );
     const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: scfg,
       stateDir: dir,
       claudeBin: bin,
@@ -1991,6 +2031,7 @@ test("dispatch sets SAPWOOD_WORKTREE_ROOT to the resolved absolute worktree path
     );
     const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "hard" } });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: scfg,
       stateDir: dir,
       worktreeRoot,
@@ -2013,6 +2054,7 @@ test("dispatch fails closed in hard mode when the guard hook is missing (no ungu
   try {
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -2049,6 +2091,7 @@ test("dispatch (#395): cfg.liveness.spawnConfirmTimeoutMs is threaded through �
       liveness: { spawnConfirmTimeoutMs: 5_000 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: liveCfg,
       stateDir: dir,
       claudeBin: bin,
@@ -2076,6 +2119,7 @@ test("dispatch (#395 PM follow-up): a spawn confirmation that never arrives is b
       liveness: { spawnConfirmTimeoutMs: 1 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: liveCfg,
       stateDir: dir,
       worktreeRoot,
@@ -2113,6 +2157,7 @@ test("dispatch (#395 gate② round 3, P1): a LIVE worker leg heart-beats against
   try {
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> only SIGKILL ends it
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -2210,6 +2255,7 @@ test("#33: crossing worker.budgetUsdSoft mid-run triggers requestHandoff exactly
       worker: { budgetUsdSoft: 0.01 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
@@ -2249,6 +2295,7 @@ test("#33: a cache-heavy stream under budget does NOT trigger a handoff -- cache
       worker: { budgetUsdSoft: 2 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
@@ -2278,7 +2325,7 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
       worker: { pricingFile: "/nonexistent/rates.yaml" },
     });
     assert.throws(
-      () => new WorkerSupervisor({ cfg: badCfg, stateDir: dir, claudeBin: "claude", guardHookPath: mkHook(dir) }),
+      () => new WorkerSupervisor({ now: realClock, cfg: badCfg, stateDir: dir, claudeBin: "claude", guardHookPath: mkHook(dir) }),
       /\/nonexistent\/rates\.yaml/,
     );
 
@@ -2302,6 +2349,7 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
       worker: { budgetUsdSoft: 1, pricingFile: ratesPath },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: cfgCustom,
       stateDir: dir,
       claudeBin: bin,
@@ -2352,6 +2400,7 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
       worker: { budgetUsdSoft: 0.01 },
     });
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
@@ -2748,23 +2797,28 @@ test("extractFailureText: an unparseable {-prefixed line (mid-write stream fragm
 
 // ── #374: extractRateLimitResetAt — the Claude CLI's structured rate_limit_event telemetry ────
 
+/** #403 (F25): the seeded "now" every extractRateLimitResetAt case below is judged against. The
+ *  function's sanity horizon compares the parsed hint to this value, so leaving it to the real
+ *  clock would make each case's verdict a function of the day the suite runs. */
+const RL_NOW_MS = Date.parse("2026-07-24T00:00:00Z");
+
 test("extractRateLimitResetAt: a real captured rate_limit_event line yields resetsAt in epoch MILLISECONDS", () => {
   const jsonl = [
     `{"type":"system","subtype":"init","model":"opus"}`,
     `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1784885400,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false},"session_id":"s1"}`,
     `{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You've hit your session limit · resets 6:30pm (Asia/Tokyo)","total_cost_usd":0}`,
   ].join("\n");
-  assert.equal(extractRateLimitResetAt(jsonl), 1784885400 * 1000);
+  assert.equal(extractRateLimitResetAt(jsonl, RL_NOW_MS), 1784885400 * 1000);
 });
 
 test("extractRateLimitResetAt: no rate_limit_event line -> null (an absent hint, never a fabricated one)", () => {
   const jsonl = [`{"type":"system","subtype":"init"}`, `gh: Bad credentials (HTTP 401)`].join("\n");
-  assert.equal(extractRateLimitResetAt(jsonl), null);
+  assert.equal(extractRateLimitResetAt(jsonl, RL_NOW_MS), null);
 });
 
 test("extractRateLimitResetAt: a non-'rejected' status (e.g. an 'allowed' telemetry line) is ignored", () => {
   const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1784885400,"rateLimitType":"five_hour"}}`;
-  assert.equal(extractRateLimitResetAt(jsonl), null);
+  assert.equal(extractRateLimitResetAt(jsonl, RL_NOW_MS), null);
 });
 
 test("extractRateLimitResetAt: the LAST rejected record wins when more than one appears", () => {
@@ -2772,17 +2826,17 @@ test("extractRateLimitResetAt: the LAST rejected record wins when more than one 
     `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1000}}`,
     `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":2000}}`,
   ].join("\n");
-  assert.equal(extractRateLimitResetAt(jsonl), 2000 * 1000);
+  assert.equal(extractRateLimitResetAt(jsonl, RL_NOW_MS), 2000 * 1000);
 });
 
 test("extractRateLimitResetAt: malformed/truncated JSON lines and a missing rate_limit_info are tolerated, never throw", () => {
   const jsonl = [`{"type":"rate_limit_event"`, `{"type":"rate_limit_event","rate_limit_info":null}`, "not json at all"].join("\n");
-  assert.doesNotThrow(() => extractRateLimitResetAt(jsonl));
-  assert.equal(extractRateLimitResetAt(jsonl), null);
+  assert.doesNotThrow(() => extractRateLimitResetAt(jsonl, RL_NOW_MS));
+  assert.equal(extractRateLimitResetAt(jsonl, RL_NOW_MS), null);
 });
 
 test("extractRateLimitResetAt: empty input -> null", () => {
-  assert.equal(extractRateLimitResetAt(""), null);
+  assert.equal(extractRateLimitResetAt("", RL_NOW_MS), null);
 });
 
 // ── #374 review (PM P2): the sanity horizon — an untrusted third-party timestamp must never be
@@ -2883,7 +2937,7 @@ test("hasRejectedRateLimitEvent: true EVEN WITHOUT a resetsAt field — the reje
 test("hasRejectedRateLimitEvent: true even when resetsAt is malformed/out-of-range — extractRateLimitResetAt's sanity horizon is a SCHEDULING concern, not a classification one", () => {
   const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":-1e20}}`;
   assert.equal(hasRejectedRateLimitEvent(jsonl), true);
-  assert.equal(extractRateLimitResetAt(jsonl), null, "sanity check: the scheduling hint itself IS rejected as out-of-range");
+  assert.equal(extractRateLimitResetAt(jsonl, RL_NOW_MS), null, "sanity check: the scheduling hint itself IS rejected as out-of-range");
 });
 
 test("hasRejectedRateLimitEvent: malformed/truncated JSON lines and a missing rate_limit_info are tolerated, never throw", () => {
@@ -3081,7 +3135,7 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
 
 test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285): the ONLY child_process importers are worker.ts (spawn), gh.ts (execFile), and review/materializer.ts (execFile) — and the ONLY subprocess call site that may ever pass a cwd is spawnClaudeSession's own OPTIONAL, caller-supplied opt (#285 review session mode) — WorkerSupervisor's own dispatch()/resume() spawn() calls stay cwd-less, so the engine structurally CANNOT exec git in a worker worktree", () => {
   const srcDir = new URL("../", import.meta.url);
-  const files = readdirSync(srcDir, { recursive: true }).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+  const files = readdirSync(srcDir, { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
   // Sanity: the three known subprocess modules are present in the scan set.
   assert.ok(files.includes("roles/worker.ts") && files.includes("forge/gh.ts") && files.includes("review/materializer.ts"));
   for (const f of files) {
@@ -3340,6 +3394,10 @@ test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP 
     assert.equal(typeof handoff.dispatched_at, "string", "dispatched_at persisted into the sentinel");
 
     // A long gap, then RESUME — the resumed run's started_at is now, AFTER the WIP's mtime.
+    // #403 (F25): a DELIBERATE real-clock read (this lane runs on `realClock`). The assertion
+    // below is pure MONOTONICITY — `dispatched_at` predates `started_at` — which is exactly the
+    // case the issue says to leave alone: a seeded clock would make it vacuous, and the only way
+    // it can fail is if the system clock runs backwards.
     await sleep(200);
     const resumed = await s.resume({ number: 74, title: "t", labels: [] }, name);
     assert.equal(resumed.name, name);
@@ -4015,6 +4073,7 @@ test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg: scfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4080,6 +4139,7 @@ test("dispatch: a proxy opt mints a handle, widens --allowedTools with the handl
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4123,6 +4183,7 @@ test("dispatch: no proxy opt (every ordinary caller today) -> no --mcp-config fl
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4148,6 +4209,7 @@ test("dispatch: a proxy mint FAILURE is non-fatal — the lane still dispatches 
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4175,6 +4237,7 @@ test("dispatch: a spawn failure with a proxy attached still tears down the minte
   try {
     const hook = mkHook(dir);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: join(dir, "does-not-exist-claude"),
@@ -4211,6 +4274,7 @@ test("dispatch: a spawn failure on a credentialFree leg (mint succeeded, spawn f
   try {
     const hook = mkHook(dir);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: join(dir, "does-not-exist-claude"),
@@ -4266,6 +4330,7 @@ test("dispatch: credentialFree opt strips forge/git credential env vars and seve
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen.tmp")}"\nmv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\nfor _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4376,6 +4441,7 @@ test("dispatch: credentialFree + mint FAILURE refuses the dispatch outright (fai
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4413,6 +4479,7 @@ test("dispatch: a mint failure records a durable 'proxy-mint-failed' event (Work
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4467,6 +4534,7 @@ test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheri
       `#!/usr/bin/env bash\necho "$GH_TOKEN" > "${join(dir, "token.seen.tmp")}"\nmv "${join(dir, "token.seen.tmp")}" "${join(dir, "token.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4517,6 +4585,7 @@ async function mkHandoffLane(
     ].join("\n"),
   );
   const s = new WorkerSupervisor({
+    now: realClock,
     cfg,
     stateDir: dir,
     claudeBin: bin,
@@ -4713,6 +4782,7 @@ test("resume: a mint failure records a durable 'proxy-mint-failed' event (Worker
       ].join("\n"),
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4789,6 +4859,7 @@ test("resume: FIX-LEG ENTRY (opts.sessionId, no .handoff sentinel) — real Work
       ].join("\n"),
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4837,6 +4908,7 @@ test("resume: fix-leg entry fails closed with NO terminal sentinel at all (never
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4859,6 +4931,7 @@ test("resume: fix-leg entry fails closed when opts.sessionId is set but opts.pro
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4932,6 +5005,7 @@ test("resume: FIX-LEG ENTRY consumes the stale prior-leg terminal sentinel on sp
       ].join("\n"),
     );
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4961,6 +5035,7 @@ test("resume: fix-leg entry does NOT remove the stale terminal sentinel when the
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
@@ -4973,6 +5048,7 @@ test("resume: fix-leg entry does NOT remove the stale terminal sentinel when the
     assert.ok(existsSync(join(dir, `${name}.done.json`)));
 
     const s2 = new WorkerSupervisor({
+      now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: join(dir, "does-not-exist-claude"),

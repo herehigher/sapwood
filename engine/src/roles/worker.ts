@@ -1019,9 +1019,11 @@ const JS_DATE_VALID_RANGE_MS = 8_640_000_000_000_000;
  *  that constant's own doc) — tolerant by construction (never throws): an absent hint simply
  *  means the ordinary bounded backoff schedule applies, exactly the pre-#374 behavior. A value
  *  merely far in the PAST (but still Date-valid) is honored unchanged — that just means "probe
- *  immediately", never a reason to reject. `nowMs` defaults to the real current time; overridable
- *  for tests. */
-export function extractRateLimitResetAt(jsonl: string, nowMs: number = Date.now()): number | null {
+ *  immediately", never a reason to reject. `nowMs` is REQUIRED (#403/F25: it used to default to
+ *  `Date.now()`, which made the horizon check silently wall-clock-relative — a fixture seeding a
+ *  reset hint got a verdict that depended on the day the suite ran). Both production callers pass
+ *  their own injected clock. */
+export function extractRateLimitResetAt(jsonl: string, nowMs: number): number | null {
   let resetAtMs: number | null = null;
   for (const line of jsonl.split("\n")) {
     const t = line.trim();
@@ -1264,7 +1266,7 @@ export interface WorkerDeps {
   /** Path to the compiled guard hook (node <path>). Default: the dist sibling of this module. */
   guardHookPath?: string;
   heartbeatMs?: number; // default 30_000
-  now?: () => Date;
+  now: () => Date;
   /** #395: injected timer so a test can deterministically win the spawn-confirmation watchdog
    *  race (util/spawn-confirm.ts's awaitSpawnConfirmation) without depending on real OS
    *  process-spawn timing. Default: a real, cancelable `setTimeout`. */
@@ -1467,7 +1469,7 @@ export class WorkerSupervisor implements Supervisor {
     return join(this.dir, `${name}.${ext}`);
   }
   private now(): Date {
-    return this.deps.now ? this.deps.now() : new Date();
+    return this.deps.now();
   }
   private log(message: string): void {
     (this.deps.log ?? console.error)(message);
@@ -2682,7 +2684,7 @@ export class WorkerSupervisor implements Supervisor {
    *  writes, feeding conductor.ts's env-park entry with a reset-time SCHEDULING hint when the
    *  CLI's own structured rate-limit telemetry names one. */
   private terminalRateLimitResetAtMs(name: string): number | null {
-    return extractRateLimitResetAt(this.readJsonl(this.path(name, "jsonl")));
+    return extractRateLimitResetAt(this.readJsonl(this.path(name, "jsonl")), this.now().getTime());
   }
 
   /** #394 (F22) / gate② round 3 (Codex sol-high BLOCK finding, P2): same shape as
@@ -2915,12 +2917,14 @@ export class WorkerSupervisor implements Supervisor {
 
   private touchHeartbeat(name: string): void {
     const p = this.path(name, "heartbeat");
-    if (existsSync(p)) {
-      const t = new Date();
-      utimesSync(p, t, t);
-    } else {
-      writeFileSync(p, "");
-    }
+    if (!existsSync(p)) writeFileSync(p, "");
+    // #403 (F25): stamp with the INJECTED clock, never `new Date()`. heartbeatAge() below reads
+    // this file's mtime and subtracts it from `this.now()` — both sides of that subtraction must
+    // come from the same clock, or a fixture that seeds `now` computes a nonsense age against a
+    // real filesystem timestamp. (The create branch above used to leave a real mtime behind for
+    // exactly that mismatch.)
+    const t = this.now();
+    utimesSync(p, t, t);
   }
   private heartbeatAge(name: string): number {
     const p = this.path(name, "heartbeat");

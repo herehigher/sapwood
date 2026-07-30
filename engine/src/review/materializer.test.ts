@@ -147,21 +147,48 @@ exec "${realGitPath}" "$@"
  *  1000ms (vs. the previous 500ms) buys real headroom against exactly that kind of contention
  *  without weakening the fake side of the margin.
  *
+ *  3000, not 1000 (#403, F25): 1000 was NOT enough, and this was caught the only way it can be —
+ *  by repeating the suite under CONCURRENT LOAD rather than in isolation. Two runs out of five
+ *  (system load average ~130, four other test processes on the machine) failed the materialize
+ *  test with a bare ENOENT on `tree/f.txt`: the real passthrough `checkout` never completed, so
+ *  the post-checkout `rev-parse` this test is named for was never reached, while `kind:
+ *  "failure"` was satisfied anyway by the checkout's own timeout. Measured cost of that same real
+ *  `git checkout` against these fixture repos, n=25 taken ON THIS MACHINE AT THAT LOAD: median
+ *  23ms, p90 29ms, max 38ms — so the ordinary cost is nowhere near 1000ms and the killer is a
+ *  contention TAIL (fork/exec storms under a process-heavy suite), not a slow operation. 3000ms
+ *  sits ~80-130x above that measured max and 3x above the bound that provably failed.
+ *
+ *  Why a bigger number and not a seam, stated plainly for review (the doctrine's default answer
+ *  for a load-bearing race is a seam): production's `materialize()`/`createPrivateClone()` apply
+ *  ONE `timeoutMs` to every git invocation they make, and `pexecFile` is a private module-level
+ *  constant with no injectable exec seam (the same constraint #416 hit). So the real passthrough
+ *  step and the faked target step are necessarily bounded by the same number, and the only
+ *  remaining levers are its size and the DIAGNOSIS when it is still too small. Both were pulled:
+ *  the materialize test now binds to `result.reason` — materialize()'s own structured
+ *  discriminator between "checkout of ... failed" and "post-checkout oid verification ... failed"
+ *  — so a future starvation fails with a message naming the step instead of a raw ENOENT four
+ *  lines later. Faking the checkout too would remove the race entirely but would also delete the
+ *  #416-round-2 property this test exists to hold (the chain must genuinely REACH the rev-parse
+ *  call), which is a worse trade.
+ *
  *  Margin ordering (why this is still not a race): the TARGET operation named in each test is
  *  faked to `exec sleep 20` regardless of `timeoutMs` -- the fake never does real work, so its
  *  20,000ms is not competing with anything, it just has to comfortably clear whatever `timeoutMs`
- *  is. `REAL_OP_TIMEOUT_MS` (1000ms) sits ~30-60x above the real ops' measured 15-30ms (generous
- *  headroom for a loaded machine) and ~20x below the fake's 20,000ms sleep (so the `timeout`
- *  option always kills the fake, never lets it complete) -- two non-adjacent orders of magnitude
- *  on either side, not a close call in either direction. `withHangGuard`'s 5000ms bounds the WORST
- *  case in the reuse-candidate test, which can burn up to two sequential target timeouts (the
- *  reuse fetch, then the fresh-clone fallback) -- at 1000ms that's ~2000ms worst case, still
- *  comfortably under the 5000ms guard. This is also why 1000 was chosen over doubling again to
- *  2000: at 2000ms per step, that same worst case (~4000ms) would leave only ~1000ms of guard
- *  headroom, eroding the very margin this constant exists to protect. The fake's own 20s
- *  self-exit only matters on the REGRESSION path (the `timeout` option dropped from production
- *  code), never on the normal assertion path. */
-const REAL_OP_TIMEOUT_MS = 1000;
+ *  is. `REAL_OP_TIMEOUT_MS` (3000ms) sits ~80-130x above the real ops' measured 23-38ms and ~6.7x
+ *  below the fake's 20,000ms sleep (so the `timeout` option always kills the fake, never lets it
+ *  complete) -- not a close call in either direction. The `withHangGuard` bound at the two call
+ *  sites that use this constant moves with it (12,000ms): the reuse-candidate test can burn up to
+ *  two sequential target timeouts (the reuse fetch, then the fresh-clone fallback), ~6000ms worst
+ *  case, so 12,000ms keeps the same 2x guard headroom the 1000/5000 pair had, and still sits below
+ *  the fake's own 20s self-exit. That self-exit only matters on the REGRESSION path (the `timeout`
+ *  option dropped from production code), never on the normal assertion path. */
+const REAL_OP_TIMEOUT_MS = 3000;
+
+/** `withHangGuard` bound for the two tests that pass `REAL_OP_TIMEOUT_MS` into production — it has
+ *  to clear that test's worst case (two sequential target timeouts) with room to spare, hence 4x
+ *  the constant above. The other two tests keep the plain 5000ms guard: they bound a 1ms/20ms
+ *  timeout, which `REAL_OP_TIMEOUT_MS` has nothing to do with. */
+const REAL_OP_HANG_GUARD_MS = 12_000;
 
 function headOid(dir: string): string {
   return git(dir, ["rev-parse", "HEAD"]).trim();
@@ -455,8 +482,8 @@ test("createPrivateClone (#395 P2): a matching, already-cloned reuse candidate i
       () =>
         withHangGuard(
           createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot, timeoutMs: REAL_OP_TIMEOUT_MS }),
-          5000,
-          "createPrivateClone did not settle within 5000ms — the timeout option is missing or not wired",
+          REAL_OP_HANG_GUARD_MS,
+          `createPrivateClone did not settle within ${REAL_OP_HANG_GUARD_MS}ms — the timeout option is missing or not wired`,
         ),
       MaterializerError,
     );
@@ -515,10 +542,21 @@ test("materialize (#395 P2): the post-checkout OID verification (`git rev-parse 
     // needs real wall-clock room to finish before the (always-hanging) rev-parse is even reached.
     const result = await withHangGuard(
       materialize({ clone, oid: head, treeDir: join(treeRoot, "tree"), timeoutMs: REAL_OP_TIMEOUT_MS }),
-      5000,
-      "materialize did not settle within 5000ms — the timeout option is missing or not wired",
+      REAL_OP_HANG_GUARD_MS,
+      `materialize did not settle within ${REAL_OP_HANG_GUARD_MS}ms — the timeout option is missing or not wired`,
     );
     assert.equal(result.kind, "failure");
+    // #403 (F25): assert WHICH step produced the failure, not merely that one did. `kind:
+    // "failure"` alone is satisfied by a starved passthrough `checkout` timing out too — so the
+    // bare check silently degraded into asserting nothing about the rev-parse call this test is
+    // named for, and the only thing that noticed was the f.txt read below blowing up with a raw
+    // ENOENT (seen live, twice, under concurrent load). `reason` is materialize()'s own structured
+    // discriminator between those two steps: bind to it.
+    assert.match(
+      (result as { reason: string }).reason,
+      /post-checkout oid verification/,
+      `the failure must come from the post-checkout rev-parse — got: ${(result as { reason: string }).reason}`,
+    );
     // Proves the checkout genuinely ran (via the real git passthrough) before the post-checkout
     // OID verification hung -- this is specifically the step the test's own name claims to cover.
     assert.equal(

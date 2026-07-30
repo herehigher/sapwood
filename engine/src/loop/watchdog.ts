@@ -58,7 +58,32 @@
 // only thing keeping the tuple moving during those specific stretches.
 import type { State } from "../state/state.js";
 
+/** #403 (F25), PR #430 gate② round 3 (P2): the watchdog's SCHEDULING seam. Two methods, no clock
+ *  reads — the watchdog is purely timer-driven, so this is the whole of its relationship with
+ *  time. The handle is opaque (`unknown`): nothing here inspects it, it only travels from
+ *  `setTimeout` back to `clearTimeout`.
+ *
+ *  REQUIRED on ProgressWatchdogOpts, not defaulted to the globals, for the same reason every `now`
+ *  in this codebase is required (#403): a defaulted seam means the default path is the untestable
+ *  one, and a test that needs to observe the CADENCE silently gets the real timer instead. It also
+ *  makes the cadence contract checkable in the units the module documents it in — the delay the
+ *  watchdog REQUESTS — rather than only in sample counts, which cannot distinguish
+ *  `windowMs/SAMPLES_PER_WINDOW` sampling from a regression to once per full window (both fire
+ *  after SAMPLES_PER_WINDOW samples; only the requested delay differs). */
+export interface WatchdogTimer {
+  setTimeout(fn: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+/** The production timer: Node's own globals. Every real caller passes this. */
+export const systemWatchdogTimer: WatchdogTimer = {
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
 export interface ProgressWatchdogOpts {
+  /** The scheduling seam — `systemWatchdogTimer` in production. REQUIRED: see WatchdogTimer. */
+  timer: WatchdogTimer;
   /** engine.tickIntervalSec * 1000 * liveness.watchdogTickMultiplier — the caller's own cadence
    *  and multiplier, computed once. */
   windowMs: number;
@@ -100,7 +125,7 @@ export interface ProgressWatchdogHandle {
 // therefore between (SAMPLES_PER_WINDOW-1)*sampleMs and (SAMPLES_PER_WINDOW+1)*sampleMs, i.e.
 // roughly windowMs to windowMs*1.25 — between one window and a small fraction over, never
 // approaching two.
-const SAMPLES_PER_WINDOW = 4;
+export const SAMPLES_PER_WINDOW = 4;
 
 /** #395 item 2 (gate② follow-up, P3): run `fn`, returning its value or `undefined` on a throw —
  *  the per-read independence primitive the stall-record enrichment below uses so ONE throwing
@@ -137,7 +162,7 @@ export function startProgressWatchdog(opts: ProgressWatchdogOpts): ProgressWatch
   let lastSeenId = opts.state.maxEventId();
   let lastSeenTickAt = opts.state.lastTickAt();
   let unchangedSamples = 0;
-  let timer: ReturnType<typeof setTimeout>;
+  let timer: unknown;
   const check = (): void => {
     const currentId = opts.state.maxEventId();
     const currentTickAt = opts.state.lastTickAt();
@@ -186,8 +211,8 @@ export function startProgressWatchdog(opts: ProgressWatchdogOpts): ProgressWatch
       lastSeenTickAt = currentTickAt;
       unchangedSamples = 0;
     }
-    timer = setTimeout(check, sampleMs);
+    timer = opts.timer.setTimeout(check, sampleMs);
   };
-  timer = setTimeout(check, sampleMs);
-  return { stop: () => clearTimeout(timer) };
+  timer = opts.timer.setTimeout(check, sampleMs);
+  return { stop: () => opts.timer.clearTimeout(timer) };
 }

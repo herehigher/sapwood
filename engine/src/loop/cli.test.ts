@@ -33,6 +33,13 @@ import type { ProxyForge } from "../proxy/mcp-server.js";
 import { SCHEMA_VERSION, State } from "../state/state.js";
 import { requiredLabels } from "./init.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 test("--version prints package version and exits 0", () => {
   const r = runCli(["node", "sapwood", "--version"]);
   assert.equal(r.code, 0);
@@ -389,7 +396,9 @@ test("normalizeUnplacedBoardItems: moves every issue to backlog and records one 
   await normalizeUnplacedBoardItems(
     {
       listUnplacedIssues: async () => ({ issues: [17, 18], skipped: 0 }),
-      setBoardStatus: async (issue, status) => moves.push([issue, status]),
+      setBoardStatus: async (issue, status) => {
+        moves.push([issue, status]);
+      },
       listIssuesAbsentFromBoard: async () => [],
     },
     { appendEvent: (kind, payload) => events.push([kind, payload]) },
@@ -559,7 +568,9 @@ test("normalizeUnplacedBoardItems: the No-Status normalization loop and the abse
       // A real No-Status item DOES get moved (existing behavior, unchanged) — proves the two
       // passes coexist — while the absent-issue report itself performs zero additional writes.
       listUnplacedIssues: async () => ({ issues: [7], skipped: 0 }),
-      setBoardStatus: async (issue, status) => writes.push([issue, status]),
+      setBoardStatus: async (issue, status) => {
+        writes.push([issue, status]);
+      },
       listIssuesAbsentFromBoard: async () => [201, 202],
     },
     { appendEvent: (kind, payload) => events.push([kind, payload]) },
@@ -1333,6 +1344,7 @@ test("formatStatus: parked (llm) renders source/reason/duration/no-escalation", 
         probeAttempts: 0,
         escalatedAt: null,
         canaryWorker: null,
+        resetHintAt: null,
       },
     ],
   };
@@ -1365,6 +1377,7 @@ test("formatStatus: parked + escalated renders the escalation timestamp", () => 
         probeAttempts: 4,
         escalatedAt: "2026-07-14T01:00:00.000Z",
         canaryWorker: null,
+        resetHintAt: null,
       },
     ],
   };
@@ -1491,6 +1504,7 @@ test("formatStatus: a mixed storm renders BOTH episodes (one line per source), c
         probeAttempts: 2,
         escalatedAt: null,
         canaryWorker: "lane-3",
+        resetHintAt: null,
       },
       {
         source: "forge",
@@ -1501,6 +1515,7 @@ test("formatStatus: a mixed storm renders BOTH episodes (one line per source), c
         probeAttempts: 0,
         escalatedAt: null,
         canaryWorker: null,
+        resetHintAt: null,
       },
     ],
   };
@@ -1682,13 +1697,22 @@ function fakeProxyForgeForCli(): ProxyForge {
     getIssueComments: async () => [],
     getIssueRelations: async () => ({ linkedPRs: [], crossReferences: [], truncated: false }),
     searchIssues: async () => [],
-    getPRDetails: async () => ({ number: 1, headOid: "abc", state: "OPEN", draft: false, labels: [], mergeable: "MERGEABLE" }),
+    getPRDetails: async () => ({
+      number: 1,
+      headOid: "abc",
+      baseRefName: "main",
+      state: "OPEN" as const,
+      draft: false,
+      labels: [],
+      mergeable: "MERGEABLE" as const,
+    }),
     getPRReviews: async () => ({ reviews: [], total: 0 }),
     getPRReviewThreads: async () => ({
       threads: [{ id: "T1", isResolved: false, comments: [], commentsComplete: true }],
       pageCapped: false,
     }),
     getPRChecks: async () => ({ checks: [], total: 0 }),
+    getPRComments: async () => ({ comments: [], total: 0 }),
   };
 }
 
@@ -1697,7 +1721,7 @@ test("buildTickFixLegResume (#253): cfg.proxy.enabled: false (the default) -> un
   const state = new State(":memory:");
   try {
     const forge = fakeProxyForgeForCli() as unknown as IForge;
-    const result = buildTickFixLegResume(cfg, forge, state, (i, p) => `fix #${i} for PR #${p}`);
+    const result = buildTickFixLegResume(cfg, forge, state, (i, p) => `fix #${i} for PR #${p}`, realClock);
     assert.equal(result, undefined);
   } finally {
     state.close();
@@ -1710,7 +1734,7 @@ test("buildTickFixLegResume (#253 review round 2, H1): cfg.proxy.enabled: true, 
   const state = new State(":memory:");
   try {
     const forge = fakeProxyForgeForCli() as unknown as IForge;
-    const result = buildTickFixLegResume(cfg, forge, state, (i, p) => `fix #${i} for PR #${p}`);
+    const result = buildTickFixLegResume(cfg, forge, state, (i, p) => `fix #${i} for PR #${p}`, realClock);
     assert.equal(
       result,
       undefined,
@@ -1730,7 +1754,7 @@ test("buildTickFixLegResume (#253): cfg.proxy.enabled: true, shadow: false (the 
   try {
     const forge = fakeProxyForgeForCli() as unknown as IForge;
     const renderFixPrompt = (issueNumber: number, pr: number): string => `fix #${issueNumber} for PR #${pr}`;
-    const result = buildTickFixLegResume(cfg, forge, state, renderFixPrompt);
+    const result = buildTickFixLegResume(cfg, forge, state, renderFixPrompt, realClock);
     assert.ok(result, "expected a real fixLegResume");
     assert.equal(result.renderFixPrompt(3, 4), "fix #3 for PR #4");
     const handle = await result.mintProxy({ role: "worker", session: "lane-7-abc" });

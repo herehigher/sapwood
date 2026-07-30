@@ -19,6 +19,12 @@ const CAPS: ProxyCaps = {
   maxRelationsPerIssue: 20,
   maxSearchResults: 20,
   fullCommentStreamOptIn: false,
+  maxReviewThreadsPerCall: 20,
+  maxCommentsPerThread: 20,
+  maxReviewsPerCall: 20,
+  maxChecksPerCall: 20,
+  maxAuditCommentsPerCall: 20,
+  maxAuditCommentScanWindow: 100,
 };
 const SCOPE = { owner: "o", repo: "r" };
 const now = () => new Date("2026-07-17T00:00:00Z");

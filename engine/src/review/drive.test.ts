@@ -17,8 +17,21 @@ import {
   resolveIdentity,
 } from "./drive.js";
 
-function status(overrides: Partial<PRStatus> = {}): PRStatus {
-  return { number: 1, headOid: "H1", baseOid: "B1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false, ...overrides };
+// `| undefined` on each key (not plain Partial): under exactOptionalPropertyTypes a fixture must
+// be able to pass an EXPLICIT undefined to model a field the forge didn't return.
+function status(overrides: { [K in keyof PRStatus]?: PRStatus[K] | undefined } = {}): PRStatus {
+  // Cast: the spread of an all-optional override map widens every field to `| undefined`, which
+  // is exactly the shape a test wants to inject and PRStatus deliberately forbids.
+  return {
+    number: 1,
+    headOid: "H1",
+    baseOid: "B1",
+    state: "OPEN",
+    mergeable: "MERGEABLE",
+    ciGreen: true,
+    ciRed: false,
+    ...overrides,
+  } as PRStatus;
 }
 
 function data(overrides: Partial<PRReviewData> = {}): PRReviewData {

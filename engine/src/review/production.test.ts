@@ -10,6 +10,13 @@ import { State } from "../state/state.js";
 import { buildAcSnapshot } from "./ac-snapshot.js";
 import { makeProductionEngineAgent, sweepReviewTrees } from "./production.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 function oid(n: number): string {
   return n.toString(16).padStart(40, "0");
 }
@@ -74,7 +81,7 @@ test("#314 decisive-outcome production hook retains same-head trees until every 
       {} as IForge,
       state,
       { run: async () => assert.fail("not called") },
-      { reviewTreeRoot: root },
+      { now: realClock, reviewTreeRoot: root },
     );
     production.driveDepsForLane(state.getWorker("lane-a")!, 2).recordWalDecisiveOutcome("run-a", "rejected");
     assert.deepEqual(readdirSync(root).sort(), [`${head}-one`, `${head}-two`, `${other}-keep`].sort());

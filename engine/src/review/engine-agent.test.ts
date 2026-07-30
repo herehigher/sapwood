@@ -164,8 +164,12 @@ function mkDeps(opts: {
 // engine-supplied diff `EngineAgentReviewer.evaluate` reads instead of calling `ctx.forge.getPRDiff`.
 const DEFAULT_DIFF_TEXT = "diff --git a/x b/x\n+added line\n";
 
-function ctx(overrides: Partial<ReviewContext> = {}): ReviewContext {
-  return { forge: mkForge(), pr: 5, issue: 42, data: mkData(), diffText: DEFAULT_DIFF_TEXT, ...overrides };
+// `| undefined` on each key (not plain Partial): under exactOptionalPropertyTypes a fixture must
+// be able to pass an EXPLICIT undefined (the "ctx.diffText missing" case below).
+function ctx(overrides: { [K in keyof ReviewContext]?: ReviewContext[K] | undefined } = {}): ReviewContext {
+  // Cast: the spread of an all-optional override map widens every field to `| undefined`, which
+  // is exactly the shape this suite injects and ReviewContext deliberately forbids.
+  return { forge: mkForge(), pr: 5, issue: 42, data: mkData(), diffText: DEFAULT_DIFF_TEXT, ...overrides } as ReviewContext;
 }
 
 // ── Construction ─────────────────────────────────────────────────────────────────────────────

@@ -24,6 +24,7 @@ import type {
   PRStatus,
   ReviewThreadItem,
 } from "../forge/forge.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { WorkerProxyOpts } from "../roles/worker.js";
@@ -44,27 +45,34 @@ import {
 } from "./round.js";
 import { type RoundArtifact, RoundArtifactSchema } from "./round-artifact.js";
 
-class FakeForge implements IForge {
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
+class FakeForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
-  async ensureRepoLabels(): Promise<string[]> {
+  override async ensureRepoLabels(): Promise<string[]> {
     return [];
   }
-  async listUnplacedIssues() {
+  override async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
-  async listIssuesAbsentFromBoard() {
+  override async listIssuesAbsentFromBoard() {
     return [];
   }
-  async readStartupReconcileData() {
+  override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
   ready: Issue[] = [];
   milestoneOpenCounts: number[] = [0];
   milestoneQueries: string[] = [];
-  async detectOwnerKind(): Promise<"user"> {
+  override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
-  async getReadyIssues(): Promise<Issue[]> {
+  override async getReadyIssues(): Promise<Issue[]> {
     return this.ready;
   }
   // #124: mirrors real GitHub behavior — a claimed issue leaves the Ready column, so it must
@@ -73,13 +81,13 @@ class FakeForge implements IForge {
   // phase more than once per round, so this needs to actually mutate state — a no-op claim was
   // harmless under the old one-batch-per-round model but would let a second wave re-dispatch
   // the exact same issue number here.
-  async claimIssue(issue: number): Promise<void> {
+  override async claimIssue(issue: number): Promise<void> {
     this.ready = this.ready.filter((i) => i.number !== issue);
   }
-  async setBoardStatus(): Promise<void> {}
+  override async setBoardStatus(): Promise<void> {}
   subIssues = new Map<number, Array<{ number: number; title: string; state: "OPEN" | "CLOSED" }>>();
   subIssueParents = new Map<number, number>();
-  async addSubIssue(parent: number, child: number): Promise<void> {
+  override async addSubIssue(parent: number, child: number): Promise<void> {
     const existingParent = this.subIssueParents.get(child);
     if (existingParent !== undefined && existingParent !== parent) {
       throw new Error(
@@ -94,41 +102,41 @@ class FakeForge implements IForge {
       this.subIssueParents.set(child, parent);
     }
   }
-  async getSubIssues(parent: number) {
+  override async getSubIssues(parent: number) {
     return this.subIssues.get(parent) ?? [];
   }
   addLabelCalls: Array<[number, string]> = [];
-  async addLabel(n: number, l: string): Promise<void> {
+  override async addLabel(n: number, l: string): Promise<void> {
     this.addLabelCalls.push([n, l]);
     for (const issue of [...this.ready, ...this.openIssues]) {
       if (issue.number === n && !issue.labels.includes(l)) issue.labels = [...issue.labels, l];
     }
   }
   removeLabelCalls: Array<[number, string]> = [];
-  async removeLabel(n: number, l: string): Promise<void> {
+  override async removeLabel(n: number, l: string): Promise<void> {
     this.removeLabelCalls.push([n, l]);
     for (const issue of [...this.ready, ...this.openIssues]) {
       if (issue.number === n) issue.labels = issue.labels.filter((x) => x !== l);
     }
   }
-  async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> {
+  override async addPRLabel(): Promise<void> {}
+  override async openPR(): Promise<number> {
     return 1;
   }
-  async getPRStatus(n: number): Promise<PRStatus> {
+  override async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
-  async mergePR(): Promise<void> {}
-  async addPRComment(): Promise<void> {}
-  async addIssueComment(): Promise<void> {}
-  async getIssueBody(): Promise<string> {
+  override async mergePR(): Promise<void> {}
+  override async addPRComment(): Promise<void> {}
+  override async addIssueComment(): Promise<void> {}
+  override async getIssueBody(): Promise<string> {
     return "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> {
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
   }
-  async getPRReviewData(): Promise<PRReviewData> {
+  override async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x",
       author: "producer",
@@ -141,56 +149,56 @@ class FakeForge implements IForge {
       unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> {
+  override async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles() {
+  override async getPRChangedFiles() {
     return { files: [], complete: true };
   }
-  async getCommitsSince(): Promise<CommitInfo[]> {
+  override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }
-  async branchExists(): Promise<boolean> {
+  override async branchExists(): Promise<boolean> {
     return false;
   }
-  async countOpenIssuesInMilestone(milestone: string): Promise<number> {
+  override async countOpenIssuesInMilestone(milestone: string): Promise<number> {
     this.milestoneQueries.push(milestone);
     return this.milestoneOpenCounts.length > 1 ? this.milestoneOpenCounts.shift()! : this.milestoneOpenCounts[0]!;
   }
   milestoneTitles: string[] = [];
-  async listMilestoneTitles(): Promise<string[]> {
+  override async listMilestoneTitles(): Promise<string[]> {
     return this.milestoneTitles;
   }
   planReviewCandidates: Issue[] = [];
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     return this.planReviewCandidates;
   }
   issueLabels: Record<number, string[]> = {};
-  async getIssueLabels(issue: number): Promise<string[]> {
+  override async getIssueLabels(issue: number): Promise<string[]> {
     return this.issueLabels[issue] ?? [];
   }
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
-  async getIssueComments(issue: number) {
+  override async getIssueComments(issue: number) {
     return this.issueComments[issue] ?? [];
   }
   createdIssues: Array<{ title: string; body: string }> = [];
   nextIssueNumber = 100;
   openIssueNumbers: number[] = [];
-  async createIssue(title: string, body: string): Promise<number> {
+  override async createIssue(title: string, body: string): Promise<number> {
     this.createdIssues.push({ title, body });
     const n = this.nextIssueNumber++;
     this.openIssueNumbers.push(n);
     return n;
   }
-  async listOpenIssueNumbers(): Promise<number[]> {
+  override async listOpenIssueNumbers(): Promise<number[]> {
     return this.openIssueNumbers;
   }
   openIssues: Issue[] = [];
-  async listOpenIssues(): Promise<Issue[]> {
+  override async listOpenIssues(): Promise<Issue[]> {
     return this.openIssues;
   }
   planTriageCandidates: Issue[] = [];
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+  override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return this.planTriageCandidates;
   }
 }
@@ -304,6 +312,7 @@ const allPeripherals = (log: Array<{ phase: PeripheralPhase; marker: string | nu
 });
 
 const baseDeps = (over: Partial<RoundDeps> = {}): RoundDeps => ({
+  now: realClock,
   forge: new FakeForge(),
   state: new State(":memory:"),
   supervisor: new FakeSupervisor(),
@@ -786,7 +795,12 @@ test("runRounds #211: a crash-resumed executing phase with no spend anchor retai
     const realOpenRound = beforeCrash.openRound.bind(beforeCrash);
     beforeCrash.openRound = () => {
       const row = realOpenRound();
-      return row ? { ...row, start_spend_id: undefined } : undefined;
+      if (!row) return undefined;
+      // #403 (F25): DELETE the key rather than setting it to `undefined` — under
+      // exactOptionalPropertyTypes an explicit `undefined` is not the same type as an absent
+      // optional property, and "absent" is what a pre-#123 row actually looks like.
+      const { start_spend_id: _omitted, ...legacy } = row;
+      return legacy;
     };
     assert.equal(beforeCrash.openRound()?.start_spend_id, undefined);
     const sup = new FakeSupervisor();
@@ -840,7 +854,7 @@ test("runRounds #211: a crash-resumed executing phase with no lanes records an e
     assert.deepEqual(hits, [{ name: "roundBudgetUsd", detail: "spent $5.00" }]);
     const durableHits = state
       .eventsAfterId(round.start_event_id ?? 0, ["round-stop"])
-      .filter((event) => event.payload.name === "roundBudgetUsd");
+      .filter((event) => (event.payload as { name: string }).name === "roundBudgetUsd");
     assert.equal(durableHits.length, 1);
     state.close();
   } finally {
@@ -1985,7 +1999,7 @@ test("runRounds standby: an outstanding pending-rollback row counts as work — 
   // idle-throttle wait — after closeRound, before the probe — exactly that window.
   const sleep = async (ms: number): Promise<void> => {
     sleepCalls.push(ms);
-    if (sleepCalls.length === 1) state.addPendingRollback(7, "Ready", "dispatch-rollback", new Date(0).toISOString());
+    if (sleepCalls.length === 1) state.addPendingRollback(7, "ready", "dispatch-rollback", new Date(0).toISOString());
   };
   const deps = baseDeps({
     forge,
@@ -2930,7 +2944,7 @@ test("runRounds #379 (gate② P1): a round whose pool-label reconcile TOTALLY fa
     aligning: {
       async run(ctx) {
         deps.state.appendEvent("pool-labels-failed", { round_id: ctx.roundId, attempted: 2, error: "simulated forge failure" });
-        return { marker: null };
+        return { marker: `align-r${ctx.roundId}` }; // #403 (F25): PeripheralStub.run returns a marker STRING, never null
       },
     },
   };
@@ -2955,7 +2969,7 @@ test("runRounds #379 (gate② P1): the dispatch block is scoped to the round tha
         if (ctx.roundId === 1) {
           deps.state.appendEvent("pool-labels-failed", { round_id: ctx.roundId, attempted: 1, error: "simulated forge failure" });
         }
-        return { marker: null };
+        return { marker: `align-r${ctx.roundId}` }; // #403 (F25): PeripheralStub.run returns a marker STRING, never null
       },
     },
   };
@@ -3216,6 +3230,9 @@ function fakeProxyForge(): ProxyForge {
     getPRReviews: async () => ({ reviews, total: reviews.length }),
     getPRReviewThreads: async () => ({ threads, pageCapped: false }),
     getPRChecks: async () => ({ checks, total: checks.length }),
+    // #403 (F25): ProxyForge's tenth member — stubbed empty because no test in this file drives
+    // it, but PRESENT, so the fixture actually satisfies the type it is passed as.
+    getPRComments: async () => ({ comments: [], total: 0 }),
   };
 }
 
@@ -3232,7 +3249,11 @@ async function callProxyTool(url: string, token: string, name: string, args: unk
 test("buildFixLegResume (#253): cfg.proxy.enabled: false (the default) -> undefined regardless of renderFixPrompt being supplied", () => {
   const state = new State(":memory:");
   try {
-    const result = buildFixLegResume({ cfg: mkCfg(), state, renderFixPrompt: (i, p) => `fix #${i} for PR #${p}` }, fakeProxyForge(), 1);
+    const result = buildFixLegResume(
+      { now: realClock, cfg: mkCfg(), state, renderFixPrompt: (i, p) => `fix #${i} for PR #${p}` },
+      fakeProxyForge(),
+      1,
+    );
     assert.equal(result, undefined);
   } finally {
     state.close();
@@ -3242,7 +3263,11 @@ test("buildFixLegResume (#253): cfg.proxy.enabled: false (the default) -> undefi
 test("buildFixLegResume (#253): cfg.proxy.enabled: true, shadow: false, but NO renderFixPrompt supplied -> undefined (round.ts's own skeleton tests/callers never touch #246's FIXABLE path)", () => {
   const state = new State(":memory:");
   try {
-    const result = buildFixLegResume({ cfg: mkCfg({ proxy: { enabled: true, shadow: false } }), state }, fakeProxyForge(), 1);
+    const result = buildFixLegResume(
+      { now: realClock, cfg: mkCfg({ proxy: { enabled: true, shadow: false } }), state },
+      fakeProxyForge(),
+      1,
+    );
     assert.equal(result, undefined);
   } finally {
     state.close();
@@ -3254,7 +3279,11 @@ test("buildFixLegResume (#253 review round 2, H1): cfg.proxy.enabled: true, shad
   try {
     const cfg = mkCfg({ proxy: { enabled: true } }); // shadow defaults true
     assert.equal(cfg.proxy.shadow, true);
-    const result = buildFixLegResume({ cfg, state, renderFixPrompt: (i, p) => `fix #${i} for PR #${p}` }, fakeProxyForge(), 1);
+    const result = buildFixLegResume(
+      { now: realClock, cfg, state, renderFixPrompt: (i, p) => `fix #${i} for PR #${p}` },
+      fakeProxyForge(),
+      1,
+    );
     assert.equal(result, undefined, "shadow mode: the machinery stays mintable for a scoped harness, but never attached in production");
   } finally {
     state.close();
@@ -3266,7 +3295,7 @@ test("buildFixLegResume (#253): proxy.enabled: true, shadow: false (the go-live 
   try {
     const renderFixPrompt = (issueNumber: number, pr: number): string => `fix #${issueNumber} for PR #${pr}`;
     const result = buildFixLegResume(
-      { cfg: mkCfg({ proxy: { enabled: true, shadow: false } }), state, renderFixPrompt },
+      { now: realClock, cfg: mkCfg({ proxy: { enabled: true, shadow: false } }), state, renderFixPrompt },
       fakeProxyForge(),
       42,
     );
@@ -3301,7 +3330,8 @@ test("buildFixLegResume (#253): proxy.enabled: true, shadow: false (the go-live 
  *  `prompt`) — the observation point for proving round.ts's REAL wiring, not a fake, reaches
  *  startFixLeg's own supervisor.resume() call unmodified. */
 class CapturingResumeSupervisor extends FakeSupervisor {
-  resumeCalls: Array<{ issue: Issue; worker: string; opts?: { proxy?: WorkerProxyOpts; prompt?: string; sessionId?: string } }> = [];
+  resumeCalls: Array<{ issue: Issue; worker: string; opts: { proxy?: WorkerProxyOpts; prompt?: string; sessionId?: string } | undefined }> =
+    [];
   override async resume(
     issue: Issue,
     worker: string,

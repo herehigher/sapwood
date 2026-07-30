@@ -473,7 +473,7 @@ export interface DashboardServerOptions {
   port?: number;
   /** The vite build to serve; defaults to this package's own `dist`. */
   staticDir?: string;
-  now?: () => Date;
+  now: () => Date;
 }
 
 /** Open the read-only handle, bind loopback, resolve once the server is actually listening. */
@@ -485,7 +485,7 @@ export async function createDashboardServer(opts: DashboardServerOptions): Promi
   } catch {
     config = null; // reported as null fields, never fatal — the DB read is the point
   }
-  const ctx: Ctx = { state, config, now: opts.now ?? (() => new Date()) };
+  const ctx: Ctx = { state, config, now: opts.now };
   // Realpath'd ONCE here so every request compares a real path against a real root. Without it
   // the comparison is real-vs-lexical and breaks wherever an ancestor is itself a link (macOS
   // `/var` -> `/private/var`, a symlinked deploy dir). An unbuilt `dist` cannot be resolved yet;

@@ -9,6 +9,13 @@ import { buildBacklogDigest } from "./align.js";
 import { decomposeProposalId, isDecomposeCandidate, runDecompositionPass, validateDecomposeOutput } from "./decompose.js";
 import { proposalMarker } from "./issue-creation.js";
 
+/** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
+ *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
+ *  this choice is written down at each fixture instead of being an invisible default — a test
+ *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
+ *  so every deliberate real-clock read in this suite greps as one decision. */
+const realClock = (): Date => new Date();
+
 const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 const readyBody = "## Why\nSmall.\n\n## What\nOne lane.\n\n## Acceptance criteria\n\n- [ ] Works\n\n## Verification plan\n\n- Run npm test";
 const remainderBody = "## Why\nUnresolved.\n\n## What\nAdapter-specific remainder.";
@@ -47,7 +54,15 @@ class Runner {
   constructor(private readonly text: string) {}
   async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
     this.calls.push(opts);
-    return { outcome: "done", name: `session-${this.calls.length}`, costUsd: 0, costKnown: true, modelUsage: [], resultText: this.text };
+    return {
+      outcome: "done",
+      name: `session-${this.calls.length}`,
+      costUsd: 0,
+      costKnown: true,
+      modelUsage: [],
+      exitCode: 0,
+      resultText: this.text,
+    };
   }
 }
 
@@ -336,7 +351,7 @@ test("unresolved feasibility is advisory-only; invalid or over-bound output land
     }),
   );
   await runDecompositionPass(
-    { forge: advisoryForge as unknown as IForge, state: new State(":memory:"), cfg, runner: advisoryRunner },
+    { now: realClock, forge: advisoryForge as unknown as IForge, state: new State(":memory:"), cfg, runner: advisoryRunner },
     5,
     advisoryForge.issues,
   );
@@ -348,14 +363,14 @@ test("unresolved feasibility is advisory-only; invalid or over-bound output land
     false,
   );
   await runDecompositionPass(
-    { forge: advisoryForge as unknown as IForge, state: new State(":memory:"), cfg, runner: advisoryRunner },
+    { now: realClock, forge: advisoryForge as unknown as IForge, state: new State(":memory:"), cfg, runner: advisoryRunner },
     6,
     advisoryForge.issues,
   );
   assert.equal(advisoryRunner.calls.length, 1, "the same why/what firing does not loop");
   advisoryForge.issues[0] = { ...advisoryForge.issues[0]!, body: "why, now with the missing compatibility choice" };
   await runDecompositionPass(
-    { forge: advisoryForge as unknown as IForge, state: new State(":memory:"), cfg, runner: advisoryRunner },
+    { now: realClock, forge: advisoryForge as unknown as IForge, state: new State(":memory:"), cfg, runner: advisoryRunner },
     7,
     advisoryForge.issues,
   );
@@ -365,6 +380,7 @@ test("unresolved feasibility is advisory-only; invalid or over-bound output land
   const failedForge = fakeForge(failedParent);
   await runDecompositionPass(
     {
+      now: realClock,
       forge: failedForge as unknown as IForge,
       state: new State(":memory:"),
       cfg: ConfigSchema.parse({
@@ -395,7 +411,7 @@ test("mixed decomposition: fence and journal precede creates; children stay outs
   const fake = fakeForge(parent);
   const state = new State(":memory:");
   await runDecompositionPass(
-    { forge: fake as unknown as IForge, state, cfg, runner: new Runner(result(mixedMetadata, [readyBody, remainderBody])) },
+    { now: realClock, forge: fake as unknown as IForge, state, cfg, runner: new Runner(result(mixedMetadata, [readyBody, remainderBody])) },
     7,
     fake.issues,
   );
@@ -426,12 +442,7 @@ test("fence label failure creates zero children; attach failure is recorded and 
   const failedFenceState = new State(":memory:");
   const failedFenceRunner = new Runner(result(mixedMetadata, [readyBody, remainderBody]));
   await runDecompositionPass(
-    {
-      forge: failedFence as unknown as IForge,
-      state: failedFenceState,
-      cfg,
-      runner: failedFenceRunner,
-    },
+    { now: realClock, forge: failedFence as unknown as IForge, state: failedFenceState, cfg, runner: failedFenceRunner },
     8,
     failedFence.issues,
   );
@@ -439,7 +450,7 @@ test("fence label failure creates zero children; attach failure is recorded and 
   assert.equal(failedFenceState.eventsAfterId(0, ["proposal-set-persisted"]).length, 1);
   failedFence.failFence = false;
   await runDecompositionPass(
-    { forge: failedFence as unknown as IForge, state: failedFenceState, cfg, runner: failedFenceRunner },
+    { now: realClock, forge: failedFence as unknown as IForge, state: failedFenceState, cfg, runner: failedFenceRunner },
     9,
     failedFence.issues,
   );
@@ -450,7 +461,13 @@ test("fence label failure creates zero children; attach failure is recorded and 
   retryForge.failAttachOnce = true;
   const state = new State(":memory:");
   await runDecompositionPass(
-    { forge: retryForge as unknown as IForge, state, cfg, runner: new Runner(result(mixedMetadata, [readyBody, remainderBody])) },
+    {
+      now: realClock,
+      forge: retryForge as unknown as IForge,
+      state,
+      cfg,
+      runner: new Runner(result(mixedMetadata, [readyBody, remainderBody])),
+    },
     9,
     retryForge.issues,
   );
@@ -458,12 +475,20 @@ test("fence label failure creates zero children; attach failure is recorded and 
   const createdCount = retryForge.issues.length;
   const fencedParent = { ...parent, labels: [...parent.labels, cfg.labels.decomposed] };
   retryForge.issues[0] = fencedParent;
-  await runDecompositionPass({ forge: retryForge as unknown as IForge, state, cfg, runner: new Runner("unused") }, 10, retryForge.issues);
+  await runDecompositionPass(
+    { now: realClock, forge: retryForge as unknown as IForge, state, cfg, runner: new Runner("unused") },
+    10,
+    retryForge.issues,
+  );
   assert.equal(retryForge.issues.length, createdCount, "reconcile never recreates children");
   assert.deepEqual(retryForge.subIssues.map((item) => item.number).sort(), [100, 101]);
   assert.equal((retryForge.comments.get(11) ?? []).filter((comment) => comment.body.includes("decompose-coverage")).length, 1);
   const writesAfterReconcile = retryForge.order.length;
-  await runDecompositionPass({ forge: retryForge as unknown as IForge, state, cfg, runner: new Runner("unused") }, 11, retryForge.issues);
+  await runDecompositionPass(
+    { now: realClock, forge: retryForge as unknown as IForge, state, cfg, runner: new Runner("unused") },
+    11,
+    retryForge.issues,
+  );
   assert.equal(retryForge.order.length, writesAfterReconcile, "a fully reconciled standing fence is a write-free no-op");
 });
 
@@ -479,6 +504,7 @@ test("proposal reconciliation ignores unrelated issues carrying a copied marker 
   fake.labels.set(78, []);
   await runDecompositionPass(
     {
+      now: realClock,
       forge: fake as unknown as IForge,
       state: new State(":memory:"),
       cfg,
@@ -500,6 +526,7 @@ test("title collisions are caller-specific: decompose preflights before fencing,
   const preflightState = new State(":memory:");
   await runDecompositionPass(
     {
+      now: realClock,
       forge: preflight as unknown as IForge,
       state: preflightState,
       cfg,
@@ -524,7 +551,13 @@ test("title collisions are caller-specific: decompose preflights before fencing,
   raced.collisionOnFence = "Ready child";
   const racedState = new State(":memory:");
   await runDecompositionPass(
-    { forge: raced as unknown as IForge, state: racedState, cfg, runner: new Runner(result(mixedMetadata, [readyBody, remainderBody])) },
+    {
+      now: realClock,
+      forge: raced as unknown as IForge,
+      state: racedState,
+      cfg,
+      runner: new Runner(result(mixedMetadata, [readyBody, remainderBody])),
+    },
     14,
     raced.issues,
   );
@@ -538,7 +571,11 @@ test("title collisions are caller-specific: decompose preflights before fencing,
 
   raced.issues[0] = { ...racedParent, labels: [...racedParent.labels, cfg.labels.decomposed, cfg.labels.needsHuman] };
   const writes = raced.order.length;
-  await runDecompositionPass({ forge: raced as unknown as IForge, state: racedState, cfg, runner: new Runner("unused") }, 15, raced.issues);
+  await runDecompositionPass(
+    { now: realClock, forge: raced as unknown as IForge, state: racedState, cfg, runner: new Runner("unused") },
+    15,
+    raced.issues,
+  );
   assert.equal(raced.order.length, writes, "a collision-escalated standing fence is a write-free no-op");
 });
 
@@ -550,7 +587,13 @@ test("child governance comment is live-marker idempotent across a crash after co
   await assert.rejects(
     () =>
       runDecompositionPass(
-        { forge: fake as unknown as IForge, state, cfg, runner: new Runner(result(mixedMetadata, [readyBody, remainderBody])) },
+        {
+          now: realClock,
+          forge: fake as unknown as IForge,
+          state,
+          cfg,
+          runner: new Runner(result(mixedMetadata, [readyBody, remainderBody])),
+        },
         15,
         fake.issues,
       ),
@@ -562,7 +605,7 @@ test("child governance comment is live-marker idempotent across a crash after co
 
   fake.issues[0] = { ...parent, labels: [...parent.labels, cfg.labels.decomposed] };
   const rerun = new Runner("must not run");
-  await runDecompositionPass({ forge: fake as unknown as IForge, state, cfg, runner: rerun }, 16, fake.issues);
+  await runDecompositionPass({ now: realClock, forge: fake as unknown as IForge, state, cfg, runner: rerun }, 16, fake.issues);
   assert.equal(rerun.calls.length, 0);
   assert.equal((fake.comments.get(100) ?? []).length, 1, "the live governance marker prevents a duplicate");
   assert.equal(state.eventsAfterId(0, ["proposal-comment-posted"]).length, 2);
@@ -581,12 +624,12 @@ test("unresolved decision is write-ahead durable and replays before the firing-m
       unresolvedContext: { reason: "Ownership evidence is missing." },
     }),
   );
-  await runDecompositionPass({ forge: fake as unknown as IForge, state, cfg, runner }, 16, fake.issues);
+  await runDecompositionPass({ now: realClock, forge: fake as unknown as IForge, state, cfg, runner }, 16, fake.issues);
   assert.equal(state.eventsAfterId(0, ["proposal-set-persisted"]).length, 1);
   assert.equal(state.eventsAfterId(0, ["concern-posted"]).length, 0);
   assert.equal((fake.comments.get(parent.number) ?? []).length, 1);
 
-  await runDecompositionPass({ forge: fake as unknown as IForge, state, cfg, runner }, 17, fake.issues);
+  await runDecompositionPass({ now: realClock, forge: fake as unknown as IForge, state, cfg, runner }, 17, fake.issues);
   assert.equal(runner.calls.length, 1, "replay never pays for a second PO session");
   assert.equal((fake.comments.get(parent.number) ?? []).length, 1, "the concern marker prevents a duplicate");
   assert.equal(state.eventsAfterId(0, ["concern-posted"]).length, 1, "the lost receipt is reconciled despite the firing marker");
@@ -604,7 +647,12 @@ test("decomposition journal rejects forged identities, scope drift, invalid refe
     const proposals = persistDecomposedSet(state, 17, parent.number, overrides);
     configure(state, proposals);
     await assert.rejects(
-      () => runDecompositionPass({ forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") }, 18, fake.issues),
+      () =>
+        runDecompositionPass(
+          { now: realClock, forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") },
+          18,
+          fake.issues,
+        ),
       /(invalid|malformed|mismatch|multiple|duplicate|unknown|out-of-range|omits)/,
     );
     assert.equal(fake.order.length, 0);
@@ -669,7 +717,11 @@ test("durable decomposition replay is independent of current maxChildren config 
     board: { owner: "o", repo: "r", projectNumber: 4 },
     roles: { po: { maxChildren: 1 } },
   });
-  await runDecompositionPass({ forge: fake as unknown as IForge, state, cfg: narrower, runner: new Runner("unused") }, 19, fake.issues);
+  await runDecompositionPass(
+    { now: realClock, forge: fake as unknown as IForge, state, cfg: narrower, runner: new Runner("unused") },
+    19,
+    fake.issues,
+  );
   assert.equal(fake.order.filter((item) => item.startsWith("create:")).length, 2);
 });
 
@@ -688,7 +740,11 @@ test("replay rejects a schema-valid proposal-created receipt pointing at an unre
     issue: 999,
   });
 
-  await runDecompositionPass({ forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") }, 20, fake.issues);
+  await runDecompositionPass(
+    { now: realClock, forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") },
+    20,
+    fake.issues,
+  );
 
   assert.equal(
     fake.order.some((write) => write === "attach:999" || write.startsWith("label:999:")),
@@ -701,7 +757,11 @@ test("replay rejects a schema-valid proposal-created receipt pointing at an unre
   assert.equal(escalated.length, 1);
   assert.equal((escalated[0]!.payload as { existingIssue: number }).existingIssue, 999);
   const writesAfterEscalation = fake.order.length;
-  await runDecompositionPass({ forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") }, 21, fake.issues);
+  await runDecompositionPass(
+    { now: realClock, forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") },
+    21,
+    fake.issues,
+  );
   assert.equal(fake.order.length, writesAfterEscalation, "the durable escalation makes later replay a write-free no-op");
 });
 
@@ -732,7 +792,11 @@ test("replay admits correct proposal-created receipts after exact trailer and no
     board: { owner: "o", repo: "r", projectNumber: 4 },
     roles: { po: { maxChildren: 1 } },
   });
-  await runDecompositionPass({ forge: fake as unknown as IForge, state, cfg: narrower, runner: new Runner("unused") }, 21, fake.issues);
+  await runDecompositionPass(
+    { now: realClock, forge: fake as unknown as IForge, state, cfg: narrower, runner: new Runner("unused") },
+    21,
+    fake.issues,
+  );
 
   assert.equal(
     fake.order.some((write) => write.startsWith("create:")),
@@ -779,12 +843,19 @@ test("transient live fetch failure propagates before receipt admission and rerun
   fake.failIssueFetchOnceFor = 800;
 
   await assert.rejects(
-    () => runDecompositionPass({ forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") }, 22, fake.issues),
+    () =>
+      runDecompositionPass({ now: realClock, forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") }, 22, fake.issues),
     /transient issue fetch failure/,
   );
-  assert.deepEqual(fake.order, []);
+  // Copy, not `fake.order` itself: node:assert's `asserts actual is T` signature would otherwise
+  // narrow the live array to `never[]` for the rest of the test.
+  assert.deepEqual([...fake.order], []);
   assert.equal(state.eventsAfterId(0, ["proposal-skipped"]).length, 0);
 
-  await runDecompositionPass({ forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") }, 23, fake.issues);
+  await runDecompositionPass(
+    { now: realClock, forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") },
+    23,
+    fake.issues,
+  );
   assert.ok(fake.order.includes("attach:800"));
 });
