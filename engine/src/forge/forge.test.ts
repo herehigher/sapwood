@@ -7,6 +7,7 @@ import {
   ADD_SUB_ISSUE_MUTATION,
   assemblePRReviewData,
   associateLanePr,
+  collectReviewThreads,
   countUnresolvedThreads,
   ENGINE_COMMENT_MARKER,
   extractAcceptanceCriteria,
@@ -14,6 +15,7 @@ import {
   extractVerificationSection,
   fetchAllReviewThreads,
   findItemId,
+  findingDigest,
   findLaneOwnedPr,
   findOptionId,
   GithubForge,
@@ -1522,11 +1524,167 @@ const threadsPage = (resolved: boolean[], pageInfo?: { hasNextPage: boolean; end
 
 test("parseReviewThreadsPage: counts only isResolved=false nodes + surfaces the page cursor", () => {
   const p = parseReviewThreadsPage(threadsPage([false, true, false], { hasNextPage: true, endCursor: "CUR" }));
-  assert.deepEqual(p, { unresolved: 2, hasNextPage: true, endCursor: "CUR" });
+  assert.equal(p.unresolved, 2);
+  assert.equal(p.hasNextPage, true);
+  assert.equal(p.endCursor, "CUR");
 });
 
 test("parseReviewThreadsPage: absent/malformed shape -> 0 + terminal, never throws or loops", () => {
-  assert.deepEqual(parseReviewThreadsPage(JSON.stringify({})), { unresolved: 0, hasNextPage: false, endCursor: null });
+  assert.deepEqual(parseReviewThreadsPage(JSON.stringify({})), {
+    unresolved: 0,
+    threads: [],
+    hasNextPage: false,
+    endCursor: null,
+  });
+});
+
+// ── #378 (F14): resolved-thread + head-freshness data plumbing ────────────────────────────────
+// The motivating case is PR #366: the SAME config-YAML finding was re-raised five times after it
+// had been human-adjudicated and thread-resolved. Gate② could not tell an already-adjudicated
+// re-raise from a fresh finding because the only per-thread data it ever saw was an aggregate
+// unresolved COUNT. These fields (span + GitHub's own isOutdated + the resolution-time commit
+// reference) are what reviewer.ts needs to make that distinction — see docs/patches/378-*.patch.
+
+/** A reviewThreads page carrying the full #378 node shape (the helper above deliberately keeps
+ *  the OLD, field-less node shape so the degradation tests below stay honest). */
+const richThreadsPage = (
+  nodes: {
+    id: string;
+    isResolved: boolean;
+    isOutdated?: boolean;
+    path?: string | null;
+    line?: number | null;
+    originalLine?: number | null;
+    oid?: string;
+    body?: string;
+  }[],
+  pageInfo?: { hasNextPage: boolean; endCursor: string | null },
+): string =>
+  JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            ...(pageInfo ? { pageInfo } : {}),
+            nodes: nodes.map((n) => ({
+              id: n.id,
+              isResolved: n.isResolved,
+              isOutdated: n.isOutdated ?? false,
+              path: n.path ?? null,
+              line: n.line ?? null,
+              originalLine: n.originalLine ?? null,
+              comments: { nodes: n.oid || n.body ? [{ body: n.body ?? null, commit: { oid: n.oid } }] : [] },
+            })),
+          },
+        },
+      },
+    },
+  });
+
+test("#378 parseReviewThreadsPage: parses each thread's span, isOutdated, anchor commit and finding digest", () => {
+  const p = parseReviewThreadsPage(
+    richThreadsPage([
+      { id: "T1", isResolved: true, path: "sapwood.config.yaml", line: 12, originalLine: 12, oid: "ANCHOR", body: "missing key `foo`" },
+      { id: "T2", isResolved: false, isOutdated: true, path: "engine/src/a.ts", line: null, originalLine: 40, oid: "OLD" },
+    ]),
+  );
+  assert.equal(p.unresolved, 1);
+  assert.deepEqual(p.threads, [
+    {
+      id: "T1",
+      isResolved: true,
+      isOutdated: false,
+      path: "sapwood.config.yaml",
+      line: 12,
+      originalLine: 12,
+      anchorCommitOid: "ANCHOR",
+      findingDigest: findingDigest("missing key `foo`"),
+    },
+    {
+      id: "T2",
+      isResolved: false,
+      isOutdated: true,
+      path: "engine/src/a.ts",
+      line: null,
+      originalLine: 40,
+      anchorCommitOid: "OLD",
+      findingDigest: null, // no body -> no digest, so nothing can ever match it
+    },
+  ]);
+});
+
+test("#378 findingDigest: identical finding text digests identically; DIFFERENT text on the same span never collides", () => {
+  // The defect this closes (engine-agent review of PR #445): keying adjudication on file:line
+  // alone let a DIFFERENT, never-adjudicated finding landing on an already-adjudicated line be
+  // silently subtracted from the blocking count. Span is not finding identity.
+  assert.equal(findingDigest("missing required key `foo`"), findingDigest("missing required key `foo`"));
+  assert.notEqual(findingDigest("missing required key `foo`"), findingDigest("wrong indentation"));
+});
+
+test("#378 findingDigest: normalizes only whitespace runs — a markdown re-wrap of the SAME finding still matches", () => {
+  assert.equal(findingDigest("missing required\n  key `foo`"), findingDigest("  missing required key `foo`  "));
+  // Deliberately NOT case-folded or punctuation-stripped: every widening of this comparison
+  // trades toward the dangerous failure direction (suppressing a distinct finding), so the
+  // normalization stays at the narrowest thing that survives a re-wrap.
+  assert.notEqual(findingDigest("Missing required key `foo`"), findingDigest("missing required key `foo`"));
+});
+
+test("#378 parseReviewThreadsPage: an empty/whitespace-only body yields NO digest — an unkeyable thread is never filterable", () => {
+  const p = parseReviewThreadsPage(richThreadsPage([{ id: "T1", isResolved: true, path: "a.ts", line: 1, body: "   \n  " }]));
+  assert.equal(p.threads[0]!.findingDigest, null);
+});
+
+test("#378 parseReviewThreadsPage: an older/field-less response degrades safely — span null, isOutdated fails CLOSED (true)", () => {
+  // Absent isOutdated must read as "the span may have moved", never "the span is unchanged":
+  // the false-NEGATIVE direction (a genuinely-adjudicated duplicate keeps blocking) is a wasted
+  // fix round; the false-POSITIVE direction would suppress a REAL finding from gate② input.
+  const p = parseReviewThreadsPage(threadsPage([false, true]));
+  assert.equal(p.unresolved, 1);
+  assert.deepEqual(
+    p.threads.map((t) => [t.id, t.isOutdated, t.path, t.line, t.originalLine, t.anchorCommitOid, t.findingDigest]),
+    [
+      ["", true, null, null, null, null, null],
+      ["", true, null, null, null, null, null],
+    ],
+  );
+});
+
+test("#378 collectReviewThreads: pages to exhaustion and returns BOTH the unresolved total and every thread", async () => {
+  const pages: Record<string, string> = {
+    "": richThreadsPage([{ id: "T1", isResolved: true, path: "a.ts", line: 1 }], { hasNextPage: true, endCursor: "P2" }),
+    P2: richThreadsPage([{ id: "T2", isResolved: false, path: "a.ts", line: 1 }], { hasNextPage: false, endCursor: null }),
+  };
+  const { unresolved, threads } = await collectReviewThreads(async (after) => pages[after ?? ""]!);
+  assert.equal(unresolved, 1);
+  assert.deepEqual(
+    threads.map((t) => t.id),
+    ["T1", "T2"],
+  );
+});
+
+test("#378 collectReviewThreads: the 50-page ceiling bounds a runaway cursor (same as countUnresolvedThreads)", async () => {
+  let calls = 0;
+  const { threads } = await collectReviewThreads(async () => {
+    calls++;
+    return richThreadsPage([{ id: `T${calls}`, isResolved: false }], { hasNextPage: true, endCursor: "SAME" });
+  });
+  assert.equal(calls, 50);
+  assert.equal(threads.length, 50);
+});
+
+test("#378 assemblePRReviewData: threads ride along on PRReviewData; omitted -> undefined (no filtering possible, fail-closed)", () => {
+  const view = JSON.stringify({
+    headRefOid: "H",
+    author: { login: "producer" },
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reviews: [],
+  });
+  const spans = parseReviewThreadsPage(richThreadsPage([{ id: "T1", isResolved: true, path: "a.ts", line: 3 }])).threads;
+  assert.deepEqual(assemblePRReviewData(view, "[]", 0, "[]", spans).threads, spans);
+  assert.equal(assemblePRReviewData(view, "[]", 0).threads, undefined);
 });
 
 test("countUnresolvedThreads: pages to exhaustion — an unresolved thread PAST page 1 is still counted (Codex PR #42 P2)", async () => {
