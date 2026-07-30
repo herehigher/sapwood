@@ -482,11 +482,51 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   |---|---|---|---|---|
   | `hold` | human | WAIT | **held** (keeps its slot) | none (self-assigned, short) |
   | `needs-human` | **engine** | ESCALATE marker | released | human queue; removal = sign-off |
-  | `blocked` | human | veto | released | nobody's queue (external wait) |
+  | `blocked` | **engine** or human | veto | released | nobody's queue (external wait) |
 
   Collapsing any two of these into one label loses a bit: escalations would pollute the human
   queue with external-dependency waits (`blocked`), and removing one shared label would
-  accidentally sign off two unrelated facts at once. (The 👀 reaction was considered and
+  accidentally sign off two unrelated facts at once.
+
+  **`blocked` is engine-applied too (#397).** The tier table above used to say `blocked` was
+  human-written; the code disagreed and the code wins — `roles/architect.ts` applies it when the
+  architect pass finds a severe contradiction, and this document's own write-side-asymmetry
+  paragraph below ("only `needsHuman`/`blocked` are ever engine-applied") always said so. Both
+  passages now read the same way. A human still applies and removes it too; the asymmetry that
+  matters is that `hold` is the one tier the engine NEVER writes.
+
+  **The ESCALATE tier splits by required ACTION, not by carrier (#397).** `needs-human` used to
+  carry six distinct meanings behind one description, so a human seeing it could not tell what
+  was expected of them or what removing it would do. Splitting by carrier
+  (`needs-human-pr`/`needs-human-issue`) was rejected — the object already tells you where it
+  sits. The split is by what the human must DO, into exactly two buckets, plus one label that
+  admits it was never an escalation:
+
+  | label | meaning | carrier | removal |
+  |---|---|---|---|
+  | `needs-human` | the machine STOPPED; a human owes the next decision | issue (and PR, for visibility) | the #147 reentry handshake, unchanged |
+  | `human-merge-only` | a human must MERGE this PR; nothing is stuck | PR only, written once | never removed by any automated act |
+  | `planless` | **not an escalation** — no verification plan yet | issue | add a plan; nobody is on the hook |
+
+  `human-merge-only` is deliberately NOT a member of `escalation.humanLabels`. That array is
+  checked against ISSUE-side labels (the gated-reentry reclaim fence, `orderForDispatch`, the
+  standby probe, `round.ts`'s pool-consumability check), none of which a PR-only label could ever
+  satisfy — so adding it there would be a no-op for those checks while quietly widening
+  `deriveGate`'s veto set and the config collision guard for no benefit. Instead, a lane settling
+  on this verdict terminates WITHOUT `gated_escalation_labeled`, the same mechanism `state.ts`
+  already uses to keep no-PR-failed and label-write-failed rows permanently invisible to
+  `State.gatedFailedWorkers()`. A row that never enters `gatedFailedWorkers()` can never be
+  gate-reclaimed, so the CAPPED branch that re-applies `needs-human` can never fire for it — the
+  reclaim loop is closed structurally, not by another label fence. `planless` keeps the exact
+  exposure the fence had while it borrowed `needs-human`: `isPoolEligible`, `needsPlanReview`,
+  `needsPlanTriage`, and the standby probe each exclude it explicitly.
+
+  **Accepted, bounded cost of the split, stated rather than hidden:** the #292 instruction-path
+  latch is now keyed on `human-merge-only`, so a PR carrying `needs-human` no longer short-circuits
+  there. It falls through to the ordinary gate path, which costs ONE changed-files read and — only
+  when no review-trigger pin exists for the live head yet — ONE review trigger, both once per head,
+  never per tick. Latching on `needs-human` as well would report a bucket-1 escalation under a
+  bucket-2 reason, and the conductor would then settle that lane without ever labelling its issue. (The 👀 reaction was considered and
   rejected as the hold carrier: it's Codex's own review-protocol signal, it can't suppress
   fix-leg dispatch once findings exist, and it ages into #170's own machinery — a genuinely
   different concern.) Config: `escalation.holdLabels` (default `[sapwood:hold]`, resolved under

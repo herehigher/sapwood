@@ -446,31 +446,60 @@ test("#292 MergeDriver: instruction-path change escalates once before review, th
   const first = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(first.kind, "needs-human");
   assert.match(first.reason, /instruction-path-change:CLAUDE\.md/);
-  assert.deepEqual(forge.prLabelsAdded, [[7, "needs-human"]]);
+  // #397 bucket 2: this verdict is "a human must MERGE this PR", not "the machine got stuck", so
+  // the label written here (and the latch that suppresses the repeat writes below) is
+  // `human-merge-only`. `needs-human` is never written on this path, on the PR or the issue.
+  assert.deepEqual(forge.prLabelsAdded, [[7, "sapwood:human-merge-only"]]);
   assert.equal(forge.comments.length, 1);
   assert.match(forge.comments[0]?.[1] ?? "", /human-vetted reviewer authority.*#292/);
   assert.deepEqual(reviewer.triggered, []);
 
   const second = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(second.kind, "needs-human");
-  assert.deepEqual(forge.prLabelsAdded, [[7, "needs-human"]]);
+  assert.deepEqual(forge.prLabelsAdded, [[7, "sapwood:human-merge-only"]]);
   assert.equal(forge.comments.length, 1);
   assert.equal(forge.calls.filter((call) => call === "changed-files").length, 1, "latched tick must not refetch files");
 });
 
-test("#292 MergeDriver: an existing needs-human label returns HUMAN before file fetch or review trigger", async () => {
+test("#292/#397 MergeDriver: an existing human-merge-only label returns HUMAN before file fetch or review trigger", async () => {
   const forge = new FakeForge();
-  forge.reviewData = { ...forge.reviewData, labels: ["needs-human"] };
+  forge.reviewData = { ...forge.reviewData, labels: ["sapwood:human-merge-only"] };
   forge.changedFiles = [{ filename: "src/app.ts" }];
   const reviewer = new FakeReviewer();
 
-  // For a needs-human-labeled PR that does not touch instruction paths, the terminal outcome is
-  // unchanged from pre-#292 (needs-human); the latch deliberately avoids the wasted trigger.
+  // #397: the instruction-path latch is now keyed on `human-merge-only`, the label THIS path
+  // writes — so the "already adjudicated, don't spend another read" short-circuit still holds
+  // for the PRs the latch was built for, and only for those.
   const outcome = await new MergeDriver({ forge, reviewer, cfg: mkCfg() }).driveOne(7, 46, NEVER_TRIGGERED, noopRecord);
   assert.deepEqual(outcome, { kind: "needs-human", pr: 7, reason: "gate:HUMAN:instruction-path-latch", holdObservation: { held: false } });
   assert.equal(forge.calls.includes("changed-files"), false);
   assert.deepEqual(reviewer.triggered, []);
   assert.deepEqual(forge.comments, []);
+});
+
+test("#397: a needs-human PR no longer satisfies the instruction-path latch — it escalates through deriveGate's own human-label veto, keeping the two buckets apart", async () => {
+  const forge = new FakeForge();
+  forge.reviewData = { ...forge.reviewData, labels: ["needs-human"] };
+  forge.changedFiles = [{ filename: "src/app.ts" }];
+  const reviewer = new FakeReviewer();
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
+
+  // ACCEPTED, BOUNDED COST of the split, stated rather than hidden: pre-#397 a needs-human PR
+  // short-circuited on the instruction latch before any read. It now falls through to the
+  // ordinary path, which costs ONE changed-files read and (only if no trigger pin exists for the
+  // live head yet) ONE review trigger — both once per head, not per tick. The alternative,
+  // latching on `needs-human` too, would report a bucket-1 escalation under a bucket-2 reason,
+  // and the conductor would then settle the lane WITHOUT ever labelling its issue (#397's
+  // settleHumanMergeOnly). An honest reason is worth one comment.
+  const first = await driver.driveOne(7, 46, NEVER_TRIGGERED, noopRecord);
+  assert.deepEqual(first, { kind: "queued", pr: 7, reason: "review-triggered", holdObservation: { held: false } });
+  assert.deepEqual(forge.prLabelsAdded, [], "the instruction path writes no label for a non-matching PR");
+
+  // Next tick, with the pin at the live head, the human-label veto produces the bucket-1 reason.
+  const second = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(second.kind, "needs-human");
+  assert.match(second.reason, /^gate:HUMAN:/);
+  assert.doesNotMatch(second.reason, /instruction-path/, "never misattributed to the instruction-path chain");
 });
 
 test("#292 MergeDriver regression pin: a non-matching PR keeps the pre-#292 merge outcome/call path, plus exactly one changed-files read", async () => {

@@ -1157,9 +1157,17 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         // (RoundScopedForge deliberately does not milestone-scope it — see its own doc comment),
         // so the milestone filter is applied here, matching what countOpenIssuesInMilestone
         // itself counts.
+        // #397: `planless` is excluded here for the SAME disabled-consumer reason as a human
+        // hold — a plan-less fenced issue is invisible to every triage/review/pool predicate
+        // (forge.ts's isPlanless), so nothing enabled can consume it either. It used to be
+        // covered incidentally because the fence borrowed `needsHuman` (a humanLabels member);
+        // spelling it out keeps this probe's behavior byte-for-byte identical under the new name.
         const openIssues = await forge.listOpenIssues();
         return openIssues.some(
-          (i) => i.milestone === cfg.round.milestone && !cfg.escalation.humanLabels.some((label) => labelsInclude(i.labels, label)),
+          (i) =>
+            i.milestone === cfg.round.milestone &&
+            !cfg.escalation.humanLabels.some((label) => labelsInclude(i.labels, label)) &&
+            !labelsInclude(i.labels, cfg.labels.planless),
         );
       }
       return false;

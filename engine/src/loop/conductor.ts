@@ -32,6 +32,7 @@ import {
   probeDue,
   probeDueWithHint,
 } from "./env-failure.js";
+import { isHumanMergeOnlyVerdict } from "./escalation-buckets.js";
 import { attemptThreadWrite, computeFixResponseHarvest, type FixResponseWriteOutcome } from "./fix-response.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1855,6 +1856,30 @@ async function escalateNeedsHuman(
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason };
 }
 
+/** #397 bucket 2: settle a lane whose gate verdict is "a human must MERGE this PR" (today: the
+ *  #292 instruction-path trust chain). Three deliberate differences from escalateNeedsHuman above:
+ *
+ *  1. NO label write. The PR already carries `labels.humanMergeOnly` — the escalating path
+ *     (`escalateInstructionPathChanges`) wrote it BEFORE returning, and that label is the latch.
+ *     Nothing belongs on the ISSUE: the issue isn't stuck, its PR just needs a human's hand.
+ *  2. `gated_escalation_labeled` is left at 0. That is the whole P1 decision (#397): a row that
+ *     never sets it is permanently invisible to `State.gatedFailedWorkers()` — the SAME
+ *     invisibility class state.ts already uses for no-PR-failed and label-write-failed rows — so
+ *     this lane can never enter GATED RECLAIM, never be re-driven, and can never reach the CAPPED
+ *     branch that re-applies `needs-human`. The reclaim loop is closed structurally, not by adding
+ *     `humanMergeOnly` to `escalation.humanLabels` (which would be a no-op for every issue-side
+ *     fence that array actually feeds, while quietly widening deriveGate's veto set).
+ *  3. No attempt-trail comment. There is no reentry to trail — this verdict is one-way.
+ *
+ *  The returned outcome still reports `kind: "needs-human"` because that is DrivenOutcome's shape
+ *  for "this lane is a human's now"; the distinguishing record is the `drive-human-merge-only`
+ *  event, so the two buckets are told apart in the durable ledger, not just in a label. */
+function settleHumanMergeOnly(state: State, w: WorkerRow, pr: number, reason: string, iso: () => string): DrivenOutcome {
+  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 0 });
+  state.appendEvent("drive-human-merge-only", { worker: w.name, issue: w.issue, pr, reason });
+  return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason };
+}
+
 /** #283 (M10, E2, design #279 §5): review-time AC-snapshot drift check. Called for EVERY driving
  *  lane, BEFORE `gate.driveOne` is ever invoked for it this tick — the fail-closed guarantee is
  *  ordering: drift detection must happen before, not instead of or racing, the drive attempt, so
@@ -2717,6 +2742,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           driven.push({ kind: "merged", worker: w.name, issue: w.issue, pr });
           break;
         case "needs-human":
+          // #397 bucket 2: "a human must MERGE this PR" is a DIFFERENT required action from "the
+          // machine stopped and a human owes the next decision", and it settles differently —
+          // see settleHumanMergeOnly's own doc for why it never touches a label here.
+          if (isHumanMergeOnlyVerdict(outcome.reason)) {
+            driven.push(settleHumanMergeOnly(state, w, pr, outcome.reason, iso));
+            break;
+          }
           // #147 P2 (Codex PR #151): the label write goes FIRST, and its success is recorded
           // durably on the terminal row (gated_escalation_labeled) — because GATED RECLAIM's
           // re-entry signal is "the needs-human label is ABSENT", absence is only evidence of a

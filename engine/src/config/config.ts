@@ -385,6 +385,14 @@ const Labels = z
     // (align.ts's selectRoundPool), consumed by the executing phase's dispatch-scoping wrapper
     // (round.ts's PoolScopedForge). Same omitted-default pattern as every sibling label above.
     roundPool: z.string().optional(),
+    // #397: the two labels that split `needs-human`'s six overloaded meanings apart.
+    // `humanMergeOnly` is bucket 2 (a human must merge this PR) — written on the PR only, never
+    // listed in escalation.humanLabels (P1 decision: a lane on this verdict is excluded from
+    // gated reclaim structurally, via gated_escalation_labeled, not by a label fence).
+    // `planless` is the class-6 routing fence that was never an escalation at all. Both follow
+    // labels.prefix and use the same omitted-default pattern as every sibling label above.
+    humanMergeOnly: z.string().optional(),
+    planless: z.string().optional(),
   })
   .strict();
 
@@ -1328,6 +1336,8 @@ export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): Sapw
     split: cfg.labels.split ?? defaults.split,
     decomposed: cfg.labels.decomposed ?? defaults.decomposed,
     roundPool: cfg.labels.roundPool ?? defaults.roundPool,
+    humanMergeOnly: cfg.labels.humanMergeOnly ?? defaults.humanMergeOnly,
+    planless: cfg.labels.planless ?? defaults.planless,
   };
   cfg.labels = resolvedLabels;
   cfg.escalation.humanLabels ??= [resolvedLabels.needsHuman, resolvedLabels.blocked];
@@ -1376,8 +1386,32 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
     ["labels.originAgent", cfg.labels.originAgent],
     ["labels.split", cfg.labels.split],
     ["labels.decomposed", cfg.labels.decomposed],
+    // #397: both new labels join the PROTECTED set (so nothing may alias them), but neither
+    // joins `escalation.humanLabels` — see each field's own doc in the Labels schema above.
+    ["labels.humanMergeOnly", cfg.labels.humanMergeOnly],
+    ["labels.planless", cfg.labels.planless],
     ...cfg.escalation.humanLabels.map((label, i): [string, string] => [`escalation.humanLabels[${i}]`, label]),
   ];
+  // #397: the protected pair must also be distinct from EACH OTHER and from every label above —
+  // aliasing `planless` (a fence nothing owes a human for) onto `humanMergeOnly` (a one-way merge
+  // verdict) or onto `needsHuman` would silently re-merge the exact meanings this issue split.
+  for (const [name, value] of [
+    ["humanMergeOnly", cfg.labels.humanMergeOnly],
+    ["planless", cfg.labels.planless],
+  ] as Array<["humanMergeOnly" | "planless", string]>) {
+    for (const [key, other] of otherLabels) {
+      if (key === `labels.${name}`) continue;
+      if (!labelsInclude([other], value)) continue;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["labels", name],
+        message:
+          `labels.${name} ("${value}") collides with ${key} ("${other}") — #397 split the escalation ` +
+          `action-buckets apart precisely so one label carries one required human action; aliasing them ` +
+          `re-merges those meanings. Use a distinct value for labels.${name}.`,
+      });
+    }
+  }
   for (const [key, value] of otherLabels) {
     if (labelsInclude([value], cfg.labels.roundPool)) {
       ctx.addIssue({
@@ -1404,6 +1438,8 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
     ["labels.planApproved", cfg.labels.planApproved],
     ["labels.originAgent", cfg.labels.originAgent],
     ["labels.roundPool", cfg.labels.roundPool],
+    ["labels.humanMergeOnly", cfg.labels.humanMergeOnly],
+    ["labels.planless", cfg.labels.planless],
     ...cfg.escalation.humanLabels.map((label, i): [string, string] => [`escalation.humanLabels[${i}]`, label]),
     ...cfg.escalation.holdLabels.map((label, i): [string, string] => [`escalation.holdLabels[${i}]`, label]),
   ];

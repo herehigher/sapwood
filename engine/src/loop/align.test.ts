@@ -754,7 +754,7 @@ test("createAligningStub #231 gate② F2: the triage issue-body manifest version
   assert.notEqual(versionA, versionB, "a title-only edit with the SAME body must still change the recorded version");
 });
 
-test("createAligningStub: a declared issue WITHOUT a plan section is escalated needs-human, never left silently planless", async () => {
+test("createAligningStub (#397): a declared issue WITHOUT a plan section is fenced `planless` — a routing fence, NOT the human-escalation queue", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "Vague issue", body: NO_PLAN_BODY }]))]);
@@ -764,7 +764,11 @@ test("createAligningStub: a declared issue WITHOUT a plan section is escalated n
   await stub.run({ roundId: 2, phase: "aligning", marker: null });
   const newIssue = forge.openIssueNumbers[0]!;
   assert.ok(forge.issueLabels[newIssue]!.includes("origin:agent"), "still stamped, even when planless");
-  assert.ok(forge.issueLabels[newIssue]!.includes(cfg.labels.needsHuman));
+  // #397 class 6: a freshly PO-created plan-less issue was never an escalation — nobody owes a
+  // decision on it, a plan is simply missing. It carries the honest fence, and never lands in
+  // the human queue.
+  assert.ok(forge.issueLabels[newIssue]!.includes(cfg.labels.planless));
+  assert.ok(!forge.issueLabels[newIssue]!.includes(cfg.labels.needsHuman));
   assert.equal(forge.boardStatusCalls.length, 0);
   const comment = forge.issueCommentsPosted.find(([n]) => n === newIssue)?.[1] ?? "";
   assert.ok(/no verification plan/.test(comment));
@@ -794,9 +798,10 @@ test("createAligningStub: multiple declared issues are each processed independen
   );
   const [a, b] = forge.openIssueNumbers as [number, number];
   assert.ok(forge.issueLabels[a]!.includes("origin:agent"));
-  assert.ok(!forge.issueLabels[a]!.includes(cfg.labels.needsHuman));
+  assert.ok(!forge.issueLabels[a]!.includes(cfg.labels.planless));
   assert.ok(forge.issueLabels[b]!.includes("origin:agent"));
-  assert.ok(forge.issueLabels[b]!.includes(cfg.labels.needsHuman));
+  assert.ok(forge.issueLabels[b]!.includes(cfg.labels.planless)); // #397: the fence, not needs-human
+  assert.ok(!forge.issueLabels[b]!.includes(cfg.labels.needsHuman));
   state.close();
 });
 
@@ -981,7 +986,7 @@ test("createAligningStub #216: proposal receipt lands only after reconciled gove
   assert.equal(forge.createdIssues.length, 1);
   const issue = forge.openIssueNumbers[0]!;
   assert.ok(forge.issueLabels[issue]!.includes(cfg.labels.originAgent));
-  assert.ok(forge.issueLabels[issue]!.includes(cfg.labels.needsHuman));
+  assert.ok(forge.issueLabels[issue]!.includes(cfg.labels.planless)); // #397: the plan-less fence
   assert.equal(forge.issueCommentsPosted.length, 0);
   assert.equal(state.eventsAfterId(0, ["proposal-created"]).length, 0, "partial governance is not terminal");
 
@@ -989,7 +994,7 @@ test("createAligningStub #216: proposal receipt lands only after reconciled gove
   await createAligningStub({ now: realClock, forge, state, cfg, runner: rerun }).run({ roundId: 222, phase: "aligning", marker: null });
   assert.equal(rerun.calls.length, 0);
   assert.ok(forge.issueLabels[issue]!.includes(cfg.labels.originAgent));
-  assert.ok(forge.issueLabels[issue]!.includes(cfg.labels.needsHuman));
+  assert.ok(forge.issueLabels[issue]!.includes(cfg.labels.planless)); // #397: the plan-less fence
   assert.equal(forge.issueCommentsPosted.filter(([number]) => number === issue).length, 1);
   assert.equal(state.eventsAfterId(0, ["proposal-created"]).length, 1);
   state.close();

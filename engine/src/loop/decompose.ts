@@ -530,14 +530,17 @@ async function reconcileJournal(deps: DecomposeDeps, parent: Issue, journal: Dec
       applyGovernance: async ({ proposal, issue }) => {
         const child = journal.proposals.find((p) => p.proposalId === proposal.id)!;
         await deps.forge.addLabel(issue, deps.cfg.labels.originAgent);
-        if (child.kind === "remainder") await deps.forge.addLabel(issue, deps.cfg.labels.needsHuman);
+        // #397 class 6: a coarse remainder was never an ESCALATION — nobody owes a decision on a
+        // child that was just created. It is a routing fence keeping it off every queue until a
+        // plan exists, so it carries `planless`, not the human-escalation label it used to borrow.
+        if (child.kind === "remainder") await deps.forge.addLabel(issue, deps.cfg.labels.planless);
         const marker = proposalGovernanceMarker(proposal.id);
         const comments = await deps.forge.getIssueComments(issue);
         if (!comments.some((comment) => comment.body.includes(marker))) {
           await deps.forge.addIssueComment(
             issue,
             (child.kind === "remainder"
-              ? `Created as a coarse remainder of #${parent.number}; ${deps.cfg.labels.needsHuman} keeps it on the planless backlog path.`
+              ? `Created as a coarse remainder of #${parent.number}; ${deps.cfg.labels.planless} keeps it on the planless backlog path.`
               : `Created as a Ready-able child of #${parent.number}; a human still moves it to Ready.`) + `\n\n${marker}`,
           );
         }

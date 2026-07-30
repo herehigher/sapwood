@@ -2125,8 +2125,18 @@ function engineAuthoredPrBody(lane: string, issue: number, branch: string): stri
 
 type ReadyCfg = {
   board: { owner: string; repo: string; statusField: string; status: { ready: string } };
-  labels: { verifyNa: string; planApproved: string; needsHuman: string; blocked: string; decomposed?: string };
+  // #397: `planless` is optional here for the same reason `decomposed` is — a hand-built ReadyCfg
+  // in a test predates it; a real cfg always resolves it.
+  labels: { verifyNa: string; planApproved: string; needsHuman: string; blocked: string; decomposed?: string; planless?: string };
 };
+
+/** #397 class 6: the routing fence decompose's remainder path and align's no-plan path apply. It
+ *  is NOT an escalation — nobody owes a decision on it — but it must stay off exactly the queues
+ *  `needsHuman` kept it off, or renaming it would silently widen pool/triage/review exposure.
+ *  Every predicate that excludes on `needsHuman`/`blocked` calls this too. */
+function isPlanless(labels: string[], l: ReadyCfg["labels"]): boolean {
+  return l.planless !== undefined && labelsInclude(labels, l.planless);
+}
 
 function isDecomposed(labels: string[], l: ReadyCfg["labels"]): boolean {
   return l.decomposed !== undefined && labelsInclude(labels, l.decomposed);
@@ -2210,6 +2220,7 @@ export function selectReadyIssues(project: ParsedProject, cfg: ReadyCfg): Issue[
 function needsPlanReview(labels: string[], l: ReadyCfg["labels"]): boolean {
   if (isDecomposed(labels, l)) return false;
   if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
+  if (isPlanless(labels, l)) return false; // #397: same exclusion this fence had while it borrowed needsHuman
   if (labelsInclude(labels, l.verifyNa)) return false; // doc-gate path OR the mixed state — neither is reviewable
   return !labelsInclude(labels, l.planApproved);
 }
@@ -2251,6 +2262,7 @@ export function selectPlanReviewCandidates(project: ParsedProject, cfg: ReadyCfg
 function isPoolEligible(labels: string[], l: ReadyCfg["labels"]): boolean {
   if (isDecomposed(labels, l)) return false;
   if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
+  if (isPlanless(labels, l)) return false; // #397: same exclusion this fence had while it borrowed needsHuman
   if (labelsInclude(labels, l.verifyNa) && labelsInclude(labels, l.planApproved)) return false;
   return true;
 }
@@ -2286,6 +2298,7 @@ export function selectPoolEligibleIssues(project: ParsedProject, cfg: ReadyCfg):
 function needsPlanTriage(body: string, labels: string[], l: ReadyCfg["labels"]): boolean {
   if (isDecomposed(labels, l)) return false;
   if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
+  if (isPlanless(labels, l)) return false; // #397: same exclusion this fence had while it borrowed needsHuman
   if (labelsInclude(labels, l.verifyNa)) return false;
   return extractVerificationPlan(body) == null;
 }

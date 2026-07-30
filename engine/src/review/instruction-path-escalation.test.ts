@@ -61,6 +61,27 @@ test("#292 escalation helper: label-presence latch writes label then one comment
   assert.equal(calls.filter((call) => call.startsWith("label:")).length, 1);
   assert.equal(calls.filter((call) => call.startsWith("comment:")).length, 1);
   assert.match(calls.find((call) => call.startsWith("comment:")) ?? "", /`AGENTS\.md`.*human-vetted reviewer authority.*#292/);
+  // #397 bucket 2: this path's verdict is "a human must MERGE this PR", so the label it writes —
+  // and the latch that proves the second tick was suppressed — is `human-merge-only`. `needs-human`
+  // is never written here, on the PR or anywhere else.
+  assert.deepEqual(labels, [cfg.labels.humanMergeOnly]);
+  assert.equal(
+    calls.some((call) => call.includes(cfg.labels.needsHuman)),
+    false,
+  );
+});
+
+test("#397: a PR carrying only needs-human does NOT satisfy the instruction-path latch — the two buckets stay apart", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  const forge = {
+    getPRChangedFiles: async () => ({ files: [{ filename: "src/app.ts" }], complete: true }),
+    addPRLabel: async () => assert.fail("a non-matching PR writes no instruction-path label"),
+    addPRComment: async () => assert.fail("a non-matching PR posts no instruction-path comment"),
+  } satisfies Pick<IForge, "getPRChangedFiles" | "addPRLabel" | "addPRComment">;
+  // Pre-#397 this returned "latched" (needs-human was the latch), which reported a bucket-1
+  // escalation under a bucket-2 reason. It is now "clear": the ordinary human-label veto in
+  // deriveGate handles a needs-human PR, and the conductor escalates it as bucket 1.
+  assert.deepEqual(await escalateInstructionPathChanges({ forge, pr: 7, labels: [cfg.labels.needsHuman], cfg }), { kind: "clear" });
 });
 
 test("#292 escalation helper: instructionPaths [] is a true off-switch with zero forge calls", async () => {
