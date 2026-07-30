@@ -40,7 +40,7 @@ import type {
   ReviewFallbackLock,
   ReviewTriggerPin,
 } from "./reviewer.js";
-import { changesRequestedOnHead, NO_FALLBACK_LOCK, resolveReviewVerdict } from "./reviewer.js";
+import { changesRequestedOnHead, deriveBlockingSignal, NO_FALLBACK_LOCK, resolveReviewVerdict, staleHeadReviewCount } from "./reviewer.js";
 
 export type Gate = "MERGE" | "WAIT" | "HUMAN" | "FIXABLE";
 
@@ -650,10 +650,18 @@ export class MergeDriver {
       if (cfg.merge.mode === "produce-pr-and-stop") {
         return { kind: "stopped", pr, reason: `gates-passed:FIXABLE:${verdict.action}` };
       }
+      // #378 (F14): report the count gate② ACTUALLY acted on (already-adjudicated re-raises
+      // removed), plus what was excluded and why. `data.unresolvedThreads` was the raw total,
+      // which is what made PR #366's five duplicate re-flags — two of them against a stale head
+      // — indistinguishable from five real findings in the audit trail.
+      const blocking = deriveBlockingSignal(data);
+      const stale = staleHeadReviewCount(data.reviews, data.headOid);
       return {
         kind: "fixable",
         pr,
-        reason: `gate:FIXABLE:${verdict.action}:unresolvedThreads=${data.unresolvedThreads}:ciRed=${status.ciRed ?? false}`,
+        reason:
+          `gate:FIXABLE:${verdict.action}:unresolvedThreads=${blocking.unresolvedThreads}:ciRed=${status.ciRed ?? false}` +
+          `:adjudicatedDuplicates=${blocking.adjudicatedDuplicates}:staleHeadReviews=${stale}`,
         prescription: "findings",
       };
     }
