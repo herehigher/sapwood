@@ -25,7 +25,13 @@ import { unadjudicatedConcerns } from "./loop/dissent.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
 import { InitError, init, requiredLabels } from "./loop/init.js";
 import { type EngineLogger, FileEngineLogger } from "./loop/logger.js";
-import { parseReconcileCompleted, reconcileStartup, type StartupOrphan, sweepStaleRoleSessions } from "./loop/reconcile.js";
+import {
+  auditGatedEscalationFlags,
+  parseReconcileCompleted,
+  reconcileStartup,
+  type StartupOrphan,
+  sweepStaleRoleSessions,
+} from "./loop/reconcile.js";
 import { type PeripheralPhase, type RoundStopHit, type RoundsResult, runRounds } from "./loop/round.js";
 import { createDefaultPeripherals } from "./loop/round-defaults.js";
 import { createProxyMint } from "./proxy/mint.js";
@@ -1163,6 +1169,9 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // detects, never blocks, never mutates.
   checkWebAccessSettingsDenial(cfg, state, log);
   await reconcileStartup(forge, state, cfg, log);
+  // #391 F19: same best-effort startup pass — correct the gated-reentry marker on lanes whose
+  // hold label is observably live, so removing that label is the only manual step a human needs.
+  await auditGatedEscalationFlags(forge, state, cfg, log);
   sweepStaleRoleSessions(state, {
     log,
     ...(overrides.roleRunnerDeps?.stateDir !== undefined ? { stateDir: overrides.roleRunnerDeps.stateDir } : {}),
@@ -1301,6 +1310,9 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // detects, never blocks, never mutates.
   checkWebAccessSettingsDenial(cfg, state, log);
   await reconcileStartup(forge, state, cfg, log);
+  // #391 F19: same best-effort startup pass — correct the gated-reentry marker on lanes whose
+  // hold label is observably live, so removing that label is the only manual step a human needs.
+  await auditGatedEscalationFlags(forge, state, cfg, log);
   sweepStaleRoleSessions(state, {
     log,
     ...(overrides.roleRunnerDeps?.stateDir !== undefined ? { stateDir: overrides.roleRunnerDeps.stateDir } : {}),
