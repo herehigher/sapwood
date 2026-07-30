@@ -3149,6 +3149,30 @@ test("#169 restart adoption: stale confirmed-alive lane requests one graceful ha
   st.close();
 });
 
+/** #403 (F25), PR #430 gate② round 3: wait until `predicate` holds, with a NAMED rejection if it
+ *  never does. The bound exists to keep a genuinely wedged process from hanging the runner until
+ *  its outer ceiling — it is deliberately generous (orders of magnitude above the real work being
+ *  waited on) so it bounds catastrophe rather than deciding any test's verdict. The banned shape
+ *  is the opposite: a tight budget whose expiry IS the assertion (docs/REVIEW-DOCTRINE.md, "No
+ *  timing-dependent assertions"). */
+const waitForNamed = async (predicate: () => boolean, message: string, timeoutMs = 30_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`hang guard (${timeoutMs}ms): ${message}`);
+    await sleep(20);
+  }
+};
+
+/** True once `pid` no longer exists — `kill(pid, 0)` throws ESRCH for a reaped process. */
+const pidIsGone = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+};
+
 test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, probe finalizes .handoff, and conductor resumes with zero needs-human", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-adopt-detached-"));
   const dbPath = join(dir, "sapwood.sqlite");
@@ -3200,15 +3224,18 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
       note: "Spend during engine downtime was unobserved.",
     });
 
-    for (let i = 0; i < 400; i++) {
-      try {
-        process.kill(running.wrapper_pid, 0);
-        await sleep(20);
-      } catch {
-        break;
-      }
-    }
-    assert.throws(() => process.kill(running.wrapper_pid, 0), "cooperative wrapper exited from the graceful SIGTERM");
+    // #403 (F25), PR #430 gate② round 3: a NAMED HANG GUARD, not a real-time budget. This was a
+    // 400x20ms bounded poll followed by `assert.throws(process.kill(pid, 0))`, which made the
+    // verdict "did a real subprocess exit within 8 seconds of wall clock" — under concurrent load
+    // it does not (caught live: this test failed at 10.17s in this PR's own load evidence, with
+    // "Missing expected exception", i.e. the wrapper was merely slow, not broken). The wrapper's
+    // own work here is a bash TERM trap plus `exit`, so any bound orders of magnitude above that
+    // is a backstop rather than a margin: waiting on the condition means the test now fails only
+    // if the wrapper never exits AT ALL, and says so by name when it doesn't.
+    await waitForNamed(
+      () => pidIsGone(running.wrapper_pid),
+      "the cooperative wrapper never exited from the graceful SIGTERM (a SIGKILL would not satisfy the marker assertion below either)",
+    );
     assert.ok(existsSync(termMarker), "TERM trap wrote its marker; SIGKILL cannot satisfy this assertion");
 
     const settled = await tick({ now: realClock, forge, state: st, supervisor: s2, cfg });

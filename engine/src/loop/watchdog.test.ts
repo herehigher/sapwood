@@ -270,15 +270,14 @@ test("startProgressWatchdog: event-log progress before the window elapses resets
   };
   const exitCalls: number[] = [];
   const handle = startProgressWatchdog({ windowMs: 20, state, exit: (code) => exitCalls.push(code), eventPayload: {} });
-  // Generous real-time margin -- safe to be generous here (unlike the original) because nothing
-  // hinges on hitting an exact wall-clock boundary anymore: the reset-every-2-samples pattern
-  // guarantees no fire no matter how many, or how few, samples actually land during this sleep.
-  await sleep(400);
+  // #403 (F25), PR #430 gate② round 3 (P1, same class the reviewer flagged one instance of): this
+  // was `await sleep(400)` followed by a `sampleCalls >= 6` sanity check, so the CHECK's own
+  // precondition rode on elapsed real time — under load the process can be descheduled for the
+  // whole sleep and resume with fewer samples landed, failing on scheduler order rather than on
+  // the property. Wait on the count instead: it is the only clock either side of this test reads,
+  // and the named hang guard inside waitFor bounds a sampler that never runs at all.
+  await waitFor(() => sampleCalls >= 6, "the watchdog never completed 6 samples — the reset-every-2-samples pattern was never exercised");
   assert.deepEqual(exitCalls, [], "progress reset the window on every sample pair — no stall was ever declared");
-  assert.ok(
-    sampleCalls >= 6,
-    `sanity: the watchdog must have actually sampled several times to exercise the reset repeatedly, got ${sampleCalls}`,
-  );
   handle.stop();
 });
 
@@ -390,15 +389,26 @@ test("startProgressWatchdog (#395 gate② round 4, P1): maxEventId() frozen but 
     exit: (code) => exitCalls.push(code),
     eventPayload: {},
   });
-  // Long enough that a maxEventId()-only watchdog would have fired several times over. The
-  // duration is a soak, not a margin: no assertion below depends on how many samples landed.
-  await sleep(200);
+  // #403 (F25), PR #430 gate② round 3 (P1): the prerequisite is a SAMPLE COUNT, not elapsed real
+  // time. This used to be `await sleep(200)` followed by a `samples() >= 2` sanity check, which
+  // made the check's own precondition a race: under concurrent load the process can be
+  // descheduled for the whole 200ms and resume before the watchdog has run two sampling
+  // callbacks, so it failed for scheduler reasons that have nothing to do with the property under
+  // test. Waiting on the count is exact instead — and stronger: 2x SAMPLES_PER_WINDOW guarantees
+  // a maxEventId()-only watchdog (the regression this test exists to catch) would have seen a
+  // FULL window of unchanged samples and fired at least once by the assertion below. The hang
+  // guard inside waitFor bounds catastrophe (a sampler that never runs at all) with a named
+  // message; it never decides this test's verdict.
+  const SAMPLES_PER_WINDOW = 4; // watchdog.ts's own constant
+  await waitFor(
+    () => state.samples() >= SAMPLES_PER_WINDOW * 2,
+    `the watchdog never completed ${SAMPLES_PER_WINDOW * 2} samples — a sampler that never ran, not a passing test`,
+  );
   assert.deepEqual(
     exitCalls,
     [],
     "last_tick_at kept advancing every real tick — this must never read as a stall, no matter how quiet the event log stays",
   );
-  assert.ok(state.samples() >= 2, `sanity: the watchdog must have actually sampled, got ${state.samples()}`);
   handle.stop();
 });
 

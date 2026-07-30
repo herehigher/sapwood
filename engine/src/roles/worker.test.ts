@@ -868,9 +868,18 @@ test("spawnClaudeSession (#285): opts.cwd OMITTED -> the spawned process inherit
   }
 });
 
-const waitFor = async (predicate: () => boolean, message: string): Promise<void> => {
-  for (let i = 0; i < 400 && !predicate(); i++) await sleep(20);
-  assert.ok(predicate(), message);
+/** #403 (F25), PR #430 gate② round 3: a NAMED HANG GUARD, not a real-time budget. This used to be
+ *  a fixed 400x20ms poll whose expiry WAS the assertion, so under concurrent load a merely-slow
+ *  real subprocess failed the test for scheduler reasons (the same shape that failed live in
+ *  conductor.test.ts's #169 integration test during this PR's load evidence). The bound is now
+ *  deliberately generous — orders of magnitude above the real work being waited on — so it bounds
+ *  a genuinely wedged child rather than deciding any verdict, and it fails by name when it fires. */
+const waitFor = async (predicate: () => boolean, message: string, timeoutMs = 30_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`hang guard (${timeoutMs}ms): ${message}`);
+    await sleep(20);
+  }
 };
 const waitForFile = (path: string, message = `timed out waiting for ${path}`): Promise<void> => waitFor(() => existsSync(path), message);
 const waitForHeartbeatTick = async (path: string): Promise<void> => {

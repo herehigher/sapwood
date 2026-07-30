@@ -15,11 +15,16 @@ The suite uses colocated `node:test` files loaded through `tsx`. The source carr
 | `engine/` | `npm run typecheck` | `tsc -p tsconfig.typecheck.json`. |
 | `engine/` | `npm run build` | `tsc`. |
 
-`engine/tsconfig.json` is the BUILD config and excludes `src/**/*.test.ts` so `tsc` does not emit
-test files into `dist/`. `engine/tsconfig.typecheck.json` extends it, drops that exclusion, and is
-what `npm run typecheck` runs — so fixtures are type-checked, not merely stripped by `tsx`. It
-carries a named legacy exclusion list of files with pre-existing fixture type debt; shrink that
-list, never grow it.
+`engine/tsconfig.json` is the BUILD config and excludes `src/**/*.test.ts` (and
+`src/**/*.test-support.ts`) so `tsc` does not emit test files into `dist/`.
+`engine/tsconfig.typecheck.json` extends it, drops that exclusion, and is what `npm run typecheck`
+runs — so **every** fixture is type-checked, not merely stripped by `tsx`. It excludes nothing, and
+must stay that way: an excluded test file is one where a fixture can drop a required dependency —
+a required `now` clock, for instance — and still compile, which is the coverage hole the compiler
+check exists to close. If a test file stops compiling, fix the file rather than excluding it.
+A partial `IForge` double is the usual cause; `src/forge/unstubbed-forge.test-support.ts` exists so
+a fixture can stub only the slice it drives (`class FakeForge extends UnstubbedForge`) without
+restating the rest of the interface.
 
 The root lint command and engine lint command are not identical: the root invokes Biome at the repository root, while `biome.json` limits included files to `engine/src/**/*.ts`.
 
