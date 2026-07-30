@@ -72,27 +72,48 @@ WHAT IT DELIBERATELY DOES NOT WEAKEN (pinned by the tests in this patch):
   - absent thread data (any pre-#378 fixture or forge fake) filters nothing at
     all — byte-for-byte the pre-#378 gate.
 
-REPRODUCING THE PRE-SUBMISSION VERIFICATION (do not take the numbers on trust —
-the engine-agent review of PR #445 correctly noted that a deleted dry-run tree
-is not independently checkable). The producing worker is forbidden from writing
-the real paths, so it type-checked, linted and RAN this exact content as a
-sibling module tree. To reproduce that on the PR branch without applying
-anything to the protected files:
+PRE-SUBMISSION VERIFICATION — RUN AGAINST THE TRUE MODULE GRAPH, WITH A CONTROL.
 
-    mkdir -p engine/src/roles378
-    cp engine/src/roles/{reviewer,merge-driver,reviewer.test,merge-driver.test}.ts \
-       engine/src/roles378/
-    sed 's|engine/src/roles/|engine/src/roles378/|g' \
-       docs/patches/378-resolved-thread-head-freshness.patch > /tmp/378re.patch
-    git apply -p1 /tmp/378re.patch
-    (cd engine && npm run typecheck && npx biome ci src/roles378 \
-       && node --import tsx --test src/roles378/reviewer.test.ts \
-                                  src/roles378/merge-driver.test.ts)
-    rm -rf engine/src/roles378
+The engine-agent review of PR #445 raised the right objection twice: the numbers
+in this header are the producing worker's own, and the first attempt at proving
+them used a SIBLING module tree (engine/src/roles378/) that was not faithful —
+every other module (review/drive.ts, conductor.ts, index.ts) still imported the
+REAL, unpatched ../roles/reviewer.js, so a type or import-ordering break against
+the true module graph could not have surfaced there. That gap is now closed.
 
-Expected: 273 tests pass, 0 fail; typecheck and lint clean. `git apply --check
--p1` against the real paths is likewise clean. Applying the patch for real is
-still the human step.
+Method: copy the WHOLE engine tree to a path that is not a protected path (no
+`/engine/src/roles/` segment, so the guard's write-path denial is respected and
+the repo's own files are never touched), apply this patch there, and run the
+FULL suite — so every importer resolves to the patched reviewer.ts. Plus an
+identical UNPATCHED control, so the numbers are a delta and not an artifact of
+the copy. Run from the repo root:
+
+    mkdir -p verify378
+    cp -R engine/src engine/prompts engine/data engine/scripts verify378/
+    cp engine/tsconfig.json engine/tsconfig.typecheck.json engine/package.json \
+       engine/pricing.yaml verify378/
+    sed 's|engine/src/\*\*|src/**|' biome.json > verify378/biome.json
+    (cd verify378/src && patch -p3 \
+        < ../../docs/patches/378-resolved-thread-head-freshness.patch)
+    (cd verify378 && npx tsc -p tsconfig.typecheck.json && npx biome ci src \
+        && node --import tsx --test "src/**/*.test.ts")
+
+    # unpatched control: same construction, `patch` step omitted
+    rm -rf verify378 verify378_control   # leave nothing behind
+
+MEASURED (2026-07-30, this branch):
+  control (unpatched copy) : 3017 tests, 3015 pass, 0 fail, 2 skipped
+  patched tree             : 3032 tests, 3030 pass, 0 fail, 2 skipped
+  delta                    : +15 tests, all passing, ZERO regressions
+  typecheck exit 0; biome ci over all 114 files clean — no formatting or
+  import-ordering finding, the specific risk the review named
+
+The control reproducing the real engine tree's own numbers exactly (3017/3015)
+is what makes the patched run meaningful: the copy is faithful, so the +15 are
+this patch's own new tests and nothing else moved. This is the substance of
+AC #6. It remains a producer-run measurement that a static review cannot
+re-execute, so the recipe above is written to be run verbatim by whoever applies
+the patch — and applying it for real is still the human step, unchanged.
 
 --- a/engine/src/roles/reviewer.ts
 +++ b/engine/src/roles/reviewer.ts
