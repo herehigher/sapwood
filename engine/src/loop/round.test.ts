@@ -3752,3 +3752,113 @@ test("runRounds (#395 gate② round 4): a WAIT-gated lane (PR on pending CI) nev
   await runPromise;
   state.close();
 });
+
+// ── #433 (F33): a round is a DISPATCH window; lanes carry ACROSS rounds. A round whose own pool
+// ── is empty must still run its tick loop for whatever lanes it inherited — reclaim/drive/resume
+// ── everything but dispatch — or a carried lane is orphaned for the whole round (the 2026-07-29
+// ── live shape: PR #423's verdict arrived mid-round and was consumed by nobody for six rounds).
+// ── Empty pool + ZERO lanes still fast-closes (the very first test in this file). ───────────────
+
+test("runRounds (#433): a DRIVING lane carried into a round with an EMPTY dispatch pool is driven EVERY tick — a verdict arriving mid-round reaches merge inside that same round, no human, no next round", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge(); // ready = [] — this round's pool is empty
+  const sup = new FakeSupervisor();
+  const state = new State(":memory:");
+  // The carried lane: PR open, awaiting its Codex verdict (the #433 live shape, lane-377/PR #423).
+  state.upsertWorker({ name: "lane-377", issue: 377, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 423 });
+  // The verdict lands on the THIRD drive pass — i.e. mid-round, after the round's first tick.
+  const gate = new ScriptedMergeGate([
+    { kind: "queued", pr: 423, reason: "awaiting-review" },
+    { kind: "queued", pr: 423, reason: "awaiting-review" },
+    { kind: "merged", pr: 423, headOid: "H" },
+  ]);
+  const deps = baseDeps({ forge, state, supervisor: sup, sleep, mergeGate: gate, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }) });
+  const stopSafety = boundedStopOnPhase(deps, 5); // round 1's five peripheral phases only
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 1, "the merge happened inside the FIRST (empty-pool) round — no later round needed");
+  assert.ok(gate.calls >= 3, `the carried lane must be driven every tick of the empty round, not once (drive passes: ${gate.calls})`);
+  assert.equal(state.getWorker("lane-377")?.state, "done", "the verdict was consumed and the PR merged");
+  state.close();
+});
+
+test("runRounds (#433): a carried lane whose fix rounds are EXHAUSTED gets its needs-human escalation evaluated in the empty-pool round, not silently skipped", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const cfg = mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } });
+  // fix_rounds already AT the cap: the next FIXABLE gate can only escalate (driveDecision's
+  // ESCALATE), which is exactly the path the six empty rounds never re-evaluated.
+  state.upsertWorker({
+    name: "lane-377",
+    issue: 377,
+    session_id: "s",
+    state: "driving",
+    started_at: "t",
+    ended_at: "t2",
+    pr: 423,
+    fix_rounds: cfg.lanes.prFixCap,
+  });
+  const gate = new ScriptedMergeGate([{ kind: "fixable", pr: 423, reason: "ci-red" }]);
+  const deps = baseDeps({ forge, state, supervisor: sup, sleep, mergeGate: gate, cfg });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  await runRounds(deps);
+  stopSafety();
+  assert.ok(
+    events.some(([kind, payload]) => kind === "fix-rounds-capped" && (payload as { issue: number }).issue === 377),
+    "the cap-exhausted escalation must be evaluated in the empty round",
+  );
+  assert.ok(
+    forge.addLabelCalls.some(([n, l]) => n === 377 && l === cfg.labels.needsHuman),
+    "the needs-human label reached GitHub — an operator can actually see it",
+  );
+  assert.equal(state.getWorker("lane-377")?.state, "failed");
+  state.close();
+});
+
+test("runRounds (#433): standby must never withhold the next round while a CARRIED lane still needs the tick loop — a gated-reentry candidate a human unlabelled AFTER the round closed is picked up by the next round, not orphaned in backoff forever", async () => {
+  const forge = new FakeForge(); // ready/planReview/triage all [] — an empty backlog, so standby engages
+  const state = new State(":memory:");
+  const cfg = mkCfg({ round: { standby: { enabled: true } } });
+  // The carried lane: the fix-round cap escalated it to needs-human with its PR still open (the
+  // ONLY producer of a `failed`+pr row, #147/#246) — invisible to activeWorkers(), so its round
+  // closed as "idle" with this lane still awaiting the engine's GATED RECLAIM.
+  state.upsertWorker({
+    name: "lane-377",
+    issue: 377,
+    session_id: "s",
+    state: "failed",
+    started_at: "t",
+    ended_at: "t2",
+    pr: 423,
+    gated_escalation_labeled: 1,
+  });
+  forge.issueLabels[377] = [cfg.labels.needsHuman];
+  const gate = new ScriptedMergeGate([{ kind: "merged", pr: 423, headOid: "H" }]);
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    // Bounded, so the pre-fix behavior (standby backing off forever over a carried lane nobody
+    // drives) FAILS these assertions instead of hanging the suite — same stance as the standby
+    // tests above.
+    if (sleepCalls.length >= 8) stop();
+  };
+  const deps = baseDeps({ forge, state, sleep, mergeGate: gate, tickIntervalSec: 5, cfg });
+  // The human's explicit act — removing needs-human — lands only AFTER the first round has
+  // closed, exactly like PR #423's verdict arriving between rounds. Nothing else changes: the
+  // backlog stays empty, so this lane is the ONLY work left in the whole system.
+  deps.onRoundPhase = (_roundId, phase) => {
+    if (phase === "retro") forge.issueLabels[377] = [];
+  };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  await runRounds(deps);
+  assert.ok(state.getRound(2) != null, "a second round must open — a carried lane is work, so standby must not engage");
+  assert.equal(state.getWorker("lane-377")?.state, "done", "the carried lane was reclaimed, re-driven and merged without a human merge");
+  state.close();
+});
