@@ -1923,18 +1923,19 @@ test("runRounds standby: KILL_SWITCH bypasses the probe entirely — a round sti
   }
 });
 
-test("runRounds standby: round.milestone open (undecomposed, plan-less) issues count as work even with Ready/plan-review both empty — decomposing them is the PO's job, not a standby signal", async () => {
+test("runRounds standby: round.milestone open issues count as work even with Ready/plan-review both empty — decomposing them is the PO's job, not a standby signal", async () => {
   const forge = new FakeForge();
   forge.ready = []; // isolates the milestone-goals signal from Ready/plan-review
-  forge.planReviewCandidates = [];
-  // #432 round 2 (gate② review): the milestone catch-all this test originally exercised
-  // (populating listOpenIssues + milestoneOpenCounts) is DELETED — undecomposed, plan-less
-  // milestone issues are now exactly the PO's plan-triage candidate set, milestone-scoped by
-  // RoundScopedForge (round.ts ~516) already. Model that real coupling directly: a live forge
-  // would return these two from getIssuesNeedingPlanTriage(), not from a separate openIssues read.
-  forge.planTriageCandidates = [
+  forge.milestoneOpenCounts = [3]; // the milestone still has undecomposed open issues
+  // #212 probe residual fix: the milestone catch-all now ALSO requires at least one non-held
+  // (no cfg.escalation.humanLabels label) open issue actually IN the milestone — populate the
+  // full-open-backlog fixture the fix reads (listOpenIssues), or this would now (correctly)
+  // read as "nothing consumable" and the test's own premise (undecomposed, non-held issues)
+  // would go untested.
+  forge.openIssues = [
     { number: 50, title: "undecomposed", labels: [], milestone: "M4" },
     { number: 51, title: "also undecomposed", labels: [], milestone: "M4" },
+    { number: 52, title: "not this milestone", labels: [] },
   ];
   const state = new State(":memory:");
   const events = spyOnEvents(state);
@@ -1955,6 +1956,7 @@ test("runRounds standby: round.milestone open (undecomposed, plan-less) issues c
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened straight after the idle round 1 — never entered standby");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
+  assert.ok(forge.milestoneQueries.includes("M4"), "the milestone was actually queried");
   state.close();
 });
 
@@ -1962,15 +1964,18 @@ test("runRounds standby (#391 F21): a milestone backlog whose every open issue i
   const forge = new FakeForge();
   forge.ready = []; // nothing dispatchable…
   forge.planReviewCandidates = []; // …nothing awaiting gate⓪…
-  // The 2026-07-24 quota-storm residue: every open milestone issue is either claimed (a stale
-  // in-progress label left by a lane that died) or latched needs-human. Neither is pool-eligible,
-  // and (#432 round 2) neither is triage-shaped either since claimed issues already have a plan
-  // and latched ones are excluded by needsPlanTriage's own needsHuman check — so a real forge's
-  // getIssuesNeedingPlanTriage() is empty here too, no enabled role consumes anything, and
-  // pre-fix this pinned the probe true and 16 rounds burned paid role sessions on a provably
-  // empty pool.
   forge.planTriageCandidates = []; // …nothing to triage…
+  forge.milestoneOpenCounts = [3]; // …but the milestone still LOOKS busy
+  // The 2026-07-24 quota-storm residue: every open milestone issue is either claimed (a stale
+  // in-progress label left by a lane that died) or latched needs-human. Neither is pool-eligible
+  // and no enabled role consumes either, so pre-fix this pinned the probe true and 16 rounds
+  // burned paid role sessions on a provably empty pool.
   const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 144, title: "claimed by a dead lane", labels: [cfg.labels.inProgress], milestone: "M4" },
+    { number: 145, title: "also claimed", labels: [cfg.labels.inProgress], milestone: "M4" },
+    { number: 207, title: "latched", labels: [cfg.labels.needsHuman], milestone: "M4" },
+  ];
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
@@ -3177,12 +3182,16 @@ test("removeRoundPoolLabel #212: refuses to remove any label other than cfg.labe
 test("runRounds standby (#212 probe residual fix): a milestone whose open issues ALL carry a human-hold label no longer counts as work — standby engages instead of opening empty rounds forever", async () => {
   const forge = new FakeForge();
   forge.ready = [];
-  // #432 round 2: needsPlanTriage/needsPlanReview both already exclude needsHuman/blocked/planless
-  // internally (forge.ts), so a real forge's plan-review/plan-triage candidate sets are empty for
-  // exactly this backlog too — no separate milestone catch-all/openIssues fixture needed anymore.
-  forge.planReviewCandidates = [];
-  forge.planTriageCandidates = [];
+  forge.milestoneOpenCounts = [2];
   const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 1, title: "held a", labels: [cfg.labels.needsHuman], milestone: "M4" },
+    { number: 2, title: "held b", labels: [cfg.labels.blocked], milestone: "M4" },
+    // #397: the class-6 fence is unconsumable for exactly the same reason (every triage/review/
+    // pool predicate excludes it), so it must not pin the probe true either. It used to be
+    // covered incidentally by borrowing needs-human; under its own name the probe says so.
+    { number: 3, title: "fenced", labels: [cfg.labels.planless], milestone: "M4" },
+  ];
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
@@ -3208,18 +3217,19 @@ test("runRounds standby (#212 probe residual fix): a milestone whose open issues
     events.some(([kind]) => kind === "standby-wait"),
     "standby actually engaged — an all-held milestone no longer pins the probe true",
   );
+  assert.ok(forge.milestoneQueries.includes("M4"), "the cheap count was still checked first");
   state.close();
 });
 
 test("runRounds standby (#212 probe residual fix): a mixed milestone (one held, one not) still counts as work — no standby", async () => {
   const forge = new FakeForge();
   forge.ready = [];
-  forge.planReviewCandidates = []; // the held issue is excluded there too, and neither is Ready
-  // #432 round 2: the "not held" issue is raw (no plan) — model the real coupling, a live forge's
-  // getIssuesNeedingPlanTriage() (milestone-scoped, needsHuman/blocked-excluding) would return it;
-  // the held issue is correctly absent from this set already, no separate exclusion needed here.
-  forge.planTriageCandidates = [{ number: 2, title: "not held", labels: [], milestone: "M4" }];
+  forge.milestoneOpenCounts = [2];
   const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 1, title: "held", labels: [cfg.labels.needsHuman], milestone: "M4" },
+    { number: 2, title: "not held", labels: [], milestone: "M4" },
+  ];
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
@@ -3233,24 +3243,39 @@ test("runRounds standby (#212 probe residual fix): a mixed milestone (one held, 
   state.close();
 });
 
-// ── #432 (F32, PM gate⓪ adjudication 2026-07-31 + gate② review round 2): the milestone
-//    catch-all is DELETED, not filtered — round 1 of this issue proved a shape filter narrowed
-//    it correctly, but round 2's review proved that shape filter made the whole block a strict
-//    subset of the (already milestone-scoped) plan-review/plan-triage reads directly above it:
-//    unreachable-true under po.enabled, and a #127-class disabled-consumer bug under
-//    po-off/planReviewer-on. See round.ts's deletion-site comment for the full subset proof.
-//    Fixtures below model the REAL coupling a live forge produces — a raw issue that is
-//    triage-shaped is a `getIssuesNeedingPlanTriage()` candidate, milestone-scoped by
-//    RoundScopedForge, never an independent `openIssues`-only fact the two selectors could
-//    disagree about (that disagreement was exactly the probe/consumer drift the adjudication
-//    warned about, and round 1's fixtures had fallen into it). ─────────────────────────────
+// ── #432 (F32, PM gate⓪ adjudication 2026-07-31): round 3. Rounds 1-2's approach (a shape
+//    filter, then a full deletion) both turned out wrong — gate② review (Codex, gpt-5.6-sol
+//    high) refuted round 2's subset proof with file:line evidence: `selectPlanTriageCandidates`
+//    iterates ProjectV2 board membership (`project.items`), while the catch-all's own
+//    `listOpenIssues()` read is the FULL repo backlog — an off-board milestone issue is real work
+//    the board-scoped triage/review reads can never see. Round 2 also missed that the aligning
+//    phase consumes MORE than plan-triage (split-labeled decompose candidates, decomposed-parent
+//    journal recovery — both via decompose.ts/align.ts) and that plan-reviewer self-heals
+//    `plan:approved` Ready issues with a broken body through the deliberately body-independent
+//    pool (plan-review.ts's class-2 `confirmOneIssue`), which runs even with `po.enabled: false`.
+//    Round 3 restores the catch-all EXACTLY as it stood on origin/main, then layers ONE minimal,
+//    label-driven exclusion on top — see round.ts's own comment at the exclusion site for the
+//    full citation of each exemption's consumer. Every test below is RED-TO-GREEN BY
+//    CONSTRUCTION: the F32 negative case was verified to FAIL (probe stays pinned true, no
+//    standby) against an unmodified checkout of origin/main's round.ts — see the PR body for the
+//    exact repro command — and each "still counts as work" case below was verified to FAIL
+//    against this issue's OWN round-2 commit (the full-block deletion), proving both that the
+//    restored catch-all is necessary (round 2 broke these) and that the new exclusion is not
+//    over-broad (it doesn't accidentally re-break them). ──────────────────────────────────────
 
-test("runRounds standby (#432 F32): a milestone whose open non-Ready issues are ALL fully-specified (plan+AC present, no triage signal) does not count as work — standby engages after one idle round", async () => {
+const SPECIFIED_BODY = "## Acceptance criteria\n- [ ] x\n\n## Verification plan\n- npm test";
+
+test("runRounds standby (#432 F32): a milestone whose open non-Ready issues are ALL fully-specified (plan+AC present) and carry NONE of split/decomposed/plan:approved does not count as work — standby engages after one idle round", async () => {
   const forge = new FakeForge();
   forge.ready = []; // none are Ready yet — awaiting only human promotion
   forge.planReviewCandidates = []; // Ready-lane-only signal, moot here
   forge.planTriageCandidates = []; // #89: neither has a plan gap — nothing for the PO to triage
+  forge.milestoneOpenCounts = [2];
   const cfg = mkCfg({ round: { milestone: "v0.2.1", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 460, title: "fully specified a", labels: [], body: SPECIFIED_BODY, milestone: "v0.2.1" },
+    { number: 461, title: "fully specified b", labels: [], body: SPECIFIED_BODY, milestone: "v0.2.1" },
+  ];
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
@@ -3270,20 +3295,23 @@ test("runRounds standby (#432 F32): a milestone whose open non-Ready issues are 
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(
     events.some(([kind]) => kind === "standby-wait"),
-    "standby actually engaged — a milestone of fully-specified, human-Ready-gated issues (both the review and triage lines empty) no longer pins the probe true; this is the F32 acceptance evidence",
+    "standby actually engaged — a milestone of fully-specified, human-Ready-gated issues with no consumable-signal label no longer pins the probe true; this is the F32 acceptance evidence " +
+      "(RED against unmodified origin/main round.ts: its catch-all has no shape check at all and counts these unconditionally — see the PR body for the verified repro)",
   );
+  assert.ok(forge.milestoneQueries.includes("v0.2.1"), "the cheap count was still checked first");
   state.close();
 });
 
-test("runRounds standby (#432 F32, AC2): a genuinely raw issue (no plan/AC structure) in the milestone still counts as work, via the PO's own plan-triage line — cold-start decomposition is unaffected by the catch-all's deletion", async () => {
+test("runRounds standby (#432 F32, AC2): a genuinely raw issue (no plan/AC structure) in the milestone still counts as work — cold-start decomposition is unaffected", async () => {
   const forge = new FakeForge();
   forge.ready = [];
   forge.planReviewCandidates = [];
-  // Real coupling: getIssuesNeedingPlanTriage() is RoundScopedForge-milestone-scoped and backed
-  // by the SAME needsPlanTriage predicate a raw (plan-less) issue satisfies — this IS what a live
-  // forge would return, not a hand-built openIssues fixture the deleted catch-all used to read.
-  forge.planTriageCandidates = [{ number: 500, title: "brand new, no plan yet", labels: [], milestone: "M4" }];
+  forge.planTriageCandidates = []; // this probe's milestone rung must carry the signal on its own
+  forge.milestoneOpenCounts = [1];
   const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 500, title: "brand new, no plan yet", labels: [], body: "just an idea, nothing structured", milestone: "M4" },
+  ];
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
@@ -3297,15 +3325,21 @@ test("runRounds standby (#432 F32, AC2): a genuinely raw issue (no plan/AC struc
   state.close();
 });
 
-test("runRounds standby (#432 F32): a MIXED milestone (one fully-specified, one raw) still counts as work — the raw issue alone drives the triage line; the fully-specified one contributes to no signal at all", async () => {
+test("runRounds standby (#432 F32, MIXED): one fully-specified issue plus one raw issue still counts as work — the raw issue alone is enough", async () => {
   const forge = new FakeForge();
   forge.ready = [];
-  forge.planReviewCandidates = []; // the fully-specified issue isn't Ready yet either — not a review candidate
-  // Only the raw issue is triage-shaped. A real forge would never place the fully-specified issue
-  // in this set (needsPlanTriage returns false once a plan section exists) — it is deliberately
-  // absent here too, proving the mixed backlog resolves on the raw issue alone.
+  forge.planReviewCandidates = [];
+  // Realistic coupling: the raw issue #500 is genuinely on-board and plan-less, so a live forge's
+  // getIssuesNeedingPlanTriage() would return it too (needsPlanTriage true) — populated here to
+  // match, not to isolate any one line; either the triage line or the catch-all alone is enough,
+  // and this test only asserts the mixed backlog resolves to "work exists" either way.
   forge.planTriageCandidates = [{ number: 500, title: "raw", labels: [], milestone: "M4" }];
+  forge.milestoneOpenCounts = [2];
   const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 460, title: "fully specified", labels: [], body: SPECIFIED_BODY, milestone: "M4" },
+    { number: 500, title: "raw", labels: [], body: "just an idea", milestone: "M4" },
+  ];
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
@@ -3319,52 +3353,128 @@ test("runRounds standby (#432 F32): a MIXED milestone (one fully-specified, one 
   state.close();
 });
 
-test("runRounds standby (#432 F32, disabled-consumer corner the deletion fixes): po.enabled: false, planReviewer.enabled: true — a raw milestone issue counts as NOTHING, because its only consumer (the PO) is off; standby engages", async () => {
+test("runRounds standby (#432 F32, Codex P1-1 off-board): a fully-specified milestone issue ABSENT from every board-scoped selector (planTriageCandidates/planReviewCandidates both empty, as a real off-board issue would leave them) still counts as work when it is genuinely raw — the repo-wide listOpenIssues() read sees it even when ProjectV2 board membership wouldn't", async () => {
   const forge = new FakeForge();
   forge.ready = [];
-  forge.planReviewCandidates = []; // planReviewer is on, but nothing Ready-lane to review either
-  // Genuinely triage-shaped (a live forge WOULD return this from getIssuesNeedingPlanTriage) —
-  // the point is the probe must never even read it while po.enabled is false, let alone count it.
-  // This is exactly the corner the deleted catch-all used to get wrong: it read `listOpenIssues()`
-  // unconditionally on `po.enabled || planReviewer.enabled`, so a triage-shaped issue counted as
-  // work even with the PO off, as long as planReviewer alone was on.
-  forge.planTriageCandidates = [{ number: 500, title: "raw", labels: [], milestone: "M4" }];
-  let triageProbeCalls = 0;
-  const realGetNeedingTriage = forge.getIssuesNeedingPlanTriage.bind(forge);
-  forge.getIssuesNeedingPlanTriage = async () => {
-    triageProbeCalls++;
-    return realGetNeedingTriage();
-  };
+  // An off-board issue is, by definition, invisible to every ProjectV2-board-scoped selector —
+  // both stay empty even though the milestone genuinely has raw work in it. Only the repo-wide
+  // listOpenIssues() read (which the restored catch-all uses, unlike a board-scoped-only design)
+  // can see it. This is the exact universe-mismatch gap Codex's P1-1 finding identified in
+  // round 2's deletion (which relied solely on the board-scoped triage read).
+  forge.planReviewCandidates = [];
+  forge.planTriageCandidates = [];
+  forge.milestoneOpenCounts = [1];
+  const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [{ number: 600, title: "off-board raw issue", labels: [], body: "not on the project board at all", milestone: "M4" }];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — the off-board issue was still seen and counted");
+  assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
+  state.close();
+});
+
+test("runRounds standby (#432 F32, Codex P1-1 split): a fully-specified milestone issue carrying `split` still counts as work — a human's decompose request must wake the loop even though the body already has a full plan+AC", async () => {
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.planReviewCandidates = [];
+  forge.planTriageCandidates = []; // fully specified -> needsPlanTriage is false, same as a real forge
+  forge.milestoneOpenCounts = [1];
+  const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  // isDecomposeCandidate (decompose.ts) = split ∧ ¬decomposed ∧ ¬needsHuman ∧ ¬blocked — consumed
+  // by runDecompositionPass (align.ts ~1486-1490, inside alignStub.run, gated on roles.po.enabled).
+  forge.openIssues = [{ number: 700, title: "split, fully specified", labels: [cfg.labels.split], body: SPECIFIED_BODY, milestone: "M4" }];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(
+    result.rounds,
+    2,
+    "round 2 opened straight after idle round 1 — the split-labeled issue was still counted despite a complete body",
+  );
+  assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
+  state.close();
+});
+
+test("runRounds standby (#432 F32, Codex P1-1 decomposed): a decomposed parent still counts as work — its local decomposition journal may still need recovery, which needsPlanTriage's own decomposed exclusion makes invisible to the triage line", async () => {
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.planReviewCandidates = [];
+  forge.planTriageCandidates = []; // needsPlanTriage explicitly excludes `decomposed` — a real forge agrees
+  forge.milestoneOpenCounts = [1];
+  const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  // decompose.ts's `recoveries` set (inside runDecompositionPass) is exactly decomposed-labelled
+  // issues with an unreconciled LOCAL journal — this probe has no local-journal read of its own,
+  // so (documented residual, same stance as the claimed-issue comment above it in round.ts) it
+  // counts EVERY decomposed-labelled issue, a same-round-idle over-count, never a missed recovery.
+  forge.openIssues = [{ number: 800, title: "fenced parent", labels: [cfg.labels.decomposed], body: SPECIFIED_BODY, milestone: "M4" }];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — the decomposed parent was still counted");
+  assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
+  state.close();
+});
+
+test("runRounds standby (#432 F32, Codex P1-2 plan:approved broken body): po.enabled: false, planReviewer.enabled: true — a Ready-lane issue carrying plan:approved whose body no longer has a verification-plan section still counts as work, through the catch-all alone", async () => {
+  // po.enabled: false is load-bearing here, not incidental: with po ON, getIssuesNeedingPlanTriage
+  // (line ~1157) would ALSO return this issue true — needsPlanTriage (forge.ts) never checks
+  // planApproved, only extractVerificationPlan(body). That would catch this exact case via the
+  // triage line, making the test pass for the wrong reason and leaving the catch-all's own
+  // plan:approved exemption unexercised. Disabling po isolates the catch-all as the ONLY signal
+  // that can see this issue — precisely Codex's P1-2 scenario ("With PO off and planReviewer on,
+  // the post-deletion probe returns false. The old milestone catch-all returned true.").
+  const forge = new FakeForge();
+  forge.ready = []; // isDispatchable fails closed: no verification-plan section in the body
+  forge.planReviewCandidates = []; // needsPlanReview fails closed too: plan:approved is already present
+  forge.milestoneOpenCounts = [1];
   const cfg = mkCfg({
     roles: { po: { enabled: false }, planReviewer: { enabled: true } },
     round: { milestone: "M4", standby: { enabled: true } },
   });
+  // plan-review.ts's confirmOneIssue (class 2, ~737-805) is reached via the round-pool's
+  // getPoolEligibleIssues (forge.ts, deliberately body-independent) -> createPlanReviewStub,
+  // gated on roles.planReviewer.enabled — and the pool itself runs even with roles.po.enabled:
+  // false (round-defaults.ts's "the aligning phase's round-pool selection is NEVER gated by
+  // roles.po.enabled").
+  forge.openIssues = [
+    {
+      number: 900,
+      title: "approved, broken body",
+      labels: [cfg.labels.planApproved],
+      body: "the plan section got deleted",
+      milestone: "M4",
+    },
+  ];
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
-  let stop = (): void => {};
-  const sleepCalls: number[] = [];
-  const sleep = async (ms: number): Promise<void> => {
-    sleepCalls.push(ms);
-    if (sleepCalls.length >= 4) stop();
-  };
-  const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 5, cfg, peripherals: allPeripherals(log) });
-  deps.registerSignals = (requestStop) => {
-    stop = requestStop;
-    return () => {};
-  };
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
+  const stopSafety = boundedStopOnPhase(deps, 10);
   const result = await runRounds(deps);
-  assert.equal(result.stoppedBy, "signal");
-  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
-  assert.ok(
-    events.some(([kind]) => kind === "standby-wait"),
-    "standby actually engaged — with the PO off, a raw milestone issue has no enabled consumer",
-  );
+  stopSafety();
   assert.equal(
-    triageProbeCalls,
-    0,
-    "getIssuesNeedingPlanTriage was never called — the disabled role short-circuits the probe's API read itself, and there is no catch-all left to read listOpenIssues() as a second path around that guard",
+    result.rounds,
+    2,
+    "round 2 opened straight after idle round 1 — the broken-body plan:approved issue was still counted, via the catch-all alone",
   );
+  assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
   state.close();
 });
 
