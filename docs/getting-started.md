@@ -268,9 +268,13 @@ ships instead is a **supervision contract** the engine holds up its end of:
   loop** (too many process births in a window), and `liveness.maxConsecutiveStalls`
   parks a **deterministic wedge** (consecutive stalled runs with no round closed between
   them) — both escalate to a human through the park channel instead of burning restarts.
-  These are backstops, not a substitute: configure the supervisor's **own**
-  circuit-breaker too — a *prerequisite* for unattended supervised runs
-  ([security.md](security.md)'s supervisor prerequisite).
+  The stall count resets **only on real progress — a round closing — or the park's own
+  clear receipt, never on how a run exited**: clean stops (including the SIGTERM your
+  supervisor sends before every restart) and crashes alike are neutral, so no restart
+  pattern can launder a wedge past the breaker (the engine cannot observe the intent
+  behind a signal and does not infer it). These are backstops, not a substitute:
+  configure the supervisor's **own** circuit-breaker too — a *prerequisite* for
+  unattended supervised runs ([security.md](security.md)'s supervisor prerequisite).
 - **Stopping a supervised engine** is the supervisor's stop verb (e.g. `systemctl stop`),
   which sends SIGTERM — the in-flight round finishes, harvest included, and `run-ended`
   is written. The kill switch remains the in-band emergency freeze; note a kill-switch

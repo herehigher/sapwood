@@ -512,7 +512,7 @@ export function formatStatus(s: StatusSnapshot): string {
         p.source === "rapid-restart"
           ? "clears on a later start outside the restart window (docs/troubleshooting.md)"
           : p.source === "consecutive-stalls"
-            ? "clears on a later start after a graceful stop breaks the stall streak (docs/troubleshooting.md)"
+            ? "clears on a later start after a closed round breaks the stall streak (docs/troubleshooting.md)"
             : "probing on backoff, auto-resumes on recovery";
       lines.push(
         `park: PARKED (${p.source}) since ${p.enteredAt} (${durationSec}s) — ` +
@@ -1113,20 +1113,20 @@ export function buildTickFixLegResume(
  *  wall clock now anchors to in-memory process start). Appended once per process start,
  *  before anything else this run writes (so it also anchors the #154 run-spend ledger position),
  *  carrying the ALLOWLISTED config subset (never the resolved object — see
- *  dashboardConfigSubset) plus a hash of the full config for change detection across runs. */
-function appendRunStarted(state: Pick<State, "appendEvent">, cfg: SapwoodConfig, lockTakeover?: LockTakeoverRecord): void {
+ *  dashboardConfigSubset) plus a hash of the full config for change detection across runs.
+ *
+ *  #407 gate② P2: appends ONLY the boundary itself. The stale-lock takeover event that used to
+ *  ride here moved to the drivers' own terminal bracket — every write after a SUCCESSFUL
+ *  run-started must sit inside the try that guarantees a `run-ended` on a controlled exit, and
+ *  this function runs strictly BEFORE that bracket opens (a failed run-started append must not
+ *  produce an unpaired terminal). */
+function appendRunStarted(state: Pick<State, "appendEvent">, cfg: SapwoodConfig): void {
   state.appendEvent("run-started", { config: dashboardConfigSubset(cfg), configHash: configHash(cfg) });
-  // #382 round 2 (codex PR #467 finding 4): the stale-lock takeover happened at THIS run's
-  // startup, so its event must land inside THIS run's replay group — i.e. AFTER `run-started`,
-  // the authoritative grouping boundary this function's own doc establishes. Appending it any
-  // earlier (round 1 did, at acquisition time) attributes it to the PREVIOUS run's group.
-  if (lockTakeover !== undefined) {
-    state.appendEvent("instance-lock-taken-over", { lockPath: lockTakeover.lockPath, previousPid: lockTakeover.previousPid });
-  }
 }
 
 /** #382: what runEngine hands the drivers when startup took over a stale lock — carried as a
- *  pending startup event so appendRunStarted can order it after the run boundary (above). */
+ *  pending startup event so the drivers can order it after the run boundary (above), inside
+ *  their terminal bracket (#407 gate② P2). */
 interface LockTakeoverRecord {
   lockPath: string;
   previousPid: number | null;
@@ -1181,25 +1181,35 @@ async function runTickEngine(
   // buildTickFixLegResume's own doc for the tick driver's round 0 / phase "tick" audit identity.
   const renderFixPrompt = buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
-  appendRunStarted(state, cfg, lockTakeover);
-  // #431 (owner amendment 1): the rapid-restart detector, strictly AFTER appendRunStarted — the
-  // count then includes THIS boot's own birth, and everything the detector emits lands after
-  // `run-started` inside this run's replay group (the #382-pinned run-started-first ordering is
-  // undisturbed). A trip parks autonomous dispatch via the existing park paradigm; startup
-  // itself continues (reconcile passes are engine hygiene, not dispatch).
-  detectRapidRestart(state, cfg, systemClock, log);
-  // #407: the stall breaker — the SAME placement pattern as the rapid-restart detector above
-  // (strictly after the run boundary, same park paradigm on a trip, startup itself continues),
-  // reading back whether the PREVIOUS run ended in a watchdog stall and whether the streak has
-  // reached liveness.maxConsecutiveStalls. See stall-breaker.ts's own doc.
-  detectConsecutiveStalls(state, cfg, systemClock, log);
-  // #407 (item 1): everything from here to process exit sits inside this run's open boundary, so
-  // EVERY path out of it must close the bracket with exactly one `run-ended` — the success path
-  // below, or the catch (a thrown startup pass / driver error, exiting through main()'s own
-  // exit(1)). The two paths that must NOT reach the catch stay out by construction: the watchdog
-  // exits via process.exit from its own timer (no unwinding, `engine-stalled` is its terminal),
-  // and a hard kill unwinds nothing at all (the ABSENCE is the record — appendRunEnded's doc).
+  appendRunStarted(state, cfg);
+  // #407 (item 1, gate② P2): the run boundary is OPEN — every controlled exit from here to
+  // process exit must close it with exactly one `run-ended`, so the bracket opens IMMEDIATELY
+  // after the successful run-started append (P2: the takeover append used to sit before it,
+  // and a throw there exited through main()'s handler with no terminal — a recorded false
+  // crash). The success path appends the driver's own stoppedBy; the catch appends
+  // {stoppedBy: "error"}. The two paths that must NOT reach the catch stay out by
+  // construction: the watchdog exits via process.exit from its own timer (no unwinding,
+  // `engine-stalled` is its terminal), and a hard kill unwinds nothing at all (the ABSENCE is
+  // the record — appendRunEnded's doc).
   try {
+    // #382 round 2 (codex PR #467 finding 4): the stale-lock takeover happened at THIS run's
+    // startup, so its event must land inside THIS run's replay group — i.e. AFTER `run-started`,
+    // the authoritative grouping boundary. Appending it any earlier (round 1 did, at acquisition
+    // time) attributes it to the PREVIOUS run's group.
+    if (lockTakeover !== undefined) {
+      state.appendEvent("instance-lock-taken-over", { lockPath: lockTakeover.lockPath, previousPid: lockTakeover.previousPid });
+    }
+    // #431 (owner amendment 1): the rapid-restart detector, strictly AFTER appendRunStarted —
+    // the count then includes THIS boot's own birth, and everything the detector emits lands
+    // after `run-started` inside this run's replay group (the #382-pinned run-started-first
+    // ordering is undisturbed). A trip parks autonomous dispatch via the existing park paradigm;
+    // startup itself continues (reconcile passes are engine hygiene, not dispatch).
+    detectRapidRestart(state, cfg, systemClock, log);
+    // #407: the stall breaker — the SAME placement pattern as the rapid-restart detector above
+    // (strictly after the run boundary, same park paradigm on a trip, startup itself continues),
+    // reading back whether the PREVIOUS run ended in a watchdog stall and whether the streak has
+    // reached liveness.maxConsecutiveStalls. See stall-breaker.ts's own doc.
+    detectConsecutiveStalls(state, cfg, systemClock, log);
     const forge = overrides.forge ?? new GithubForge(cfg);
     // #253: the tick driver's TickDeps.fixLegResume — undefined (no handle/listener/token/journal
     // write/argv change on any production session — see buildTickFixLegResume's own doc for the
@@ -1352,20 +1362,24 @@ async function runRoundsEngine(
   // built once here the way the tick driver's fixLegResume is.
   const renderFixPrompt = buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
-  appendRunStarted(state, cfg, lockTakeover);
-  // #431 (owner amendment 1): the rapid-restart detector, strictly AFTER appendRunStarted — the
-  // count then includes THIS boot's own birth, and everything the detector emits lands after
-  // `run-started` inside this run's replay group (the #382-pinned run-started-first ordering is
-  // undisturbed). A trip parks autonomous dispatch via the existing park paradigm; startup
-  // itself continues (reconcile passes are engine hygiene, not dispatch).
-  detectRapidRestart(state, cfg, systemClock, log);
-  // #407: the stall breaker — same placement pattern as the rapid-restart detector above; see
-  // runTickEngine's own comment and stall-breaker.ts's doc.
-  detectConsecutiveStalls(state, cfg, systemClock, log);
-  // #407 (item 1): the run boundary's closing bracket — same try/catch contract as
-  // runTickEngine's own comment above: every path out appends exactly one `run-ended`; the
-  // watchdog's process.exit and a hard kill stay out by construction.
+  appendRunStarted(state, cfg);
+  // #407 (item 1, gate② P2): the run boundary's closing bracket — same contract as
+  // runTickEngine's own comment above: the bracket opens IMMEDIATELY after the successful
+  // run-started append, so every write of this run (takeover event included) sits inside it and
+  // every controlled exit appends exactly one `run-ended`; the watchdog's process.exit and a
+  // hard kill stay out by construction.
   try {
+    // #382 round 2 (codex PR #467 finding 4): the takeover event lands AFTER `run-started`,
+    // inside this run's replay group — see runTickEngine's own comment above.
+    if (lockTakeover !== undefined) {
+      state.appendEvent("instance-lock-taken-over", { lockPath: lockTakeover.lockPath, previousPid: lockTakeover.previousPid });
+    }
+    // #431 (owner amendment 1): the rapid-restart detector, strictly AFTER appendRunStarted —
+    // see runTickEngine's own comment above.
+    detectRapidRestart(state, cfg, systemClock, log);
+    // #407: the stall breaker — same placement pattern as the rapid-restart detector above; see
+    // runTickEngine's own comment and stall-breaker.ts's doc.
+    detectConsecutiveStalls(state, cfg, systemClock, log);
     const forge = overrides.forge ?? new GithubForge(cfg);
     const engineReviewRunner =
       cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state, now: systemClock }) : null;

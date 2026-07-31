@@ -1568,15 +1568,15 @@ export async function escalatePark(
         `docs/troubleshooting.md and docs/security.md (supervisor circuit-breaker prerequisite).`
       : park.source === "consecutive-stalls"
         ? // #407: same probe-less honesty as the rapid-restart arm above — this episode's own
-          // clearing story (stall-breaker.ts: a graceful stop breaks the streak) must be the one
+          // clearing story (stall-breaker.ts: only a closed round breaks the streak) must be the one
           // the message promises. In practice the breaker escalates at trip time (its
           // escalateLocally sets the latch), so this ladder only reaches it through an exotic
           // latch loss — same residual as rapid-restart.
           `sapwood: engine parked since ${park.enteredAt} — consecutive-stall breaker (${park.reason}). ` +
           `This episode has now stood for over the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
-          `escalation threshold. There is NO probe for this episode: fix the recurring wedge, stop the ` +
-          `engine gracefully (SIGTERM), and start it again — a clean stop breaks the stall streak and ` +
-          `the next start resumes automatically. See docs/troubleshooting.md.`
+          `escalation threshold. There is NO probe for this episode: fix the recurring wedge — the park ` +
+          `clears on the first start after a round has CLOSED again (no exit, clean or otherwise, ` +
+          `clears it). See docs/troubleshooting.md.`
         : `sapwood: engine parked since ${park.enteredAt} due to a ${park.source} environment failure ` +
           `(${park.reason}) — this has exceeded the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
           `escalation threshold. The engine is still probing on a bounded exponential backoff and will ` +

@@ -146,17 +146,35 @@ test("breaker table: a single closed round anywhere in the span resets the strea
   s.close();
 });
 
-test("a CLEAN run between stalls resets the streak ('the last N runs all ended stalled'), a CRASHED run leaves it unchanged (evidence of nothing)", () => {
+test("P1 (PR #473 gate②): clean exits are streak-NEUTRAL — a supervisor that SIGTERMs before each restart cannot launder a deterministic wedge (stall, clean, stall, clean, stall still trips at 3)", () => {
   const s = new State(":memory:");
+  // The evasion pattern: every wedge cycle is laced with a clean `run-ended` (systemd
+  // KillSignal / launchd stop before each restart). Under the rejected reset-on-clean-run
+  // semantics this streak stayed at 1 forever; the AC's own condition — no round CLOSED
+  // between the stalls — says it is 3.
   seedRun(s, "stalled");
   seedRun(s, "clean");
+  seedRun(s, "stalled");
+  seedRun(s, "clean");
+  seedRun(s, "stalled");
+  boot(s);
+  const outcome = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
+  assert.deepEqual(outcome, { restartAfterStall: true, streak: 3, tripped: true });
+  assert.equal(s.isParked(), true, "the wedge is parked despite the interleaved clean stops");
+  s.close();
+});
+
+test("alternating stall/crash/stall/crash/stall still trips at 3 stalls — a crash is evidence of nothing, in neither direction", () => {
+  const s = new State(":memory:");
+  seedRun(s, "stalled");
+  seedRun(s, "crash");
   seedRun(s, "stalled");
   seedRun(s, "crash");
   seedRun(s, "stalled");
   boot(s);
   const outcome = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
-  // clean reset after stall #1; then stall (1), crash (unchanged), stall (2).
-  assert.deepEqual(outcome, { restartAfterStall: true, streak: 2, tripped: false });
+  assert.deepEqual(outcome, { restartAfterStall: true, streak: 3, tripped: true });
+  assert.equal(s.isParked(), true);
   s.close();
 });
 
@@ -173,7 +191,7 @@ test("config-driven threshold (user-tunables rule): liveness.maxConsecutiveStall
   s.close();
 });
 
-// ── the clearing story (module doc): a graceful stop of the parked run breaks the streak ──
+// ── the clearing story (module doc): only a CLOSED ROUND breaks a standing streak ─────────
 
 test("re-trip while already parked: dispatch stays gated but NO duplicate detected/escalated events — the episode is the dedup carrier", () => {
   const s = new State(":memory:");
@@ -194,20 +212,22 @@ test("re-trip while already parked: dispatch stays gated but NO duplicate detect
   s.close();
 });
 
-test("clearing: the operator gracefully stops the parked engine (run-ended) and restarts — the streak is broken, the park clears with a park-resumed receipt", () => {
+test("clearing: the parked run closes a (dispatch-empty) round — the NEXT start reads that closed round as recovery evidence and clears with a park-resumed receipt", () => {
   const s = new State(":memory:");
   seedRun(s, "stalled");
   seedRun(s, "stalled");
   seedRun(s, "stalled");
   boot(s);
   detectConsecutiveStalls(s, mkCfg(), realNow, silentLog); // trips, parks
-  // The parked run holds at the dispatch gate until the operator SIGTERMs it: a clean exit
-  // writes its run-ended terminal (cli.ts item 1) — the human's own fingerprint in the log.
+  // A park gates dispatch, not the round loop: round 1 opens unconditionally (round.ts), its
+  // peripheral phases complete without touching the wedged dispatch path, and it CLOSES — the
+  // canary the clearing story rests on. The operator then stops and restarts the engine.
+  s.appendEvent("round-phase", { round_id: 4, phase: "closed" });
   s.appendEvent("run-ended", { stoppedBy: "signal" });
   boot(s);
   const outcome = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
   assert.deepEqual(outcome, { restartAfterStall: false, streak: 0, tripped: false });
-  assert.equal(s.parkRow(CONSECUTIVE_STALLS_PARK_SOURCE), null, "the broken streak is the sanctioned-recovery signal");
+  assert.equal(s.parkRow(CONSECUTIVE_STALLS_PARK_SOURCE), null, "the closed round is the sanctioned-recovery signal");
   assert.equal(s.isParked(), false);
   const resumed = s.eventsAfterId(0, ["park-resumed"]);
   assert.equal(resumed.length, 1);
@@ -217,18 +237,26 @@ test("clearing: the operator gracefully stops the parked engine (run-ended) and 
   s.close();
 });
 
-test("clearing is NOT granted to an unsanctioned death: the parked run killed hard (no terminal) leaves the streak — and the park — standing", () => {
+test("clearing is NOT granted to any exit: the parked run stopped gracefully (run-ended, no round closed) OR killed hard leaves the streak — and the park — standing", () => {
   const s = new State(":memory:");
   seedRun(s, "stalled");
   seedRun(s, "stalled");
   seedRun(s, "stalled");
   boot(s);
   detectConsecutiveStalls(s, mkCfg(), realNow, silentLog); // trips, parks
-  // SIGKILL/OOM: the parked run dies with no terminal at all. A crash is evidence of nothing.
+  // The parked run is SIGTERMed before its round could close (or the wedge is in the round
+  // loop itself): a clean terminal, zero progress evidence. P1: exits never clear.
+  s.appendEvent("run-ended", { stoppedBy: "signal" });
   boot(s);
-  const outcome = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
-  assert.equal(outcome.tripped, true);
-  assert.equal(s.isParked(), true, "no clean stop, no forgiveness — the park stands");
+  const afterClean = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
+  assert.equal(afterClean.tripped, true);
+  assert.equal(s.isParked(), true, "a clean stop is not progress — the park stands");
+  // And a hard kill of the next parked run (no terminal at all) changes nothing either.
+  boot(s);
+  const afterCrash = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
+  assert.equal(afterCrash.tripped, true);
+  assert.equal(s.isParked(), true, "no progress, no forgiveness — the park stands");
+  assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1, "and the escalation never spams across those restarts");
   s.close();
 });
 
@@ -239,6 +267,7 @@ test("a closed episode's stalls are consumed: after a clear, old stalls never re
   seedRun(s, "stalled");
   boot(s);
   detectConsecutiveStalls(s, mkCfg(), realNow, silentLog); // episode 1: parks
+  s.appendEvent("round-phase", { round_id: 4, phase: "closed" }); // the parked run's own canary round
   s.appendEvent("run-ended", { stoppedBy: "signal" });
   boot(s);
   detectConsecutiveStalls(s, mkCfg(), realNow, silentLog); // clears episode 1

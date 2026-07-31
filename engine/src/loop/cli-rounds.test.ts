@@ -1339,3 +1339,48 @@ test("sapwood run (#407): the Nth consecutive stalled run trips the breaker at s
     state.close();
   }
 });
+
+test("#407 terminal table (gate② P2), stale-lock startup failure: a throw in the takeover append — after run-started, before the drivers' body — still closes the boundary with run-ended {stoppedBy: error}", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-terminal-takeover-"));
+  const state = new State(join(dir, "sapwood.sqlite"));
+  const lockPath = state.instanceLockPath();
+  assert.ok(lockPath !== null);
+  writeFileSync(lockPath!, JSON.stringify({ pid: 999999, token: "crashed", acquiredAt: "2026-07-30T00:00:00.000Z" }));
+  // The P2 window, reproduced exactly: the FIRST write after a successful run-started — the
+  // stale-lock takeover event — throws. Before the fix that write sat outside the terminal
+  // bracket, so the run exited through main()'s error handler with no terminal at all: a
+  // recorded false crash. The bracket now opens immediately after run-started, so this exit is
+  // a controlled failure with its run-ended pair.
+  const throwing = new Proxy(state, {
+    get(target, prop, receiver) {
+      if (prop === "appendEvent") {
+        return (kind: string, payload: Record<string, unknown>) => {
+          if (kind === "instance-lock-taken-over") throw new Error("takeover append exploded");
+          return target.appendEvent(kind, payload);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+  try {
+    await assert.rejects(
+      () =>
+        runEngine(["node", "sapwood", "run", "--once"], {
+          cfg: mkCfg({ engine: { driver: "tick" } }),
+          forge: new FakeForge(),
+          state: throwing as State,
+          logger: silentLogger,
+          pidLiveness: () => false, // scripted: the recorded holder is dead
+        }),
+      /takeover append exploded/,
+    );
+    const payload = soleRunEnded(state);
+    assert.equal(payload.stoppedBy, "error");
+    assert.match(String(payload.error), /takeover append exploded/);
+    assert.equal(existsSync(lockPath!), false, "the lock still releases through runEngine's own finally");
+  } finally {
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

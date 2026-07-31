@@ -27,30 +27,43 @@
 //   - `run-ended` (#407 item 1, cli.ts's appendRunEnded): the CLEAN terminal — "this run exited
 //     on purpose". A group with NEITHER terminal is a crash/kill.
 //   - `round-phase` with phase "closed" (round.ts): real forward progress.
-// STREAK = how many consecutive runs immediately preceding this one each ended stalled, with a
-// closed round ANYWHERE in the span resetting the count to zero. Concretely, walking the log in
-// id order: a stalled run increments it, a closed round resets it, a CLEANLY-ended run resets it
-// ("the last N runs all ended stalled" — a clean run in between disproves determinism), and a
-// crashed run (no terminal at all) leaves it UNCHANGED — a crash is evidence of nothing, in
-// neither direction, and treating it as health would let a kill window between this module's own
-// detection event and its park mirror forgive three real stalls (the exact class #431 round 4
-// hunted). The transient-wedge guarantee falls out directly: a host-sleep wedge closes rounds
-// between its stalls, so its streak never exceeds 1.
+// STREAK = how many stalled runs since the last piece of PROGRESS EVIDENCE. It resets on
+// exactly TWO things and nothing else (#407's own AC wording — "N consecutive stalled runs with
+// no round CLOSED between them" — is a progress condition, not an exit-cleanliness condition;
+// PR #473 gate② P1 pinned this):
+//   (a) a CLOSED ROUND (`round-phase` with phase "closed") anywhere between stalls, and
+//   (b) this episode's own sanctioned clear receipt (`park-resumed`, below).
+// EVERY exit terminal is streak-NEUTRAL: a crashed run (no terminal) is evidence of nothing,
+// and a CLEANLY-ENDED run (`run-ended` — signal, stop-condition, idle, --once) is TOO. The
+// clean-run case is the P1 lesson: a supervisor that SIGTERMs before each restart (systemd's
+// KillSignal, launchd) would otherwise lace every wedge cycle with a clean terminal and reset
+// the streak forever — a deterministic wedge that never trips the breaker. The engine cannot
+// observe the intent behind a signal (human vs supervisor) and must not infer it; only a closed
+// round is evidence the loop actually moved. Crash neutrality has its own second reason: a kill
+// window between this module's detection event and its park mirror must not forgive real stalls
+// (the #431 round-4 class). The transient-wedge guarantee falls out directly: a host-sleep
+// wedge closes rounds between its stalls, so its streak never exceeds 1.
 //
 // CLEARING STORY — the rapid-restart shape, with the drained-window condition replaced by a
 // broken streak, because the stall streak does not decay with time the way a birth window does:
 // the episode has NO probe; a later engine start observing streak < threshold appends the
-// `park-resumed` receipt (receipt FIRST, then clearPark — #431 round 4) and resumes. While
-// parked, the engine holds dispatch and cannot close rounds, so the only thing that breaks the
-// streak is a CLEAN `run-ended` — i.e. the operator gracefully stopping the parked engine
-// (SIGTERM) and starting it again, which is exactly what "a human intervened" looks like from
-// the log. An unsanctioned death of the parked run (SIGKILL, OOM) leaves no clean terminal and
-// the park stands. Deleting the park_state row by hand also works: the next start finds the
-// log-open episode with streak still >= threshold and rebuilds the row (kill-window heal), or —
-// after a graceful stop broke the streak — closes the episode with its receipt. If the operator
-// resumes WITHOUT fixing the wedge, the streak simply re-accumulates and a NEW episode parks and
-// escalates again — bounded, honest, one human notification per episode, never an unattended
-// infinite restart loop.
+// `park-resumed` receipt (receipt FIRST, then clearPark — #431 round 4) and resumes. With every
+// exit neutral, the ONLY thing that breaks a standing streak is a closed round — and the parked
+// engine itself supplies exactly that canary: a park gates DISPATCH, not the round loop, and
+// round 1 of a run opens unconditionally (round.ts), so a parked run whose peripheral phases
+// complete closes one (dispatch-empty) round. The wedge decides what happens next, honestly:
+//   - wedge in the dispatch/worker path -> the parked round closes; the NEXT start reads that
+//     closed round as recovery evidence, appends the receipt, and resumes dispatch. Resumed
+//     WITHOUT the wedge fixed, dispatch re-wedges and the streak re-accumulates to a NEW
+//     episode — bounded, one escalation per episode, never silent.
+//   - wedge in the round loop itself -> the parked run stalls again before any round closes;
+//     the streak only grows, the park and its (deduped) escalation stand until the wedge is
+//     actually fixed. No restart pattern — graceful or hard — can launder it.
+// Deleting the park_state row by hand does NOT stick while the log still shows an unbroken
+// streak: the next start rebuilds every mirror from the log (LOG AUTHORITY — and the row-null
+// state is indistinguishable from the kill window between detection and enterPark, so treating
+// it as an operator act would fail open). The manual override is fixing the wedge, not state
+// surgery — docs/troubleshooting.md says so in operator terms.
 import type { SapwoodConfig } from "../config/config.js";
 import type { State } from "../state/state.js";
 
@@ -67,10 +80,10 @@ export interface StallBreakerOutcome {
   tripped: boolean;
 }
 
-/** One run group's folded facts — see the module doc for what each terminal means. */
+/** One run group's folded facts. Only the stall matters to the fold: exit terminals — clean and
+ *  crash alike — are streak-neutral by the module doc's P1 rule, so nothing else is tracked. */
 interface RunGroup {
   stalled: boolean;
-  cleanEnd: boolean;
 }
 
 /** Run once per engine start, strictly AFTER this process's own `run-started` append and next to
@@ -117,10 +130,10 @@ export function detectConsecutiveStalls(
   const escalationMessage = (reason: string): string =>
     `sapwood: consecutive-stall breaker tripped — ${reason}. Autonomous dispatch is parked. ` +
     `The same wedge appears to recur on every restart; restarting again will not fix it. ` +
-    `Diagnose the stall (the engine-stalled events name the round/phase and last event), fix the cause, ` +
-    `then stop this engine gracefully (SIGTERM) and start it again — a clean stop breaks the streak and ` +
-    `the next start resumes automatically. See docs/troubleshooting.md and docs/getting-started.md ` +
-    `("Running under a supervisor").`;
+    `Diagnose the stall (the engine-stalled events name the round/phase and last event) and fix the cause. ` +
+    `The park clears on the first start after a round has CLOSED again (the parked engine's own ` +
+    `dispatch-empty round counts once its phases complete) — no exit, clean or otherwise, clears it. ` +
+    `See docs/troubleshooting.md and docs/getting-started.md ("Running under a supervisor").`;
   /** The immediate local escalation — same channel, ordering, and mirror-heal contract as
    *  rapid-restart.ts's escalateLocally (see its own doc): the log-deduped park-escalated event
    *  FIRST, then the ESCALATION marker and the escalated_at latch as idempotent mirrors. */
@@ -148,32 +161,34 @@ export function detectConsecutiveStalls(
   const reasonFor = (s: number, m: number): string =>
     `${s} consecutive stalled runs with no round closed between them (threshold ${m}) — deterministic wedge suspected`;
   try {
-    // ── the streak fold (module doc) ──────────────────────────────────────────────────────
-    const events = state.eventsAfterId(0, ["run-started", "engine-stalled", "run-ended", "round-phase", "park-resumed"]);
+    // ── the streak fold (module doc) — resets on (a) round-closed and (b) this episode's own
+    // clear receipt, and on NOTHING else. `run-ended` is deliberately NOT in the read set:
+    // every exit terminal is streak-neutral by the P1 ruling (PR #473 gate②), so the fold does
+    // not even look at it — neutrality by construction, not by an ignored branch. Run groups
+    // are still walked, but only for the per-group stall dedup and item 2's previous-run
+    // question (the previous run's stall fact, which needs boundaries, not terminals). ──────
+    const events = state.eventsAfterId(0, ["run-started", "engine-stalled", "round-phase", "park-resumed"]);
     let streak = 0;
     let prevGroup: RunGroup | null = null; // the group immediately before `current`
     let current: RunGroup | null = null; // the group being walked (null before the first run-started)
     const finalizeCurrent = (): void => {
       if (current === null) return;
       if (current.stalled) streak++;
-      else if (current.cleanEnd) streak = 0;
-      // else: a crashed group — evidence of nothing, streak unchanged (module doc).
+      // A group without a stall — crashed OR cleanly ended alike — changes nothing (module doc).
       prevGroup = current;
     };
     for (const e of events) {
       if (e.kind === "run-started") {
         finalizeCurrent();
-        current = { stalled: false, cleanEnd: false };
+        current = { stalled: false };
       } else if (current === null) {
         // Pre-history before any run boundary (a legacy DB) — nothing to attribute it to.
       } else if (e.kind === "engine-stalled") {
         current.stalled = true;
-      } else if (e.kind === "run-ended") {
-        current.cleanEnd = true;
       } else if (e.kind === "round-phase") {
-        if ((e.payload as { phase?: unknown }).phase === "closed") streak = 0;
+        if ((e.payload as { phase?: unknown }).phase === "closed") streak = 0; // reset (a)
       } else if ((e.payload as { source?: unknown }).source === CONSECUTIVE_STALLS_PARK_SOURCE) {
-        streak = 0; // a closed episode's stalls are consumed — they must never re-trip
+        streak = 0; // reset (b): a closed episode's stalls are consumed — they must never re-trip
       }
     }
     // `current` is THIS run's own group (the detector runs after appendRunStarted); `prevGroup`

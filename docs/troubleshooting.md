@@ -239,14 +239,20 @@ machinery as an environment failure — `PARKED (consecutive-stalls)` in `sapwoo
 `data/ESCALATION`), and stays up without dispatching.
 
 Recovery: diagnose the wedge — each `engine-stalled` event's payload names the open round/phase,
-the last event, and the tick age — and fix the cause. Then stop the parked engine **gracefully**
-(SIGTERM / Ctrl-C): the clean stop writes a `run-ended` terminal, which is what breaks the stall
-streak, and the next start clears the park automatically (`park-resumed`,
-`via: stall-streak-clear`). A `kill -9` deliberately does *not* clear it — a run that dies
-without a terminal is indistinguishable from another crash, so the park stands. Deleting the
-`park_state` row by hand also works but should never be necessary. A *transient* wedge (a host
-sleeping mid-round, a passing outage) closes rounds between its stalls and never trips the
-breaker at all.
+the last event, and the tick age — and fix the cause. The stall count resets **only on real
+progress (a round closing) or the park's own clear receipt — never on how a run exited**: clean
+stops (including the SIGTERM a supervisor sends before every restart) and hard kills alike are
+neutral, so no restart pattern can launder the wedge. The park supplies its own canary: parking
+gates *dispatch*, not the round loop, so the parked engine still opens and completes one
+dispatch-empty round — once a round has **closed** again, the next start reads that as recovery
+evidence and clears the park automatically (`park-resumed`, `via: stall-streak-clear`). In
+practice: fix the wedge, restart (`systemctl restart` / SIGTERM + start); the graceful stop lets
+the parked round finish and close, and the following start resumes dispatch. If the wedge breaks
+the round loop itself, nothing closes and the park (with its single, deduped escalation) stands
+until the wedge is actually fixed. Deleting the `park_state` row by hand does **not** stick
+here: the log still shows the unbroken streak, and the next start rebuilds the park from it —
+fix the wedge instead of the state. A *transient* wedge (a host sleeping mid-round, a passing
+outage) closes rounds between its stalls and never trips the breaker at all.
 
 ## How a dead engine says why it died (#407)
 
