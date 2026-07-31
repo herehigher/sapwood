@@ -30,13 +30,16 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // reworded "stay inside your scope" bullet (po.md, no longer read-able as a concern ban).
   "po.md": "921a55442e8bd8186145e5c1a97b672df7ed68d28c4129e2d16de8c54be02db8",
   "architect.md": "7d7f623ad8779892f2e3fb67fe7e957d33de7ae7092f93b6e8dbc481c6913515",
-  "plan-reviewer.md": "4f957b12d2ff056233cd111d9c968547cc2b4988761c4d1ba6ba40e314c10c93",
-  "plan-reviewer-confirm.md": "250c0752f7e2b91418cc76a772123107a36d7de16fa9728c33399061993497fa",
-  "plan-drafter.md": "dce0f4aca4c0d323ad8f7176a6612527075d9e6ec83b19396e9d3dc2f68903eb",
+  // #457 (F36): intentional edits — execution-class ACs are plan noise (CI already enforces
+  // ci.requiredChecks unconditionally): plan-reviewer flags-and-strips them, the confirm pass
+  // invalidates legacy plans carrying them, drafter/decompose never author them.
+  "plan-reviewer.md": "c297aac101446bc3aeb2c9c0c7fb95256738717da70bd027233228ef071bdbf4",
+  "plan-reviewer-confirm.md": "9f1a67fef890c0c29c6dc7182cb78fd7a16c2921d19384d97a141780597fbcf1",
+  "plan-drafter.md": "b3ecacee2f8df90ebb0bcfca34ee796f067c990456f8ac600d5d5e33a47d0630",
   "harvest.md": "59fb5fb1a8a3bebb2429c878c309caffe3105a3f9a32262268b7a14525026d4b",
   "retro.md": "d667893510d96a67e5e8041861daa2d6767e708acfeca2f98c498e09e6a21917",
   "po-pool.md": "a5f51726e886ecaca53dfc9773e7403b602e3cb555cfb972bee2f15e54204d09",
-  "po-decompose.md": "b5f5564e6839f59a00ed96cea063ff35a6fe27da3f1a5fb775b6e59b7295bb01",
+  "po-decompose.md": "3289b0f37585b84fdce67319f9ae4b2e82c8873b13b2a292adef25b1bca79ae2",
 };
 
 test("prompt snapshot: po.md hash matches the pinned revision", () => {
@@ -158,6 +161,33 @@ test("plan-drafter.md (#283): mandates literal `- [ ]` checkbox acceptance crite
   const body = readPrompt(defaultPlanDrafterPromptPath());
   assert.ok(body.includes("- [ ] ...`"), "shows the literal checkbox syntax");
   assert.ok(body.toLowerCase().includes("not dispatchable"), "states the dispatch consequence explicitly");
+});
+
+// ── #457 (F36): execution-class ACs are plan noise — CI enforces them unconditionally ─────────
+
+test("#457 plan-reviewer.md: execution-class ACs are named as noise to FLAG AND STRIP within minor-correction latitude, moving the execution step to the Verification plan", () => {
+  const body = readPrompt(defaultPlanReviewerPromptPath());
+  assert.ok(body.includes("Execution-class criteria are noise — flag and strip them."), "the flag-and-strip rule is present");
+  assert.match(
+    body,
+    /"the test suite passes", "typecheck\/lint clean",\s+"CI green" and equivalents must never appear as acceptance criteria/,
+  );
+  assert.match(body, /fold the execution step into\s+the `## Verification plan`/);
+});
+
+test("#457 plan-reviewer-confirm.md: an execution-class AC on a legacy approved plan is a standing invalidate-check, with the brief directing the move to the Verification plan", () => {
+  const body = readPrompt(defaultPlanConfirmPromptPath());
+  assert.match(body, /A second standing check \(F36\): an execution-class acceptance\s+criterion/);
+  assert.match(body, /a still-approved plan carrying one is `invalidate`/);
+  assert.match(body, /folded into the\s+`## Verification plan`/);
+});
+
+test("#457 plan-drafter.md + po-decompose.md: AC-authoring guidance forbids CI/suite/typecheck status as a criterion — the Verification plan owns execution steps", () => {
+  const drafter = readPrompt(defaultPlanDrafterPromptPath());
+  assert.ok(drafter.includes("Never write CI/suite/typecheck status as an acceptance criterion"), "plan-drafter carries the rule");
+  assert.match(drafter, /execution steps\s+belong in the `## Verification plan`/);
+  const decompose = readPrompt(defaultPoDecomposePromptPath());
+  assert.ok(decompose.includes("Never write CI/suite/typecheck status itself as a criterion"), "po-decompose carries the rule");
 });
 
 // ── #409: reuse-before-build + authoritative-signals-over-inferred, worded per role ───────────

@@ -46,7 +46,12 @@ producer to *edit* a path `docs/security.md`'s "Human-merge-only paths" list cov
 it was approved — the guard will deny the write mid-task. That is `invalidate`, with a brief
 naming the specific path, so the issue goes back through a full review (which owns the
 patch-deliverable/split repair options). Approvals that predate this check are exactly the
-ones it exists to catch. You have no other tool beyond this read-only trio: no
+ones it exists to catch. A second standing check (F36): an execution-class acceptance
+criterion — "the test suite passes", "typecheck clean", "CI green" and equivalents — is plan
+noise; CI already enforces `ci.requiredChecks` unconditionally for every PR, and a static
+gate② session cannot execute anything, so a still-approved plan carrying one is `invalidate`,
+with a brief instructing that the criterion be removed and its execution step folded into the
+`## Verification plan`. You have no other tool beyond this read-only trio: no
 `Bash` of any kind (no `git`, no test runner, no arbitrary command), no `Write`/`Edit` — you
 never modify anything, in the repo or on GitHub, and you never run code to "check" a claim
 beyond reading and searching what's on disk.

@@ -196,7 +196,13 @@ export type DriveOutcome = (
   // loop) owns the fix_rounds/cap/budget decision (driveDecision) this pure class never sees;
   // `reason` carries enough of the underlying signal (unresolved-thread count / CI-red) for the
   // caller's own escalation comment, without this class fetching review-finding TEXT itself.
-  | { kind: "fixable"; pr: number; reason: string; prescription?: "conflict" | "findings" }
+  // #457 (F36): `verdictRunId` is present ONLY when this fixable derives from an engine-agent
+  // decisive verdict (review/drive.ts's consume path) — the conductor's verdict-rerun circuit
+  // breaker keys on it. Classic-reviewer, conflict, and fallback fixables never carry one, so
+  // they sit structurally outside the breaker (a zero-push classic fix leg can still be real
+  // progress: thread replies/resolves are engine-executed writes that change unresolvedThreads
+  // without a commit — fix-response.ts).
+  | { kind: "fixable"; pr: number; reason: string; prescription?: "conflict" | "findings"; verdictRunId?: string }
 ) & {
   /** The reviewer-failover audit signal for this tick (#54), when one applies. STATELESS —
    *  reported on every tick the condition holds (see ReviewFailoverTransition); the caller
@@ -626,7 +632,10 @@ export class MergeDriver {
     pr: number,
     status: PRStatus,
     data: PRReviewData,
-    verdict: { action: ReviewAction; headOid: string | null },
+    // #457: `verdictRunId` is supplied by the engine-agent caller only (driveEngineAgentOne's
+    // consume verdict) and merely threaded through onto a FIXABLE outcome — this method never
+    // branches on it. Classic and fallback callers omit it.
+    verdict: { action: ReviewAction; headOid: string | null; verdictRunId?: string },
   ): Promise<DriveOutcome> {
     const { forge, cfg } = this.deps;
     const gate = deriveGate({
@@ -663,6 +672,7 @@ export class MergeDriver {
           `gate:FIXABLE:${verdict.action}:unresolvedThreads=${blocking.unresolvedThreads}:ciRed=${status.ciRed ?? false}` +
           `:adjudicatedDuplicates=${blocking.adjudicatedDuplicates}:staleHeadReviews=${stale}`,
         prescription: "findings",
+        ...(verdict.verdictRunId !== undefined ? { verdictRunId: verdict.verdictRunId } : {}),
       };
     }
 

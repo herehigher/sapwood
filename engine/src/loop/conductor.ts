@@ -325,6 +325,25 @@ export function fixLegAdmissionBlockReason(input: {
   return null;
 }
 
+/** #457 (F36): the verdict-rerun circuit breaker's lookup — has a fix leg ALREADY been dispatched
+ *  (a `drive-fixup` event recorded) for this lane against this EXACT decisive engine-review
+ *  verdict? An engine-agent decisive verdict is pinned PERMANENT per head (review/drive.ts) and
+ *  re-consumed every tick until the head moves, so a SECOND fix leg for the same `verdictRunId`
+ *  means the first leg pushed nothing — its rerun would receive byte-identical inputs and is
+ *  deterministically useless (the F36 wedge: PR #456 burned prFixCap 8/8 in no-op legs). Keys on
+ *  the engine-authored runId, NEVER on bare head-unchanged (a zero-push CLASSIC fix leg can be
+ *  real progress via engine-executed thread replies/resolves) and never on session prose.
+ *  Event-log reuse, no new schema — same trick as fix-response.ts's fixLegJournalCursor. Bounded
+ *  blind spot (accepted): the `drive-fixup` event lands AFTER startFixLeg confirms the spawn, so
+ *  a crash in that window forgets one dispatch and the breaker trips one leg later — still
+ *  capped by prFixCap, never unbounded. */
+export function priorFixLegForVerdict(state: Pick<State, "eventsSince">, worker: string, verdictRunId: string): boolean {
+  return state.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]).some((e) => {
+    const p = e.payload as { worker?: unknown; verdictRunId?: unknown };
+    return p.worker === worker && p.verdictRunId === verdictRunId;
+  });
+}
+
 /** #375 AC2: is a `driving` lane TERMINAL-for-drain — i.e. can it NEVER make forward progress
  *  while DRIVE stays frozen (an active kill switch skips the whole DRIVE loop entirely, #69)?
  *  A `driving` lane has no live process — nothing for supervisor.requestHandoff/reclaim to act
@@ -2804,7 +2823,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           const fixRounds = w.fix_rounds ?? 0;
           const cap = cfg.lanes.prFixCap;
           const action = driveDecision("FIXABLE", fixRounds, cap, driveOverBudget);
-          if (action === "FIXUP") {
+          // #457 (F36): verdict-rerun breaker — see priorFixLegForVerdict's own doc. A prior
+          // `drive-fixup` for this exact engine-agent verdict means its one leg already ran and
+          // pushed nothing; a rerun gets byte-identical inputs, so no further fix round is spent
+          // and the SAME escalation branch a spent cap takes below runs instead. Fixables with
+          // no verdictRunId (classic reviewer, conflict, fallback) never trip it.
+          const verdictRerun = outcome.verdictRunId !== undefined && priorFixLegForVerdict(state, w.name, outcome.verdictRunId);
+          if (action === "FIXUP" && !verdictRerun) {
             if (!deps.fixLegResume) {
               // #246 review round 1 (C1, PM-narrowed): an unwired fix loop must DEGRADE to the
               // exact pre-#246 escalation (visible needs-human), never a silent retry-forever —
@@ -2869,7 +2894,16 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
                 now,
                 outcome.prescription,
               );
-              state.appendEvent("drive-fixup", { worker: w.name, issue: w.issue, pr, fixRounds: fixRounds + 1, reason: outcome.reason });
+              // #457: the `verdictRunId` recorded here is what priorFixLegForVerdict matches on —
+              // the breaker's one durable memory of "this verdict already got its leg".
+              state.appendEvent("drive-fixup", {
+                worker: w.name,
+                issue: w.issue,
+                pr,
+                fixRounds: fixRounds + 1,
+                reason: outcome.reason,
+                ...(outcome.verdictRunId !== undefined ? { verdictRunId: outcome.verdictRunId } : {}),
+              });
               driven.push({ kind: "fixup", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
             } catch (e) {
               // startFixLeg's own contract (#245): a thrown resume() leaves the row untouched
@@ -2881,7 +2915,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             }
             break;
           }
-          // action === "ESCALATE": with `driveOverBudget` now permanently `false` (#375 — a fix
+          // action === "ESCALATE" (or #457's verdict-rerun breaker fell through from FIXUP
+          // above): with `driveOverBudget` now permanently `false` (#375 — a fix
           // leg is exempt from round budget, so driveDecision's own overBudget-escalate branch
           // can never fire here anymore), the ONLY way this branch is reached is fixRounds
           // already >= cap (or a non-integer/negative fix_rounds, driveDecision's own fail-safe)
@@ -2899,7 +2934,20 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           // be past the ceiling drain window, there is no reason to make it wait an extra tick
           // for what DRIVE already proved true right here.
           driveFixBlockedLanes.add(w.name);
-          // Cap exhausted. Hard rule (#69/#147 forge-before-terminal-upsert): the needs-human
+          // #457: TWO entry reasons share this one escalation shape — fixRounds >= cap (the
+          // pre-existing ESCALATE branch) or the verdict-rerun breaker above. Same
+          // forge-before-terminal-upsert ordering, same #147 gated-reentry path out; only the
+          // reason string and comment wording differ.
+          const escalReason = verdictRerun ? "fix-leg-no-op:verdict-rerun" : `fix-rounds-cap:${fixRounds}/${cap}`;
+          const escalComment = verdictRerun
+            ? `sapwood: no further fix leg for PR #${pr} — one already ran against this exact review verdict ` +
+              `and pushed no change (${fixRounds} fix round(s) spent of ${cap}), so the standing signal is not ` +
+              `producer-fixable (${outcome.reason}). Escalating to \`${cfg.labels.needsHuman}\` for ` +
+              `adjudication: resolve the signal, then remove the label to reclaim the PR (#147 gated reentry).`
+            : `sapwood: fix-round cap (${cap}) reached for PR #${pr} — ${fixRounds} round(s) spent, ` +
+              `standing fixable signal unresolved (${outcome.reason}). Escalating to \`${cfg.labels.needsHuman}\` for ` +
+              `adjudication: resolve the signal, then remove the label to reclaim the PR (#147 gated reentry).`;
+          // Cap exhausted (or verdict rerun). Hard rule (#69/#147 forge-before-terminal-upsert): the needs-human
           // label AND the escalation comment (naming rounds spent + the standing signal) land
           // BEFORE the terminal upsert. A label-write failure leaves the row untouched (still
           // `driving`, no latch) so next tick's fresh FIXABLE-at-cap re-derivation retries the
@@ -2924,20 +2972,28 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           // crash struck before this function returned, also re-posts the comment — a harmless
           // duplicate re-poke, not a correctness issue, so no new dedup machinery for it.
           try {
-            await forge.addIssueComment(
-              w.issue,
-              `sapwood: fix-round cap (${cap}) reached for PR #${pr} — ${fixRounds} round(s) spent, ` +
-                `standing fixable signal unresolved (${outcome.reason}). Escalating to \`${cfg.labels.needsHuman}\` for ` +
-                `adjudication: resolve the signal, then remove the label to reclaim the PR (#147 gated reentry).`,
-            );
+            await forge.addIssueComment(w.issue, escalComment);
           } catch (e) {
             state.appendEvent("fix-rounds-cap-comment-failed", { worker: w.name, issue: w.issue, pr, error: String(e) });
             driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "fix-rounds-cap-comment-failed" });
             break;
           }
           state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
-          state.appendEvent("fix-rounds-capped", { worker: w.name, issue: w.issue, pr, fixRounds, cap });
-          driven.push({ kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `fix-rounds-cap:${fixRounds}/${cap}` });
+          // #457: a breaker trip gets its own terminal event kind — it is NOT a spent cap
+          // (fixRounds < cap is the whole point) and carries the verdict identity for audit.
+          if (verdictRerun) {
+            state.appendEvent("fix-leg-verdict-rerun", {
+              worker: w.name,
+              issue: w.issue,
+              pr,
+              fixRounds,
+              cap,
+              ...(outcome.verdictRunId !== undefined ? { verdictRunId: outcome.verdictRunId } : {}),
+            });
+          } else {
+            state.appendEvent("fix-rounds-capped", { worker: w.name, issue: w.issue, pr, fixRounds, cap });
+          }
+          driven.push({ kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: escalReason });
           break;
         }
       }

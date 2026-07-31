@@ -77,6 +77,11 @@ EXACT checkbox syntax. For a docs/chore issue that turns out to be inherently un
 note that in the body and say so in your final message — the doc-gate (`verify:n/a`) label
 decision itself still belongs to the plan-reviewer/a human, never to you.
 
+Never write CI/suite/typecheck status as an acceptance criterion ("the test suite passes",
+"CI green", "typecheck clean" and equivalents) — CI enforces those unconditionally for every
+PR, so as ACs they are pure noise a static reviewer cannot confirm (F36); execution steps
+belong in the `## Verification plan`, whose authority (CI) already runs them.
+
 ## If the brief flags a human-merge-only conflict
 
 If the reviewer's brief says an acceptance criterion requires editing a path

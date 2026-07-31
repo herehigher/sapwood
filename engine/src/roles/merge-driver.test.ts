@@ -880,6 +880,8 @@ test("MergeDriver.driveOne (#270): conflict + standing findings chooses the sing
   assert.equal((outcome as { prescription?: string }).prescription, "conflict");
   assert.match((outcome as { reason: string }).reason, /merge-conflict/);
   assert.doesNotMatch((outcome as { reason: string }).reason, /HANDLE_THREADS/);
+  // #457 (F36): conflict-caused fixables never carry a verdictRunId (breaker cause-isolation).
+  assert.equal((outcome as { verdictRunId?: string }).verdictRunId, undefined);
 });
 
 test("MergeDriver.driveOne (#270): prFixCap:0 escalates conflict; produce-pr-and-stop only reports FIXABLE", async () => {
@@ -970,6 +972,9 @@ test("MergeDriver.driveOne (#246): unresolved findings (HANDLE_THREADS) -> fixab
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "fixable");
   assert.match((outcome as { reason: string }).reason, /HANDLE_THREADS/);
+  // #457 (F36): a CLASSIC-reviewer fixable carries NO verdictRunId — it sits structurally
+  // outside the conductor's verdict-rerun breaker.
+  assert.equal((outcome as { verdictRunId?: string }).verdictRunId, undefined);
   assert.deepEqual(forge.merged, []);
   assert.deepEqual(forge.labelsAdded, []); // driveOne itself never labels — the caller (conductor.ts) owns escalation
 });
@@ -1042,6 +1047,8 @@ test("MergeDriver.driveOne (#246): CI_RED alongside MERGE_OK -> fixable; produce
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "fixable");
   assert.match((outcome as { reason: string }).reason, /ciRed=true/);
+  // #457 (F36): a CI_RED-caused classic fixable carries no verdictRunId (breaker cause-isolation).
+  assert.equal((outcome as { verdictRunId?: string }).verdictRunId, undefined);
 
   const stopDriver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg({ merge: { mode: "produce-pr-and-stop" } }) });
   const stopped = await stopDriver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
@@ -1921,6 +1928,11 @@ test("MergeDriver.driveOne (engine-agent): rejected + delivered -> FIXABLE (cond
     mkEngineAgentDeps(recorded, { auditDelivery: async () => ({ delivered: true }) }),
   );
   assert.equal(outcome.kind, "fixable");
+  if (outcome.kind === "fixable") {
+    // #457 (F36): an engine-agent-derived fixable carries the decisive verdict's own runId —
+    // the conductor's verdict-rerun breaker keys on it.
+    assert.equal(outcome.verdictRunId, "run-1");
+  }
 });
 
 // ── #460 (F37): engine-agent CONFLICTING preflight -> FIXABLE:merge-conflict, not a re-queue ──
