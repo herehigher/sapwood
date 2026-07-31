@@ -93,7 +93,37 @@ before moving, deleting, or restoring `data/`. Recovery:
 If a drain escalated to a hard kill (the drain window elapsed before a worker handed
 off), that lane's issue/PR will carry `needs-human` — see above.
 
-## Environment-failure park (#168)
+## Single-instance lock (#382)
+
+Only one `sapwood run` may drive a given data dir (and therefore a given board) at a
+time — two concurrent engines double-drive: duplicate dispatch, conflicting merges. At
+startup, before any board read/write or reconcile, the engine takes a lock at
+`data/sapwood.lock` (beside `sapwood.sqlite`) recording its pid; a second start against
+the same data dir exits 1 with a message naming the holder's pid and the lock path.
+
+The lock is released on every normal exit (stop conditions, `--once`, kill switch,
+graceful signals). A **crash** leaves it behind by design — the next start checks
+whether the recorded pid is still alive and, if it is dead, takes the stale lock over
+automatically (logged, plus a durable `instance-lock-taken-over` event). Crash + restart,
+including a supervisor's fast restart (#431), therefore needs no manual step.
+
+The one case that can need a hand: the previous engine died without releasing AND the OS
+has since recycled its pid onto some unrelated live process. The liveness check then
+reads "alive" and startup is refused — deliberately the safe direction (a false refusal,
+never a false takeover). If you've confirmed the named pid is not a sapwood engine
+(`ps -p <pid>`), delete `data/sapwood.lock` and start again.
+
+Stale-lock takeovers are serialized through a mutex directory, `data/sapwood.lock.takeover`,
+held only for the sub-second takeover itself. If an engine **crashes inside that window**, the
+directory is left behind and every later start that needs a takeover refuses with a message
+naming it — deliberately fail-closed (a visible refusal, never a possible double-drive). The
+check: if `data/sapwood.lock.takeover` exists and **no** sapwood engine is running against
+this data dir, remove the directory (`rmdir data/sapwood.lock.takeover`) and start again.
+Ordinary starts (no stale lock to take over) are unaffected by a leftover mutex directory.
+
+A crash can also leave a stray `sapwood.lock.tmp-*` file in `data/` — a sidecar of the lock's
+atomic create. Its name is unique per process start and is never re-matched by a later
+engine: harmless, safe to delete.
 
 A failure whose structured error output matches an environment-failure signature — an
 LLM-provider issue (429 / usage-limit / credit-exhausted) or a forge issue (network unreachable

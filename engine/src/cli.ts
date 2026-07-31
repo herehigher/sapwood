@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 // `sapwood` CLI. M0.5 shipped `init`; `run` (the M4 loop driver, #46) and `validate` (#49)
 // landed next; `status` + `run --dry-run` (#15) land here. The plugin's slash commands
 // (/sapwood-run, /sapwood-status, /sapwood-stop) are thin wrappers that shell out to this CLI
 // — see ../../commands/.
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import { configHash, DEFAULT_CONFIG_PATHS, dashboardConfigSubset, loadConfig, type SapwoodConfig } from "./config/config.js";
@@ -24,6 +24,7 @@ import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop
 import { unadjudicatedConcerns } from "./loop/dissent.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
 import { InitError, init, requiredLabels } from "./loop/init.js";
+import { acquireInstanceLock } from "./loop/instance-lock.js";
 import { type EngineLogger, FileEngineLogger } from "./loop/logger.js";
 import {
   auditGatedEscalationFlags,
@@ -41,7 +42,7 @@ import { MergeDriver } from "./roles/merge-driver.js";
 import { RoleRunner, type RoleRunnerDeps } from "./roles/peripheral.js";
 import { makeFallbackReviewers, makeReviewer } from "./roles/reviewer.js";
 import { buildRenderFixPrompt, buildRenderPrompt, discoverClaudeBin, probeLlmPing, WorkerSupervisor } from "./roles/worker.js";
-import { type ParkRow, SCHEMA_VERSION, State, type WorkerRow } from "./state/state.js";
+import { DEFAULT_DB_PATH, INSTANCE_LOCK_FILENAME, type ParkRow, SCHEMA_VERSION, State, type WorkerRow } from "./state/state.js";
 
 const require = createRequire(import.meta.url);
 // ponytail: runtime require avoids JSON-import assertion syntax differences across Node versions
@@ -994,6 +995,11 @@ export interface EngineOverrides {
    *  actually stops. */
   onRoundPhase?: (roundId: number, phase: PeripheralPhase) => void;
   onRoundStop?: (roundId: number, hit: RoundStopHit) => void;
+  /** #382: pid-liveness seam for the single-instance lock — lets a test script "that pid is
+   *  dead" deterministically (repo rule: no assertion may depend on real subprocess lifetimes).
+   *  Production passes none, so the real `process.kill(pid, 0)` probe
+   *  (instance-lock.ts's pidIsAlive) applies. */
+  pidLiveness?: (pid: number) => boolean;
 }
 
 function createRunLogger(cfg: SapwoodConfig, override?: EngineLogger): { logger: EngineLogger; path: string } {
@@ -1097,14 +1103,33 @@ export function buildTickFixLegResume(
  *  before anything else this run writes (so it also anchors the #154 run-spend ledger position),
  *  carrying the ALLOWLISTED config subset (never the resolved object — see
  *  dashboardConfigSubset) plus a hash of the full config for change detection across runs. */
-function appendRunStarted(state: Pick<State, "appendEvent">, cfg: SapwoodConfig): void {
+function appendRunStarted(state: Pick<State, "appendEvent">, cfg: SapwoodConfig, lockTakeover?: LockTakeoverRecord): void {
   state.appendEvent("run-started", { config: dashboardConfigSubset(cfg), configHash: configHash(cfg) });
+  // #382 round 2 (codex PR #467 finding 4): the stale-lock takeover happened at THIS run's
+  // startup, so its event must land inside THIS run's replay group — i.e. AFTER `run-started`,
+  // the authoritative grouping boundary this function's own doc establishes. Appending it any
+  // earlier (round 1 did, at acquisition time) attributes it to the PREVIOUS run's group.
+  if (lockTakeover !== undefined) {
+    state.appendEvent("instance-lock-taken-over", { lockPath: lockTakeover.lockPath, previousPid: lockTakeover.previousPid });
+  }
+}
+
+/** #382: what runEngine hands the drivers when startup took over a stale lock — carried as a
+ *  pending startup event so appendRunStarted can order it after the run boundary (above). */
+interface LockTakeoverRecord {
+  lockPath: string;
+  previousPid: number | null;
 }
 
 /** The M4 tick-driver path (`driver.ts`'s `runDriver`) — unchanged behavior, kept reachable via
  *  `engine.driver: tick` (#106's explicit escape hatch) now that the round orchestrator
  *  (runRoundsEngine below) is the default. */
-async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: EngineOverrides): Promise<number> {
+async function runTickEngine(
+  argv: string[],
+  cfg: SapwoodConfig,
+  overrides: EngineOverrides,
+  lockTakeover?: LockTakeoverRecord,
+): Promise<number> {
   const { logger, path: logPath } = createRunLogger(cfg, overrides.logger);
   const log = logger.log.bind(logger);
   log(`[sapwood:run] startup logPath=${logPath}`);
@@ -1121,7 +1146,7 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // buildTickFixLegResume's own doc for the tick driver's round 0 / phase "tick" audit identity.
   const renderFixPrompt = buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
-  appendRunStarted(state, cfg);
+  appendRunStarted(state, cfg, lockTakeover);
   const forge = overrides.forge ?? new GithubForge(cfg);
   // #253: the tick driver's TickDeps.fixLegResume — undefined (no handle/listener/token/journal
   // write/argv change on any production session — see buildTickFixLegResume's own doc for the
@@ -1237,7 +1262,12 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
  *  acceptance criterion). Every safety behavior (KILL_SWITCH, cost ceilings, drain-before-kill,
  *  graceful-stop-still-runs-harvest) lives in round.ts/state.ts unchanged — this function only
  *  wires the real collaborators runRounds needs, it adds no safety logic of its own. */
-async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: EngineOverrides): Promise<number> {
+async function runRoundsEngine(
+  argv: string[],
+  cfg: SapwoodConfig,
+  overrides: EngineOverrides,
+  lockTakeover?: LockTakeoverRecord,
+): Promise<number> {
   const { logger, path: logPath } = createRunLogger(cfg, overrides.logger);
   const log = logger.log.bind(logger);
   log(`[sapwood:run] startup logPath=${logPath}`);
@@ -1253,7 +1283,7 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // built once here the way the tick driver's fixLegResume is.
   const renderFixPrompt = buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
-  appendRunStarted(state, cfg);
+  appendRunStarted(state, cfg, lockTakeover);
   const forge = overrides.forge ?? new GithubForge(cfg);
   const engineReviewRunner =
     cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state, now: systemClock }) : null;
@@ -1427,16 +1457,69 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   // EngineOverrides.cfg is a tests-only injection seam and keeps its established precedence.
   // Production passes no override, so the CLI path is handed to loadConfig verbatim.
   const cfg = applyMilestoneOverride(argv, overrides.cfg ?? loadConfig(validatedRun.configPath));
-  if (cfg.engine.driver === "tick") return runTickEngine(argv, cfg, overrides);
-  // Gate② P2: fail fast on tick-only flags BEFORE any collaborator is constructed or any
-  // dispatch can happen — same abort-with-zero-dispatch stance as buildRenderPrompt /
-  // assertStopMilestoneExists startup validation.
-  const flagError = tickOnlyFlagError(argv);
-  if (flagError) {
-    process.stderr.write(`${flagError}\n`);
+  if (cfg.engine.driver !== "tick") {
+    // Gate② P2: fail fast on tick-only flags BEFORE any collaborator is constructed or any
+    // dispatch can happen — same abort-with-zero-dispatch stance as buildRenderPrompt /
+    // assertStopMilestoneExists startup validation.
+    const flagError = tickOnlyFlagError(argv);
+    if (flagError) {
+      process.stderr.write(`${flagError}\n`);
+      return 1;
+    }
+  }
+  // #382 round 2 (codex PR #467 finding 3): the cheap eager config validations come FIRST — a
+  // broken worker.promptFile/fixPromptFile must reject before the lock is taken and before the
+  // DB is even opened (round 1 had displaced this fail-fast behind State construction). The
+  // drivers still build their own renderers; these calls are validation-only, the same
+  // discard-the-renderer stance runValidate/runDryRun already take.
+  buildRenderPrompt(cfg);
+  buildRenderFixPrompt(cfg);
+  // #382 (F9): single-instance lock on the data dir, acquired BEFORE State exists — a refused
+  // second engine must perform ZERO writes against the holder's data dir, and constructing a
+  // State opens + migrates the shared SQLite DB (a NEWER binary would upgrade the live
+  // holder's schema on its way to exit 1 — codex finding 3). The lock path is therefore
+  // derived without a State: from the injected test state's own data dir when present
+  // (in-memory -> null -> no-op acquire, the killSwitchPath convention), else from the same
+  // DEFAULT_DB_PATH the State default constructor uses, with only the plain data DIR created
+  // up front (the lockfile needs a parent; an empty dir write-conflicts with nobody).
+  let lockPath: string | null;
+  if (overrides.state !== undefined) {
+    lockPath = overrides.state.instanceLockPath();
+  } else {
+    const dataDir = dirname(DEFAULT_DB_PATH);
+    mkdirSync(dataDir, { recursive: true });
+    lockPath = join(dataDir, INSTANCE_LOCK_FILENAME);
+  }
+  const lock = acquireInstanceLock(lockPath, {
+    now: systemClock,
+    ...(overrides.pidLiveness !== undefined ? { isPidAlive: overrides.pidLiveness } : {}),
+  });
+  if (!lock.acquired) {
+    process.stderr.write(`sapwood run: ${lock.message}\n`);
     return 1;
   }
-  return runRoundsEngine(argv, cfg, overrides);
+  try {
+    let lockTakeover: LockTakeoverRecord | undefined;
+    if (lock.tookOver !== null && lock.lockPath !== null) {
+      // Takeover is the crash+restart drill working as designed — observable, never silent.
+      // The log line lands now; the DURABLE event is handed to the drivers so it can land
+      // after `run-started`, inside this run's replay group (appendRunStarted, finding 4).
+      console.error(
+        `[sapwood:startup] took over stale instance lock at ${lock.lockPath} ` +
+          `(previous holder pid ${lock.tookOver.pid ?? "unparseable"} is gone)`,
+      );
+      lockTakeover = { lockPath: lock.lockPath, previousPid: lock.tookOver.pid };
+    }
+    if (cfg.engine.driver === "tick") return await runTickEngine(argv, cfg, overrides, lockTakeover);
+    return await runRoundsEngine(argv, cfg, overrides, lockTakeover);
+  } finally {
+    // The one shutdown seam every exit path already funnels through: runTickEngine/
+    // runRoundsEngine RETURN on kill-switch, stop conditions, --once, and graceful signals
+    // (round.ts's registerSignals requests a stop; the loop drains and returns), and a thrown
+    // startup/driver error propagates through here too. Only a hard death (SIGKILL, crash)
+    // skips this — exactly the stale-lock case the dead-pid takeover above recovers.
+    lock.release();
+  }
 }
 
 async function main(argv: string[]): Promise<number> {

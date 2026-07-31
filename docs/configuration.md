@@ -29,7 +29,11 @@ required; every other key has a default.
 Treat `data/` as durable runtime state: back it up, and never delete it while sapwood is
 running. SQLite worker rows are the recovery truth; the GitHub board is only a management
 view and sapwood deliberately never rebuilds local state from it. `KILL_SWITCH`, `PAUSE`, and
-`ESCALATION` also live in this directory and disappear with it. Losing the database resets the
+`ESCALATION` also live in this directory and disappear with it. So does `sapwood.lock`, the
+single-instance lock (#382): one data dir = one board = at most one running engine — a second
+`sapwood run` against the same data dir refuses to start, and a stale lock from a crashed
+engine is taken over automatically once its pid is dead (see
+[troubleshooting](troubleshooting.md#single-instance-lock-382)). Losing the database resets the
 daily `spend_ledger`, so the same UTC day's budget may be spent again; this is a known accepted
 residual risk. On the next start sapwood reports detectable board/PR orphans, but does not
 requeue, relabel, drive, or otherwise reconstruct them.

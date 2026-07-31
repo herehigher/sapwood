@@ -8,7 +8,7 @@
 // (zero token) drives the real spawn/sentinel/cost-parse path — createDefaultPeripherals's
 // stubs are never faked themselves.
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -914,4 +914,133 @@ test("sapwood run: engine.driver: tick still reaches the M4 tick-driver escape h
   assert.ok(logged.some((line) => line.startsWith("[sapwood:run] stopped after 1 tick(s)")));
   assert.ok(logged.every((line) => /^\[sapwood:[^\]]+\]/.test(line)));
   assert.equal(observedTicks, 1, "logger tick summaries compose with the caller's existing onTick hook");
+});
+
+// ── #382 (F9): single-instance lock on the data dir, wired through runEngine — acquired before
+// any board/forge access, released on the normal exit path. Pid liveness is either scripted
+// (EngineOverrides.pidLiveness) or process.pid's own definitional liveness — never a real
+// subprocess lifetime (repo rule).
+
+test("sapwood run (#382): a LIVE holder's lock refuses startup — exit 1, message names pid + lock path, ZERO forge access, holder's lock untouched", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-lock-"));
+  const state = new State(join(dir, "sapwood.sqlite"));
+  const lockPath = state.instanceLockPath();
+  assert.ok(lockPath !== null);
+  // The holder pid is THIS test process — its liveness is a fact, probed by the REAL default
+  // process.kill(pid, 0) path (no seam), deterministically.
+  writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: "holder", acquiredAt: "2026-07-31T00:00:00.000Z" }));
+  const forge = new FakeForge();
+  let forgeTouched = false;
+  const trackingForge = new Proxy(forge, {
+    get(target, prop, receiver) {
+      forgeTouched = true;
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  try {
+    const { code, stderr } = await captureStderr(() =>
+      runEngine(["node", "sapwood", "run", "--once"], {
+        cfg: mkCfg({ engine: { driver: "tick" } }),
+        forge: trackingForge,
+        state,
+        logger: silentLogger,
+      }),
+    );
+    assert.equal(code, 1);
+    assert.match(stderr, new RegExp(`pid ${process.pid}`));
+    assert.ok(stderr.includes(lockPath), "the refusal names the lock path");
+    assert.match(stderr, /refusing to start/);
+    assert.equal(forgeTouched, false, "refusal happens before ANY board/forge access — zero double-drive risk");
+    const holder = JSON.parse(readFileSync(lockPath, "utf8")) as { token: string };
+    assert.equal(holder.token, "holder", "the live holder's lock survives the refused start");
+  } finally {
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sapwood run (#382 round 2, codex finding 3): a refused start performs ZERO DB writes — no sqlite file is created, no State is ever constructed", async () => {
+  // No `state` override here on purpose: this drives the exact production path where runEngine
+  // itself would construct the default State — the finding was that it did so (open + migrate
+  // the shared DB) BEFORE lock arbitration. The default paths are cwd-relative, so the test
+  // runs inside its own tmp cwd; node:test runs tests in this file sequentially, and the cwd is
+  // restored in finally before any other test can observe it.
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-lock-nodb-"));
+  const previousCwd = process.cwd();
+  try {
+    process.chdir(dir);
+    mkdirSync(join(dir, "data"), { recursive: true });
+    const lockPath = join(dir, "data", "sapwood.lock");
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: "holder", acquiredAt: "2026-07-31T00:00:00.000Z" }));
+    const { code, stderr } = await captureStderr(() =>
+      runEngine(["node", "sapwood", "run", "--once"], {
+        cfg: mkCfg({ engine: { driver: "tick" } }),
+        forge: new FakeForge(),
+        logger: silentLogger,
+      }),
+    );
+    assert.equal(code, 1);
+    assert.match(stderr, /refusing to start/);
+    assert.equal(existsSync(join(dir, "data", "sapwood.sqlite")), false, "no DB file — the holder's data dir saw zero writes");
+    const holder = JSON.parse(readFileSync(lockPath, "utf8")) as { token: string };
+    assert.equal(holder.token, "holder", "the live holder's lock survives");
+  } finally {
+    process.chdir(previousCwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sapwood run (#382): the lock is held for the whole run and released on normal shutdown", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-lock-"));
+  const state = new State(join(dir, "sapwood.sqlite"));
+  const lockPath = state.instanceLockPath();
+  assert.ok(lockPath !== null);
+  try {
+    let lockedDuringTick = false;
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge: new FakeForge(),
+      state,
+      logger: silentLogger,
+      onTick: () => {
+        lockedDuringTick = existsSync(lockPath);
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(lockedDuringTick, true, "the lockfile exists while the engine ticks");
+    assert.equal(existsSync(lockPath), false, "normal shutdown releases the lock");
+  } finally {
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sapwood run (#382): a stale lock from a dead pid is taken over — the run proceeds, emits instance-lock-taken-over, and releases on exit (crash+restart drill unaffected)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-lock-"));
+  const state = new State(join(dir, "sapwood.sqlite"));
+  const lockPath = state.instanceLockPath();
+  assert.ok(lockPath !== null);
+  writeFileSync(lockPath, JSON.stringify({ pid: 999999, token: "crashed", acquiredAt: "2026-07-30T00:00:00.000Z" }));
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge: new FakeForge(),
+      state,
+      logger: silentLogger,
+      pidLiveness: () => false, // scripted: the recorded holder is dead
+    });
+    assert.equal(code, 0, "a crashed predecessor's lock never blocks the restart");
+    const events = state.eventsAfterId(0, ["run-started", "instance-lock-taken-over"]);
+    // #382 round 2 (codex finding 4): the takeover belongs to THIS run's replay group, so it
+    // must land AFTER run-started — the authoritative grouping boundary (#206) — never before.
+    assert.deepEqual(
+      events.map((e) => e.kind),
+      ["run-started", "instance-lock-taken-over"],
+    );
+    assert.deepEqual(events[1]!.payload, { lockPath, previousPid: 999999 });
+    assert.equal(existsSync(lockPath), false, "the takeover's own lock is released on normal shutdown");
+  } finally {
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
