@@ -622,6 +622,9 @@ checklist item**):
 | `fix-rounds-capped` | PR #{pr} used up its fix attempts — needs a human |
 | `fix-leg-verdict-rerun` | PR #{pr}'s review findings aren't fixable by the producer — needs a human |
 | `ceiling-escalated` | Safety ceiling reached — winding down all work |
+| `ceiling-breach-entered` | Branches on `payload.reason` (#431 round 3: one event per REASON, each ceiling has its own lifecycle): wall-clock → "This run hit its {maxWallClockSec}s attention alarm — no new work until a restart"; daily-budget → "Today's ${dailyBudgetUsd} budget is spent — no new work until tomorrow". One per reason per episode, never per tick |
+| `rapid-restart-detected` | Engine started {births} times in {windowSec}s — crash loop suspected, dispatch parked for a human (#431) |
+| `ceiling-breach-cleared` | Branches on `payload.reason` (#431 round 3): wall-clock → "The wall-clock alarm cleared"; daily-budget → "The daily budget rolled over" — that reason's closing receipt; work resumes only when no ceiling remains open. One per reason per episode, transition-only |
 | `rollback-recovered` | Returned issue #{issue} to the backlog safely |
 | `rollback-retry-failed` | Still trying to return issue #{issue} to the backlog |
 | `rollback-escalated` | Couldn't return issue #{issue} automatically — flagged for a human |
@@ -943,7 +946,7 @@ Five things about it are decisions, not implementation detail:
   same derivation. Its six dashboard-only reads (`lastTickAt`, `countEvents`,
   `eventsPage`, `spendByModelForDay`, `spendPage`, `listRounds`) are read-only
   additions to `engine/src/state/state.ts` — notably `lastTickAt`, which reads
-  the heartbeat without the write `engineSessionStart` performs.
+  the heartbeat without the write `touchLastTick` performs.
 - **The SQLite handle stays read-only even now that a write route exists.** The
   control verbs write files, never rows; a write attempted through the handle
   still throws, and the test suite asserts it after a successful control call.
@@ -1015,9 +1018,10 @@ mutable snapshot or outside the engine's own DB is live-only.
   directly ("round 12").
 - **No composite "run N, round M" identity.** Both coordinates would be
   synthetic; `round_id` alone already pinpoints a round. Run *grouping* is
-  derived from `run-started` events — never inferred from the
-  `engine_session` gap heuristic, which serves the wall-clock ceiling and
-  deliberately resets on quiet gaps.
+  derived from `run-started` events — the authoritative run boundary
+  (#431 deleted the old `engine_session` gap heuristic outright; the
+  wall-clock ceiling now anchors to in-memory process start and
+  `engine_session` survives only as the liveness heartbeat row).
 - **The unit of replay is the round.** Its event window is exact via the
   #123 id cursors (`start_event_id` / `start_spend_id`), immune to
   same-millisecond boundary collisions. A run replays as the ordered chapter

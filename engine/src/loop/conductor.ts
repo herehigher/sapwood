@@ -105,24 +105,20 @@ export function budgetExceeded(total: number, cap: number): boolean {
 
 export type CeilingReason = "kill-switch" | "daily-budget" | "wall-clock";
 
-/** Engine-session BASE stale gap (State.engineSessionStart): a tick gap longer than this
- *  means the engine was stopped/crashed/paused, and the wall-clock session resets. Longer
- *  than any sane tick interval (0day ticks are minutes apart) so a live engine never
- *  self-resets, yet short enough that an operator pause is a practical recovery from a
- *  wall-clock breach. NEVER compare a tick cadence against this constant directly — use
- *  engineSessionGapSec(tickIntervalSec), which scales the gap with the cadence. */
-export const ENGINE_SESSION_GAP_SEC = 900;
-
-/** The stale gap actually used: max(base, 2 × the caller's tick cadence). A fixed 900s gap
- *  with a legal tick cadence ≥ 15min would make EVERY tick look stale — the session resets
- *  each tick, wallClockElapsedSec ≈ 0 forever, and the wall-clock tier silently never fires
- *  (gate② PR #41 P2, exactly the fail-open class this repo guards against). Scaling by 2×
- *  keeps one missed tick from resetting the session while any cadence stays well under the
- *  gap. Non-finite/negative cadence (unknown / self-paced caller) -> the base gap. */
-export function engineSessionGapSec(tickIntervalSec: number): number {
-  if (!Number.isFinite(tickIntervalSec) || tickIntervalSec <= 0) return ENGINE_SESSION_GAP_SEC;
-  return Math.max(ENGINE_SESSION_GAP_SEC, 2 * tickIntervalSec);
-}
+// #431 (F29): the engine-session gap machinery that used to live here (ENGINE_SESSION_GAP_SEC,
+// engineSessionGapSec, State.engineSessionStart's started_at resurrection) is DELETED, not
+// relocated. It measured PROCESS LIVENESS, not autonomous action: a parked wait loop refreshed
+// the heartbeat every iteration and burned the whole wall-clock budget doing nothing, a
+// 2-minute restart inherited a breached session by design, and the documented pause-to-recover
+// path was closed off by the very loop that was waiting (the F29 double-strike). The wall-clock
+// ceiling now anchors to IN-MEMORY process start (TickDeps.processStartedAt, captured once by
+// each driver at entry): restart — manual, script, or supervisor — at ANY gap length is a
+// sanctioned renewal and gets a fresh clock by construction. The durable cross-restart bounds
+// are cost.dailyBudgetUsd + guard/gates/kill-switch (owner adjudication 2026-07-30); the
+// wall clock is a per-process attention alarm, not a security boundary. The crash-loop case the
+// gap heuristic defended against is now handled by the rapid-restart detector
+// (loop/rapid-restart.ts) + the #382 single-instance lock, with the supervisor's own
+// circuit-breaker as a documented PREREQUISITE (docs/security.md).
 
 /** Pure ceiling check — daily USD cap + wall-clock cap ONLY. #69: the kill switch is no
  *  longer one of these reasons; it's checked once, at the very top of tick(), before this
@@ -146,6 +142,66 @@ export function evaluateCeiling(input: {
  *  budgetExceeded's ">" convention — equal is not over). */
 export function drainEscalationDue(breachAtIso: string, nowMs: number, drainWindowSec: number): boolean {
   return (nowMs - Date.parse(breachAtIso)) / 1000 > drainWindowSec;
+}
+
+/** #431 round 3: the ceilings the entered/cleared pair narrates. "kill-switch" is deliberately
+ *  absent — the switch has its own visibility and its own reasons row via drainThenEscalate. */
+const ANNOUNCEABLE_CEILINGS = ["daily-budget", "wall-clock"] as const;
+
+/** #431 round 5 (codex P1): is any park OTHER than the llm's own episode open? The llm-canary
+ *  exception — a green ping arming ONE canary in tick()'s PARK section, and the round-wait
+ *  loop's green-light clear — may bypass ONLY the llm episode itself: the canary exists to test
+ *  whether the LLM is back, and a round-open consumes LLM spend. Every other ParkSource
+ *  (forge, rapid-restart, and anything added later) is an INDEPENDENT "dispatch is parked"
+ *  fact that a canary spawn or a round open must respect. Deliberately source-AGNOSTIC
+ *  (`source !== "llm"`, never an enumerated deny-list): a future ParkSource blocks by default
+ *  and can never silently reopen this hole (the round-4 code checked the forge row alone, so
+ *  the rapid-restart park was bypassed by a green ping — codex's claimed:[7]/spawned:[7]
+ *  repro). Both call sites share this ONE definition. */
+export function nonLlmParkOpen(state: Pick<State, "parkedSources">): boolean {
+  return state.parkedSources().some((p) => p.source !== "llm");
+}
+
+/** #431 AC3 (F29, rounds 2-3): the reason-bearing breach narration — the F29 breach was
+ *  INVISIBLE (the only signal was `park-wait-heartbeat {parked:false}`), so the ceiling-wait
+ *  paths now keep a PER-REASON entered/cleared pair in the event log, exactly one transition
+ *  event per fact.
+ *
+ *  THE WRITE RULE (round 3, stated once here, applied everywhere in this issue's machinery —
+ *  the ceiling row, and rapid-restart.ts's escalation latch): for any fact and its
+ *  receipt/latch/row, the LOG write goes FIRST; the row/latch is a MIRROR written after; and
+ *  dedup reads ONLY the log. A kill between the two writes then always leaves the log ahead of
+ *  the mirror — the next pass repairs the mirror from the log — and never the reverse, which
+ *  is the direction that silently loses facts (rounds 1-2 each had one such window: row-first
+ *  announcement, delete-before-receipt, latch-before-event).
+ *
+ *  PER REASON (round 3, codex P2): a single global pair could not represent overlapping
+ *  lifecycles — daily-budget opens at 23:59, wall-clock joins, midnight clears daily while
+ *  wall-clock stays: the global pair emitted nothing and the frozen row kept saying
+ *  "daily-budget" (status promising "until tomorrow" for a breach that needed a restart), and
+ *  a later daily re-breach under the still-open wall-clock was never announced. Each reason
+ *  now has its own lifecycle keyed in the log (State.latestCeilingEventForReason): a reason
+ *  JOINING the current set appends its `ceiling-breach-entered {reason, ...}`; a reason
+ *  LEAVING appends its `ceiling-breach-cleared {reason}` — including the total-clear case
+ *  (currentReasons = []) and a restart's fresh anchor closing a prior life's episodes. Callers
+ *  then mirror the row: recordCeilingBreach(currentReasons) on breach (reasons always current,
+ *  `at` preserved for the drain window), clearCeilingBreach() AFTER the receipts on total
+ *  clear. Both ceiling-wait sites go through here: tick()'s CEILING section and round.ts's
+ *  waitForDispatchClear (including its standby-wake re-entry). */
+export function reconcileCeilingAnnouncements(
+  state: Pick<State, "latestCeilingEventForReason" | "appendEvent">,
+  currentReasons: CeilingReason[],
+  detail: { wallClockElapsedSec: number; maxWallClockSec: number; dailySpendUsd: number; dailyBudgetUsd: number },
+): void {
+  for (const reason of ANNOUNCEABLE_CEILINGS) {
+    const open = state.latestCeilingEventForReason(reason) === "ceiling-breach-entered";
+    const breachedNow = currentReasons.includes(reason);
+    if (breachedNow && !open) {
+      state.appendEvent("ceiling-breach-entered", { reason, ...detail });
+    } else if (!breachedNow && open) {
+      state.appendEvent("ceiling-breach-cleared", { reason });
+    }
+  }
 }
 
 /**
@@ -916,12 +972,18 @@ export interface TickDeps {
    *  settled worker leg exactly once across restart; the tick driver (driver.ts) never sets
    *  this — default 0 (no spend known). */
   roundSpendUsd?: () => number;
-  /** The caller's tick cadence in seconds, when ticks run on a fixed schedule. Scales the
-   *  wall-clock session stale gap (engineSessionGapSec: max(900, 2× cadence)) so a legal
-   *  slow cadence cannot make every tick look stale and silently void the wall-clock tier
-   *  (gate② PR #41 P2). The M4 loop driver MUST pass its cadence here. Omitted -> the base
-   *  gap (only safe for callers ticking faster than ENGINE_SESSION_GAP_SEC). */
-  tickIntervalSec?: number;
+  // #431: TickDeps.tickIntervalSec is GONE — its only consumer was the deleted session-gap
+  // scaling (engineSessionGapSec). The drivers' own cadence fields (DriverDeps.tickIntervalSec,
+  // RoundDeps.tickIntervalSec) are unaffected: they drive the inter-tick sleep and the #395
+  // watchdog window, neither of which ever flowed through here.
+  /** #431 (F29): the wall-clock ceiling's anchor — THIS PROCESS's start, held in memory by the
+   *  caller (both shipped drivers capture it once at entry from their own injected clock and
+   *  thread it here; see runDriver/runRounds). Deliberately NOT persisted and NOT inherited: a
+   *  restart at any gap length gets a fresh clock by construction (the owner-adjudicated F29
+   *  semantics — the wall clock is a per-process attention alarm, not a security boundary).
+   *  Omitted (direct library/test callers only — every shipped driver passes it): the tick
+   *  anchors at its own `now()`, i.e. the wall-clock tier measures zero for that call. */
+  processStartedAt?: Date;
   now: () => Date;
   /** #13: the review + merge gate for driving lanes. Omitted -> driving lanes stay driving with
    *  no gate/merge activity this tick (pre-#13 behavior — M2 dogfood / callers that haven't
@@ -1492,14 +1554,25 @@ export async function escalatePark(
   log?: (message: string) => void,
 ): Promise<void> {
   const suspendedRequeues = state.pendingRollbacks().filter((r) => r.reason === ENV_FAILURE_REQUEUE_REASON).length;
+  // #431 round 2 (codex P2): the message is SOURCE-AWARE — a `rapid-restart` episode has no
+  // probe and no probe-driven auto-resume (state.ts's ParkSource doc), so the env-failure
+  // wording's promises would be false for it. In practice rapid-restart escalates at trip time
+  // (rapid-restart.ts's escalateLocally sets the latch), so this ladder only reaches it through
+  // an exotic latch loss — the honest message is still required for exactly that case.
   const message =
-    `sapwood: engine parked since ${park.enteredAt} due to a ${park.source} environment failure ` +
-    `(${park.reason}) — this has exceeded the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
-    `escalation threshold. The engine is still probing on a bounded exponential backoff and will ` +
-    `auto-resume dispatch on the first successful probe; this notification does not stop that. ` +
-    (suspendedRequeues > 0 ? `${suspendedRequeues} issue requeue(s) are held durably and will drain on resume. ` : "") +
-    `Informational only — no action is required unless the underlying outage is expected to ` +
-    `persist.`;
+    park.source === "rapid-restart"
+      ? `sapwood: engine parked since ${park.enteredAt} — rapid-restart detector (${park.reason}). ` +
+        `This episode has now stood for over the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
+        `escalation threshold. There is NO probe for this episode: dispatch stays parked until an ` +
+        `engine start observes the restart window drained (or the park is cleared by hand) — see ` +
+        `docs/troubleshooting.md and docs/security.md (supervisor circuit-breaker prerequisite).`
+      : `sapwood: engine parked since ${park.enteredAt} due to a ${park.source} environment failure ` +
+        `(${park.reason}) — this has exceeded the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
+        `escalation threshold. The engine is still probing on a bounded exponential backoff and will ` +
+        `auto-resume dispatch on the first successful probe; this notification does not stop that. ` +
+        (suspendedRequeues > 0 ? `${suspendedRequeues} issue requeue(s) are held durably and will drain on resume. ` : "") +
+        `Informational only — no action is required unless the underlying outage is expected to ` +
+        `persist.`;
   const intended = escalationChannel(park.source, forgeParked);
   // P2-3 (PR #180 review): the event below records the channel ACTUALLY used — when the forge
   // comment fails and this degrades to the local fallback, the audit trail must say "local",
@@ -2706,23 +2779,31 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // mid-loop: wall-clock keeps elapsing even when no spend banks, so a LATER lane could see a
   // stale "not breached" right as the real ceiling crosses — and the CEILING/DISPATCH sections
   // below, which round 1 had reuse that same stale snapshot, would drain/gate on an OLDER value
-  // than their pre-#246 positions ever gave them. Fix: memoize ONLY the side-effecting piece —
-  // `state.engineSessionStart` WRITES on every call (advances last_tick_at, resets started_at
-  // past the stale gap), so it must run exactly once per tick — and re-derive the (pure, cheap)
-  // ceiling reasons FRESH, with a fresh `now()`, at EVERY consumption point via
-  // `ceilingReasonsAsOf` below: the fixable case's own admission check (per lane, inside the
-  // loop), the CEILING section at its original position, and the DISPATCH gate. Same stance for
-  // `runSpendStopCrossed` — a cheap callback, called fresh at each admission point rather than
-  // snapshotted once. `parkedBeforeProbes` stays a single up-front snapshot: `state.isParked()`
-  // has no side effects, and nothing between here and PARK's own later re-check mutates park
-  // state within the same tick (unlike wall-clock time, which elapses regardless) — no
-  // staleness risk, so hoisting it is genuinely safe, unlike the ceiling snapshot was.
-  const engineSessionStartDate = state.engineSessionStart(now(), engineSessionGapSec(deps.tickIntervalSec ?? 0));
+  // than their pre-#246 positions ever gave them. Fix: run the side-effecting piece exactly once
+  // per tick — the last_tick_at heartbeat write (state.touchLastTick, the #431 survivor of the
+  // old engineSessionStart; see its own doc for the two consumers that keep it alive) — and
+  // re-derive the (pure, cheap) ceiling reasons FRESH, with a fresh `now()`, at EVERY
+  // consumption point via `ceilingReasonsAsOf` below: the fixable case's own admission check
+  // (per lane, inside the loop), the CEILING section at its original position, and the DISPATCH
+  // gate. Same stance for `runSpendStopCrossed` — a cheap callback, called fresh at each
+  // admission point rather than snapshotted once. `parkedBeforeProbes` stays a single up-front
+  // snapshot: `state.isParked()` has no side effects, and nothing between here and PARK's own
+  // later re-check mutates park state within the same tick (unlike wall-clock time, which
+  // elapses regardless) — no staleness risk, so hoisting it is genuinely safe, unlike the
+  // ceiling snapshot was.
+  //
+  // #431 (F29): the wall-clock anchor is the CALLER's in-memory process start
+  // (deps.processStartedAt — both shipped drivers capture it once at entry), never a persisted
+  // session resurrected across restarts. One `now()` read serves both the heartbeat stamp and
+  // the direct-caller fallback anchor, preserving this tick's exact now()-call count.
+  const tickNow = now();
+  state.touchLastTick(tickNow);
+  const processStartedAt = deps.processStartedAt ?? tickNow;
   const ceilingReasonsAsOf = (asOf: Date): CeilingReason[] =>
     evaluateCeiling({
       dailySpendUsd: state.dailySpendUsd(asOf),
       dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
-      wallClockElapsedSec: (asOf.getTime() - engineSessionStartDate.getTime()) / 1000,
+      wallClockElapsedSec: (asOf.getTime() - processStartedAt.getTime()) / 1000,
       maxWallClockSec: cfg.cost.maxWallClockSec,
     });
   const parkedBeforeProbes = state.isParked();
@@ -3203,15 +3284,28 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   #246 review round 2 (E1): re-derived FRESH here via `ceilingReasonsAsOf` (a fresh `now()`,
   //   same as pre-#246) rather than reusing a pre-DRIVE-loop snapshot — see that helper's own
   //   comment (above the DRIVE loop) for why a snapshot taken before a potentially-long DRIVE
-  //   loop would be stale here. Only `state.engineSessionStart`'s own WRITE is memoized
-  //   (must run exactly once per tick); this evaluation itself is exactly as fresh as before
-  //   #246 ever touched this section. ──
+  //   loop would be stale here. Only the last_tick_at heartbeat WRITE (state.touchLastTick, the
+  //   #431 survivor) runs exactly once per tick; this evaluation itself is exactly as fresh as
+  //   before #246 ever touched this section. ──
   const nowDate = now();
   const ceilingReasons = ceilingReasonsAsOf(nowDate);
   const ceilingBreached = ceilingReasons.length > 0;
   let drainRequested: string[] = [];
   let escalated: string[] = [];
   if (ceilingBreached) {
+    // #431 AC3, rounds 2-3: narrate EVENT-FIRST (per-reason joins AND departures), then mirror
+    // the row with the CURRENT reason set — the round-3 write rule, stated once on
+    // reconcileCeilingAnnouncements. Both land BEFORE the (long, async) drain below so the
+    // breach is visible in the ledger the moment it is detected (drainThenEscalate's internal
+    // recordCeilingBreach call preserves the first-detected `at`, so the drain window is
+    // unaffected by recording here first).
+    reconcileCeilingAnnouncements(state, ceilingReasons, {
+      wallClockElapsedSec: (nowDate.getTime() - processStartedAt.getTime()) / 1000,
+      maxWallClockSec: cfg.cost.maxWallClockSec,
+      dailySpendUsd: state.dailySpendUsd(nowDate),
+      dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
+    });
+    state.recordCeilingBreach(ceilingReasons, nowDate);
     ({ drainRequested, escalated } = await drainThenEscalate(
       forge,
       state,
@@ -3230,8 +3324,18 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       { mode: "observed", blockedLanes: driveFixBlockedLanes },
     ));
   } else {
-    // Resolved (daily cap rolled to a fresh day / wall-clock cfg raised / kill switch
-    // lifted before this tick) -> clear so a future re-breach starts a fresh drain window.
+    // Resolved (daily cap rolled to a fresh day / wall-clock cfg raised / a restart's fresh
+    // anchor / kill switch lifted before this tick) -> RECEIPT-FIRST, then delete the row
+    // (#431 round 3, codex P2: the round-2 order deleted first, so a kill between the two left
+    // neither row nor receipt and the stale `entered` suppressed the NEXT episode's
+    // announcement forever; receipt-first leaves row+receipt, which the next pass no-ops and
+    // deletes). The receipts are transition-only — a healthy steady-state tick appends nothing.
+    reconcileCeilingAnnouncements(state, [], {
+      wallClockElapsedSec: (nowDate.getTime() - processStartedAt.getTime()) / 1000,
+      maxWallClockSec: cfg.cost.maxWallClockSec,
+      dailySpendUsd: state.dailySpendUsd(nowDate),
+      dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
+    });
     state.clearCeilingBreach();
   }
 
@@ -3321,9 +3425,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           state.bumpParkProbe("llm", iso());
         } else {
           // Ping green: pace the next check (touch, NOT bump — the exponent only grows on a
-          // FAILED outcome) and, forge permitting, arm exactly one canary for DISPATCH below.
+          // FAILED outcome) and arm exactly one canary for DISPATCH below — but ONLY when no
+          // independent non-llm park stands (#431 round 5, codex P1: this used to check the
+          // forge row alone, so an open rapid-restart park was bypassed by a green ping —
+          // see nonLlmParkOpen's own doc for the source-agnostic invariant).
           state.touchParkProbe("llm", iso());
-          if (state.parkRow("forge") == null) canaryBudget = 1;
+          if (!nonLlmParkOpen(state)) canaryBudget = 1;
         }
       }
     }

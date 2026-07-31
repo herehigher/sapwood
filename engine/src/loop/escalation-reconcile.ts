@@ -192,6 +192,22 @@ export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   // refuses to touch an issue with any open escalation, so a `resume-held` row would block the
   // sweep of the very stale label that produced it — the F34 wedge, rebuilt by its own fix.
   //
+  // DELIBERATELY ABSENT (#431): `ceiling-breach-entered` and `rapid-restart-detected` — the
+  // same F34 question, answered NO for both, on the same structural ground: this table is the
+  // needs-human-LABEL reconciler, keyed by the issue in each event's payload
+  // (openEscalations), and neither kind carries an issue or applies a label.
+  //  - `ceiling-breach-entered` (and its round-2 closing receipt `ceiling-breach-cleared`) is
+  //    observability for a SELF-RESOLVING state (the ceiling wait clears when the day rolls /
+  //    the config changes / the process restarts); the attention item on that path is the
+  //    pre-existing `ceiling-escalated` (its row is above), emitted per-lane WITH an issue
+  //    when the drain window actually expires someone's work.
+  //  - `rapid-restart-detected`'s waiting-on-a-human state is carried by its durable
+  //    `rapid-restart` park episode (park_state row + `park-escalated`/`park-resumed`
+  //    lifecycle + the ESCALATION marker + `sapwood status` — the same engine-level channel
+  //    every park uses; `park-escalated` itself is likewise not in this table). Listing the
+  //    detection event here would double-count the episode and give the reconciler a row no
+  //    external merge/close/label-removal could ever resolve.
+  //
   // KNOWN, BOUNDED GAP (#295 review round 10, deferred to #404): frontend-design.md §3 also
   // flags two PREDICATE kinds — `reclaim-failed` when `payload.next` is not an automatic
   // continuation, and `reclaim-done` on its no-PR branch. They are attention items only for

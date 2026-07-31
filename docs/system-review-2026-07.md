@@ -8,6 +8,14 @@ M5 / v1.0 issues that reference this document.
 
 > Doc-structure note: filed as a standalone review document for now; fold into
 > the docs architecture when the repo is prepared for public release.
+>
+> **Superseded detail (#431, 2026-07-31):** the wall-clock ceiling described
+> below as a 4h global/session tier was re-anchored to PROCESS LIFE — 24h
+> default, one clock per process, fresh on every restart, with the session-gap
+> machinery deleted and crash-loop protection moved to `engine.rapidRestart`.
+> Mentions of "4h"/"session" in this dated review are the pre-#431 design,
+> kept as the historical record; current semantics live in
+> [configuration.md](configuration.md) and [security.md](security.md).
 
 ## Architecture assessment: the deterministic top tier
 
@@ -113,14 +121,16 @@ recovered once given away.
 - **Budget tiers:** worker `budgetUsdSoft` = graceful handoff (hard-killing
   workers would re-burn the same tokens on requeue forever and orphan dirty
   worktrees); round `roundBudgetUsd` = stops further work, never kills;
-  global `dailyBudgetUsd` + `maxWallClockSec` (default **4h**) = the hard
-  tier: freeze + drain + escalate. Post-hoc enforcement; bounded overshoot
+  global `dailyBudgetUsd` + `maxWallClockSec` (then **4h**; since #431 a
+  **24h per-process attention alarm** — see the supersession note above) =
+  the hard tier: freeze + drain + escalate. Post-hoc enforcement; bounded overshoot
   ≈ cap × worker soft budget.
 - **"Alive but idle" diagnosis chain** (until the dashboard ships):
   1. `ls data/` — `PAUSE`/`KILL_SWITCH` sentinels;
-  2. `sapwood status` — ceiling breached? (`maxWallClockSec` 4h is the
-     usual overnight suspect; `dailyBudgetUsd` second) — a breached engine
-     freezes dispatch but keeps ticking, which looks like a hang;
+  2. `sapwood status` — ceiling breached? (historically `maxWallClockSec`
+     4h was the usual overnight suspect; since #431 it is 24h per process
+     life and renews on restart, so `dailyBudgetUsd` leads) — a breached
+     engine freezes dispatch but keeps ticking, which looks like a hang;
   3. board + lanes — everything escalated to `needs-human`/`blocked`, or a
      `driving` lane stuck on a conflicted PR (conflicts suppress CI
      silently: no merge ref, zero check-suites).
@@ -197,8 +207,8 @@ flowchart TB
 
 Budget tiers overlay (not drawn per-edge): worker `budgetUsdSoft` → handoff
 inside W1; round `roundBudgetUsd` → stops further waves inside EX1/EX2, never
-kills; global `dailyBudgetUsd` + `maxWallClockSec` (4h) → engine-wide freeze +
-drain, checked at every tick.
+kills; global `dailyBudgetUsd` + `maxWallClockSec` (4h then; 24h per-process since
+#431) → engine-wide freeze + drain, checked at every tick.
 
 ### v1.0 — the same loop with the governed-extensibility layer
 

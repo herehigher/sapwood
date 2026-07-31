@@ -23,7 +23,7 @@
 //     implementation detail of conductor.ts that can change (see #383, which explicitly plans to
 //     dedupe drive-queued) — the watchdog must not depend on it either way.
 //   - state.lastTickAt(): engine_session.last_tick_at, written on EVERY tick regardless of what
-//     that tick did (conductor.ts's engineSessionStart call) — the SAME column the dashboard's
+//     that tick did (conductor.ts's touchLastTick call — the #431 survivor) — the SAME column the dashboard's
 //     deriveEngineState already reads (State.lastTickAt's own doc). A pure read, never touched
 //     here via a second path.
 // Stalled only when BOTH have gone unchanged across a full window — a tick that's actually

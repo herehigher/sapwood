@@ -27,12 +27,13 @@ import type { RoundPhase, RoundRow, State } from "../state/state.js";
 import { createHeartbeatGate } from "../util/heartbeat.js";
 import {
   type CeilingReason,
-  engineSessionGapSec,
   escalatePark,
   evaluateCeiling,
   type FixLegResumeDeps,
   type MergeGate,
+  nonLlmParkOpen,
   probeForgeReachable,
+  reconcileCeilingAnnouncements,
   type Supervisor,
   type TickDeps,
   type TickResult,
@@ -257,6 +258,9 @@ export interface RoundDeps {
   mergeGate?: MergeGate;
   engineAgentDriveDeps?: TickDeps["engineAgentDriveDeps"];
   now: () => Date;
+  /** #431: test seam for the wall-clock ceiling's in-memory process-start anchor. Omitted
+   *  (production): runRounds captures `now()` once at entry — see its own comment. */
+  processStartedAt?: Date;
   /** Injected sleep so tests can drive the loop without real wall-clock waits (same contract
    *  as driver.ts's DriverDeps.sleep). */
   sleep?: (ms: number) => Promise<void>;
@@ -888,6 +892,12 @@ export async function escalatePoolRemovalFailures(
 export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   const now = deps.now;
   const iso = () => now().toISOString();
+  // #431 (F29): the wall-clock ceiling's anchor — THIS process's start, held in memory for the
+  // whole run (a const in this closure, dead with the process). Never persisted, never
+  // inherited: a restart at any gap length gets a fresh clock by construction. Derived from the
+  // injected clock, so no real-clock read hides here (#403/F25). RoundDeps.processStartedAt
+  // exists as a test seam only; production (cli.ts) passes nothing and anchors here.
+  const processStartedAt = deps.processStartedAt ?? now();
   const cfg = deps.cfg;
   const forge: IForge = cfg.round.milestone ? new RoundScopedForge(deps.forge, cfg.round.milestone) : deps.forge;
   const peripherals = deps.peripherals ?? {};
@@ -995,9 +1005,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  (env-failure.ts's probeBackoffSec/probeDueWithHint, conductor.ts's probeForgeReachable/
    *  escalatePark) — never a parallel mechanism, just a second call site for the same one.
    *  Ceiling reasons are re-derived FRESH every wait iteration (evaluateCeiling), never trusted
-   *  from a stale stored marker — engineSessionStart's wall-clock bookkeeping is safe to touch
-   *  from here too (its own doc: "call once per tick" means roughly this cadence, not an
-   *  exclusive tick()-only invariant; multiple forward-only calls never corrupt it).
+   *  from a stale stored marker — elapsed is a pure read off the in-memory process-start anchor
+   *  (#431), so re-deriving here has no side effects at all (the old engineSessionStart call
+   *  this loop used to make was a WRITE that kept a breached session alive — the F29 wedge).
    *
    *  llm-ping semantics match conductor.ts's canary doctrine EXACTLY (settleCanary's own doc: a
    *  green ping on the cheapest model is NOT itself proof the worker/role's real model/tier has
@@ -1005,15 +1015,19 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  open (the round's own peripheral role sessions become the real canary, via item 1's
    *  runSessionWithRetry env-classification wiring: a non-classified attempt clears the episode
    *  for real, a re-classified one simply continues it). Gated the SAME way conductor.ts gates
-   *  its own canary: only when no FORGE episode is ALSO open (`state.parkRow("forge") == null`)
-   *  — a mixed storm never opens a round that would just fail on forge writes anyway. `forge`
-   *  itself IS a genuine recovery signal (conductor.ts's own doc: "the cheap IForge read is a
-   *  GENUINE recovery signal") and clears outright on success, same as conductor.ts.
+   *  its own canary, by the SAME shared predicate (#431 round 5, nonLlmParkOpen): the green
+   *  light counts only when NO park of any non-llm source is open — forge, rapid-restart, or
+   *  any future ParkSource (source-agnostic by construction, so a new source blocks by
+   *  default). A mixed storm never opens a round that would just fail on forge writes anyway,
+   *  and a rapid-restart park is an independent "dispatch is parked" fact no llm recovery can
+   *  override. `forge` itself IS a genuine recovery signal (conductor.ts's own doc: "the cheap
+   *  IForge read is a GENUINE recovery signal") and clears outright on success, same as
+   *  conductor.ts.
    *
    *  Returns (clear to open) the instant ceiling is clear AND (nothing is parked OR the llm
-   *  episode alone just got a green light), or immediately when KILL_SWITCH is active or a
-   *  signal arrives — same "let the round open & block normally at its first peripheral phase"
-   *  contract the standby loop above already documents for KILL_SWITCH.
+   *  episode is the ONLY open park and just got a green light), or immediately when KILL_SWITCH
+   *  is active or a signal arrives — same "let the round open & block normally at its first
+   *  peripheral phase" contract the standby loop above already documents for KILL_SWITCH.
    *
    *  #374 review (Codex sol-high finding 2, P1): the llm ping is skipped entirely while
    *  ceiling-breached (same `!ceilingBreached` gate conductor.ts's own llm-probe section uses) —
@@ -1043,15 +1057,34 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     for (;;) {
       if (signalled || deps.state.isKillSwitchActive()) return;
       const nowDate = now();
-      const sessionStart = deps.state.engineSessionStart(nowDate, engineSessionGapSec(deps.tickIntervalSec));
+      // #431 (F29): elapsed measures THIS process's life (the in-memory anchor above), so this
+      // wait loop can no longer extend — or inherit — a wall-clock budget across restarts, and
+      // sitting parked/waiting here cannot itself keep a breached session alive (the exact F29
+      // wedge: the old engineSessionStart call on this line refreshed the session heartbeat
+      // every iteration, closing off the documented pause-to-recover path).
+      const wallClockElapsedSec = (nowDate.getTime() - processStartedAt.getTime()) / 1000;
       const ceilingReasons: CeilingReason[] = evaluateCeiling({
         dailySpendUsd: deps.state.dailySpendUsd(nowDate),
         dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
-        wallClockElapsedSec: (nowDate.getTime() - sessionStart.getTime()) / 1000,
+        wallClockElapsedSec,
         maxWallClockSec: cfg.cost.maxWallClockSec,
       });
-      if (ceilingReasons.length > 0) deps.state.recordCeilingBreach(ceilingReasons, nowDate);
-      else deps.state.clearCeilingBreach();
+      // #431 AC3, rounds 2-3: narrate the per-reason lifecycle EVENT-FIRST, then mirror the
+      // row — the round-3 write rule (reconcileCeilingAnnouncements' own doc; same order and
+      // same kill-window reasoning as tick()'s CEILING section, including receipt-BEFORE-delete
+      // on the clear side). Never silent again: F29's only trace was `park-wait-heartbeat
+      // {parked:false}` from this loop's own heartbeat.
+      reconcileCeilingAnnouncements(deps.state, ceilingReasons, {
+        wallClockElapsedSec,
+        maxWallClockSec: cfg.cost.maxWallClockSec,
+        dailySpendUsd: deps.state.dailySpendUsd(nowDate),
+        dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
+      });
+      if (ceilingReasons.length > 0) {
+        deps.state.recordCeilingBreach(ceilingReasons, nowDate);
+      } else {
+        deps.state.clearCeilingBreach();
+      }
 
       let llmGreenLight = false;
       for (const episode of deps.state.parkedSources()) {
@@ -1070,7 +1103,10 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           } else {
             deps.state.bumpParkProbe("forge", iso());
           }
-        } else if (deps.probeLlmReachable && ceilingReasons.length === 0) {
+        } else if (episode.source === "llm" && deps.probeLlmReachable && ceilingReasons.length === 0) {
+          // ^ #431: the source guard is now explicit — a `rapid-restart` episode (state.ts's
+          // ParkSource) has NO probe by design (it clears only when a later start observes the
+          // birth window drained, loop/rapid-restart.ts) and must never burn a PAID llm ping.
           // Disabled-consumer rule (doctrine): no wired probe -> untouched, same as
           // conductor.ts's own llm probe section. #374 review (Codex sol-high finding 2, P1):
           // ALSO skip while ceiling-breached, same as conductor.ts's own llm-probe section
@@ -1108,7 +1144,11 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         }
       }
 
-      const parkClearToOpen = !deps.state.isParked() || (llmGreenLight && deps.state.parkRow("forge") == null);
+      // #431 round 5 (codex P1): a green llm light clears the way ONLY when no independent
+      // non-llm park stands — the same shared source-agnostic guard as tick()'s canary arm
+      // (conductor.ts's nonLlmParkOpen; this used to check the forge row alone, so an open
+      // rapid-restart park could let this loop open a paid round).
+      const parkClearToOpen = !deps.state.isParked() || (llmGreenLight && !nonLlmParkOpen(deps.state));
       if (ceilingReasons.length === 0 && parkClearToOpen) return;
 
       // #374 review (Codex sol-high verify-pass finding 2, P2): about to actually sit out a wait
@@ -1508,7 +1548,8 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     state: deps.state,
     supervisor: deps.supervisor,
     cfg: deps.cfg,
-    tickIntervalSec: deps.tickIntervalSec,
+    // #431: the wall-clock ceiling's in-memory anchor — captured once at runRounds entry.
+    processStartedAt,
     // exactOptionalPropertyTypes: only include optional keys when actually provided — an
     // explicit `undefined` is not the same as an omitted key under this tsconfig setting.
     ...(deps.mergeGate !== undefined ? { mergeGate: deps.mergeGate } : {}),
@@ -1922,6 +1963,29 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
               /* telemetry only — see the standby-wait catch above */
             }
             standbyAttempts = 0;
+          }
+          // #431 round 2 (codex P1): the standby dwell itself consumes PROCESS LIFE, and this
+          // wake is a fresh round-open decision — re-enter the SAME admission gate the
+          // pre-standby path just above ran, BEFORE any peripheral can dispatch. Without this,
+          // a dwell that outlives cost.maxWallClockSec woke straight into paid peripherals
+          // (aligning/architecting/plan-review run before the executing tick's own ceiling
+          // check could ever fire), with no breach row and no event — invisible to status and
+          // the dashboard. waitForDispatchClear is the existing breach-wait path: it records
+          // the breach, emits the once-per-episode `ceiling-breach-entered`, keeps probing
+          // parks, and returns immediately for KILL_SWITCH/signals (the round then opens and
+          // blocks at its first peripheral, the standby loop's own documented kill-switch
+          // contract — unchanged).
+          await waitForDispatchClear();
+          if (signalled) {
+            return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "signal" };
+          }
+          // Same unconditional final-stop refresh as the pre-standby gate (see its comment):
+          // the recovery-clear iteration is exactly the one waitForDispatchClear's internal
+          // re-check deliberately skips.
+          checkFinalSpend();
+          await checkFinalMilestone();
+          if (finalStopHit) {
+            return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "stop-condition", stopCondition: finalStopHit };
           }
         }
 

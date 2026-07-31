@@ -236,6 +236,9 @@ export type EscalationChannel = "forge" | "local";
  * mixed storm, PR #180 review): then the forge is known-broken and the llm escalation degrades
  * to the local channel too, never attempting a doomed GitHub write.
  */
-export function escalationChannel(source: EnvFailureSource, forgeParked = false): EscalationChannel {
+export function escalationChannel(source: EnvFailureSource | "rapid-restart", forgeParked = false): EscalationChannel {
+  // #431: `rapid-restart` (state.ts's ParkSource, the crash-loop detector's episode) rides the
+  // non-forge branch — an intact forge is still the preferred channel. In practice its episodes
+  // carry no trigger issue, so escalatePark's own triggerIssue branch routes them local anyway.
   return source === "forge" || forgeParked ? "local" : "forge";
 }

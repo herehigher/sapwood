@@ -20,8 +20,19 @@ import { createReadStream, existsSync, realpathSync, rmSync, statSync, writeFile
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
 import { loadConfig, type SapwoodConfig } from "../engine/src/config/config.js";
-import { engineSessionGapSec } from "../engine/src/loop/conductor.js";
 import { State, type WorkerRow } from "../engine/src/state/state.js";
+
+/** #431: this lived in the engine as `engineSessionGapSec` and was deleted there along with the
+ *  wall-clock session machinery (the wall clock now anchors to in-memory process start and
+ *  never reads a gap). The DASHBOARD's need survives independently: the `stalled` derivation is
+ *  a UI liveness heuristic over `last_tick_at` (the #431-surviving heartbeat), and it still
+ *  wants a cadence-aware bound so a legal slow cadence doesn't render a healthy engine as
+ *  stalled. Same math as the deleted helper — max(900s, 2× cadence) tolerates one missed tick
+ *  at any legal cadence; non-finite/unknown cadence falls back to the 900s base. */
+export function heartbeatStaleGapSec(tickIntervalSec: number): number {
+  if (!Number.isFinite(tickIntervalSec) || tickIntervalSec <= 0) return 900;
+  return Math.max(900, 2 * tickIntervalSec);
+}
 
 /** §8 default; overridable so several data dirs can be inspected side by side. */
 export const DEFAULT_PORT = 4517;
@@ -214,7 +225,7 @@ export function currentEngineState(state: State, cfg: SapwoodConfig | null, now:
     ceilingBreach: state.ceilingBreach(),
     pause: state.isPauseActive(),
     lastTickAt: state.lastTickAt(),
-    staleGapSec: engineSessionGapSec(cfg?.engine.tickIntervalSec ?? 0),
+    staleGapSec: heartbeatStaleGapSec(cfg?.engine.tickIntervalSec ?? 0),
     roundOpen: round !== undefined,
     standbyWaiting: standbyWaiting(state),
   });

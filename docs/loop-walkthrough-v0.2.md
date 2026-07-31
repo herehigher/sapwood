@@ -128,7 +128,7 @@ phase cursor and closes out *before* any new round opens.
 | Worker (soft) | `worker.budgetUsdSoft` | graceful handoff: WIP commit+push, `.handoff` | never |
 | Round (soft) | `cost.roundBudgetUsd` | no further waves; drain continues | never |
 | Engine day (hard) | `cost.dailyBudgetUsd` | freeze all dispatch + drain + escalate | after drain window |
-| Engine session (hard) | `cost.maxWallClockSec` (default **4 h**) | same freeze+drain | after drain window |
+| Engine process (hard) | `cost.maxWallClockSec` (default **24 h**, #431: a per-process attention alarm — one clock per process life, fresh on every restart) | same freeze+drain | after drain window |
 | Human (hard) | `data/KILL_SWITCH` | freeze + drain + hard kill, exit 1 | after drain window |
 
 Soft tiers preserve work (hard-killing a worker re-burns the same tokens on
@@ -149,7 +149,7 @@ one job:
 | **Working** | lanes running / PRs driving | `workers` rows in `running`/`driving`; recent `events` | normal: lanes, phase, spend |
 | **Standby** (#125) | provably nothing to do; parked | `standby-wait` events (attempt n, waitSec) newer than any `dispatched`; open round: none | "Standby — nothing Ready; probing every X min (backoff n)". **Not** an error state |
 | **Paused** | human froze dispatch; in-flight work continues | `data/PAUSE` exists | "Paused by operator — in-flight lanes finishing; remove data/PAUSE to resume" |
-| **Ceiling-frozen** | hard tier breached; engine ticks but dispatches nothing | `ceiling-escalated` event; spend ≥ `dailyBudgetUsd`, or session age ≥ `maxWallClockSec` (**the 4 h default is the #1 overnight "hang"**) | "Frozen: daily budget / wall-clock ceiling — resumes at midnight / restart". Rust-red, needs a person |
+| **Ceiling-frozen** | hard tier breached; engine ticks but dispatches nothing | per-reason `ceiling-breach-entered` events (#431) + the `ceiling_breach` row's current reasons; spend ≥ `dailyBudgetUsd`, or process age ≥ `maxWallClockSec` (24 h per process life — a restart starts a fresh clock, so an overnight "hang" here means the process genuinely ran a full day) | "Frozen: daily budget — resumes at midnight" / "wall-clock attention alarm — restart renews". Rust-red, needs a person |
 | **Draining to kill** | KILL_SWITCH tripped; handoff window running | `data/KILL_SWITCH` exists; workers transitioning to handoff | countdown against `drainWindowSec`; "will exit 1" |
 | **Winding down** | stop condition hit; finishing the round | `round-stop`/stop-condition events; dispatch skipped with reason | "Stop condition met (N issues merged) — finishing in-flight work" |
 | **Escalated dry** | board empty because everything needs a human | Ready empty + `needs-human`-labeled issues / `drive-needs-human`, `plan-review-escalated` events | pin the escalation list; "the loop is waiting on YOU, not broken" |

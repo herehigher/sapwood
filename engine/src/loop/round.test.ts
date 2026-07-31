@@ -4563,3 +4563,231 @@ test("runRounds (#433): standby must never withhold the next round while a CARRI
   assert.equal(state.getWorker("lane-377")?.state, "done", "the carried lane was reclaimed, re-driven and merged without a human merge");
   state.close();
 });
+
+test("runRounds (#431 AC3): the ceiling-wait loop announces the breach ONCE — many wait iterations, one reason-bearing ceiling-breach-entered, and the wait itself can no longer extend the budget", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // round 1 has no dispatch work — opens unconditionally, closes idle
+  const state = new State(":memory:");
+  const base = Date.parse("2026-07-31T00:00:00.000Z");
+  // The process is ALREADY past its wall-clock cap when the run begins (200s alive, 100s cap):
+  // after round 1 closes, waitForDispatchClear holds the next round open indefinitely. The
+  // clock never advances during the wait — under the deleted machinery each iteration's
+  // engineSessionStart WRITE was what kept the breached session alive (F29); now the wait
+  // iterations are pure reads and the announcement is the loop's only ledger trace.
+  const now = () => new Date(base + 200_000);
+  const sleepCalls: number[] = [];
+  let stop = (): void => {};
+  const sleep = async (_ms: number): Promise<void> => {
+    sleepCalls.push(_ms);
+    if (sleepCalls.length >= 4) stop(); // several full wait iterations, then wind down
+  };
+  const deps = baseDeps({
+    forge,
+    state,
+    sleep,
+    now,
+    processStartedAt: new Date(base),
+    tickIntervalSec: 1,
+    cfg: mkCfg({ cost: { maxWallClockSec: 100 } }),
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.ok(sleepCalls.length >= 4, "the loop actually sat out multiple ceiling-wait iterations");
+  const announced = state.eventsAfterId(0, ["ceiling-breach-entered"]);
+  assert.equal(announced.length, 1, "one announcement per breach episode — never per wait iteration (F29's silence AND spam both closed)");
+  const payload = announced[0]!.payload as { reason: string; maxWallClockSec: number; wallClockElapsedSec: number };
+  assert.equal(payload.reason, "wall-clock", "the event names WHICH ceiling (per-reason, round 3)");
+  assert.equal(payload.maxWallClockSec, 100);
+  assert.equal(payload.wallClockElapsedSec, 200);
+  assert.ok(state.ceilingBreach() !== null, "the breach row stands for the whole wait");
+  state.close();
+});
+
+test("runRounds (#431 round 2, codex P1): a standby dwell that outlives maxWallClockSec wakes into the BREACH-WAIT — announced once, and NO new round/peripherals ever open on this process life", async () => {
+  // Codex's reproduction, encoded: cap 100s; round 1 opens at t=0 and closes idle; standby
+  // dwells 60s + 120s of backoff (t=240s > cap); work then appears. Round 1's semantics are
+  // untouched (it always opens); the WAKE must re-enter the same admission gate the pre-standby
+  // path uses — never open a round (and run paid peripherals) on a process already past its cap.
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const base = Date.parse("2026-07-31T00:00:00.000Z");
+  let ms = base;
+  const now = () => new Date(ms);
+  // Work appears only once the process is past its cap: empty board before t=150s, one Ready
+  // issue after — pure clock steering, no call-count coupling.
+  forge.getReadyIssues = async () => (ms - base > 150_000 ? [{ number: 9, title: "late work", labels: [] }] : []);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (requestedMs: number): Promise<void> => {
+    sleepCalls.push(requestedMs);
+    ms += requestedMs; // the dwell consumes process life — the exact F29-adjacent shape
+    if (sleepCalls.length >= 8) stop(); // bounded safety net past the wake + several wait iterations
+  };
+  const deps = baseDeps({
+    forge,
+    state,
+    sleep,
+    now,
+    processStartedAt: new Date(base),
+    tickIntervalSec: 60,
+    cfg: mkCfg({ cost: { maxWallClockSec: 100 }, round: { standby: { enabled: true } } }),
+    peripherals: allPeripherals(log),
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "the wake never opened a round on a breached process");
+  assert.equal(state.getRound(2), undefined, "no second round exists");
+  assert.deepEqual(
+    log.map((l) => l.phase),
+    ["aligning", "architecting", "plan_review", "harvesting", "retro"],
+    "round 1's peripherals only — the wake ran NO paid peripheral on the breached process",
+  );
+  const announced = state.eventsAfterId(0, ["ceiling-breach-entered"]);
+  assert.equal(announced.length, 1, "the wake's admission gate announced the breach exactly once");
+  assert.equal((announced[0]!.payload as { reason: string }).reason, "wall-clock");
+  assert.ok(state.ceilingBreach() !== null, "the breach row stands — status/dashboard see the winding-down state");
+  state.close();
+});
+
+test("runRounds (#431 round 4, codex finding 5): the ROUND-WAIT clear site's write order is receipt-BEFORE-row-delete — the twin of the tick-path ordering proxy", async () => {
+  // A daily-budget breach that clears by UTC-midnight rollover DURING waitForDispatchClear:
+  // round 1 ticks breached (entered + row), the pre-round-2 gate waits one iteration, the
+  // sleep crosses midnight, and the second iteration performs the clear transition — whose
+  // write order this test observes directly through a recording proxy.
+  const st = new State(":memory:");
+  const writes: string[] = [];
+  const spied = new Proxy(st, {
+    get(target, prop, receiver) {
+      if (prop === "appendEvent") {
+        return (kind: string, payload: unknown) => {
+          if (kind === "ceiling-breach-cleared") writes.push("append:ceiling-breach-cleared");
+          target.appendEvent(kind, payload);
+        };
+      }
+      if (prop === "clearCeilingBreach") {
+        return () => {
+          writes.push("row:delete");
+          target.clearCeilingBreach();
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as State;
+  const forge = new FakeForge();
+  forge.ready = [];
+  const base = Date.parse("2026-07-06T23:59:00.000Z");
+  let ms = base;
+  const now = () => new Date(ms);
+  st.recordSpend("w1", 1, 60, "2026-07-06T23:00:00.000Z", []); // $60 on the 6th, $50 cap -> breached until midnight
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (requestedMs: number): Promise<void> => {
+    sleepCalls.push(requestedMs);
+    ms += requestedMs; // the first wait iteration's sleep crosses midnight
+    if (sleepCalls.length >= 10) stop(); // bounded safety net
+  };
+  const deps = baseDeps({
+    forge,
+    state: spied,
+    sleep,
+    now,
+    processStartedAt: new Date(base),
+    tickIntervalSec: 60,
+    cfg: mkCfg({ cost: { dailyBudgetUsd: 50 } }),
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const stopSafety = boundedStopOnPhase(deps, 8);
+  await runRounds(deps);
+  stopSafety();
+  const clearSeq = writes.filter((w) => w === "append:ceiling-breach-cleared" || w === "row:delete");
+  assert.equal(clearSeq.filter((w) => w === "append:ceiling-breach-cleared").length, 1, "exactly one clear transition happened");
+  assert.equal(
+    clearSeq[0],
+    "append:ceiling-breach-cleared",
+    "the LOG receipt lands strictly before any row delete at the round-wait site — the round-3 write rule, pinned here too",
+  );
+  const pair = st.eventsAfterId(0, ["ceiling-breach-entered", "ceiling-breach-cleared"]).map((e) => e.kind);
+  assert.deepEqual(
+    pair,
+    ["ceiling-breach-entered", "ceiling-breach-cleared"],
+    "one daily episode, opened by round 1's tick and closed mid-wait",
+  );
+  st.close();
+});
+
+test("runRounds (#431 rounds 5-6, codex P1): the round-wait green-light clear respects a NON-LLM park — a green llm probe INSIDE the wait iteration never opens round 2 while rapid-restart stands", async () => {
+  // Round 6 (codex): the round-5 version of this test was not genuinely red-first — with a
+  // real clock and a non-advancing fake sleep, round 1's own tick consumed the one due ping
+  // and the wait loop never observed a green probe, so the pre-fix predicate was never
+  // exercised. This rewrite injects an ADVANCING clock (each fake sleep moves it 120s, past
+  // the 30s probe backoff), captures an event-id cursor when round 1's LAST phase completes,
+  // and PROVES a successful llm park-probe lands AFTER that cursor — i.e. inside the wait —
+  // before asserting the gate held. Red-verified on ccb8a85 (the pre-fix predicate): the
+  // wait's first green ping cleared the gate and opened round 2.
+  const forge = new FakeForge();
+  forge.ready = [];
+  const state = new State(":memory:");
+  const t0 = "2026-07-24T00:00:00.000Z"; // old entered/probe stamps -> the llm probe starts due
+  state.enterPark("llm", "quota exhausted", null, t0);
+  state.appendEvent("rapid-restart-detected", { births: 5, windowSec: 600, maxBirths: 5, enteredAt: t0 });
+  state.enterPark("rapid-restart", "crash loop suspected", null, t0);
+  let ms = Date.parse("2026-07-31T00:00:00.000Z");
+  const now = () => new Date(ms);
+  let pings = 0;
+  let round1ClosedAtEventId: number | null = null;
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (requestedMs: number): Promise<void> => {
+    sleepCalls.push(requestedMs);
+    ms += 120_000; // every wait advances the clock past the 30s probe backoff -> the NEXT wait iteration's probe is due
+    if (sleepCalls.length >= 6) stop(); // several wait iterations, then wind down
+  };
+  const deps = baseDeps({
+    forge,
+    state,
+    sleep,
+    now,
+    processStartedAt: new Date(ms),
+    tickIntervalSec: 1,
+    probeLlmReachable: async () => {
+      pings++;
+      return true; // ALWAYS green — under the pre-fix predicate this cleared the gate and opened round 2
+    },
+    onRoundPhase: (roundId, phase) => {
+      if (roundId === 1 && phase === "retro") round1ClosedAtEventId = state.maxEventId();
+    },
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.ok(round1ClosedAtEventId !== null, "round 1 ran to its last phase");
+  const waitProbes = state
+    .eventsAfterId(round1ClosedAtEventId as unknown as number, ["park-probe"])
+    .map((e) => e.payload as { source: string; success: boolean })
+    .filter((p) => p.source === "llm" && p.success === true);
+  assert.ok(
+    waitProbes.length >= 1,
+    "a SUCCESSFUL llm probe provably ran INSIDE the wait (after round 1 closed) — the gate was genuinely exercised",
+  );
+  assert.equal(result.rounds, 1, "round 1 only (its unconditional open) — the green light never cleared the gate");
+  assert.equal(state.getRound(2), undefined, "no paid round 2 while the rapid-restart park stands");
+  assert.ok(pings >= 2, "the probe ran in round 1's tick AND in the wait");
+  assert.ok(state.parkRow("rapid-restart") !== null, "the non-llm park stands throughout");
+  state.close();
+});

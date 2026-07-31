@@ -58,7 +58,9 @@ Identifies the repo and ProjectV2 board the loop drives.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `tickIntervalSec` | `60` | How often the engine calls `tick()`. Also feeds the wall-clock cost ceiling's session-gap scaling, so a real (non-default) cadence keeps that ceiling accurate. |
+| `tickIntervalSec` | `60` | How often the engine calls `tick()` — the inter-tick sleep and the liveness watchdog window. (#431 removed the wall-clock session-gap scaling this used to feed.) |
+| `rapidRestart.maxBirths` | `5` | #431: the crash-loop detector — at startup the engine counts its own recent process births (`run-started` events, one per boot; wait-loop iterations can never inflate it) inside `rapidRestart.windowSec`. Reaching `maxBirths` (the current start counts) parks autonomous dispatch with an escalation — the existing park paradigm, visible in `sapwood status` and `data/ESCALATION` — until a later start observes the window drained (see [troubleshooting.md](troubleshooting.md)). Normal restarts never trip it. Births are counted in a closed window ending at the detector's own clock, so future-dated `run-started` rows (a DB restored from a fast-clock machine, or a backward host-clock step) never count — they can neither false-trip the detector nor defeat a manual park clear. |
+| `rapidRestart.windowSec` | `600` | The birth-counting window for `rapidRestart.maxBirths`. |
 | `driver` | `rounds` | Which engine `sapwood run` drives (#106). `rounds` — the round orchestrator: peripheral roles (aligning/architecting/plan_review/harvesting/retro) wrapped around the same tick engine, one round at a time (see [`PLAN.md`'s round-orchestrator section](../docs/PLAN.md#v02-north-star-the-round-orchestrator)). `tick` — the bare M4 loop driver, no peripherals; `--once`/`--until-idle` only apply in this mode (under `rounds` they are a startup **error** — exit 1 before any dispatch — never silently ignored). Every safety behavior (KILL_SWITCH, cost ceilings, drain-before-kill, graceful stop still running harvest) holds under both. |
 
 ## `liveness`
@@ -165,7 +167,7 @@ of the soft per-worker budget above.
 |---|---|---|
 | `roundBudgetUsd` | `30` | Soft per-round dispatch throttle (not the hard safety boundary — see `dailyBudgetUsd`). It counts every `spend_ledger` row after the round's durable start cursor: opening/closing peripheral sessions and each settled worker leg exactly once. Crossing it stops new dispatch, never kills in-flight work, and never skips harvest or retro. |
 | `dailyBudgetUsd` | `100` | **Burn-rate cap**, not a total — "$100/day, renews in Xh." Summed from completed workers' actual cost (each worker's terminal `total_cost_usd`, a priced snapshot that settles on that worker's final bill) by **UTC calendar day**, and persisted across restarts (`spend_ledger`), so it renews at the next UTC midnight regardless of any restart in between. A common misreading (2026-07-13 dashboard/cost discussion, #17/#154) is treating this as a run total or an all-time cap — it is neither; see `stop.afterSpendUsd` below for the actual per-run cap. Breaching it freezes new dispatch/merges engine-wide and drains in-flight workers. |
-| `maxWallClockSec` | `14400` (4h) | A **continuous-activity window**, not total run duration. It accumulates only while ticks are actually flowing (executing/drain) and **RESETS on any quiet gap** longer than `max(900s, 2 × engine.tickIntervalSec)` — a deep standby wait or a long peripheral stretch resets it, so an idle-heavy multi-day run never trips it. What it actually detects: "the dispatch/drain machinery has churned 4h without a single quiet quarter-hour" — a runaway/batch-scoping smell, **not a long-run limiter**. (A rapid crash-loop still can't evade it: each tick refreshes the session rather than resetting it.) Independent of `worker.timeoutSec`, which bounds one worker, and of run duration generally — there is no run-duration cap at all; see the knob table below. |
+| `maxWallClockSec` | `86400` (24h) | A **per-process attention alarm** (#431): one clock per process life, anchored at process start (in memory, never persisted), breached when *this* engine process has been alive longer than this. A restart — manual, script, or supervisor — is a sanctioned renewal and starts a fresh clock at any gap length. **Not a security boundary**: the durable cross-restart bounds are `dailyBudgetUsd` + guard/gates/kill-switch; crash-loop abuse is caught by `engine.rapidRestart` plus your supervisor's own circuit-breaker (a *prerequisite* for unattended supervised runs — see [security.md](security.md)). Entering the breach emits one reason-bearing `ceiling-breach-entered` event per episode. One caveat: a 24h process life can straddle UTC midnight and therefore span **two** `dailyBudgetUsd` periods (~2× worst-case single-life spend; this existed at the old 4h default with smaller magnitude). Independent of `worker.timeoutSec`, which bounds one worker; there is still no run-duration cap — see the knob table below. |
 | `drainWindowSec` | `300` (5min) | Bounded grace window after a ceiling breach (daily budget / wall-clock / kill switch) during which running workers are asked to hand off gracefully before the conductor escalates to a hard process-tree kill. |
 
 ## `stop`
@@ -214,7 +216,7 @@ case, no knob at all) — this table exists because two of these are easy to mis
 | spawn confirmation | `liveness.spawnConfirmTimeoutMs` (#395) | Bounds waiting for a role session's or worker leg's own process-spawn event — distinct from `worker.timeoutSec`, which bounds the session once it's confirmed running. |
 | round | *(deliberately no duration cap)* | Bounded by *work*, not time: `lanes.roundDispatchCap` (dispatch quota) and `cost.roundBudgetUsd` (soft spend throttle) end a round's dispatch; there is no "a round may run at most N minutes" knob, by design — a round's real-world length follows its work. |
 | run | `stop.afterSpendUsd` / `afterIssuesMerged` / `afterPRsOpened` / `onMilestoneComplete` | Goal-based, not time-based — a run ends when one of these conditions fires (or on a signal), never on an elapsed-time budget. |
-| wall-clock window | `cost.maxWallClockSec` | A *continuous-activity* window that resets on any quiet gap — see above. Detects runaway churn, not a long run. |
+| wall-clock window | `cost.maxWallClockSec` | A per-process attention alarm — one clock per process life, fresh on every restart; see above. Not a long-run limiter, not a security boundary. |
 | calendar day | `cost.dailyBudgetUsd` | A burn-rate cap that renews at UTC midnight and survives restarts — the one cross-restart ceiling in this table. |
 
 **`run --milestone NAME` (#129):** a shortcut for the single most common bounded-run
@@ -850,7 +852,9 @@ validate` catches all three).
   again. The ping proves network + auth + *some* account capacity on the cheapest model —
   but **not** that the worker's own model/tier has quota (model-specific caps,
   primary-model-only overload), so a green ping is only a *gate*, never a recovery signal.
-  When the backoff interval elapses and the ping succeeds (and no forge episode is open), the
+  When the backoff interval elapses and the ping succeeds (and **no other park of any source is
+  open** — forge, rapid-restart, or any future park source: a green LLM light may bypass only
+  the LLM's own episode, #431), the
   engine dispatches exactly **one canary lane**. The llm episode clears only when that canary
   reaches a terminal state that is *not* itself env-classified; a canary that env-fails
   continues the *same* episode — the entry time (and therefore the escalation clock) is

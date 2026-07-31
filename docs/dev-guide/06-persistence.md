@@ -100,7 +100,7 @@ Append-only settled spend, one row per worker/model usage record: `id`, `ts`, `w
 
 #### `engine_session`
 
-Singleton row `id=1` with `started_at` and `last_tick_at`. `engineSessionStart()` creates/refreshes it; ceiling evaluation reads it. A sufficiently long tick gap begins a new continuous engine session, while short crash/restart gaps preserve the wall-clock ceiling window.
+Singleton row `id=1` with `started_at` and `last_tick_at`. Since #431 this row is a pure liveness heartbeat: `touchLastTick()` refreshes `last_tick_at` once per tick, and its only readers are the #395 progress watchdog (the `(maxEventId, lastTickAt)` tuple) and the dashboard's `stalled` derivation. The wall-clock ceiling never reads it — that ceiling anchors to in-memory process start (`TickDeps.processStartedAt`), so no gap heuristic exists and no restart can inherit a prior session (`started_at` remains as write-only schema bookkeeping).
 
 #### `ceiling_breach`
 

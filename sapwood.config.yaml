@@ -18,8 +18,15 @@ board:
     done: Done
 
 # engine:
-#   tickIntervalSec: 60 # how often the engine calls tick() (also feeds the wall-clock
-#                        # cost ceiling's session-gap scaling)
+#   tickIntervalSec: 60 # how often the engine calls tick() (the inter-tick sleep and the
+#                        # liveness watchdog window)
+#   rapidRestart:        # #431: crash-loop detector - counts this engine's own process starts
+#     maxBirths: 5       # (run-started events) at startup; maxBirths starts within windowSec
+#     windowSec: 600     # parks autonomous dispatch with an escalation until a later start
+#                        # observes the window drained. Normal restarts (manual, script, or a
+#                        # supervisor) never trip it; a supervisor's OWN crash-loop breaker
+#                        # (e.g. systemd StartLimitBurst) is still a prerequisite for
+#                        # unattended runs - see docs/security.md.
 #   driver: rounds       # #106: "rounds" (default) - the round orchestrator (aligning/
 #                        # architecting/dispatch/harvesting/retro peripherals wrapped
 #                        # around the tick engine, one round at a time). "tick" - the
@@ -119,6 +126,12 @@ worker:
 cost: # engine-enforced HARD ceiling (safety boundary, drains before killing)
   roundBudgetUsd: 30
   dailyBudgetUsd: 100
+  # maxWallClockSec: 86400 # #431: per-PROCESS attention alarm (default 24h) - breached when
+  #                        # THIS engine process has been alive longer than this; a restart at
+  #                        # any gap length starts a fresh clock. Not a security boundary:
+  #                        # dailyBudgetUsd above + guard/gates/kill-switch are the durable
+  #                        # cross-restart bounds. Note a 24h life can straddle UTC midnight
+  #                        # and thus two dailyBudgetUsd periods (docs/configuration.md).
 
 # dashboard:
 #   controls: true # v0.2 dashboard operations verbs (start/pause/resume/stop) and the
