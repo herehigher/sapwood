@@ -1124,3 +1124,263 @@ test("sapwood run (#431): a clean start (window drained) CLEARS a stale rapid-re
     state.close();
   }
 });
+
+// ── #407 (item 1): the terminal-event coverage table — every controlled exit path appends
+// exactly ONE `run-ended`, with the driver's own stoppedBy verbatim. The two paths that append
+// none are structural (cli.ts's appendRunEnded doc): the watchdog exits via process.exit from
+// its own timer (its terminal is `engine-stalled` — watchdog.test.ts's own territory), and a
+// hard kill unwinds nothing at all — the ABSENCE is the crash record, which is precisely what
+// the dashboard's latestRunTerminal reads it as. ─────────────────────────────────────────────
+
+/** The one run-ended event this run wrote — asserting exactly-one is part of every row. */
+function soleRunEnded(state: State): Record<string, unknown> {
+  const ended = state.eventsAfterId(0, ["run-ended"]);
+  assert.equal(ended.length, 1, "exactly one terminal event per run");
+  const trail = state.eventsAfterId(0, ["run-started", "run-ended"]);
+  assert.equal(trail[trail.length - 1]!.kind, "run-ended", "the terminal closes the run's own boundary — after run-started");
+  return ended[0]!.payload as Record<string, unknown>;
+}
+
+test("#407 terminal table, rounds + signal: a graceful signal stop appends run-ended {stoppedBy: signal}", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  try {
+    const code = await runEngine(["node", "sapwood", "run"], {
+      cfg: mkCfg(),
+      forge,
+      state,
+      logger: silentLogger,
+      sleep: async () => {},
+      // The signal arrives before the first round opens — the loop winds down immediately.
+      registerSignals: (requestStop) => {
+        requestStop();
+        return () => {};
+      },
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(soleRunEnded(state), { stoppedBy: "signal" });
+  } finally {
+    state.close();
+  }
+});
+
+test("#407 terminal table, rounds + stop-condition: a completed milestone appends run-ended {stoppedBy: stop-condition, stopCondition: onMilestoneComplete}", async () => {
+  const state = new State(":memory:");
+  class NamedMilestoneForge extends FakeForge {
+    override async listMilestoneTitles(): Promise<string[]> {
+      return ["M4 — UX surface + CLI"];
+    }
+    override async countOpenIssuesInMilestone(): Promise<number> {
+      return 0;
+    }
+  }
+  const forge = new NamedMilestoneForge();
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--milestone", "M4 — UX surface + CLI"], {
+      cfg: mkCfg(),
+      forge,
+      state,
+      logger: silentLogger,
+      sleep: async () => {},
+      registerSignals: () => () => {},
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(soleRunEnded(state), { stoppedBy: "stop-condition", stopCondition: "onMilestoneComplete" });
+  } finally {
+    state.close();
+  }
+});
+
+test("#407 terminal table, rounds + kill-switch: the KILL_SWITCH stop appends run-ended {stoppedBy: kill-switch} even as the run exits 1", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-rounds-terminal-kill-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const state = new State(join(dir, "sapwood.sqlite"));
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const forge = new FakeForge();
+    const code = await runEngine(["node", "sapwood", "run"], {
+      cfg: mkCfg(),
+      forge,
+      state,
+      logger: silentLogger,
+      roleRunnerDeps: {
+        stateDir: join(dir, "roles"),
+        worktreeRoot: join(dir, "worktrees"),
+        claudeBin: bin,
+        heartbeatMs: 50,
+        guardHookPath: mkHook(dir),
+        preSpawnCaptureTimeoutMs: 150,
+        preSpawnCapturePollMs: 10,
+      },
+      sleep: async () => {},
+      registerSignals: () => () => {},
+    });
+    assert.equal(code, 1, "kill-switch stop is a non-zero exit — an operator must notice");
+    assert.deepEqual(soleRunEnded(state), { stoppedBy: "kill-switch" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#407 terminal table, tick + --once: the single bounded tick appends run-ended {stoppedBy: once}", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge,
+      state,
+      logger: silentLogger,
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(soleRunEnded(state), { stoppedBy: "once" });
+  } finally {
+    state.close();
+  }
+});
+
+test("#407 terminal table, tick + --until-idle: the natural idle exit appends run-ended {stoppedBy: idle}", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge(); // empty board: the first tick is already idle
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--until-idle"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge,
+      state,
+      logger: silentLogger,
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(soleRunEnded(state), { stoppedBy: "idle" });
+  } finally {
+    state.close();
+  }
+});
+
+test("#407 terminal table, startup error AFTER the run boundary: a thrown startup pass appends run-ended {stoppedBy: error} and still rejects", async () => {
+  const state = new State(":memory:");
+  class NamedMilestoneForge extends FakeForge {
+    override async listMilestoneTitles(): Promise<string[]> {
+      return ["M4 — UX surface + CLI"];
+    }
+  }
+  const forge = new NamedMilestoneForge();
+  try {
+    await assert.rejects(
+      () => runEngine(["node", "sapwood", "run", "--milestone", "M4"], { cfg: mkCfg(), forge, state, logger: silentLogger }),
+      /no milestone titled "M4"/,
+    );
+    const payload = soleRunEnded(state);
+    assert.equal(payload.stoppedBy, "error");
+    assert.match(String(payload.error), /no milestone titled "M4"/);
+  } finally {
+    state.close();
+  }
+});
+
+// ── #407 (items 2+3): the stall lifecycle wired through the REAL runEngine startup path — the
+// unit-level table lives in stall-breaker.test.ts; these prove cli.ts actually calls it,
+// strictly after the run boundary. ───────────────────────────────────────────────────────────
+
+test("sapwood run (#407): a restart after a stalled run appends engine-restart-after-stall AFTER run-started and proceeds normally (tick driver)", async () => {
+  const state = new State(":memory:");
+  // The previous run's trace: its boundary, then the watchdog's terminal.
+  state.appendEvent("run-started", { configHash: "h" });
+  state.appendEvent("engine-stalled", { windowMs: 600_000 });
+  const forge = new FakeForge();
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge,
+      state,
+      logger: silentLogger,
+    });
+    assert.equal(code, 0, "startup stall-awareness never blocks the run");
+    const trail = state.eventsAfterId(0, ["run-started", "engine-restart-after-stall"]).map((e) => e.kind);
+    assert.deepEqual(
+      trail,
+      ["run-started", "run-started", "engine-restart-after-stall"],
+      "the audit record lands inside THIS run's replay group",
+    );
+    assert.equal(state.isParked(), false, "one stall is a restart, not an escalation");
+  } finally {
+    state.close();
+  }
+});
+
+test("sapwood run (#407): the Nth consecutive stalled run trips the breaker at startup — a durable consecutive-stalls park + local escalation, and ZERO dispatch of a ready issue", async () => {
+  const state = new State(":memory:");
+  for (let i = 0; i < 3; i++) {
+    state.appendEvent("run-started", { configHash: "h" });
+    state.appendEvent("engine-stalled", { windowMs: 600_000 });
+  }
+  const dispatched: number[] = [];
+  class ReadyForge extends FakeForge {
+    override async getReadyIssues(): Promise<Issue[]> {
+      return [{ number: 41, title: "wedged forever", labels: [], body: "" } as unknown as Issue];
+    }
+    override async claimIssue(...args: [number?]): Promise<void> {
+      dispatched.push(args[0] ?? -1);
+    }
+  }
+  const forge = new ReadyForge();
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge,
+      state,
+      logger: silentLogger,
+    });
+    assert.equal(code, 0, "the breaker parks dispatch; it does not abort the process");
+    assert.equal(state.isParked(), true, "the consecutive-stalls park gates dispatch");
+    assert.equal(state.eventsAfterId(0, ["consecutive-stalls-detected"]).length, 1);
+    assert.equal(state.eventsAfterId(0, ["park-escalated"]).length, 1, "escalated through the existing needs-human park channel");
+    assert.deepEqual(dispatched, [], "no worker was ever dispatched into the wedge");
+  } finally {
+    state.close();
+  }
+});
+
+test("#407 terminal table (gate② P2), stale-lock startup failure: a throw in the takeover append — after run-started, before the drivers' body — still closes the boundary with run-ended {stoppedBy: error}", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-terminal-takeover-"));
+  const state = new State(join(dir, "sapwood.sqlite"));
+  const lockPath = state.instanceLockPath();
+  assert.ok(lockPath !== null);
+  writeFileSync(lockPath!, JSON.stringify({ pid: 999999, token: "crashed", acquiredAt: "2026-07-30T00:00:00.000Z" }));
+  // The P2 window, reproduced exactly: the FIRST write after a successful run-started — the
+  // stale-lock takeover event — throws. Before the fix that write sat outside the terminal
+  // bracket, so the run exited through main()'s error handler with no terminal at all: a
+  // recorded false crash. The bracket now opens immediately after run-started, so this exit is
+  // a controlled failure with its run-ended pair.
+  const throwing = new Proxy(state, {
+    get(target, prop, receiver) {
+      if (prop === "appendEvent") {
+        return (kind: string, payload: Record<string, unknown>) => {
+          if (kind === "instance-lock-taken-over") throw new Error("takeover append exploded");
+          return target.appendEvent(kind, payload);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+  try {
+    await assert.rejects(
+      () =>
+        runEngine(["node", "sapwood", "run", "--once"], {
+          cfg: mkCfg({ engine: { driver: "tick" } }),
+          forge: new FakeForge(),
+          state: throwing as State,
+          logger: silentLogger,
+          pidLiveness: () => false, // scripted: the recorded holder is dead
+        }),
+      /takeover append exploded/,
+    );
+    const payload = soleRunEnded(state);
+    assert.equal(payload.stoppedBy, "error");
+    assert.match(String(payload.error), /takeover append exploded/);
+    assert.equal(existsSync(lockPath!), false, "the lock still releases through runEngine's own finally");
+  } finally {
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

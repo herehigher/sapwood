@@ -47,6 +47,11 @@ board:
 #                                 # (a long-but-healthy inline review session self-kills the
 #                                 # engine under a duration-based trigger; see watchdog.ts) —
 #                                 # durable engine-stalled event + nonzero exit
+#   maxConsecutiveStalls: 3       # #407: this many CONSECUTIVE runs all ending in a watchdog
+#                                 # stall with no round closed between them = a deterministic
+#                                 # wedge — the next start parks dispatch + escalates to a human
+#                                 # instead of blind-retrying (a transient wedge closes rounds
+#                                 # between stalls and never trips this; see stall-breaker.ts)
 
 # logging:
 #   path: data/logs/sapwood.log # disposable run narrative; relative paths resolve against

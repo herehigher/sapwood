@@ -246,6 +246,79 @@ At every level, `sapwood status` (below) tells you what's happening without need
 live session, and `/sapwood-stop` is always available to freeze or gently pause the
 engine — see [`security.md`](security.md) for exactly what each control does.
 
+## Running under a supervisor
+
+sapwood deliberately ships **no supervisor of its own** — process supervision is the
+operator's concern, and the platform (systemd, launchd, a loop script) already solves it
+with fewer failure modes than a bundled `--supervise` parent would add. What sapwood
+ships instead is a **supervision contract** the engine holds up its end of:
+
+- **Exit semantics.** A clean stop — a signal, a `stop.*` condition, `--once`/
+  `--until-idle`, the kill switch — writes a durable `run-ended` event naming the reason
+  and exits (`0`, except the kill switch and a failed `--once`, which exit `1` so a
+  script notices). A **self-diagnosed stall** — the progress watchdog observing a whole
+  window with zero durable events — writes `engine-stalled` and exits **nonzero**: that
+  nonzero exit is the restart request. A crash writes nothing, and that absence is
+  itself meaningful (see [troubleshooting.md](troubleshooting.md#how-a-dead-engine-says-why-it-died-407)).
+- **Restart is always safe.** Startup is rerun-not-resume: reconcile recovers the round
+  in flight, adopts still-alive detached workers, and a restart after a stall records
+  `engine-restart-after-stall` for the audit trail — no manual step, no state surgery.
+- **The engine carries its own restart-loop backstops**, so supervision cannot turn a
+  deterministic failure into an infinite loop: `engine.rapidRestart` parks a **crash
+  loop** (too many process births in a window), and `liveness.maxConsecutiveStalls`
+  parks a **deterministic wedge** (consecutive stalled runs with no round closed between
+  them) — both escalate to a human through the park channel instead of burning restarts.
+  The stall count resets **only on real progress — a round closing — never on how a run
+  exited**: clean stops (including the SIGTERM your supervisor sends before every
+  restart) and crashes alike are neutral, so no restart pattern can launder a wedge past
+  the breaker (the engine cannot observe the intent behind a signal and does not infer
+  it). An established `consecutive-stalls` park **never auto-clears**: it stands, with
+  its single escalation, across any number of restarts until you clear it explicitly —
+  see [troubleshooting.md](troubleshooting.md#consecutive-stalls-park-407) for the
+  operator-clear step. These are backstops, not a substitute: configure the
+  supervisor's **own** circuit-breaker too — a *prerequisite* for unattended supervised
+  runs ([security.md](security.md)'s supervisor prerequisite).
+- **Stopping a supervised engine** is the supervisor's stop verb (e.g. `systemctl stop`),
+  which sends SIGTERM — the in-flight round finishes, harvest included, and `run-ended`
+  is written. The kill switch remains the in-band emergency freeze; note a kill-switch
+  stop exits `1`, which a `Restart=on-failure` supervisor will restart into another
+  immediate kill-switch exit until you stop the unit or lift the switch.
+
+Worked example — systemd (`/etc/systemd/system/sapwood.service`):
+
+```ini
+[Unit]
+Description=sapwood engine
+After=network-online.target
+# The supervisor's OWN circuit-breaker (security.md prerequisite): stop restarting
+# after 5 failures inside 10 minutes; `systemctl reset-failed sapwood` re-arms it.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+# The repo the engine drives; config, data/ and logs resolve from here.
+WorkingDirectory=/srv/my-repo
+ExecStart=/usr/bin/env sapwood run
+# Restart the watchdog's nonzero stall exit; a clean signal stop stays stopped.
+Restart=on-failure
+RestartSec=30
+# Graceful stop: SIGTERM lets the in-flight round finish (harvest included) and
+# write its run-ended terminal. The stop timeout must comfortably outlive
+# worker.timeoutSec (default 3600s) so a draining worker is never SIGKILLed
+# mid-handoff.
+KillSignal=SIGTERM
+TimeoutStopSec=3900
+
+[Install]
+WantedBy=multi-user.target
+```
+
+On macOS, launchd's equivalents are `KeepAlive` with
+`<key>SuccessfulExit</key><false/>` (restart only on nonzero exit) and
+`ExitTimeOut` for the graceful-stop window; launchd has no built-in start-limit
+burst, which makes the engine's own two backstops — and checking
+`sapwood status` after any unattended stretch — matter more there.
+
 ## Slash commands
 
 These are thin wrappers around the `sapwood` CLI, meant to be run from inside a Claude

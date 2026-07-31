@@ -225,6 +225,60 @@ prerequisite), fix the crash's cause, and start the engine once the window has d
 (`park-resumed`, `via: restart-window-clear`). No state surgery is needed; deleting the
 `park_state` row by hand also works but should never be necessary.
 
+## Consecutive-stalls park (#407)
+
+The progress watchdog ([configuration.md](configuration.md)'s `liveness.watchdogTickMultiplier`)
+diagnoses a *single* stall: it appends a durable `engine-stalled` event and exits nonzero so a
+supervisor can restart the engine. At startup the engine reads that record back: a restart after
+a stalled run appends `engine-restart-after-stall` and proceeds through the normal startup
+reconcile (rerun-not-resume — no manual step). But once the last `liveness.maxConsecutiveStalls`
+runs (default 3) have **all** ended stalled with **no round closed between them**, the wedge is
+deterministic — the same bug re-wedging every restart — and restarting again would loop forever.
+The engine then emits `consecutive-stalls-detected`, **parks** autonomous dispatch (the same park
+machinery as an environment failure — `PARKED (consecutive-stalls)` in `sapwood status`, plus
+`data/ESCALATION`), and stays up without dispatching.
+
+Recovery is **operator-explicit — this park never auto-clears.** The stall count that *arms*
+the breaker resets only on real progress (a round closing between stalls); how a run exited is
+always neutral — clean stops (including the SIGTERM a supervisor sends before every restart)
+and hard kills alike — so no restart pattern can launder the wedge. And once the park is
+established, no engine-produced signal clears it either: a dispatch-empty round closing while
+parked only proves the orchestration loop is healthy, not that the wedge on the (gated)
+dispatch surface is gone, so the engine deliberately does not read it as recovery. The steps:
+
+1. Diagnose the wedge — each `engine-stalled` event's payload names the open round/phase, the
+   last event, and the tick age — and fix the cause.
+2. Clear the park by deleting its `park_state` row (the same manual channel as every park):
+
+   ```sh
+   sqlite3 data/sapwood.sqlite "DELETE FROM park_state WHERE source = 'consecutive-stalls'"
+   ```
+
+3. Start (or restart) the engine. The next start observes the deletion, records the clear
+   (`park-resumed`, `via: operator-clear`), removes the `data/ESCALATION` marker, and resumes
+   dispatch. The streak restarts from zero — if the wedge was not actually fixed, a fresh
+   streak re-parks and re-escalates as a new episode.
+
+Until you act, the park and its single, deduped escalation stand across any number of restarts
+— nothing is re-spammed and nothing is lost. A *transient* wedge (a host sleeping mid-round, a
+passing outage) closes rounds between its stalls and never trips the breaker at all.
+
+## How a dead engine says why it died (#407)
+
+Every run's fate is the **last run-lifecycle event** in the ledger after its `run-started`:
+
+- `run-ended` — a clean stop; the payload's `stoppedBy` names the path (`signal`, `once`,
+  `idle`, `stop-condition` + the condition's name, `kill-switch`, or `error` with the thrown
+  message).
+- `engine-stalled` — the watchdog self-diagnosed a stall and exited nonzero; the payload carries
+  the round/phase, last event, and tick age at fire time.
+- *neither* — the process died without getting to write anything: a crash, an OOM kill, or a
+  `kill -9`. The absence is itself the record.
+
+The dashboard derives its dead-engine state from exactly this partition (`stopped` with a
+reason / `stalled` with a reason / bare crashed-or-killed), so it and the ledger can never
+disagree.
+
 ## Where to look after an unattended run
 
 The run log (`logging.path`, default `data/logs/sapwood.log`) is the disposable human/LLM
