@@ -870,6 +870,65 @@ test("reconcileEscalations: a review-disputed lane resolves via 'label-removed' 
   state.close();
 });
 
+// #450 (design #402 R3, §3c; architectural review amendment 2026-07-31, item 1): review-non-convergent
+// must be a tracked source too — same F34 invisible-escalation class the tests above guard against,
+// for conductor.ts's `escalateNonConvergent` (the convergence-stop escalation).
+
+test("openEscalations: review-non-convergent is a tracked source — the convergence-stop escalation must surface on the strip, never the F34 invisible class (#450)", () => {
+  const open = openEscalations([
+    {
+      kind: "review-non-convergent",
+      payload: { worker: "w1", issue: 7, pr: 12, signal: "recurrence", fixRounds: 2, prevFindingKeys: ["a"], currFindingKeys: ["a"] },
+    },
+  ]);
+  assert.equal(open.size, 1);
+  assert.deepEqual(open.get("review-non-convergent:7"), { source: "review-non-convergent", issue: 7, pr: 12, labelProven: true });
+});
+
+test("reconcileEscalations: a review-non-convergent lane whose PR was hand-merged resolves via 'merged' — same clear semantics as fix-rounds-capped/fix-leg-verdict-rerun/review-disputed (#450)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("review-non-convergent", {
+    worker: "w1",
+    issue: 7,
+    pr: 12,
+    signal: "flat",
+    fixRounds: 3,
+    prevFindingKeys: [],
+    currFindingKeys: [],
+  });
+  forge.prStates[12] = "MERGED";
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source: "review-non-convergent", via: "merged" }]);
+  state.close();
+});
+
+test("reconcileEscalations: a review-non-convergent lane resolves via 'label-removed' once a human clears needs-human without merging — the #147 gated-reentry reclaim path (#450)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("review-non-convergent", {
+    worker: "w1",
+    issue: 7,
+    pr: 12,
+    signal: "marginal-complexity",
+    fixRounds: 1,
+    prevFindingKeys: [],
+    currFindingKeys: ["a"],
+  });
+  forge.prStates[12] = "OPEN";
+  forge.issueStates[7] = "OPEN";
+  forge.issueLabels[7] = []; // the human removed needs-human — #147's reclaim signal
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source: "review-non-convergent", via: "label-removed" }]);
+  state.close();
+});
+
 // #447: `lane-revived` is the OTHER return of a `failed` lane to `driving` — same clear rule.
 // #457 review round 1 (P1): `fix-leg-verdict-rerun` rides the same parametrized sweep — it must
 // clear on every issue-moving kind exactly like the sources it shares the fold with.

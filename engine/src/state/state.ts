@@ -2182,6 +2182,37 @@ export class State {
     return p.headOid == null ? null : { id: row.id, headOid: p.headOid };
   }
 
+  /** #450 (design #402 R3, architectural review amendment 2026-07-31, item 2): the SAME id+value
+   *  dedup shape as `lastReviewDisputedFailureEvent` above, for the convergence-stop escalation's
+   *  two `review-non-convergent-*-failed` companion kinds — a genuinely permanent failure class
+   *  (an over-limit comment, a standing label-permission problem) gets the identical dedup
+   *  discipline every other terminal-escalation failure kind in this file already has (#383/#465:
+   *  without it, a standing forge-write problem re-appends its own `-failed` event every tick
+   *  forever, the F30 steady-state event-spam class). Keyed on `fixRounds` rather than `headOid`
+   *  (`lastReviewDisputedFailureEvent`'s own key): this escalation is not thread-bound — there is
+   *  no head OID to key on — and `fixRounds` is `escalateNonConvergent`'s own stable identity for
+   *  ONE escalation attempt (it never changes mid-attempt; a lane whose `fix_rounds` later
+   *  increments has, by construction, left this branch and dispatched another fix leg instead).
+   *  Scoped to (worker, pr), same lane-repointing rationale as every sibling helper here. */
+  lastReviewNonConvergentFailureEvent(
+    kind: "review-non-convergent-label-failed" | "review-non-convergent-comment-failed",
+    worker: string,
+    pr: number,
+  ): { id: number; fixRounds: number } | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, payload FROM events
+         WHERE kind = ?
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.pr') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(kind, worker, pr) as { id: number; payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { fixRounds?: unknown };
+    return typeof p.fixRounds === "number" ? { id: row.id, fixRounds: p.fixRounds } : null;
+  }
+
   /** #449 gate② P1 fix (design #402 R2): the most recent `drive-fixup` event's id + recorded
    *  `head` for (worker, pr), or `null` if none has ever been recorded — `conductor.ts`'s
    *  `gatherFixDiffPaths` reads this to find the PRECEDING round's head, the start of the range
@@ -2197,17 +2228,26 @@ export class State {
    *  predates this field — a #449-deploy-transition edge, not a genuine round 1). The caller
    *  tells them apart by checking for a `null` return vs. a non-null return whose `head` is
    *  `null`, and must NOT treat the two identically (see `gatherFixDiffPaths`'s own doc for why:
-   *  only the true round-1 case is safe to widen to the full base..head set). */
-  lastDriveFixupEvent(worker: string, pr: number): { id: number; head: string | null } | null {
+   *  only the true round-1 case is safe to widen to the full base..head set).
+   *
+   *  #450 gate② P1: `afterId` (default `0`, so every pre-#450 call site — and the existing pinned
+   *  test — is byte-for-byte unchanged) restricts the read to `id > afterId`, the SAME id-cursor
+   *  shape `eventsAfterId` already uses elsewhere in this file. `conductor.ts`'s `gatherFixDiffPaths`
+   *  passes `CONVERGENCE_EPISODE_RESET_KINDS`'s boundary here so a `drive-fixup` from a PRIOR
+   *  convergence episode (before the lane's most recent `gated-reentry`/`lane-revived`) is invisible
+   *  to this read — the post-reclaim round then correctly sees "no previous drive-fixup THIS
+   *  episode" (`null`), not a stale pre-escalation head. */
+  lastDriveFixupEvent(worker: string, pr: number, afterId = 0): { id: number; head: string | null } | null {
     const row = this.db
       .prepare(
         `SELECT id, payload FROM events
          WHERE kind = 'drive-fixup'
+           AND id > ?
            AND json_extract(payload, '$.worker') = ?
            AND json_extract(payload, '$.pr') = ?
          ORDER BY id DESC LIMIT 1`,
       )
-      .get(worker, pr) as { id: number; payload: string } | undefined;
+      .get(afterId, worker, pr) as { id: number; payload: string } | undefined;
     if (!row) return null;
     const p = JSON.parse(row.payload) as { head?: unknown };
     return { id: row.id, head: typeof p.head === "string" ? p.head : null };

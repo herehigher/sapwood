@@ -195,6 +195,28 @@ export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   // before this event. Its payload carries `pr` (the driving lane's own), so an external
   // merge/close/label-removal resolves it exactly like every other pr-bearing `always` source.
   "review-disputed": "always",
+  // #450 (design #402 R3, §3c; architectural review amendment 2026-07-31, item 1): the
+  // convergence-stop escalation — conductor.ts's `escalateNonConvergent`, the FIXABLE branch's
+  // dedicated "the progress classifier returned a STALLED verdict" path. Landed after this table's
+  // own #441/#468+#432-R6 discipline was set, so it is registered from the start rather than
+  // discovered as an F34 gap later (the amendment's own framing: "every needs-human-writing
+  // escalation kind absent from this table is the F34 class"). Distinct from (and disjoint with)
+  // `fix-rounds-capped`/`fix-leg-verdict-rerun`/`review-disputed` above even though it shares their
+  // forge-before-terminal-upsert shape — `driveDecision` (conductor.ts) only ever reaches this
+  // branch for a STALLED `progress` verdict, never a spent cap or a verdict rerun (the amendment's
+  // own three-way precedence keeps the three mutually exclusive on any one tick).
+  //
+  // `always`, following `fix-rounds-capped`'s OWN discipline exactly (the amendment's explicit
+  // instruction: "follow fix-rounds-capped's discipline"): the event is appended strictly AFTER
+  // its own `addLabel` AND `addIssueComment` both returned successfully — a label-write failure
+  // appends only the companion `review-non-convergent-label-failed` (out of this table, same
+  // "label-first-or-no-event" doctrine as `gated-reentry-capped-label-failed`) and returns without
+  // ever reaching this event; a comment-write failure appends only
+  // `review-non-convergent-comment-failed`, likewise out of this table and likewise
+  // short-circuiting before this event. Its payload carries `pr` (the driving lane's own), so an
+  // external merge/close/label-removal resolves it exactly like every other pr-bearing `always`
+  // source — including the #147 gated-reentry reclaim path this escalation's own comment points at.
+  "review-non-convergent": "always",
   // DELIBERATELY ABSENT (#441): `resume-held`. It is a new event kind that leaves a lane stopped,
   // so the question "does it need a row here?" is exactly the one F34 punishes getting wrong —
   // answered NO, on purpose, for two independent reasons. (1) It is not a new attention item: it

@@ -19,6 +19,13 @@ import { firstMatchingLabel, labelsInclude, matchBlockedByLabel, matchPriorityLa
 import { capDigest } from "../retro/retro-digest.js";
 import { buildAcSnapshot, checkAcSnapshotDrift } from "../review/ac-snapshot.js";
 import { parseEngineReviewArtifact } from "../review/audit.js";
+import {
+  type ConvergenceStallSignal,
+  type ConvergenceVerdict,
+  classifyProgress,
+  computeFlatStreak,
+  countBlocking,
+} from "../review/convergence.js";
 import type { EngineAgentDriveDeps } from "../review/drive.js";
 import { effectiveSeverity, type FindingKind, type FindingSeverity } from "../review/finding-axes.js";
 import { boundRecords, classicThreadFindingKey, engineAgentFindingKey } from "../review/finding-key.js";
@@ -369,13 +376,28 @@ export type DriveAction = "MERGE" | "WAIT" | "FIXUP" | "ESCALATE";
  * Derive a scheduling action from the PR gate + fixup-round count.
  *  MERGE -> MERGE; WAIT -> WAIT;
  *  FIXABLE: non-integer/negative rounds OR over-budget -> ESCALATE (no new fixup worker);
+ *           a STALLED progress verdict -> ESCALATE, checked BEFORE the cap (#450, design #402
+ *           R3/§3c, architectural review amendment item 2: precedence is verdict-rerun (the
+ *           caller's own #457 breaker, checked before this function is even called) ->
+ *           convergence-stalled (this check) -> cap (the fallthrough below) — a stalled lane
+ *           must never pay another fix round just because rounds remain under the cap);
  *           rounds < cap -> FIXUP, else ESCALATE.
  *  HUMAN / empty / unknown -> ESCALATE (fail-safe: never auto-merge/auto-fix on a bad signal).
+ *
+ * `progress` defaults to `"converging"` so every pre-#450 call site (and every existing test that
+ * never passes a fifth argument) keeps its exact prior behavior — this function's signature grew,
+ * its FIXABLE semantics for a converging (or unclassified) lane did not.
  *
  * NOTE: this is the conductor's drive_decision only. The PR-gate ACTION->action map
  * (0day merge_decision / pr_gate) belongs to M3's reviewer.ts + merge-driver.ts.
  */
-export function driveDecision(gate: string, fixRounds: number, cap: number, overBudget: boolean): DriveAction {
+export function driveDecision(
+  gate: string,
+  fixRounds: number,
+  cap: number,
+  overBudget: boolean,
+  progress: ConvergenceVerdict = "converging",
+): DriveAction {
   switch (gate) {
     case "MERGE":
       return "MERGE";
@@ -384,6 +406,7 @@ export function driveDecision(gate: string, fixRounds: number, cap: number, over
     case "FIXABLE":
       if (!Number.isInteger(fixRounds) || fixRounds < 0) return "ESCALATE";
       if (overBudget) return "ESCALATE";
+      if (typeof progress === "object") return "ESCALATE"; // #450: stalled — before the cap check
       return fixRounds < cap ? "FIXUP" : "ESCALATE";
     default:
       return "ESCALATE";
@@ -477,6 +500,32 @@ export function priorFixLegForVerdict(state: Pick<State, "eventsSince">, worker:
   return tripped;
 }
 
+/** #450 gate② P1 (architectural review, 2026-07-31; PM adjudication accepted this as the ruling):
+ *  the CONVERGENCE EPISODE boundary. An escalation (verdict-rerun, convergence-stalled, or
+ *  fix-rounds-capped) appends NO `drive-fixup` event — nothing dispatched, nothing to record — so
+ *  without a reset, the first classification after a #147 GATED RECLAIM (`gated-reentry`) or a
+ *  #447 park-recovery reentry (`lane-revived`) would fold in PRE-ESCALATION rounds the human never
+ *  saw: `prev` misaligned by one round (the escalated round itself was never recorded), a
+ *  `fixDiffPaths` range that silently widens across the human's OWN intervening diff (reproducing
+ *  the exact over-wide-range false-STALL #449's gate② P1 was written to kill — "the false-positive
+ *  direction here silently *stops* a productive lane"), and a `flatStreak` that keeps counting
+ *  pre-reclaim rounds, capable of re-firing `flat` on the very FIRST post-reclaim verdict with zero
+ *  fix leg dispatched. A human has no config knob to clear a convergence verdict the way raising
+ *  `prFixCap` clears a spent cap — #147 gated reclaim is the ONLY reset available, so it must
+ *  actually reset.
+ *
+ *  Bounding the fold at `state.maxEventIdForKinds(CONVERGENCE_EPISODE_RESET_KINDS, worker, pr)` —
+ *  reused by `gatherFixDiffPaths` (the previous-head selection) and `classifyConvergenceProgress`
+ *  (the `prev`/`flatStreak` history read) — makes the first post-reclaim classification see
+ *  `prev === null`: round-1 semantics, ALWAYS `"converging"`, exactly one fresh fix leg dispatches
+ *  (or the lane merges outright) and the streak rebuilds from live, post-reclaim rounds only. Zero
+ *  new machinery: `maxEventIdForKinds` is the same helper `dedupeFailure` (this file) and
+ *  `REVIEW_DISPUTED_ESCALATION_FAILURE_RESET_KINDS`'s own doc already call `gated-reentry`/
+ *  `lane-revived` episode boundaries for the identical "a human-initiated fresh look at the SAME
+ *  (worker, pr) is a genuinely new episode" reason — this is the one consumer that had been
+ *  ignoring its own convention. */
+const CONVERGENCE_EPISODE_RESET_KINDS = ["gated-reentry", "lane-revived"];
+
 /** #449 (design #402 R2, §3a): one `drive-fixup` payload's identity record — the `findings` array
  *  (`{key, severity, kind}`) and `fixDiffPaths` bound, both truncation-marked rather than
  *  silently dropped (`review/finding-key.ts`'s `boundRecords`). A fixed, arbitrary-but-documented
@@ -541,6 +590,11 @@ interface FixupFindingRecord {
  * `fixDiffPaths` sourcing lives in `gatherFixDiffPaths` below — see that function's own doc for
  * the range-diff mechanics (#449 gate② P1 fix). `currentHead`, needed there, comes off the SAME
  * data already fetched for `findings` above (`wal.head` / `data.headOid`) — no extra forge call.
+ *
+ * #450 gate② P1: computes its own `CONVERGENCE_EPISODE_RESET_KINDS` boundary
+ * (`state.maxEventIdForKinds`) and passes it to `gatherFixDiffPaths`, so a post-#147-reclaim (or
+ * post-#447-revival) round's `fixDiffPaths` never ranges back across the human's own intervening
+ * diff — see `CONVERGENCE_EPISODE_RESET_KINDS`'s own doc for the full failure mode this closes.
  */
 async function gatherFixupFindingRecord(
   state: State,
@@ -549,6 +603,7 @@ async function gatherFixupFindingRecord(
   pr: number,
   verdictRunId: string | undefined,
 ): Promise<FixupFindingRecord> {
+  const episodeResetId = state.maxEventIdForKinds(CONVERGENCE_EPISODE_RESET_KINDS, worker.name, pr);
   let rawFindings: FixupFindingRecordEntry[] = [];
   let currentHead: string | null = null;
   try {
@@ -583,7 +638,7 @@ async function gatherFixupFindingRecord(
     rawFindings = [];
   }
   const boundedFindings = boundRecords(rawFindings, MAX_FIXUP_FINDINGS);
-  const diffPaths = await gatherFixDiffPaths(state, forge, worker.name, pr, currentHead);
+  const diffPaths = await gatherFixDiffPaths(state, forge, worker.name, pr, currentHead, episodeResetId);
 
   return {
     findings: boundedFindings.entries,
@@ -633,6 +688,14 @@ async function gatherFixupFindingRecord(
  * marked `fixDiffPaths` degrades that round's classifier to count-only convergence, the design's
  * own sanctioned narrower direction (§3a's "accepted blind spot" for unlocated findings takes the
  * identical shape), never a false signal in either direction.
+ *
+ * #450 gate② P1: `episodeResetId` (`CONVERGENCE_EPISODE_RESET_KINDS`'s own boundary) is passed to
+ * `state.lastDriveFixupEvent` so a `drive-fixup` from a PRIOR convergence episode (before the most
+ * recent `gated-reentry`/`lane-revived`) is invisible to the `prev === null` check below — a round
+ * immediately following a #147 reclaim (or a #447 park revival) therefore takes the SAME "round 1
+ * of this episode: EXACT base..head" branch a lane's true first round takes, never a range that
+ * silently spans the human's own intervening diff (see `CONVERGENCE_EPISODE_RESET_KINDS`'s own doc
+ * for the failure mode this closes).
  */
 async function gatherFixDiffPaths(
   state: State,
@@ -640,10 +703,11 @@ async function gatherFixDiffPaths(
   workerName: string,
   pr: number,
   currentHead: string | null,
+  episodeResetId: number,
 ): Promise<{ paths: string[]; truncated: boolean; unavailable: boolean }> {
   if (currentHead === null) return { paths: [], truncated: false, unavailable: true };
   try {
-    const prev = state.lastDriveFixupEvent(workerName, pr);
+    const prev = state.lastDriveFixupEvent(workerName, pr, episodeResetId);
     let files: readonly PRChangedFile[];
     let complete: boolean;
     if (prev === null) {
@@ -3357,14 +3421,25 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "review-disputed-escalation-write-failed" });
             break;
           }
-          const action = driveDecision("FIXABLE", fixRounds, cap, driveOverBudget);
           // #457 (F36): verdict-rerun breaker — see priorFixLegForVerdict's own doc. A prior
           // `drive-fixup` for this exact engine-agent verdict means its one leg already ran and
           // pushed nothing; a rerun gets byte-identical inputs, so no further fix round is spent
           // and the SAME escalation branch a spent cap takes below runs instead. Fixables with
-          // no verdictRunId (classic reviewer, conflict, fallback) never trip it.
+          // no verdictRunId (classic reviewer, conflict, fallback) never trip it. Computed FIRST,
+          // before #450's progress classification below — the amendment's own three-way
+          // precedence (verdict-rerun -> convergence-stalled -> cap): a byte-identical rerun is
+          // futile regardless of measured progress, so it wins outright.
           const verdictRerun = outcome.verdictRunId !== undefined && priorFixLegForVerdict(state, w.name, outcome.verdictRunId);
-          if (action === "FIXUP" && !verdictRerun) {
+          // #450 gate② P3c: whether THIS lane could possibly want a NEW fix leg at all —
+          // fixRounds strictly under cap, not a verdict-rerun (which never dispatches regardless),
+          // and fixRounds itself a valid, driveDecision-would-not-fail-safe value. Purely
+          // arithmetic, zero forge reads. When `false` (already at/over cap, or invalid rounds),
+          // this lane is going to ESCALATE one way or another and — matching the CAP-exhaustion
+          // branch's own long-standing, unconditional-of-admission-state behavior below — the
+          // fixLegResume/admission checks are skipped entirely (they only ever governed whether a
+          // NEW SPAWN could proceed, never whether an escalation could fire).
+          const roundsRemain = !verdictRerun && Number.isInteger(fixRounds) && fixRounds >= 0 && fixRounds < cap;
+          if (roundsRemain) {
             if (!deps.fixLegResume) {
               // #246 review round 1 (C1, PM-narrowed): an unwired fix loop must DEGRADE to the
               // exact pre-#246 escalation (visible needs-human), never a silent retry-forever —
@@ -3374,7 +3449,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               // instead of the pre-#246 HANDLE_THREADS -> HUMAN escalation an operator could
               // actually see and act on. Wiring a real mintProxy into cli.ts/round.ts is
               // explicitly OUT of scope for this PR (#253's own deliverable) — this only makes
-              // today's unwired default fail-SAFE and VISIBLE instead of fail-silent.
+              // today's unwired default fail-SAFE and VISIBLE instead of fail-silent. This check
+              // needs no progress/convergence input at all (structural: is the fix loop even
+              // wired), so #450 gate② P3c hoisted it — and the admission-block check below it —
+              // ahead of `gatherFixupFindingRecord`'s forge reads; see that call site's own doc.
               const reason = `fix-loop-unwired:${outcome.reason}`;
               state.appendEvent("fix-leg-dispatch-unconfigured", { worker: w.name, issue: w.issue, pr, reason });
               driven.push(await escalateNeedsHuman(forge, state, cfg, w, pr, reason, iso));
@@ -3401,6 +3479,20 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             // pre-DRIVE-loop snapshot — DRIVE can run long across many lanes, and wall-clock
             // keeps elapsing regardless of spend, so a snapshot taken before the loop started
             // could be stale by the time a LATER lane reaches this check.
+            //
+            // #450 gate② P3c (accepted, PM adjudication): checked BEFORE `gatherFixupFindingRecord`
+            // now, not after — on main (pre-#450) this check already gated every forge read a
+            // FIXUP dispatch triggers; #450's own progress classification had regressed that,
+            // paying `gatherFixupFindingRecord`'s 1-2 forge reads on EVERY non-rerun FIXABLE tick
+            // regardless of admission state (a paused/parked lane repeated them every tick for the
+            // duration of the block — the #383 90-minute-park evidence base). ACCEPTED TRADE-OFF,
+            // stated as such (marginal-complexity discipline): a lane that would have STALLED this
+            // tick, were it evaluated, defers that escalation until the block clears, exactly like
+            // it now defers a would-be dispatch — never wrong, only delayed by the block's own
+            // duration, and the block itself is already a "nothing proceeds" condition for this
+            // lane. This does NOT touch the CAP-exhaustion escalation's own long-standing
+            // unconditional-of-admission-state behavior (`roundsRemain` is `false` once fixRounds
+            // >= cap, so admission is never consulted there — same as before this issue).
             const admissionBlock = fixLegAdmissionBlockReason({
               paused: humanPauseOnly,
               ceilingBreached: ceilingReasonsAsOf(now()).length > 0,
@@ -3439,21 +3531,47 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               if (admissionBlock === "ceiling") driveFixBlockedLanes.add(w.name);
               break;
             }
+          }
+          // #450 (design #402 R3, §3c; amendment item 2): the CURRENT decisive verdict's finding
+          // record + progress classification, gathered/computed only when NOT a verdict-rerun (the
+          // extra WAL/thread read and the drive-fixup history fold would be pure waste on that
+          // path, since verdictRerun already wins regardless of what progress says). Gathered here
+          // — BEFORE driveDecision, not just before startFixLeg — because driveDecision itself now
+          // needs `progress` to decide FIXUP vs ESCALATE; #449 gate② P2's own crash-window
+          // narrowing (this function's own doc) is UNCHANGED by moving the read earlier: the
+          // window that matters is confirmed-spawn -> drive-fixup-append, and every statement
+          // between this gather and `startFixLeg` below (driveDecision, the dispatch itself) is
+          // synchronous — no new `await` sits between them that didn't already sit there. On
+          // dispatch, the SAME `findingRecord` computed here is reused for the `drive-fixup`
+          // append below (no second read); on escalation (stalled or capped), it supplies the
+          // comment's finding-key evidence. Reached ONLY when `roundsRemain` was false (already at
+          // cap — still needs progress to pick the correct escalation label, #450 gate② P3d) OR
+          // `roundsRemain` was true AND both the fixLegResume/admission checks above cleared (#450
+          // gate② P3c's own trade-off: a blocked/unconfigured lane never reaches this line at all).
+          let findingRecord: FixupFindingRecord | null = null;
+          let progress: ConvergenceVerdict = "converging";
+          let progressPrev: FixupFindingRecordEntry[] | null = null;
+          if (!verdictRerun) {
+            findingRecord = await gatherFixupFindingRecord(state, forge, w, pr, outcome.verdictRunId);
+            const classified = classifyConvergenceProgress(state, w.name, pr, findingRecord);
+            progress = classified.verdict;
+            progressPrev = classified.prev;
+          }
+          const action = driveDecision("FIXABLE", fixRounds, cap, driveOverBudget, progress);
+          if (action === "FIXUP" && !verdictRerun) {
             try {
-              // #449 gate② P2 fix (design #402 R2): gathered BEFORE startFixLeg, not after — the
-              // confirmed-spawn -> drive-fixup-append window is #457's `priorFixLegForVerdict`
-              // breaker's own durable memory boundary ("the breaker's one durable memory of 'this
-              // verdict already got its leg'"), and two live forge reads sitting in that window
-              // widened it from ~zero to real network-round-trip time: a crash there leaves a
-              // spawned leg + `fix-leg-started` on record with NO `drive-fixup` to follow it, so
-              // the breaker misses and a duplicate leg is admitted for the same verdict.
-              // gatherFixupFindingRecord never throws (see its own doc), so moving it here costs
-              // nothing on the error path below — only startFixLeg itself can land in the catch.
-              const findingRecord = await gatherFixupFindingRecord(state, forge, w, pr, outcome.verdictRunId);
+              // #449 gate② P2 fix (design #402 R2) + #450: `findingRecord` was already gathered
+              // above — reused here, not re-read. `!verdictRerun` here guarantees `findingRecord`
+              // is non-null (the `if (!verdictRerun)` gather above is the ONLY place it is ever
+              // set); the fixLegResume/admission checks that used to physically sit here (pre-P3c)
+              // already ran, and passed, earlier in this branch — `action === "FIXUP"` cannot be
+              // reached otherwise (`roundsRemain` gated them, and a block/unconfigured fix loop
+              // `break`s out of the whole case before `driveDecision` is even called).
+              const dispatchFindingRecord = findingRecord!;
               await startFixLeg(
-                { state, supervisor, renderFixPrompt: deps.fixLegResume.renderFixPrompt },
+                { state, supervisor, renderFixPrompt: deps.fixLegResume!.renderFixPrompt },
                 w,
-                { mint: deps.fixLegResume.mintProxy, credentialFree: true },
+                { mint: deps.fixLegResume!.mintProxy, credentialFree: true },
                 now,
                 outcome.prescription,
               );
@@ -3468,12 +3586,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
                 fixRounds: fixRounds + 1,
                 reason: outcome.reason,
                 ...(outcome.verdictRunId !== undefined ? { verdictRunId: outcome.verdictRunId } : {}),
-                ...(findingRecord.head !== null ? { head: findingRecord.head } : {}),
-                findings: findingRecord.findings,
-                ...(findingRecord.findingsTruncated ? { findingsTruncated: true as const } : {}),
-                fixDiffPaths: findingRecord.fixDiffPaths,
-                ...(findingRecord.fixDiffPathsTruncated ? { fixDiffPathsTruncated: true as const } : {}),
-                ...(findingRecord.fixDiffPathsUnavailable ? { fixDiffPathsUnavailable: true as const } : {}),
+                ...(dispatchFindingRecord.head !== null ? { head: dispatchFindingRecord.head } : {}),
+                findings: dispatchFindingRecord.findings,
+                ...(dispatchFindingRecord.findingsTruncated ? { findingsTruncated: true as const } : {}),
+                fixDiffPaths: dispatchFindingRecord.fixDiffPaths,
+                ...(dispatchFindingRecord.fixDiffPathsTruncated ? { fixDiffPathsTruncated: true as const } : {}),
+                ...(dispatchFindingRecord.fixDiffPathsUnavailable ? { fixDiffPathsUnavailable: true as const } : {}),
               });
               driven.push({ kind: "fixup", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
             } catch (e) {
@@ -3486,8 +3604,44 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             }
             break;
           }
+          // #450 (design #402 R3, §3c; amendment item 2): convergence-stalled — checked BEFORE
+          // the fix-rounds-cap branch below, the SECOND link in the verdict-rerun ->
+          // convergence-stalled -> cap precedence chain (verdict-rerun already short-circuited the
+          // dispatch above via `!verdictRerun`; a stalled `progress` made `driveDecision` itself
+          // return "ESCALATE" instead of "FIXUP", which is how control reaches here at all). A
+          // converging lane that later reaches the cap never enters this branch (`progress` stays
+          // `"converging"`, this whole `typeof progress === "object"` check is false) — it falls
+          // through to the pre-existing fix-rounds-capped branch below unchanged, keeping the two
+          // facts (`review-non-convergent` vs `fix-rounds-capped`) reachable and distinguishable,
+          // exactly the issue's own AC.
+          if (!verdictRerun && typeof progress === "object") {
+            const escalated = await escalateNonConvergent(
+              forge,
+              state,
+              cfg,
+              w,
+              pr,
+              fixRounds,
+              progress.stalled,
+              progressPrev,
+              findingRecord!.findings,
+              findingRecord!.head,
+              iso,
+            );
+            if (escalated) {
+              driveFixBlockedLanes.add(w.name);
+              driven.push(escalated);
+              break;
+            }
+            // A forge write (label or comment) failed — same "leave the row driving, retry the
+            // WHOLE branch next tick" contract the dispute/cap-exhausted escalations already take.
+            driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "review-non-convergent-escalation-write-failed" });
+            break;
+          }
           // action === "ESCALATE" (or #457's verdict-rerun breaker fell through from FIXUP
-          // above): with `driveOverBudget` now permanently `false` (#375 — a fix
+          // above), and #450's convergence-stalled branch just above did NOT fire (`progress` is
+          // `"converging"` — either round 1, still measurably improving, or verdictRerun already
+          // short-circuited it): with `driveOverBudget` now permanently `false` (#375 — a fix
           // leg is exempt from round budget, so driveDecision's own overBudget-escalate branch
           // can never fire here anymore), the ONLY way this branch is reached is fixRounds
           // already >= cap (or a non-integer/negative fix_rounds, driveDecision's own fail-safe)
@@ -4341,4 +4495,223 @@ async function escalateReviewDisputed(
     threads: escalation.threads.map((t) => t.threadId),
   });
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `review-disputed:${escalation.threads.length}` };
+}
+
+// ── #450 (design #402 R3, §3c) — convergence stop ───────────────────────────────────────────────
+
+/** Whole-comment safety net, same two-layer discipline `REVIEW_DISPUTED_COMMENT_MAX_CHARS`'s own
+ *  doc describes — comfortably under GitHub's 65,536-char ceiling even at the max bounded key
+ *  count below. */
+const REVIEW_NON_CONVERGENT_COMMENT_MAX_CHARS = 60_000;
+
+/** A fixed, arbitrary-but-documented cap on how many of each round's finding KEYS the escalation
+ *  comment lists — same "bounded, marked truncation, never a silent drop" discipline
+ *  `MAX_FIXUP_FINDINGS` above already applies to the `drive-fixup` payload these keys are read
+ *  from (`boundRecords`, `review/finding-key.ts`). Not config-exposed for the identical reason
+ *  `MAX_FIXUP_FINDINGS` isn't: a round producing more than this many blocking findings is itself
+ *  an anomaly worth a bounded, marked truncation, not a new tunable. */
+const REVIEW_NON_CONVERGENT_MAX_KEYS_IN_COMMENT = 30;
+
+/** #450 gate② P2 (architectural review, 2026-07-31 — accepted): keyed on `(worker, pr, fixRounds,
+ *  headOid)` — WIDENED with the head OID after gate② review found the original `(worker, pr,
+ *  fixRounds)`-only key silently suppresses a legitimate re-escalation. The key's own original
+ *  rationale ("a lane whose `fix_rounds` later changes has, by construction, dispatched another
+ *  fix leg instead") is exactly backwards across an escalate -> #147 gated-reclaim -> re-escalate
+ *  cycle: a reclaim's own `upsertWorker` (this file, the GATED RECLAIM section) never touches
+ *  `fix_rounds` — it stays byte-identical across the reclaim — so a SECOND stall episode against
+ *  the SAME `fixRounds` would otherwise match the FIRST escalation's already-posted marker,
+ *  `alreadyPosted` would suppress the new comment, and the human would see only a re-applied label
+ *  with no fresh evidence, even when the signal itself changed (first `recurrence`, later `flat`).
+ *  Mirrors `reviewDisputedCommentMarker`'s own rationale exactly ("a re-escalation against a NEW
+ *  head is never mistaken for the same, already-posted episode") — `headOid` is `null`-safe
+ *  (`"no-head"` sentinel) since an engine-agent WAL read or a degraded classic read can legitimately
+ *  fail to resolve one (`gatherFixupFindingRecord`'s own doc). Checked via a live
+ *  `getIssueComments` read immediately before every post attempt — same ambiguous-write-outcome
+ *  closure `escalateReviewDisputed`'s own marker gives. */
+function reviewNonConvergentCommentMarker(worker: string, pr: number, fixRounds: number, headOid: string | null): string {
+  return `<!-- sapwood:review-non-convergent:${worker}:${pr}:${fixRounds}:${headOid ?? "no-head"} -->`;
+}
+
+/** #450: episode-reset kinds for `lastReviewNonConvergentFailureEvent`'s dedup — mirrors
+ *  `REVIEW_DISPUTED_ESCALATION_FAILURE_RESET_KINDS`'s own reasoning verbatim, just for this
+ *  escalation's two failure-companion kinds instead of `review-disputed`'s. */
+const REVIEW_NON_CONVERGENT_ESCALATION_FAILURE_RESET_KINDS = ["review-non-convergent", "gated-reentry", "lane-revived"];
+
+/**
+ * #450 (design #402 R3, §3c; architectural review amendment 2026-07-31, item 2): the
+ * convergence-stop escalation — a FIXABLE tick whose progress classifier
+ * (`review/convergence.ts`'s `classifyProgress`) returned a STALLED verdict escalates straight to
+ * `needs-human`, spending ZERO further fix rounds — the same "zero paid fix legs" property #451's
+ * `escalateReviewDisputed` established for disputes (`w.fix_rounds` is carried through UNCHANGED
+ * on the terminal upsert; this branch never calls `startFixLeg`).
+ *
+ * Modeled directly on `escalateReviewDisputed`'s own shape — the amendment's own instruction is
+ * "matching review-disputed's shape where applicable" — same forge-before-terminal-upsert
+ * discipline, the same ATOMIC `state.upsertWorkerWithEvent` terminal write (label AND comment land
+ * BEFORE the `review-non-convergent` event, and that event lands in the SAME transaction as the
+ * terminal worker-row write: a crash between a bare `upsertWorker` and a separate `appendEvent`
+ * would otherwise leave the row `failed` with no durable escalation record — permanently, since a
+ * `failed` lane with the label already applied is never driven again to re-derive one), the same
+ * per-failure-kind dedup (`REVIEW_NON_CONVERGENT_ESCALATION_FAILURE_RESET_KINDS`), and the same
+ * live-marker-read-before-repost check that closes the ambiguous comment-write-failure class (a
+ * `gh`/network timeout can leave a comment successfully created on GitHub while the client still
+ * sees an error).
+ *
+ * `signal`/`prevFindings`/`currFindings` come from `classifyConvergenceProgress` below — this
+ * function does no classification of its own, only writes the escalation the caller already
+ * decided on. `headOid` (#450 gate② P2) is the CURRENT round's head, from the SAME
+ * `FixupFindingRecord` the caller already gathered — passed straight to
+ * `reviewNonConvergentCommentMarker`, see that function's own doc for why the marker needs it.
+ * Defined at module end (a hoisted function declaration), same placement reasoning as
+ * `escalateReviewDisputed`'s own doc: its `addLabel` call must physically follow every OTHER
+ * needs-human-labeled write site in this file (escalation-buckets.test.ts's SITE_INVENTORY is
+ * keyed by scan order), and this placement adds one new trailing entry rather than renumbering
+ * the ones that already exist.
+ */
+async function escalateNonConvergent(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  w: WorkerRow,
+  pr: number,
+  fixRoundsSpent: number,
+  signal: ConvergenceStallSignal,
+  prevFindings: FixupFindingRecordEntry[] | null,
+  currFindings: readonly FixupFindingRecordEntry[],
+  headOid: string | null,
+  iso: () => string,
+): Promise<DrivenOutcome | null> {
+  const dedupeFailure = (kind: "review-non-convergent-label-failed" | "review-non-convergent-comment-failed", error: unknown): void => {
+    const lastFailed = state.lastReviewNonConvergentFailureEvent(kind, w.name, pr);
+    const resetId = state.maxEventIdForKinds(REVIEW_NON_CONVERGENT_ESCALATION_FAILURE_RESET_KINDS, w.name, pr);
+    const sameEpisode = lastFailed != null && lastFailed.id > resetId && lastFailed.fixRounds === fixRoundsSpent;
+    if (!sameEpisode) {
+      state.appendEvent(kind, { worker: w.name, issue: w.issue, pr, fixRounds: fixRoundsSpent, error: String(error) });
+    }
+  };
+  try {
+    await forge.addLabel(w.issue, cfg.labels.needsHuman);
+  } catch (e) {
+    dedupeFailure("review-non-convergent-label-failed", e);
+    return null;
+  }
+  const boundedPrev = boundRecords(
+    (prevFindings ?? []).map((f) => f.key),
+    REVIEW_NON_CONVERGENT_MAX_KEYS_IN_COMMENT,
+  );
+  const boundedCurr = boundRecords(
+    currFindings.map((f) => f.key),
+    REVIEW_NON_CONVERGENT_MAX_KEYS_IN_COMMENT,
+  );
+  const marker = reviewNonConvergentCommentMarker(w.name, pr, fixRoundsSpent, headOid);
+  const comment =
+    capDigest(
+      `sapwood: PR #${pr}'s review is not converging — the progress signal is **${signal}** ` +
+        `(${fixRoundsSpent} fix round(s) already spent; design #402 §3b). Escalating directly to ` +
+        `\`${cfg.labels.needsHuman}\` instead of dispatching another fix leg, per ` +
+        `docs/REVIEW-DOCTRINE.md's adjudication principle 4: runaway complexity escalates to the ` +
+        `top of the loop, not more patches — the intended response is DESIGN RE-ENTRY ` +
+        `(architect/plan re-review), not merely this human notification.\n\n` +
+        `Round r-1 finding keys${boundedPrev.truncated ? " (truncated)" : ""}:\n` +
+        `${boundedPrev.entries.map((k) => `- \`${k}\``).join("\n") || "(none — round 1 has no r-1 to compare against)"}\n\n` +
+        `Current round finding keys${boundedCurr.truncated ? " (truncated)" : ""}:\n` +
+        `${boundedCurr.entries.map((k) => `- \`${k}\``).join("\n") || "(none)"}\n\n` +
+        `Adjudicate: resolve the underlying design/technical direction, then remove ` +
+        `\`${cfg.labels.needsHuman}\` to reclaim (#147 gated reentry).`,
+      REVIEW_NON_CONVERGENT_COMMENT_MAX_CHARS,
+    ) + `\n\n${marker}`;
+  let alreadyPosted: boolean;
+  try {
+    const comments = await forge.getIssueComments(w.issue);
+    alreadyPosted = comments.some((c) => c.body.includes(marker));
+  } catch (e) {
+    dedupeFailure("review-non-convergent-comment-failed", e);
+    return null;
+  }
+  if (!alreadyPosted) {
+    try {
+      await forge.addIssueComment(w.issue, comment);
+    } catch (e) {
+      dedupeFailure("review-non-convergent-comment-failed", e);
+      return null;
+    }
+  }
+  // Same crash window closed the same way as escalateReviewDisputed's own terminal write: the
+  // row and the receipt land in ONE transaction. Zero fix-round cost: `fix_rounds` carried through
+  // unchanged — this branch never called startFixLeg, so there is nothing to bump.
+  state.upsertWorkerWithEvent({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 }, "review-non-convergent", {
+    worker: w.name,
+    issue: w.issue,
+    pr,
+    signal,
+    fixRounds: fixRoundsSpent,
+    prevFindingKeys: boundedPrev.entries,
+    currFindingKeys: boundedCurr.entries,
+  });
+  return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `review-non-convergent:${signal}` };
+}
+
+/** #450 (design #402 R3, §3c): folds this (worker, pr)'s `drive-fixup` history — BOUNDED to the
+ *  CURRENT convergence episode (#450 gate② P1) — into `review/convergence.ts`'s pure
+ *  `classifyProgress` inputs: round r-1's recorded findings (`prev`) and the `flatStreak` ending at
+ *  the CURRENT round, both derived from the SAME append-only event ledger #449 already writes to
+ *  (design #402 §9: "new tables: zero").
+ *
+ *  #450 gate② P1: `state.eventsAfterId(episodeResetId, ["drive-fixup"])` — NOT the unbounded
+ *  `eventsSince` this function used before gate②'s first-pass review — where `episodeResetId =
+ *  state.maxEventIdForKinds(CONVERGENCE_EPISODE_RESET_KINDS, workerName, pr)`. A `drive-fixup` from
+ *  a PRIOR episode (before this lane's most recent #147 `gated-reentry` or #447 `lane-revived`) is
+ *  invisible to the fold, so the FIRST post-reclaim classification sees `pastFindings = []` ->
+ *  `prev === null` -> round-1 semantics (`classifyProgress`'s own `prev === null` row): always
+ *  `"converging"`, never an instant re-stall on a comparison the human's intervention never
+ *  touched. See `CONVERGENCE_EPISODE_RESET_KINDS`'s own doc for the full failure mode this closes
+ *  (misaligned `prev`, an over-wide `fixDiffPaths` spanning the human's own diff, and a `flatStreak`
+ *  that kept counting pre-escalation rounds). Same id-cursor read `priorFixLegForVerdict` (#457)
+ *  already uses for an identical "walk this lane's whole history" need, just scoped by BOTH kind
+ *  (`["drive-fixup"]`) and a lower id bound instead of kind alone.
+ *
+ *  Returns the PREVIOUS round's findings alongside the verdict so `escalateNonConvergent`'s
+ *  comment can cite both rounds' keys without a second fold over the same history — `curr`'s own
+ *  findings are already held by the caller (the `FixupFindingRecord` it just gathered), so only
+ *  `prev` needs to travel back out of this function. */
+function classifyConvergenceProgress(
+  state: State,
+  workerName: string,
+  pr: number,
+  curr: FixupFindingRecord,
+): { verdict: ConvergenceVerdict; prev: FixupFindingRecordEntry[] | null } {
+  const episodeResetId = state.maxEventIdForKinds(CONVERGENCE_EPISODE_RESET_KINDS, workerName, pr);
+  const events = state.eventsAfterId(episodeResetId, ["drive-fixup"]);
+  // #450 gate② Codex cross-vendor (PM-narrowed ruling): each PAST round's `findingsTruncated` bit
+  // travels alongside its findings — a capped `MAX_FIXUP_FINDINGS` snapshot's length is a floor,
+  // not a fact, and `review/convergence.ts`'s `classifyProgress`/`computeFlatStreak` must know
+  // which rounds to distrust for COUNT purposes (never for key identity — see that module's own
+  // "TRUNCATION POISONS COUNT-DEPENDENT SHAPES ONLY" doc). `findingsTruncated` is absent (not
+  // `false`) on an untruncated event's payload (`state.appendEvent("drive-fixup", ...)`'s own
+  // conditional-spread shape above) — `=== true` reads that fail-closed correctly either way.
+  const pastRounds: { findings: FixupFindingRecordEntry[]; truncated: boolean }[] = [];
+  for (const e of events) {
+    const p = e.payload as { worker?: unknown; pr?: unknown; findings?: unknown; findingsTruncated?: unknown };
+    if (p.worker !== workerName || p.pr !== pr) continue;
+    pastRounds.push({
+      findings: Array.isArray(p.findings) ? (p.findings as FixupFindingRecordEntry[]) : [],
+      truncated: p.findingsTruncated === true,
+    });
+  }
+  const prevRound = pastRounds.length > 0 ? pastRounds[pastRounds.length - 1]! : null;
+  const flatStreak = computeFlatStreak(
+    pastRounds.map((r) => ({ count: countBlocking(r.findings), truncated: r.truncated })),
+    { count: countBlocking(curr.findings), truncated: curr.findingsTruncated },
+  );
+  return {
+    verdict: classifyProgress(
+      prevRound?.findings ?? null,
+      curr.findings,
+      curr.fixDiffPaths,
+      flatStreak,
+      prevRound?.truncated ?? false,
+      curr.findingsTruncated,
+    ),
+    prev: prevRound?.findings ?? null,
+  };
 }
