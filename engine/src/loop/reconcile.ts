@@ -204,7 +204,13 @@ export async function auditGatedEscalationFlags(
  *  State.upsertWorkerWithEvent): a marker corrected with no `gated-flag-healed` in the ledger
  *  would silently move a lane between owners. */
 function handGatedLaneToReentry(state: Pick<State, "upsertWorkerWithEvent">, w: WorkerRow): void {
-  state.upsertWorkerWithEvent({ ...w, gated_escalation_labeled: 1 }, "gated-flag-healed", {
+  // #398: the carrier is "issue" because that is what this heal OBSERVED — the audit's own
+  // evidence is a human-hold label found on the ISSUE (`getIssueLabels`, below), so the carrier
+  // recorded here must be the object the audit actually looked at. Stated rather than left to
+  // the column default: these rows reach the audit with `gated_escalation_labeled = 0`, which can
+  // mean an escalation whose PR-side label write FAILED — leaving a stale "pr" carrier standing
+  // would make GATED RECLAIM re-check the PR for a hold the audit proved is on the issue.
+  state.upsertWorkerWithEvent({ ...w, gated_escalation_labeled: 1, gated_escalation_carrier: "issue" }, "gated-flag-healed", {
     worker: w.name,
     issue: w.issue,
     pr: w.pr ?? null,

@@ -485,6 +485,9 @@ export class RoundScopedForge implements IForge {
   getIssueLabels(issue: number) {
     return this.inner.getIssueLabels(issue);
   }
+  getPRLabels(pr: number) {
+    return this.inner.getPRLabels(pr);
+  }
   getIssueComments(issue: number) {
     return this.inner.getIssueComments(issue);
   }
@@ -673,6 +676,9 @@ export class PoolScopedForge implements IForge {
   }
   getIssueLabels(issue: number) {
     return this.inner.getIssueLabels(issue);
+  }
+  getPRLabels(pr: number) {
+    return this.inner.getPRLabels(pr);
   }
   getIssueComments(issue: number) {
     return this.inner.getIssueComments(issue);

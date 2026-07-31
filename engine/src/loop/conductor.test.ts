@@ -37,6 +37,7 @@ import {
   drainEscalationDue,
   driveDecision,
   drivingLaneTerminalForDrain,
+  escalationCarrier,
   evaluateCeiling,
   gatedReentryDecision,
   hasReserveLabel,
@@ -155,9 +156,23 @@ class FakeForge extends UnstubbedForge implements IForge {
     this.labelsRemoved.push([n, l]);
     this.issueLabelsByIssue[n] = (this.issueLabelsByIssue[n] ?? []).filter((x) => x !== l);
   }
+  /** #398: per-PR label set — the PR-side twin of `issueLabelsByIssue`, mutable so a test can
+   *  simulate a human removing needs-human from the PR (the #147 reentry act, now on the carrier
+   *  the escalation actually wrote). `addPRLabel` appends here, never removes. */
+  prLabelsByPr: Record<number, string[]> = {};
   override async addPRLabel(n: number, l: string): Promise<void> {
+    if (this.throwOnAddPRLabel) throw new Error("simulated forge failure");
     this.prLabelsAdded.push([n, l]);
+    const cur = this.prLabelsByPr[n] ?? [];
+    if (!cur.includes(l)) this.prLabelsByPr[n] = [...cur, l];
     if (!this.prReviewData.labels.includes(l)) this.prReviewData = { ...this.prReviewData, labels: [...this.prReviewData.labels, l] };
+  }
+  /** #398: mirrors `throwOnAddLabel` for the PR carrier — proves a failed PR-side label write is
+   *  recorded as `labeled: 0` and leaves the lane fail-closed-invisible to GATED RECLAIM, exactly
+   *  as the issue-side failure always did. */
+  throwOnAddPRLabel = false;
+  override async getPRLabels(n: number): Promise<string[]> {
+    return this.prLabelsByPr[n] ?? [];
   }
   override async openPR(): Promise<number> {
     return 1;
@@ -1655,7 +1670,12 @@ test("tick DRIVE: needs-human -> worker failed + needs-human label", async () =>
   gate.outcomes[55] = { kind: "needs-human", pr: 55, reason: "gate:HUMAN" };
   const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.getWorker("lane-a")?.state, "failed");
-  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  // #398 AC1: the lane HAS a PR, so the escalation was PR-born — the label lands on the PR (where
+  // deriveGate reads labels and where the human deciding this lane's fate is looking) and the
+  // issue is left clean. ONE carrier, never both.
+  assert.deepEqual(forge.prLabelsAdded, [[55, "needs-human"]]);
+  assert.deepEqual(forge.labelsAdded, []);
+  assert.equal(st.getWorker("lane-a")?.gated_escalation_carrier, "pr");
   assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-a", issue: 2, pr: 55, reason: "gate:HUMAN" }]);
   st.close();
 });
@@ -3736,7 +3756,9 @@ test("tick DRIVE (#246 review round 1, C1): fixable but NO fixLegResume dep conf
   assert.equal(row.fix_rounds ?? 0, 0);
   assert.equal(row.gated_escalation_labeled, 1);
   assert.deepEqual(sup.resumeCalls, []);
-  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  // #398: same shared escalateNeedsHuman, so the same carrier rule — the PR, not the issue.
+  assert.deepEqual(forge.prLabelsAdded, [[55, "needs-human"]]);
+  assert.deepEqual(forge.labelsAdded, []);
   assert.equal(r.driven.length, 1);
   assert.equal(r.driven[0]!.kind, "needs-human");
   assert.match((r.driven[0] as { reason: string }).reason, /fix-loop-unwired/);
@@ -3747,7 +3769,9 @@ test("tick DRIVE (#246 review round 1, C1): fixable but NO fixLegResume dep conf
 test("tick DRIVE (#246 review round 1, C1): the fixLegResume-unwired degrade's label-write failure STILL terminalizes (escalateNeedsHuman's shared, pre-#246/#147 stance) — labeled=0 marks it fail-closed-invisible to GATED RECLAIM, same as the plain HUMAN-gate case (NOT the newer stay-driving fallback the fix-rounds-cap path owns)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
-  forge.throwOnAddLabel = true;
+  // #398: the carrier is the PR now, so THIS is the write that has to fail for the fail-closed
+  // marker to be exercised — the issue-side thrower would no longer be reached at all.
+  forge.throwOnAddPRLabel = true;
   const sup = new FakeSupervisor();
   seedDriving(st, "lane-a", 2, 55);
   const gate = new FakeMergeGate();
@@ -7671,9 +7695,12 @@ test("#170 review silence: aged episode labels PR + emits once while driving; ve
     ]);
     assert.equal(rawEventKinds(path).filter((k) => k === "review-silence-escalated").length, 1);
 
-    // Human clears both synchronized holds. Existing gated reentry clears the old pin and posts
-    // a fresh trigger; only a post-trigger review can then merge.
-    forge.issueLabelsByIssue[170] = [];
+    // #398: ONE removal, on the PR. Before this issue the human had to strip the label from the
+    // issue AND the PR (#170 labelled the PR, the next tick's gate:HUMAN labelled the issue) —
+    // the double-removal burden this carrier split exists to end. Both escalations now land on
+    // the PR, so clearing the PR is the whole human act; the issue was never labelled at all.
+    assert.deepEqual(forge.labelsAdded, []);
+    forge.prLabelsByPr[170] = [];
     forge.prReviewData = { ...forge.prReviewData, labels: [], reviews: [] };
     const reentered = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
     assert.deepEqual(reentered.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-silent", issue: 170, pr: 170, attempt: 1 }]);
@@ -7813,7 +7840,9 @@ test("tick DRIVE (#248): hold + needs-human simultaneously on the SAME PR -> esc
   assert.equal(st.getWorker("lane-both")?.state, "failed");
   // #248 review round 1 (G4): the escalation DOES write needs-human (asserted above via the
   // outcome kind) — this proves that legitimate write is never, itself, the hold label.
-  assert.deepEqual(forge.labelsAdded, [[51, "needs-human"]]);
+  // #398: on the PR, the carrier this PR-born escalation was born on.
+  assert.deepEqual(forge.prLabelsAdded, [[601, "needs-human"]]);
+  assert.deepEqual(forge.labelsAdded, []);
   assertNeverWritesHoldLabel(forge, cfg.escalation.holdLabels);
   st.close();
 });
@@ -7854,6 +7883,233 @@ test("tick GATED RECLAIM (#400): hold has ONE carrier, the PR — an ISSUE-level
   assert.deepEqual(r2.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-capped", issue: 60, pr: 700, attempt: 1 }]);
   assert.equal(st.getWorker("lane-capped")?.state, "driving");
   assertNeverWritesHoldLabel(forge, cfg.escalation.holdLabels); // still never written by the engine
+  st.close();
+});
+
+// ── #398: the escalation carrier — "the label lives where the escalation was born" ───────────
+//
+// The behavioural half of AC2 (the structural half — every write site's declared carrier and the
+// four named #69 P1 dual-write exceptions — is escalation-buckets.test.ts's SITE_INVENTORY).
+// These fixtures assert the carrier CHOSEN AT RUNTIME from the lane's own `pr`, and the matching
+// handshake read on the other side.
+
+test("#398 AC1/AC2: escalationCarrier is a pure function of the lane's pr — the whole rule, in one place", () => {
+  assert.equal(escalationCarrier(55), "pr");
+  assert.equal(escalationCarrier(null), "issue");
+  assert.equal(escalationCarrier(undefined), "issue");
+});
+
+test("#398 AC1: a PR-LESS lane's escalation labels the issue — drive-no-pr, the issue-born arm of the same rule", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const gate = new FakeMergeGate();
+  // A `driving` row with NO pr is DRIVE's own fail-safe: there is no other object that could
+  // carry the fact, so the issue is where it goes. `drive-no-pr` is issue-born by definition.
+  st.upsertWorker({
+    name: "lane-nopr",
+    issue: 77,
+    session_id: "s-lane-nopr",
+    state: "driving",
+    started_at: "t0",
+    ended_at: null,
+    pr: null,
+  });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(forge.labelsAdded, [[77, "needs-human"]]);
+  assert.deepEqual(forge.prLabelsAdded, []);
+  st.close();
+});
+
+test("#398 AC3: removing the label from the carrier the engine USED re-admits the lane — and the other object needs no action at all", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+  seedDriving(st, "lane-carrier", 88, 880);
+  gate.outcomes[880] = { kind: "needs-human", pr: 880, reason: "gate:HUMAN:HANDLE_THREADS" };
+
+  // Tick 1: escalate. PR labelled, issue untouched.
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(forge.prLabelsAdded, [[880, "needs-human"]]);
+  assert.deepEqual(forge.labelsAdded, []);
+  assert.deepEqual(forge.issueLabelsByIssue[88] ?? [], [], "the issue was never labelled, so there is nothing there to remove");
+  assert.equal(st.getWorker("lane-carrier")?.gated_escalation_carrier, "pr");
+
+  // Tick 2: the label still stands on the PR -> SKIP. Note the ISSUE is already clean here, so a
+  // handshake that read the issue would reclaim RIGHT NOW, with the human hold still in place.
+  gate.outcomes[880] = { kind: "queued", pr: 880, reason: "gate-pending:WAIT_REVIEW" };
+  const held = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(held.gatedReclaimed, []);
+  assert.equal(st.getWorker("lane-carrier")?.state, "failed");
+
+  // Tick 3: ONE removal, on the PR — the whole human act. The issue is untouched throughout.
+  forge.prLabelsByPr[880] = [];
+  const reclaimed = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(reclaimed.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-carrier", issue: 88, pr: 880, attempt: 1 }]);
+  assert.equal(st.getWorker("lane-carrier")?.state, "driving");
+  assert.deepEqual(forge.labelsRemoved, [], "the engine never had to clear anything on the issue either");
+  st.close();
+});
+
+test("#398 crash consistency: a kill between the PR label write and the terminal upsert re-escalates idempotently — the carrier and the proof marker land together or not at all", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+  seedDriving(st, "lane-crash", 89, 890);
+  gate.outcomes[890] = { kind: "needs-human", pr: 890, reason: "gate:HUMAN:HANDLE_THREADS" };
+
+  // The crash window: `escalateNeedsHuman` writes the label FIRST, then the terminal row. A kill
+  // strictly between them leaves the PR labelled with the row still `driving` — nothing durable
+  // claims an escalation happened, so nothing can be falsely trusted. Reproduced by landing the
+  // label the way the interrupted attempt would have, with the row untouched.
+  await forge.addPRLabel(890, "needs-human");
+  assert.equal(st.getWorker("lane-crash")?.state, "driving");
+  assert.equal(st.getWorker("lane-crash")?.gated_escalation_labeled ?? 0, 0, "no proof marker from a half-finished attempt");
+
+  // The rerun re-derives the same verdict and re-attempts the whole escalation. GitHub's addLabel
+  // is idempotent, so the recovery costs one no-op write and leaves exactly one label.
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.equal(r.driven[0]!.kind, "needs-human");
+  const row = st.getWorker("lane-crash")!;
+  assert.equal(row.state, "failed");
+  assert.equal(row.gated_escalation_labeled, 1);
+  assert.equal(row.gated_escalation_carrier, "pr", "the carrier and the marker are written by the SAME upsert — they cannot disagree");
+  assert.deepEqual(forge.prLabelsByPr[890], ["needs-human"], "idempotent: one label, not two");
+  assert.deepEqual(forge.labelsAdded, [], "and the rerun never spills onto the other carrier");
+  st.close();
+});
+
+test("#398 AC5 (cutover): a lane escalated BEFORE the split keeps the ISSUE handshake — clearing its PR proves nothing, clearing its issue re-admits it", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+  gate.outcomes[900] = { kind: "queued", pr: 900, reason: "gate-pending:WAIT_REVIEW" };
+  // Exactly what a pre-#398 escalation left behind: no carrier recorded, so the column's default
+  // ("issue") describes it — which is the truth, since the old code could only write the issue.
+  st.upsertWorker({
+    name: "lane-legacy",
+    issue: 90,
+    session_id: "s-lane-legacy",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 900,
+    gated_escalation_labeled: 1,
+  });
+  forge.issueLabelsByIssue[90] = ["needs-human"];
+  forge.prLabelsByPr[900] = []; // the PR never carried it — reading the PR here would be a false release
+
+  const skipped = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(skipped.gatedReclaimed, [], "an unconditional PR read would have re-admitted this lane with no human act");
+
+  forge.issueLabelsByIssue[90] = [];
+  const reclaimed = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(reclaimed.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-legacy", issue: 90, pr: 900, attempt: 1 }]);
+  st.close();
+});
+
+test("#398 AC6: GATED RECLAIM reads a PR-carried lane's labels via getPRLabels — never the heavy getPRReviewData gate query — and a PR-level HOLD SKIPs reclaim (restoring, on the correct carrier, what #400 removed)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ escalation: { humanLabels: ["needs-human", "blocked"], holdLabels: ["hold"] } });
+  const gate = new FakeMergeGate();
+  gate.outcomes[910] = { kind: "queued", pr: 910, reason: "gate-pending:WAIT_REVIEW" };
+  st.upsertWorker({
+    name: "lane-pr-hold",
+    issue: 91,
+    session_id: "s-lane-pr-hold",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 910,
+    gated_escalation_labeled: 1,
+    gated_escalation_carrier: "pr",
+  });
+
+  // A human is investigating (`hold` on the PR) and has already cleared needs-human. #400 named
+  // this exact case as its accepted-but-real cost: the lane would burn a reentry attempt on a
+  // go-ahead nobody actually gave. The same fetch that answers "is the hold gone?" sees the hold.
+  forge.prLabelsByPr[910] = ["hold"];
+  const before = forge.getPRReviewDataCalls;
+  const skipped = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(skipped.gatedReclaimed, []);
+  assert.equal(st.getWorker("lane-pr-hold")?.gated_reentry_attempts ?? 0, 0, "a PR-level hold costs ZERO reentry attempts");
+  assert.equal(
+    forge.getPRReviewDataCalls,
+    before,
+    "the carrier read is getPRLabels — the heavy gate query is not made on the reclaim path at all",
+  );
+
+  // The investigation ends: hold lifted, nothing else on the PR -> reclaim.
+  forge.prLabelsByPr[910] = [];
+  const reclaimed = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(reclaimed.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-pr-hold", issue: 91, pr: 910, attempt: 1 }]);
+  assertNeverWritesHoldLabel(forge, cfg.escalation.holdLabels);
+  st.close();
+});
+
+test("#398 AC6: an ISSUE-carried lane's hold set is UNCHANGED — #400's ruling that an issue-level hold is the wrong carrier for a PR's gate still stands", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ escalation: { humanLabels: ["needs-human", "blocked"], holdLabels: ["hold"] } });
+  const gate = new FakeMergeGate();
+  gate.outcomes[920] = { kind: "queued", pr: 920, reason: "gate-pending:WAIT_REVIEW" };
+  st.upsertWorker({
+    name: "lane-issue-hold",
+    issue: 92,
+    session_id: "s-lane-issue-hold",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 920,
+    gated_escalation_labeled: 1,
+    gated_escalation_carrier: "issue",
+  });
+  forge.issueLabelsByIssue[92] = ["hold"]; // needs-human gone; an issue-level hold remains
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-issue-hold", issue: 92, pr: 920, attempt: 1 }]);
+  st.close();
+});
+
+test("#398 AC4: a PR-escalated lane's issue is kept out of the dispatch pool by board Status + the in-progress label, NOT by an issue-side escalation label", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+  seedDriving(st, "lane-fenced", 93, 930);
+  gate.outcomes[930] = { kind: "needs-human", pr: 930, reason: "gate:HUMAN:HANDLE_THREADS" };
+  // claimIssue (at dispatch) already moved this issue to In Progress and applied the in-progress
+  // label; the escalation does not touch either. `orderForDispatch`/`isPoolEligible` stay pure
+  // functions over the BOARD's own item labels — deliberately never a per-issue PR read (the
+  // per-tick forge-read inflation the #248 PM ruling rejected).
+  forge.issueLabelsByIssue[93] = ["in-progress"];
+  forge.ready = []; // an In-Progress issue is not in getReadyIssues() — the fence, structurally
+
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.equal(r.driven[0]!.kind, "needs-human");
+  assert.deepEqual(forge.prLabelsAdded, [[930, "needs-human"]]);
+  assert.deepEqual(forge.labelsAdded, [], "no issue-side escalation label — and none is needed to keep it off the queue");
+  assert.deepEqual(r.dispatched, []);
+  assert.deepEqual(forge.boardSet, [], "the escalation never moves the board either — In Progress is where claimIssue left it");
+  // The predicate itself is UNCHANGED by this issue and still a pure function over the board
+  // item's own labels — it has no lane/PR association and takes none. Proof: the very same issue
+  // scores identically whether or not its PR carries `needs-human`, because `orderForDispatch`
+  // cannot see a PR at all. (Making it consult PR labels would mean a per-issue forge read per
+  // tick — the read inflation the #248 PM ruling rejected — and is unnecessary: the escalated
+  // issue is fenced OFF THE BOARD at `Status: In Progress`, which is why `forge.ready` is empty
+  // above even though nothing issue-side was labelled.)
+  const boardItem = { number: 93, title: "t", labels: [] as string[] };
+  assert.deepEqual(orderForDispatch([boardItem], cfg), [boardItem], "no PR knowledge — a clean board item is dispatchable either way");
+  assert.deepEqual(orderForDispatch([{ ...boardItem, labels: ["needs-human"] }], cfg), [], "and the label read itself is untouched");
   st.close();
 });
 
@@ -8137,12 +8393,21 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   assert.equal(st.getWorker("lane-b")?.gated_reentry_attempts, 1);
   assert.equal(st.getWorker("lane-b")?.gated_reentry_capped, 0); // cap is only latched on the NEXT removal
   assert.deepEqual(r2.driven, [{ kind: "needs-human", worker: "lane-b", issue: 11, pr: 199, reason: "gate:HUMAN:HANDLE_THREADS" }]);
-  assert.deepEqual(forge.labelsAdded, [[11, "needs-human"]]);
+  // #398: the RE-escalation is PR-born (the lane has a PR), so it lands on the PR and records
+  // that carrier — while tick 1 above still honoured the seeded row's legacy ISSUE carrier. Both
+  // halves of the cutover, in one lane.
+  assert.deepEqual(forge.prLabelsAdded, [[199, "needs-human"]]);
+  assert.deepEqual(forge.labelsAdded, []);
+  assert.equal(st.getWorker("lane-b")?.gated_escalation_carrier, "pr");
   // A REPEAT escalation (gated_reentry_attempts > 0) carries the attempt trail — the very first
-  // escalation for a lane never gets this comment.
-  assert.equal(forge.issueComments.length, 1);
-  assert.match(forge.issueComments[0]![1], /attempt 1\/1/);
-  assert.match(forge.issueComments[0]![1], /last automatic attempt/);
+  // escalation for a lane never gets this comment. #398: posted where the label is, so "remove
+  // it again to retry" points at the object that actually carries the hold.
+  assert.equal(forge.issueComments.length, 0);
+  // Filtered: `prComments` also holds the merge driver's own `@codex review` trigger posts.
+  const gatedNotices = () => forge.prComments.filter(([, body]) => body.startsWith("sapwood: gated-PR"));
+  assert.equal(gatedNotices().length, 1);
+  assert.match(gatedNotices()[0]![1], /attempt 1\/1/);
+  assert.match(gatedNotices()[0]![1], /last automatic attempt/);
   // #167 review (Codex P2+P3 adjudication): cap-hit is this codebase's nearest mechanism to
   // the review doctrine's prFixCap→needs-human pattern — the escalation comment states the
   // principle (re-examine design/technical direction, not more patches) SELF-CONTAINED, true
@@ -8150,26 +8415,33 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   // doctrine file on disk at the default path — the legal, common "no doctrine adopted" case
   // (doctrine.ts's NO_DOCTRINE) — so the comment must NOT cite a doctrine file that doesn't
   // exist.
-  assert.match(forge.issueComments[0]![1], /re-examine the feature's design/i);
-  assert.doesNotMatch(forge.issueComments[0]![1], /review doctrine/i);
-  assert.doesNotMatch(forge.issueComments[0]![1], /point 4/i);
+  assert.match(gatedNotices()[0]![1], /re-examine the feature's design/i);
+  assert.doesNotMatch(gatedNotices()[0]![1], /review doctrine/i);
+  assert.doesNotMatch(gatedNotices()[0]![1], /point 4/i);
   assert.equal(sup.dispatched.length, 0); // never a new worker, even across the re-escalation
 
-  // Human removes needs-human a SECOND time — but the cap (1) is already spent.
-  forge.issueLabelsByIssue[11] = [];
+  // Human removes needs-human a SECOND time — from the PR, the carrier the re-escalation used —
+  // but the cap (1) is already spent.
+  forge.prLabelsByPr[199] = [];
+  forge.prReviewData = { ...forge.prReviewData, labels: [] };
   const r3 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r3.gatedReclaimed, [{ kind: "capped", worker: "lane-b", issue: 11, pr: 199, attempts: 1 }]);
   assert.equal(st.getWorker("lane-b")?.state, "failed"); // never reclaimed this time
   assert.equal(st.getWorker("lane-b")?.gated_reentry_capped, 1);
-  assert.deepEqual(forge.labelsAdded, [
-    [11, "needs-human"],
-    [11, "needs-human"],
+  // #398: the CAPPED re-apply goes back onto the same carrier — never the issue, which would
+  // leave the block on an object the handshake does not read.
+  assert.deepEqual(forge.prLabelsAdded, [
+    [199, "needs-human"],
+    [199, "needs-human"],
   ]); // re-applied
-  assert.equal(forge.issueComments.length, 2); // the cap-reached notice
+  assert.deepEqual(forge.labelsAdded, []);
+  assert.equal(gatedNotices().length, 2); // the cap-reached notice
+  assert.equal(forge.issueComments.length, 0);
   assert.equal(sup.dispatched.length, 0);
 
   // A THIRD removal changes nothing — the row is permanently excluded from here on.
-  forge.issueLabelsByIssue[11] = [];
+  forge.prLabelsByPr[199] = [];
+  forge.prReviewData = { ...forge.prReviewData, labels: [] };
   const r4 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r4.gatedReclaimed, []);
   assert.equal(st.getWorker("lane-b")?.state, "failed");
@@ -8322,17 +8594,21 @@ test("#147 P2 (Codex PR #151): a FAILED needs-human label write means label abse
   seedRunning(st, "lane-x", 30);
   sup.probes["lane-x"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 400 };
   gate.outcomes[400] = { kind: "needs-human", pr: 400, reason: "gate:HUMAN:HANDLE_THREADS" };
-  forge.throwOnAddLabel = true;
+  // #398: the carrier is the PR for a PR-bearing lane, so the PR-side write is the one that has
+  // to fail here — the invariant under test ("absence proves nothing unless the engine applied
+  // it") is carrier-independent, but the write it is about moved.
+  forge.throwOnAddPRLabel = true;
   const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.equal(st.getWorker("lane-x")?.state, "failed"); // terminal transition still landed
   assert.equal(st.getWorker("lane-x")?.gated_escalation_labeled, 0); // label write provably failed
-  assert.deepEqual(forge.labelsAdded, []); // nothing landed on the issue
+  assert.deepEqual(forge.prLabelsAdded, []); // nothing landed on the PR
+  assert.deepEqual(forge.labelsAdded, []); // and nothing on the issue either — one carrier, and it failed
   assert.deepEqual(r1.driven, [{ kind: "needs-human", worker: "lane-x", issue: 30, pr: 400, reason: "gate:HUMAN:HANDLE_THREADS" }]);
 
-  // Next tick: the issue has NO needs-human label — exactly the state a transient label
+  // Next tick: the PR has NO needs-human label — exactly the state a transient label
   // failure leaves behind. Without the labeled marker this would read as an explicit human
   // removal and automation would re-admit itself with no human in the loop. It must not.
-  forge.throwOnAddLabel = false;
+  forge.throwOnAddPRLabel = false;
   const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r2.gatedReclaimed, []);
   assert.equal(st.getWorker("lane-x")?.state, "failed"); // permanently manual-drive (pre-#147 situation)
@@ -8350,7 +8626,9 @@ test("#147 P2: the happy-path escalation records labeled=1 (label applied), whic
   await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.getWorker("lane-y")?.state, "failed");
   assert.equal(st.getWorker("lane-y")?.gated_escalation_labeled, 1);
-  assert.deepEqual(forge.labelsAdded, [[31, "needs-human"]]);
+  assert.equal(st.getWorker("lane-y")?.gated_escalation_carrier, "pr");
+  assert.deepEqual(forge.prLabelsAdded, [[401, "needs-human"]]);
+  assert.deepEqual(forge.labelsAdded, []);
   st.close();
 });
 
@@ -8438,7 +8716,8 @@ test("#397: the SAME lane shape with an ordinary bucket-1 verdict still escalate
   await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.getWorker("lane-ord")?.gated_escalation_labeled, 1);
   assert.equal(st.gatedFailedWorkers().length, 1);
-  assert.deepEqual(forge.labelsAdded, [[398, "needs-human"]]);
+  assert.deepEqual(forge.prLabelsAdded, [[398, "needs-human"]]); // #398: PR-born verdict, PR carrier
+  assert.deepEqual(forge.labelsAdded, []);
   st.close();
 });
 

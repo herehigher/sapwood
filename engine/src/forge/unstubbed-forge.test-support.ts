@@ -56,6 +56,7 @@ const IFORGE_MEMBERS = [
   "getPRComments",
   "getPRDetails",
   "getPRDiff",
+  "getPRLabels",
   "getPRReviewData",
   "getPRReviews",
   "getPRReviewThreads",

@@ -71,11 +71,28 @@ test("#397: every OTHER gate reason stays bucket 1 — the classifier is narrow 
  *
  * Keys are `${file}#${ordinal-within-file}` and each row pins the source text, so MOVING a site
  * is free while ADDING, REMOVING, or REWRITING one fails this test until it is classified.
+ *
+ * #398 adds `carrier` — WHICH object each LABEL site writes, the second axis the bucket split
+ * deliberately left out ("the split is by WHAT THE HUMAN MUST DO, never by carrier"). The rule
+ * adopted with the owner (2026-07-27 retro) is "the label lives where the escalation was born":
+ *
+ *   "issue" | "pr"  — a site that writes exactly that object, unconditionally.
+ *   "carrier-rule"  — the shared writer (`labelEscalationCarrier`), which picks ONE object at
+ *                     runtime from the lane's `pr` via `escalationCarrier`. Its two lines are two
+ *                     scanner sites but one exclusive choice; the behavioural half of this AC
+ *                     (conductor.test.ts) proves which arm each caller takes.
+ *
+ * Rows are additionally paired into `DUAL_WRITE_EXCEPTIONS` below when a single path deliberately
+ * writes BOTH objects. That set is closed and named: any new pair fails the exception test.
  */
-const SITE_INVENTORY: Record<string, { bucket: "human-merge-only" | "needs-human" | "planless"; src: string; why: string }> = {
+const SITE_INVENTORY: Record<
+  string,
+  { bucket: "human-merge-only" | "needs-human" | "planless"; carrier?: "issue" | "pr" | "carrier-rule"; src: string; why: string }
+> = {
   // ── bucket 2: a human must MERGE this PR ────────────────────────────────────────────────
   "review/instruction-path-escalation.ts#0": {
     bucket: "human-merge-only",
+    carrier: "pr",
     src: "await input.forge.addPRLabel(input.pr, input.cfg.labels.humanMergeOnly);",
     why: "#292 instruction-path trust chain — the PR is fine, its merge decision is a human's",
   },
@@ -99,11 +116,13 @@ const SITE_INVENTORY: Record<string, { bucket: "human-merge-only" | "needs-human
   // ── not an escalation at all: the class-6 routing fence ─────────────────────────────────
   "loop/decompose.ts#2": {
     bucket: "planless",
+    carrier: "issue",
     src: 'if (child.kind === "remainder") await deps.forge.addLabel(issue, deps.cfg.labels.planless);',
     why: "decompose remainder — a fence keeping a plan-less child off every queue, nobody owes a decision",
   },
   "loop/align.ts#0": {
     bucket: "planless",
+    carrier: "issue",
     src: "if (!hasPlan) await deps.forge.addLabel(issueNumber, l.planless);",
     why: "PO-created issue with no verification plan — same fence, same non-escalation",
   },
@@ -112,166 +131,199 @@ const SITE_INVENTORY: Record<string, { bucket: "human-merge-only" | "needs-human
   // 1a — cap / DEAD / undecidable lane disposition (conductor).
   "loop/conductor.ts#0": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(row.issue, cfg.labels.needsHuman).catch(() => {});",
-    why: "rollback exhausted (reasonless escalation)",
+    why: "rollback exhausted (reasonless escalation) — issue-born: the fact is about the board write for the work item",
   },
   "loop/conductor.ts#1": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(worker.issue, cfg.labels.needsHuman);",
-    why: "resume cap reached",
+    why: "resume UNDECIDABLE (#172) — issue-born: a handoff lane may have no PR at all",
   },
   "loop/conductor.ts#2": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman).catch(() => {});",
-    why: "drain escalation (issue)",
+    why: "ceiling drain (issue) — #69 P1 dual-write pair A, see DUAL_WRITE_EXCEPTIONS",
   },
   "loop/conductor.ts#3": {
     bucket: "needs-human",
+    carrier: "pr",
     src: "await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman).catch(() => {});",
-    why: "drain escalation (PR)",
+    why: "ceiling drain (PR) — #69 P1 dual-write pair A, retained-worktree salvage flag for the merge gate",
   },
   "loop/conductor.ts#4": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "drain of a driving lane",
+    why: 'drain of a driving lane (#375) — a PR-BEARING lane escalated on the ISSUE. Left as-is by #398, whose scope is escalateNeedsHuman + fix-response; it is single-carrier and self-consistent (it records gated_escalation_carrier: "issue", so the handshake reads the issue it wrote). Moving it is a follow-up, not a silent drive-by',
   },
   "loop/conductor.ts#5": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "handoff cap reached",
+    why: "ESCALATE_NOPR — done but no PR was opened; issue-born by definition, there is nothing else to carry it",
   },
   "loop/conductor.ts#6": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "dead lane with retained dirty worktree (issue)",
+    why: "reclaim-terminal ESCALATE, dirty worktree (issue) — #69 P1 dual-write pair B",
   },
   "loop/conductor.ts#7": {
     bucket: "needs-human",
+    carrier: "pr",
     src: "if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);",
-    why: "same, on the PR",
+    why: "same, on the PR — #69 P1 dual-write pair B",
   },
-  "loop/conductor.ts#8": { bucket: "needs-human", src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);", why: "reclaim escalation" },
+  "loop/conductor.ts#8": {
+    bucket: "needs-human",
+    carrier: "issue",
+    src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
+    why: "fix-leg spawn UNCONFIRMED — issue-born: the ambiguity is about this lane's own process, not the PR's content",
+  },
+  // #398: the SHARED carrier writer (labelEscalationCarrier). Two scanner lines, ONE exclusive
+  // choice — this is what makes "one carrier per escalation, never both" structural for its
+  // callers (escalateNeedsHuman and GATED RECLAIM's CAPPED re-apply) rather than a rule each
+  // restates. Which arm a given call site takes is asserted behaviourally in conductor.test.ts.
   "loop/conductor.ts#9": {
     bucket: "needs-human",
-    src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "escalateNeedsHuman — the shared gate-verdict escalation",
+    carrier: "carrier-rule",
+    src: 'if (carrier === "pr") await forge.addPRLabel(pr, cfg.labels.needsHuman);',
+    why: "shared carrier writer, PR arm — taken when the lane has a PR",
   },
   "loop/conductor.ts#10": {
     bucket: "needs-human",
-    src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "#283 AC-snapshot drift — unverifiable lane",
+    carrier: "carrier-rule",
+    src: "else await forge.addLabel(issue, cfg.labels.needsHuman);",
+    why: "shared carrier writer, issue arm — taken when the lane has no PR",
   },
   "loop/conductor.ts#11": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "dead lane, dirty worktree (issue)",
+    why: "#283 AC-snapshot drift — issue-born: the fact IS about the work item (its body drifted from the snapshot)",
   },
   "loop/conductor.ts#12": {
     bucket: "needs-human",
-    src: "if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);",
-    why: "same, on the PR",
+    carrier: "issue",
+    src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
+    why: "DEAD lane, dirty worktree (issue) — #69 P1 dual-write pair C",
   },
   "loop/conductor.ts#13": {
     bucket: "needs-human",
-    src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "dead fixing lane, dirty worktree (issue)",
+    carrier: "pr",
+    src: "if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);",
+    why: "same, on the PR — #69 P1 dual-write pair C",
   },
   "loop/conductor.ts#14": {
     bucket: "needs-human",
-    src: "if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);",
-    why: "same, on the PR",
+    carrier: "issue",
+    src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
+    why: "DEAD fixing lane, dirty worktree (issue) — #69 P1 dual-write pair D",
   },
   "loop/conductor.ts#15": {
     bucket: "needs-human",
-    src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "fail-safe: dead fixing lane with no PR",
+    carrier: "pr",
+    src: "if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);",
+    why: "same, on the PR — #69 P1 dual-write pair D",
   },
   "loop/conductor.ts#16": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "#147 gated-reentry CAPPED — re-applies the label it must never be able to re-apply for bucket 2",
+    why: "fail-safe: DEAD fixing lane with no PR — issue-born by definition",
   },
   "loop/conductor.ts#17": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "fail-safe: driving lane missing its PR",
+    why: "fail-safe: driving lane missing its PR (drive-no-pr) — issue-born by definition",
   },
   "loop/conductor.ts#18": {
     bucket: "needs-human",
+    carrier: "pr",
     src: "await forge.addPRLabel(pr, cfg.labels.needsHuman);",
-    why: "#170 review-silence visibility escalation (PR)",
+    why: "#170 review-silence visibility escalation — PR-born, and since #398 the NEXT tick's gate:HUMAN escalation lands on the same object rather than adding a second carrier",
   },
   "loop/conductor.ts#19": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "fix-leg start failure",
+    why: "fix-rounds cap / verdict-rerun breaker — issue-born: the work item's rework budget is spent",
   },
   "loop/conductor.ts#20": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "ceiling/wind-down terminal escalation",
+    why: "handoff resume CAPPED (#172) — issue-born, same no-PR-guaranteed shape as #1",
   },
   "loop/conductor.ts#21": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman).catch(() => {});",
-    why: "kill-switch drain escalation",
+    why: "fixing-origin handoff with no PR (fail-safe) — issue-born by definition",
   },
-  // #451 (design #402 §4/D4): the dispute-pricing escalation (escalateReviewDisputed, defined at
-  // module end so this site's addLabel physically follows every other needsHuman write in the
-  // file — see that function's own doc for why).
   "loop/conductor.ts#22": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
     why: "review-disputed — every unresolved current-head thread is durably disputed",
   },
-  // #450 (design #402 R3, §3c): the convergence-stop escalation (escalateNonConvergent, defined at
-  // module end AFTER escalateReviewDisputed — same "physically follows every other needsHuman
-  // write" placement reasoning that function's own doc gives, so this adds one new trailing entry
-  // rather than renumbering #0-#22 above).
   "loop/conductor.ts#23": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
     why: "review-non-convergent — the progress classifier returned a STALLED verdict",
   },
   // 1b — the PO decomposition path's genuine give-ups (distinct from the class-6 fence above).
   "loop/decompose.ts#0": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await deps.forge.addLabel(parent.number, deps.cfg.labels.needsHuman);",
     why: "fenced title collision — human reconciliation required",
   },
   "loop/decompose.ts#1": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await deps.forge.addLabel(parent.number, deps.cfg.labels.needsHuman);",
     why: "created-receipt/live mismatch — human reconciliation required",
   },
   "loop/decompose.ts#3": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await deps.forge.addLabel(parent.number, deps.cfg.labels.needsHuman);",
     why: "decomposition session invalid after retry",
   },
   "loop/decompose.ts#4": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await deps.forge.addLabel(parent.number, deps.cfg.labels.needsHuman);",
     why: "unresolved decision failed to persist",
   },
   "loop/decompose.ts#5": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await deps.forge.addLabel(parent.number, deps.cfg.labels.needsHuman);",
     why: "preflight title collision, zero children",
   },
   "loop/decompose.ts#6": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await deps.forge.addLabel(parent.number, deps.cfg.labels.needsHuman);",
     why: "proposal evidence failed to persist",
   },
   // 1c — peripheral role-session failure and the verify:n/a doc-gate signoff.
   "roles/plan-review.ts#0": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await deps.forge.addLabel(issue.number, l.needsHuman);",
     why: "plan-review session failed/degraded",
   },
   "roles/plan-review.ts#1": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await deps.forge.addLabel(issue.number, l.needsHuman);",
     why: "verify:n/a doc-gate — removal IS the human signoff",
   },
@@ -280,19 +332,16 @@ const SITE_INVENTORY: Record<string, { bucket: "human-merge-only" | "needs-human
   // the #147 handshake on removal) rather than folded into "the machine gave up".
   "roles/architect.ts#0": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await deps.forge.addLabel(v.issue, deps.cfg.labels.needsHuman);",
     why: "architect pool verdict (bucket-1 sub-case)",
   },
   // 1e — the fix-response thread-write escalation.
   "loop/fix-response.ts#0": {
     bucket: "needs-human",
-    src: "await forge.addLabel(row.issue, cfg.labels.needsHuman);",
-    why: "thread-write retries exhausted (issue)",
-  },
-  "loop/fix-response.ts#1": {
-    bucket: "needs-human",
+    carrier: "pr",
     src: "await forge.addPRLabel(row.pr, cfg.labels.needsHuman);",
-    why: "same, on the PR",
+    why: "thread-write retries exhausted — PR-born by construction (the failed write is a reply to / resolution of a REVIEW THREAD on this PR). #398 deleted its issue-side twin: two carriers meant a human had to strip the label twice before the lane was released (the F19-F21 residue, dogfood lanes 144 and 295)",
   },
   // 1g — #432 round 6: the SHARED writer (escalation-writer.ts's escalateToNeedsHuman) both of
   // the F32 saga's retry-cap degrade-to-human escalations now route through — round 5 hand-rolled
@@ -303,6 +352,7 @@ const SITE_INVENTORY: Record<string, { bucket: "human-merge-only" | "needs-human
   // `always` — this write is best-effort, and its outcome (not its mere existence) is the proof.
   "loop/escalation-writer.ts#0": {
     bucket: "needs-human",
+    carrier: "issue",
     src: "await forge.addLabel(issue, cfg.labels.needsHuman);",
     why: "shared: a durable dissent concern OR a stale roundPool-removal both reaching their retry cap",
   },
@@ -400,17 +450,21 @@ test("#397 AC: EVERY escalation write site in engine source is classified into e
   }
 });
 
-test("#397 AC: the corrected site inventory — 7 PR-side label writes, 32 issue-side (#432 round 6's shared writer collapsed round 5's 2 sites into 1; #451 added review-disputed; #450 added review-non-convergent), and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
+test("#397 AC: the corrected site inventory — 8 PR-side label writes, 30 issue-side (#398 moved fix-response's escalation to the PR and deleted its issue twin, and split escalateNeedsHuman's single write into the shared carrier writer's two arms), and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
   const sites = scanEscalationSites();
   const labelSites = sites.filter(
     (s) => SITE_INVENTORY[s.key]!.src.includes("addLabel(") || SITE_INVENTORY[s.key]!.src.includes("addPRLabel("),
   );
   const prSide = labelSites.filter((s) => s.src.includes("addPRLabel("));
-  assert.equal(prSide.length, 7, "PR-side escalation writes (#397's corrected count)");
+  assert.equal(
+    prSide.length,
+    8,
+    "PR-side escalation writes (#397's count, +2 for #398's fix-response move and carrier-writer PR arm, -1 for the deleted fix-response issue twin)",
+  );
   assert.equal(
     labelSites.length - prSide.length,
-    32,
-    "issue-side escalation writes (#397's corrected count + #432 round 6's shared retry-cap escalation writer + #451's review-disputed + #450's review-non-convergent)",
+    30,
+    "issue-side escalation writes (#397's corrected count, minus #398's deleted fix-response issue twin, minus escalateNeedsHuman's own former issue write now folded into the shared carrier writer)",
   );
   // The four sites the AC names explicitly because they carry no `gate:HUMAN:` reason prefix.
   for (const key of ["roles/merge-driver.ts#4", "roles/merge-driver.ts#5", "roles/merge-driver.ts#6", "loop/conductor.ts#0"]) {
@@ -422,6 +476,79 @@ test("#397 AC: the corrected site inventory — 7 PR-side label writes, 32 issue
     bucket2Writes.map((s) => s.key),
     ["review/instruction-path-escalation.ts#0"],
   );
+});
+
+// ── #398: the carrier axis ────────────────────────────────────────────────────────────────────
+
+/**
+ * #398 AC2: the CLOSED set of paths that deliberately write BOTH carriers, each named and
+ * justified. Everything else in the inventory writes exactly one object.
+ *
+ * All four are the #69 P1 retained-worktree hardening, and the born-where rule genuinely does not
+ * decide them: they are simultaneously ISSUE-born (a possibly-dirty worktree holding uncommitted
+ * WIP is a fact about the WORK ITEM, and a human must salvage it) and MERGE-GATE-relevant (the
+ * lane may hold an open PR that would otherwise keep driving toward merge while the WIP waits on
+ * a person — the merge gate reads the PR's own labels, so the PR-side write is a SALVAGE FLAG
+ * that stops the gate, not a duplicate of the issue-side fact). Dropping either half loses a
+ * distinct guarantee, so both stay, deliberately, and are enumerated here so no fifth pair can
+ * be added silently.
+ *
+ * These are also the paths whose PR-side write is conditional on `worktreeRetained` — a clean
+ * reclaim of the same lane writes the issue only — which is why they cannot route through
+ * `escalationCarrier` (a pure function of `pr`) in the first place.
+ */
+const DUAL_WRITE_EXCEPTIONS: Array<{ name: string; issueSite: string; prSite: string }> = [
+  { name: "ceiling drain (#69 P1a)", issueSite: "loop/conductor.ts#2", prSite: "loop/conductor.ts#3" },
+  { name: "reclaim-terminal ESCALATE (#69 P3-b)", issueSite: "loop/conductor.ts#6", prSite: "loop/conductor.ts#7" },
+  { name: "DEAD lane, dirty worktree (#69 P1)", issueSite: "loop/conductor.ts#12", prSite: "loop/conductor.ts#13" },
+  { name: "DEAD fixing lane, dirty worktree (#69 P1)", issueSite: "loop/conductor.ts#14", prSite: "loop/conductor.ts#15" },
+];
+
+test("#398 AC2: every LABEL site declares a carrier, and the declaration matches what the source line actually writes", () => {
+  const sites = scanEscalationSites();
+  const labelSites = sites.filter((s) => s.src.includes("addLabel(") || s.src.includes("addPRLabel("));
+  const undeclared = labelSites.filter((s) => SITE_INVENTORY[s.key]?.carrier === undefined);
+  assert.deepEqual(
+    undeclared.map((s) => `${s.key}  ${s.src}`),
+    [],
+    "#398: a label site with no declared carrier — say which object it writes, and why that is where the escalation was born",
+  );
+  for (const site of labelSites) {
+    const declared = SITE_INVENTORY[site.key]!.carrier;
+    const writesPr = site.src.includes("addPRLabel(");
+    if (declared === "carrier-rule") continue; // one exclusive choice across two lines — asserted behaviourally
+    assert.equal(declared, writesPr ? "pr" : "issue", `${site.key} declares ${declared} but the source writes the other object`);
+  }
+});
+
+test("#398 AC2: the dual-write exceptions are exactly the four named #69 P1 retained-worktree paths — no fifth pair appears silently", () => {
+  const sites = scanEscalationSites();
+  const byKey = new Map(sites.map((s) => [s.key, s.src]));
+  for (const exception of DUAL_WRITE_EXCEPTIONS) {
+    assert.ok(byKey.get(exception.issueSite)?.includes("addLabel("), `${exception.name}: issue-side write missing`);
+    assert.ok(byKey.get(exception.prSite)?.includes("addPRLabel("), `${exception.name}: PR-side salvage flag missing`);
+    // Adjacency is the structural signal that these two writes are ONE path, not two escalations
+    // that happen to share a file — a pair that drifted apart is a rewrite worth re-reading.
+    const [, issueOrdinal] = exception.issueSite.split("#");
+    const [, prOrdinal] = exception.prSite.split("#");
+    assert.equal(Number(prOrdinal), Number(issueOrdinal) + 1, `${exception.name}: the pair is no longer adjacent`);
+  }
+  // Every OTHER PR-side write belongs to a single-carrier path: the shared carrier writer's PR
+  // arm, #170's review-silence escalation, fix-response's thread-write escalation, and #292's
+  // human-merge-only latch. If a new PR-side write appears, it is either single-carrier (and
+  // belongs in this list) or a new dual-write pair (and belongs in DUAL_WRITE_EXCEPTIONS).
+  const prSideKeys = sites.filter((s) => s.src.includes("addPRLabel(")).map((s) => s.key);
+  const exceptionPrKeys = new Set(DUAL_WRITE_EXCEPTIONS.map((e) => e.prSite));
+  assert.deepEqual(
+    prSideKeys.filter((k) => !exceptionPrKeys.has(k)),
+    ["loop/conductor.ts#9", "loop/conductor.ts#18", "loop/fix-response.ts#0", "review/instruction-path-escalation.ts#0"],
+  );
+});
+
+test("#398: fix-response's thread-write escalation writes the PR and nothing else — its issue-side twin is gone", () => {
+  const src = readFileSync(join(SRC, "loop/fix-response.ts"), "utf8");
+  assert.ok(src.includes("await forge.addPRLabel(row.pr, cfg.labels.needsHuman);"), "the PR-side write must remain");
+  assert.ok(!/addLabel\(row\.issue/.test(src), "#398: the issue-side twin must be gone — two carriers meant two human removals");
 });
 
 // ── the new labels: provisioning, descriptions, config wiring ─────────────────────────────────

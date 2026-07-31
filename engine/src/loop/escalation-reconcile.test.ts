@@ -52,6 +52,14 @@ class FakeForge extends UnstubbedForge implements IForge {
     this.reads.push(`getPRStatus:${pr}`);
     return { number: pr, headOid: "x", state: this.prStates[pr] ?? "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
+  /** #398: the PR-side label store — read only for an escalation whose payload says its carrier
+   *  is the PR. Read-only, like the two above; it records into `reads`, never `writes`. */
+  prLabels: Record<number, string[]> = {};
+  override async getPRLabels(pr: number): Promise<string[]> {
+    this.reads.push(`getPRLabels:${pr}`);
+    if (this.failReadsFor.has(pr)) throw new Error("forge exploded");
+    return this.prLabels[pr] ?? [];
+  }
 
   // ── writes: every one records, so AC3 ("zero writes to GitHub") is structurally checkable ──
   override async claimIssue(): Promise<void> {
@@ -1068,5 +1076,64 @@ test("reconcileEscalations: a plan-review-escalated whose label never landed is 
   await reconcileEscalations(forge, state, mkCfg());
 
   assert.deepEqual(resolvedEvents(logged), []);
+  state.close();
+});
+
+// ── #398: the carrier — label absence is only observable on the object the escalation WROTE ──
+
+test("#398: a PR-CARRIED drive-needs-human is read on the PR — a clean issue is NOT a resolution (the false clear this module's own doctrine calls worse than a zombie row)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("drive-needs-human", { worker: "w1", issue: 7, pr: 12, reason: "r", labeled: 1, carrier: "pr" });
+  // The issue is clean and always was — the escalation never labelled it. Reading the issue here
+  // would report "a human resolved this" about work nobody has looked at, on the VERY FIRST pass.
+  forge.issueLabels[7] = [];
+  forge.prLabels[12] = [NEEDS_HUMAN];
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), []);
+  assert.ok(forge.reads.includes("getPRLabels:12"), "the carrier read actually happened");
+  state.close();
+});
+
+test("#398: clearing the PR-carried label DOES resolve it — one carrier, one removal", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("drive-needs-human", { worker: "w1", issue: 7, pr: 12, reason: "r", labeled: 1, carrier: "pr" });
+  forge.issueLabels[7] = [];
+  forge.prLabels[12] = [];
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source: "drive-needs-human", via: "label-removed" }]);
+  assert.deepEqual(forge.writes, [], "still structurally read-only (#295 AC3)");
+  state.close();
+});
+
+test("#398 cutover: a legacy event with NO carrier field is read on the ISSUE, exactly as before — and a PR-carrier claim with no pr number falls back to the issue too", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  // Pre-#398 payload shape: no `carrier` key at all.
+  state.appendEvent("drive-needs-human", { worker: "w1", issue: 7, pr: 12, reason: "r", labeled: 1 });
+  forge.issueLabels[7] = [NEEDS_HUMAN];
+  forge.prLabels[12] = []; // a PR read would falsely clear this
+  const logged = tapEvents(state);
+  await reconcileEscalations(forge, state, mkCfg());
+  assert.deepEqual(resolvedEvents(logged), []);
+  assert.ok(!forge.reads.includes("getPRLabels:12"), "no carrier claim, no PR-side read");
+
+  // A malformed claim ("pr" carrier, no pr to read) also falls back to the issue: a zombie strip
+  // row is recoverable, a released lane nobody looked at is not.
+  const forge2 = new FakeForge();
+  const state2 = new State(":memory:");
+  state2.appendEvent("concern-post-escalated", { round_id: "r1", issue: 8, labeled: 1, carrier: "pr" });
+  forge2.issueLabels[8] = [NEEDS_HUMAN];
+  const logged2 = tapEvents(state2);
+  await reconcileEscalations(forge2, state2, mkCfg());
+  assert.deepEqual(resolvedEvents(logged2), []);
+  state2.close();
   state.close();
 });

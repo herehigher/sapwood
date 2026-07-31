@@ -33,7 +33,16 @@ import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { ReviewFallbackLock, ReviewTriggerPin } from "../roles/reviewer.js";
 import { isReviewerKind } from "../roles/reviewer.js";
 import { UnresumableLaneError, type WorkerProxyOpts } from "../roles/worker.js";
-import type { BoardStatus, CategorizedTokenUsage, ModelUsageEntry, ParkRow, PendingRollback, State, WorkerRow } from "../state/state.js";
+import type {
+  BoardStatus,
+  CategorizedTokenUsage,
+  EscalationCarrier,
+  ModelUsageEntry,
+  ParkRow,
+  PendingRollback,
+  State,
+  WorkerRow,
+} from "../state/state.js";
 import {
   classifyEnvFailure,
   type EnvFailureSource,
@@ -249,6 +258,24 @@ export function labelsBlockers(labels: string[], prefix: string): number[] {
 /** True if any reserve-ish label (reserve / needs-human — config-driven) is present. */
 export function hasReserveLabel(labels: string[], reserveLabels: string[]): boolean {
   return reserveLabels.some((reserveLabel) => labelsInclude(labels, reserveLabel));
+}
+
+/** #398: THE carrier rule, in one place — "the label lives where the escalation was born." A
+ *  lane that has a PR is escalating ABOUT that PR (gate②'s HUMAN verdict, a thread-write that
+ *  could not be posted, the FIXABLE degrade), so the label goes on the PR: that is where the
+ *  merge gate reads labels (`deriveGate`, merge-driver.ts) and where the human deciding whether
+ *  the finding is addressed is already looking. A PR-less lane has nothing else to carry the
+ *  fact, so it goes on the issue. ONE carrier per escalation, never both.
+ *
+ *  Deliberately a pure function of the lane's `pr` and nothing else — no config, no forge read —
+ *  so a call site's chosen carrier is a fact a table test can enumerate (#398 AC2) instead of a
+ *  branch buried in each escalation's own body. The four #69 P1 retained-worktree paths
+ *  (ceiling drain, reclaim-terminal ESCALATE, DEAD lane, fixing-DEAD lane) deliberately do NOT
+ *  route through this rule — see their own comments and `escalation-carrier.test.ts`'s exception
+ *  table for why their PR-side write is a merge-gate salvage flag rather than a second copy of
+ *  the issue-side fact. */
+export function escalationCarrier(pr: number | null | undefined): EscalationCarrier {
+  return pr != null ? "pr" : "issue";
 }
 
 /** Reserved coding-lane floor = ceil(L/2) (anti-starvation). */
@@ -1748,8 +1775,8 @@ async function drainThenEscalate(
         });
         continue; // stays `driving`, no latch — the next drain tick retries this whole branch
       }
-      state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
-      state.appendEvent("drive-needs-human", { worker: w.name, issue: w.issue, pr: w.pr, reason, labeled: 1 });
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1, gated_escalation_carrier: "issue" });
+      state.appendEvent("drive-needs-human", { worker: w.name, issue: w.issue, pr: w.pr, reason, labeled: 1, carrier: "issue" });
       escalated.push(w.name);
     }
   }
@@ -2312,7 +2339,7 @@ async function reconcileDrivingFixIntents(
         state.appendEvent("fix-leg-undecidable-label-failed", { worker: w.name, issue: w.issue, error: String(e) });
         continue;
       }
-      state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1, gated_escalation_carrier: "issue" });
       // #295 (Codex P2, PR #371): `pr` rides along so the escalation-resolution sweep can
       // observe an external merge/close of this lane's PR — without it the sweep could only
       // ever see issue closure or label removal for this source.
@@ -2320,6 +2347,23 @@ async function reconcileDrivingFixIntents(
     }
     // "none": nothing to reconcile.
   }
+}
+
+/** #398: the ONE place the carrier rule becomes a forge call — `needs-human` on the PR, or on the
+ *  issue, never on both. Shared by `escalateNeedsHuman` and GATED RECLAIM's CAPPED re-apply so
+ *  the escalation and the re-escalation cannot drift onto different objects (a re-apply that
+ *  missed the carrier would leave the human's removal standing while the row stayed latched).
+ *  Deliberately NOT best-effort: every caller decides for itself what a failed write means to its
+ *  own terminal transition, exactly as before. */
+async function labelEscalationCarrier(
+  forge: Pick<IForge, "addLabel" | "addPRLabel">,
+  cfg: Pick<SapwoodConfig, "labels">,
+  carrier: EscalationCarrier,
+  issue: number,
+  pr: number,
+): Promise<void> {
+  if (carrier === "pr") await forge.addPRLabel(pr, cfg.labels.needsHuman);
+  else await forge.addLabel(issue, cfg.labels.needsHuman);
 }
 
 /** #147 P2 + #246 review round 1 (C1): the SHARED needs-human escalation for a `driving` lane —
@@ -2330,7 +2374,19 @@ async function reconcileDrivingFixIntents(
  *  loop isn't wired" degrade (C1 below) go through byte-for-byte the SAME escalation — an
  *  unconfigured fix loop must never silently retry forever where the pre-#246 gate would have
  *  visibly escalated to a human; it degrades to the EXACT same visible escalation instead,
- *  never a parallel path. */
+ *  never a parallel path.
+ *
+ *  #398 — CARRIER: this is the main artery ("the most common escalation in the whole engine"),
+ *  and it used to write the ISSUE while `deriveGate` (merge-driver.ts) read the PR's labels, so
+ *  a human looking at the PR where the decision is made saw no marker at all. It now writes
+ *  exactly ONE object, chosen by `escalationCarrier` from the lane's own `pr`: the PR for a
+ *  PR-bearing lane (every current caller — both call sites are inside DRIVE, which only ever
+ *  runs for a lane with a PR), the issue otherwise. The chosen carrier is recorded on the row
+ *  (`gated_escalation_carrier`) AND in the event payload, because both the reentry handshake
+ *  (GATED RECLAIM) and the resolution reconciler (escalation-reconcile.ts) decide by observing
+ *  the label's ABSENCE and must look at the object the write actually went to. The trail comment
+ *  follows the label onto the same object for the same reason — a "remove the label to retry"
+ *  instruction posted somewhere other than where the label is, is a wrong instruction. */
 async function escalateNeedsHuman(
   forge: IForge,
   state: State,
@@ -2340,43 +2396,43 @@ async function escalateNeedsHuman(
   reason: string,
   iso: () => string,
 ): Promise<DrivenOutcome> {
+  const carrier = escalationCarrier(pr);
   let labeled = 1;
   let labelError: string | null = null;
   try {
-    await forge.addLabel(w.issue, cfg.labels.needsHuman);
+    await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
   } catch (e) {
     labeled = 0;
     labelError = String(e);
   }
-  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled });
+  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled, gated_escalation_carrier: carrier });
   state.appendEvent("drive-needs-human", {
     worker: w.name,
     issue: w.issue,
     pr,
     reason,
     labeled,
+    carrier,
     ...(labelError != null ? { labelError } : {}),
   });
   // #147: gated_reentry_attempts > 0 means this lane was reclaimed by GATED RECLAIM at least
   // once (a human removed needs-human believing the finding was fixed) and STILL escalated —
-  // leave the attempt trail on the issue so a repeat escalation isn't indistinguishable from
-  // the very first one. Never fires for a first-time escalation (attempts is 0 for every lane
-  // that's never been through GATED RECLAIM, including #246's own fixLegResume-unwired degrade).
+  // leave the attempt trail where the label is (#398) so a repeat escalation isn't
+  // indistinguishable from the very first one. Never fires for a first-time escalation (attempts
+  // is 0 for every lane that's never been through GATED RECLAIM, including #246's own
+  // fixLegResume-unwired degrade).
   const gatedAttempts = w.gated_reentry_attempts ?? 0;
   if (gatedAttempts > 0) {
     const cap = cfg.lanes.gatedReentryCap;
-    await forge
-      .addIssueComment(
-        w.issue,
-        `sapwood: gated-PR reentry attempt ${gatedAttempts}/${cap} for PR #${pr} ` +
-          `re-escalated \`${cfg.labels.needsHuman}\` — ${reason}. ` +
-          (gatedAttempts >= cap
-            ? // #167 review (Codex P2+P3): cap reached — see capHitEscalationNote's own doc
-              // comment for why this is a helper, not inline text.
-              capHitEscalationNote(cfg)
-            : `Remove \`${cfg.labels.needsHuman}\` again once it's addressed to retry.`),
-      )
-      .catch(() => {});
+    const body =
+      `sapwood: gated-PR reentry attempt ${gatedAttempts}/${cap} for PR #${pr} ` +
+      `re-escalated \`${cfg.labels.needsHuman}\` — ${reason}. ` +
+      (gatedAttempts >= cap
+        ? // #167 review (Codex P2+P3): cap reached — see capHitEscalationNote's own doc
+          // comment for why this is a helper, not inline text.
+          capHitEscalationNote(cfg)
+        : `Remove \`${cfg.labels.needsHuman}\` from this pull request again once it's addressed to retry.`);
+    await (carrier === "pr" ? forge.addPRComment(pr, body) : forge.addIssueComment(w.issue, body)).catch(() => {});
   }
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason };
 }
@@ -2497,7 +2553,7 @@ async function checkAcDriftBeforeDrive(
     labeled = 0;
     labelError = String(e);
   }
-  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled });
+  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled, gated_escalation_carrier: "issue" });
   // #301 review round 3 (P2): the durable event lands HERE — immediately after the terminal
   // upsert, BEFORE the comment is ever attempted — so it is the crash-safe record of "this
   // escalation happened, and what the label write did" regardless of whatever the comment attempt
@@ -2986,16 +3042,29 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     for (const w of state.gatedFailedWorkers()) {
       if (w.pr == null) continue; // fail-safe; gatedFailedWorkers() already filters this
       const pr = w.pr;
-      const labels = await forge.getIssueLabels(w.issue);
-      const attempts = w.gated_reentry_attempts ?? 0;
+      // #398: read the carrier the ESCALATION wrote, not a fixed object. `gated_escalation_labeled
+      // = 1` (which this query already requires) proves the engine applied the label; this column
+      // says WHERE, and defaults to "issue" — so every pre-#398 row, whose label really is on the
+      // issue, keeps the exact handshake it was escalated under. Reading the PR unconditionally
+      // would see nothing on those rows and re-admit them with no human act at all.
+      const carrier: EscalationCarrier = w.gated_escalation_carrier ?? "issue";
       // Round-4 P2 (Codex PR #151): eligibility requires ZERO of cfg.escalation.humanLabels on
-      // the issue — the SAME standard (and the same hasReserveLabel helper) dispatch applies in
-      // orderForDispatch. needsHuman alone would let an issue still carrying `blocked` reclaim
-      // and drive to merge (the merge driver's human-label veto reads the PR's labels, not the
-      // issue's) the moment needs-human was removed.
-      // #400: hold labels are NOT consulted here — hold's one carrier is the PR. See
-      // gatedReentryDecision's own doc for the removal rationale and its bounded cost.
-      const decision = gatedReentryDecision(hasReserveLabel(labels, cfg.escalation.humanLabels), attempts, cfg.lanes.gatedReentryCap);
+      // the carrier — the SAME standard (and the same hasReserveLabel helper) dispatch applies in
+      // orderForDispatch. needsHuman alone would let a lane still carrying `blocked` reclaim
+      // and drive to merge the moment needs-human was removed.
+      //
+      // #398 (restoring what #400 removed, on the correct carrier): for a PR-carried escalation
+      // the SAME fetch that answers "is the hold gone?" also sees a PR-level HOLD, so
+      // `escalation.holdLabels` joins the SKIP set here at zero marginal cost. That is exactly
+      // #400's own doctrine — hold gates the PR surface, reentry drives the PR — and it closes
+      // the accepted-but-real gap that ruling named: a human who holds the PR while investigating
+      // and then clears needs-human no longer burns a `gated_reentry_attempts` slot. It is NOT
+      // reinstated for an ISSUE carrier: #400's ruling that an issue-level hold is the wrong
+      // carrier for a PR's gate stands unchanged.
+      const holdSet = carrier === "pr" ? [...cfg.escalation.humanLabels, ...cfg.escalation.holdLabels] : cfg.escalation.humanLabels;
+      const labels = carrier === "pr" ? await forge.getPRLabels(pr) : await forge.getIssueLabels(w.issue);
+      const attempts = w.gated_reentry_attempts ?? 0;
+      const decision = gatedReentryDecision(hasReserveLabel(labels, holdSet), attempts, cfg.lanes.gatedReentryCap);
       if (decision === "SKIP") continue; // a human hold still stands — no complete human act yet
       if (decision === "CAPPED") {
         // The cap was already spent on a prior reclaim that re-escalated, and a human removed
@@ -3013,30 +3082,33 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         // the label until it succeeds (the same retry-until-success shape as the rollback
         // machinery; gatedReentryDecision stays CAPPED throughout, so no extra reclaim can
         // slip through while retrying).
+        //
+        // #398: re-applied to the SAME carrier the escalation used. Re-applying to the issue for
+        // a PR-carried lane would both fail to restore the block (the handshake reads the PR) and
+        // hand the human a second object to clean up — the two-carriers-two-removals residue this
+        // issue exists to end.
         try {
-          await forge.addLabel(w.issue, cfg.labels.needsHuman);
+          await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
         } catch (e) {
           state.appendEvent("gated-reentry-capped-label-failed", {
             worker: w.name,
             issue: w.issue,
             pr,
             attempts,
+            carrier,
             error: String(e),
           });
           continue;
         }
         // Best-effort courtesy notice — the label above is the load-bearing block; a comment
         // hiccup must not strand the latch.
-        await forge
-          .addIssueComment(
-            w.issue,
-            `sapwood: gated-PR reentry cap (${cfg.lanes.gatedReentryCap}) reached for PR #${pr} — ` +
-              `re-applying \`${cfg.labels.needsHuman}\`. Automatic reentry is exhausted for this ` +
-              `PR; merge it by hand once it's ready.`,
-          )
-          .catch(() => {});
+        const cappedNotice =
+          `sapwood: gated-PR reentry cap (${cfg.lanes.gatedReentryCap}) reached for PR #${pr} — ` +
+          `re-applying \`${cfg.labels.needsHuman}\`. Automatic reentry is exhausted for this ` +
+          `PR; merge it by hand once it's ready.`;
+        await (carrier === "pr" ? forge.addPRComment(pr, cappedNotice) : forge.addIssueComment(w.issue, cappedNotice)).catch(() => {});
         state.upsertWorker({ ...w, ended_at: iso(), gated_reentry_capped: 1 });
-        state.appendEvent("gated-reentry-capped", { worker: w.name, issue: w.issue, pr, attempts });
+        state.appendEvent("gated-reentry-capped", { worker: w.name, issue: w.issue, pr, attempts, carrier });
         gatedReclaimed.push({ kind: "capped", worker: w.name, issue: w.issue, pr, attempts });
         continue;
       }
@@ -3705,7 +3777,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "fix-rounds-cap-comment-failed" });
             break;
           }
-          state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
+          state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1, gated_escalation_carrier: "issue" });
           // #457: a breaker trip gets its own terminal event kind — it is NOT a spent cap
           // (fixRounds < cap is the whole point) and carries the verdict identity for audit.
           if (verdictRerun) {
@@ -4486,14 +4558,18 @@ async function escalateReviewDisputed(
   // receipt land in ONE transaction — see this function's own doc for the crash window this
   // closes. Zero fix-round cost (AC): `fix_rounds` carried through unchanged — this branch never
   // called startFixLeg, so there is nothing to bump.
-  state.upsertWorkerWithEvent({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 }, "review-disputed", {
-    worker: w.name,
-    issue: w.issue,
-    pr,
-    headOid: escalation.headOid,
-    fixRounds: fixRoundsSpent,
-    threads: escalation.threads.map((t) => t.threadId),
-  });
+  state.upsertWorkerWithEvent(
+    { ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1, gated_escalation_carrier: "issue" },
+    "review-disputed",
+    {
+      worker: w.name,
+      issue: w.issue,
+      pr,
+      headOid: escalation.headOid,
+      fixRounds: fixRoundsSpent,
+      threads: escalation.threads.map((t) => t.threadId),
+    },
+  );
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `review-disputed:${escalation.threads.length}` };
 }
 
@@ -4639,15 +4715,19 @@ async function escalateNonConvergent(
   // Same crash window closed the same way as escalateReviewDisputed's own terminal write: the
   // row and the receipt land in ONE transaction. Zero fix-round cost: `fix_rounds` carried through
   // unchanged — this branch never called startFixLeg, so there is nothing to bump.
-  state.upsertWorkerWithEvent({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 }, "review-non-convergent", {
-    worker: w.name,
-    issue: w.issue,
-    pr,
-    signal,
-    fixRounds: fixRoundsSpent,
-    prevFindingKeys: boundedPrev.entries,
-    currFindingKeys: boundedCurr.entries,
-  });
+  state.upsertWorkerWithEvent(
+    { ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1, gated_escalation_carrier: "issue" },
+    "review-non-convergent",
+    {
+      worker: w.name,
+      issue: w.issue,
+      pr,
+      signal,
+      fixRounds: fixRoundsSpent,
+      prevFindingKeys: boundedPrev.entries,
+      currFindingKeys: boundedCurr.entries,
+    },
+  );
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `review-non-convergent:${signal}` };
 }
 

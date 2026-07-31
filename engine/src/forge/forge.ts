@@ -341,6 +341,15 @@ export interface IForge {
    *  check after a plan-reviewer/plan-drafter session runs (distinguishing approved vs
    *  needs-human vs still-awaiting without re-fetching the whole board). */
   getIssueLabels(issue: number): Promise<string[]>;
+  /** #398: a PR's current label set — `getIssueLabels`' PR-side twin, and the READ half of the
+   *  escalation-carrier split. Once a PR-born escalation writes `needs-human` on the PR (see
+   *  `addPRLabel`), the #147 gated-reentry handshake has to observe THAT object's labels to
+   *  decide whether a human released the lane; before this method the only way to see a PR's
+   *  labels was `getPRReviewData`, the heavy gate query (PR metadata + reviews + reactions +
+   *  every review thread paged to exhaustion), which GATED RECLAIM has no other reason to make.
+   *  `gh pr view`, never `gh issue view`, for the same number-namespace reason `addPRLabel`
+   *  gives. */
+  getPRLabels(pr: number): Promise<string[]>;
   /** #87: an ISSUE's conversation comments (distinct from getPRReviewData's PR comments,
    *  though the underlying GitHub REST endpoint is the same `issues/<n>/comments` either way —
    *  PRs are issues under the hood). The plan_review orchestrator reads the plan-reviewer's
@@ -1110,6 +1119,13 @@ export class GithubForge implements IForge {
 
   async getIssueLabels(issue: number): Promise<string[]> {
     const out = await this.gh(["issue", "view", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--json", "labels"]);
+    return parseIssueLabels(out);
+  }
+
+  /** #398: see IForge.getPRLabels' doc. Same `labels` JSON shape as the issue read, so
+   *  `parseIssueLabels` parses it unchanged. */
+  async getPRLabels(pr: number): Promise<string[]> {
+    const out = await this.gh(["pr", "view", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--json", "labels"]);
     return parseIssueLabels(out);
   }
 
