@@ -363,6 +363,60 @@ test("#477 (F25 class): two episodes minted at a FROZEN clock — the same times
   s.close();
 });
 
+test("#478 legacy ledger (gate② P2): a pre-#477 open episode's escalation (no episodeId) satisfies the dedupe — the first post-upgrade restart appends NOTHING, and a later NEW episode still escalates with an id", () => {
+  const s = new State(":memory:");
+  // The pre-#477 shape, verbatim: detection + park row + park-escalated WITHOUT episodeId +
+  // escalated_at latch, all intact (in-memory State reports the marker channel as "nothing to
+  // heal", i.e. intact). The legacy rule: an escalation lacking episodeId belongs to the open
+  // episode iff its ledger id is newer than the episode's detection event id.
+  seedRun(s, "stalled");
+  seedRun(s, "stalled");
+  seedRun(s, "stalled");
+  boot(s);
+  s.appendEvent("consecutive-stalls-detected", { streak: 3, maxConsecutiveStalls: 3, enteredAt: "2026-07-31T00:00:00.000Z" });
+  s.enterPark(CONSECUTIVE_STALLS_PARK_SOURCE, "wedge", null, "2026-07-31T00:00:00.000Z");
+  s.appendEvent("park-escalated", {
+    source: CONSECUTIVE_STALLS_PARK_SOURCE,
+    channel: "local",
+    triggerIssue: null,
+    enteredAt: "2026-07-31T00:00:00.000Z", // pre-#477: no episodeId
+  });
+  s.recordParkEscalation(CONSECUTIVE_STALLS_PARK_SOURCE, "2026-07-31T00:00:01.000Z");
+
+  // First post-upgrade restart: the intact episode must NOT be re-escalated (#473's per-episode
+  // cross-restart never-spam invariant wins over the upgrade seam).
+  boot(s);
+  const outcome = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
+  assert.equal(outcome.tripped, true, "the legacy episode stands");
+  assert.equal(s.isParked(), true);
+  assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1, "zero new park-escalated — the legacy event satisfies the dedupe");
+
+  // The operator clears the legacy episode — the same membership check must recognize the
+  // legacy escalation on the operator-clear path too.
+  s.clearPark(CONSECUTIVE_STALLS_PARK_SOURCE);
+  boot(s);
+  const cleared = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
+  assert.equal(cleared.tripped, false, "the operator clear is honored for a legacy episode");
+  assert.equal(s.eventsAfterId(0, ["park-resumed"]).length, 1, "receipted");
+
+  // And a genuinely NEW episode still escalates normally, id-stamped.
+  for (let i = 0; i < 3; i++) {
+    s.appendEvent("engine-stalled", { windowMs: 600_000 });
+    boot(s);
+    detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
+  }
+  const detected = s.eventsAfterId(0, ["consecutive-stalls-detected"]);
+  assert.equal(detected.length, 2, "the new episode got its own detection");
+  const escalated = s.eventsAfterId(0, ["park-escalated"]);
+  assert.equal(escalated.length, 2, "…and its own single escalation");
+  assert.equal(
+    (escalated[1]!.payload as { episodeId?: number }).episodeId,
+    detected[1]!.id,
+    "the new escalation is id-stamped to its own episode — the legacy arm never leaks forward",
+  );
+  s.close();
+});
+
 // ── log authority / heal-on-boot (the #431 round-4 write rule, applied here verbatim) ─────
 
 test("heal-on-boot: killed between the detection event and enterPark — the next start rebuilds the park-row MIRROR under the episode's own metadata, no duplicate detection", () => {

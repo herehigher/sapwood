@@ -132,18 +132,24 @@ export function detectConsecutiveStalls(
   };
   /** Is this episode's escalation already in the LOG? Keyed on the episode's ledger-id identity
    *  (#477 — the payload's `episodeId`, stamped by escalateLocally below), never on a minted
-   *  timestamp. A #473-era legacy `park-escalated` carries no `episodeId` and therefore never
-   *  matches: for an episode still open across the upgrade the heal path re-appends one
-   *  id-stamped escalation event — a single bounded audit duplicate, accepted over keeping any
-   *  timestamp comparison alive in the dedupe path (the exact hole this fix removes). */
+   *  timestamp.
+   *
+   *  LEGACY RULE (#478 gate② P2): a #473-era `park-escalated` carries no `episodeId`, and
+   *  treating it as never-matching would make the first post-upgrade restart append a duplicate
+   *  escalation for an intact open episode — violating the per-episode never-spam invariant the
+   *  #473 tests pin. So an event LACKING `episodeId` counts as THIS episode's escalation iff its
+   *  own ledger id is newer than the episode's detection event id. That match is exact by
+   *  construction: pre-#477 semantics admit only ONE open episode, and its escalation is
+   *  appended strictly after its detection (LOG FIRST) — so a legacy escalation newer than the
+   *  open detection necessarily belongs to it, and legacy escalations of earlier (closed)
+   *  episodes are older than it. Still zero timestamp comparisons: both sides of the legacy
+   *  test are ledger ids. */
   const escalatedInLog = (episodeId: number): boolean =>
-    state
-      .eventsAfterId(0, ["park-escalated"])
-      .some(
-        (e) =>
-          (e.payload as { source?: unknown }).source === CONSECUTIVE_STALLS_PARK_SOURCE &&
-          (e.payload as { episodeId?: unknown }).episodeId === episodeId,
-      );
+    state.eventsAfterId(0, ["park-escalated"]).some((e) => {
+      if ((e.payload as { source?: unknown }).source !== CONSECUTIVE_STALLS_PARK_SOURCE) return false;
+      const stamped = (e.payload as { episodeId?: unknown }).episodeId;
+      return stamped === undefined ? e.id > episodeId : stamped === episodeId;
+    });
   const escalationMessage = (reason: string): string =>
     `sapwood: consecutive-stall breaker tripped — ${reason}. Autonomous dispatch is parked. ` +
     `The same wedge appears to recur on every restart; restarting again will not fix it, and the ` +
