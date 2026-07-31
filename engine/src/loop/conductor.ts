@@ -4055,16 +4055,17 @@ async function escalateReviewDisputed(
     )
     .join("\n\n");
   const marker = reviewDisputedCommentMarker(w.name, pr, escalation.headOid);
-  const comment = capDigest(
-    `sapwood: PR #${pr} — every unresolved review thread on the current head (\`${escalation.headOid}\`) carries a ` +
-      `recorded **disputed** resolution (${fixRoundsSpent} fix round(s) already spent). A dispute is a producer/reviewer ` +
-      `disagreement, not something more fix rounds can resolve (design #402 §4/D4) — escalating directly to ` +
-      `\`${cfg.labels.needsHuman}\` for adjudication instead of dispatching another fix leg. Evidence per thread ` +
-      `(excerpted — the full text is on each thread by id):\n\n${evidence}\n\n` +
-      `Adjudicate each: side with the reviewer (resolve the thread yourself, or ask for another fix round) or side with the ` +
-      `producer (resolve it as not-a-defect). Remove \`${cfg.labels.needsHuman}\` once done to reclaim (#147 gated reentry).`,
-    REVIEW_DISPUTED_COMMENT_MAX_CHARS,
-  ) + `\n\n${marker}`;
+  const comment =
+    capDigest(
+      `sapwood: PR #${pr} — every unresolved review thread on the current head (\`${escalation.headOid}\`) carries a ` +
+        `recorded **disputed** resolution (${fixRoundsSpent} fix round(s) already spent). A dispute is a producer/reviewer ` +
+        `disagreement, not something more fix rounds can resolve (design #402 §4/D4) — escalating directly to ` +
+        `\`${cfg.labels.needsHuman}\` for adjudication instead of dispatching another fix leg. Evidence per thread ` +
+        `(excerpted — the full text is on each thread by id):\n\n${evidence}\n\n` +
+        `Adjudicate each: side with the reviewer (resolve the thread yourself, or ask for another fix round) or side with the ` +
+        `producer (resolve it as not-a-defect). Remove \`${cfg.labels.needsHuman}\` once done to reclaim (#147 gated reentry).`,
+      REVIEW_DISPUTED_COMMENT_MAX_CHARS,
+    ) + `\n\n${marker}`;
   // #451 gate② round 3 (Codex P2): a live read for the marker BEFORE every post attempt — the
   // SAME shape fix-response.ts's replyAlreadyPosted (#247 D3/F2) takes for the identical
   // ambiguous-write-outcome problem. A FAILED check fails CLOSED (never assume "not posted yet",
