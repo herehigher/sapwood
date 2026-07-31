@@ -34,6 +34,19 @@
 // (#431 round 2, codex P3): a DB restored from a fast-clock machine, or a backward host-clock
 // correction, can hold `run-started` rows dated in this machine's future — those must neither
 // false-trip the detector nor keep re-parking after a manual park clear for the whole skew.
+//
+// LOG AUTHORITY (#431 round 4 — this module's whole durability contract, the round-3 write rule
+// applied uniformly after codex found the mirror-before-log class recurring here three times):
+//   EVERY fact's FIRST durable write is its log event; every row/marker/latch is a MIRROR
+//   reconstructible from the log; every dedup reads the LOG.
+// Concretely: the episode's identity is its `enteredAt`, minted into the
+// `rapid-restart-detected` payload BEFORE any mirror exists; the episode is OPEN in the log iff
+// its latest detected/park-resumed transition is `detected` (openEpisodeInLog); the park row,
+// the ESCALATION marker, and the escalated_at latch are all mirrors a later boot rebuilds from
+// the log when a kill separated them from their events; and the auto-clear appends its
+// `park-resumed` receipt BEFORE deleting the row. A kill between any two writes therefore
+// always leaves the log ahead of a mirror (repairable next boot), never a fact behind a mirror
+// (unrepairable — the exact class codex reproduced in rounds 2-4).
 import type { SapwoodConfig } from "../config/config.js";
 import type { State } from "../state/state.js";
 
@@ -63,10 +76,33 @@ export function detectRapidRestart(
   const nowDate = now();
   const cutoffIso = new Date(nowDate.getTime() - windowSec * 1000).toISOString();
   let births = 0;
-  /** Is this episode's escalation already in the LOG? Episode identity = the park's own
-   *  enteredAt, carried in the payload. The fold is over park-escalated events only (bounded by
-   *  escalation episodes — a handful, ever), and events from other sources / the generic ladder
-   *  (which carries no enteredAt) never match. */
+  /** The AUTHORITATIVE episode state, folded from the log (module doc: LOG AUTHORITY). The
+   *  episode is OPEN iff the latest rapid-restart detected/resumed transition is `detected` —
+   *  the same transition-pair fold every #431 pair uses. Returns the open episode's identity
+   *  (its minted enteredAt, plus the payload the reason/park mirrors are rebuilt from), or
+   *  null. Both event kinds are rare (a handful per DB, ever), so the fold is cheap. A legacy
+   *  round-1..3 `rapid-restart-detected` payload carries no enteredAt — `enteredAt: null`
+   *  then, and the healers below fall back to the row/now. */
+  const openEpisodeInLog = (): { enteredAt: string | null; births: number; windowSec: number; maxBirths: number } | null => {
+    let open: { enteredAt: string | null; births: number; windowSec: number; maxBirths: number } | null = null;
+    for (const e of state.eventsAfterId(0, ["rapid-restart-detected", "park-resumed"])) {
+      if (e.kind === "rapid-restart-detected") {
+        const p = e.payload as { enteredAt?: unknown; births?: unknown; windowSec?: unknown; maxBirths?: unknown };
+        open = {
+          enteredAt: typeof p.enteredAt === "string" ? p.enteredAt : null,
+          births: typeof p.births === "number" ? p.births : 0,
+          windowSec: typeof p.windowSec === "number" ? p.windowSec : windowSec,
+          maxBirths: typeof p.maxBirths === "number" ? p.maxBirths : maxBirths,
+        };
+      } else if ((e.payload as { source?: unknown }).source === RAPID_RESTART_PARK_SOURCE) {
+        open = null; // the resumed receipt closes the episode
+      }
+    }
+    return open;
+  };
+  /** Is this episode's escalation already in the LOG? Episode identity = the minted enteredAt,
+   *  carried in the payload. Events from other sources / the generic duration ladder (which
+   *  carries no enteredAt) never match. */
   const escalatedInLog = (enteredAtIso: string): boolean =>
     state
       .eventsAfterId(0, ["park-escalated"])
@@ -75,25 +111,24 @@ export function detectRapidRestart(
           (e.payload as { source?: unknown; enteredAt?: unknown }).source === RAPID_RESTART_PARK_SOURCE &&
           (e.payload as { enteredAt?: unknown }).enteredAt === enteredAtIso,
       );
+  const escalationMessage = (reason: string): string =>
+    `sapwood: rapid-restart detector tripped — ${reason}. Autonomous dispatch is parked. ` +
+    `A crash loop is not a sanctioned restart pattern: stop the supervisor/restart source, fix the cause, ` +
+    `and start the engine once the window has drained (a later clean start resumes automatically). ` +
+    `See docs/troubleshooting.md and docs/security.md (supervisor circuit-breaker prerequisite).`;
   /** The immediate local escalation — NOW, not after envFailure.parkEscalateAfterSec: a crash
    *  loop already IS the escalation-worthy fact, and each of its restarts resets this
    *  process's life anyway. Local channel of the existing park ladder (escalatePark's own
    *  triggerIssue-less branch): park-escalated event + ESCALATION marker + status surface.
    *
-   *  #431 round 3 (codex P3): ordered by THE WRITE RULE (stated once, on conductor.ts's
-   *  reconcileCeilingAnnouncements): the LOG write (park-escalated, deduped per episode via
-   *  escalatedInLog) goes FIRST; the marker and the escalated_at latch are MIRRORS written
-   *  after. Round 2 latched first — a kill between latch and event left `escalatedAt` set with
-   *  zero park-escalated events, and the heal branch (which keyed on the latch) then skipped
-   *  the repair forever. Now every crash position heals on the next boot: event missing ->
-   *  this function runs in full; event present but latch null -> the caller mirrors the latch
-   *  alone (no duplicate event). */
+   *  Ordered by LOG AUTHORITY (module doc): the park-escalated event (deduped per episode via
+   *  escalatedInLog) goes FIRST; the ESCALATION marker and the escalated_at latch are MIRRORS
+   *  rewritten after — BOTH of them, idempotently, on every call (#431 round 4, codex P2: the
+   *  round-3 heal repaired the latch alone, so a kill between the event and the marker write
+   *  lost the marker forever). Callers invoke this whenever any piece of the escalation is
+   *  missing; the event dedup makes the log side idempotent and the mirrors overwrite. */
   const escalateLocally = (reason: string, enteredAtIso: string): void => {
-    const message =
-      `sapwood: rapid-restart detector tripped — ${reason}. Autonomous dispatch is parked. ` +
-      `A crash loop is not a sanctioned restart pattern: stop the supervisor/restart source, fix the cause, ` +
-      `and start the engine once the window has drained (a later clean start resumes automatically). ` +
-      `See docs/troubleshooting.md and docs/security.md (supervisor circuit-breaker prerequisite).`;
+    const message = escalationMessage(reason);
     if (!escalatedInLog(enteredAtIso)) {
       state.appendEvent("park-escalated", {
         source: RAPID_RESTART_PARK_SOURCE,
@@ -113,52 +148,65 @@ export function detectRapidRestart(
     state.recordParkEscalation(RAPID_RESTART_PARK_SOURCE, nowDate.toISOString());
     log(`[sapwood:startup] ${message}`);
   };
+  const reasonFor = (b: number, w: number, m: number): string => `${b} engine starts within ${w}s (threshold ${m}) — crash loop suspected`;
   try {
     births = state.countEventsBetween(cutoffIso, nowDate.toISOString(), "run-started");
-    const existing = state.parkRow(RAPID_RESTART_PARK_SOURCE);
+    const openEpisode = openEpisodeInLog();
+    const row = state.parkRow(RAPID_RESTART_PARK_SOURCE);
     if (births >= maxBirths) {
-      if (existing === null) {
-        const reason = `${births} engine starts within ${windowSec}s (threshold ${maxBirths}) — crash loop suspected`;
-        // Event first (the detection fact), then the durable park (the consequence), then the
-        // escalation — same event-before-upsert ordering the escalation paths use. A crash
-        // ANYWHERE in this sequence heals on the next boot: before the park -> re-detects and
-        // re-parks; after the park but before the escalation latch -> the still-open branch
-        // below observes escalatedAt === null and completes the marker/latch/event (#431
-        // round 2, codex P2 — round 1 left that crash window permanently unescalated).
-        state.appendEvent("rapid-restart-detected", { births, windowSec, maxBirths });
-        state.enterPark(RAPID_RESTART_PARK_SOURCE, reason, null, nowDate.toISOString());
-        escalateLocally(reason, nowDate.toISOString());
+      if (openEpisode === null) {
+        // Fresh trip. LOG FIRST: the detection event carries the episode's minted identity
+        // (the enteredAt every mirror will use) — dedup for later births reads THIS event, not
+        // the park row (#431 round 4, codex P3: row-keyed dedup re-announced the same storm
+        // when a kill landed between the event and enterPark). Then the mirrors: park row,
+        // marker, latch — each reconstructible below if a kill separates them from the log.
+        const enteredAtIso = nowDate.toISOString();
+        const reason = reasonFor(births, windowSec, maxBirths);
+        state.appendEvent("rapid-restart-detected", { births, windowSec, maxBirths, enteredAt: enteredAtIso });
+        state.enterPark(RAPID_RESTART_PARK_SOURCE, reason, null, enteredAtIso);
+        escalateLocally(reason, enteredAtIso);
       } else {
-        // Already parked from a previous birth in this same storm — the durable episode is the
-        // dedup carrier (one rapid-restart-detected + one escalation per episode, not per
-        // birth: a crash loop must not turn the ledger into spam). Dispatch is already gated.
-        // #431 rounds 2-3: heal-on-boot, keyed on the LOG (the write rule) — a prior birth that
-        // died anywhere in the escalation sequence is repaired here: no park-escalated in the
-        // log for this episode -> run the full escalation (its own log-dedup makes this
-        // idempotent); log entry present but the latch still null (died between event and
-        // latch) -> mirror the latch alone, never a duplicate event.
-        if (!escalatedInLog(existing.enteredAt)) {
-          escalateLocally(existing.reason, existing.enteredAt);
-        } else if (existing.escalatedAt === null) {
-          state.recordParkEscalation(RAPID_RESTART_PARK_SOURCE, nowDate.toISOString());
+        // The log says the episode is already open — the durable dedup carrier (one detection
+        // + one escalation per episode, never per birth: a crash loop must not turn the ledger
+        // into spam). Reconstruct EVERY missing mirror from the log (module doc):
+        const enteredAtIso = openEpisode.enteredAt ?? row?.enteredAt ?? nowDate.toISOString();
+        const reason = row?.reason ?? reasonFor(openEpisode.births, openEpisode.windowSec, openEpisode.maxBirths);
+        if (row === null) {
+          // Killed between the detection event and enterPark — the dispatch-gating row itself
+          // is the missing mirror. Rebuild it under the episode's own identity.
+          state.enterPark(RAPID_RESTART_PARK_SOURCE, reason, null, enteredAtIso);
+        }
+        if (!escalatedInLog(enteredAtIso) || row?.escalatedAt == null || !state.escalationMarkerExists()) {
+          // Any piece of the escalation missing (event / latch / ESCALATION marker) -> rerun
+          // the whole escalation: the event side is log-deduped, the mirrors overwrite
+          // idempotently (#431 round 4, codex P2 — the marker is a mirror too).
+          escalateLocally(reason, enteredAtIso);
         }
         log(
-          `[sapwood:startup] rapid-restart park still open (entered ${existing.enteredAt}): ` +
+          `[sapwood:startup] rapid-restart park still open (entered ${enteredAtIso}): ` +
             `${births} births within ${windowSec}s — autonomous dispatch stays parked`,
         );
       }
       return { tripped: true, births };
     }
-    if (existing !== null) {
+    if (openEpisode !== null || row !== null) {
       // The window has drained — this start is the sanctioned-recovery signal the episode was
-      // waiting for (its only auto-clear path; see the module doc). Same clearPark choke point
-      // every park resume flows through, so the ESCALATION marker cleanup rides along free.
+      // waiting for (its only auto-clear path; see the module doc). RECEIPT FIRST (#431
+      // round 4, codex P2: the round-3 order deleted the row first, so a kill between the two
+      // lost row AND receipt — the next boot saw nothing to close and the episode never got
+      // its park-resumed). With the receipt down, clearPark is the mirror cleanup — and a kill
+      // between the two now leaves a closed-in-log episode with a stray row, which THIS branch
+      // deletes on the next boot (openEpisodeInLog is null then, row non-null) with the
+      // receipt dedup below preventing a duplicate.
+      const enteredAtIso = openEpisode?.enteredAt ?? row?.enteredAt ?? null;
+      if (openEpisode !== null) {
+        state.appendEvent("park-resumed", {
+          source: RAPID_RESTART_PARK_SOURCE,
+          enteredAt: enteredAtIso,
+          via: "restart-window-clear",
+        });
+      }
       state.clearPark(RAPID_RESTART_PARK_SOURCE);
-      state.appendEvent("park-resumed", {
-        source: RAPID_RESTART_PARK_SOURCE,
-        enteredAt: existing.enteredAt,
-        via: "restart-window-clear",
-      });
       log(`[sapwood:startup] rapid-restart park cleared — ${births} birth(s) within ${windowSec}s is under the ${maxBirths} threshold`);
     }
   } catch (error) {

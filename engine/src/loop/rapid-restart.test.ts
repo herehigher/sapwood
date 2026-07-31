@@ -6,6 +6,9 @@
 // 10-minute window against appends that happened microseconds ago (no assertion rides on
 // subprocess speed or scheduler behavior).
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import { State } from "../state/state.js";
@@ -40,11 +43,15 @@ test("trip at the threshold: rapid-restart-detected + a durable park (dispatch-g
 
   const detected = s.eventsAfterId(0, ["rapid-restart-detected"]);
   assert.equal(detected.length, 1);
-  assert.deepEqual(detected[0]!.payload, { births: 5, windowSec: 600, maxBirths: 5 });
+  const detectedPayload = detected[0]!.payload as { births: number; windowSec: number; maxBirths: number; enteredAt: string };
+  assert.equal(detectedPayload.births, 5);
+  assert.equal(detectedPayload.windowSec, 600);
+  assert.equal(detectedPayload.maxBirths, 5);
 
   // The park is the EXISTING paradigm's episode row: every dispatch gate consults isParked().
   const park = s.parkRow(RAPID_RESTART_PARK_SOURCE);
   assert.ok(park !== null, "a durable rapid-restart park episode exists");
+  assert.equal(park!.enteredAt, detectedPayload.enteredAt, "round 4: the row mirrors the LOG's minted episode identity");
   assert.equal(s.isParked(), true, "the standard dispatch gates see the park");
   assert.match(park!.reason, /5 engine starts within 600s/);
   assert.equal(park!.triggerIssue, null);
@@ -80,6 +87,9 @@ test("aged births never count: the same 5 births observed from an hour later are
 
 test("a clean start CLEARS a stale rapid-restart park (the episode's only auto-resume) with a park-resumed receipt", () => {
   const s = new State(":memory:");
+  // A faithful open episode: the detection event (the LOG fact, round 4's dedup carrier) plus
+  // its park-row mirror — exactly what a real trip leaves behind.
+  s.appendEvent("rapid-restart-detected", { births: 5, windowSec: 600, maxBirths: 5, enteredAt: "2026-07-30T00:00:00.000Z" });
   s.enterPark(RAPID_RESTART_PARK_SOURCE, "old storm", null, "2026-07-30T00:00:00.000Z");
   assert.equal(s.isParked(), true);
   const outcome = detectRapidRestart(s, mkCfg(), (() => new Date(Date.now() + 3600_000)) as () => Date, silentLog);
@@ -125,7 +135,10 @@ test("config keys steer the detector (user-tunables rule): a 2-birth threshold t
   const outcome = detectRapidRestart(s, cfg, realNow, silentLog);
   assert.deepEqual(outcome, { tripped: true, births: 2 });
   const detected = s.eventsAfterId(0, ["rapid-restart-detected"]);
-  assert.deepEqual(detected[0]!.payload, { births: 2, windowSec: 1200, maxBirths: 2 });
+  const p2 = detected[0]!.payload as { births: number; windowSec: number; maxBirths: number; enteredAt: string };
+  assert.equal(p2.births, 2);
+  assert.equal(p2.windowSec, 1200);
+  assert.equal(typeof p2.enteredAt, "string");
   s.close();
 });
 
@@ -251,5 +264,71 @@ test("heal-on-boot (#431 round 3): event present but latch null (died between ev
   detectRapidRestart(s, mkCfg(), realNow, silentLog);
   assert.ok(s.parkRow(RAPID_RESTART_PARK_SOURCE)?.escalatedAt !== null, "the latch is mirrored from the log");
   assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1, "no duplicate event — the log already carries the fact");
+  s.close();
+});
+
+test("log authority (#431 round 4, codex P2): killed between the park-escalated event and the marker write — the next boot rebuilds the ESCALATION marker, not just the latch", () => {
+  // Codex's repro asserted markerExistsAfterHeal:false under round 3. File-backed State so the
+  // marker channel actually exists.
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-rr-marker-"));
+  try {
+    const s = new State(join(dir, "sapwood.sqlite"));
+    seedBirths(s, 5);
+    // Post-crash state: detection + park + park-escalated EVENT landed; marker and latch did not.
+    s.appendEvent("rapid-restart-detected", { births: 5, windowSec: 600, maxBirths: 5, enteredAt: "2026-07-31T00:00:00.000Z" });
+    s.enterPark(RAPID_RESTART_PARK_SOURCE, "storm", null, "2026-07-31T00:00:00.000Z");
+    s.appendEvent("park-escalated", {
+      source: RAPID_RESTART_PARK_SOURCE,
+      channel: "local",
+      triggerIssue: null,
+      enteredAt: "2026-07-31T00:00:00.000Z",
+    });
+    assert.equal(existsSync(join(dir, "ESCALATION")), false, "the kill window: event logged, marker lost");
+
+    s.appendEvent("run-started", {});
+    detectRapidRestart(s, mkCfg(), realNow, silentLog);
+    assert.equal(existsSync(join(dir, "ESCALATION")), true, "the marker MIRROR is rebuilt from the log");
+    assert.ok(s.parkRow(RAPID_RESTART_PARK_SOURCE)?.escalatedAt !== null, "the latch mirror too");
+    assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1, "and never a duplicate event — the log side is deduped");
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("log authority (#431 round 4, codex P2): auto-clear is RECEIPT-FIRST — killed between the receipt and clearPark, the next boot deletes the stray row silently (no duplicate receipt, episode already closed in the log)", () => {
+  const s = new State(":memory:");
+  // Post-crash state under the NEW order: episode opened + receipt appended, row still present.
+  s.appendEvent("rapid-restart-detected", { births: 5, windowSec: 600, maxBirths: 5, enteredAt: "2026-07-30T00:00:00.000Z" });
+  s.enterPark(RAPID_RESTART_PARK_SOURCE, "old storm", null, "2026-07-30T00:00:00.000Z");
+  s.appendEvent("park-resumed", { source: RAPID_RESTART_PARK_SOURCE, enteredAt: "2026-07-30T00:00:00.000Z", via: "restart-window-clear" });
+  assert.ok(s.parkRow(RAPID_RESTART_PARK_SOURCE) !== null, "the kill window: receipt down, row not yet deleted");
+
+  const outcome = detectRapidRestart(s, mkCfg(), (() => new Date(Date.now() + 3600_000)) as () => Date, silentLog);
+  assert.equal(outcome.tripped, false);
+  assert.equal(s.parkRow(RAPID_RESTART_PARK_SOURCE), null, "the stray mirror row is deleted");
+  assert.equal(s.eventsAfterId(0, ["park-resumed"]).length, 1, "no duplicate receipt — the log already closed the episode");
+  // The round-3 order's loss (row deleted, receipt never written, episode unrecoverable) is
+  // unrepresentable going forward: the receipt is the FIRST write of the clear transition.
+  s.close();
+});
+
+test("log authority (#431 round 4, codex P3): killed between rapid-restart-detected and enterPark — the next birth does NOT duplicate the detection, and the park-row MIRROR is rebuilt under the episode's minted identity", () => {
+  const s = new State(":memory:");
+  seedBirths(s, 5);
+  // Codex's repro: detection landed, the row did not; round 3's row-keyed dedup then appended
+  // detectedEvents:2 for the same uninterrupted storm.
+  s.appendEvent("rapid-restart-detected", { births: 5, windowSec: 600, maxBirths: 5, enteredAt: "2026-07-31T00:00:00.000Z" });
+  assert.equal(s.parkRow(RAPID_RESTART_PARK_SOURCE), null);
+
+  s.appendEvent("run-started", {}); // the next birth in the same storm
+  const outcome = detectRapidRestart(s, mkCfg(), realNow, silentLog);
+  assert.equal(outcome.tripped, true);
+  assert.equal(s.eventsAfterId(0, ["rapid-restart-detected"]).length, 1, "dedup reads the LOG — one detection per episode, not per birth");
+  const park = s.parkRow(RAPID_RESTART_PARK_SOURCE);
+  assert.ok(park !== null, "the dispatch-gating row is rebuilt");
+  assert.equal(park!.enteredAt, "2026-07-31T00:00:00.000Z", "under the episode's own minted identity, not a fresh one");
+  assert.ok(park!.escalatedAt !== null, "the escalation mirrors ride along");
+  assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1);
   s.close();
 });

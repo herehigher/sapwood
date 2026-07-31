@@ -3960,3 +3960,73 @@ test("runRounds (#431 round 2, codex P1): a standby dwell that outlives maxWallC
   assert.ok(state.ceilingBreach() !== null, "the breach row stands — status/dashboard see the winding-down state");
   state.close();
 });
+
+test("runRounds (#431 round 4, codex finding 5): the ROUND-WAIT clear site's write order is receipt-BEFORE-row-delete — the twin of the tick-path ordering proxy", async () => {
+  // A daily-budget breach that clears by UTC-midnight rollover DURING waitForDispatchClear:
+  // round 1 ticks breached (entered + row), the pre-round-2 gate waits one iteration, the
+  // sleep crosses midnight, and the second iteration performs the clear transition — whose
+  // write order this test observes directly through a recording proxy.
+  const st = new State(":memory:");
+  const writes: string[] = [];
+  const spied = new Proxy(st, {
+    get(target, prop, receiver) {
+      if (prop === "appendEvent") {
+        return (kind: string, payload: unknown) => {
+          if (kind === "ceiling-breach-cleared") writes.push("append:ceiling-breach-cleared");
+          target.appendEvent(kind, payload);
+        };
+      }
+      if (prop === "clearCeilingBreach") {
+        return () => {
+          writes.push("row:delete");
+          target.clearCeilingBreach();
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as State;
+  const forge = new FakeForge();
+  forge.ready = [];
+  const base = Date.parse("2026-07-06T23:59:00.000Z");
+  let ms = base;
+  const now = () => new Date(ms);
+  st.recordSpend("w1", 1, 60, "2026-07-06T23:00:00.000Z", []); // $60 on the 6th, $50 cap -> breached until midnight
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (requestedMs: number): Promise<void> => {
+    sleepCalls.push(requestedMs);
+    ms += requestedMs; // the first wait iteration's sleep crosses midnight
+    if (sleepCalls.length >= 10) stop(); // bounded safety net
+  };
+  const deps = baseDeps({
+    forge,
+    state: spied,
+    sleep,
+    now,
+    processStartedAt: new Date(base),
+    tickIntervalSec: 60,
+    cfg: mkCfg({ cost: { dailyBudgetUsd: 50 } }),
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const stopSafety = boundedStopOnPhase(deps, 8);
+  await runRounds(deps);
+  stopSafety();
+  const clearSeq = writes.filter((w) => w === "append:ceiling-breach-cleared" || w === "row:delete");
+  assert.equal(clearSeq.filter((w) => w === "append:ceiling-breach-cleared").length, 1, "exactly one clear transition happened");
+  assert.equal(
+    clearSeq[0],
+    "append:ceiling-breach-cleared",
+    "the LOG receipt lands strictly before any row delete at the round-wait site — the round-3 write rule, pinned here too",
+  );
+  const pair = st.eventsAfterId(0, ["ceiling-breach-entered", "ceiling-breach-cleared"]).map((e) => e.kind);
+  assert.deepEqual(
+    pair,
+    ["ceiling-breach-entered", "ceiling-breach-cleared"],
+    "one daily episode, opened by round 1's tick and closed mid-wait",
+  );
+  st.close();
+});

@@ -1083,7 +1083,15 @@ test("sapwood run (#431): a 5th start inside the window trips the detector — r
     assert.equal(forge.claimCalls, 0, "the ready issue was never claimed — zero autonomous dispatch under the park");
     const detected = state.eventsAfterId(0, ["rapid-restart-detected"]);
     assert.equal(detected.length, 1);
-    assert.deepEqual(detected[0]!.payload, { births: 5, windowSec: 600, maxBirths: 5 });
+    const detectedPayload = detected[0]!.payload as { births: number; windowSec: number; maxBirths: number; enteredAt: string };
+    assert.equal(detectedPayload.births, 5);
+    assert.equal(detectedPayload.windowSec, 600);
+    assert.equal(detectedPayload.maxBirths, 5);
+    assert.equal(
+      state.parkRow("rapid-restart")?.enteredAt,
+      detectedPayload.enteredAt,
+      "the row mirrors the LOG's minted identity (round 4)",
+    );
   } finally {
     state.close();
   }
@@ -1091,6 +1099,9 @@ test("sapwood run (#431): a 5th start inside the window trips the detector — r
 
 test("sapwood run (#431): a clean start (window drained) CLEARS a stale rapid-restart park and proceeds — the sanctioned-recovery path needs no manual state surgery", async () => {
   const state = new State(":memory:");
+  // A faithful open episode: the detection event (round 4's LOG-authority dedup carrier) plus
+  // its park-row mirror — what a real trip leaves behind.
+  state.appendEvent("rapid-restart-detected", { births: 5, windowSec: 600, maxBirths: 5, enteredAt: "2026-07-30T00:00:00.000Z" });
   state.enterPark("rapid-restart", "old storm", null, "2026-07-30T00:00:00.000Z");
   const forge = new FakeForge();
   try {

@@ -2555,6 +2555,16 @@ export class State {
     writeFileSync(p, JSON.stringify(payload, null, 2) + "\n");
   }
 
+  /** #431 round 4: does the local ESCALATION marker exist? The log-authority healers
+   *  (loop/rapid-restart.ts) use this to rebuild the marker MIRROR when a kill separated it
+   *  from its park-escalated event. A null dir (in-memory State — tests) has no marker channel
+   *  at all, reported as `true` ("nothing to heal") so healers never spin on a mirror that
+   *  cannot exist. */
+  escalationMarkerExists(): boolean {
+    const p = this.escalationMarkerPath();
+    return p == null || existsSync(p);
+  }
+
   /** Best-effort removal of a stale escalation marker once the episode it described has
    *  resolved (conductor.ts clears it on auto-resume) — a missing file is not an error. */
   clearEscalationMarker(): void {
