@@ -436,6 +436,48 @@ test("driveEngineAgentReview: preflight failure -> queued, no WAL, no pin (costs
   assert.equal(recorded.pin, null);
 });
 
+// ── #460 (F37): CONFLICTING preflight routes to {kind:"conflict"}, not an unbounded queue ─────
+
+test("driveEngineAgentReview: mergeable CONFLICTING -> {kind:'conflict'} carrying status/data, no WAL, no pin, no session", async () => {
+  let evaluated = false;
+  const { deps, recorded } = makeDeps({
+    forge: { getPRStatus: async () => status({ mergeable: "CONFLICTING" }) },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, { kind: "conflict", status: status({ mergeable: "CONFLICTING" }), data: data() });
+  assert.equal(evaluated, false, "no session for a structurally conflicted PR");
+  assert.equal(recorded.wal, null);
+  assert.equal(recorded.pin, null);
+});
+
+test("driveEngineAgentReview: mergeable UNKNOWN stays queued (transient) — never routed like CONFLICTING", async () => {
+  let evaluated = false;
+  const { deps } = makeDeps({
+    forge: { getPRStatus: async () => status({ mergeable: "UNKNOWN" }) },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /not-mergeable:UNKNOWN/);
+  assert.equal(evaluated, false);
+});
+
+test("driveEngineAgentReview: CONFLICTING + a higher-precedence preflight failure (draft) still queues plain — draft wins, same precedence deriveGate assumes", async () => {
+  const { deps } = makeDeps({
+    forge: { getPRStatus: async () => status({ mergeable: "CONFLICTING" }), getPRReviewData: async () => data({ isDraft: true }) },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /pr-is-draft/);
+});
+
 test("driveEngineAgentReview: empty ci.requiredChecks -> preflight CI-evidence never passes, queued, no session", async () => {
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" },

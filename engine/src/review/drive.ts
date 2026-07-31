@@ -214,6 +214,12 @@ export type EngineAgentDriveOutcome =
   | { kind: "queued"; reason: string }
   | { kind: "merged"; headOid: string }
   | { kind: "needs-human"; reason: string }
+  // #460 (F37): a structural merge conflict, not a transient preflight failure — see the
+  // `checkPreflight` call site below for why this is distinguished from every other reason.
+  // Carries status/data so the caller (merge-driver.ts's driveEngineAgentOne) can run the SAME
+  // deriveGate CONFLICTING branch driveOne's classic path already uses, instead of this module
+  // re-deriving (or duplicating) that gate itself.
+  | { kind: "conflict"; status: PRStatus; data: PRReviewData }
   | { kind: "consume"; status: PRStatus; data: PRReviewData; verdict: { action: "MERGE_OK" | "HANDLE_THREADS"; headOid: string } };
 
 /**
@@ -361,7 +367,22 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     humanLabels: deps.cfg.escalation.humanLabels,
     holdLabels: deps.cfg.escalation.holdLabels,
   });
-  if (!preflight.ok) return { kind: "queued", reason: `engine-agent: preflight failed: ${preflight.reason}` };
+  if (!preflight.ok) {
+    // #460 (F37): CONFLICTING is not transient like every other preflight reason — 54
+    // consecutive drive-queued ticks on PR#452 with no exit (events 3984-4190, 2026-07-30)
+    // before this route existed. `checkPreflight`'s own ordering (state/draft/human-label/
+    // hold-label all precede the mergeable check) means reaching this EXACT reason string
+    // already cleared every higher-precedence gate — the same precedence deriveGate's own
+    // CONFLICTING branch (merge-driver.ts) assumes, so this is a safe, unambiguous signal to
+    // route out of the queue loop and into the SAME FIXABLE:merge-conflict machinery the codex
+    // reviewer path already uses (merge-driver.ts driveOne's CONFLICTING block), rather than
+    // re-deriving that gate here. UNKNOWN (and everything else) stays a queue: transient, and
+    // no session was ever spawned for either case.
+    if (preflight.reason === "not-mergeable:CONFLICTING") {
+      return { kind: "conflict", status: status0, data: data0 };
+    }
+    return { kind: "queued", reason: `engine-agent: preflight failed: ${preflight.reason}` };
+  }
 
   let checksPage: { checks: import("../forge/forge.js").PRCheckItem[] };
   try {

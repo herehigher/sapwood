@@ -309,6 +309,11 @@ const SITE_INVENTORY: Record<string, { bucket: "human-merge-only" | "needs-human
     src: 'return { kind: "needs-human", pr, reason: `merge-failed-deterministic: ${msg}` };',
     why: "deterministic merge failure",
   },
+  "roles/merge-driver.ts#8": {
+    bucket: "needs-human",
+    src: 'if (conflictGate === "HUMAN") return { kind: "needs-human", pr, reason: "gate:HUMAN:merge-conflict" };',
+    why: "#460: the engine-agent route's own CONFLICTING block (driveEngineAgentOne) — same reason as #2, fix loop disabled",
+  },
   "review/drive.ts#0": {
     bucket: "needs-human",
     src: 'return { kind: "needs-human", reason: `engine-agent: gate:HUMAN:pr-state-${data0.state}` };',
