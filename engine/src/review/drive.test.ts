@@ -454,6 +454,27 @@ test("driveEngineAgentReview: mergeable CONFLICTING -> {kind:'conflict'} carryin
   assert.equal(recorded.pin, null);
 });
 
+test("driveEngineAgentReview (#460 P1, review round 2, Codex sol high executable repro): split-generation read — status0 CONFLICTING @H1 races a FRESH data0 @H2 (already conflict-free) -> NOT {kind:'conflict'}; falls through to the ordinary machinery, which queues on the SAME 'not-mergeable:CONFLICTING' preflight reason (no pin exists yet, so no fix leg is ever dispatched against a conflict that may no longer be real on the live head)", async () => {
+  let evaluated = false;
+  const { deps, recorded } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ mergeable: "CONFLICTING", headOid: "H1" }),
+      getPRReviewData: async () => data({ headOid: "H2", unresolvedThreads: 0 }), // fresh, unblocked, DIFFERENT head
+    },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.notEqual(outcome.kind, "conflict", "a mixed-head read must never take the conflict route on a stale/mismatched status");
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /not-mergeable:CONFLICTING/);
+  assert.equal(evaluated, false, "still no paid session — this is a queue, not a fresh attempt");
+  assert.equal(recorded.wal, null);
+  assert.equal(recorded.pin, null);
+});
+
 test("driveEngineAgentReview: mergeable UNKNOWN stays queued (transient) — never routed like CONFLICTING", async () => {
   let evaluated = false;
   const { deps } = makeDeps({

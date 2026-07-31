@@ -333,13 +333,23 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   // label/hold-label all precede the mergeable check) still guarantees those higher-precedence
   // gates win over this route — see checkPreflight's own doc for exactly which of those diverge
   // from deriveGate's classic-path precedence (draft/human-label do; hold-label does not).
+  //
+  // #460 P1 (PR#462 review round 2, Codex sol high, executable repro): `status0` and `data0` are
+  // two INDEPENDENT reads (the `Promise.all` above) — a stale `status0@H1` CONFLICTING racing a
+  // fresh `data0@H2` that is already conflict-free must NOT take this route (it would dispatch a
+  // fix leg, burning a fix-round, against a conflict that no longer exists on the real head). The
+  // repo's own split-generation identity discipline (H/B/D triple, `resolveIdentity`'s own doc)
+  // applies here too: only act on a mergeability reading when both reads agree on the head it
+  // describes. A mismatch falls through to the ordinary machinery below (pin/preflight), which
+  // already queues/refetches a split-head pair on its own (e.g. the decisive-pin consume path's
+  // `refetchStillValid` head check).
   const conflictCheck = checkPreflight({
     status: status0,
     data: data0,
     humanLabels: deps.cfg.escalation.humanLabels,
     holdLabels: deps.cfg.escalation.holdLabels,
   });
-  if (!conflictCheck.ok && conflictCheck.reason === "not-mergeable:CONFLICTING") {
+  if (!conflictCheck.ok && conflictCheck.reason === "not-mergeable:CONFLICTING" && status0.headOid === data0.headOid) {
     return { kind: "conflict", status: status0, data: data0 };
   }
 
@@ -402,11 +412,16 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     humanLabels: deps.cfg.escalation.humanLabels,
     holdLabels: deps.cfg.escalation.holdLabels,
   });
-  // #460: `preflight.reason` can never be "not-mergeable:CONFLICTING" here — the conflictCheck
-  // above already special-cased and returned on that EXACT reason, against the SAME status0/
-  // data0 this call reuses (no fetch happens in between). Every other preflight reason
-  // (including UNKNOWN mergeability) is transient and stays a queue: no session was ever
-  // spawned for it.
+  // #460 (PR#462 review round 2, P2 wording fix): `preflight.reason` CAN still be
+  // "not-mergeable:CONFLICTING" here — the conflictCheck above only special-cases it when
+  // `status0.headOid === data0.headOid`; a split-generation read (stale CONFLICTING status0
+  // racing a fresh, already-conflict-free data0 at a different head, or vice versa) deliberately
+  // falls through to here instead. This is the SAME "queued" every other preflight reason
+  // already gets — no separate branch needed, since a head mismatch also means neither read can
+  // be trusted enough to act on yet, and the NEXT tick re-fetches both as one fresh, coherent
+  // pair. Every reason reaching this line (transient ones like UNKNOWN mergeability, and
+  // standing ones like a draft/label/unresolved-thread that persists until a human or the
+  // producer changes it) gets the SAME outcome: queued, retried next tick, no session spawned.
   if (!preflight.ok) return { kind: "queued", reason: `engine-agent: preflight failed: ${preflight.reason}` };
 
   let checksPage: { checks: import("../forge/forge.js").PRCheckItem[] };
