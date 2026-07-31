@@ -155,6 +155,18 @@ export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   // fix-rounds-capped doctrine its own comment cites ("an escalation event may only claim what
   // provably landed"), so the event cannot exist unless the label landed.
   "verify-na-proposed": "always",
+  // #432 round 5 (P1-2, F34 discipline): dissent.ts's `escalateUnpostableConcern` — a durable
+  // concern that failed to post `cfg.roles.po.maxConcernPostAttempts` times (issue deleted/
+  // transferred/inaccessible). `always`, same reasoning as `verify-na-proposed` right above:
+  // the event is appended strictly AFTER its own `addLabel` succeeds (dissent.ts's own doc), so
+  // it cannot exist unless the label landed. No PR — a dissent concern is issue-only.
+  "concern-post-escalated": "always",
+  // #432 round 5 (P2-3, F34 discipline): round.ts/align.ts's `escalatePoolRemovalFailures` — a
+  // stale `roundPool` label whose removal failed deterministically `cfg.round.maxPoolRemovalAttempts`
+  // times (both call sites route through round.ts's `removeRoundPoolLabel`). `always`, same
+  // reasoning: appended strictly after its own `addLabel` succeeds. No PR — round-pool membership
+  // is issue-only.
+  "round-pool-removal-capped": "always",
   // `plan-review-escalated` is `never`, NOT `always` (round 11, Codex P1 — a FALSE-CLEAR risk,
   // the class this module's doctrine calls strictly worse than a zombie row). It has TWO emission
   // sites with opposite orderings: plan-review.ts's own `escalate` appends after an unguarded

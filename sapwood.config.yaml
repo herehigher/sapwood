@@ -235,6 +235,9 @@ reviewer:
 #     #                   Unset = the engine's shipped prompts/po-decompose.md.
 #     maxChildren: 8      # hard cap per human split firing, including coarse remainders
 #     acceptanceCriteriaHint: 5 # prompt-only per-child AC-count heuristic; not a dispatch gate
+#     maxConcernPostAttempts: 5 # #432 round 5: dissent's durable-concern retry sweep escalates
+#                        # needs-human after this many recorded post failures (a permanently
+#                        # unreadable issue), same degrade-to-human bound as maxDraftCycles below.
 #     # poolPromptFile: prompts/my-po-pool.md
 #     #                   #212: a SEPARATE prompt for the round-pool SELECTION session (choosing
 #     #                   which of this round's top candidate issues actually belong in the
@@ -380,6 +383,9 @@ reviewer:
 #                    # what roundDispatchCap could otherwise fill). Runs every round regardless of
 #                    # roles.po.enabled — with the PO off, selection is still engine-computed
 #                    # (no session).
+#   maxPoolRemovalAttempts: 5 # #432 round 5: after this many deterministic failures removing a
+#                    # stale roundPool label from the SAME issue, escalate needs-human instead of
+#                    # retrying forever (same degrade-to-human bound as roles.po.maxDraftCycles).
 
 # #128: the loop's north-star goal file — the alignment yardstick the aligning (PO) and
 # architecting peripherals read every round, and the entry retro proposals must cite as their

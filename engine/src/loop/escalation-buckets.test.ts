@@ -277,6 +277,19 @@ const SITE_INVENTORY: Record<string, { bucket: "human-merge-only" | "needs-human
     src: "await forge.addPRLabel(row.pr, cfg.labels.needsHuman);",
     why: "same, on the PR",
   },
+  // 1g — #432 round 5: the two retry-cap degrade-to-human escalations the F32 saga's own
+  // design rule produced (probeHasWork's "every signal must name its terminal" — see round.ts's
+  // doc). Same bounded-retry-then-degrade paradigm as maxDraftCycles/prFixCap, both new this round.
+  "loop/dissent.ts#0": {
+    bucket: "needs-human",
+    src: "await forge.addLabel(concern.issue, cfg.labels.needsHuman);",
+    why: "a durable dissent concern failed to post maxConcernPostAttempts times (unreadable/inaccessible issue)",
+  },
+  "loop/round.ts#0": {
+    bucket: "needs-human",
+    src: "await forge.addLabel(issue, cfg.labels.needsHuman);",
+    why: "a stale roundPool label failed to remove maxPoolRemovalAttempts times",
+  },
   // 1f — gate verdicts that mean "the machine is stuck", INCLUDING the three non-gate-prefixed
   // merge-driver reasons the AC calls out by name.
   "roles/merge-driver.ts#2": {
@@ -371,14 +384,18 @@ test("#397 AC: EVERY escalation write site in engine source is classified into e
   }
 });
 
-test("#397 AC: the corrected site inventory — 7 PR-side label writes, 29 issue-side, and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
+test("#397 AC: the corrected site inventory — 7 PR-side label writes, 31 issue-side (#432 round 5 added 2), and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
   const sites = scanEscalationSites();
   const labelSites = sites.filter(
     (s) => SITE_INVENTORY[s.key]!.src.includes("addLabel(") || SITE_INVENTORY[s.key]!.src.includes("addPRLabel("),
   );
   const prSide = labelSites.filter((s) => s.src.includes("addPRLabel("));
   assert.equal(prSide.length, 7, "PR-side escalation writes (#397's corrected count)");
-  assert.equal(labelSites.length - prSide.length, 29, "issue-side escalation writes (#397's corrected count)");
+  assert.equal(
+    labelSites.length - prSide.length,
+    31,
+    "issue-side escalation writes (#397's corrected count + #432 round 5's dissent/round-pool retry-cap escalations)",
+  );
   // The four sites the AC names explicitly because they carry no `gate:HUMAN:` reason prefix.
   for (const key of ["roles/merge-driver.ts#4", "roles/merge-driver.ts#5", "roles/merge-driver.ts#6", "loop/conductor.ts#0"]) {
     assert.equal(SITE_INVENTORY[key]?.bucket, "needs-human", key);

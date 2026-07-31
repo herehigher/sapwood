@@ -129,7 +129,7 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async mergePR(): Promise<void> {}
   override async addPRComment(): Promise<void> {}
   override async addIssueComment(): Promise<void> {}
-  override async getIssueBody(): Promise<string> {
+  override async getIssueBody(_issue: number): Promise<string> {
     return "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
@@ -3605,7 +3605,7 @@ test("runRounds standby (#432 round 4, P1-1 regression pin): a VALID approved is
   state.close();
 });
 
-test("runRounds standby (#432 round 4): a Ready issue carrying plan:approved with a verification-plan SECTION present but a malformed (non-checkbox) acceptance-criteria list counts as work via the NEW status-aware getPoolEligibleIssues() probe line — no milestone scoping needed, this signal is general", async () => {
+test("runRounds standby (#432 round 5): a Ready, POOLED issue carrying plan:approved with a verification-plan SECTION present but a malformed (non-checkbox) acceptance-criteria list counts as work via the status-aware getPoolEligibleIssues() ∩ roundPool probe line — no milestone scoping needed, this signal is general", async () => {
   const forge = new FakeForge();
   forge.ready = []; // isDispatchable fails: extractAcceptanceCriteria returns null for a malformed list
   forge.planReviewCandidates = []; // already plan:approved — not a review candidate
@@ -3613,8 +3613,14 @@ test("runRounds standby (#432 round 4): a Ready issue carrying plan:approved wit
   const cfg = mkCfg({ round: { standby: { enabled: true } } }); // milestone UNSET — this signal must carry alone
   // The one signal a live forge WOULD carry for this shape: selectPoolEligibleIssues is
   // deliberately body-independent (forge.ts), so a Ready + plan:approved issue is pool-eligible
-  // regardless of whether its AC list actually parses — exactly the class-2 repair's own job.
-  forge.poolEligible = [{ number: 1003, title: "approved, broken AC list", labels: [cfg.labels.planApproved], body: BROKEN_AC_BODY }];
+  // regardless of whether its AC list actually parses. #432 round 5: eligibility ALONE is no
+  // longer enough — the probe now also requires the roundPool label, matching EXACTLY what
+  // plan-review.ts's createPlanReviewStub filters its own pool membership by (~914) — this issue
+  // carries it (a real PO pool-selection pass applied it), representing the class-2 repair's
+  // actual live candidate, not merely someone eligible-but-unselected.
+  forge.poolEligible = [
+    { number: 1003, title: "approved, broken AC list", labels: [cfg.labels.planApproved, cfg.labels.roundPool], body: BROKEN_AC_BODY },
+  ];
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
@@ -3626,9 +3632,46 @@ test("runRounds standby (#432 round 4): a Ready issue carrying plan:approved wit
   assert.equal(
     result.rounds,
     2,
-    "round 2 opened straight after idle round 1 — the pool-eligible broken-AC issue was work, via the new probe line alone",
+    "round 2 opened straight after idle round 1 — the pooled broken-AC issue was work, via the new probe line alone",
   );
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
+  state.close();
+});
+
+test("runRounds standby (#432 round 5, Codex P1-1, RED vs round 4): a Ready, ELIGIBLE-BUT-UNPOOLED issue (plan:approved, malformed AC, no roundPool label) does NOT count as work — a valid PO selection of `selected: []` leaves it with no consumer, and round 4's unfiltered getPoolEligibleIssues() read wrongly pinned the probe on exactly this remainder", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // isDispatchable fails: extractAcceptanceCriteria returns null for a malformed list
+  forge.planReviewCandidates = []; // already plan:approved — not a review candidate
+  forge.planTriageCandidates = []; // extractVerificationPlan(body) IS non-null — not a triage candidate either
+  const cfg = mkCfg({ round: { standby: { enabled: true } } }); // milestone UNSET — same as the pooled counterpart above
+  // Eligible (Ready, not held, not the #94 mixed state) but genuinely NOT selected into this
+  // round's pool — plan-review.ts's createPlanReviewStub only ever reads
+  // `eligible.filter(roundPool)`, so this issue has no session that will ever touch it until a
+  // LATER pool selection actually picks it. That is a rendered PO judgment, not pending work.
+  forge.poolEligible = [
+    { number: 1003, title: "approved, broken AC list, unpooled", labels: [cfg.labels.planApproved], body: BROKEN_AC_BODY },
+  ];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop();
+  };
+  const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 5, cfg, peripherals: allPeripherals(log) });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby actually engaged — an eligible-but-unpooled issue has no consumer this round, and must not pin the probe true",
+  );
   state.close();
 });
 
@@ -3652,6 +3695,147 @@ test("runRounds standby (#432 round 4, P2-3): a fully-specified milestone issue 
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — the stale roundPool-labeled issue was still counted");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
+  state.close();
+});
+
+// ── #432 round 5 (PM adjudication of Codex second confirm round): a repeated defect CLASS —
+//    a retry signal added to the probe without a TERMINAL lets a deterministic failure pin
+//    rounds open forever. Both tests below pin the SELF-RESOLUTION: N deterministic failures
+//    (never succeeding) must escalate exactly once and then let standby engage. ────────────────
+
+// Note: round.test.ts's `allPeripherals` fixture stubs every phase with a bare logging stub —
+// it never runs the REAL round-defaults.ts wiring (align.ts's dissent sweep, plan-review.ts's
+// pool consumer). The actual "N failures reach the cap, escalate exactly once"
+// reconcileDurableConcerns mechanism is exercised directly in dissent.test.ts, where nothing
+// stands between the test and the real function. What belongs here is narrower and just as
+// load-bearing: does round.ts's PROBE correctly read the TERMINAL once it lands? These two tests
+// pin exactly that — the "before" (still pending, probe pinned) and "after" (escalated, probe
+// unpinned) states dissent.test.ts's own escalation test proves the ledger transitions between.
+
+test("runRounds standby (#432 round 5, P1-2): a durable dissent concern that is STILL PENDING (not yet escalated) counts as work — standby does not engage", async () => {
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.planReviewCandidates = [];
+  forge.planTriageCandidates = [];
+  forge.poolEligible = [];
+  const cfg = mkCfg({ round: { standby: { enabled: true } } });
+  const state = new State(":memory:");
+  // A decision event with no matching concern-posted/concern-post-escalated receipt — exactly
+  // what a failed-but-not-yet-capped post attempt leaves behind.
+  state.appendEvent("triage-decision-accepted", { round_id: 1, concerns: [{ issue: 777, reason: "this issue's premise seems wrong" }] });
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — the still-pending concern was still counted as work");
+  assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
+  state.close();
+});
+
+test("runRounds standby (#432 round 5, P1-2, the TERMINAL): a durable dissent concern that has ALREADY escalated (concern-post-escalated on record) does NOT count as work — the probe unpins", async () => {
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.planReviewCandidates = [];
+  forge.planTriageCandidates = [];
+  forge.poolEligible = [];
+  const cfg = mkCfg({ round: { standby: { enabled: true } } });
+  const state = new State(":memory:");
+  // Same decision event as the pending-state test above, PLUS the terminal escalation event
+  // escalateUnpostableConcern (dissent.ts) appends after its own addLabel succeeds — this is
+  // exactly the ledger state reconcileDurableConcerns leaves once maxConcernPostAttempts is
+  // reached (dissent.test.ts proves that transition; this test proves the probe honors it).
+  state.appendEvent("triage-decision-accepted", { round_id: 1, concerns: [{ issue: 777, reason: "this issue's premise seems wrong" }] });
+  state.appendEvent("concern-post-escalated", { round_id: 1, issue: 777, reason: "this issue's premise seems wrong" });
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop();
+  };
+  const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 5, cfg, peripherals: allPeripherals(log) });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby actually engaged — an escalated concern has no local-SQLite signal left pinning the probe",
+  );
+  state.close();
+});
+
+test("runRounds standby (#432 round 5, P2-3): a stale roundPool label that fails to remove EVERY pass escalates needs-human exactly once it reaches maxPoolRemovalAttempts, and the probe unpins — the self-resolution pins itself", async () => {
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.planReviewCandidates = [];
+  forge.planTriageCandidates = []; // fully specified -> needsPlanTriage false, same as a real forge
+  forge.milestoneOpenCounts = [1];
+  const cfg = mkCfg({ round: { milestone: "M4", maxPoolRemovalAttempts: 2, standby: { enabled: true } } });
+  forge.openIssues = [
+    {
+      number: 1005,
+      title: "stale pool label, removal always fails",
+      labels: [cfg.labels.roundPool],
+      body: SPECIFIED_BODY,
+      milestone: "M4",
+    },
+  ];
+  // A deterministic, never-clearing removeLabel failure (e.g. a repo permission problem) — round
+  // close's own sweep is what calls this, since deps.poolLabel below wires it in.
+  forge.removeLabel = async (n: number, l: string) => {
+    if (n === 1005 && l === cfg.labels.roundPool) throw new Error("removeLabel permanently failing");
+    forge.removeLabelCalls.push([n, l]);
+  };
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 6) stop();
+  };
+  const deps = baseDeps({
+    forge,
+    state,
+    sleep,
+    tickIntervalSec: 5,
+    cfg,
+    peripherals: allPeripherals(log),
+    poolLabel: cfg.labels.roundPool, // round-close only sweeps stale pool labels when a pool is actually configured
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  // Round 1: round-close's own sweep attempts removal, fails (1st recorded failure, 1 < cap 2) —
+  // the label is still on the issue, still fully-specified, still no other consumable signal, so
+  // the catch-all's roundPool exemption keeps counting it as work between rounds 1 and 2. Round
+  // 2's round-close sweep fails again (2nd failure, reaches the cap) and escalates in the SAME
+  // pass — needsHuman now structurally excludes the issue from the catch-all, and standby engages.
+  assert.equal(result.rounds, 2, "exactly two rounds opened before the cap was reached and escalation fired");
+  assert.ok(
+    forge.addLabelCalls.some(([n, l]) => n === 1005 && l === cfg.labels.needsHuman),
+    "the issue whose stale pool label wouldn't remove was escalated needs-human",
+  );
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby engaged once the issue escalated and stopped pinning the probe",
+  );
+  const escalations = events.filter(
+    ([kind, payload]) => kind === "round-pool-removal-capped" && (payload as { issue?: number }).issue === 1005,
+  );
+  assert.equal(escalations.length, 1, "the issue escalated EXACTLY once, not once per subsequent pass");
   state.close();
 });
 

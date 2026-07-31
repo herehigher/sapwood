@@ -22,6 +22,7 @@ import {
   concernHash,
   concernMarker,
   isSapwoodComment,
+  pendingDurableConcerns,
   postConcerns,
   reconcileDurableConcerns,
   scanForAdjudication,
@@ -639,6 +640,71 @@ test("reconcileDurableConcerns #237 round-3 adjudication: reads the ledger with 
   await reconcileDurableConcerns(forge, state, cfg);
 
   assert.equal(calls, 1, "one collapsed query covering triage-decision-accepted/proposal-set-persisted/concern-posted together");
+  state.close();
+});
+
+// ── #432 round 5 (P1-2, Codex second confirm round): the TERMINAL a permanently unpostable
+//    concern was missing — a deterministic post failure (issue deleted/transferred/permanently
+//    inaccessible) must not pin round.ts's probe true forever. ──────────────────────────────────
+
+test("reconcileDurableConcerns (#432 round 5, P1-2): a concern whose issue is PERMANENTLY unreadable is retried, then escalates needs-human EXACTLY ONCE at maxConcernPostAttempts, and drops out of pendingDurableConcerns from then on", async () => {
+  const forge = new FakeForge();
+  forge.getIssueBody = async (issue: number) => {
+    if (issue === 777) throw new Error("issue permanently inaccessible");
+    return "";
+  };
+  const state = new State(":memory:");
+  const cfg = ConfigSchema.parse({
+    board: { owner: "owner", repo: "r", projectNumber: 1 },
+    roles: { po: { maxConcernPostAttempts: 2 } },
+  });
+  state.appendEvent("triage-decision-accepted", { round_id: 1, concerns: [{ issue: 777, reason: "this issue's premise seems wrong" }] });
+
+  // Pass 1: 1st failed attempt (1 < cap 2) — still pending, no escalation yet.
+  await reconcileDurableConcerns(forge, state, cfg);
+  assert.equal(pendingDurableConcerns(state).length, 1, "still pending after the first failure — below the cap");
+  assert.deepEqual(forge.addLabelCalls, [], "no escalation yet — the cap hasn't been reached");
+
+  // Pass 2: 2nd failed attempt reaches the cap and escalates in the SAME pass.
+  await reconcileDurableConcerns(forge, state, cfg);
+  assert.equal(pendingDurableConcerns(state).length, 0, "the concern dropped out of pending the instant it escalated");
+  assert.deepEqual(forge.addLabelCalls, [[777, cfg.labels.needsHuman]], "escalated needs-human exactly once");
+
+  // Pass 3: a concern that already escalated is no longer even attempted — no further failure
+  // events, no re-escalation, no wasted forge calls.
+  const bodyCallsBefore = forge.addLabelCalls.length;
+  await reconcileDurableConcerns(forge, state, cfg);
+  assert.equal(pendingDurableConcerns(state).length, 0, "still empty — nothing left to sweep");
+  assert.equal(forge.addLabelCalls.length, bodyCallsBefore, "no repeat escalation on a later pass");
+
+  const escalations = state.eventsAfterId(0, ["concern-post-escalated"]);
+  assert.equal(escalations.length, 1, "exactly one terminal escalation event, ever");
+  assert.deepEqual(escalations[0]!.payload, { round_id: 1, issue: 777, reason: "this issue's premise seems wrong" });
+  state.close();
+});
+
+test("reconcileDurableConcerns (#432 round 5, P1-2): a TRANSIENT failure that clears well under the cap never escalates", async () => {
+  const forge = new FakeForge();
+  let attempt = 0;
+  forge.getIssueBody = async (issue: number) => {
+    attempt++;
+    if (issue === 42 && attempt <= 2) throw new Error("transient blip");
+    return "";
+  };
+  const state = new State(":memory:");
+  const cfg = ConfigSchema.parse({
+    board: { owner: "owner", repo: "r", projectNumber: 1 },
+    roles: { po: { maxConcernPostAttempts: 5 } },
+  });
+  state.appendEvent("triage-decision-accepted", { round_id: 1, concerns: [{ issue: 42, reason: "double-check this" }] });
+
+  await reconcileDurableConcerns(forge, state, cfg); // fails (attempt 1)
+  await reconcileDurableConcerns(forge, state, cfg); // fails (attempt 2)
+  await reconcileDurableConcerns(forge, state, cfg); // succeeds (attempt 3) — well under the cap of 5
+
+  assert.equal(pendingDurableConcerns(state).length, 0, "delivered normally — no longer pending");
+  assert.deepEqual(forge.addLabelCalls, [], "never escalated — the transient failure cleared on its own before the cap");
+  assert.equal(forge.comments[42]?.length, 1, "the concern comment actually landed");
   state.close();
 });
 
