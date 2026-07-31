@@ -51,7 +51,13 @@ import { issuePriority } from "./conductor.js";
 import { runDecompositionPass } from "./decompose.js";
 import { type Concern, ConcernSchema, postConcerns, validateConcerns } from "./dissent.js";
 import { createIssueProposals, normalizeProposalTitle, proposalMarker } from "./issue-creation.js";
-import { escalatePoolRemovalFailures, type PeripheralStub, removeRoundPoolLabel } from "./round.js";
+import {
+  escalatePoolRemovalFailures,
+  type PeripheralStub,
+  poolRemovalEscalated,
+  poolRemovalFailureCount,
+  removeRoundPoolLabel,
+} from "./round.js";
 
 /** #89's round convention (same shape as plan-review.ts's planReviewMarker): the round
  *  ledger's persisted marker for this phase, also embedded in every comment this phase posts
@@ -1073,10 +1079,22 @@ async function reconcilePoolLabels(
     recordIncomplete({ read_failed: true });
     return;
   }
+  // #432 round 6 (P1-2/P2-3, gate② third confirm): the SAME idempotence + cap-before-attempt
+  // ordering round.ts's own round-close sweep uses — see that call site's own comment for the
+  // full crash-window argument. Both checks are only reachable when eventCtx is supplied (a bare
+  // selectRoundPool caller has no state handle to count against, same limitation recordIncomplete
+  // already had) — without it, this loop falls back to its pre-#432 behavior unchanged.
   const failedRemovals: number[] = [];
   for (const issue of openIssues) {
     if (targetNumbers.has(issue.number)) continue;
     if (!labelsInclude(issue.labels, cfg.labels.roundPool)) continue;
+    if (eventCtx) {
+      if (poolRemovalEscalated(eventCtx.state, issue.number)) continue;
+      if (poolRemovalFailureCount(eventCtx.state, issue.number) >= cfg.round.maxPoolRemovalAttempts) {
+        await escalatePoolRemovalFailures(forge, cfg, eventCtx.state, [issue.number], log);
+        continue;
+      }
+    }
     try {
       await removeRoundPoolLabel(forge, cfg, issue.number, cfg.labels.roundPool);
     } catch (e) {
@@ -1086,9 +1104,6 @@ async function reconcilePoolLabels(
   }
   if (failedRemovals.length > 0) {
     recordIncomplete({ failed_issues: failedRemovals });
-    // #432 round 5 (P2-3): the SAME check round.ts's own round-close sweep runs after its own
-    // failedRemovals — only reachable here when eventCtx is supplied (a bare selectRoundPool
-    // caller has no state handle to count against, same limitation recordIncomplete already had).
     if (eventCtx) await escalatePoolRemovalFailures(forge, cfg, eventCtx.state, failedRemovals, log);
   }
 }

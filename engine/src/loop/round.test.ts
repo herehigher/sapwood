@@ -32,11 +32,14 @@ import { State } from "../state/state.js";
 import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
 import {
   buildFixLegResume,
+  escalatePoolRemovalFailures,
   isRoundFullyDegraded,
   noopPeripheralStub,
   type PeripheralPhase,
   type PeripheralStub,
   PoolScopedForge,
+  poolRemovalEscalated,
+  poolRemovalFailureCount,
   type RoundDeps,
   RoundScopedForge,
   type RoundStopHit,
@@ -3836,6 +3839,75 @@ test("runRounds standby (#432 round 5, P2-3): a stale roundPool label that fails
     ([kind, payload]) => kind === "round-pool-removal-capped" && (payload as { issue?: number }).issue === 1005,
   );
   assert.equal(escalations.length, 1, "the issue escalated EXACTLY once, not once per subsequent pass");
+  state.close();
+});
+
+// ── #432 round 6 (PM adjudication of Codex third confirm round): the round-5 terminals were
+//    hand-rolled with raw addLabel instead of the shared escalation-writer.ts discipline —
+//    direct, function-level reproductions of each finding, mirroring how Codex itself verified
+//    them (unit-level, not through the full runRounds harness, since align.ts's real reconcile
+//    never runs there — round.test.ts's `allPeripherals` stubs every phase). ─────────────────────
+
+test("escalatePoolRemovalFailures (#432 round 6, P1-1): addLabel failing EVERY time still appends the terminal event, with labeled:0 — the probe unpins regardless", async () => {
+  const forge = new FakeForge();
+  forge.addLabel = async () => {
+    throw new Error("permission denied");
+  };
+  const state = new State(":memory:");
+  const cfg = mkCfg({ round: { maxPoolRemovalAttempts: 1 } });
+  state.appendEvent("pool-reconcile-incomplete", { round_id: 1, failed_issues: [9] });
+
+  await escalatePoolRemovalFailures(forge, cfg, state, [9]);
+
+  const terminals = state.eventsAfterId(0, ["round-pool-removal-capped"]);
+  assert.equal(terminals.length, 1, "the terminal event landed despite the label write failing every time");
+  assert.deepEqual(terminals[0]!.payload, { issue: 9, labeled: 0, labelError: "Error: permission denied" });
+  state.close();
+});
+
+test("escalatePoolRemovalFailures (#432 round 6, P2-3): idempotence — calling it again for an ALREADY-escalated issue performs zero label attempts and appends zero new terminal events", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg({ round: { maxPoolRemovalAttempts: 1 } });
+  state.appendEvent("pool-reconcile-incomplete", { round_id: 1, failed_issues: [9] });
+
+  await escalatePoolRemovalFailures(forge, cfg, state, [9]); // first call: escalates
+  assert.equal(forge.addLabelCalls.length, 1, "the first call escalated once");
+  assert.equal(state.eventsAfterId(0, ["round-pool-removal-capped"]).length, 1);
+
+  // An UNRELATED wake (e.g. a later round's own sweep re-observing the same still-labelled,
+  // still-open issue) calls this again with the SAME issue in failedIssues.
+  await escalatePoolRemovalFailures(forge, cfg, state, [9]);
+  assert.equal(forge.addLabelCalls.length, 1, "zero NEW label attempts — poolRemovalEscalated skipped it");
+  assert.equal(state.eventsAfterId(0, ["round-pool-removal-capped"]).length, 1, "zero NEW terminal events");
+  assert.ok(poolRemovalEscalated(state, 9));
+  state.close();
+});
+
+test("poolRemovalFailureCount (#432 round 6, P2-4): an episode boundary resets the count — 4 failures BEFORE a re-pool event, plus 1 failure AFTER it, count as 1, not 5", async () => {
+  const state = new State(":memory:");
+  // Four "ancient" failures, rounds 1-4.
+  for (let r = 1; r <= 4; r++) state.appendEvent("pool-reconcile-incomplete", { round_id: r, failed_issues: [9] });
+  assert.equal(poolRemovalFailureCount(state, 9), 4, "sanity: all four count before any reset");
+
+  // Round 5: the issue is re-selected into the pool (a fresh episode — whatever removal history
+  // preceded it is closed, successfully or not; the label is now legitimately supposed to be
+  // there again).
+  state.appendEvent("pool-selected", { round_id: 5, issues: [9] });
+
+  // Round 9: a genuinely NEW, unrelated transient failure.
+  state.appendEvent("pool-reconcile-incomplete", { round_id: 9, failed_issues: [9] });
+
+  assert.equal(poolRemovalFailureCount(state, 9), 1, "only the post-reset failure counts — the four ancient ones are a closed episode");
+  state.close();
+});
+
+test("poolRemovalFailureCount (#432 round 6, P2-4): a pool-selected event for a DIFFERENT issue does not reset this issue's count", async () => {
+  const state = new State(":memory:");
+  state.appendEvent("pool-reconcile-incomplete", { round_id: 1, failed_issues: [9] });
+  state.appendEvent("pool-selected", { round_id: 2, issues: [42] }); // a different issue entirely
+  state.appendEvent("pool-reconcile-incomplete", { round_id: 3, failed_issues: [9] });
+  assert.equal(poolRemovalFailureCount(state, 9), 2, "both failures still count — issue #9 was never re-pooled");
   state.close();
 });
 

@@ -647,7 +647,7 @@ test("reconcileDurableConcerns #237 round-3 adjudication: reads the ledger with 
 //    concern was missing — a deterministic post failure (issue deleted/transferred/permanently
 //    inaccessible) must not pin round.ts's probe true forever. ──────────────────────────────────
 
-test("reconcileDurableConcerns (#432 round 5, P1-2): a concern whose issue is PERMANENTLY unreadable is retried, then escalates needs-human EXACTLY ONCE at maxConcernPostAttempts, and drops out of pendingDurableConcerns from then on", async () => {
+test("reconcileDurableConcerns (#432 round 6, P1-2): a concern whose issue is PERMANENTLY unreadable is retried, then escalates needs-human EXACTLY ONCE once the cap is reached, and drops out of pendingDurableConcerns from then on", async () => {
   const forge = new FakeForge();
   forge.getIssueBody = async (issue: number) => {
     if (issue === 777) throw new Error("issue permanently inaccessible");
@@ -660,17 +660,25 @@ test("reconcileDurableConcerns (#432 round 5, P1-2): a concern whose issue is PE
   });
   state.appendEvent("triage-decision-accepted", { round_id: 1, concerns: [{ issue: 777, reason: "this issue's premise seems wrong" }] });
 
-  // Pass 1: 1st failed attempt (1 < cap 2) — still pending, no escalation yet.
+  // Pass 1: failures-so-far (0) < cap (2) — attempts a post, which fails (1 recorded failure).
   await reconcileDurableConcerns(forge, state, cfg);
   assert.equal(pendingDurableConcerns(state).length, 1, "still pending after the first failure — below the cap");
   assert.deepEqual(forge.addLabelCalls, [], "no escalation yet — the cap hasn't been reached");
 
-  // Pass 2: 2nd failed attempt reaches the cap and escalates in the SAME pass.
+  // Pass 2: failures-so-far (1) < cap (2) — attempts ONE more post (round 6's cap check runs
+  // BEFORE the attempt, using the STANDING count — see reconcileDurableConcerns' own doc for why
+  // this ordering, not "escalate the instant the cap is crossed", is what closes the crash
+  // window). This attempt also fails, bringing the recorded count to 2.
+  await reconcileDurableConcerns(forge, state, cfg);
+  assert.equal(pendingDurableConcerns(state).length, 1, "still pending — the cap was JUST reached, not yet acted on this pass");
+  assert.deepEqual(forge.addLabelCalls, [], "still no escalation — the check for THIS pass ran before the count reached 2");
+
+  // Pass 3: failures-so-far (2) >= cap (2) — escalates instead of attempting another post.
   await reconcileDurableConcerns(forge, state, cfg);
   assert.equal(pendingDurableConcerns(state).length, 0, "the concern dropped out of pending the instant it escalated");
   assert.deepEqual(forge.addLabelCalls, [[777, cfg.labels.needsHuman]], "escalated needs-human exactly once");
 
-  // Pass 3: a concern that already escalated is no longer even attempted — no further failure
+  // Pass 4: a concern that already escalated is no longer even attempted — no further failure
   // events, no re-escalation, no wasted forge calls.
   const bodyCallsBefore = forge.addLabelCalls.length;
   await reconcileDurableConcerns(forge, state, cfg);
@@ -679,7 +687,46 @@ test("reconcileDurableConcerns (#432 round 5, P1-2): a concern whose issue is PE
 
   const escalations = state.eventsAfterId(0, ["concern-post-escalated"]);
   assert.equal(escalations.length, 1, "exactly one terminal escalation event, ever");
-  assert.deepEqual(escalations[0]!.payload, { round_id: 1, issue: 777, reason: "this issue's premise seems wrong" });
+  assert.deepEqual(escalations[0]!.payload, {
+    issue: 777,
+    round_id: 1,
+    reason: "this issue's premise seems wrong",
+    labeled: 1,
+  });
+  state.close();
+});
+
+test("reconcileDurableConcerns (#432 round 6, P1-1): a concern whose issue is BOTH unreadable AND unlabelable still escalates — the terminal event is UNCONDITIONAL, carrying labeled: 0, not suppressed by the same broken issue also rejecting the addLabel write", async () => {
+  const forge = new FakeForge();
+  forge.getIssueBody = async (issue: number) => {
+    if (issue === 888) throw new Error("issue permanently inaccessible");
+    return "";
+  };
+  forge.addLabel = async (n: number, l: string) => {
+    if (n === 888) throw new Error("this issue also rejects label writes");
+    forge.addLabelCalls.push([n, l]);
+  };
+  const state = new State(":memory:");
+  const cfg = ConfigSchema.parse({
+    board: { owner: "owner", repo: "r", projectNumber: 1 },
+    roles: { po: { maxConcernPostAttempts: 1 } },
+  });
+  state.appendEvent("triage-decision-accepted", { round_id: 1, concerns: [{ issue: 888, reason: "unlabelable too" }] });
+
+  await reconcileDurableConcerns(forge, state, cfg); // pass 1: 0 < cap 1 — attempts a post, fails (1 failure recorded)
+  assert.equal(pendingDurableConcerns(state).length, 1, "still pending after the first failure");
+  await reconcileDurableConcerns(forge, state, cfg); // pass 2: 1 >= cap 1 — escalates
+
+  assert.equal(pendingDurableConcerns(state).length, 0, "unpinned despite the label write ALSO failing");
+  const escalations = state.eventsAfterId(0, ["concern-post-escalated"]);
+  assert.equal(escalations.length, 1, "the terminal event landed regardless of the label outcome");
+  assert.deepEqual(escalations[0]!.payload, {
+    issue: 888,
+    round_id: 1,
+    reason: "unlabelable too",
+    labeled: 0,
+    labelError: "Error: this issue also rejects label writes",
+  });
   state.close();
 });
 

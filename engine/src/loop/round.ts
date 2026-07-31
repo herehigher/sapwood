@@ -41,6 +41,7 @@ import {
 import { pendingDurableConcerns } from "./dissent.js";
 import { issuesMergedThisTick, prsOpenedThisTick, type StopConditionHit, type StopConfig } from "./driver.js";
 import { emptySpinBreached, parkDurationExceededSec, probeBackoffSec, probeDueWithHint } from "./env-failure.js";
+import { escalateToNeedsHuman } from "./escalation-writer.js";
 import { buildRoundArtifact, persistRoundArtifact, type RoundArtifact } from "./round-artifact.js";
 import { startProgressWatchdog, systemWatchdogTimer } from "./watchdog.js";
 
@@ -787,61 +788,83 @@ export async function removeRoundPoolLabel(forge: IForge, cfg: SapwoodConfig, is
   await forge.removeLabel(issue, label);
 }
 
-/** #432 round 5 (P2-3, the TERMINAL a deterministic roundPool-removal failure was missing): how
- *  many times a `pool-reconcile-incomplete` event's `failed_issues` array has named THIS issue —
- *  across BOTH `removeRoundPoolLabel` call sites (align.ts's round-open reconcile, this file's
- *  own round-close sweep below — both append the SAME event kind, no per-call-site duplication).
- *  Pure ledger fold, same shape as dissent.ts's `concernPostFailureCount`; a malformed/absent
- *  array is skipped, never thrown. */
+/** #432 round 6 (P2-4, gate② third confirm — the episode-boundary fix): how many times a
+ *  `pool-reconcile-incomplete` event's `failed_issues` array has named THIS issue SINCE its last
+ *  RESET — a later `pool-selected` event naming the same issue, i.e. the issue was re-added to
+ *  the pool. Round 5's version counted every historical occurrence unconditionally, so an issue
+ *  that failed removal, got cleanly removed (or simply drifted out of the pool) and was later
+ *  RE-SELECTED into a fresh pool episode still carried its old failure tally forward — four
+ *  long-resolved episodes plus one genuinely new transient failure could hit the cap immediately,
+ *  escalating an issue with no continuous failure streak at all. `pool-selected` (align.ts,
+ *  written every round BEFORE any label write, `{round_id, issues}`) is the natural reset
+ *  signal: an issue reappearing there means whatever removal history preceded it belongs to a
+ *  CLOSED episode, not a continuing one. Compared by `round_id` (both event kinds' payloads carry
+ *  it) rather than raw event id — `eventsAfterId` already returns rows in id order, so a single
+ *  forward fold tracking "the highest reset round_id seen so far" gives the same ordering
+ *  guarantee `conductor.ts`'s `maxEventIdForKinds`/`DRIVE_QUEUED_RESET_KINDS` pattern uses,
+ *  without needing a new `json_each`-based State method (`pool-selected`'s `issues` field is an
+ *  array, which `maxEventIdForKinds`'s scalar `json_extract` equality can't scope by). A
+ *  malformed/absent array on either kind is skipped, never thrown. */
 export function poolRemovalFailureCount(state: Pick<State, "eventsAfterId">, issue: number): number {
+  const events = state.eventsAfterId(0, ["pool-reconcile-incomplete", "pool-selected"]);
+  // Two passes, deliberately: the reset boundary is the MAX round_id among every matching
+  // `pool-selected` event across the WHOLE history, not "the highest reset seen so far while
+  // walking forward" — a reset event is chronologically AFTER the ancient failures it retires,
+  // so a single forward fold would still count them (it hasn't seen the reset yet when it
+  // reaches them). Compute the boundary FIRST, then filter against the settled value.
+  let resetAfterRound = 0;
+  for (const e of events) {
+    if (e.kind !== "pool-selected") continue;
+    const p = e.payload as { round_id?: unknown; issues?: unknown } | null;
+    if (typeof p?.round_id === "number" && Array.isArray(p.issues) && p.issues.includes(issue)) {
+      resetAfterRound = Math.max(resetAfterRound, p.round_id);
+    }
+  }
   let count = 0;
-  for (const e of state.eventsAfterId(0, ["pool-reconcile-incomplete"])) {
-    const p = e.payload as { failed_issues?: unknown } | null;
-    if (Array.isArray(p?.failed_issues) && p.failed_issues.includes(issue)) count++;
+  for (const e of events) {
+    if (e.kind !== "pool-reconcile-incomplete") continue;
+    const p = e.payload as { round_id?: unknown; failed_issues?: unknown } | null;
+    if (typeof p?.round_id !== "number" || !Array.isArray(p.failed_issues) || !p.failed_issues.includes(issue)) continue;
+    if (p.round_id > resetAfterRound) count++;
   }
   return count;
 }
 
-/** #432 round 5 (P2-3, degrade-to-human): for every issue a removal attempt just failed for THIS
- *  pass, check its CUMULATIVE failure count (poolRemovalFailureCount, across every round from
- *  either call site) against `cfg.round.maxPoolRemovalAttempts` and escalate the ones that have
- *  crossed it. `addLabel` is UNGUARDED-then-contained the same way dissent.ts's
- *  `escalateUnpostableConcern` is (see that function's own doc for the full "why unguarded would
- *  be the wrong failure mode here, why an idempotent retry is safe" argument — it applies
- *  verbatim): on failure, log and skip — the next pass's call re-attempts the same idempotent
- *  label write. The escalation event lands ONLY after the label write succeeds (`"always"` proof
- *  semantics, registered in escalation-reconcile.ts's `ESCALATION_SOURCES`). Once escalated, the
- *  issue carries `needsHuman`, which STRUCTURALLY removes it from the milestone catch-all below
- *  via the existing `humanLabels` exclusion (and from `getPoolEligibleIssues()` itself —
- *  forge.ts's `isPoolEligible` already excludes held issues) — no separate "stop retrying this
- *  issue" guard needed. The stale `roundPool` label itself is left in place (removing it is
- *  precisely the operation that keeps failing); it simply stops mattering, since a held issue
- *  never reaches the roundPool exemption check at all. */
+/** #432 round 6 (P2-3, idempotence): does issue N already carry the `round-pool-removal-capped`
+ *  terminal receipt? Both removal-attempt call sites (this file's round-close sweep, align.ts's
+ *  `reconcilePoolLabels`) check this BEFORE attempting removal at all — an unrelated legitimate
+ *  wake must never re-attempt (and re-fail, re-count, potentially re-escalate) a removal the
+ *  engine has already handed to a human. Pure ledger fold, same shape as `poolRemovalFailureCount`
+ *  itself. */
+export function poolRemovalEscalated(state: Pick<State, "eventsAfterId">, issue: number): boolean {
+  return state.eventsAfterId(0, ["round-pool-removal-capped"]).some((e) => (e.payload as { issue?: unknown } | null)?.issue === issue);
+}
+
+/** #432 round 6 (P1-1/P1-2, gate② third confirm): the DEGRADE-TO-HUMAN terminal for an issue
+ *  whose roundPool label has failed to remove `cfg.round.maxPoolRemovalAttempts` times — now a
+ *  thin wrapper over the SHARED writer (escalation-writer.ts's `escalateToNeedsHuman`), same fix
+ *  shape as dissent.ts's `escalateUnpostableConcern`: the terminal event is UNCONDITIONAL
+ *  (`labeled: 0|1`), so a deterministic label-write failure no longer suppresses it, and — paired
+ *  with `poolRemovalEscalated`'s idempotence check at BOTH call sites, run BEFORE any removal
+ *  attempt — a crash between this function's label write and its event append can no longer be
+ *  rescued by a later removal attempt succeeding and emptying `failedRemovals` before the
+ *  interrupted escalation gets a chance to complete. Once escalated, the issue carries
+ *  `needsHuman`, which STRUCTURALLY removes it from the milestone catch-all below via the
+ *  existing `humanLabels` exclusion (and from `getPoolEligibleIssues()` itself — forge.ts's
+ *  `isPoolEligible` already excludes held issues) — no separate "stop counting this issue" guard
+ *  needed in the probe itself. The stale `roundPool` label is left in place (removing it is
+ *  precisely the operation that keeps failing); it simply stops mattering once held. */
 export async function escalatePoolRemovalFailures(
   forge: IForge,
   cfg: SapwoodConfig,
   state: Pick<State, "appendEvent" | "eventsAfterId">,
   failedIssues: readonly number[],
-  log?: (message: string) => void,
+  _log?: (message: string) => void,
 ): Promise<void> {
-  const warn = log ?? console.error;
   for (const issue of failedIssues) {
+    if (poolRemovalEscalated(state, issue)) continue; // idempotence — already handed to a human
     if (poolRemovalFailureCount(state, issue) < cfg.round.maxPoolRemovalAttempts) continue;
-    try {
-      await forge.addLabel(issue, cfg.labels.needsHuman);
-    } catch (e) {
-      warn(
-        `[sapwood:pool] round-pool removal cap: failed to apply ${cfg.labels.needsHuman} to #${issue} — ` +
-          `will retry next pass: ${String(e)}`,
-      );
-      continue;
-    }
-    try {
-      state.appendEvent("round-pool-removal-capped", { issue });
-    } catch {
-      // Best-effort — the label already landed; a lost event append just re-attempts the same
-      // (idempotent, no-op) label write next pass.
-    }
+    await escalateToNeedsHuman(forge, state, cfg, issue, "round-pool-removal-capped", {});
   }
 }
 
@@ -1981,9 +2004,26 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         // round-open sweep) — the tick-error above/below stays for free-text observability, but
         // only this structured event is countable (dissent-style event-log counting, no new
         // columns) toward escalatePoolRemovalFailures' cap.
+        //
+        // #432 round 6 (P1-2/P2-3, gate② third confirm): for EACH issue, idempotence and the cap
+        // are checked BEFORE attempting removal at all — not after. Two reasons, both closing a
+        // gap round 5 left: (1) `poolRemovalEscalated` skips an issue already handed to a human —
+        // an unrelated legitimate wake must never re-attempt (and re-fail, re-count, potentially
+        // re-escalate) a removal the engine has already given up on; (2) an issue already AT the
+        // cap from a prior pass is escalated again HERE, before this pass's own removal attempt —
+        // if a prior escalation's label write succeeded but its event append was lost to a crash,
+        // this completes it (idempotent label re-write, event lands now) BEFORE giving the
+        // ordinary removal a chance to succeed this exact pass and empty `failedRemovals`, which
+        // would otherwise hide the interrupted escalation forever (see escalatePoolRemovalFailures'
+        // own doc). An issue below the cap still gets its ordinary removal attempt as before.
         const failedRemovals: number[] = [];
         for (const issue of openIssues) {
           if (!labelsInclude(issue.labels, deps.poolLabel)) continue;
+          if (poolRemovalEscalated(deps.state, issue.number)) continue;
+          if (poolRemovalFailureCount(deps.state, issue.number) >= cfg.round.maxPoolRemovalAttempts) {
+            await escalatePoolRemovalFailures(forge, cfg, deps.state, [issue.number], deps.log);
+            continue;
+          }
           try {
             await removeRoundPoolLabel(forge, cfg, issue.number, deps.poolLabel);
           } catch (e) {

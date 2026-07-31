@@ -155,18 +155,23 @@ export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   // fix-rounds-capped doctrine its own comment cites ("an escalation event may only claim what
   // provably landed"), so the event cannot exist unless the label landed.
   "verify-na-proposed": "always",
-  // #432 round 5 (P1-2, F34 discipline): dissent.ts's `escalateUnpostableConcern` — a durable
-  // concern that failed to post `cfg.roles.po.maxConcernPostAttempts` times (issue deleted/
-  // transferred/inaccessible). `always`, same reasoning as `verify-na-proposed` right above:
-  // the event is appended strictly AFTER its own `addLabel` succeeds (dissent.ts's own doc), so
-  // it cannot exist unless the label landed. No PR — a dissent concern is issue-only.
-  "concern-post-escalated": "always",
-  // #432 round 5 (P2-3, F34 discipline): round.ts/align.ts's `escalatePoolRemovalFailures` — a
-  // stale `roundPool` label whose removal failed deterministically `cfg.round.maxPoolRemovalAttempts`
-  // times (both call sites route through round.ts's `removeRoundPoolLabel`). `always`, same
-  // reasoning: appended strictly after its own `addLabel` succeeds. No PR — round-pool membership
-  // is issue-only.
-  "round-pool-removal-capped": "always",
+  // #432 round 6 (P1-1, F34 discipline — round 5 had this as `always`, WRONG): dissent.ts's
+  // `escalateUnpostableConcern`, via the shared writer (escalation-writer.ts's
+  // `escalateToNeedsHuman`) — a durable concern that failed to post
+  // `cfg.roles.po.maxConcernPostAttempts` times (issue deleted/transferred/inaccessible). The
+  // event is now UNCONDITIONAL (appended regardless of whether the label write succeeded, exactly
+  // so a label-write failure on an already-broken issue can't ALSO suppress the terminal that's
+  // supposed to unpin the probe over it) — so its existence no longer proves the label landed.
+  // `payload`, matching `drive-needs-human`'s own classification: proven only when the event's
+  // OWN `labeled` field says `1`. No PR — a dissent concern is issue-only.
+  "concern-post-escalated": "payload",
+  // #432 round 6 (P2-3, F34 discipline — round 5 had this as `always`, WRONG for the identical
+  // reason above): round.ts/align.ts's `escalatePoolRemovalFailures`, via the same shared writer —
+  // a stale `roundPool` label whose removal failed deterministically
+  // `cfg.round.maxPoolRemovalAttempts` times (both call sites route through round.ts's
+  // `removeRoundPoolLabel`). `payload`: proven only when `labeled === 1`. No PR — round-pool
+  // membership is issue-only.
+  "round-pool-removal-capped": "payload",
   // `plan-review-escalated` is `never`, NOT `always` (round 11, Codex P1 — a FALSE-CLEAR risk,
   // the class this module's doctrine calls strictly worse than a zombie row). It has TWO emission
   // sites with opposite orderings: plan-review.ts's own `escalate` appends after an unguarded
