@@ -51,7 +51,13 @@ import { issuePriority } from "./conductor.js";
 import { runDecompositionPass } from "./decompose.js";
 import { type Concern, ConcernSchema, postConcerns, validateConcerns } from "./dissent.js";
 import { createIssueProposals, normalizeProposalTitle, proposalMarker } from "./issue-creation.js";
-import { type PeripheralStub, removeRoundPoolLabel } from "./round.js";
+import {
+  escalatePoolRemovalFailures,
+  type PeripheralStub,
+  poolRemovalEscalated,
+  poolRemovalFailureCount,
+  removeRoundPoolLabel,
+} from "./round.js";
 
 /** #89's round convention (same shape as plan-review.ts's planReviewMarker): the round
  *  ledger's persisted marker for this phase, also embedded in every comment this phase posts
@@ -1014,9 +1020,13 @@ async function applyPoolLabels(
 /** Optional durable-event context for reconcilePoolLabels' incomplete-removal honesty record —
  *  omitted by callers (e.g. selectRoundPool) that have no round context of their own; the
  *  reconcile still runs identically, it just can't durably record an incomplete pass (a log
- *  line still fires either way). */
+ *  line still fires either way). #432 round 5: `eventsAfterId` joined `appendEvent` in the Pick
+ *  so a supplied eventCtx can also feed `escalatePoolRemovalFailures`' own ledger-count read
+ *  (round.ts) — every real caller passes a full `State`, so this is additive for them; only a
+ *  caller with genuinely no round context (selectRoundPool) omits eventCtx entirely and skips
+ *  both the honesty record and the escalation check, exactly as it already skipped the former. */
 interface ReconcileEventCtx {
-  state: Pick<State, "appendEvent">;
+  state: Pick<State, "appendEvent" | "eventsAfterId">;
   roundId: number;
 }
 
@@ -1069,10 +1079,22 @@ async function reconcilePoolLabels(
     recordIncomplete({ read_failed: true });
     return;
   }
+  // #432 round 6 (P1-2/P2-3, gate② third confirm): the SAME idempotence + cap-before-attempt
+  // ordering round.ts's own round-close sweep uses — see that call site's own comment for the
+  // full crash-window argument. Both checks are only reachable when eventCtx is supplied (a bare
+  // selectRoundPool caller has no state handle to count against, same limitation recordIncomplete
+  // already had) — without it, this loop falls back to its pre-#432 behavior unchanged.
   const failedRemovals: number[] = [];
   for (const issue of openIssues) {
     if (targetNumbers.has(issue.number)) continue;
     if (!labelsInclude(issue.labels, cfg.labels.roundPool)) continue;
+    if (eventCtx) {
+      if (poolRemovalEscalated(eventCtx.state, issue.number)) continue;
+      if (poolRemovalFailureCount(eventCtx.state, issue.number) >= cfg.round.maxPoolRemovalAttempts) {
+        await escalatePoolRemovalFailures(forge, cfg, eventCtx.state, [issue.number], log);
+        continue;
+      }
+    }
     try {
       await removeRoundPoolLabel(forge, cfg, issue.number, cfg.labels.roundPool);
     } catch (e) {
@@ -1080,7 +1102,10 @@ async function reconcilePoolLabels(
       failedRemovals.push(issue.number);
     }
   }
-  if (failedRemovals.length > 0) recordIncomplete({ failed_issues: failedRemovals });
+  if (failedRemovals.length > 0) {
+    recordIncomplete({ failed_issues: failedRemovals });
+    if (eventCtx) await escalatePoolRemovalFailures(forge, cfg, eventCtx.state, failedRemovals, log);
+  }
 }
 
 /** The deterministic, no-session pool selection: the FULL candidate set (computePoolCandidates),

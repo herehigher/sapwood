@@ -534,6 +534,14 @@ const Roles = z
       // Prompt-only granularity heuristic. Gate⓪'s hard checks remain plan + non-empty checkbox
       // AC extraction; this hint never becomes a scheduling estimate or hard dispatch gate.
       acceptanceCriteriaHint: z.number().int().positive().default(5),
+      // #432 round 5 (P1-2, degrade-to-human): dissent.ts's durable-concern retry sweep
+      // (reconcileDurableConcerns) gives up posting a concern's comment after this many recorded
+      // failures (a permanently unreadable/inaccessible issue — deleted, transferred, locked —
+      // is the deterministic case; a transient blip retries and clears well under the cap) and
+      // escalates needs-human instead, the same bound-a-retry-loop-then-degrade-to-human paradigm
+      // roles.planReviewer.maxDraftCycles/lanes.prFixCap already use. Positive int only: 0 would
+      // escalate on the very first transient failure, defeating the retry it's meant to bound.
+      maxConcernPostAttempts: z.number().int().positive().default(5),
       // #212 (gate① F1): the round-pool SELECTION session's own prompt — a distinct file from
       // promptFile above (align/triage), same #74 pattern: unset -> the engine's shipped
       // `prompts/po-pool.md`; a relative path resolves against the CONFIG FILE's directory (see
@@ -998,6 +1006,14 @@ const Round = z
     // the executing phase down to fewer candidates than lanes.roundDispatchCap could otherwise
     // fill). User-tunable, shipped commented in sapwood.config.yaml.
     poolFactor: z.number().finite().positive().default(1.5),
+    // #432 round 5 (P2-3, degrade-to-human): both round-pool label-removal call sites (align.ts's
+    // reconcilePoolLabels round-open sweep, this file's own round-close sweep) route through
+    // removeRoundPoolLabel and record every failure as a `pool-reconcile-incomplete` event; this
+    // many recorded failures for the SAME issue (a deterministically un-removable label, e.g. a
+    // repo permission problem) escalates needs-human instead of retrying forever — same bound-
+    // then-degrade paradigm as roles.po.maxConcernPostAttempts/roles.planReviewer.maxDraftCycles.
+    // Positive int only, same "0 defeats the retry it's meant to bound" rationale.
+    maxPoolRemovalAttempts: z.number().int().positive().default(5),
   })
   .strict();
 

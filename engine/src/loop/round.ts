@@ -19,7 +19,7 @@
 // responsible for treating a non-null marker as "already externalized, don't duplicate."
 
 import type { SapwoodConfig } from "../config/config.js";
-import type { IForge, Issue } from "../forge/forge.js";
+import { extractVerificationPlan, type IForge, type Issue } from "../forge/forge.js";
 import { type LabelSpec, labelsInclude } from "../forge/labels.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import { createProxyMint } from "../proxy/mint.js";
@@ -38,8 +38,10 @@ import {
   type TickResult,
   tick,
 } from "./conductor.js";
+import { pendingDurableConcerns } from "./dissent.js";
 import { issuesMergedThisTick, prsOpenedThisTick, type StopConditionHit, type StopConfig } from "./driver.js";
 import { emptySpinBreached, parkDurationExceededSec, probeBackoffSec, probeDueWithHint } from "./env-failure.js";
+import { escalateToNeedsHuman } from "./escalation-writer.js";
 import { buildRoundArtifact, persistRoundArtifact, type RoundArtifact } from "./round-artifact.js";
 import { startProgressWatchdog, systemWatchdogTimer } from "./watchdog.js";
 
@@ -786,6 +788,93 @@ export async function removeRoundPoolLabel(forge: IForge, cfg: SapwoodConfig, is
   await forge.removeLabel(issue, label);
 }
 
+/** #432 round 6/7 (P2-4, gate② third AND fourth confirm — the episode-boundary fix, corrected
+ *  twice): how many times a `pool-reconcile-incomplete` event's `failed_issues` array has named
+ *  THIS issue SINCE its last RESET — a `pool-selected` event naming the same issue, i.e. the
+ *  issue was (re-)added to the pool. Round 5 counted every historical occurrence unconditionally,
+ *  so a long-resolved episode's failures could combine with a genuinely new one to hit the cap
+ *  immediately. Round 6 tried resetting on the MAX `round_id` among matching `pool-selected`
+ *  events — WRONG, because `pool-selected` (align.ts, round-open) and `pool-reconcile-incomplete`
+ *  (either align.ts's own round-open reconcile, or this file's round-close sweep) routinely share
+ *  the SAME round_id: an issue selected this round can still fail removal in this SAME round's
+ *  own round-close sweep (round-close strips EVERY roundPool-labelled issue unconditionally, not
+ *  just ones excluded from this round's target). A strict `round_id >` comparison on equal values
+ *  is false either way, so that ordinary same-round failure was silently never counted at all —
+ *  the single most common failure shape couldn't reach the cap, and a continuously-reselected
+ *  issue reset its own streak away every round.
+ *
+ *  Round 7's fix drops `round_id` entirely and uses the SAME "last relevant event wins"
+ *  discipline this batch has now used three times (conductor.ts's
+ *  `priorFixLegForVerdict`/`DRIVE_QUEUED_RESET_KINDS`): a SINGLE forward pass over
+ *  `eventsAfterId`'s own id-ordered rows. A `pool-selected` naming this issue resets the running
+ *  count to 0; a `pool-reconcile-incomplete` naming it increments the running count — purely by
+ *  which happened LATER in the ledger, regardless of round_id. Since `pool-selected` is always
+ *  written before any removal is even attempted (align.ts's own module doc), a same-round
+ *  selection-then-failure now correctly counts: the selection's reset is already applied by the
+ *  time the later, same-round failure increments from zero.
+ *
+ *  DOCUMENTED RESIDUAL (accepted, not chased with a third reset rule): an issue selected AND
+ *  failing removal EVERY single round never accumulates past 1 — each round's OWN `pool-selected`
+ *  resets the count before that SAME round's own failure re-increments it. This is benign, not
+ *  the F32 shape this cap exists to close: an issue selected every round is, BY DEFINITION, a
+ *  live, currently-consumed pool member every one of those rounds (plan-review.ts's class-2
+ *  repair acts on it regardless of whether its stale label ever successfully clears) — the probe
+ *  was never actually stuck on unconsumable work in this pattern, only on cosmetic label
+ *  bookkeeping noise. The cap's real job — an issue that has LEFT the pool (no longer selected)
+ *  whose stale label keeps failing to remove — is unaffected: nothing resets it, so consecutive
+ *  failures accumulate normally toward the cap exactly as intended. */
+export function poolRemovalFailureCount(state: Pick<State, "eventsAfterId">, issue: number): number {
+  let count = 0;
+  for (const e of state.eventsAfterId(0, ["pool-reconcile-incomplete", "pool-selected"])) {
+    if (e.kind === "pool-selected") {
+      const p = e.payload as { issues?: unknown } | null;
+      if (Array.isArray(p?.issues) && p.issues.includes(issue)) count = 0;
+      continue;
+    }
+    const p = e.payload as { failed_issues?: unknown } | null;
+    if (Array.isArray(p?.failed_issues) && p.failed_issues.includes(issue)) count++;
+  }
+  return count;
+}
+
+/** #432 round 6 (P2-3, idempotence): does issue N already carry the `round-pool-removal-capped`
+ *  terminal receipt? Both removal-attempt call sites (this file's round-close sweep, align.ts's
+ *  `reconcilePoolLabels`) check this BEFORE attempting removal at all — an unrelated legitimate
+ *  wake must never re-attempt (and re-fail, re-count, potentially re-escalate) a removal the
+ *  engine has already handed to a human. Pure ledger fold, same shape as `poolRemovalFailureCount`
+ *  itself. */
+export function poolRemovalEscalated(state: Pick<State, "eventsAfterId">, issue: number): boolean {
+  return state.eventsAfterId(0, ["round-pool-removal-capped"]).some((e) => (e.payload as { issue?: unknown } | null)?.issue === issue);
+}
+
+/** #432 round 6 (P1-1/P1-2, gate② third confirm): the DEGRADE-TO-HUMAN terminal for an issue
+ *  whose roundPool label has failed to remove `cfg.round.maxPoolRemovalAttempts` times — now a
+ *  thin wrapper over the SHARED writer (escalation-writer.ts's `escalateToNeedsHuman`), same fix
+ *  shape as dissent.ts's `escalateUnpostableConcern`: the terminal event is UNCONDITIONAL
+ *  (`labeled: 0|1`), so a deterministic label-write failure no longer suppresses it, and — paired
+ *  with `poolRemovalEscalated`'s idempotence check at BOTH call sites, run BEFORE any removal
+ *  attempt — a crash between this function's label write and its event append can no longer be
+ *  rescued by a later removal attempt succeeding and emptying `failedRemovals` before the
+ *  interrupted escalation gets a chance to complete. Once escalated, the issue carries
+ *  `needsHuman`, which STRUCTURALLY removes it from the milestone catch-all below via the
+ *  existing `humanLabels` exclusion (and from `getPoolEligibleIssues()` itself — forge.ts's
+ *  `isPoolEligible` already excludes held issues) — no separate "stop counting this issue" guard
+ *  needed in the probe itself. The stale `roundPool` label is left in place (removing it is
+ *  precisely the operation that keeps failing); it simply stops mattering once held. */
+export async function escalatePoolRemovalFailures(
+  forge: IForge,
+  cfg: SapwoodConfig,
+  state: Pick<State, "appendEvent" | "eventsAfterId">,
+  failedIssues: readonly number[],
+  _log?: (message: string) => void,
+): Promise<void> {
+  for (const issue of failedIssues) {
+    if (poolRemovalEscalated(state, issue)) continue; // idempotence — already handed to a human
+    if (poolRemovalFailureCount(state, issue) < cfg.round.maxPoolRemovalAttempts) continue;
+    await escalateToNeedsHuman(forge, state, cfg, issue, "round-pool-removal-capped", {});
+  }
+}
+
 /**
  * Run rounds until a stop condition fires. Always attempts at least one round.
  *
@@ -1134,11 +1223,54 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  contributes no vote either way, same "unset = no scoping" stance as RoundScopedForge. Reads
    *  the same (possibly milestone-scoped) `forge` runExecuting/checkFinalMilestone already use.
    *
+   *  #432 (F32) history, recorded so the next reader doesn't retrace it: round 1 narrowed the
+   *  milestone catch-all below with a `needsPlanTriage`-shape filter; round 2 (wrongly) DELETED
+   *  the whole block on a claim that the plan-review/plan-triage reads above already subsumed it
+   *  — refuted at gate② review (`selectPlanTriageCandidates` iterates ProjectV2 board membership,
+   *  while this catch-all deliberately reads the FULL repo backlog). Round 3 restored the
+   *  catch-all and added a label-driven exclusion; round 4 replaced part of that exclusion with a
+   *  `getPoolEligibleIssues()` probe line — and that line was ITSELF an F32 generator (round 5:
+   *  see its own comment below). Three separate times now, a signal added here to fix an
+   *  under-count instead created an over-count. The standing rule that history earns:
+   *
+   *  DESIGN RULE — every signal admitted to this probe must NAME ITS TERMINAL: the state in
+   *  which a DETERMINISTIC failure (not just eventual success) stops that signal from counting.
+   *  A signal that only describes "when there's real work" and never "when a failure to act on it
+   *  stops mattering" is an F32 generator waiting to be found — it will eventually pin the probe
+   *  true over some permanently-stuck case its own author didn't enumerate. Every signal below
+   *  states its terminal at its own call site; the milestone catch-all's per-label exemptions
+   *  state theirs together, in its own comment.
+   *
    *  An all-empty probe is still not proof of "nothing to do" — the PO can decompose the plan
    *  doc alone — which is why standby additionally requires the idle-round precondition (see
-   *  lastRoundIdle). Known ceiling: a plan-doc edit made DURING standby is invisible to this
-   *  pure-API probe — the operator files an issue (any probe signal) or restarts the run to
-   *  wake the PO.
+   *  lastRoundIdle). Known ceilings, all WAITING-ON-HUMAN or observation-only work this probe
+   *  deliberately does NOT hold rounds open for (the #212 stance: a human-latency window must
+   *  never pin the probe true) — each is bounded and self-corrects the next time ANY other
+   *  signal legitimately wakes the loop:
+   *   - a plan-doc edit made DURING standby is invisible to this pure-API probe — the operator
+   *     files an issue (any probe signal) or restarts the run to wake the PO;
+   *   - dissent.ts's `scanForAdjudication` (a human REPLYING to an already-posted concern) needs
+   *     live forge reads (getIssueMeta/getIssueBody/getIssueComments) per open concern — not a
+   *     cheap local fact like `pendingDurableConcerns` above, so it is not probed here; a
+   *     still-open concern simply stays unadjudicated in `sapwood status` until the next
+   *     legitimate wake re-runs the scan (bounded: a stale dashboard row, never a stuck decision);
+   *   - escalation-reconcile.ts's `reconcileEscalations` (recording `escalation-resolved`) is
+   *     likewise a live-forge read, not a local fact, so it is not probed here either. Its
+   *     resolution sources are wider than label removal alone — a merge, a PR close, an issue
+   *     close, or a board-status repair all observe as resolved (module doc's own `ResolutionVia`
+   *     union), not only a human stripping the hold label by hand. And its consequence is wider
+   *     than a stale dashboard row too: post-#468/#441, an `escalation-resolved` event also feeds
+   *     `escalation-sweep.ts`'s `sweepResolvedHolds`, which strips the engine-applied
+   *     `needs-human` label the resolution proved is no longer earned — during standby, THAT
+   *     sweep is deferred right alongside the dashboard entry, so a resolved escalation's issue
+   *     keeps carrying a stale hold label (and stays excluded from every held-issue-sensitive
+   *     read, including this probe's own humanLabels exclusion below) until the next legitimate
+   *     wake runs the sweep. Bounded the same way: a stale label/row, never a stuck decision —
+   *     the underlying work was never actually blocked, only its bookkeeping lagged.
+   *   - an eligible-but-unpooled issue (`getPoolEligibleIssues()` member with no `roundPool`
+   *     label) is NOT a blind spot in this sense — see the pool probe line's own comment below:
+   *     it is a rendered PO judgment (a valid `selected: []`), not pending work of any kind, so
+   *     it correctly never counts and needs no terminal of its own.
    *
    *  Contained, fail-OPEN to round-opening (gate② on PR #150; same tick-error containment as
    *  checkFinalMilestone above): standby is exactly the long-idle mode where this probe runs
@@ -1155,6 +1287,15 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // so an outstanding row counts as work, or standby would starve the retry indefinitely.
       // Local SQLite read: the cheapest signal, checked first.
       if (deps.state.pendingRollbacks().length > 0) return true;
+      // #432 round 4 (Codex P1 finding 2, gate② review 3): a durable dissent CONCERN whose
+      // comment-post transiently failed (dissent.ts's postConcernIfNew) is engine-owned pending
+      // work — reconcileDurableConcerns' own retry sweep runs every round regardless of
+      // roles.po.enabled, so this is consumable no matter what's enabled. Dissent intentionally
+      // writes NO labels (module doc, #237 AC3), so no label-driven exemption in the milestone
+      // catch-all below could ever represent it; pendingDurableConcerns (dissent.ts) is the
+      // SAME pure-local SQLite read reconcileDurableConcerns folds over — cheap, checked here
+      // beside pendingRollbacks, before any network call.
+      if (pendingDurableConcerns(deps.state).length > 0) return true;
       // #433 (F33): a CARRIED lane is work. Rounds are dispatch windows and lanes cross them by
       // design, but every phase that finishes a lane — reclaim, resume, drive, gated reentry —
       // only ever runs inside a round's own executing tick. So withholding the next round over an
@@ -1182,6 +1323,48 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // burns the remaining peripheral sessions doing nothing, indefinitely.
       if (cfg.roles.planReviewer.enabled && (await forge.getIssuesNeedingPlanReview()).length > 0) return true;
       if (cfg.roles.po.enabled && (await forge.getIssuesNeedingPlanTriage()).length > 0) return true;
+      // #432 round 5 (Codex P1 finding 1, gate② confirm round 2 — round 4's own version of this
+      // line was itself an F32 generator): the round-pool's ELIGIBLE set (forge.ts's
+      // selectPoolEligibleIssues/isPoolEligible, #214) is Ready-lane-scoped, hold-excluding, and
+      // excludes the #94 forbidden verifyNa+planApproved mixed state, but it is a SUPERSET of what
+      // the class-2 repair session actually consumes — plan-review.ts's createPlanReviewStub reads
+      // `eligible.filter((i) => labelsInclude(i.labels, l.roundPool))` (~914), never the raw
+      // eligible list. A valid PO pool-selection judgment of `selected: []` (round-defaults.ts's
+      // own doc: "controlled experiments found the session selects every candidate at every model
+      // tier" is the DEFAULT deterministic-pool case, but `roles.po.poolSelection: true` makes a
+      // genuine empty selection reachable) leaves the eligible-but-unpooled remainder with NO
+      // consumer this round — round 4's unfiltered read pinned the probe true on exactly that
+      // remainder, reopening a paid PO selection pass every idle round for nothing. Filtering by
+      // `cfg.labels.roundPool` (present in the SAME read's label arrays — no extra forge call)
+      // makes the probe literally `getPoolEligibleIssues() ∩ roundPool`, the exact set
+      // createPlanReviewStub consumes: an eligible-but-unpooled issue is a rendered PO judgment,
+      // not pending work — see this probe's own "known ceilings" doc comment above for that
+      // stance spelled out as its own bullet. Round-pool selection runs UNCONDITIONALLY every
+      // round regardless of roles.po.enabled (round-defaults.ts ~200); the repair SESSION is
+      // gated on roles.planReviewer.enabled (createPlanReviewStub's own gate) — same
+      // disabled-consumer rule as the two lines above. This replaces round 3's `plan:approved`
+      // label exemption below, which over-counted (a valid approved issue demoted off Ready, or
+      // the #94 forbidden verifyNa+planApproved state, both pinned the probe true with nothing
+      // able to consume them) and under-delivered (the broken-body case it was cited for never
+      // needed it — a broken body already fails `planCompleteOrExempt` below and counts on its
+      // own).
+      //
+      // #432 round 5 DESIGN RULE (recorded here because this exact signal has now been wrong in
+      // BOTH directions — round 3's label proxy over-counted, round 4's unfiltered selector
+      // over-counted a different way): every signal admitted to probeHasWork must NAME ITS
+      // TERMINAL — the state in which a DETERMINISTIC failure stops counting, not just the happy
+      // path where the signal's own work gets consumed. A signal with no terminal is an F32
+      // generator waiting to be found. This line's terminal is the roundPool label ITSELF: it is
+      // applied atomically with pool selection (align.ts's reconcilePoolLabels, always reachable,
+      // never gated on a role) and removed either by round-close (this file, ~1874) or the next
+      // round-open reconcile — see the milestone catch-all's own roundPool exemption below, and
+      // its escalation path (escalatePoolRemovalFailures), for what happens when that removal
+      // itself fails deterministically.
+      if (
+        cfg.roles.planReviewer.enabled &&
+        (await forge.getPoolEligibleIssues()).some((i) => labelsInclude(i.labels, cfg.labels.roundPool))
+      )
+        return true;
       // #127 gate② R1 (same disabled-consumer rule): the milestone catch-all exists because an
       // open not-yet-Ready issue in the round's milestone is exactly what the PO/aligning pass
       // decomposes (or gate⓪ approves) — with BOTH gate⓪ roles off, nothing enabled can consume
@@ -1226,14 +1409,81 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         // as a board write but whose addLabel failed still pins this probe. That direction is the
         // deliberate one — it errs toward opening a round, the same fail-toward-more-work stance
         // this probe's own catch uses.
+        //
+        // #432 (F32, PM gate⓪ adjudication 2026-07-31, round 4 — round 3's shape narrowed
+        // further after gate② review found the label set itself wrong in BOTH directions): a
+        // fully-specified issue (plan/AC already drafted, or explicitly plan-exempt) that carries
+        // NONE of the two labels below is nothing any enabled role can act on — it is just
+        // waiting on a human Ready-promotion, the exact F32 churn (8 such issues in v0.2.1 pinned
+        // this probe true for six empty rounds). This is a MINIMAL, label-driven exclusion
+        // layered on top of the #212/#397/#391 exclusions above — it does NOT replace the
+        // catch-all's own repo-wide `listOpenIssues()` read (board-scoped selectors like
+        // selectPlanTriageCandidates iterate ProjectV2 `project.items` only and would miss an
+        // off-board milestone issue entirely — the exact gap round 2's deletion opened).
+        //
+        // "Plan-complete-or-exempt" = extractVerificationPlan(body) != null (forge.ts, the same
+        // read isDispatchable/needsPlanTriage share — needsPlanReview does NOT: it is a pure
+        // label-only predicate, forge.ts ~2229, so it is not part of this list) OR the issue
+        // carries verifyNa (the doc-gate path — no plan is ever expected). An issue in EITHER
+        // state is only excluded when it ALSO carries none of:
+        //  - cfg.labels.split: a human-fired decompose request. isDecomposeCandidate (decompose.ts)
+        //    is exactly `split ∧ ¬decomposed ∧ ¬needsHuman ∧ ¬blocked` — consumed by
+        //    runDecompositionPass, called from align.ts's aligning-phase handler (~1486-1490)
+        //    INSIDE alignStub.run, which round-defaults.ts gates on `cfg.roles.po.enabled` (the
+        //    `deps.cfg.roles.po.enabled ? await alignStub.run(ctx) : ...` branch) — a live
+        //    decompose candidate, fully specified or not, must still wake the loop when the PO is
+        //    on, or the human's split request stalls in standby indefinitely.
+        //  - cfg.labels.decomposed: a fenced parent whose decomposition may still have an
+        //    unreconciled LOCAL journal (decompose.ts's `recoveries` set, `runDecompositionPass`)
+        //    — the same align.ts call site/gate as `split` above. `needsPlanTriage` explicitly
+        //    EXCLUDES `decomposed` (forge.ts), so this recovery work is invisible to the triage
+        //    line above by design; excluding it here too would silently strand it in standby.
+        //    This probe has no local-journal read of its own (SQLite state, not a forge call), so
+        //    — same "residual, stated rather than overclaimed" stance as the claimed-issue
+        //    comment above — every decomposed-labelled issue counts, even ones whose journal is
+        //    ALREADY fully reconciled: a same-round-idle over-count, never a missed recovery.
+        //
+        // #432 round 4 (Codex P1 finding 1): `cfg.labels.planApproved` was HERE in round 3 and is
+        // now deliberately REMOVED — it was wrong in both directions. Over-counting: a VALID
+        // approved issue demoted off Ready back to a non-Ready status (or an issue stuck in the
+        // #94 forbidden verifyNa+planApproved mixed state, which every real selector treats as
+        // human-cleanup-only) still carries the label, so this probe pinned itself true forever
+        // with nothing enabled able to consume either shape — violating this very issue's own
+        // acceptance criteria. Under-delivering: the ONE case it was actually cited for — a Ready,
+        // approved issue whose body/AC became unparseable — never needed the label at all, since a
+        // broken body already fails `planCompleteOrExempt` above and counts on its own. The real
+        // gap (Ready + approved + a plan SECTION present but otherwise unparseable, e.g. a
+        // malformed checkbox AC list — a shape `extractVerificationPlan` alone can't distinguish
+        // from "fine") is now covered by the STATUS-AWARE `getPoolEligibleIssues()` probe line
+        // above instead: a single selector shared with the class-2 repair consumer, not a label
+        // proxy that can drift from what that selector actually requires (Ready-lane scoping,
+        // hold-exclusion, #94-exclusion — none of which a label check alone can express).
+        //
+        // #432 round 4 (Codex P2 finding 3): `cfg.labels.roundPool` joins the signal set — a
+        // stale pool label is an engine-OWNED artifact (align.ts's `reconcilePoolLabels`, on
+        // every round-open pool-selection pass, and round.ts's own round-close removal sweep,
+        // ~1701) whose retry is unconditional, not role-gated; a milestone issue carrying a stale
+        // `roundPool` label the LAST cleanup attempt failed to strip is exactly the kind of
+        // engine-owned residue #391's claimed-issue exclusion above already treats as "the round
+        // wasn't idle" for — this label just needed the same "still counts" treatment split/
+        // decomposed get, so the retry net isn't withheld by an otherwise-fully-specified body.
+        // No new prose heuristic: every check above reuses an existing predicate/label-config key
+        // (extractVerificationPlan, cfg.labels.verifyNa/split/decomposed/roundPool) already shared
+        // with the consumers cited.
         const openIssues = await forge.listOpenIssues();
-        return openIssues.some(
-          (i) =>
-            i.milestone === cfg.round.milestone &&
-            !labelsInclude(i.labels, cfg.labels.inProgress) &&
-            !cfg.escalation.humanLabels.some((label) => labelsInclude(i.labels, label)) &&
-            !labelsInclude(i.labels, cfg.labels.planless),
-        );
+        return openIssues.some((i) => {
+          if (i.milestone !== cfg.round.milestone) return false;
+          if (labelsInclude(i.labels, cfg.labels.inProgress)) return false;
+          if (cfg.escalation.humanLabels.some((label) => labelsInclude(i.labels, label))) return false;
+          if (labelsInclude(i.labels, cfg.labels.planless)) return false;
+          const planCompleteOrExempt = extractVerificationPlan(i.body ?? "") != null || labelsInclude(i.labels, cfg.labels.verifyNa);
+          const carriesConsumableSignal =
+            labelsInclude(i.labels, cfg.labels.split) ||
+            labelsInclude(i.labels, cfg.labels.decomposed) ||
+            labelsInclude(i.labels, cfg.labels.roundPool);
+          if (planCompleteOrExempt && !carriesConsumableSignal) return false;
+          return true;
+        });
       }
       return false;
     } catch (e) {
@@ -1756,18 +2006,51 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
             /* state write failed too — tickErrors still counts it */
           }
         }
+        // #432 round 5 (P2-3): failedRemovals also feeds a STRUCTURED `pool-reconcile-incomplete`
+        // event below (the SAME kind align.ts's reconcilePoolLabels already uses for its own
+        // round-open sweep) — the tick-error above/below stays for free-text observability, but
+        // only this structured event is countable (dissent-style event-log counting, no new
+        // columns) toward escalatePoolRemovalFailures' cap.
+        //
+        // #432 round 6 (P1-2/P2-3, gate② third confirm): for EACH issue, idempotence and the cap
+        // are checked BEFORE attempting removal at all — not after. Two reasons, both closing a
+        // gap round 5 left: (1) `poolRemovalEscalated` skips an issue already handed to a human —
+        // an unrelated legitimate wake must never re-attempt (and re-fail, re-count, potentially
+        // re-escalate) a removal the engine has already given up on; (2) an issue already AT the
+        // cap from a prior pass is escalated again HERE, before this pass's own removal attempt —
+        // if a prior escalation's label write succeeded but its event append was lost to a crash,
+        // this completes it (idempotent label re-write, event lands now) BEFORE giving the
+        // ordinary removal a chance to succeed this exact pass and empty `failedRemovals`, which
+        // would otherwise hide the interrupted escalation forever (see escalatePoolRemovalFailures'
+        // own doc). An issue below the cap still gets its ordinary removal attempt as before.
+        const failedRemovals: number[] = [];
         for (const issue of openIssues) {
           if (!labelsInclude(issue.labels, deps.poolLabel)) continue;
+          if (poolRemovalEscalated(deps.state, issue.number)) continue;
+          if (poolRemovalFailureCount(deps.state, issue.number) >= cfg.round.maxPoolRemovalAttempts) {
+            await escalatePoolRemovalFailures(forge, cfg, deps.state, [issue.number], deps.log);
+            continue;
+          }
           try {
             await removeRoundPoolLabel(forge, cfg, issue.number, deps.poolLabel);
           } catch (e) {
             tickErrors++;
+            failedRemovals.push(issue.number);
             try {
               deps.state.appendEvent("tick-error", { error: `round-pool label clear failed for #${issue.number}: ${String(e)}` });
             } catch {
               /* state write failed too — tickErrors still counts it */
             }
           }
+        }
+        if (failedRemovals.length > 0) {
+          try {
+            deps.state.appendEvent("pool-reconcile-incomplete", { round_id: round.round_id, failed_issues: failedRemovals });
+          } catch {
+            /* best-effort — the tick-error(s) above already recorded the failure; a lost append
+               here only means this pass's failures don't count toward the escalation cap */
+          }
+          await escalatePoolRemovalFailures(forge, cfg, deps.state, failedRemovals, deps.log);
         }
       }
 

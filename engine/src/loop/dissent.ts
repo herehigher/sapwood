@@ -137,6 +137,7 @@ import { z } from "zod";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
 import type { State } from "../state/state.js";
+import { escalateToNeedsHuman } from "./escalation-writer.js";
 
 export const ConcernSchema = z.object({ issue: z.number().int().positive(), reason: z.string().min(1) }).strict();
 export type Concern = z.infer<typeof ConcernSchema>;
@@ -202,13 +203,70 @@ export interface PostConcernsDeps {
   log?: (message: string) => void;
 }
 
+/** #432 round 5 (P1-2, gate② confirm round 2): the event kind `postConcernIfNew` appends on each
+ *  of its three UNPOSTED failure branches (body read / comments read / comment write) — the
+ *  DETERMINISTIC-failure terminal `pendingDurableConcerns` (below) needs so a permanently
+ *  unpostable concern (issue deleted/transferred/inaccessible — Codex's exact scenario) cannot
+ *  pin the probe true forever. Keyed by the SAME (round_id, issue, reason) stable triple
+ *  `reconcileDurableConcerns`' own receipt lookup uses — no new columns, event-log counting only
+ *  (the same discipline conductor.ts's `priorFixLegForVerdict`/`fix_rounds` use, adapted to a
+ *  pure ledger fold since this codebase's user-tunables rule keeps the CAP itself in config, not
+ *  a schema column). */
+const POST_FAILED_KIND = "concern-post-failed";
+
+/** #432 round 5 (round 6 changed its PROOF semantics — see escalation-reconcile.ts's
+ *  ESCALATION_SOURCES entry): the terminal escalation event. `pendingDurableConcerns` treats this
+ *  identically to `concern-posted` (both mean "no longer pending"), regardless of whether the
+ *  label write it carries actually landed — see `escalateUnpostableConcern`'s own doc for why the
+ *  event is now UNCONDITIONAL rather than gated on the label write. */
+const POST_ESCALATED_KIND = "concern-post-escalated";
+
+/** #432 round 5: how many times THIS concern (keyed by its stable (round_id, issue, reason)
+ *  triple) has failed to post — the count `reconcileDurableConcerns` compares against
+ *  `cfg.roles.po.maxConcernPostAttempts` BEFORE attempting another post (see that function's own
+ *  doc for why the check now runs first). Pure ledger fold, same shape as `pendingDurableConcerns`
+ *  itself; a malformed event is skipped, never thrown. Concerns need no episode-boundary reset
+ *  (unlike round.ts's `poolRemovalFailureCount`): the (round_id, issue, reason) key ALREADY scopes
+ *  every count to one specific concern instance, and a delivered concern never re-enters
+ *  `pendingDurableConcerns` to be counted again — there is no cross-episode collision to guard
+ *  against here, only within-episode accumulation. */
+function concernPostFailureCount(state: Pick<State, "eventsAfterId">, roundId: number, issue: number, reason: string): number {
+  return state.eventsAfterId(0, [POST_FAILED_KIND]).filter((e) => {
+    const p = e.payload as { round_id?: unknown; issue?: unknown; reason?: unknown } | null;
+    return p?.round_id === roundId && p?.issue === issue && p?.reason === reason;
+  }).length;
+}
+
+/** #432 round 6 (P1-1/P1-2, gate② third confirm): the DEGRADE-TO-HUMAN terminal for a concern
+ *  that has failed to post `cfg.roles.po.maxConcernPostAttempts` times — now a thin wrapper over
+ *  the SHARED writer (escalation-writer.ts's `escalateToNeedsHuman`), which fixed the two defects
+ *  this file's own round-5 hand-rolled version had: (1) a deterministic label-write failure no
+ *  longer suppresses the terminal event — the event is UNCONDITIONAL, carrying `labeled: 0|1`,
+ *  so a permanently-unpostable concern whose issue ALSO can't be labelled still unpins the probe;
+ *  (2) `reconcileDurableConcerns` now checks the cap BEFORE attempting another post (not after),
+ *  so a crash between this function's label write and its event append can never be "rescued" by
+ *  a LATER ordinary post succeeding and removing the concern from consideration before the
+ *  interrupted escalation gets a chance to complete — see that function's own doc. */
+async function escalateUnpostableConcern(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  roundId: number,
+  concern: Concern,
+): Promise<void> {
+  await escalateToNeedsHuman(forge, state, cfg, concern.issue, POST_ESCALATED_KIND, { round_id: roundId, reason: concern.reason });
+}
+
 /** Post one concern's idempotent comment, exactly once per (issue, concern-hash) ACROSS ROUNDS
  *  (#237 AC2). The marker check (getIssueComments, read fresh every call) IS the idempotency
  *  boundary — not the durable `concern-posted` event (module doc). The ONLY IForge calls made
- *  here are getIssueBody, getIssueComments, and addIssueComment (#237 AC3, structural — no
- *  label/status/dispatch write exists in this function at all). A read/write failure degrades to
- *  "skip this concern this pass" — logged, never thrown; if the session raises the same concern
- *  again next round, it retries naturally. */
+ *  here (besides #432 round 5's escalation path above, a SEPARATE terminal-only addLabel) are
+ *  getIssueBody, getIssueComments, and addIssueComment (#237 AC3, structural — no label/status/
+ *  dispatch write exists in this function itself). A read/write failure degrades to "skip this
+ *  concern this pass" — logged, never thrown; if the session raises the same concern again next
+ *  round, it retries naturally. #432 round 5: each of the three UNPOSTED failure branches below
+ *  also appends `concern-post-failed` (best-effort, contained) — the count
+ *  `escalateUnpostableConcern`'s caller compares against the configured cap. */
 async function postConcernIfNew(
   forge: IForge,
   state: State,
@@ -217,6 +275,15 @@ async function postConcernIfNew(
   concern: Concern,
   log: (message: string) => void,
 ): Promise<void> {
+  const recordFailedAttempt = (): void => {
+    try {
+      state.appendEvent(POST_FAILED_KIND, { round_id: roundId, issue: concern.issue, reason: concern.reason });
+    } catch {
+      // Best-effort — a lost append merely under-counts this pass toward the cap; the NEXT
+      // failed attempt (if any) tries again, and a genuinely stuck concern will still eventually
+      // accumulate enough recorded failures to escalate.
+    }
+  };
   let body: string;
   try {
     body = await forge.getIssueBody(concern.issue);
@@ -225,6 +292,7 @@ async function postConcernIfNew(
       `[sapwood:dissent] round ${roundId}: failed to read #${concern.issue}'s body while posting a concern — ` +
         `skipped this pass: ${String(e)}`,
     );
+    recordFailedAttempt();
     return;
   }
   const hash = concernHash(concern.reason, body);
@@ -237,6 +305,7 @@ async function postConcernIfNew(
       `[sapwood:dissent] round ${roundId}: failed to read #${concern.issue}'s comments while posting a concern — ` +
         `skipped this pass: ${String(e)}`,
     );
+    recordFailedAttempt();
     return;
   }
   if (comments.some((c) => c.body.includes(marker))) {
@@ -285,6 +354,7 @@ async function postConcernIfNew(
     log(
       `[sapwood:dissent] round ${roundId}: failed to post the concern comment for #${concern.issue} — ` + `skipped this pass: ${String(e)}`,
     );
+    recordFailedAttempt();
     return;
   }
   try {
@@ -417,18 +487,27 @@ const RECEIPT_KIND = "concern-posted";
  *  triageProgress), now backed by an index rather than a sequential scan — concern volume is
  *  expected to be low (structured objections are rare, not a bulk mechanism) either way, so no
  *  cursor/bookkeeping machinery was added on top of the index (PM ruling). */
-export async function reconcileDurableConcerns(
-  forge: IForge,
-  state: State,
-  cfg: SapwoodConfig,
-  log?: (message: string) => void,
-): Promise<void> {
-  const warn = log ?? console.error;
-  const events = state.eventsAfterId(0, [...DECISION_KINDS, RECEIPT_KIND]);
+/** #432 round 4 (PM adjudication, gate② review 3): the pure-local HALF of
+ *  `reconcileDurableConcerns` below, factored out so `round.ts`'s `probeHasWork` can ask "is
+ *  there unposted durable-concern work" as a cheap local SQLite read — no forge call, same
+ *  economics as `state.pendingRollbacks()`. Dissent intentionally writes NO labels (module doc,
+ *  #237 AC3), so this durable-event fact is invisible to every label-driven exemption the probe's
+ *  milestone catch-all could ever carry; a decision whose comment-post transiently failed would
+ *  otherwise sit unswept until unrelated backlog work happened to wake the loop again.
+ *
+ *  #432 round 5 (P1-2, the TERMINAL this signal was missing): `POST_ESCALATED_KIND` is folded
+ *  into the SAME receipt set `RECEIPT_KIND` (`concern-posted`) uses — both mean "no longer
+ *  pending" to this function, one because delivery succeeded, one because
+ *  `escalateUnpostableConcern` gave up and handed it to a human after
+ *  `cfg.roles.po.maxConcernPostAttempts` recorded failures. A concern that escalates therefore
+ *  drops out of BOTH this probe signal and `reconcileDurableConcerns`' own retry loop below in
+ *  the same fold, with no separate "already escalated" guard needed. */
+export function pendingDurableConcerns(state: State): Array<{ roundId: number; concern: Concern }> {
+  const events = state.eventsAfterId(0, [...DECISION_KINDS, RECEIPT_KIND, POST_ESCALATED_KIND]);
   const receiptKeys = new Set<string>();
   const decisionEvents: typeof events = [];
   for (const e of events) {
-    if (e.kind === RECEIPT_KIND) {
+    if (e.kind === RECEIPT_KIND || e.kind === POST_ESCALATED_KIND) {
       const parsed = ConcernReceiptEventSchema.safeParse(e.payload);
       if (!parsed.success) continue; // malformed receipt — never thrown, just excluded from the "already delivered" set
       receiptKeys.add(`${parsed.data.round_id}:${parsed.data.issue}:${parsed.data.reason}`);
@@ -445,7 +524,43 @@ export async function reconcileDurableConcerns(
       if (!receiptKeys.has(key)) pending.push({ roundId: parsed.data.round_id, concern });
     }
   }
-  for (const { roundId, concern } of pending) {
+  return pending;
+}
+
+/** #432 round 6 (P1-2, gate② third confirm — the crash-window fix): the cap check now runs
+ *  BEFORE attempting a post, not after. Round 5 attempted the post first and only re-examined
+ *  "still pending" concerns afterward — which meant a concern whose escalation was INTERRUPTED
+ *  by a crash (label applied, terminal event lost) could be silently rescued the next time this
+ *  function ran: if that later pass's ORDINARY post attempt happened to succeed (the failure that
+ *  triggered the cap was transient after all), the concern left `pendingDurableConcerns`
+ *  entirely — delivered, not escalated — and the leftover, unproven `needs-human` label was never
+ *  looked at again. Checking the cap FIRST closes that window: a concern already at (or past) the
+ *  cap from a PRIOR pass is escalated again (idempotent — `escalateToNeedsHuman`'s label write is
+ *  a GitHub-side no-op if already applied, and its event append completes whatever the crashed
+ *  pass left unfinished) and is never handed to `postConcernIfNew` at all this pass — the ordinary
+ *  retry never gets a chance to "rescue" a concern out from under an incomplete escalation.
+ *  `pendingDurableConcerns` itself is `reconcileDurableConcerns`'s ONLY idempotence guard for
+ *  re-escalation: once `escalateUnpostableConcern` succeeds in landing `concern-post-escalated`,
+ *  that concern drops out of the pending set (the SAME fold `pendingDurableConcerns` already
+ *  treats it as a terminal receipt for) and this loop never sees it again — no separate
+ *  "already escalated" check needed here, unlike round.ts's pool-removal path (see
+ *  `poolRemovalEscalated`'s own doc for why THAT signal needs one of its own). Costs exactly the
+ *  same ONE `pendingDurableConcerns` query the #237 round-3 "one query" test pins for the common
+ *  nothing-pending case (per-concern `concernPostFailureCount` reads only run for concerns that
+ *  actually exist to check). */
+export async function reconcileDurableConcerns(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  log?: (message: string) => void,
+): Promise<void> {
+  const warn = log ?? console.error;
+  for (const { roundId, concern } of pendingDurableConcerns(state)) {
+    const failures = concernPostFailureCount(state, roundId, concern.issue, concern.reason);
+    if (failures >= cfg.roles.po.maxConcernPostAttempts) {
+      await escalateUnpostableConcern(forge, state, cfg, roundId, concern);
+      continue; // capped — a human owns it now; no further post attempts
+    }
     await postConcernIfNew(forge, state, cfg, roundId, concern, warn);
   }
 }
