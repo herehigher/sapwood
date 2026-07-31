@@ -66,6 +66,16 @@ export type PreflightResult = { ok: true } | { ok: false; reason: string };
  * caller only needs the FIRST failure reason; each is individually unit-tested in isolation).
  * Deliberately does NOT check CI evidence (that's async — requiredChecksSatisfied, called
  * separately by the caller with a fetched `getPRChecks` page) so this stays a pure, sync function.
+ *
+ * #460 (PR#462 review round 1, P2 wording fix): this ordering matches merge-driver.ts's
+ * `deriveGate` PRECEDENCE (state/draft/human-label/hold-label all outrank mergeable in both), but
+ * the two do NOT reach the same OUTCOME for every reason: `deriveGate` maps a non-OPEN state,
+ * draft, or human-triage label to HUMAN — an escalation — while a `driveEngineAgentReview`
+ * preflight failure for any of those same reasons is a plain `queued` (pre-existing engine-agent
+ * semantics, uniform for conflicted and non-conflicted PRs alike; changing that divergence is
+ * out of #460's scope). Hold-label is the one reason where the two DO line up exactly: `deriveGate`
+ * maps it to WAIT, and a `hold-label-present` preflight failure is also `queued` — both a wait,
+ * not an escalation.
  */
 export function checkPreflight(input: {
   status: PRStatus;
@@ -308,6 +318,31 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     };
   }
 
+  // ── conflict route (#460 F37), checked BEFORE the attempt-gate/pin machinery ───────────────
+  // #460 P1 (PR#462 review round 1): the attempt-gate below has TWO paths that can swallow a
+  // CONFLICTING PR before it ever reaches the ordinary preflight check further down — a decisive
+  // pin's consume path (`refetchStillValid`) necessarily discards a conflicted head (its base
+  // moved, or CI is no longer green: a conflicted PR builds no merge ref, so CI is suppressed),
+  // and an unavailable pin's backoff window queues unconditionally regardless of mergeability.
+  // Both would report a generic "queued"/backoff reason and never reach the conflict route,
+  // wedging an APPROVED- or REJECTED-pinned PR that goes conflicted forever (no fix leg would
+  // ever move the head). Checked here instead, against the SAME status0/data0 already fetched
+  // above, BEFORE any pin read/write — this route never touches the pin at all; when a
+  // conflict-fix leg eventually pushes a new head, the ordinary head-change pin-clear above
+  // handles it and a fresh review runs. `checkPreflight`'s own ordering (state/draft/human-
+  // label/hold-label all precede the mergeable check) still guarantees those higher-precedence
+  // gates win over this route — see checkPreflight's own doc for exactly which of those diverge
+  // from deriveGate's classic-path precedence (draft/human-label do; hold-label does not).
+  const conflictCheck = checkPreflight({
+    status: status0,
+    data: data0,
+    humanLabels: deps.cfg.escalation.humanLabels,
+    holdLabels: deps.cfg.escalation.holdLabels,
+  });
+  if (!conflictCheck.ok && conflictCheck.reason === "not-mergeable:CONFLICTING") {
+    return { kind: "conflict", status: status0, data: data0 };
+  }
+
   // ── attempt-gate: the per-head pin (design #279 §2 R3) ──────────────────────────────────────
   let pin = deps.getAttemptPin();
   if (pin && pin.head !== status0.headOid) {
@@ -367,22 +402,12 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     humanLabels: deps.cfg.escalation.humanLabels,
     holdLabels: deps.cfg.escalation.holdLabels,
   });
-  if (!preflight.ok) {
-    // #460 (F37): CONFLICTING is not transient like every other preflight reason — 54
-    // consecutive drive-queued ticks on PR#452 with no exit (events 3984-4190, 2026-07-30)
-    // before this route existed. `checkPreflight`'s own ordering (state/draft/human-label/
-    // hold-label all precede the mergeable check) means reaching this EXACT reason string
-    // already cleared every higher-precedence gate — the same precedence deriveGate's own
-    // CONFLICTING branch (merge-driver.ts) assumes, so this is a safe, unambiguous signal to
-    // route out of the queue loop and into the SAME FIXABLE:merge-conflict machinery the codex
-    // reviewer path already uses (merge-driver.ts driveOne's CONFLICTING block), rather than
-    // re-deriving that gate here. UNKNOWN (and everything else) stays a queue: transient, and
-    // no session was ever spawned for either case.
-    if (preflight.reason === "not-mergeable:CONFLICTING") {
-      return { kind: "conflict", status: status0, data: data0 };
-    }
-    return { kind: "queued", reason: `engine-agent: preflight failed: ${preflight.reason}` };
-  }
+  // #460: `preflight.reason` can never be "not-mergeable:CONFLICTING" here — the conflictCheck
+  // above already special-cased and returned on that EXACT reason, against the SAME status0/
+  // data0 this call reuses (no fetch happens in between). Every other preflight reason
+  // (including UNKNOWN mergeability) is transient and stays a queue: no session was ever
+  // spawned for it.
+  if (!preflight.ok) return { kind: "queued", reason: `engine-agent: preflight failed: ${preflight.reason}` };
 
   let checksPage: { checks: import("../forge/forge.js").PRCheckItem[] };
   try {
