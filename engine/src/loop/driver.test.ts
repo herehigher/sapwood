@@ -2,6 +2,9 @@
 // --once / --until-idle) against a real State (:memory:) + fake forge/supervisor (no claude, no
 // gh) — mirrors conductor.test.ts's tick test-double style.
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
@@ -740,29 +743,20 @@ test("runDriver stop.afterSpendUsd: configured-but-uncrossed NEVER swallows the 
   deps.state.close();
 });
 
-test("runDriver stop.afterSpendUsd: a quiet gap that resets the wall-clock SESSION mid-run never resets the run-spend total (standby/quiet-gap semantics)", async () => {
+test("runDriver stop.afterSpendUsd: a long quiet gap mid-run never resets the run-spend total (#431: the wall clock is process-anchored now, and run spend was always id-cursor-anchored — neither cares about gaps)", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();
   forge.ready = [];
   let nowMs = new Date("2026-07-13T00:00:00Z").getTime();
   const now = () => new Date(nowMs);
   const deps = baseDeps({ forge, sleep, now, tickIntervalSec: 5, stop: { afterSpendUsd: 10 } });
-  // Spy on the underlying session-start bookkeeping to PROVE a reset actually happened, rather
-  // than just asserting the spend total's own behavior.
-  const sessionStarts: string[] = [];
-  const realSessionStart = deps.state.engineSessionStart.bind(deps.state);
-  deps.state.engineSessionStart = (n: Date, gap: number) => {
-    const r = realSessionStart(n, gap);
-    sessionStarts.push(r.toISOString());
-    return r;
-  };
   let tickCount = 0;
   deps.onTick = () => {
     tickCount++;
     if (tickCount === 1) {
       deps.state.recordSpend("w1", 1, 6, now().toISOString(), []); // $6 — below the $10 threshold
-      // Jump 20 minutes — past engineSessionGapSec (max(900s, 2*5s) = 900s) — so the NEXT tick's
-      // engineSessionStart call resets the wall-clock session.
+      // Jump 20 minutes — the gap that used to reset the deleted wall-clock session machinery.
+      // Nothing resets any more (#431); the run-spend id-cursor never did.
       nowMs += 20 * 60 * 1000;
     } else if (tickCount === 2) {
       deps.state.recordSpend("w2", 2, 5, now().toISOString(), []); // +$5 = $11 total, crosses $10
@@ -771,12 +765,72 @@ test("runDriver stop.afterSpendUsd: a quiet gap that resets the wall-clock SESSI
   const stopSafety = boundedStop(deps, 10);
   const result = await runDriver(deps);
   stopSafety();
-  assert.notEqual(sessionStarts[0], sessionStarts[sessionStarts.length - 1], "the wall-clock session DID reset mid-run");
   assert.equal(result.stoppedBy, "stop-condition");
-  // $6 (tick 1) + $5 (tick 2) = $11, summed straight through the session reset — the run-spend
-  // anchor is a separate, session-independent id-cursor.
+  // $6 (tick 1) + $5 (tick 2) = $11, summed straight through the quiet gap — the run-spend
+  // anchor is an id-cursor, independent of any clock.
   assert.deepEqual(result.stopCondition, { name: "afterSpendUsd", threshold: 10, detail: "spent $11.00" });
   deps.state.close();
+});
+
+test("runDriver (#431 AC1/AC2): two runDriver 'restarts' over one durable DB get fresh wall clocks at ANY gap length — a first life past the cap never leaks a breach into the next, and parked/wait time counts only within a process life", async () => {
+  // The driver-level restart drill: the same shape as the tick-level AC1 test, but through
+  // runDriver itself (the real anchor-capture site). First run lives past maxWallClockSec and
+  // breaches; the second run — whether restarted 100s or 3600s later — starts a fresh clock and
+  // sees a clean ceiling on its first tick.
+  for (const gapSec of [100, 3600]) {
+    const dir = mkdtempSync(join(tmpdir(), "sapwood-driver-wallclock-"));
+    try {
+      const dbPath = join(dir, "sapwood.sqlite");
+      const base = new Date("2026-07-13T00:00:00Z").getTime();
+      let nowMs = base;
+      const now = () => new Date(nowMs);
+
+      // Run 1: born t=0; by its second tick it is 2000s old with a 1000s cap -> breached.
+      const forge1 = new FakeForge();
+      forge1.ready = [];
+      const state1 = new State(dbPath);
+      const breached: boolean[] = [];
+      const deps1 = baseDeps({
+        forge: forge1,
+        state: state1,
+        now,
+        sleep: mkSleepSpy().sleep,
+        cfg: mkCfg({ cost: { maxWallClockSec: 1000 } }),
+        onTick: (r) => {
+          breached.push(r.ceilingBreached);
+          nowMs += 2000_000; // age the process 2000s per tick
+        },
+      });
+      const stop1 = boundedStop(deps1, 2);
+      await runDriver(deps1);
+      stop1();
+      assert.deepEqual(breached, [false, true], "run 1 really breached its own wall clock on its second tick");
+      state1.close();
+
+      // Run 2: a fresh runDriver call (fresh in-memory anchor) after gapSec, same durable DB.
+      nowMs += gapSec * 1000;
+      const forge2 = new FakeForge();
+      forge2.ready = [];
+      const state2 = new State(dbPath);
+      let firstTickBreached: boolean | null = null;
+      const deps2 = baseDeps({
+        forge: forge2,
+        state: state2,
+        now,
+        sleep: mkSleepSpy().sleep,
+        cfg: mkCfg({ cost: { maxWallClockSec: 1000 } }),
+        stopMode: "once",
+        onTick: (r) => {
+          firstTickBreached ??= r.ceilingBreached;
+        },
+      });
+      await runDriver(deps2);
+      assert.equal(firstTickBreached, false, `gap ${gapSec}s: the restart's first tick sees a FRESH clock, no inherited breach`);
+      state2.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });
 
 // ── #295 (Codex P1, PR #371): the escalation-resolution sweep runs on the TICK driver too ────

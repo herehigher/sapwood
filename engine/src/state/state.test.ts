@@ -765,30 +765,22 @@ test("per-leg resume accounting survives an engine restart between handoff and r
   }
 });
 
-test("engineSessionStart: continuous ticking keeps the original session start", () => {
+test("touchLastTick (#431 AC1/AC2): the heartbeat advances per call and NOTHING else survives — no session inheritance, no gap heuristic, no readable started_at anywhere on the State surface", () => {
   const s = mem();
-  const gap = 900;
-  const t0 = s.engineSessionStart(new Date("2026-07-06T00:00:00Z"), gap);
-  assert.equal(t0.toISOString(), "2026-07-06T00:00:00.000Z");
-  // Ticks every 5 minutes (under the 15-min gap): the session start never moves, so
-  // wall-clock elapsed keeps accumulating — a live engine cannot self-reset the cap.
-  assert.equal(s.engineSessionStart(new Date("2026-07-06T00:05:00Z"), gap).toISOString(), "2026-07-06T00:00:00.000Z");
-  assert.equal(s.engineSessionStart(new Date("2026-07-06T00:10:00Z"), gap).toISOString(), "2026-07-06T00:00:00.000Z");
-  assert.equal(s.engineSessionStart(new Date("2026-07-06T00:14:00Z"), gap).toISOString(), "2026-07-06T00:00:00.000Z");
-  s.close();
-});
-
-test("engineSessionStart: a tick gap past staleGapSec (engine stopped/paused) RESETS the session (Codex PR #41 R2 P1)", () => {
-  const s = mem();
-  const gap = 900;
-  s.engineSessionStart(new Date("2026-07-06T00:00:00Z"), gap);
-  s.engineSessionStart(new Date("2026-07-06T00:05:00Z"), gap); // still the same session
-  // 16 minutes of silence (> 900s): the engine was down/paused — new session, fresh start.
-  const restarted = s.engineSessionStart(new Date("2026-07-06T00:21:01Z"), gap);
-  assert.equal(restarted.toISOString(), "2026-07-06T00:21:01.000Z");
-  // Exactly-at-gap is NOT stale (same ">" convention as budgetExceeded).
-  const next = s.engineSessionStart(new Date("2026-07-06T00:36:01Z"), gap); // +900s exactly
-  assert.equal(next.toISOString(), "2026-07-06T00:21:01.000Z"); // still the same session
+  s.touchLastTick(new Date("2026-07-06T00:00:00Z"));
+  assert.equal(s.lastTickAt(), "2026-07-06T00:00:00.000Z");
+  // Any later touch — 5 minutes or 5 days apart — just moves the heartbeat. There is no gap
+  // threshold to compare against and no session identity to keep or reset: the deleted
+  // engineSessionStart's whole decision table (continuous-ticking keep / stale-gap reset /
+  // exactly-at-gap edge) is unrepresentable against this API, which is the #431 acceptance
+  // criterion "assert via the deleted table".
+  s.touchLastTick(new Date("2026-07-06T00:05:00Z"));
+  assert.equal(s.lastTickAt(), "2026-07-06T00:05:00.000Z");
+  s.touchLastTick(new Date("2026-07-11T09:00:00Z"));
+  assert.equal(s.lastTickAt(), "2026-07-11T09:00:00.000Z");
+  // The wall-clock anchor is in-memory (TickDeps.processStartedAt) — State exposes no
+  // session-start read at all, so no restart can resurrect one from here by construction.
+  assert.equal("engineSessionStart" in s, false, "the session-inheritance API is deleted, not deprecated");
   s.close();
 });
 
@@ -3095,8 +3087,8 @@ test("migration v25->v26 clears a decisive engine-review pin whose WAL has no ve
     raw.close();
 
     const s = new State(dbPath);
-    assert.equal(SCHEMA_VERSION, 27);
-    assert.equal(s.userVersion(), 27);
+    assert.equal(SCHEMA_VERSION, 28);
+    assert.equal(s.userVersion(), 28);
     assert.equal(s.getEngineReviewAttemptPin("lane-v25"), null, "the lane is re-reviewable on its unchanged head");
     const row = s.getWorker("lane-v25");
     assert.equal(row?.engine_review_pin_head, null);
@@ -3127,8 +3119,8 @@ test("migration v26->v27: a populated v26 DB (predating park_state.reset_hint_at
     raw.close();
 
     const s = new State(dbPath);
-    assert.equal(SCHEMA_VERSION, 27);
-    assert.equal(s.userVersion(), 27);
+    assert.equal(SCHEMA_VERSION, 28);
+    assert.equal(s.userVersion(), 28);
     const row = s.parkRow("llm");
     assert.equal(row?.reason, "pre-existing v26 episode");
     assert.equal(row?.triggerIssue, 42);
@@ -3143,16 +3135,62 @@ test("migration v26->v27: a populated v26 DB (predating park_state.reset_hint_at
   }
 });
 
+test("migration v27->v28 (#431): a populated v27 DB opens with its park episode intact, and the widened CHECK now admits a rapid-restart episode (the old CHECK swallowed it silently via INSERT OR IGNORE)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 27; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 27");
+    raw
+      .prepare(
+        `INSERT INTO park_state (source, reason, trigger_issue, entered_at, last_probe_at, probe_attempts, reset_hint_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run("llm", "pre-existing v27 episode", 7, "2026-07-30T00:00:00Z", "2026-07-30T00:00:00Z", 3, "2026-07-30T01:00:00Z");
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    const llm = s.parkRow("llm");
+    assert.equal(llm?.reason, "pre-existing v27 episode");
+    assert.equal(llm?.probeAttempts, 3, "every copied column survives the recreate-and-copy");
+    assert.equal(llm?.resetHintAt, "2026-07-30T01:00:00Z");
+    assert.equal(s.enterPark("rapid-restart", "crash loop", null, "2026-07-31T00:00:00Z"), true, "the widened CHECK admits the row");
+    assert.equal(s.parkRow("rapid-restart")?.reason, "crash loop");
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #142: dashboard reads (docs/frontend-design.md §8) ──────────────────────────────────────
 
-test("lastTickAt reads the heartbeat WITHOUT moving it (a spectator must not reset the session)", () => {
+test("lastTickAt reads the heartbeat WITHOUT moving it (the #395 watchdog and the dashboard are spectators, never writers)", () => {
   const s = mem();
-  assert.equal(s.lastTickAt(), null, "no session row yet — the engine has never ticked here");
+  assert.equal(s.lastTickAt(), null, "no heartbeat row yet — the engine has never ticked here");
 
-  s.engineSessionStart(new Date("2026-07-24T10:00:00.000Z"), 900);
+  s.touchLastTick(new Date("2026-07-24T10:00:00.000Z"));
   assert.equal(s.lastTickAt(), "2026-07-24T10:00:00.000Z");
-  // Reading twice must not touch last_tick_at — engineSessionStart is the ONLY writer.
+  // Reading twice must not touch last_tick_at — touchLastTick is the ONLY writer (#431: the
+  // heartbeat survives the session-machinery deletion for exactly these two readers).
   assert.equal(s.lastTickAt(), "2026-07-24T10:00:00.000Z");
+  s.close();
+});
+
+test("countEventsSince (#431): counts one kind within the ts window — the rapid-restart detector's birth count", () => {
+  const s = mem();
+  assert.equal(s.countEventsSince("1970-01-01T00:00:00.000Z", "run-started"), 0);
+  s.appendEvent("run-started", {});
+  s.appendEvent("run-started", {});
+  s.appendEvent("park-wait-heartbeat", { parked: false }); // a different kind can never inflate the birth count
+  s.appendEvent("run-started", {});
+  // appendEvent stamps the REAL machine clock (its own doc — deliberate), so the window edges
+  // are asserted with cutoffs unreachably far on either side: epoch (everything counts) and
+  // far-future (nothing does). No assertion depends on how fast the appends ran.
+  assert.equal(s.countEventsSince("1970-01-01T00:00:00.000Z", "run-started"), 3);
+  assert.equal(s.countEventsSince("2999-01-01T00:00:00.000Z", "run-started"), 0, "births before the cutoff never count");
   s.close();
 });
 

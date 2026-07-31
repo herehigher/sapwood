@@ -26,6 +26,7 @@ import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, t
 import { InitError, init, requiredLabels } from "./loop/init.js";
 import { acquireInstanceLock } from "./loop/instance-lock.js";
 import { type EngineLogger, FileEngineLogger } from "./loop/logger.js";
+import { detectRapidRestart } from "./loop/rapid-restart.js";
 import {
   auditGatedEscalationFlags,
   parseReconcileCompleted,
@@ -503,10 +504,16 @@ export function formatStatus(s: StatusSnapshot): string {
       // machine — the operator's wall clock is the correct source, and no assertion in the suites
       // reads this string's duration (they assert the park's own fields, not the rendered "Ns").
       const durationSec = Math.max(0, Math.floor((Date.now() - Date.parse(p.enteredAt)) / 1000));
+      // #431: a rapid-restart episode has NO probe — its clearing story is different, and the
+      // status line must not promise probing that will never happen.
+      const recovery =
+        p.source === "rapid-restart"
+          ? "clears on a later start outside the restart window (docs/troubleshooting.md)"
+          : "probing on backoff, auto-resumes on recovery";
       lines.push(
         `park: PARKED (${p.source}) since ${p.enteredAt} (${durationSec}s) — ` +
           `reason: ${p.reason} — no new dispatch; in-flight lanes proceed normally; ` +
-          `probing on backoff, auto-resumes on recovery` +
+          recovery +
           (p.canaryWorker ? ` — canary lane ${p.canaryWorker} in flight` : "") +
           (p.escalatedAt ? ` — escalated to a human at ${p.escalatedAt}` : ""),
       );
@@ -1147,6 +1154,12 @@ async function runTickEngine(
   const renderFixPrompt = buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg, lockTakeover);
+  // #431 (owner amendment 1): the rapid-restart detector, strictly AFTER appendRunStarted — the
+  // count then includes THIS boot's own birth, and everything the detector emits lands after
+  // `run-started` inside this run's replay group (the #382-pinned run-started-first ordering is
+  // undisturbed). A trip parks autonomous dispatch via the existing park paradigm; startup
+  // itself continues (reconcile passes are engine hygiene, not dispatch).
+  detectRapidRestart(state, cfg, systemClock, log);
   const forge = overrides.forge ?? new GithubForge(cfg);
   // #253: the tick driver's TickDeps.fixLegResume — undefined (no handle/listener/token/journal
   // write/argv change on any production session — see buildTickFixLegResume's own doc for the
@@ -1284,6 +1297,12 @@ async function runRoundsEngine(
   const renderFixPrompt = buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg, lockTakeover);
+  // #431 (owner amendment 1): the rapid-restart detector, strictly AFTER appendRunStarted — the
+  // count then includes THIS boot's own birth, and everything the detector emits lands after
+  // `run-started` inside this run's replay group (the #382-pinned run-started-first ordering is
+  // undisturbed). A trip parks autonomous dispatch via the existing park paradigm; startup
+  // itself continues (reconcile passes are engine hygiene, not dispatch).
+  detectRapidRestart(state, cfg, systemClock, log);
   const forge = overrides.forge ?? new GithubForge(cfg);
   const engineReviewRunner =
     cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state, now: systemClock }) : null;

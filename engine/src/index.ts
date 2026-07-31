@@ -46,8 +46,6 @@ export {
   type DrivenOutcome,
   drainEscalationDue,
   driveDecision,
-  ENGINE_SESSION_GAP_SEC,
-  engineSessionGapSec,
   evaluateCeiling,
   hasReserveLabel,
   isCodingRank,

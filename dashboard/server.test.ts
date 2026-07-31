@@ -204,7 +204,7 @@ test("/api/loop/state carries ceiling reasons only while winding-down (§8)", as
   // A breach with no kill switch → winding-down → reasons surface.
   const fx = await fixture((s) => {
     s.recordCeilingBreach(["daily-budget"], new Date("2026-07-24T11:00:00.000Z"));
-    s.engineSessionStart(new Date(), 900); // a fresh heartbeat so it isn't stalled
+    s.touchLastTick(new Date()); // a fresh heartbeat so it isn't stalled (#431: the surviving writer)
   });
   try {
     const body = await getJson(fx, "/api/loop/state");
@@ -221,7 +221,7 @@ test("/api/loop/state clears ceiling reasons once the kill switch stops the engi
   const fx = await fixture(
     (s) => {
       s.recordCeilingBreach(["daily-budget"], new Date("2026-07-24T11:00:00.000Z"));
-      s.engineSessionStart(new Date(), 900);
+      s.touchLastTick(new Date());
     },
     { killSwitch: true },
   );
@@ -462,7 +462,7 @@ test("/api/rounds is an empty list on a fresh DB, never an error", async () => {
 
 // ── POST /api/control (§8 / §3 Operations, #360) ───────────────────────────────────────────
 
-const ticking = (s: State) => s.engineSessionStart(new Date(), 900);
+const ticking = (s: State) => s.touchLastTick(new Date());
 
 test("POST /api/control accepts exactly the four verbs; estop and garbage are 400", async () => {
   const fx = await fixture(ticking);

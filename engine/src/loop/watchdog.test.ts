@@ -528,7 +528,7 @@ test("startProgressWatchdog (#395 gate② round 4, P1): BOTH maxEventId() and la
   });
   // Neither .bump() nor .tick() is ever called — both signals sit frozen at their starting value,
   // exactly the genuine-stall shape (a wedged tick reaches neither the appendEvent call nor the
-  // engineSessionStart call that writes last_tick_at).
+  // touchLastTick call that writes last_tick_at).
   await waitFor(() => exitCalls.length > 0, "both signals frozen — the genuine stall the watchdog exists to catch never fired");
   assert.deepEqual(exitCalls, [1], "both signals frozen must fire — this is the genuine stall the watchdog exists to catch");
   handle.stop();

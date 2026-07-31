@@ -836,6 +836,32 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   (db) => {
     db.exec(`ALTER TABLE park_state ADD COLUMN reset_hint_at TEXT;`);
   },
+  // 27 -> 28 (#431, owner amendment 1): the rapid-restart detector parks through the SAME
+  // park_state machinery as the environment sources (existing paradigm, never a new refusal
+  // mode), so the source CHECK gains its third member. SQLite cannot ALTER a CHECK constraint —
+  // recreate-and-copy, preserving every column and the PRIMARY KEY. Caught by construction in
+  // this PR's own tests: enterPark is INSERT OR IGNORE, so the old CHECK swallowed a
+  // 'rapid-restart' row SILENTLY (changes = 0) rather than erroring — the fail-open shape this
+  // repo's doctrine exists to hunt.
+  (db) => {
+    db.exec(`
+      CREATE TABLE park_state_new (
+        source         TEXT PRIMARY KEY CHECK (source IN ('llm', 'forge', 'rapid-restart')),
+        reason         TEXT NOT NULL,
+        trigger_issue  INTEGER,
+        entered_at     TEXT NOT NULL,
+        last_probe_at  TEXT NOT NULL,
+        probe_attempts INTEGER NOT NULL DEFAULT 0,
+        escalated_at   TEXT,
+        canary_worker  TEXT,
+        reset_hint_at  TEXT
+      );
+      INSERT INTO park_state_new SELECT source, reason, trigger_issue, entered_at, last_probe_at,
+        probe_attempts, escalated_at, canary_worker, reset_hint_at FROM park_state;
+      DROP TABLE park_state;
+      ALTER TABLE park_state_new RENAME TO park_state;
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -1220,13 +1246,20 @@ export type FixResponseSettleOutcome =
 
 export type EnvFailureSource = "llm" | "forge";
 
+/** #431 (owner amendment 1): everything that can hold a park episode. The two environment
+ *  sources above carry probe/canary machinery and auto-resume; `rapid-restart` (the crash-loop
+ *  detector, loop/rapid-restart.ts) deliberately has NO probe — it clears only when a later
+ *  engine start observes the birth window drained (or a human clears it), so the probe loops
+ *  in conductor.ts/round.ts must never treat it as an llm/forge episode. */
+export type ParkSource = EnvFailureSource | "rapid-restart";
+
 /** #168: one environment-failure park episode — ONE ROW PER SOURCE (see the schema v11->v12
  *  migration comment for why per-source rows and why this lives in the state DB, not a file
  *  sentinel). `triggerIssue` is the issue whose lane failure caused this episode, or null.
  *  `canaryWorker` (llm rows only) is the in-flight canary lane's name, or null when no canary
  *  is being tested — see conductor.ts's PARK section for the canary contract. */
 export interface ParkRow {
-  source: EnvFailureSource;
+  source: ParkSource;
   reason: string;
   triggerIssue: number | null;
   enteredAt: string;
@@ -2264,31 +2297,30 @@ export class State {
     return row.total;
   }
 
-  /** Active-session start for the wall-clock ceiling; call once per tick. Each call
-   *  refreshes last_tick_at (the session's liveness heartbeat). If the previous tick is
-   *  older than staleGapSec — the engine was stopped, crashed, or deliberately paused — the
-   *  session RESETS to `now` and the wall-clock elapsed starts over. A continuously ticking
-   *  engine (including a rapid crash-loop restart, whose gaps stay under the threshold)
-   *  keeps accumulating and CANNOT evade the cap; recovery from a wall-clock breach is a
-   *  deliberate operator action (pause longer than the gap, or raise cost.maxWallClockSec).
-   *  (Codex PR #41 R2 P1.) */
-  engineSessionStart(now: Date, staleGapSec: number): Date {
-    const row = this.db.prepare("SELECT started_at, last_tick_at FROM engine_session WHERE id = 1").get() as
-      | { started_at: string; last_tick_at: string }
-      | undefined;
+  /** #431 (F29): the per-tick liveness heartbeat — the ONE piece of the old `engine_session`
+   *  machinery that SURVIVES the wall-clock re-anchor, because it has two live consumers that
+   *  are entirely about process liveness, not wall-clock accounting:
+   *    1. the #395 progress watchdog samples the tuple `(state.maxEventId(), state.lastTickAt())`
+   *       (watchdog.ts) — a quiet-log ticking engine must never self-kill, and last_tick_at is
+   *       the half of that tuple that proves a TICK is still flowing;
+   *    2. the dashboard's `deriveEngineState` derives `stalled` from `lastTickAt` cross-process
+   *       (dashboard server) — its only signal that an engine process is alive at all.
+   *  Everything ELSE the old engineSessionStart did is DELETED, not moved: the `started_at`
+   *  resurrection across restarts, the staleGapSec gap heuristic, and the pause-to-reset
+   *  ritual measured PROCESS LIVENESS, not autonomous action (a parked wait loop refreshed the
+   *  heartbeat every iteration and burned the whole budget while doing nothing — the F29
+   *  strike). The wall-clock ceiling now anchors to IN-MEMORY process start (conductor.ts's
+   *  TickDeps.processStartedAt); a restart at ANY gap length gets a fresh clock by
+   *  construction. `started_at` remains a schema column (migrations are append-only) but is
+   *  write-only bookkeeping here, never read back. */
+  touchLastTick(now: Date): void {
     const nowIso = now.toISOString();
-    if (!row || (now.getTime() - Date.parse(row.last_tick_at)) / 1000 > staleGapSec) {
-      this.db
-        .prepare(
-          `INSERT INTO engine_session (id, started_at, last_tick_at) VALUES (1, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET
-             started_at = excluded.started_at, last_tick_at = excluded.last_tick_at`,
-        )
-        .run(nowIso, nowIso);
-      return now;
-    }
-    this.db.prepare("UPDATE engine_session SET last_tick_at = ? WHERE id = 1").run(nowIso);
-    return new Date(row.started_at);
+    this.db
+      .prepare(
+        `INSERT INTO engine_session (id, started_at, last_tick_at) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET last_tick_at = excluded.last_tick_at`,
+      )
+      .run(nowIso, nowIso);
   }
 
   /** Record a ceiling breach's first-detected time (INSERT OR IGNORE: re-detecting a
@@ -2370,13 +2402,7 @@ export class State {
    *  .rateLimitResetAtMs), stored ONCE at first entry, same "first detection wins" stance as
    *  `reason`/`entered_at` — a later classified failure for the SAME open episode never
    *  overwrites it (INSERT OR IGNORE no-ops the whole row on conflict, this column included). */
-  enterPark(
-    source: EnvFailureSource,
-    reason: string,
-    triggerIssue: number | null,
-    now: string,
-    resetHintAtIso: string | null = null,
-  ): boolean {
+  enterPark(source: ParkSource, reason: string, triggerIssue: number | null, now: string, resetHintAtIso: string | null = null): boolean {
     const res = this.db
       .prepare(
         `INSERT OR IGNORE INTO park_state (source, reason, trigger_issue, entered_at, last_probe_at, probe_attempts, reset_hint_at)
@@ -2398,7 +2424,7 @@ export class State {
     reset_hint_at: string | null;
   }): ParkRow {
     return {
-      source: row.source as EnvFailureSource,
+      source: row.source as ParkSource,
       reason: row.reason,
       triggerIssue: row.trigger_issue,
       enteredAt: row.entered_at,
@@ -2419,7 +2445,7 @@ export class State {
   }
 
   /** The open episode for one source, or null. */
-  parkRow(source: EnvFailureSource): ParkRow | null {
+  parkRow(source: ParkSource): ParkRow | null {
     const row = this.db.prepare("SELECT * FROM park_state WHERE source = ?").get(source) as
       | Parameters<typeof State.rowToPark>[0]
       | undefined;
@@ -2485,7 +2511,7 @@ export class State {
    *  Never re-fires for the same episode (conductor.ts's escalatePark checks escalatedAt == null
    *  before calling this) — additive, not a state transition: probing/auto-resume are unaffected
    *  either side of this call. */
-  recordParkEscalation(source: EnvFailureSource, at: string): void {
+  recordParkEscalation(source: ParkSource, at: string): void {
     this.db.prepare("UPDATE park_state SET escalated_at = ? WHERE source = ?").run(at, source);
   }
 
@@ -2494,7 +2520,7 @@ export class State {
    *  open episode also removes the local escalation marker (PR #180 review P2-2: the marker
    *  described an outage that no longer exists — wiring the clear here, at the single choke
    *  point every resume path goes through, is what guarantees it can never be forgotten). */
-  clearPark(source: EnvFailureSource): void {
+  clearPark(source: ParkSource): void {
     this.db.prepare("DELETE FROM park_state WHERE source = ?").run(source);
     if (!this.isParked()) this.clearEscalationMarker();
   }
@@ -2760,6 +2786,18 @@ export class State {
     return rows.map((r) => ({ kind: r.kind, payload: JSON.parse(r.payload) as unknown }));
   }
 
+  /** #431: how many events of `kind` carry a ts at/after `sinceIso` — the rapid-restart
+   *  detector's birth count (`run-started` is appended exactly once per process boot, so this
+   *  IS the number of process births in the window; wait-loop iterations append other kinds and
+   *  can never inflate it, by construction). Same ts-window semantics as eventsSince above —
+   *  and the same clock caveat: `ts` is the real machine clock at write time (appendEvent's own
+   *  doc), so the caller's cutoff must come from the same host clock family (cli.ts's
+   *  systemClock in production). A count, not the rows — the detector needs no payloads. */
+  countEventsSince(sinceIso: string, kind: string): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM events WHERE ts >= ? AND kind = ?").get(sinceIso, kind) as { n: number };
+    return row.n;
+  }
+
   /** #210: every retained worktree path whose LATEST retention has not been released yet — the
    *  input to conductor.ts's releaseVanishedWorktrees scan (docs/frontend-design.md §11
    *  follow-up 4). Identity is the `worktreePath`, not the lane name (lane names are reused
@@ -2859,10 +2897,10 @@ export class State {
   // module that knows this schema's SQL — §8's requirement that `sapwood status` and the
   // dashboard "can never disagree" is only structural if neither re-derives the other's queries.
 
-  /** The engine session's liveness heartbeat, READ-ONLY — the staleness input to §8's engine-state
-   *  derivation. Deliberately NOT engineSessionStart(), which WRITES (it refreshes the heartbeat
-   *  and may reset the session): a spectator reading the clock must never move it. `null` means
-   *  no session row exists at all — the engine has never ticked against this DB. */
+  /** The engine's liveness heartbeat, READ-ONLY — the staleness input to §8's engine-state
+   *  derivation. Deliberately NOT touchLastTick() (#431's surviving writer), which WRITES: a
+   *  spectator reading the clock must never move it. `null` means no heartbeat row exists at
+   *  all — the engine has never ticked against this DB. */
   lastTickAt(): string | null {
     const row = this.db.prepare("SELECT last_tick_at FROM engine_session WHERE id = 1").get() as { last_tick_at: string } | undefined;
     return row?.last_tick_at ?? null;

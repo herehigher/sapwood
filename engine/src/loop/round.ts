@@ -26,8 +26,8 @@ import { createProxyMint } from "../proxy/mint.js";
 import type { RoundPhase, RoundRow, State } from "../state/state.js";
 import { createHeartbeatGate } from "../util/heartbeat.js";
 import {
+  announceCeilingBreachOnce,
   type CeilingReason,
-  engineSessionGapSec,
   escalatePark,
   evaluateCeiling,
   type FixLegResumeDeps,
@@ -255,6 +255,9 @@ export interface RoundDeps {
   mergeGate?: MergeGate;
   engineAgentDriveDeps?: TickDeps["engineAgentDriveDeps"];
   now: () => Date;
+  /** #431: test seam for the wall-clock ceiling's in-memory process-start anchor. Omitted
+   *  (production): runRounds captures `now()` once at entry — see its own comment. */
+  processStartedAt?: Date;
   /** Injected sleep so tests can drive the loop without real wall-clock waits (same contract
    *  as driver.ts's DriverDeps.sleep). */
   sleep?: (ms: number) => Promise<void>;
@@ -799,6 +802,12 @@ export async function removeRoundPoolLabel(forge: IForge, cfg: SapwoodConfig, is
 export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   const now = deps.now;
   const iso = () => now().toISOString();
+  // #431 (F29): the wall-clock ceiling's anchor — THIS process's start, held in memory for the
+  // whole run (a const in this closure, dead with the process). Never persisted, never
+  // inherited: a restart at any gap length gets a fresh clock by construction. Derived from the
+  // injected clock, so no real-clock read hides here (#403/F25). RoundDeps.processStartedAt
+  // exists as a test seam only; production (cli.ts) passes nothing and anchors here.
+  const processStartedAt = deps.processStartedAt ?? now();
   const cfg = deps.cfg;
   const forge: IForge = cfg.round.milestone ? new RoundScopedForge(deps.forge, cfg.round.milestone) : deps.forge;
   const peripherals = deps.peripherals ?? {};
@@ -906,9 +915,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  (env-failure.ts's probeBackoffSec/probeDueWithHint, conductor.ts's probeForgeReachable/
    *  escalatePark) — never a parallel mechanism, just a second call site for the same one.
    *  Ceiling reasons are re-derived FRESH every wait iteration (evaluateCeiling), never trusted
-   *  from a stale stored marker — engineSessionStart's wall-clock bookkeeping is safe to touch
-   *  from here too (its own doc: "call once per tick" means roughly this cadence, not an
-   *  exclusive tick()-only invariant; multiple forward-only calls never corrupt it).
+   *  from a stale stored marker — elapsed is a pure read off the in-memory process-start anchor
+   *  (#431), so re-deriving here has no side effects at all (the old engineSessionStart call
+   *  this loop used to make was a WRITE that kept a breached session alive — the F29 wedge).
    *
    *  llm-ping semantics match conductor.ts's canary doctrine EXACTLY (settleCanary's own doc: a
    *  green ping on the cheapest model is NOT itself proof the worker/role's real model/tier has
@@ -954,15 +963,32 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     for (;;) {
       if (signalled || deps.state.isKillSwitchActive()) return;
       const nowDate = now();
-      const sessionStart = deps.state.engineSessionStart(nowDate, engineSessionGapSec(deps.tickIntervalSec));
+      // #431 (F29): elapsed measures THIS process's life (the in-memory anchor above), so this
+      // wait loop can no longer extend — or inherit — a wall-clock budget across restarts, and
+      // sitting parked/waiting here cannot itself keep a breached session alive (the exact F29
+      // wedge: the old engineSessionStart call on this line refreshed the session heartbeat
+      // every iteration, closing off the documented pause-to-recover path).
+      const wallClockElapsedSec = (nowDate.getTime() - processStartedAt.getTime()) / 1000;
       const ceilingReasons: CeilingReason[] = evaluateCeiling({
         dailySpendUsd: deps.state.dailySpendUsd(nowDate),
         dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
-        wallClockElapsedSec: (nowDate.getTime() - sessionStart.getTime()) / 1000,
+        wallClockElapsedSec,
         maxWallClockSec: cfg.cost.maxWallClockSec,
       });
-      if (ceilingReasons.length > 0) deps.state.recordCeilingBreach(ceilingReasons, nowDate);
-      else deps.state.clearCeilingBreach();
+      if (ceilingReasons.length > 0) {
+        deps.state.recordCeilingBreach(ceilingReasons, nowDate);
+        // #431 AC3: entering (or re-checking) the ceiling wait announces the breach — reasons,
+        // thresholds, observed values — exactly once per episode. Never silent again: F29's
+        // only trace was `park-wait-heartbeat {parked:false}` from the loop's own heartbeat.
+        announceCeilingBreachOnce(deps.state, ceilingReasons, {
+          wallClockElapsedSec,
+          maxWallClockSec: cfg.cost.maxWallClockSec,
+          dailySpendUsd: deps.state.dailySpendUsd(nowDate),
+          dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
+        });
+      } else {
+        deps.state.clearCeilingBreach();
+      }
 
       let llmGreenLight = false;
       for (const episode of deps.state.parkedSources()) {
@@ -981,7 +1007,10 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           } else {
             deps.state.bumpParkProbe("forge", iso());
           }
-        } else if (deps.probeLlmReachable && ceilingReasons.length === 0) {
+        } else if (episode.source === "llm" && deps.probeLlmReachable && ceilingReasons.length === 0) {
+          // ^ #431: the source guard is now explicit — a `rapid-restart` episode (state.ts's
+          // ParkSource) has NO probe by design (it clears only when a later start observes the
+          // birth window drained, loop/rapid-restart.ts) and must never burn a PAID llm ping.
           // Disabled-consumer rule (doctrine): no wired probe -> untouched, same as
           // conductor.ts's own llm probe section. #374 review (Codex sol-high finding 2, P1):
           // ALSO skip while ceiling-breached, same as conductor.ts's own llm-probe section
@@ -1258,7 +1287,8 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     state: deps.state,
     supervisor: deps.supervisor,
     cfg: deps.cfg,
-    tickIntervalSec: deps.tickIntervalSec,
+    // #431: the wall-clock ceiling's in-memory anchor — captured once at runRounds entry.
+    processStartedAt,
     // exactOptionalPropertyTypes: only include optional keys when actually provided — an
     // explicit `undefined` is not the same as an omitted key under this tsconfig setting.
     ...(deps.mergeGate !== undefined ? { mergeGate: deps.mergeGate } : {}),

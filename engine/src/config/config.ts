@@ -158,18 +158,21 @@ const Cost = z
     // boundaries — cost is only known at worker completion, so bounded overshoot ≈
     // lanes.roundDispatchCap × per-worker spend is possible before the freeze.
     dailyBudgetUsd: z.number().finite().positive().default(100),
-    // A CONTINUOUS-ACTIVITY window (#14), not total run duration — a common misreading (2026-07-13
-    // dashboard/cost discussion, #154). It accumulates only while ticks are actually flowing
-    // (State.engineSessionStart: continuous ticking) and RESETS on any quiet gap longer than
-    // engineSessionGapSec (max(900s, 2x tickIntervalSec)) — a deep standby wait or a long
-    // peripheral stretch resets it, so an idle-heavy multi-day run never trips this. What it
-    // actually detects: the dispatch/drain machinery has churned this many seconds without a
-    // single quiet quarter-hour — a runaway/batch-scoping smell, not a long-run limiter (a
-    // rapid crash-loop still can't evade it, since each tick refreshes the session rather than
-    // resetting it). Independent of worker.timeoutSec (which bounds a single worker) and of
-    // stop.afterSpendUsd/run duration (there is no run-duration cap at all — see docs/
-    // configuration.md's knob table). Conservative default: 4h.
-    maxWallClockSec: z.number().int().positive().default(14400),
+    // #431 (F29): a PER-PROCESS attention alarm — one clock per process life, anchored at
+    // process start (in memory, never persisted), breached when THIS process has been alive
+    // longer than this many seconds. A restart — manual, script, or supervisor — is a
+    // sanctioned renewal and starts a fresh clock at any gap length (owner adjudication
+    // 2026-07-30: the old session-gap machinery measured process liveness, not autonomous
+    // action — a parked wait loop burned the whole budget doing nothing). This is NOT a
+    // security boundary: the durable cross-restart bounds are cost.dailyBudgetUsd +
+    // guard/gates/kill-switch; crash-loop abuse is the rapid-restart detector's job
+    // (engine.rapidRestart below) plus the operator's own supervisor circuit-breaker
+    // (docs/security.md — a PREREQUISITE for unattended supervised runs). Note: a 24h life
+    // can straddle UTC midnight and therefore two dailyBudgetUsd periods (~2x worst-case
+    // single-life spend; this existed at the old 4h default with smaller magnitude).
+    // Independent of worker.timeoutSec (which bounds a single worker); there is still no
+    // run-duration cap (see docs/configuration.md's knob table). Default: 24h.
+    maxWallClockSec: z.number().int().positive().default(86400),
     // Bounded grace window (#14) after a ceiling breach (daily budget / wall-clock / kill
     // switch) is first detected, during which running workers are asked to hand off
     // gracefully (SIGTERM -> checkpoint -> .handoff) before the conductor escalates to the
@@ -757,13 +760,29 @@ const Guard = z
 
 const Engine = z
   .object({
-    // The M4 loop driver's tick cadence (#46): how often `driver.ts` calls tick(). Threaded
-    // straight into TickDeps.tickIntervalSec so the wall-clock ceiling's session-gap scaling
-    // (conductor.ts engineSessionGapSec: max(900, 2x cadence)) sees the REAL cadence instead of
-    // silently falling back to the 900s floor (gate② PR #41 P2 — a legal slow cadence could
-    // otherwise make every tick look "stale" and void the wall-clock tier). Conservative default:
-    // 1 minute (0day's loop ticks minutes apart, PLAN.md).
+    // The loop's tick cadence (#46): how often the drivers call tick() — the inter-tick sleep
+    // and the #395 watchdog window. (#431 deleted the wall-clock session-gap scaling this used
+    // to feed; the wall clock now anchors to in-memory process start and never reads the
+    // cadence.) Conservative default: 1 minute (0day's loop ticks minutes apart, PLAN.md).
     tickIntervalSec: z.number().int().positive().default(60),
+    // #431 (owner amendment 1): the rapid-restart detector — the crash-loop protection that
+    // REPLACES the deleted session-gap heuristic without reviving F29. At startup the engine
+    // counts its own recent process births (`run-started` events, appended exactly once per
+    // boot — wait-loop iterations can never inflate the count, by construction) inside
+    // `windowSec`; reaching `maxBirths` parks the engine (no autonomous dispatch) with a local
+    // escalation until a later start observes the window drained. Rationale: a crash-loop is
+    // definitionally not the operator's standing intent; normal restarts renew freely. The
+    // numbers are heuristics, hence config keys (user-tunables rule), not constants.
+    rapidRestart: z
+      .object({
+        // Births (process starts) within the window that trip the detector — the CURRENT start
+        // counts as one, so 5 means "this is the 5th start in windowSec".
+        maxBirths: z.number().int().positive().default(5),
+        // The birth-counting window, in seconds.
+        windowSec: z.number().int().positive().default(600),
+      })
+      .strict()
+      .default({}),
     // #106: which engine `sapwood run` drives. "rounds" (default, v0.2 north star) — the round
     // orchestrator (round.ts's runRounds + round-defaults.ts's createDefaultPeripherals): peripheral
     // roles (aligning/architecting/plan_review/harvesting/retro) wrapped around the same tick

@@ -922,12 +922,30 @@ Two different things are both called "budget," and they behave differently on pu
   gates permit. Each resumed leg gets a fresh soft budget, bounded by
   `worker.maxResumes` (default 2); resumed `total_cost_usd` is per-leg and is ledgered
   directly, so total recorded spend is the sum of the real legs.
-- **`cost.dailyBudgetUsd` / `cost.maxWallClockSec`** are **hard** engine-wide ceilings —
-  the actual runaway-spend safety boundary, independent of any single worker. Breaching
-  either freezes new dispatch/merges and starts draining in-flight workers
+- **`cost.dailyBudgetUsd` / `cost.maxWallClockSec`** are **hard** engine-wide ceilings.
+  Breaching either freezes new dispatch/merges and starts draining in-flight workers
   (`cost.drainWindowSec`'s grace window), same "drain before kill" posture as the kill
   switch: give a worker the chance to hand off cleanly, and only escalate to a hard
-  process-tree kill once the drain window elapses.
+  process-tree kill once the drain window elapses. Their roles differ (#431):
+  `dailyBudgetUsd` is the **durable** runaway-spend boundary — a UTC-calendar-day
+  ledger sum that survives restarts. `maxWallClockSec` is a **per-process attention
+  alarm** — one clock per process life, anchored at process start in memory, fresh on
+  every restart at any gap length. A restart is a *sanctioned* renewal (manual, script,
+  or a user-configured supervisor — the human's standing intent); the durable
+  cross-restart bounds are money (`dailyBudgetUsd`), gates, guard, and the kill switch,
+  never the wall clock. Entering a breach emits a reason-bearing
+  `ceiling-breach-entered` event once per episode.
+
+**Supervisor prerequisite (#431):** operators running unattended under a supervisor
+MUST configure the supervisor's own crash-loop circuit-breaker — e.g. systemd's
+`StartLimitBurst=5` / `StartLimitIntervalSec=600` (or the equivalent restart-limit in
+your process manager) — sapwood *assumes* it. A crash-looping engine is visible in the
+supervisor's restart counters; alert THERE. Defense-in-depth behind that assumption:
+the engine's own rapid-restart detector (`engine.rapidRestart`, default 5 starts in
+10 minutes) parks autonomous dispatch with an escalation when it observes its own
+crash-loop, and the `#382` single-instance data-dir lock keeps a supervisor's fast
+restarts from ever double-driving one board. A crash loop's blast radius is bounded
+either way by `dailyBudgetUsd` and the merge gates.
 
 In both directions the design favors **drain-then-escalate over an immediate hard
 stop** — a hard kill is the last resort, not the first response, because it destroys

@@ -208,6 +208,23 @@ invisibly parked-behind-the-park.
    does not lose the park state or its duration clock — it resumes probing, not dispatching —
    and does not, on its own, clear a still-genuinely-broken environment either.
 
+## Rapid-restart park (#431)
+
+At startup the engine counts its own recent process births (`run-started` events) —
+`engine.rapidRestart.maxBirths` starts (default 5, the current start included) within
+`engine.rapidRestart.windowSec` (default 600s) means a **crash loop**, which is not a
+sanctioned restart pattern. The engine then emits `rapid-restart-detected`, **parks**
+autonomous dispatch (the same park machinery as an environment failure — visible in
+`sapwood status` as `PARKED (rapid-restart)` and in `data/ESCALATION`), and stays up
+without dispatching.
+
+Recovery: stop whatever is restarting the engine (usually a supervisor without its own
+restart limit — configure one; see [security.md](security.md)'s supervisor
+prerequisite), fix the crash's cause, and start the engine once the window has drained
+— a start that counts fewer than `maxBirths` births clears the park automatically
+(`park-resumed`, `via: restart-window-clear`). No state surgery is needed; deleting the
+`park_state` row by hand also works but should never be necessary.
+
 ## Where to look after an unattended run
 
 The run log (`logging.path`, default `data/logs/sapwood.log`) is the disposable human/LLM

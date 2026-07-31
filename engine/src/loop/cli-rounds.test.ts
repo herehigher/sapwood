@@ -1044,3 +1044,72 @@ test("sapwood run (#382): a stale lock from a dead pid is taken over — the run
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── #431 (owner amendment 1): the rapid-restart detector, wired through runEngine — the count
+// includes this boot's own run-started, a trip parks autonomous dispatch via the existing park
+// paradigm, and a clean start clears a stale episode. The birth window is steered by seeding
+// real-clock run-started events moments before the run (well inside the 600s default window —
+// no assertion depends on timing) — never by sleeping.
+
+test("sapwood run (#431): a 5th start inside the window trips the detector — rapid-restart-detected AFTER run-started, a durable park, and ZERO dispatch of the ready issue", async () => {
+  const state = new State(":memory:");
+  class ReadyForge extends FakeForge {
+    claimCalls = 0;
+    override async getReadyIssues(): Promise<Issue[]> {
+      return [{ number: 9, title: "ready work", labels: [] }];
+    }
+    override async claimIssue(): Promise<void> {
+      this.claimCalls++;
+    }
+  }
+  const forge = new ReadyForge();
+  // Four prior births moments ago (a crash loop); this run's own appendRunStarted is the 5th.
+  for (let i = 0; i < 4; i++) state.appendEvent("run-started", { configHash: "prior" });
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge,
+      state,
+      logger: silentLogger,
+    });
+    assert.equal(code, 0, "a trip parks dispatch; it never aborts startup (park, not a refusal mode)");
+    const kinds = state.eventsAfterId(0, ["run-started", "rapid-restart-detected", "park-escalated"]).map((e) => e.kind);
+    assert.deepEqual(
+      kinds.slice(-3),
+      ["run-started", "rapid-restart-detected", "park-escalated"],
+      "detection lands inside this run's replay group",
+    );
+    assert.equal(state.isParked(), true, "the standard park gate is what blocks dispatch");
+    assert.equal(forge.claimCalls, 0, "the ready issue was never claimed — zero autonomous dispatch under the park");
+    const detected = state.eventsAfterId(0, ["rapid-restart-detected"]);
+    assert.equal(detected.length, 1);
+    assert.deepEqual(detected[0]!.payload, { births: 5, windowSec: 600, maxBirths: 5 });
+  } finally {
+    state.close();
+  }
+});
+
+test("sapwood run (#431): a clean start (window drained) CLEARS a stale rapid-restart park and proceeds — the sanctioned-recovery path needs no manual state surgery", async () => {
+  const state = new State(":memory:");
+  state.enterPark("rapid-restart", "old storm", null, "2026-07-30T00:00:00.000Z");
+  const forge = new FakeForge();
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge,
+      state,
+      logger: silentLogger,
+    });
+    assert.equal(code, 0);
+    assert.equal(state.isParked(), false, "the stale episode cleared at startup — only 1 birth in the window");
+    const resumed = state.eventsAfterId(0, ["park-resumed"]);
+    assert.equal(resumed.length, 1);
+    assert.deepEqual(resumed[0]!.payload, {
+      source: "rapid-restart",
+      enteredAt: "2026-07-30T00:00:00.000Z",
+      via: "restart-window-clear",
+    });
+  } finally {
+    state.close();
+  }
+});

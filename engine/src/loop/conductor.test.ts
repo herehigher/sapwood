@@ -33,8 +33,6 @@ import {
   drainEscalationDue,
   driveDecision,
   drivingLaneTerminalForDrain,
-  ENGINE_SESSION_GAP_SEC,
-  engineSessionGapSec,
   evaluateCeiling,
   gatedReentryDecision,
   hasReserveLabel,
@@ -4836,68 +4834,142 @@ test("#69 P3b (fable): a .failed-sentinel lane with an open PR and a CLEAN workt
   st.close();
 });
 
-test("tick ceiling: wall-clock breaches on continuous ticking but RECOVERS after an operator pause (Codex R2 P1)", async () => {
+test("tick ceiling (#431): within ONE process life a wall-clock breach PERSISTS across quiet gaps — the pause-to-reset ritual is deleted; recovery is a restart's fresh anchor", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   const cfg = mkCfg({ cost: { maxWallClockSec: 600 } }); // 10-min cap for the test
-  let clock = new Date("2026-07-06T00:00:00Z");
+  const firstStart = new Date("2026-07-06T00:00:00Z");
+  let clock = firstStart;
   const now = () => clock;
-  const tickAt = async (iso: string) => {
+  const tickAt = async (iso: string, processStartedAt: Date) => {
     clock = new Date(iso);
-    return tick({ forge, state: st, supervisor: sup, cfg, now });
+    return tick({ forge, state: st, supervisor: sup, cfg, now, processStartedAt });
   };
 
-  // Continuous ticking (5-min intervals, under the 15-min session gap): the session start
-  // never moves, so elapsed accumulates past the 600s cap -> wall-clock breach at t=15min.
-  assert.equal((await tickAt("2026-07-06T00:00:00Z")).ceilingBreached, false);
-  assert.equal((await tickAt("2026-07-06T00:05:00Z")).ceilingBreached, false);
+  // The process ages past the cap -> wall-clock breach at t=15min, dispatch frozen.
+  assert.equal((await tickAt("2026-07-06T00:00:00Z", firstStart)).ceilingBreached, false);
+  assert.equal((await tickAt("2026-07-06T00:05:00Z", firstStart)).ceilingBreached, false);
   forge.ready = [{ number: 4, title: "", labels: ["prio:3-feature"] }]; // arrives pre-breach
-  const breached = await tickAt("2026-07-06T00:15:00Z"); // 900s elapsed > 600s cap
+  const breached = await tickAt("2026-07-06T00:15:00Z", firstStart); // 900s alive > 600s cap
   assert.equal(breached.ceilingBreached, true);
   assert.deepEqual(breached.ceilingReasons, ["wall-clock"]);
   assert.deepEqual(breached.dispatched, [{ kind: "skipped", issue: 4, reason: "ceiling" }]);
 
-  // An operator pause longer than the session gap (15min) resets the session — the data dir
-  // is NOT permanently breached (the original engineStartedAt design was). Dispatch resumes.
-  const recovered = await tickAt("2026-07-06T00:31:00Z"); // 16-min gap since the last tick
+  // A 16-minute quiet gap WITHIN the same process life recovers nothing: the anchor is process
+  // start, so elapsed only grows — the deleted gap machinery's pause-to-reset ritual (an
+  // operator pause > 900s used to reset the session) is gone, per the owner adjudication. This
+  // process is done dispatching until it exits.
+  const stillBreached = await tickAt("2026-07-06T00:31:00Z", firstStart);
+  assert.equal(stillBreached.ceilingBreached, true, "no self-reset inside one process life");
+
+  // The modern recovery: a RESTART (any gap length). The new process's fresh in-memory anchor
+  // clears the ceiling and resumes dispatch; the durable breach row clears with it, so a
+  // re-breach in the new life gets a fresh drain window.
+  const restartAt = new Date("2026-07-06T00:32:00Z");
+  const recovered = await tickAt("2026-07-06T00:32:00Z", restartAt);
   assert.equal(recovered.ceilingBreached, false);
-  assert.equal(st.ceilingBreach(), null); // the breach record cleared -> a re-breach gets a fresh drain window
+  assert.equal(st.ceilingBreach(), null);
   assert.ok(recovered.dispatched.some((d) => d.kind === "dispatched" && d.issue === 4));
   st.close();
 });
 
-test("engineSessionGapSec: scales with tick cadence — max(base, 2x); unknown/garbage cadence -> base", () => {
-  assert.equal(engineSessionGapSec(0), ENGINE_SESSION_GAP_SEC); // unknown/self-paced
-  assert.equal(engineSessionGapSec(60), ENGINE_SESSION_GAP_SEC); // fast cadence: base wins
-  assert.equal(engineSessionGapSec(450), ENGINE_SESSION_GAP_SEC); // 2x450=900: base still wins (ties to base)
-  assert.equal(engineSessionGapSec(1200), 2400); // slow cadence: 2x cadence wins
-  assert.equal(engineSessionGapSec(-5), ENGINE_SESSION_GAP_SEC); // garbage -> fail-safe base
-  assert.equal(engineSessionGapSec(NaN), ENGINE_SESSION_GAP_SEC);
-  assert.equal(engineSessionGapSec(Infinity), ENGINE_SESSION_GAP_SEC);
-});
-
-test("tick ceiling PINNING: a legal slow cadence (>= 15min) must NOT void the wall-clock tier (gate② PR #41 P2)", async () => {
-  // With a fixed 900s stale gap, ticking every 20min made EVERY tick look stale: the session
-  // reset each tick, elapsed ~= 0 forever, and the wall-clock ceiling silently never fired.
-  // With tickIntervalSec passed, the gap scales to 2x cadence and the tier stays live.
+test("tick ceiling (#431): the wall-clock tier anchors to processStartedAt — elapsed past the cap breaches, regardless of tick cadence or gaps", async () => {
+  // The old session-gap machinery is gone: no cadence scaling, no stale-gap reset. Elapsed is
+  // simply now - processStartedAt, so a slow cadence can never void the tier (the PR #41 P2
+  // fail-open class stays closed, now by construction instead of by gap arithmetic).
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   const cfg = mkCfg({ cost: { maxWallClockSec: 600 } }); // 10-min cap
-  let clock = new Date("2026-07-06T00:00:00Z");
+  const processStartedAt = new Date("2026-07-06T00:00:00Z");
+  let clock = processStartedAt;
   const now = () => clock;
   const tickAt = async (iso: string) => {
     clock = new Date(iso);
-    return tick({ forge, state: st, supervisor: sup, cfg, now, tickIntervalSec: 1200 }); // 20-min cadence
+    return tick({ forge, state: st, supervisor: sup, cfg, now, processStartedAt });
   };
-  assert.equal((await tickAt("2026-07-06T00:00:00Z")).ceilingBreached, false);
-  // t=20min: gap since last tick is 1200s. Old behavior: 1200 > 900 -> session resets ->
-  // elapsed 0 -> NO breach, tier dead. Fixed behavior: gap = max(900, 2x1200) = 2400 ->
-  // session holds -> elapsed 1200 > 600 cap -> breach. This test fails on the old behavior.
-  const r = await tickAt("2026-07-06T00:20:00Z");
+  assert.equal((await tickAt("2026-07-06T00:05:00Z")).ceilingBreached, false); // 300s alive < 600s cap
+  const r = await tickAt("2026-07-06T00:20:00Z"); // 1200s alive > 600s cap
   assert.equal(r.ceilingBreached, true);
   assert.deepEqual(r.ceilingReasons, ["wall-clock"]);
+  st.close();
+});
+
+test("tick ceiling (#431 AC1): a RESTART at ANY gap length gets a fresh wall clock — sub-900s and 900s+ gaps behave identically (the deleted inheritance machinery would have breached the short-gap case)", async () => {
+  // Simulates the F29 shape: a first process life long enough to breach, then a restart. Under
+  // the deleted engine_session machinery a restart within the 900s stale gap INHERITED the
+  // breached session (the short-gap restart would see elapsed ~= first life + gap and breach
+  // on its first tick); past the gap it reset. Now both restarts anchor at their own process
+  // start and neither breaches — identical behavior at 100s and 3600s gaps.
+  for (const gapSec of [100, 3600]) {
+    const dir = mkdtempSync(join(tmpdir(), "sapwood-wallclock-"));
+    try {
+      const dbPath = join(dir, "sapwood.sqlite");
+      const forge = new FakeForge();
+      const cfg = mkCfg({ cost: { maxWallClockSec: 1000 } });
+      const base = new Date("2026-07-06T00:00:00Z").getTime();
+
+      // First process life: born t=0, still ticking at t=2000s -> breached (sanity anchor).
+      let st = new State(dbPath);
+      const firstStart = new Date(base);
+      let clock = new Date(base + 2000_000);
+      const r1 = await tick({ forge, state: st, supervisor: new FakeSupervisor(), cfg, now: () => clock, processStartedAt: firstStart });
+      assert.equal(r1.ceilingBreached, true, "the first life really was past its own cap");
+      st.close();
+
+      // Restart after gapSec: a NEW process (fresh in-memory anchor), same durable DB.
+      st = new State(dbPath);
+      const secondStart = new Date(base + (2000 + gapSec) * 1000);
+      clock = secondStart;
+      const r2 = await tick({ forge, state: st, supervisor: new FakeSupervisor(), cfg, now: () => clock, processStartedAt: secondStart });
+      assert.equal(r2.ceilingBreached, false, `gap ${gapSec}s: a restart starts a fresh clock — no inherited breach`);
+      assert.deepEqual(r2.ceilingReasons, [], `gap ${gapSec}s behaves identically to every other gap length`);
+      st.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("tick ceiling (#431 AC3): entering the ceiling emits ONE reason-bearing ceiling-breach-entered per episode — named reasons + thresholds + observed values, deduped across re-detections, re-armed by a fresh episode", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ cost: { maxWallClockSec: 600 } });
+  const processStartedAt = new Date("2026-07-06T00:00:00Z");
+  let clock = processStartedAt;
+  const now = () => clock;
+  const tickAt = async (iso: string) => {
+    clock = new Date(iso);
+    return tick({ forge, state: st, supervisor: sup, cfg, now, processStartedAt });
+  };
+  await tickAt("2026-07-06T00:05:00Z"); // under the cap — no breach, no event
+  assert.equal(st.eventsAfterId(0, ["ceiling-breach-entered"]).length, 0);
+  await tickAt("2026-07-06T00:20:00Z"); // breach detected — announced once
+  await tickAt("2026-07-06T00:21:00Z"); // still breached — same episode, NO second event
+  const events = st.eventsAfterId(0, ["ceiling-breach-entered"]);
+  assert.equal(events.length, 1, "one announcement per breach episode, not per tick");
+  const payload = events[0]!.payload as {
+    reasons: string[];
+    episodeAt: string;
+    wallClockElapsedSec: number;
+    maxWallClockSec: number;
+    dailyBudgetUsd: number;
+  };
+  assert.deepEqual(payload.reasons, ["wall-clock"], "the event names WHICH ceiling");
+  assert.equal(payload.maxWallClockSec, 600, "the event carries the configured threshold");
+  assert.equal(payload.wallClockElapsedSec, 1200, "the event carries the observed elapsed");
+  assert.equal(payload.episodeAt, st.ceilingBreach()?.at.toISOString(), "episode identity = the breach row's first-detected at");
+  assert.equal(typeof payload.dailyBudgetUsd, "number");
+  // Episode ends (cap raised), then a NEW breach: the announcement re-arms.
+  st.clearCeilingBreach();
+  const relaxed = mkCfg({ cost: { maxWallClockSec: 999999 } });
+  clock = new Date("2026-07-06T00:22:00Z");
+  await tick({ forge, state: st, supervisor: sup, cfg: relaxed, now, processStartedAt });
+  assert.equal(st.ceilingBreach(), null, "the relaxed tick cleared the breach row (episode over)");
+  await tickAt("2026-07-06T00:25:00Z"); // back under the tight cap config -> a fresh episode
+  assert.equal(st.eventsAfterId(0, ["ceiling-breach-entered"]).length, 2, "a fresh episode announces again");
   st.close();
 });
 

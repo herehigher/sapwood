@@ -622,6 +622,8 @@ checklist item**):
 | `fix-rounds-capped` | PR #{pr} used up its fix attempts — needs a human |
 | `fix-leg-verdict-rerun` | PR #{pr}'s review findings aren't fixable by the producer — needs a human |
 | `ceiling-escalated` | Safety ceiling reached — winding down all work |
+| `ceiling-breach-entered` | Branches on `payload.reasons` (#431): wall-clock → "This run hit its {maxWallClockSec}s attention alarm — no new work until a restart"; daily-budget → "Today's ${dailyBudgetUsd} budget is spent — no new work until tomorrow"; both → join with " and ". One per breach episode, never per tick |
+| `rapid-restart-detected` | Engine started {births} times in {windowSec}s — crash loop suspected, dispatch parked for a human (#431) |
 | `rollback-recovered` | Returned issue #{issue} to the backlog safely |
 | `rollback-retry-failed` | Still trying to return issue #{issue} to the backlog |
 | `rollback-escalated` | Couldn't return issue #{issue} automatically — flagged for a human |
@@ -943,7 +945,7 @@ Five things about it are decisions, not implementation detail:
   same derivation. Its six dashboard-only reads (`lastTickAt`, `countEvents`,
   `eventsPage`, `spendByModelForDay`, `spendPage`, `listRounds`) are read-only
   additions to `engine/src/state/state.ts` — notably `lastTickAt`, which reads
-  the heartbeat without the write `engineSessionStart` performs.
+  the heartbeat without the write `touchLastTick` performs.
 - **The SQLite handle stays read-only even now that a write route exists.** The
   control verbs write files, never rows; a write attempted through the handle
   still throws, and the test suite asserts it after a successful control call.

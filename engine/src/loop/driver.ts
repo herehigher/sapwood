@@ -1,8 +1,8 @@
 // driver.ts — the M4 loop driver (#46): calls tick() on a fixed cadence
-// (cfg.engine.tickIntervalSec), threading that cadence into TickDeps.tickIntervalSec so the
-// wall-clock ceiling's session-gap scaling (conductor.ts engineSessionGapSec) sees the REAL
-// cadence instead of silently falling back to the 900s floor — the "loop driver MUST pass
-// tickIntervalSec into tick()" obligation PR #41/#42 left behind (PLAN.md M3 deferred list).
+// (cfg.engine.tickIntervalSec). #431 deleted the session-gap scaling that cadence used to feed
+// into tick(); the wall-clock ceiling now anchors to this driver's own in-memory process-start
+// capture (TickDeps.processStartedAt, threaded below), and the cadence drives only the
+// inter-tick sleep and the #395 watchdog window.
 //
 // Everything KILL_SWITCH/ceiling-drain does is already inside tick() (conductor.ts): a breach
 // freezes dispatch, drains running workers, and — past the bounded drain window — escalates to
@@ -38,8 +38,8 @@ export interface StopConfig {
   /** #154: the per-run spend budget — see config.ts's Stop.afterSpendUsd for the full
    *  rationale (distinct from roundBudgetUsd/dailyBudgetUsd). Compared against a RUN-scoped
    *  ledger sum (State.spentUsdAfterId from an anchor captured once at engine startup,
-   *  State.maxSpendLedgerId) — never engineSessionStart's wall-clock accounting window, which
-   *  deliberately resets on a quiet gap; a run's spend total must never reset mid-run. */
+   *  State.maxSpendLedgerId) — a run's spend total never resets mid-run, and since #431 the
+   *  wall clock shares the same capture-once-per-process anchoring (see runDriver). */
   afterSpendUsd?: number;
 }
 
@@ -56,8 +56,9 @@ export interface StopConditionHit {
 }
 
 export interface DriverDeps extends TickDeps {
-  /** The driver's tick cadence in seconds. Unlike TickDeps.tickIntervalSec (optional there,
-   *  for callers with no fixed schedule), the driver itself IS the cadence source — required. */
+  /** The driver's tick cadence in seconds — the inter-tick sleep and the #395 watchdog window.
+   *  (#431 removed TickDeps' own tickIntervalSec along with the session-gap scaling it fed;
+   *  the cadence now lives only on the drivers, which are the schedule's actual owners.) */
   tickIntervalSec: number;
   stopMode?: StopMode; // default "forever"
   /** #76: optional goal-based stop conditions, OR'd with each other (first hit wins) and layered
@@ -248,8 +249,14 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
   // constant for the process lifetime, deliberately: a restart calls runDriver fresh and gets a
   // fresh anchor, so afterSpendUsd starts back at $0 — the acceptance criterion, not a bug).
   // spentUsdAfterId sums spend_ledger rows with id > this cursor, i.e. exactly this run's own
-  // ledgered spend — never engineSessionStart's wall-clock window, which resets on a quiet gap.
+  // ledgered spend.
   const runSpendAnchorId = deps.state.maxSpendLedgerId();
+  // #431 (F29): the wall-clock ceiling's anchor — the same capture-once-in-memory pattern as the
+  // spend anchor above, and now with the SAME restart semantics: a restart calls runDriver fresh
+  // and the wall clock starts over at zero, at any gap length (the deleted engineSessionStart
+  // machinery used to resurrect a prior session across sub-900s gaps — the F29 wedge). Derived
+  // from the injected clock (#403/F25); DriverDeps.processStartedAt is a test seam only.
+  const processStartedAt = deps.processStartedAt ?? deps.now();
   // Set once, the first time any configured stop condition is satisfied (OR semantics — first
   // hit wins, never overwritten by a later condition). From that tick onward every subsequent
   // tick() call is forced dispatch-paused (see the merged tickDeps below): no new lane is
@@ -276,8 +283,8 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
           ? { runSpendStopCrossed: () => deps.state.spentUsdAfterId(runSpendAnchorId) >= deps.stop!.afterSpendUsd! }
           : {};
       const tickDeps: TickDeps = stopConditionHit
-        ? { ...deps, ...spendStopThunk, forceDispatchPause: true }
-        : { ...deps, ...spendStopThunk };
+        ? { ...deps, ...spendStopThunk, processStartedAt, forceDispatchPause: true }
+        : { ...deps, ...spendStopThunk, processStartedAt };
       try {
         result = await tick(tickDeps);
         ticks++;

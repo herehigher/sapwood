@@ -3866,3 +3866,46 @@ test("runRounds (#433): standby must never withhold the next round while a CARRI
   assert.equal(state.getWorker("lane-377")?.state, "done", "the carried lane was reclaimed, re-driven and merged without a human merge");
   state.close();
 });
+
+test("runRounds (#431 AC3): the ceiling-wait loop announces the breach ONCE — many wait iterations, one reason-bearing ceiling-breach-entered, and the wait itself can no longer extend the budget", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // round 1 has no dispatch work — opens unconditionally, closes idle
+  const state = new State(":memory:");
+  const base = Date.parse("2026-07-31T00:00:00.000Z");
+  // The process is ALREADY past its wall-clock cap when the run begins (200s alive, 100s cap):
+  // after round 1 closes, waitForDispatchClear holds the next round open indefinitely. The
+  // clock never advances during the wait — under the deleted machinery each iteration's
+  // engineSessionStart WRITE was what kept the breached session alive (F29); now the wait
+  // iterations are pure reads and the announcement is the loop's only ledger trace.
+  const now = () => new Date(base + 200_000);
+  const sleepCalls: number[] = [];
+  let stop = (): void => {};
+  const sleep = async (_ms: number): Promise<void> => {
+    sleepCalls.push(_ms);
+    if (sleepCalls.length >= 4) stop(); // several full wait iterations, then wind down
+  };
+  const deps = baseDeps({
+    forge,
+    state,
+    sleep,
+    now,
+    processStartedAt: new Date(base),
+    tickIntervalSec: 1,
+    cfg: mkCfg({ cost: { maxWallClockSec: 100 } }),
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.ok(sleepCalls.length >= 4, "the loop actually sat out multiple ceiling-wait iterations");
+  const announced = state.eventsAfterId(0, ["ceiling-breach-entered"]);
+  assert.equal(announced.length, 1, "one announcement per breach episode — never per wait iteration (F29's silence AND spam both closed)");
+  const payload = announced[0]!.payload as { reasons: string[]; maxWallClockSec: number; wallClockElapsedSec: number };
+  assert.deepEqual(payload.reasons, ["wall-clock"], "the event names WHICH ceiling");
+  assert.equal(payload.maxWallClockSec, 100);
+  assert.equal(payload.wallClockElapsedSec, 200);
+  assert.ok(state.ceilingBreach() !== null, "the breach row stands for the whole wait");
+  state.close();
+});

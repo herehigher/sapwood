@@ -19,10 +19,14 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.labels.verifyNa, "sapwood:verify:n/a");
   assert.equal(cfg.labels.planApproved, "sapwood:plan:approved"); // #88 gate⓪
   assert.deepEqual(cfg.escalation.humanLabels, ["sapwood:needs-human", "sapwood:blocked"]);
-  // #14 engine cost ceiling + kill switch: conservative defaults.
+  // #14 engine cost ceiling + kill switch: conservative defaults. (#431: the wall clock is a
+  // per-process attention alarm at 24h — restarts renew it, so 4h's "runaway churn" framing no
+  // longer applies.)
   assert.equal(cfg.cost.dailyBudgetUsd, 100);
-  assert.equal(cfg.cost.maxWallClockSec, 14400);
+  assert.equal(cfg.cost.maxWallClockSec, 86400);
   assert.equal(cfg.cost.drainWindowSec, 300);
+  // #431: the rapid-restart detector's tunables ship as config keys, never constants.
+  assert.deepEqual(cfg.engine.rapidRestart, { maxBirths: 5, windowSec: 600 });
 });
 
 test("labels.prefix derives omitted workflow and escalation defaults, including the empty-prefix escape hatch", () => {
