@@ -2146,6 +2146,7 @@ test("settleTerminalWorker (D4): a validated batch's worker row + spend + EVERY 
         pr: 30,
         fixRounds: 1,
         batchKey: "lane-fix#1",
+        headOid: "head-x",
         writes: [
           { threadId: "T1", reply: "fixed", resolution: "addressed" },
           { threadId: "T2", reply: "disagree", resolution: "disputed" },
@@ -2164,7 +2165,22 @@ test("settleTerminalWorker (D4): a validated batch's worker row + spend + EVERY 
   }
   const events = s.eventsSince("1970-01-01T00:00:00.000Z", ["fix-response-queued"]);
   assert.equal(events.length, 1);
-  assert.deepEqual(events[0]!.payload, { worker: "lane-fix", issue: 9, pr: 30, batchKey: "lane-fix#1", fixRounds: 1, count: 2 });
+  // #451: `headOid` + per-thread `writes` (threadId/resolution/reply) now ride this SAME
+  // receipt event — see its own doc (settleTerminalWorker, above) for why: it is the ONE durable
+  // record of a `disputed` resolution once its pending_thread_writes row clears.
+  assert.deepEqual(events[0]!.payload, {
+    worker: "lane-fix",
+    issue: 9,
+    pr: 30,
+    batchKey: "lane-fix#1",
+    fixRounds: 1,
+    count: 2,
+    headOid: "head-x",
+    writes: [
+      { threadId: "T1", resolution: "addressed", reply: "fixed" },
+      { threadId: "T2", resolution: "disputed", reply: "disagree" },
+    ],
+  });
   s.close();
 });
 
@@ -2218,6 +2234,7 @@ test("settleTerminalWorker (D4 crash-ordering): a thrown mid-batch enqueue rolls
           pr: 30,
           fixRounds: 1,
           batchKey: "lane-fix#1",
+          headOid: "head-x",
           writes: [
             { threadId: "T1", reply: "fixed", resolution: "addressed" },
             { threadId: "T2", reply: "disagree", resolution: "disputed" }, // this insert throws

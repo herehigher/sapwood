@@ -182,6 +182,19 @@ export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   // doctrine requires. Cost: it clears by issue closure only, which is still strictly more
   // clearing than the zero paths it had.
   "plan-review-escalated": "never",
+  // #451 (design #402 §4/D4, architectural review amendment 2026-07-31): the dispute-pricing
+  // escalation — conductor.ts's `escalateReviewDisputed`, the FIXABLE branch's dedicated
+  // "every unresolved current-head thread is disputed" path, distinct from (and disjoint with)
+  // both `fix-rounds-capped` and `fix-leg-verdict-rerun` above even though it shares their
+  // forge-before-terminal-upsert shape. `always`, for the SAME reason those two are: the event is
+  // appended strictly AFTER its own addLabel AND addIssueComment both returned successfully — a
+  // label-write failure appends only the companion `review-disputed-label-failed` (out of this
+  // table, same "label-first-or-no-event" doctrine as `gated-reentry-capped-label-failed`) and
+  // returns without ever reaching this event; a comment-write failure appends only
+  // `review-disputed-comment-failed`, likewise out of this table and likewise short-circuiting
+  // before this event. Its payload carries `pr` (the driving lane's own), so an external
+  // merge/close/label-removal resolves it exactly like every other pr-bearing `always` source.
+  "review-disputed": "always",
   // DELIBERATELY ABSENT (#441): `resume-held`. It is a new event kind that leaves a lane stopped,
   // so the question "does it need a row here?" is exactly the one F34 punishes getting wrong —
   // answered NO, on purpose, for two independent reasons. (1) It is not a new attention item: it

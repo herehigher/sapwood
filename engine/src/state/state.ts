@@ -1254,6 +1254,17 @@ export interface FixResponseSettleBatch {
   fixRounds: number;
   batchKey: string;
   writes: FixResponseSettleWrite[];
+  /** #451 (design #402 §4/D4): the head this fix round's session actually answered — sourced by
+   *  the caller from the lane's OWN `review_triggered_head` (state.ts's WorkerRow), read BEFORE
+   *  `settleTerminalWorker`'s own write clears it for a `fixing` lane (reclaimTerminalLane's
+   *  `fixingPinClear`). A FIXABLE gate can only be derived once `triggerPin.head ===
+   *  status.headOid` (merge-driver.ts's driveOne, the trigger-pin branch above the gate switch),
+   *  so this durably records EXACTLY the head the dispute/finding was raised against — the one
+   *  fact `review-disputed` escalation needs to tell "still current" from "the PR moved since" and
+   *  no live GitHub read can answer (a review thread's `isOutdated` only flags a changed SPAN, not
+   *  an unrelated push elsewhere on the PR). `null` only for a pre-#451 fixture/caller that omits
+   *  it — treated as "head unknown," which the escalation predicate below reads fail-closed. */
+  headOid: string | null;
 }
 
 export interface FixResponseSettleInvalid {
@@ -2245,6 +2256,15 @@ export class State {
               spend.at,
             );
           }
+          // #451: `headOid` + per-thread `writes` (threadId/resolution/reply) ride this SAME
+          // receipt event — the only durable record of a `disputed` resolution once its
+          // pending_thread_writes row clears (attemptThreadWrite drops a disputed row the instant
+          // its reply posts; fix-response.ts's own `completeThreadReply` receipt carries no
+          // resolution/reply at all). Live GitHub state cannot substitute: an unresolved thread
+          // with our reply already posted is indistinguishable, from a pure live read, between
+          // "disputed" (final, by design — speak-not-act) and "addressed, resolve still retrying"
+          // (the SAME queue's bounded-retry path) — only this durable field tells them apart.
+          // fix-response.ts's `latestThreadResolutions` is the one reader.
           this.appendEvent("fix-response-queued", {
             worker: batch.worker,
             issue: batch.issue,
@@ -2252,6 +2272,8 @@ export class State {
             batchKey: batch.batchKey,
             fixRounds: batch.fixRounds,
             count: batch.writes.length,
+            headOid: batch.headOid,
+            writes: batch.writes.map((w) => ({ threadId: w.threadId, resolution: w.resolution, reply: w.reply })),
           });
         }
       }

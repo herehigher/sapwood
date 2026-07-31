@@ -216,6 +216,14 @@ const SITE_INVENTORY: Record<string, { bucket: "human-merge-only" | "needs-human
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman).catch(() => {});",
     why: "kill-switch drain escalation",
   },
+  // #451 (design #402 §4/D4): the dispute-pricing escalation (escalateReviewDisputed, defined at
+  // module end so this site's addLabel physically follows every other needsHuman write in the
+  // file — see that function's own doc for why).
+  "loop/conductor.ts#22": {
+    bucket: "needs-human",
+    src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
+    why: "review-disputed — every unresolved current-head thread is durably disputed",
+  },
   // 1b — the PO decomposition path's genuine give-ups (distinct from the class-6 fence above).
   "loop/decompose.ts#0": {
     bucket: "needs-human",
@@ -383,7 +391,7 @@ test("#397 AC: EVERY escalation write site in engine source is classified into e
   }
 });
 
-test("#397 AC: the corrected site inventory — 7 PR-side label writes, 30 issue-side (#432 round 6's shared writer collapsed round 5's 2 sites into 1), and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
+test("#397 AC: the corrected site inventory — 7 PR-side label writes, 31 issue-side (#432 round 6's shared writer collapsed round 5's 2 sites into 1; #451 added the review-disputed escalation), and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
   const sites = scanEscalationSites();
   const labelSites = sites.filter(
     (s) => SITE_INVENTORY[s.key]!.src.includes("addLabel(") || SITE_INVENTORY[s.key]!.src.includes("addPRLabel("),
@@ -392,8 +400,8 @@ test("#397 AC: the corrected site inventory — 7 PR-side label writes, 30 issue
   assert.equal(prSide.length, 7, "PR-side escalation writes (#397's corrected count)");
   assert.equal(
     labelSites.length - prSide.length,
-    30,
-    "issue-side escalation writes (#397's corrected count + #432 round 6's shared retry-cap escalation writer)",
+    31,
+    "issue-side escalation writes (#397's corrected count + #432 round 6's shared retry-cap escalation writer + #451's review-disputed)",
   );
   // The four sites the AC names explicitly because they carry no `gate:HUMAN:` reason prefix.
   for (const key of ["roles/merge-driver.ts#4", "roles/merge-driver.ts#5", "roles/merge-driver.ts#6", "loop/conductor.ts#0"]) {

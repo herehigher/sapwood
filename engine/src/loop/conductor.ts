@@ -33,7 +33,13 @@ import {
   probeDueWithHint,
 } from "./env-failure.js";
 import { isHumanMergeOnlyVerdict } from "./escalation-buckets.js";
-import { attemptThreadWrite, computeFixResponseHarvest, type FixResponseWriteOutcome } from "./fix-response.js";
+import {
+  attemptThreadWrite,
+  computeDisputeEscalation,
+  computeFixResponseHarvest,
+  type DisputeEscalation,
+  type FixResponseWriteOutcome,
+} from "./fix-response.js";
 import { reviveEnvFailedPrLanes } from "./reconcile.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1746,6 +1752,13 @@ async function reclaimTerminalLane(
               fixRounds: w.fix_rounds ?? 0,
               prNumber: p.prNumber ?? w.pr ?? null,
               resultText: p.resultText ?? "",
+              // #451: `w.review_triggered_head` is read HERE, before fixingPinClear's own write
+              // (below, same settleTerminalWorker transaction) nulls it out — it is exactly the
+              // head this fix round's FIXABLE gate was derived against (merge-driver.ts's driveOne
+              // only reaches a verdict once `triggerPin.head === status.headOid`), so it durably
+              // anchors this round's disputed/addressed resolutions to the head they actually
+              // answered. See FixResponseSettleBatch.headOid's own doc.
+              headOid: w.review_triggered_head ?? null,
             })
           : undefined;
       // PR produced: hold the lane in `driving` (it still occupies a lane until the #13 review
@@ -3084,6 +3097,31 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           // budget; see that constant's own doc for what still bounds it).
           const fixRounds = w.fix_rounds ?? 0;
           const cap = cfg.lanes.prFixCap;
+          // #451 (design #402 §4/§4a/D4): a disputed thread is priced at ZERO paid fix legs, not
+          // a threshold — checked BEFORE driveDecision below even runs, because when it fires it
+          // REPLACES the whole FIXUP/ESCALATE decision for this tick rather than refining it.
+          // `prescription === "findings"` scopes this to the thread-bearing branch of FIXABLE
+          // (never the merge-conflict prescription, which has no threads at all — see
+          // `DriveOutcome`'s own doc, merge-driver.ts). computeDisputeEscalation is itself the
+          // structural gate for classic-vs-engine-agent (see its own doc): an engine-agent-caused
+          // fixable has zero live review threads, so it always returns `null` here and this whole
+          // branch is a no-op for that path, naturally disjoint from #457's verdictRunId-keyed
+          // breaker below — never both on the same tick (conductor.test.ts pins this).
+          const disputeEscalation =
+            outcome.prescription === "findings" ? await computeDisputeEscalation(forge, state, cfg, w.name, pr) : null;
+          if (disputeEscalation) {
+            const escalated = await escalateReviewDisputed(forge, state, cfg, w, pr, fixRounds, disputeEscalation, iso);
+            if (escalated) {
+              driveFixBlockedLanes.add(w.name);
+              driven.push(escalated);
+              break;
+            }
+            // A forge write (label or comment) failed — same "leave the row driving, retry the
+            // WHOLE branch next tick" contract the cap-exhausted escalation below takes; nothing
+            // to do here but fall through to the ordinary retry-next-tick queued outcome.
+            driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "review-disputed-escalation-write-failed" });
+            break;
+          }
           const action = driveDecision("FIXABLE", fixRounds, cap, driveOverBudget);
           // #457 (F36): verdict-rerun breaker — see priorFixLegForVerdict's own doc. A prior
           // `drive-fixup` for this exact engine-agent verdict means its one leg already ran and
@@ -3881,4 +3919,70 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     fixingReclaimed,
     fixResponses,
   };
+}
+
+/** #451 (design #402 §4/D4): the `review-disputed` escalation — a FIXABLE tick whose every
+ *  unresolved current-head thread is durably recorded `disputed` (computeDisputeEscalation,
+ *  fix-response.ts) escalates straight to `needs-human`, spending ZERO fix rounds (unlike the
+ *  cap-exhausted branch below it, this is never reached having dispatched a fix leg this tick —
+ *  `w.fix_rounds` is carried through UNCHANGED on the terminal upsert). Defined here, at module
+ *  end (a hoisted function declaration, called from `tick()`'s FIXABLE branch above), so its own
+ *  `addLabel` call physically follows every OTHER needsHuman-labeled write site in this file —
+ *  escalation-buckets.test.ts's SITE_INVENTORY is keyed by (file, scan-order ordinal), and this
+ *  placement adds ONE new trailing entry instead of renumbering the twenty-two that already exist.
+ *
+ *  Same forge-before-terminal-upsert discipline as the fix-rounds-capped branch (#69/#147): the
+ *  needs-human label AND the evidence comment land BEFORE the terminal upsert, and — the amendment
+ *  requirement driving `ESCALATION_SOURCES["review-disputed"] = "always"` — the `review-disputed`
+ *  event is appended STRICTLY AFTER both writes succeed, never before. A label-write failure
+ *  leaves the row untouched (still `driving`) so next tick's fresh FIXABLE re-derivation retries
+ *  the whole branch from scratch; a comment-write failure does the same (never silently drop the
+ *  evidence a human needs to adjudicate). Returns `null` on either failure — the caller pushes its
+ *  own `queued` outcome and retries next tick, same shape escalateNeedsHuman's callers do not need
+ *  because THAT function tolerates a labelError inline; this one cannot, because the comment
+ *  carries load-bearing adjudication evidence a `.catch(() => {})` would silently lose. */
+async function escalateReviewDisputed(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  w: WorkerRow,
+  pr: number,
+  fixRoundsSpent: number,
+  escalation: DisputeEscalation,
+  iso: () => string,
+): Promise<DrivenOutcome | null> {
+  try {
+    await forge.addLabel(w.issue, cfg.labels.needsHuman);
+  } catch (e) {
+    state.appendEvent("review-disputed-label-failed", { worker: w.name, issue: w.issue, pr, error: String(e) });
+    return null;
+  }
+  const evidence = escalation.threads
+    .map((t) => `- thread \`${t.threadId}\`\n  reviewer finding: ${t.findingBody}\n  producer reply (disputed, unresolved): ${t.reply}`)
+    .join("\n\n");
+  const comment =
+    `sapwood: PR #${pr} — every unresolved review thread on the current head (\`${escalation.headOid}\`) carries a ` +
+    `recorded **disputed** resolution (${fixRoundsSpent} fix round(s) already spent). A dispute is a producer/reviewer ` +
+    `disagreement, not something more fix rounds can resolve (design #402 §4/D4) — escalating directly to ` +
+    `\`${cfg.labels.needsHuman}\` for adjudication instead of dispatching another fix leg. Evidence per thread:\n\n${evidence}\n\n` +
+    `Adjudicate each: side with the reviewer (resolve the thread yourself, or ask for another fix round) or side with the ` +
+    `producer (resolve it as not-a-defect). Remove \`${cfg.labels.needsHuman}\` once done to reclaim (#147 gated reentry).`;
+  try {
+    await forge.addIssueComment(w.issue, comment);
+  } catch (e) {
+    state.appendEvent("review-disputed-comment-failed", { worker: w.name, issue: w.issue, pr, error: String(e) });
+    return null;
+  }
+  // Zero fix-round cost (AC): `fix_rounds` carried through unchanged — this branch never called
+  // startFixLeg, so there is nothing to bump.
+  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
+  state.appendEvent("review-disputed", {
+    worker: w.name,
+    issue: w.issue,
+    pr,
+    headOid: escalation.headOid,
+    fixRounds: fixRoundsSpent,
+    threads: escalation.threads.map((t) => t.threadId),
+  });
+  return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `review-disputed:${escalation.threads.length}` };
 }
