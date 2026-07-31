@@ -809,12 +809,36 @@ test("reconcileEscalations: a fix-rounds-capped lane whose PR was hand-merged re
   state.close();
 });
 
+test("openEscalations: fix-leg-verdict-rerun is a tracked source — the breaker's escalation must surface on the strip, never the F34 invisible class (#457 review round 1 P1)", () => {
+  const open = openEscalations([
+    { kind: "fix-leg-verdict-rerun", payload: { worker: "w1", issue: 7, pr: 12, fixRounds: 1, cap: 8, verdictRunId: "run-9" } },
+  ]);
+  assert.equal(open.size, 1);
+  assert.deepEqual(open.get("fix-leg-verdict-rerun:7"), { source: "fix-leg-verdict-rerun", issue: 7, pr: 12, labelProven: true });
+});
+
+test("reconcileEscalations: a fix-leg-verdict-rerun lane whose PR was hand-merged resolves via 'merged' — same clear semantics as fix-rounds-capped (#457 review round 1 P1)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("fix-leg-verdict-rerun", { worker: "w1", issue: 7, pr: 12, fixRounds: 1, cap: 8, verdictRunId: "run-9" });
+  forge.prStates[12] = "MERGED";
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source: "fix-leg-verdict-rerun", via: "merged" }]);
+  state.close();
+});
+
 // #447: `lane-revived` is the OTHER return of a `failed` lane to `driving` — same clear rule.
+// #457 review round 1 (P1): `fix-leg-verdict-rerun` rides the same parametrized sweep — it must
+// clear on every issue-moving kind exactly like the sources it shares the fold with.
 for (const clearKind of ["dispatched", "merged", "gated-reentry", "lane-revived"]) {
   test(`openEscalations: a later '${clearKind}' on the same issue clears the item — the strip's own fold rule (round 4 P2)`, () => {
     const open = openEscalations([
       { kind: "ceiling-escalated", payload: { worker: "w1", issue: 7, reasons: ["x"] } },
       { kind: "env-failure-preserved", payload: { worker: "w1", issue: 7 } },
+      { kind: "fix-leg-verdict-rerun", payload: { worker: "w1", issue: 7, pr: 12, fixRounds: 1, cap: 8 } },
       { kind: clearKind, payload: { worker: "w1", issue: 7 } },
     ]);
     assert.equal(open.size, 0, "every source on that issue clears, not just one key");

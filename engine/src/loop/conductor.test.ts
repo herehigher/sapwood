@@ -2005,6 +2005,9 @@ test("tick DRIVE (#457, F36): verdict-rerun breaker — a SECOND fixable for the
   assert.equal(row.gated_escalation_labeled, 1);
   assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
   assert.match(forge.issueComments[0]![1], /already ran against this exact review verdict/);
+  // #457 review round 1 (P2b, accepted push-failure blind spot): the comment directs the human
+  // at the preserved worktree rather than the engine growing push-detection machinery.
+  assert.match(forge.issueComments[0]![1], /unpushed commits/);
   assert.equal(r2.driven[0]?.kind, "needs-human");
   assert.equal((r2.driven[0] as { reason: string }).reason, "fix-leg-no-op:verdict-rerun");
   const trip = st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-verdict-rerun"]);
@@ -2051,6 +2054,39 @@ test("tick DRIVE (#457, F36): a fixable WITHOUT a verdictRunId (classic reviewer
   st.close();
 });
 
+test("tick DRIVE (#457 review round 1 P2, interrupted-leg amnesty): an env-failed then #447-revived leg gets a FRESH leg for the same verdict — only a completed no-op leg after the revival trips the breaker", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = {
+    kind: "fixable",
+    pr: 55,
+    reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false",
+    verdictRunId: "run-9",
+  };
+  const fixLegResume = { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never };
+  const deps = { now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, fixLegResume };
+  await tick(deps); // leg 1 dispatched (drive-fixup recorded)
+  // The leg is killed by an environment failure and later revived (#447) — it never completed,
+  // so its dispatch record must not count as a completed no-op leg.
+  st.appendEvent("env-failure-preserved", { worker: "lane-a", issue: 2, source: "quota" });
+  st.appendEvent("lane-revived", { worker: "lane-a", issue: 2, pr: 55 });
+  st.upsertWorker({ ...st.getWorker("lane-a")!, state: "driving", ended_at: null });
+  const r2 = await tick(deps);
+  assert.equal(r2.driven[0]?.kind, "fixup", "the retry leg for the interrupted one dispatches — no trip");
+  assert.equal(sup.resumeCalls.length, 2);
+  assert.deepEqual(forge.labelsAdded, []);
+  // THAT leg completes having pushed nothing: the same pinned verdict re-consumes — NOW it trips.
+  st.upsertWorker({ ...st.getWorker("lane-a")!, state: "driving", ended_at: "t4" });
+  const r3 = await tick(deps);
+  assert.equal(r3.driven[0]?.kind, "needs-human");
+  assert.equal((r3.driven[0] as { reason: string }).reason, "fix-leg-no-op:verdict-rerun");
+  assert.equal(sup.resumeCalls.length, 2, "no third leg");
+  st.close();
+});
+
 test("priorFixLegForVerdict (#457): matches only the SAME lane's drive-fixup with the SAME verdictRunId; classic drive-fixup events (no verdictRunId) never match", () => {
   const st = new State(":memory:");
   assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), false);
@@ -2060,6 +2096,21 @@ test("priorFixLegForVerdict (#457): matches only the SAME lane's drive-fixup wit
   assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), true);
   assert.equal(priorFixLegForVerdict(st, "lane-b", "run-9"), false, "another lane's dispatch never matches");
   assert.equal(priorFixLegForVerdict(st, "lane-a", "run-10"), false, "another verdict never matches");
+  st.close();
+});
+
+test("priorFixLegForVerdict (#457 review round 1 P2): interruption events amnesty ONLY the same lane's earlier dispatches — later completed legs trip again", () => {
+  const st = new State(":memory:");
+  st.appendEvent("drive-fixup", { worker: "lane-a", issue: 2, pr: 55, fixRounds: 1, reason: "r", verdictRunId: "run-9" });
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), true);
+  st.appendEvent("env-failure-preserved", { worker: "lane-a", issue: 2, source: "quota" });
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), false, "an interrupted leg's dispatch is amnestied");
+  st.appendEvent("lane-revived", { worker: "lane-a", issue: 2, pr: 55 });
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), false, "revival keeps the amnesty");
+  st.appendEvent("drive-fixup", { worker: "lane-a", issue: 2, pr: 55, fixRounds: 2, reason: "r", verdictRunId: "run-9" });
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), true, "the post-revival completed leg trips normally");
+  st.appendEvent("env-failure-preserved", { worker: "lane-b", issue: 3, source: "quota" });
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), true, "another lane's interruption forgives nothing here");
   st.close();
 });
 

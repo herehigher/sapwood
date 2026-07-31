@@ -24,7 +24,9 @@ Out of scope: <!-- Encouraged: name one adjacent documentation change this issue
      with no checkbox do not count. A criterion may wrap onto more than one line (like the
      example below) — that's fine, it's still one criterion. Exempt ONLY if this doc change is
      inherently unverifiable and carries the `verify:n/a` label (doc-gate path, see the
-     Verification plan section below). -->
+     Verification plan section below). Never write CI/build status as a criterion ("the docs
+     build passes", "CI green") — CI enforces those unconditionally; execution steps belong in
+     the Verification plan below. -->
 
 - [ ] Concrete, checkable statement of what "done" looks like (e.g. which section of
       which doc is added/updated, and what it says).

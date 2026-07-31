@@ -131,6 +131,13 @@ const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
   // AFTER its own addLabel returned (a throw emits `fix-rounds-cap-label-failed` and `break`s
   // without this event), and its payload carries the driving lane's `pr`.
   "fix-rounds-capped": "always",
+  // #457 review round 1 (P1): the verdict-rerun breaker's escalation (conductor.ts's shared
+  // fix-escalation branch) — same emission ordering as `fix-rounds-capped`, which it shares a
+  // branch with: appended strictly AFTER its own addLabel returned (a throw emits
+  // `fix-rounds-cap-label-failed` and `break`s without this event), payload carries the driving
+  // lane's `pr`. `always`, for the identical reason. Absent from this table it would be the F34
+  // failure class: an invisible escalation no external merge/close/label-removal could resolve.
+  "fix-leg-verdict-rerun": "always",
   // #295 review round 10 (Codex P1): the two gate⓪ attention sources frontend-design.md §3 flags
   // by name. Neither carries a PR.
   //

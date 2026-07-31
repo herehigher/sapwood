@@ -326,22 +326,45 @@ export function fixLegAdmissionBlockReason(input: {
 }
 
 /** #457 (F36): the verdict-rerun circuit breaker's lookup — has a fix leg ALREADY been dispatched
- *  (a `drive-fixup` event recorded) for this lane against this EXACT decisive engine-review
- *  verdict? An engine-agent decisive verdict is pinned PERMANENT per head (review/drive.ts) and
- *  re-consumed every tick until the head moves, so a SECOND fix leg for the same `verdictRunId`
- *  means the first leg pushed nothing — its rerun would receive byte-identical inputs and is
- *  deterministically useless (the F36 wedge: PR #456 burned prFixCap 8/8 in no-op legs). Keys on
- *  the engine-authored runId, NEVER on bare head-unchanged (a zero-push CLASSIC fix leg can be
- *  real progress via engine-executed thread replies/resolves) and never on session prose.
- *  Event-log reuse, no new schema — same trick as fix-response.ts's fixLegJournalCursor. Bounded
- *  blind spot (accepted): the `drive-fixup` event lands AFTER startFixLeg confirms the spawn, so
- *  a crash in that window forgets one dispatch and the breaker trips one leg later — still
- *  capped by prFixCap, never unbounded. */
+ *  (a `drive-fixup` event recorded) AND run to completion for this lane against this EXACT
+ *  decisive engine-review verdict? An engine-agent decisive verdict is pinned PERMANENT per head
+ *  (review/drive.ts) and re-consumed every tick until the head moves, so a SECOND fix leg for the
+ *  same `verdictRunId` means the first leg pushed nothing — its rerun would receive
+ *  byte-identical inputs and is deterministically useless (the F36 wedge: PR #456 burned prFixCap
+ *  8/8 in no-op legs). Keys on the engine-authored runId, NEVER on bare head-unchanged (a
+ *  zero-push CLASSIC fix leg can be real progress via engine-executed thread replies/resolves)
+ *  and never on session prose. Event-log reuse, no new schema — same trick as fix-response.ts's
+ *  fixLegJournalCursor.
+ *
+ *  #457 review round 1 (P2, interrupted-leg amnesty): a dispatch record is NOT proof the leg ran
+ *  to completion. A leg killed by an environment failure (env-failure-preserved) and later
+ *  revived (#447's lane-revived) never got to act on the findings — denying its retry leg would
+ *  escalate a lane whose fix never ran. So a LATER env-failure-preserved/lane-revived event for
+ *  the SAME worker forgives every earlier dispatch: the next leg for that verdict runs fresh, and
+ *  only a completed no-op leg AFTER the revival trips the breaker. Ordering is eventsSince's own
+ *  chronological (by id) contract — no wall-clock comparison.
+ *
+ *  Bounded blind spots (accepted, honesty over machinery): (1) the `drive-fixup` event lands
+ *  AFTER startFixLeg confirms the spawn, so a crash in that window forgets one dispatch and the
+ *  breaker trips one leg later — still capped by prFixCap; (2) a leg that committed locally but
+ *  FAILED TO PUSH looks identical to a no-op leg, so the breaker escalates one leg early — no
+ *  push-detection machinery for it (ruled #457 review round 1); the escalation comment instead
+ *  tells the human to check the preserved worktree for unpushed commits. */
 export function priorFixLegForVerdict(state: Pick<State, "eventsSince">, worker: string, verdictRunId: string): boolean {
-  return state.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]).some((e) => {
+  const events = state.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup", "env-failure-preserved", "lane-revived"]);
+  let tripped = false;
+  for (const e of events) {
     const p = e.payload as { worker?: unknown; verdictRunId?: unknown };
-    return p.worker === worker && p.verdictRunId === verdictRunId;
-  });
+    if (p.worker !== worker) continue;
+    if (e.kind === "drive-fixup") {
+      if (p.verdictRunId === verdictRunId) tripped = true;
+    } else {
+      // env-failure-preserved / lane-revived AFTER the dispatch: that leg was interrupted, its
+      // dispatch record is amnestied (see doc above).
+      tripped = false;
+    }
+  }
+  return tripped;
 }
 
 /** #375 AC2: is a `driving` lane TERMINAL-for-drain — i.e. can it NEVER make forward progress
@@ -2942,7 +2965,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           const escalComment = verdictRerun
             ? `sapwood: no further fix leg for PR #${pr} — one already ran against this exact review verdict ` +
               `and pushed no change (${fixRounds} fix round(s) spent of ${cap}), so the standing signal is not ` +
-              `producer-fixable (${outcome.reason}). Escalating to \`${cfg.labels.needsHuman}\` for ` +
+              `producer-fixable (${outcome.reason}). If that leg committed work whose push failed, it is still ` +
+              `in the lane's preserved worktree — check there for unpushed commits before adjudicating. ` +
+              `Escalating to \`${cfg.labels.needsHuman}\` for ` +
               `adjudication: resolve the signal, then remove the label to reclaim the PR (#147 gated reentry).`
             : `sapwood: fix-round cap (${cap}) reached for PR #${pr} — ${fixRounds} round(s) spent, ` +
               `standing fixable signal unresolved (${outcome.reason}). Escalating to \`${cfg.labels.needsHuman}\` for ` +
