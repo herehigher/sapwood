@@ -452,6 +452,24 @@ test("shipped engine-reviewer prompt (#319): forbids markdown fences around the 
   assert.doesNotMatch(prompt, /^<<<END_SAPWOOD_RESULT>>>[ \t]*\n```[ \t]*$/m);
 });
 
+test("shipped engine-reviewer prompt (#457, F36): pins the execution-class tiering rule — the engine is the execution authority, and the fail-closed carve-outs stay verbatim", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.match(prompt, /Execution-class criteria — the engine, not you, is the execution authority\./);
+  assert.match(prompt, /can never be `confirmed` by a static\s+session, and that inability is NOT a gap in the PR\./);
+  assert.match(prompt, /tier it\s+`claim-accepted` when the tree corroborates the claim/);
+  // The fail-closed carve-outs: these three shapes stay cannot-confirm + finding.
+  assert.match(
+    prompt,
+    /Reserve\s+`cannot-confirm` \(with its finding\) for what the PRODUCER can actually fix in this PR: a missing\s+or vacuous test, an execution claim with no CI coverage at all, or a diff that visibly\s+contradicts the criterion\./,
+  );
+});
+
+test("shipped engine-reviewer prompt (#457, F36): pins the capability-limit rule — a session's own inability to execute is never itself a finding", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.match(prompt, /A capability limit of this review session[\s\S]*is never itself a finding\./);
+  assert.match(prompt, /Every finding must name something the producer\s+\(or a human adjudicator\) can act on IN this PR's content\./);
+});
+
 test("loadEngineReviewerPromptTemplate: a custom template MISSING a required placeholder throws at load, naming the missing one (#74 fail-fast)", () => {
   const dir = mkdtempSync(join(tmpdir(), "engine-agent-template-"));
   const file = join(dir, "no-diff.md");

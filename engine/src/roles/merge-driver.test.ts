@@ -880,6 +880,8 @@ test("MergeDriver.driveOne (#270): conflict + standing findings chooses the sing
   assert.equal((outcome as { prescription?: string }).prescription, "conflict");
   assert.match((outcome as { reason: string }).reason, /merge-conflict/);
   assert.doesNotMatch((outcome as { reason: string }).reason, /HANDLE_THREADS/);
+  // #457 (F36): conflict-caused fixables never carry a verdictRunId (breaker cause-isolation).
+  assert.equal((outcome as { verdictRunId?: string }).verdictRunId, undefined);
 });
 
 test("MergeDriver.driveOne (#270): prFixCap:0 escalates conflict; produce-pr-and-stop only reports FIXABLE", async () => {
@@ -970,6 +972,9 @@ test("MergeDriver.driveOne (#246): unresolved findings (HANDLE_THREADS) -> fixab
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "fixable");
   assert.match((outcome as { reason: string }).reason, /HANDLE_THREADS/);
+  // #457 (F36): a CLASSIC-reviewer fixable carries NO verdictRunId — it sits structurally
+  // outside the conductor's verdict-rerun breaker.
+  assert.equal((outcome as { verdictRunId?: string }).verdictRunId, undefined);
   assert.deepEqual(forge.merged, []);
   assert.deepEqual(forge.labelsAdded, []); // driveOne itself never labels — the caller (conductor.ts) owns escalation
 });
@@ -1042,6 +1047,8 @@ test("MergeDriver.driveOne (#246): CI_RED alongside MERGE_OK -> fixable; produce
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "fixable");
   assert.match((outcome as { reason: string }).reason, /ciRed=true/);
+  // #457 (F36): a CI_RED-caused classic fixable carries no verdictRunId (breaker cause-isolation).
+  assert.equal((outcome as { verdictRunId?: string }).verdictRunId, undefined);
 
   const stopDriver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg({ merge: { mode: "produce-pr-and-stop" } }) });
   const stopped = await stopDriver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
@@ -1921,6 +1928,68 @@ test("MergeDriver.driveOne (engine-agent): rejected + delivered -> FIXABLE (cond
     mkEngineAgentDeps(recorded, { auditDelivery: async () => ({ delivered: true }) }),
   );
   assert.equal(outcome.kind, "fixable");
+  if (outcome.kind === "fixable") {
+    // #457 (F36): an engine-agent-derived fixable carries the decisive verdict's own runId —
+    // the conductor's verdict-rerun breaker keys on it.
+    assert.equal(outcome.verdictRunId, "run-1");
+  }
+});
+
+test("MergeDriver.driveOne (engine-agent, #457 review round 1 P1): a MERGE_OK + CI-red FIXABLE is structurally unreachable through the consume path — no verdictRunId-bearing fixable can ever exist for a CI-repair cause", async () => {
+  // The adjudicated concern: the breaker must never deny a repeat CI-repair leg. Through the
+  // engine-agent path that shape cannot arise at all: consume requires ciGreen
+  // (refetchStillValid, review/drive.ts) and ciGreen excludes ciRed by construction
+  // (forge.ts's derivation — any failed check makes ciGreen false). Driving the artificial
+  // both-true state through anyway pins the precedence that guarantees it: deriveGate's
+  // MERGE_OK arm consults ciGreen FIRST, so no fixable — let alone a verdictRunId-bearing one —
+  // is ever derived. The REACHABLE CI-red repair fixable is the classic path's (ciGreen=false),
+  // pinned verdictRunId-less in the #246 CI_RED test above.
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, ciRed: true }; // artificial: ciGreen also true (fake-only)
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async (): Promise<ApprovalResult> => ({
+      kind: "approved",
+      headOid: "HEAD",
+      evidence: { freshApprovingReviews: 0, freshTrustedSignals: 0 },
+    }),
+  };
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkEngineAgentCfg({ lanes: { prFixCap: 2 } }) });
+  const outcome = await driver.driveOne(
+    7,
+    46,
+    ALREADY_TRIGGERED,
+    noopRecord,
+    undefined,
+    undefined,
+    undefined,
+    mkEngineAgentDeps(recorded, { auditDelivery: async () => ({ delivered: true }) }),
+  );
+  assert.notEqual(outcome.kind, "fixable", "MERGE_OK never derives a fixable while ciGreen holds — the breaker has nothing to key on");
+});
+
+test("MergeDriver.driveOne (engine-agent, #457 review round 1 P1): rejected verdict WHILE CI is also red -> no verdictRunId either (conservative: the mixed cause is outside the breaker; the cap still bounds it)", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, ciRed: true };
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async (): Promise<ApprovalResult> => ({ kind: "rejected", headOid: "HEAD", findings: [{ id: "f1", body: "bug" }] }),
+  };
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkEngineAgentCfg({ lanes: { prFixCap: 2 } }) });
+  const outcome = await driver.driveOne(
+    7,
+    46,
+    ALREADY_TRIGGERED,
+    noopRecord,
+    undefined,
+    undefined,
+    undefined,
+    mkEngineAgentDeps(recorded, { auditDelivery: async () => ({ delivered: true }) }),
+  );
+  assert.equal(outcome.kind, "fixable");
+  assert.equal((outcome as { verdictRunId?: string }).verdictRunId, undefined);
 });
 
 // ── #460 (F37): engine-agent CONFLICTING preflight -> FIXABLE:merge-conflict, not a re-queue ──

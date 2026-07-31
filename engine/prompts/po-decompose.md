@@ -37,7 +37,9 @@ Hard target for every `ready` child:
 - Exactly one PR completes it: one issue, one implementation lane, one PR.
 - Its acceptance criteria are verifiable inside that PR's own CI plus gate②. Give it a real
   `## Acceptance criteria` section with literal checkbox items and a distinct
-  `## Verification plan` section.
+  `## Verification plan` section. Never write CI/suite/typecheck status itself as a criterion
+  ("the test suite passes", "CI green") — CI enforces those unconditionally; execution steps
+  belong in the child's `## Verification plan`.
 
 Self-check heuristics only (never numeric scheduling claims and never hard gates):
 

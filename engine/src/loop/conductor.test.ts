@@ -48,6 +48,7 @@ import {
   metaLaneAllowed,
   nextRoundId,
   orderForDispatch,
+  priorFixLegForVerdict,
   type ReclaimResult,
   releaseVanishedWorktrees,
   resumeDecision,
@@ -1935,6 +1936,181 @@ test("tick DRIVE (#460, real engine-agent path): CONFLICTING at the shared fix-r
   assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
   assert.equal(st.getWorker("lane-a")?.state, "failed");
   assert.equal(sup.resumeCalls.length, 0, "capped — no fix leg dispatched");
+  st.close();
+});
+
+test("tick DRIVE (#457 x #460, breaker cause isolation on the REAL conflict route): repeated CONFLICTING fixables carry no verdictRunId and keep dispatching legs — the verdict-rerun breaker never fires for conflicts", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.prStatus = { ...forge.prStatus, mergeable: "CONFLICTING", ciGreen: false };
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "x" }) };
+  const cfg = mkCfg({ reviewer: { mode: "engine-agent", agent: { model: "sonnet" } } });
+  const gate = new MergeDriver({ forge, reviewer, cfg });
+  const deps = {
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg,
+    mergeGate: gate,
+    engineAgentDriveDeps: mkEngineAgentDriveDeps,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+  await tick(deps);
+  st.upsertWorker({ ...st.getWorker("lane-a")!, state: "driving", ended_at: "t3" });
+  const r2 = await tick(deps);
+  assert.equal(r2.driven[0]?.kind, "fixup", "second conflict leg still dispatches — no breaker trip");
+  assert.equal(sup.resumeCalls.length, 2);
+  assert.equal(st.getWorker("lane-a")?.fix_rounds, 2);
+  assert.deepEqual(forge.labelsAdded, []);
+  const fixups = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
+  assert.equal(fixups.length, 2);
+  assert.ok(
+    fixups.every((e) => (e.payload as { verdictRunId?: string }).verdictRunId === undefined),
+    "conflict fixables record no verdictRunId",
+  );
+  st.close();
+});
+
+test("tick DRIVE (#457, F36): verdict-rerun breaker — a SECOND fixable for the SAME engine-agent verdictRunId dispatches NO fix leg, spends NO fix round, and takes the cap-style escalation (label + comment before terminal upsert)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = {
+    kind: "fixable",
+    pr: 55,
+    reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false",
+    prescription: "findings",
+    verdictRunId: "run-9",
+  };
+  const fixLegResume = { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never };
+  const r1 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, fixLegResume });
+  assert.equal(r1.driven[0]?.kind, "fixup");
+  const fixup = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
+  assert.equal(fixup.length, 1);
+  assert.equal((fixup[0]!.payload as { verdictRunId?: string }).verdictRunId, "run-9", "the dispatch records the verdict identity");
+
+  // The leg reclaims having pushed NOTHING: lane back to `driving`, head unmoved — the next tick
+  // re-consumes the SAME pinned decisive verdict (review/drive.ts), i.e. the same verdictRunId.
+  st.upsertWorker({ ...st.getWorker("lane-a")!, state: "driving", ended_at: "t3" });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, fixLegResume });
+  const row = st.getWorker("lane-a")!;
+  assert.equal(sup.resumeCalls.length, 1, "no second paid leg for the same verdict");
+  assert.equal(row.fix_rounds, 1, "no further fix round spent — the breaker fires BEFORE the counter");
+  assert.equal(row.state, "failed");
+  assert.equal(row.gated_escalation_labeled, 1);
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  assert.match(forge.issueComments[0]![1], /already ran against this exact review verdict/);
+  // #457 review round 1 (P2b, accepted push-failure blind spot): the comment directs the human
+  // at the preserved worktree rather than the engine growing push-detection machinery.
+  assert.match(forge.issueComments[0]![1], /unpushed commits/);
+  assert.equal(r2.driven[0]?.kind, "needs-human");
+  assert.equal((r2.driven[0] as { reason: string }).reason, "fix-leg-no-op:verdict-rerun");
+  const trip = st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-verdict-rerun"]);
+  assert.equal(trip.length, 1);
+  assert.equal((trip[0]!.payload as { verdictRunId?: string }).verdictRunId, "run-9");
+  st.close();
+});
+
+test("tick DRIVE (#457, F36): a DIFFERENT verdictRunId (head moved -> fresh review run) dispatches a fresh fix leg — the breaker keys on the verdict identity, never the lane", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  const fixable = (verdictRunId: string) =>
+    ({ kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false", verdictRunId }) as const;
+  gate.outcomes[55] = fixable("run-9");
+  const fixLegResume = { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, fixLegResume });
+  st.upsertWorker({ ...st.getWorker("lane-a")!, state: "driving", ended_at: "t3" });
+  gate.outcomes[55] = fixable("run-10");
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, fixLegResume });
+  assert.equal(r2.driven[0]?.kind, "fixup");
+  assert.equal(sup.resumeCalls.length, 2, "a NEW verdict gets its own leg");
+  assert.equal(st.getWorker("lane-a")?.fix_rounds, 2);
+  assert.deepEqual(forge.labelsAdded, [], "no escalation — normal rework continues");
+  st.close();
+});
+
+test("tick DRIVE (#457, F36): a fixable WITHOUT a verdictRunId (classic reviewer / conflict / fallback) never trips the breaker — repeat fixables keep dispatching up to the cap", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const fixLegResume = { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, fixLegResume });
+  st.upsertWorker({ ...st.getWorker("lane-a")!, state: "driving", ended_at: "t3" });
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, fixLegResume });
+  assert.equal(r2.driven[0]?.kind, "fixup");
+  assert.equal(sup.resumeCalls.length, 2, "cause isolation: only engine-agent verdict fixables are breaker-eligible");
+  assert.deepEqual(forge.labelsAdded, []);
+  st.close();
+});
+
+test("tick DRIVE (#457 review round 1 P2, interrupted-leg amnesty): an env-failed then #447-revived leg gets a FRESH leg for the same verdict — only a completed no-op leg after the revival trips the breaker", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = {
+    kind: "fixable",
+    pr: 55,
+    reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false",
+    verdictRunId: "run-9",
+  };
+  const fixLegResume = { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never };
+  const deps = { now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, fixLegResume };
+  await tick(deps); // leg 1 dispatched (drive-fixup recorded)
+  // The leg is killed by an environment failure and later revived (#447) — it never completed,
+  // so its dispatch record must not count as a completed no-op leg.
+  st.appendEvent("env-failure-preserved", { worker: "lane-a", issue: 2, source: "quota" });
+  st.appendEvent("lane-revived", { worker: "lane-a", issue: 2, pr: 55 });
+  st.upsertWorker({ ...st.getWorker("lane-a")!, state: "driving", ended_at: null });
+  const r2 = await tick(deps);
+  assert.equal(r2.driven[0]?.kind, "fixup", "the retry leg for the interrupted one dispatches — no trip");
+  assert.equal(sup.resumeCalls.length, 2);
+  assert.deepEqual(forge.labelsAdded, []);
+  // THAT leg completes having pushed nothing: the same pinned verdict re-consumes — NOW it trips.
+  st.upsertWorker({ ...st.getWorker("lane-a")!, state: "driving", ended_at: "t4" });
+  const r3 = await tick(deps);
+  assert.equal(r3.driven[0]?.kind, "needs-human");
+  assert.equal((r3.driven[0] as { reason: string }).reason, "fix-leg-no-op:verdict-rerun");
+  assert.equal(sup.resumeCalls.length, 2, "no third leg");
+  st.close();
+});
+
+test("priorFixLegForVerdict (#457): matches only the SAME lane's drive-fixup with the SAME verdictRunId; classic drive-fixup events (no verdictRunId) never match", () => {
+  const st = new State(":memory:");
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), false);
+  st.appendEvent("drive-fixup", { worker: "lane-a", issue: 2, pr: 55, fixRounds: 1, reason: "r" }); // classic: no verdictRunId
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), false);
+  st.appendEvent("drive-fixup", { worker: "lane-a", issue: 2, pr: 55, fixRounds: 2, reason: "r", verdictRunId: "run-9" });
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), true);
+  assert.equal(priorFixLegForVerdict(st, "lane-b", "run-9"), false, "another lane's dispatch never matches");
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-10"), false, "another verdict never matches");
+  st.close();
+});
+
+test("priorFixLegForVerdict (#457 review round 1 P2): interruption events amnesty ONLY the same lane's earlier dispatches — later completed legs trip again", () => {
+  const st = new State(":memory:");
+  st.appendEvent("drive-fixup", { worker: "lane-a", issue: 2, pr: 55, fixRounds: 1, reason: "r", verdictRunId: "run-9" });
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), true);
+  st.appendEvent("env-failure-preserved", { worker: "lane-a", issue: 2, source: "quota" });
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), false, "an interrupted leg's dispatch is amnestied");
+  st.appendEvent("lane-revived", { worker: "lane-a", issue: 2, pr: 55 });
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), false, "revival keeps the amnesty");
+  st.appendEvent("drive-fixup", { worker: "lane-a", issue: 2, pr: 55, fixRounds: 2, reason: "r", verdictRunId: "run-9" });
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), true, "the post-revival completed leg trips normally");
+  st.appendEvent("env-failure-preserved", { worker: "lane-b", issue: 3, source: "quota" });
+  assert.equal(priorFixLegForVerdict(st, "lane-a", "run-9"), true, "another lane's interruption forgives nothing here");
   st.close();
 });
 

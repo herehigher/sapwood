@@ -770,6 +770,11 @@ test("driveEngineAgentReview: a decisive pin for the CURRENT head is PERMANENT â
   const outcome = await driveEngineAgentReview(deps, 1, 2);
   assert.equal(evaluated, false, "a decisive pin must never trigger a new paid session");
   assert.equal(outcome.kind, "consume");
+  if (outcome.kind === "consume") {
+    // #457 (F36): the cheap-consume path must carry the WAL's OWN runId â€” the conductor's
+    // verdict-rerun breaker keys on it to recognize a re-consumed verdict.
+    assert.equal(outcome.verdict.verdictRunId, "run-1");
+  }
 });
 
 test("#288 restart reconciliation upgrades an unavailable pin from WAL receipt discovery without rerunning the paid session", async () => {
@@ -850,6 +855,8 @@ test("driveEngineAgentReview: approved + delivered + refetch clean -> consume wi
   if (outcome.kind === "consume") {
     assert.equal(outcome.verdict.action, "MERGE_OK");
     assert.equal(outcome.verdict.headOid, "H1");
+    // #457 (F36): a fresh-session consume carries THIS attempt's runId (the WAL/pin identity).
+    assert.equal(outcome.verdict.verdictRunId, "run-1");
   }
   assert.equal(recorded.pin?.kind, "decisive");
   assert.equal(recorded.wal?.decisiveOutcome, "approved");

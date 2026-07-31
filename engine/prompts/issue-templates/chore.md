@@ -24,7 +24,9 @@ Out of scope: <!-- Encouraged: name one adjacent thing this issue will not do. -
      with no checkbox do not count. A criterion may wrap onto more than one line (indent the
      continuation, like this comment) — that's fine, it's still one criterion. Exempt ONLY if
      this chore is inherently unverifiable and carries the `verify:n/a` label (doc-gate path,
-     see the Verification plan section below). -->
+     see the Verification plan section below). Never write CI/suite/typecheck status as a
+     criterion ("the test suite passes", "CI green") — CI enforces those unconditionally;
+     execution steps belong in the Verification plan below. -->
 
 - [ ] Concrete, checkable statement of what "done" looks like.
 

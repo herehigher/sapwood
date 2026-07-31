@@ -537,7 +537,7 @@ drive it, via one anime.js timeline per transition:
 | `dispatched` | Droplet detaches from the backlog stack, travels into a lane channel (`--travel`); the lane card (§3 C) lights `--sap` in the same beat. |
 | lane `running → driving` (canonical source: the PR-open transition event, `reclaim-done` with `payload.next: driving` — `/state` polling is only the live overlay that may show it a beat earlier) | Droplet emerges from the lane carrying a PR tag and parks **at the CI / REVIEW checkpoint pair**, which breathes softly while the PR waits. The engine computes gate progress live against GitHub and persists no substate, so v0.2 renders the review passage as one *waiting* state — the checkpoints never fake per-gate progress or pass/fail states. (A persisted `gate-advanced` event unlocking the two-step animation is deferred, §10.) |
 | `drive-fixup` → `fix-leg-started` | The droplet travels the **return arrow** back into its own lane; the send-back reason word (review findings / checks failed / merge conflict) lights on the arrow, the lane chip flips to `FIXING · round n of cap`, and the lane channel re-lights `--sap` — the worker fixing its own PR is the loop's proof moment. `fix-leg-resumed` re-lights the same state after a mid-fix handoff. |
-| `fix-rounds-capped`, `drive-needs-human` | The droplet crosses onto the **rust escalation branch** and parks at the NEEDS HUMAN node; the same item lands as a row in the Needs-attention strip. Still, not loud. |
+| `fix-rounds-capped`, `fix-leg-verdict-rerun`, `drive-needs-human` | The droplet crosses onto the **rust escalation branch** and parks at the NEEDS HUMAN node; the same item lands as a row in the Needs-attention strip. Still, not loud. |
 | `merged` | Both gates flash `--moss` with a ✓, the droplet crosses the merge arm into the trunk and **becomes a ring**: a new circle strokes in over 1.2 s, ring counter increments in Fraunces. The one celebratory moment. |
 | `handoff` | Droplet folds back into the backlog with a small progress badge ("saved for a successor"). |
 | `reclaim-failed`, `reclaim-dead`, `rollback-escalated` | Droplet stops, flips `--rust` with a static ✕; no shaking, no bouncing — failures are still, not loud. (`drive-needs-human` routes via the escalation branch above.) |
@@ -620,6 +620,7 @@ checklist item**):
 | `fix-leg-started` | Lane {worker} is fixing its PR — round {n} of {cap} |
 | `fix-leg-resumed` | Lane {worker} resumed fixing after a handoff |
 | `fix-rounds-capped` | PR #{pr} used up its fix attempts — needs a human |
+| `fix-leg-verdict-rerun` | PR #{pr}'s review findings aren't fixable by the producer — needs a human |
 | `ceiling-escalated` | Safety ceiling reached — winding down all work |
 | `rollback-recovered` | Returned issue #{issue} to the backlog safely |
 | `rollback-retry-failed` | Still trying to return issue #{issue} to the backlog |

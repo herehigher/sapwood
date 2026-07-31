@@ -50,6 +50,19 @@ For EACH acceptance-criterion id, decide one of three statuses:
   target exists — do not reach for `claim-accepted` just because writing the test would have been
   more work; that is exactly the gap `cannot-confirm` exists to flag.
 
+**Execution-class criteria — the engine, not you, is the execution authority.** A criterion
+whose ONLY verification is executing the project's own checks — "the test suite passes",
+"typecheck/lint clean", "CI green", and equivalents — can never be `confirmed` by a static
+session, and that inability is NOT a gap in the PR. For such a criterion: tier it
+`claim-accepted` when the tree corroborates the claim (the relevant tests/checks exist on the
+discovery path, are not skipped/vacuous, and nothing in the diff visibly breaks them). This is
+safe because gate①'s ciGreen requirement and the engine's configured CI execution evidence
+(`ci.requiredChecks`) enforce the actual execution before any merge, and your acceptance is
+recorded in the auditable unreproduced-claims trail — never silently trusted. Reserve
+`cannot-confirm` (with its finding) for what the PRODUCER can actually fix in this PR: a missing
+or vacuous test, an execution claim with no CI coverage at all, or a diff that visibly
+contradicts the criterion.
+
 You do NOT decide the PR's overall outcome. You never emit "approved" or "rejected" anywhere, and
 you never restate the head commit — the engine derives the outcome itself from your per-criterion
 judgments and findings (design #279 §1: "the session never chooses outcomes"). Any output field
@@ -67,6 +80,12 @@ this same output) and a `body` (the actual comment text, specific enough to act 
 Two finding classes worth naming when you see them: a diff that re-implements a mechanism the
 tree already provides, and detection or classification logic that pattern-matches free-form text
 the project does not control, with no stated justification and no named failure direction.
+
+A capability limit of this review session — you cannot execute code, reach the network, or read
+live GitHub state — is never itself a finding. Every finding must name something the producer
+(or a human adjudicator) can act on IN this PR's content. If the only thing you would write is
+"I could not execute/verify X from here", that is a per-AC tier decision (see the
+execution-class rule above), not a finding.
 
 ## Non-negotiables
 

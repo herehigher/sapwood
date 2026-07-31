@@ -230,7 +230,18 @@ export type EngineAgentDriveOutcome =
   // deriveGate CONFLICTING branch driveOne's classic path already uses, instead of this module
   // re-deriving (or duplicating) that gate itself.
   | { kind: "conflict"; status: PRStatus; data: PRReviewData }
-  | { kind: "consume"; status: PRStatus; data: PRReviewData; verdict: { action: "MERGE_OK" | "HANDLE_THREADS"; headOid: string } };
+  /** `verdict.verdictRunId` is the WAL/pin runId of the ONE decisive review run this verdict came
+   *  from (#457, F36): a decisive pin is PERMANENT per head, so the SAME (runId, head) verdict is
+   *  re-consumed on every tick until the head moves — the conductor's fix-leg circuit breaker
+   *  keys on it (one fix leg per decisive rejected verdict; a rerun means the leg pushed nothing
+   *  and a second identical leg is deterministically useless). Engine-authored identity, never
+   *  derived from session prose. */
+  | {
+      kind: "consume";
+      status: PRStatus;
+      data: PRReviewData;
+      verdict: { action: "MERGE_OK" | "HANDLE_THREADS"; headOid: string; verdictRunId: string };
+    };
 
 /**
  * The full engine-agent drive-ordering pipeline (design #279 §2), EXCLUDING the final
@@ -392,7 +403,7 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
       kind: "consume",
       status: status0,
       data: data0,
-      verdict: { action: syntheticVerdictAction(wal.decisiveOutcome), headOid: wal.head },
+      verdict: { action: syntheticVerdictAction(wal.decisiveOutcome), headOid: wal.head, verdictRunId: wal.runId },
     };
   }
   if (pin?.kind === "unavailable") {
@@ -532,5 +543,10 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     return { kind: "queued", reason: `engine-agent: post-session refetch discarded this tick's consume — ${revalidate.reason}` };
   }
 
-  return { kind: "consume", status: status1, data: data1, verdict: { action: syntheticVerdictAction(approvalResult.kind), headOid: H } };
+  return {
+    kind: "consume",
+    status: status1,
+    data: data1,
+    verdict: { action: syntheticVerdictAction(approvalResult.kind), headOid: H, verdictRunId: runId },
+  };
 }

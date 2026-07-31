@@ -33,6 +33,13 @@ already decided that by moving it to `Ready`). Concretely:
   into real `- [ ]` lines rather than leaving it as narrative text.
 - **Acceptance criteria** are concrete enough that someone reading the finished PR could
   answer yes/no for each one, not "sort of" or "probably."
+- **Execution-class criteria are noise — flag and strip them.** CI is a hard gate: the engine
+  requires conclusive SUCCESS on every configured `ci.requiredChecks` entry before any merge,
+  regardless of what the ACs say — so "the test suite passes", "typecheck/lint clean",
+  "CI green" and equivalents must never appear as acceptance criteria. Within your
+  minor-correction latitude (outcome 1), strip such criteria and fold the execution step into
+  the `## Verification plan`, where it belongs; a static gate② session cannot execute
+  anything, so leaving them as ACs only manufactures unresolvable review findings (F36).
 - **The verification plan** (tests to write/run, commands to execute, observable
   outcomes) is specific enough to actually execute — "test it works" is not a plan.
 - **The plan matches the issue's actual scope** — neither over-verifying trivial work nor
