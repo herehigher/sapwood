@@ -788,44 +788,51 @@ export async function removeRoundPoolLabel(forge: IForge, cfg: SapwoodConfig, is
   await forge.removeLabel(issue, label);
 }
 
-/** #432 round 6 (P2-4, gate② third confirm — the episode-boundary fix): how many times a
- *  `pool-reconcile-incomplete` event's `failed_issues` array has named THIS issue SINCE its last
- *  RESET — a later `pool-selected` event naming the same issue, i.e. the issue was re-added to
- *  the pool. Round 5's version counted every historical occurrence unconditionally, so an issue
- *  that failed removal, got cleanly removed (or simply drifted out of the pool) and was later
- *  RE-SELECTED into a fresh pool episode still carried its old failure tally forward — four
- *  long-resolved episodes plus one genuinely new transient failure could hit the cap immediately,
- *  escalating an issue with no continuous failure streak at all. `pool-selected` (align.ts,
- *  written every round BEFORE any label write, `{round_id, issues}`) is the natural reset
- *  signal: an issue reappearing there means whatever removal history preceded it belongs to a
- *  CLOSED episode, not a continuing one. Compared by `round_id` (both event kinds' payloads carry
- *  it) rather than raw event id — `eventsAfterId` already returns rows in id order, so a single
- *  forward fold tracking "the highest reset round_id seen so far" gives the same ordering
- *  guarantee `conductor.ts`'s `maxEventIdForKinds`/`DRIVE_QUEUED_RESET_KINDS` pattern uses,
- *  without needing a new `json_each`-based State method (`pool-selected`'s `issues` field is an
- *  array, which `maxEventIdForKinds`'s scalar `json_extract` equality can't scope by). A
- *  malformed/absent array on either kind is skipped, never thrown. */
+/** #432 round 6/7 (P2-4, gate② third AND fourth confirm — the episode-boundary fix, corrected
+ *  twice): how many times a `pool-reconcile-incomplete` event's `failed_issues` array has named
+ *  THIS issue SINCE its last RESET — a `pool-selected` event naming the same issue, i.e. the
+ *  issue was (re-)added to the pool. Round 5 counted every historical occurrence unconditionally,
+ *  so a long-resolved episode's failures could combine with a genuinely new one to hit the cap
+ *  immediately. Round 6 tried resetting on the MAX `round_id` among matching `pool-selected`
+ *  events — WRONG, because `pool-selected` (align.ts, round-open) and `pool-reconcile-incomplete`
+ *  (either align.ts's own round-open reconcile, or this file's round-close sweep) routinely share
+ *  the SAME round_id: an issue selected this round can still fail removal in this SAME round's
+ *  own round-close sweep (round-close strips EVERY roundPool-labelled issue unconditionally, not
+ *  just ones excluded from this round's target). A strict `round_id >` comparison on equal values
+ *  is false either way, so that ordinary same-round failure was silently never counted at all —
+ *  the single most common failure shape couldn't reach the cap, and a continuously-reselected
+ *  issue reset its own streak away every round.
+ *
+ *  Round 7's fix drops `round_id` entirely and uses the SAME "last relevant event wins"
+ *  discipline this batch has now used three times (conductor.ts's
+ *  `priorFixLegForVerdict`/`DRIVE_QUEUED_RESET_KINDS`): a SINGLE forward pass over
+ *  `eventsAfterId`'s own id-ordered rows. A `pool-selected` naming this issue resets the running
+ *  count to 0; a `pool-reconcile-incomplete` naming it increments the running count — purely by
+ *  which happened LATER in the ledger, regardless of round_id. Since `pool-selected` is always
+ *  written before any removal is even attempted (align.ts's own module doc), a same-round
+ *  selection-then-failure now correctly counts: the selection's reset is already applied by the
+ *  time the later, same-round failure increments from zero.
+ *
+ *  DOCUMENTED RESIDUAL (accepted, not chased with a third reset rule): an issue selected AND
+ *  failing removal EVERY single round never accumulates past 1 — each round's OWN `pool-selected`
+ *  resets the count before that SAME round's own failure re-increments it. This is benign, not
+ *  the F32 shape this cap exists to close: an issue selected every round is, BY DEFINITION, a
+ *  live, currently-consumed pool member every one of those rounds (plan-review.ts's class-2
+ *  repair acts on it regardless of whether its stale label ever successfully clears) — the probe
+ *  was never actually stuck on unconsumable work in this pattern, only on cosmetic label
+ *  bookkeeping noise. The cap's real job — an issue that has LEFT the pool (no longer selected)
+ *  whose stale label keeps failing to remove — is unaffected: nothing resets it, so consecutive
+ *  failures accumulate normally toward the cap exactly as intended. */
 export function poolRemovalFailureCount(state: Pick<State, "eventsAfterId">, issue: number): number {
-  const events = state.eventsAfterId(0, ["pool-reconcile-incomplete", "pool-selected"]);
-  // Two passes, deliberately: the reset boundary is the MAX round_id among every matching
-  // `pool-selected` event across the WHOLE history, not "the highest reset seen so far while
-  // walking forward" — a reset event is chronologically AFTER the ancient failures it retires,
-  // so a single forward fold would still count them (it hasn't seen the reset yet when it
-  // reaches them). Compute the boundary FIRST, then filter against the settled value.
-  let resetAfterRound = 0;
-  for (const e of events) {
-    if (e.kind !== "pool-selected") continue;
-    const p = e.payload as { round_id?: unknown; issues?: unknown } | null;
-    if (typeof p?.round_id === "number" && Array.isArray(p.issues) && p.issues.includes(issue)) {
-      resetAfterRound = Math.max(resetAfterRound, p.round_id);
-    }
-  }
   let count = 0;
-  for (const e of events) {
-    if (e.kind !== "pool-reconcile-incomplete") continue;
-    const p = e.payload as { round_id?: unknown; failed_issues?: unknown } | null;
-    if (typeof p?.round_id !== "number" || !Array.isArray(p.failed_issues) || !p.failed_issues.includes(issue)) continue;
-    if (p.round_id > resetAfterRound) count++;
+  for (const e of state.eventsAfterId(0, ["pool-reconcile-incomplete", "pool-selected"])) {
+    if (e.kind === "pool-selected") {
+      const p = e.payload as { issues?: unknown } | null;
+      if (Array.isArray(p?.issues) && p.issues.includes(issue)) count = 0;
+      continue;
+    }
+    const p = e.payload as { failed_issues?: unknown } | null;
+    if (Array.isArray(p?.failed_issues) && p.failed_issues.includes(issue)) count++;
   }
   return count;
 }

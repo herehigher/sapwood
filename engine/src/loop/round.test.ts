@@ -3911,6 +3911,35 @@ test("poolRemovalFailureCount (#432 round 6, P2-4): a pool-selected event for a 
   state.close();
 });
 
+test("poolRemovalFailureCount (#432 round 7, P2-4, Codex fourth confirm — exact repro): a SAME-ROUND selection then failure still counts — round 6's round_id `>` comparison silently dropped exactly this, the single most common failure shape (selected at round-open, removal fails at that SAME round's close)", async () => {
+  const state = new State(":memory:");
+  // Round 5: the issue is selected into the pool...
+  state.appendEvent("pool-selected", { round_id: 5, issues: [9] });
+  // ...and in that SAME round, round-close's own sweep fails to remove it (e.g. the round's
+  // target changed again before close, or the very next reconcile pass already wants it gone).
+  state.appendEvent("pool-reconcile-incomplete", { round_id: 5, failed_issues: [9] });
+  assert.equal(
+    poolRemovalFailureCount(state, 9),
+    1,
+    "the same-round failure counts — round_id comparison (5 > 5 is false) used to silently drop it",
+  );
+  state.close();
+});
+
+test("poolRemovalFailureCount (#432 round 7, P2-4, documented residual — NOT part of this round's prescription): a same-round select-then-fail pattern repeated identically across MULTIPLE rounds never exceeds 1 — each round's OWN pool-selected event resets the count before that SAME round's own failure re-increments it. Pins the ACTUAL behavior; see poolRemovalFailureCount's own doc for why this is a benign residual, not the F32 shape this cap exists to close", async () => {
+  const state = new State(":memory:");
+  for (let r = 1; r <= 3; r++) {
+    state.appendEvent("pool-selected", { round_id: r, issues: [9] });
+    state.appendEvent("pool-reconcile-incomplete", { round_id: r, failed_issues: [9] });
+  }
+  assert.equal(
+    poolRemovalFailureCount(state, 9),
+    1,
+    "stays at 1 every round in this exact pattern — benign: an issue selected EVERY round is a live, currently-consumed pool member every one of those rounds regardless of its stale label ever clearing, so the probe was never actually stuck on unconsumable work here",
+  );
+  state.close();
+});
+
 // ── #253: engine-side proxy manager — buildFixLegResume + fix-loop mint wiring ──────────────
 
 /** Mirrors proxy/mint.test.ts's own fakeForge() — a minimal ProxyForge satisfying every method
