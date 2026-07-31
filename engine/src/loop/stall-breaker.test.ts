@@ -103,7 +103,7 @@ test("breaker table: N stalls with NO round closed between them -> park + immedi
   // The park is the EXISTING paradigm's episode row: every dispatch gate consults isParked().
   const park = s.parkRow(CONSECUTIVE_STALLS_PARK_SOURCE);
   assert.ok(park !== null, "a durable consecutive-stalls park episode exists");
-  assert.equal(park!.enteredAt, payload.enteredAt, "the row mirrors the LOG's minted episode identity");
+  assert.equal(park!.enteredAt, payload.enteredAt, "the row's entered_at mirrors the detection payload's display metadata");
   assert.equal(s.isParked(), true, "the standard dispatch gates see the park");
   assert.match(park!.reason, /3 consecutive stalled runs with no round closed between them/);
   assert.ok(park!.escalatedAt !== null, "escalated at trip time — the per-tick duration ladder will not re-fire");
@@ -114,6 +114,8 @@ test("breaker table: N stalls with NO round closed between them -> park + immedi
     source: CONSECUTIVE_STALLS_PARK_SOURCE,
     channel: "local",
     triggerIssue: null,
+    // #477: the dedup key is the detection event's own ledger id; enteredAt rides as display.
+    episodeId: detected[0]!.id,
     enteredAt: park!.enteredAt,
   });
   assert.ok(logged.some((line) => /consecutive-stall breaker tripped/.test(line)));
@@ -324,9 +326,100 @@ test("a cleared episode's stalls are consumed: after the operator clear, one fre
   s.close();
 });
 
+test("#477 (F25 class): two episodes minted at a FROZEN clock — the same timestamp for both — are two distinct identities: 2 detections AND 2 escalations, never a dedupe collision", () => {
+  const s = new State(":memory:");
+  // The clock is pinned: every mint in this test carries the IDENTICAL enteredAt. Under the
+  // rejected timestamp-keyed identity, episode 2's park-escalated matched episode 1's by
+  // enteredAt and was swallowed — the deterministic same-millisecond failure a fast machine
+  // reproduced on the real clock. Identity is now the detection event's ledger id, so the
+  // frozen clock changes nothing.
+  const frozen = () => new Date("2026-07-31T12:00:00.000Z");
+  // Episode 1: three stalls, trip, operator clear.
+  seedRun(s, "stalled");
+  seedRun(s, "stalled");
+  seedRun(s, "stalled");
+  boot(s);
+  const first = detectConsecutiveStalls(s, mkCfg(), frozen, silentLog);
+  assert.equal(first.tripped, true);
+  s.clearPark(CONSECUTIVE_STALLS_PARK_SOURCE); // the operator clears
+  boot(s);
+  detectConsecutiveStalls(s, mkCfg(), frozen, silentLog); // receipts episode 1, resumes
+  // Episode 2: the unfixed wedge stalls three more times — same frozen timestamp throughout.
+  for (let i = 0; i < 3; i++) {
+    s.appendEvent("engine-stalled", { windowMs: 600_000 });
+    boot(s);
+    detectConsecutiveStalls(s, mkCfg(), frozen, silentLog);
+  }
+  const detected = s.eventsAfterId(0, ["consecutive-stalls-detected"]);
+  assert.equal(detected.length, 2, "two distinct episodes were detected");
+  assert.notEqual(detected[0]!.id, detected[1]!.id, "distinct ledger-id identities despite the identical timestamp");
+  const escalated = s.eventsAfterId(0, ["park-escalated"]);
+  assert.equal(escalated.length, 2, "each episode got its own escalation — the second was NOT swallowed by a timestamp collision");
+  assert.deepEqual(
+    escalated.map((e) => (e.payload as { episodeId?: number }).episodeId),
+    detected.map((e) => e.id),
+    "each escalation is keyed to its own episode's detection-event id",
+  );
+  s.close();
+});
+
+test("#478 legacy ledger (gate② P2): a pre-#477 open episode's escalation (no episodeId) satisfies the dedupe — the first post-upgrade restart appends NOTHING, and a later NEW episode still escalates with an id", () => {
+  const s = new State(":memory:");
+  // The pre-#477 shape, verbatim: detection + park row + park-escalated WITHOUT episodeId +
+  // escalated_at latch, all intact (in-memory State reports the marker channel as "nothing to
+  // heal", i.e. intact). The legacy rule: an escalation lacking episodeId belongs to the open
+  // episode iff its ledger id is newer than the episode's detection event id.
+  seedRun(s, "stalled");
+  seedRun(s, "stalled");
+  seedRun(s, "stalled");
+  boot(s);
+  s.appendEvent("consecutive-stalls-detected", { streak: 3, maxConsecutiveStalls: 3, enteredAt: "2026-07-31T00:00:00.000Z" });
+  s.enterPark(CONSECUTIVE_STALLS_PARK_SOURCE, "wedge", null, "2026-07-31T00:00:00.000Z");
+  s.appendEvent("park-escalated", {
+    source: CONSECUTIVE_STALLS_PARK_SOURCE,
+    channel: "local",
+    triggerIssue: null,
+    enteredAt: "2026-07-31T00:00:00.000Z", // pre-#477: no episodeId
+  });
+  s.recordParkEscalation(CONSECUTIVE_STALLS_PARK_SOURCE, "2026-07-31T00:00:01.000Z");
+
+  // First post-upgrade restart: the intact episode must NOT be re-escalated (#473's per-episode
+  // cross-restart never-spam invariant wins over the upgrade seam).
+  boot(s);
+  const outcome = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
+  assert.equal(outcome.tripped, true, "the legacy episode stands");
+  assert.equal(s.isParked(), true);
+  assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1, "zero new park-escalated — the legacy event satisfies the dedupe");
+
+  // The operator clears the legacy episode — the same membership check must recognize the
+  // legacy escalation on the operator-clear path too.
+  s.clearPark(CONSECUTIVE_STALLS_PARK_SOURCE);
+  boot(s);
+  const cleared = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
+  assert.equal(cleared.tripped, false, "the operator clear is honored for a legacy episode");
+  assert.equal(s.eventsAfterId(0, ["park-resumed"]).length, 1, "receipted");
+
+  // And a genuinely NEW episode still escalates normally, id-stamped.
+  for (let i = 0; i < 3; i++) {
+    s.appendEvent("engine-stalled", { windowMs: 600_000 });
+    boot(s);
+    detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
+  }
+  const detected = s.eventsAfterId(0, ["consecutive-stalls-detected"]);
+  assert.equal(detected.length, 2, "the new episode got its own detection");
+  const escalated = s.eventsAfterId(0, ["park-escalated"]);
+  assert.equal(escalated.length, 2, "…and its own single escalation");
+  assert.equal(
+    (escalated[1]!.payload as { episodeId?: number }).episodeId,
+    detected[1]!.id,
+    "the new escalation is id-stamped to its own episode — the legacy arm never leaks forward",
+  );
+  s.close();
+});
+
 // ── log authority / heal-on-boot (the #431 round-4 write rule, applied here verbatim) ─────
 
-test("heal-on-boot: killed between the detection event and enterPark — the next start rebuilds the park-row MIRROR under the episode's minted identity, no duplicate detection", () => {
+test("heal-on-boot: killed between the detection event and enterPark — the next start rebuilds the park-row MIRROR under the episode's own metadata, no duplicate detection", () => {
   const s = new State(":memory:");
   seedRun(s, "stalled");
   seedRun(s, "stalled");
@@ -343,7 +436,7 @@ test("heal-on-boot: killed between the detection event and enterPark — the nex
   assert.equal(s.eventsAfterId(0, ["consecutive-stalls-detected"]).length, 1, "dedup reads the LOG — one detection per episode");
   const park = s.parkRow(CONSECUTIVE_STALLS_PARK_SOURCE);
   assert.ok(park !== null, "the dispatch-gating row is rebuilt");
-  assert.equal(park!.enteredAt, "2026-07-31T00:00:00.000Z", "under the episode's own minted identity");
+  assert.equal(park!.enteredAt, "2026-07-31T00:00:00.000Z", "the row's entered_at mirrors the detection payload's display metadata");
   assert.ok(park!.escalatedAt !== null, "the escalation mirrors ride along");
   assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1);
   s.close();
@@ -358,11 +451,15 @@ test("heal-on-boot: escalation latch/marker lost between writes — rebuilt idem
     seedRun(s, "stalled");
     // Post-crash state: detection + park + park-escalated EVENT landed; marker and latch did not.
     s.appendEvent("consecutive-stalls-detected", { streak: 3, maxConsecutiveStalls: 3, enteredAt: "2026-07-31T00:00:00.000Z" });
+    // #477: the escalation is keyed on the detection event's ledger id, read back exactly the
+    // way production reads it.
+    const episodeId = s.eventsAfterId(0, ["consecutive-stalls-detected"]).at(-1)!.id;
     s.enterPark(CONSECUTIVE_STALLS_PARK_SOURCE, "wedge", null, "2026-07-31T00:00:00.000Z");
     s.appendEvent("park-escalated", {
       source: CONSECUTIVE_STALLS_PARK_SOURCE,
       channel: "local",
       triggerIssue: null,
+      episodeId,
       enteredAt: "2026-07-31T00:00:00.000Z",
     });
     assert.equal(existsSync(join(dir, "ESCALATION")), false, "the kill window: event logged, marker lost");

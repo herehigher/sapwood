@@ -2999,14 +2999,20 @@ export class State {
 
   /** #123: id-cursor variant of eventsSince — strictly-greater-than a captured MAX(id), the
    *  round-window read the artifact uses (see the v9->v10 migration comment for why ids, not
-   *  timestamps). Same non-empty-kinds guard as eventsSince. */
-  eventsAfterId(afterId: number, kinds: string[]): { kind: string; payload: unknown }[] {
+   *  timestamps). Same non-empty-kinds guard as eventsSince.
+   *
+   *  #477: each row also carries its own ledger `id` — a fact's ledger id is the one identity
+   *  that is unique, monotonic, and crash-safe, which is what a LOG-AUTHORITY identity key must
+   *  be (the stall breaker's episode identity was a minted wall-clock timestamp, and two
+   *  episodes minted in the same millisecond collided — the #403 F25 class, this time in an
+   *  identity comparison instead of a duration). Purely additive for every existing caller. */
+  eventsAfterId(afterId: number, kinds: string[]): { id: number; kind: string; payload: unknown }[] {
     if (kinds.length === 0) throw new Error("eventsAfterId: kinds must be non-empty");
     const placeholders = kinds.map(() => "?").join(",");
     const rows = this.db
-      .prepare(`SELECT kind, payload FROM events WHERE id > ? AND kind IN (${placeholders}) ORDER BY id`)
-      .all(afterId, ...kinds) as { kind: string; payload: string }[];
-    return rows.map((r) => ({ kind: r.kind, payload: JSON.parse(r.payload) as unknown }));
+      .prepare(`SELECT id, kind, payload FROM events WHERE id > ? AND kind IN (${placeholders}) ORDER BY id`)
+      .all(afterId, ...kinds) as { id: number; kind: string; payload: string }[];
+    return rows.map((r) => ({ id: r.id, kind: r.kind, payload: JSON.parse(r.payload) as unknown }));
   }
 
   /** #395 (F24 round 2): the events table's own MAX(id) — the liveness watchdog's progress

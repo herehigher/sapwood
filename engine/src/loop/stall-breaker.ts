@@ -105,13 +105,21 @@ export function detectConsecutiveStalls(
   const outcome: StallBreakerOutcome = { restartAfterStall: false, streak: 0, tripped: false };
   /** The AUTHORITATIVE episode state, folded from the log (module doc: LOG AUTHORITY) — open iff
    *  the latest consecutive-stalls detected/resumed transition is `detected`; identical fold
-   *  shape to rapid-restart.ts's openEpisodeInLog, over this module's own kind pair. */
-  const openEpisodeInLog = (): { enteredAt: string | null; streak: number; maxConsecutiveStalls: number } | null => {
-    let open: { enteredAt: string | null; streak: number; maxConsecutiveStalls: number } | null = null;
+   *  shape to rapid-restart.ts's openEpisodeInLog, over this module's own kind pair.
+   *
+   *  #477: the episode's IDENTITY is its detection event's own ledger `id` — unique, monotonic,
+   *  crash-safe. It was the minted `enteredAt` wall-clock timestamp, and two episodes minted in
+   *  the same millisecond collided (the second episode's escalation was swallowed as already
+   *  logged — the #403 F25 class, carried by the implementation while the test was honest).
+   *  `enteredAt` survives in payloads as DISPLAY metadata only: no identity comparison anywhere
+   *  in this module reads it. */
+  const openEpisodeInLog = (): { id: number; enteredAt: string | null; streak: number; maxConsecutiveStalls: number } | null => {
+    let open: { id: number; enteredAt: string | null; streak: number; maxConsecutiveStalls: number } | null = null;
     for (const e of state.eventsAfterId(0, ["consecutive-stalls-detected", "park-resumed"])) {
       if (e.kind === "consecutive-stalls-detected") {
         const p = e.payload as { enteredAt?: unknown; streak?: unknown; maxConsecutiveStalls?: unknown };
         open = {
+          id: e.id,
           enteredAt: typeof p.enteredAt === "string" ? p.enteredAt : null,
           streak: typeof p.streak === "number" ? p.streak : 0,
           maxConsecutiveStalls: typeof p.maxConsecutiveStalls === "number" ? p.maxConsecutiveStalls : max,
@@ -122,16 +130,26 @@ export function detectConsecutiveStalls(
     }
     return open;
   };
-  /** Is this episode's escalation already in the LOG? Episode identity = the minted enteredAt —
-   *  same log-keyed dedup as rapid-restart.ts's escalatedInLog. */
-  const escalatedInLog = (enteredAtIso: string): boolean =>
-    state
-      .eventsAfterId(0, ["park-escalated"])
-      .some(
-        (e) =>
-          (e.payload as { source?: unknown }).source === CONSECUTIVE_STALLS_PARK_SOURCE &&
-          (e.payload as { enteredAt?: unknown }).enteredAt === enteredAtIso,
-      );
+  /** Is this episode's escalation already in the LOG? Keyed on the episode's ledger-id identity
+   *  (#477 — the payload's `episodeId`, stamped by escalateLocally below), never on a minted
+   *  timestamp.
+   *
+   *  LEGACY RULE (#478 gate② P2): a #473-era `park-escalated` carries no `episodeId`, and
+   *  treating it as never-matching would make the first post-upgrade restart append a duplicate
+   *  escalation for an intact open episode — violating the per-episode never-spam invariant the
+   *  #473 tests pin. So an event LACKING `episodeId` counts as THIS episode's escalation iff its
+   *  own ledger id is newer than the episode's detection event id. That match is exact by
+   *  construction: pre-#477 semantics admit only ONE open episode, and its escalation is
+   *  appended strictly after its detection (LOG FIRST) — so a legacy escalation newer than the
+   *  open detection necessarily belongs to it, and legacy escalations of earlier (closed)
+   *  episodes are older than it. Still zero timestamp comparisons: both sides of the legacy
+   *  test are ledger ids. */
+  const escalatedInLog = (episodeId: number): boolean =>
+    state.eventsAfterId(0, ["park-escalated"]).some((e) => {
+      if ((e.payload as { source?: unknown }).source !== CONSECUTIVE_STALLS_PARK_SOURCE) return false;
+      const stamped = (e.payload as { episodeId?: unknown }).episodeId;
+      return stamped === undefined ? e.id > episodeId : stamped === episodeId;
+    });
   const escalationMessage = (reason: string): string =>
     `sapwood: consecutive-stall breaker tripped — ${reason}. Autonomous dispatch is parked. ` +
     `The same wedge appears to recur on every restart; restarting again will not fix it, and the ` +
@@ -141,14 +159,17 @@ export function detectConsecutiveStalls(
     `and resumes dispatch. See also docs/getting-started.md ("Running under a supervisor").`;
   /** The immediate local escalation — same channel, ordering, and mirror-heal contract as
    *  rapid-restart.ts's escalateLocally (see its own doc): the log-deduped park-escalated event
-   *  FIRST, then the ESCALATION marker and the escalated_at latch as idempotent mirrors. */
-  const escalateLocally = (reason: string, enteredAtIso: string): void => {
+   *  FIRST, then the ESCALATION marker and the escalated_at latch as idempotent mirrors. The
+   *  event and marker carry BOTH the identity (`episodeId`, the dedup key — #477) and the
+   *  display metadata (`enteredAt`, for humans reading the ledger). */
+  const escalateLocally = (reason: string, episodeId: number, enteredAtIso: string): void => {
     const message = escalationMessage(reason);
-    if (!escalatedInLog(enteredAtIso)) {
+    if (!escalatedInLog(episodeId)) {
       state.appendEvent("park-escalated", {
         source: CONSECUTIVE_STALLS_PARK_SOURCE,
         channel: "local",
         triggerIssue: null,
+        episodeId,
         enteredAt: enteredAtIso,
       });
     }
@@ -156,6 +177,7 @@ export function detectConsecutiveStalls(
       source: CONSECUTIVE_STALLS_PARK_SOURCE,
       reason,
       triggerIssue: null,
+      episodeId,
       enteredAt: enteredAtIso,
       message,
       at: nowDate.toISOString(),
@@ -220,8 +242,10 @@ export function detectConsecutiveStalls(
     const openEpisode = openEpisodeInLog();
     const row = state.parkRow(CONSECUTIVE_STALLS_PARK_SOURCE);
     if (openEpisode !== null) {
+      // Display metadata only (#477): enteredAt feeds the rebuilt row's entered_at, the receipt
+      // payload, and log lines — never an identity comparison. The identity is openEpisode.id.
       const enteredAtIso = openEpisode.enteredAt ?? row?.enteredAt ?? nowDate.toISOString();
-      if (row === null && escalatedInLog(enteredAtIso)) {
+      if (row === null && escalatedInLog(openEpisode.id)) {
         // THE operator clear (module doc): the episode had fully materialized — park row AND
         // logged escalation — and the row is now gone with no engine receipt in the log. The
         // engine's own clear is receipt-first, so a receiptless missing row on an escalated
@@ -231,6 +255,7 @@ export function detectConsecutiveStalls(
         // (removes the ESCALATION marker: the operator has acted, the alarm is answered).
         state.appendEvent("park-resumed", {
           source: CONSECUTIVE_STALLS_PARK_SOURCE,
+          episodeId: openEpisode.id,
           enteredAt: enteredAtIso,
           via: "operator-clear",
         });
@@ -244,16 +269,16 @@ export function detectConsecutiveStalls(
         // escalation per episode, never per restart). row === null WITHOUT a logged escalation
         // is the kill window between the detection event and enterPark (the escalation only
         // lands after the park), not an operator act — rebuild the row under the episode's
-        // minted identity.
+        // identity (its entered_at mirrors the detection payload's display metadata).
         const reason = row?.reason ?? reasonFor(openEpisode.streak, openEpisode.maxConsecutiveStalls);
         if (row === null) {
           state.enterPark(CONSECUTIVE_STALLS_PARK_SOURCE, reason, null, enteredAtIso);
         }
-        if (!escalatedInLog(enteredAtIso) || row?.escalatedAt == null || !state.escalationMarkerExists()) {
-          escalateLocally(reason, enteredAtIso);
+        if (!escalatedInLog(openEpisode.id) || row?.escalatedAt == null || !state.escalationMarkerExists()) {
+          escalateLocally(reason, openEpisode.id, enteredAtIso);
         }
         log(
-          `[sapwood:startup] consecutive-stalls park still open (entered ${enteredAtIso}): ` +
+          `[sapwood:startup] consecutive-stalls park still open (episode ${openEpisode.id}, entered ${enteredAtIso}): ` +
             `autonomous dispatch stays parked until the operator clears it (docs/troubleshooting.md)`,
         );
         outcome.tripped = true;
@@ -261,13 +286,18 @@ export function detectConsecutiveStalls(
       return outcome;
     }
     if (streak >= max) {
-      // Fresh trip. LOG FIRST: the detection event mints the episode identity every mirror
-      // uses; then the mirrors (park row, marker, latch), each reconstructible above.
+      // Fresh trip. LOG FIRST: the detection event IS the episode — its ledger id, read back
+      // via openEpisodeInLog (the append this branch just made is necessarily the newest
+      // detection), is the identity every mirror and every dedup uses (#477); the minted
+      // enteredAt in its payload is display metadata. Then the mirrors (park row, marker,
+      // latch), each reconstructible above.
       const enteredAtIso = nowDate.toISOString();
       const reason = reasonFor(streak, max);
       state.appendEvent("consecutive-stalls-detected", { streak, maxConsecutiveStalls: max, enteredAt: enteredAtIso });
+      const episodeId = openEpisodeInLog()?.id;
+      if (episodeId === undefined) throw new Error("consecutive-stalls-detected append not readable back from the ledger");
       state.enterPark(CONSECUTIVE_STALLS_PARK_SOURCE, reason, null, enteredAtIso);
-      escalateLocally(reason, enteredAtIso);
+      escalateLocally(reason, episodeId, enteredAtIso);
       outcome.tripped = true;
       return outcome;
     }

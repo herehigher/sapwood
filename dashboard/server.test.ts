@@ -108,7 +108,8 @@ test("#407 engine state: KILL_SWITCH still outranks the terminal (a kill-switch 
 test("#407 latestRunTerminal: newest of the run-lifecycle triple decides — run-started newest is null (alive or crashed), a terminal newest belongs to the newest run, restart resets to null", () => {
   const fold = (kinds: [string, Record<string, unknown>][]) =>
     latestRunTerminal({
-      eventsAfterId: (_after: number, _kinds: string[]) => kinds.map(([kind, payload]) => ({ kind, payload })),
+      // #477: eventsAfterId rows carry their ledger id; the synthetic ledger numbers them 1..n.
+      eventsAfterId: (_after: number, _kinds: string[]) => kinds.map(([kind, payload], i) => ({ id: i + 1, kind, payload })),
     });
   assert.equal(fold([]), null, "an engine that has never run has no terminal");
   assert.equal(fold([["run-started", {}]]), null, "no terminal yet — alive, or crashed");
