@@ -31,6 +31,7 @@ import type { ApprovalResult, ReviewContext, ReviewerAdapter } from "../roles/re
 import type { AcSnapshot } from "./ac-snapshot.js";
 import { deriveApprovalResult, parseAgentReviewOutputText } from "./agent-output.js";
 import type { EngineReviewArtifact } from "./audit.js";
+import { applySeverityOverride, changedPathsFromDiff } from "./finding-axes.js";
 import type { MaterializeResult } from "./materializer.js";
 import { runReviewSession } from "./review-session.js";
 
@@ -253,6 +254,15 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     }
     const prompt = this.buildPrompt(ctx.diffText, snapshot);
 
+    // #472 fix round (gate② P1): the reviewed diff's changed-path set, derived from the SAME
+    // `ctx.diffText` just validated above — a pure parse of caller-supplied text already in scope,
+    // never a second live fetch (no TOCTOU risk vs. the WAL-pinned diff D; see `changedPathsFromDiff`'s
+    // own doc, finding-axes.ts). Threaded into every `attempt()` below so `resolveFindingPath`'s
+    // retention branch is LIVE in production: a session-supplied `path` genuinely in this diff is
+    // KEPT, not unconditionally dropped (the P1 this fix round closes — `pathDropped` regains its
+    // documented meaning instead of being true for every path unconditionally).
+    const changedPaths = changedPathsFromDiff(ctx.diffText);
+
     // 3. Materialize the head. Failure ⇒ unavailable — `runReviewSession` (called from
     // `attempt()` below) already maps a `MaterializeResult` failure to its own `unavailable`
     // outcome, so this call's result is simply threaded through rather than branched on twice.
@@ -271,7 +281,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     // doc — so re-materializing for the retry would be redundant work, not a correctness
     // requirement) but a FRESH session (a new `run()` call, its own session name/id).
     const capUsd = this.agentCfg.costCapUsd;
-    const first = await this.attempt(materialized, prompt, capUsd, snapshot, headOid, workerModels);
+    const first = await this.attempt(materialized, prompt, capUsd, snapshot, headOid, workerModels, changedPaths);
     if (first.kind === "verdict") return first.result;
     if (first.kind === "setup-unavailable") return { kind: "unavailable", headOid, reason: first.reason };
 
@@ -296,7 +306,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
         reason: `engine-agent review attempt 1 produced no valid output and exhausted its cost cap ($${capUsd.toFixed(2)}) — no budget remains for a retry`,
       };
     }
-    const second = await this.attempt(materialized, prompt, remainder, snapshot, headOid, workerModels);
+    const second = await this.attempt(materialized, prompt, remainder, snapshot, headOid, workerModels, changedPaths);
     if (second.kind === "verdict") return second.result;
     if (second.kind === "setup-unavailable") return { kind: "unavailable", headOid, reason: second.reason };
     return {
@@ -322,6 +332,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     snapshot: AcSnapshot,
     headOid: string,
     workerModels: readonly string[],
+    changedPaths: ReadonlySet<string>,
   ): Promise<AttemptOutcome> {
     const outcome = await runReviewSession(this.deps.runner, {
       materialize: materialized,
@@ -366,14 +377,26 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     if (postCheckFailure) {
       return { kind: "setup-unavailable", reason: postCheckFailure };
     }
-    const parsed = parseAgentReviewOutputText(outcome.resultText ?? "", snapshot.manifest);
+    const parsed = parseAgentReviewOutputText(outcome.resultText ?? "", snapshot.manifest, changedPaths);
     if (!parsed) {
       return { kind: "failed", costUsd: outcome.costUsd, costKnown };
     }
     const result = deriveApprovalResult(parsed, headOid);
+    // #472 fix round (gate② P1): the persisted artifact carries EVERY classified finding — blocking
+    // AND advisory — on BOTH verdict branches, via the SAME `applySeverityOverride` primitive
+    // `deriveApprovalResult` itself applies internally (finding-axes.ts). Before this fix,
+    // `result.kind === "rejected" ? result.findings : []` meant an approved verdict's advisories
+    // (recorded in `result.evidence.advisories`, never in `result.findings` — `approved.findings` is
+    // `never` by type) had nowhere to go, and a rejected verdict's `result.findings` is deliberately
+    // BLOCKING-ONLY (design §1's gate contract, unchanged by this fix) so it never carried the
+    // advisories that rode along in the same output either. Recomputing the full gated set here
+    // (rather than threading a new field through `ApprovalResult`) keeps the GATE's own return shape
+    // exactly as `deriveApprovalResult`'s doc states — this is audit-artifact plumbing, not a gate
+    // change: `result.kind`/`result.findings`/`result.evidence` are unread below.
+    const gatedFindings = parsed.findings.map(applySeverityOverride);
     this.deps.onReviewArtifact?.(headOid, {
       perAC: parsed.perAC,
-      findings: result.kind === "rejected" ? result.findings : [],
+      findings: gatedFindings,
       sessionActualModels: [...new Set(outcome.modelUsage.map((m) => m.model).filter((m) => m !== "unknown"))],
       promptHash: this.promptHash,
     });

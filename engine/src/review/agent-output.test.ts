@@ -780,6 +780,36 @@ test("#448: an invalid-type path (non-string) still voids the WHOLE output — s
   assert.equal(out, null);
 });
 
+// ── #472 fix round (gate② P3a): anti-forgery pin — a session cannot forge the engine's own
+// bookkeeping keys. `severityOverridden`/`pathDropped` are ENGINE-RECORDED facts (finding-axes.ts's
+// own doc on `ClassifiedFinding`), added AFTER validation by `applySeverityOverride`/
+// `resolveFindingPath` — never legitimate input from a session's raw JSON. This follows from
+// ALLOWED_FINDING_KEYS today (neither key is a member), but is pinned explicitly so it cannot
+// silently regress if a future change adds either key to the allowlist "for symmetry" with the
+// other three.
+
+test("#472 (anti-forgery, P3a): a session-supplied severityOverridden key voids the WHOLE output, even with a legitimately-shaped severity/kind", () => {
+  const out = validateAgentReviewOutput(
+    { perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "x", severity: "advisory", kind: "style", severityOverridden: true }] },
+    MANIFEST,
+  );
+  assert.equal(out, null);
+});
+
+test("#472 (anti-forgery, P3a): a session-supplied pathDropped key voids the WHOLE output, even with a legitimately-shaped path", () => {
+  const out = validateAgentReviewOutput(
+    { perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "x", path: "src/a.ts", pathDropped: true }] },
+    MANIFEST,
+    new Set(["src/a.ts"]),
+  );
+  assert.equal(out, null);
+});
+
+test("#472 (anti-forgery, P3a): a session-supplied severityOverridden: false (an attempt to pre-clear the record) STILL voids the WHOLE output — presence of the key is the violation, not its value", () => {
+  const out = validateAgentReviewOutput({ perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "x", severityOverridden: false }] }, MANIFEST);
+  assert.equal(out, null);
+});
+
 // parseAgentReviewOutputText threading a changedPaths set end to end (mirrors the sentinel-wrapped
 // shape every other parseAgentReviewOutputText test above uses).
 

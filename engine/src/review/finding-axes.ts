@@ -134,3 +134,50 @@ export function resolveFindingPath(f: ClassifiedFinding, changedPaths: ReadonlyS
   const { path: _unused, ...rest } = f;
   return { ...rest, pathDropped: true };
 }
+
+// ── #472 fix round (gate② P1) ────────────────────────────────────────────────────────────────
+// `resolveFindingPath`'s retention branch needs a real changed-path set to be anything but dead
+// code in production — `engine-agent.ts` had none to give it (see that file's own #472 comment at
+// its `changedPathsFromDiff(ctx.diffText)` call site). `ctx.diffText` is the CALLER-SUPPLIED,
+// WAL-pinned diff text (design #279 §1, `engine-agent.ts`'s own doc on `ctx.diffText`) — the SAME
+// bytes hashed into D, never a second live fetch (no TOCTOU risk: this is a pure string parse of
+// text the caller already holds). Belongs here, not in `engine-agent.ts`, for the same reason
+// every other axis primitive does: pure, unit-testable, zero I/O, importing nothing beyond what
+// this module already imports.
+
+const DIFF_GIT_HEADER_RE = /^diff --git a\/(.+) b\/(.+)$/;
+const OLD_FILE_HEADER_RE = /^--- (?:a\/(.+)|\/dev\/null)$/;
+const NEW_FILE_HEADER_RE = /^\+\+\+ (?:b\/(.+)|\/dev\/null)$/;
+
+/**
+ * The reviewed diff's changed-path set, parsed from a unified-diff text (the exact shape
+ * `IForge.getPRDiff`/`gh pr diff` produces, and what `review/drive.ts`'s `resolveIdentity` hashes
+ * into D — see `ReviewContext.diffText`'s own doc). Best-effort, deliberately: this is a LOCATION
+ * signal for `resolveFindingPath` (§1, analysis-only downstream — no gate reads `path`), not a
+ * security boundary, so a diff whose paths use exotic quoting (`core.quotePath` escaping,
+ * genuinely rare in this repo's own file set) degrades to "that one path not recognized," which
+ * `resolveFindingPath` already treats as "not verified, drop it" — the same fail-safe direction as
+ * every other default in this module, never a crash or a silently-wrong accept.
+ *
+ * Reads BOTH the `diff --git a/<old> b/<new>` header (covers add/delete/modify/rename in one
+ * line — the header names both sides even when one side is a `/dev/null` add or delete in the
+ * `---`/`+++` lines below it) AND the `---`/`+++` file lines themselves (redundant coverage for
+ * diff text that, for whatever reason, elides one form); a rename contributes BOTH its old and new
+ * path, since a finding may legitimately name either.
+ */
+export function changedPathsFromDiff(diffText: string): ReadonlySet<string> {
+  const paths = new Set<string>();
+  for (const line of diffText.split("\n")) {
+    const header = DIFF_GIT_HEADER_RE.exec(line);
+    if (header) {
+      paths.add(header[1]!);
+      paths.add(header[2]!);
+      continue;
+    }
+    const oldFile = OLD_FILE_HEADER_RE.exec(line);
+    if (oldFile?.[1]) paths.add(oldFile[1]);
+    const newFile = NEW_FILE_HEADER_RE.exec(line);
+    if (newFile?.[1]) paths.add(newFile[1]);
+  }
+  return paths;
+}

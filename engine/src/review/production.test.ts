@@ -200,3 +200,216 @@ test("#288 production seam: config -> construction -> drive -> audit receipt -> 
   state.close();
   rmSync(gcParent, { recursive: true, force: true });
 });
+
+// ── #472 fix round (gate② P1): the SAME production seam above, proving the two fixed items
+// through the REAL config -> construction -> drive -> WAL-persist pipeline (not
+// engine-agent.test.ts's own EngineAgentReviewer-level fakes) — the issue's own verification plan
+// item 10 names both engine-agent.test.ts AND production.test.ts.
+
+test("#472 production seam: a finding's path genuinely in the reviewed diff reaches the persisted WAL artifact RETAINED, not dropped", async () => {
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 1 },
+    worker: { model: "sonnet" },
+    reviewer: { mode: "engine-agent", agent: { model: "opus" } },
+    ci: { requiredChecks: [{ name: "test", app: "github-actions" }] },
+  });
+  const H = "a".repeat(40);
+  const B = "b".repeat(40);
+  const body = "## Acceptance criteria\n\n- [ ] Works correctly\n";
+  const snapshot = buildAcSnapshot(12, body, "2026-01-01T00:00:00Z");
+  assert.ok(snapshot);
+  const state = new State(":memory:");
+  const gcParent = mkdtempSync(join(tmpdir(), "sapwood-review-gc-472-"));
+  const gcRoot = join(gcParent, "trees");
+  state.recordAcSnapshot(snapshot!);
+  state.upsertWorker({
+    name: "lane-12",
+    issue: 12,
+    session_id: "worker-session",
+    state: "driving",
+    started_at: "t",
+    ended_at: null,
+    pr: 7,
+  });
+  state.recordWorkerActualModel("lane-12", "sonnet");
+  const comments: PRTopLevelComment[] = [];
+  const reviewData = {
+    headOid: H,
+    author: "producer",
+    state: "OPEN" as const,
+    isDraft: false,
+    labels: [],
+    unresolvedThreads: 0,
+    reviews: [],
+    comments: [],
+    reactions: [],
+  };
+  // The diff genuinely touches "src/foo.ts" — the SAME path the session's finding names below.
+  const forge = {
+    getPRStatus: async () => ({ state: "OPEN", headOid: H, baseOid: B, ciGreen: true, mergeable: "MERGEABLE" }),
+    getPRReviewData: async () => reviewData,
+    getPRDiff: async () =>
+      "diff --git a/src/foo.ts b/src/foo.ts\nindex 1111111..2222222 100644\n--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+    getPRChangedFiles: async () => ({ files: [], complete: true }),
+    getPRChecks: async () => ({
+      checks: [{ name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null, appSlug: "github-actions" }],
+      total: 1,
+    }),
+    getPRComments: async () => ({ comments, total: comments.length }),
+    addPRComment: async (_pr: number, commentBody: string) => {
+      comments.push({ id: `IC${comments.length + 1}`, login: "sapwood", createdAt: "2026-01-01T00:00:01Z", body: commentBody });
+    },
+    mergePR: async () => {},
+  } as unknown as IForge;
+  const resultText = `<<<SAPWOOD_RESULT>>>\n${JSON.stringify({
+    perAC: snapshot!.manifest.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [{ id: "f1", body: "a real defect", path: "src/foo.ts" }],
+  })}\n<<<END_SAPWOOD_RESULT>>>`;
+  const runner = {
+    run: async () => ({
+      outcome: "done" as const,
+      costUsd: 0.1,
+      costKnown: true,
+      exitCode: 0,
+      name: "role-engine-reviewer-test",
+      resultText,
+      modelUsage: [{ model: "opus", inputTokens: 1, outputTokens: 1, cacheCreationTokens: 0, cacheReadTokens: 0 }],
+    }),
+  };
+  const production = makeProductionEngineAgent(cfg, forge, state, runner, {
+    now: () => new Date("2026-01-01T00:00:00Z"),
+    newRunId: () => "run-472-a",
+    reviewTreeRoot: gcRoot,
+    materializeOverride: async (head) => ({
+      kind: "materialized",
+      treeDir: "/private/tree",
+      oid: head,
+      manifest: [{ path: "x", contentHash: "c" }],
+    }),
+  });
+  const driver = new MergeDriver({ forge, reviewer: production.reviewer, cfg, fallbackReviewers: [] });
+  const worker = state.getWorker("lane-12")!;
+  await driver.driveOne(7, 12, { head: null, at: null }, () => {}, undefined, false, undefined, production.driveDepsForLane(worker, 7));
+
+  const wal = state.getEngineReviewWal("lane-12");
+  assert.ok(wal?.reviewArtifactJson, "expected a persisted review artifact");
+  const artifact = JSON.parse(wal!.reviewArtifactJson!) as { findings: { id: string; path?: string; pathDropped?: boolean }[] };
+  const finding = artifact.findings.find((f) => f.id === "f1");
+  assert.ok(finding, "expected the persisted WAL artifact to carry finding f1");
+  assert.equal(finding!.path, "src/foo.ts"); // KEPT — the diff genuinely touches this path
+  assert.equal(finding!.pathDropped, undefined);
+
+  state.close();
+  rmSync(gcParent, { recursive: true, force: true });
+});
+
+test("#472 production seam: an APPROVED run's persisted WAL artifact still carries its advisory finding (previously always empty on the approved branch)", async () => {
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 1 },
+    worker: { model: "sonnet" },
+    reviewer: { mode: "engine-agent", agent: { model: "opus" } },
+    ci: { requiredChecks: [{ name: "test", app: "github-actions" }] },
+  });
+  const H = "a".repeat(40);
+  const B = "b".repeat(40);
+  const body = "## Acceptance criteria\n\n- [ ] Works correctly\n";
+  const snapshot = buildAcSnapshot(12, body, "2026-01-01T00:00:00Z");
+  assert.ok(snapshot);
+  const state = new State(":memory:");
+  const gcParent = mkdtempSync(join(tmpdir(), "sapwood-review-gc-472-b-"));
+  const gcRoot = join(gcParent, "trees");
+  state.recordAcSnapshot(snapshot!);
+  state.upsertWorker({
+    name: "lane-12",
+    issue: 12,
+    session_id: "worker-session",
+    state: "driving",
+    started_at: "t",
+    ended_at: null,
+    pr: 7,
+  });
+  state.recordWorkerActualModel("lane-12", "sonnet");
+  const comments: PRTopLevelComment[] = [];
+  const reviewData = {
+    headOid: H,
+    author: "producer",
+    state: "OPEN" as const,
+    isDraft: false,
+    labels: [],
+    unresolvedThreads: 0,
+    reviews: [],
+    comments: [],
+    reactions: [],
+  };
+  const forge = {
+    getPRStatus: async () => ({ state: "OPEN", headOid: H, baseOid: B, ciGreen: true, mergeable: "MERGEABLE" }),
+    getPRReviewData: async () => reviewData,
+    getPRDiff: async () => "diff --git a/x b/x\n+ok\n",
+    getPRChangedFiles: async () => ({ files: [], complete: true }),
+    getPRChecks: async () => ({
+      checks: [{ name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null, appSlug: "github-actions" }],
+      total: 1,
+    }),
+    getPRComments: async () => ({ comments, total: comments.length }),
+    addPRComment: async (_pr: number, commentBody: string) => {
+      comments.push({ id: `IC${comments.length + 1}`, login: "sapwood", createdAt: "2026-01-01T00:00:01Z", body: commentBody });
+    },
+    mergePR: async () => {},
+  } as unknown as IForge;
+  const resultText = `<<<SAPWOOD_RESULT>>>\n${JSON.stringify({
+    perAC: snapshot!.manifest.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [{ id: "f1", body: "trivial style nit", severity: "advisory", kind: "style" }],
+  })}\n<<<END_SAPWOOD_RESULT>>>`;
+  const runner = {
+    run: async () => ({
+      outcome: "done" as const,
+      costUsd: 0.1,
+      costKnown: true,
+      exitCode: 0,
+      name: "role-engine-reviewer-test",
+      resultText,
+      modelUsage: [{ model: "opus", inputTokens: 1, outputTokens: 1, cacheCreationTokens: 0, cacheReadTokens: 0 }],
+    }),
+  };
+  const production = makeProductionEngineAgent(cfg, forge, state, runner, {
+    now: () => new Date("2026-01-01T00:00:00Z"),
+    newRunId: () => "run-472-b",
+    reviewTreeRoot: gcRoot,
+    materializeOverride: async (head) => ({
+      kind: "materialized",
+      treeDir: "/private/tree",
+      oid: head,
+      manifest: [{ path: "x", contentHash: "c" }],
+    }),
+  });
+  const driver = new MergeDriver({ forge, reviewer: production.reviewer, cfg, fallbackReviewers: [] });
+  const worker = state.getWorker("lane-12")!;
+  const outcome = await driver.driveOne(
+    7,
+    12,
+    { head: null, at: null },
+    () => {},
+    undefined,
+    false,
+    undefined,
+    production.driveDepsForLane(worker, 7),
+  );
+  assert.equal(outcome.kind, "merged"); // gate semantics unchanged — advisory-only still merges
+
+  const wal = state.getEngineReviewWal("lane-12");
+  assert.ok(wal?.reviewArtifactJson, "expected a persisted review artifact");
+  const artifact = JSON.parse(wal!.reviewArtifactJson!) as { findings: { id: string; severity?: string }[] };
+  assert.deepEqual(
+    artifact.findings.map((f) => f.id),
+    ["f1"],
+  );
+  assert.equal(artifact.findings[0]!.severity, "advisory");
+  // And the delivered audit comment renders it under the Advisory heading, not "None recorded.".
+  assert.equal(comments.length, 1);
+  const advisoryIdx = comments[0]!.body.indexOf("### Advisory (non-blocking)");
+  assert.ok(advisoryIdx >= 0);
+  assert.match(comments[0]!.body.slice(advisoryIdx), /trivial style nit/);
+
+  state.close();
+  rmSync(gcParent, { recursive: true, force: true });
+});

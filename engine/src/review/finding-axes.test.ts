@@ -10,6 +10,7 @@ import {
   ALLOWED_FINDING_KEYS,
   applySeverityOverride,
   type ClassifiedFinding,
+  changedPathsFromDiff,
   effectiveSeverity,
   FINDING_KINDS,
   resolveFindingPath,
@@ -135,6 +136,77 @@ test("resolveFindingPath: empty changed-path set drops every supplied path", () 
   assert.equal(out.pathDropped, true);
 });
 
+// ── changedPathsFromDiff: #472 fix round (gate② P1) — the primitive that makes resolveFindingPath's
+// retention branch live in production ────────────────────────────────────────────────────────────
+
+test("changedPathsFromDiff: a single modified file — both the diff --git header AND the ---/+++ lines contribute the same path", () => {
+  const diff =
+    "diff --git a/src/foo.ts b/src/foo.ts\nindex 1111111..2222222 100644\n--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+  const paths = changedPathsFromDiff(diff);
+  assert.deepEqual([...paths], ["src/foo.ts"]);
+});
+
+test("changedPathsFromDiff: multiple files in one diff — every changed path is present", () => {
+  const diff = [
+    "diff --git a/src/a.ts b/src/a.ts",
+    "index 1111111..2222222 100644",
+    "--- a/src/a.ts",
+    "+++ b/src/a.ts",
+    "@@ -1,1 +1,1 @@",
+    "-old",
+    "+new",
+    "diff --git a/src/b.ts b/src/b.ts",
+    "index 3333333..4444444 100644",
+    "--- a/src/b.ts",
+    "+++ b/src/b.ts",
+    "@@ -1,1 +1,1 @@",
+    "-old2",
+    "+new2",
+  ].join("\n");
+  assert.deepEqual([...changedPathsFromDiff(diff)].sort(), ["src/a.ts", "src/b.ts"]);
+});
+
+test("changedPathsFromDiff: a NEW file (--- /dev/null) contributes its b/ path only", () => {
+  const diff =
+    "diff --git a/src/new.ts b/src/new.ts\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1,1 @@\n+content\n";
+  assert.deepEqual([...changedPathsFromDiff(diff)], ["src/new.ts"]);
+});
+
+test("changedPathsFromDiff: a DELETED file (+++ /dev/null) still contributes its a/ path", () => {
+  const diff =
+    "diff --git a/src/gone.ts b/src/gone.ts\ndeleted file mode 100644\nindex 1111111..0000000\n--- a/src/gone.ts\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-content\n";
+  assert.deepEqual([...changedPathsFromDiff(diff)], ["src/gone.ts"]);
+});
+
+test("changedPathsFromDiff: a RENAME contributes BOTH the old and new path", () => {
+  const diff =
+    "diff --git a/src/old-name.ts b/src/new-name.ts\nsimilarity index 100%\nrename from src/old-name.ts\nrename to src/new-name.ts\n";
+  assert.deepEqual([...changedPathsFromDiff(diff)].sort(), ["src/new-name.ts", "src/old-name.ts"]);
+});
+
+test("changedPathsFromDiff: empty diff text -> empty set (never throws)", () => {
+  assert.deepEqual([...changedPathsFromDiff("")], []);
+});
+
+test("changedPathsFromDiff: a path NOT mentioned anywhere in the diff is correctly absent (the negative case resolveFindingPath relies on)", () => {
+  const diff = "diff --git a/src/foo.ts b/src/foo.ts\n--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+  assert.equal(changedPathsFromDiff(diff).has("src/bar.ts"), false);
+});
+
+// resolveFindingPath wired directly to a real changedPathsFromDiff output (not a hand-built Set) —
+// closes the gap between the two primitives being unit-correct in isolation and actually composing.
+
+test("resolveFindingPath + changedPathsFromDiff compose correctly: a path the diff touches is kept, one it doesn't is dropped", () => {
+  const diff = "diff --git a/src/foo.ts b/src/foo.ts\n--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+  const changed = changedPathsFromDiff(diff);
+  const kept = resolveFindingPath({ id: "f1", body: "x", path: "src/foo.ts" }, changed);
+  assert.equal(kept.path, "src/foo.ts");
+  assert.equal(kept.pathDropped, undefined);
+  const dropped = resolveFindingPath({ id: "f2", body: "x", path: "src/bar.ts" }, changed);
+  assert.equal(dropped.path, undefined);
+  assert.equal(dropped.pathDropped, true);
+});
+
 // ── structural invariants the issue's own ACs require ───────────────────────────────────────────
 
 test("finding-axes.ts imports nothing from roles/reviewer.ts beyond the Finding type (issue #448 AC)", () => {
@@ -165,6 +237,7 @@ test("#448: no PROTECTED_SUFFIXES source file contains this issue's new symbols 
     "effectiveSeverity",
     "applySeverityOverride",
     "resolveFindingPath",
+    "changedPathsFromDiff",
     "severityOverridden",
     "pathDropped",
     "finding-axes",
