@@ -483,6 +483,78 @@ test("shipped engine-reviewer prompt (#457, F36): pins the capability-limit rule
   assert.match(prompt, /Every finding must name something the producer\s+\(or a human adjudicator\) can act on IN this PR's content\./);
 });
 
+// #454 (design #402 R6 §6a). These assertions pin the enforced/judged BOUNDARY itself, not the
+// prose around it: every ENFORCED row named in the shipped prompt corresponds to a real check in
+// this repo's source (traced per row in #454's PR body), and the JUDGED half is stated as
+// unverifiable-by-the-engine so a prompt tuner knows which half they are editing. A future edit
+// that moves a row across the boundary reds here — which is the point: the boundary is a claim
+// about the code, and a claim about the code is testable even when the prose around it is not.
+test("shipped engine-reviewer prompt (#454, design #402 R6 §6a): the enforced-vs-judged section names every engine-ENFORCED row", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.match(prompt, /## What the engine enforces vs\. what you judge/);
+  for (const row of [
+    // perAC id-set exactness — validateAgentReviewOutput's manifest-id loop (agent-output.ts).
+    /exactly one `perAC` entry per acceptance-criterion id/,
+    // ALLOWED_FINDING_KEYS + FINDING_KINDS closed enums (finding-axes.ts, agent-output.ts).
+    /the finding key allowlist and the closed `severity`\/`kind` enums/,
+    // effectiveSeverity + ADVISORY_ELIGIBLE_KINDS (finding-axes.ts).
+    /`severity: "advisory"` is honored only for the allowlisted kinds/,
+    // deriveApprovalResult's rejected branch (agent-output.ts).
+    /a `rejected` verdict always carries a non-empty findings array/,
+    // modelSeparationUnavailableReason, pre-session config + post-session modelUsage (engine-agent.ts).
+    /model separation, checked before the session[\s\S]*and again\s+afterwards/,
+    // resolveIdentity/hashDiff (drive.ts) + checkAcSnapshotDrift (ac-snapshot.ts).
+    /head\/base\/diff identity, and snapshotted-body drift/,
+    // RoleRunner.run()'s reviewCwd branch (peripheral.ts) — hardcoded, refuses an override.
+    /the static-only tool profile/,
+  ]) {
+    assert.match(prompt, row, `enforced row missing from the shipped prompt: ${row}`);
+  }
+});
+
+test("shipped engine-reviewer prompt (#454, design #402 R6 §6a): the judged half is stated as unverifiable by the engine, row by row", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.match(
+    prompt,
+    /Nothing below is checked by the engine[\s\S]*no engine check will catch a bad\s+call/,
+    "the judged half must say, in the prompt itself, that the engine cannot verify it",
+  );
+  for (const row of [
+    /whether a named test is \*substantive\*/,
+    /the evidence-tier choice itself/,
+    /which `severity` and which `kind` a finding deserves/,
+    /whether a finding is worth writing at all/,
+    /the two finding classes named above/,
+    /everything else in this prompt's prose/,
+  ]) {
+    assert.match(prompt, row, `judged row missing from the shipped prompt: ${row}`);
+  }
+});
+
+test("shipped engine-reviewer prompt (#454, design #402 R6 §6b): the triage doctrine ships in full and does not contradict R1's axes wording", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  for (const rule of [
+    /\*\*Triage before you write\.\*\*/,
+    /\*\*Name the target\.\*\*/,
+    /\*\*Name the class\.\*\*/,
+    /\*\*Do not re-raise an adjudicated finding\.\*\*/,
+    /\*\*Scope honestly\.\*\*/,
+  ]) {
+    assert.match(prompt, rule, `§6b doctrine rule missing: ${rule}`);
+  }
+  // R1's "Severity and kind" section is the single source of truth for what the engine does with
+  // `severity`. §6a's boundary row must POINT AT it rather than restate the eligible-kind list a
+  // second time — a second copy is exactly how the two wordings would drift into contradiction.
+  const boundary = prompt.slice(prompt.indexOf("## What the engine enforces vs. what you judge"));
+  assert.ok(boundary.length > 0, "the boundary section must exist");
+  assert.match(boundary, /allowlisted kinds\*\* \("Severity and kind"\s+above\)/, "the advisory row defers to R1's section");
+  assert.doesNotMatch(
+    boundary,
+    /"test-coverage"/,
+    "§6a must not restate R1's advisory-eligible kind list — it cites the section that owns it",
+  );
+});
+
 test("loadEngineReviewerPromptTemplate: a custom template MISSING a required placeholder throws at load, naming the missing one (#74 fail-fast)", () => {
   const dir = mkdtempSync(join(tmpdir(), "engine-agent-template-"));
   const file = join(dir, "no-diff.md");

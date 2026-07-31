@@ -1,8 +1,29 @@
 # Design #402 — review layering, convergence, and tendency
 
-Status: **proposed design** (issue #402, `verify:n/a` doc-gate). Design-first: nothing
-in this document is implemented by the issue that produced it. Deliverable = this doc
-plus the implementation issues in §11.
+Status: **adjudicated and shipped** (issue #402, `verify:n/a` doc-gate). Originally a
+design-first document — nothing in it was implemented by the issue that produced it;
+the deliverable was this doc plus the implementation issues in §11. All six follow-ups
+have since landed: **R1** #448 (finding axes + severity gate), **R2** #449 (per-round
+finding record), **R3** #450 (convergence classifier, stop, and `prFixCap` 2 → 4),
+**R4** #451 (dispute costs zero paid fix legs), **R5** #453 (retro tendency table),
+**R6** #454 (this prompt-and-docs round-close, 2026-07-31). Owner rulings D1–D6 below
+are adjudicated as written; where the shipped behavior refined a section during
+implementation, the section says so in place (§4a is the largest such correction).
+
+**Shipped state vs. this document.** Read the docs, not this file, for what is true now:
+[`../PLAN.md`](../PLAN.md)'s fix-loop paragraph (convergence, layering, `prFixCap`
+semantics), [`../configuration.md`](../configuration.md) (`lanes.prFixCap`,
+`roles.retro.tendencyRounds`, `reviewer.agent.promptFile`),
+[`../role-paradigm.md`](../role-paradigm.md) (the reviewer's enforced/judged split), and
+the shipped prompt `engine/prompts/engine-reviewer.md` itself. This document remains the
+record of *why* — the alternatives rejected and the blind spots accepted on the way.
+
+**One item stays open, and deliberately not as a follow-up of this design:** §4a's
+missing dispute channel on the `engine-agent` reviewer path. It is a pre-existing defect
+in the review path as already shipped (design #279's findings-transport decision), which
+this design's own PR surfaced rather than specified; §4a carries its ⚠️ action-required
+note and an already-adjudicated preferred fix for a human to file. #402's own follow-up
+set was complete at R1–R6, and closing it never depended on that issue existing.
 
 The review spiral's *mechanics* are sound and out of scope: a fix leg's new commits
 already force a genuinely fresh, head-OID-bound review (`conductor.ts`'s trigger-pin
