@@ -645,6 +645,15 @@ const Roles = z
       // digest text itself) rather than growing the prompt unboundedly. Positive int only — 0
       // would produce an empty, useless digest.
       digestMaxChars: z.number().int().positive().default(60_000),
+      // #453 (design #402 R5, §5): how many rounds the digest's finding-class TENDENCY table
+      // spans, the current round inclusive (K=1 = this round only). Everything else in the
+      // digest is bounded by one round's start_event_id, but the recurrence this table exists
+      // to surface (the #191/#170/#172 -> M9-wave shape) happens ACROSS rounds. Bounded and
+      // operator-tunable rather than a hardcoded window: a fast-cycling run wants a wider one,
+      // a long-round run a narrower one. Positive int only — 0 would tabulate nothing while
+      // still rendering the section, which is a silently useless table rather than a bound.
+      // Fewer rounds in the ledger than K degrades to what exists, never an error.
+      tendencyRounds: z.number().int().positive().default(3),
       // #127: false -> round-defaults.ts omits the retro stub; the phase no-ops via round.ts's
       // existing noopPeripheralStub default (see roles.planReviewer.enabled above for the
       // shared rationale).

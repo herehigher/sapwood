@@ -649,6 +649,31 @@ test("defaultRetroPromptPath: resolves to the shipped prompts/retro.md, which ex
   }
 });
 
+test("#453: prompts/retro.md points at the finding-class tendency table, states the design-source rule against it, and names the blind spot", () => {
+  const body = readFileSync(defaultRetroPromptPath(), "utf8");
+  // The section the digest actually renders (retro-digest.ts's formatTendencySection) — the
+  // prompt must name it, or the table ships as data nothing was told to read.
+  assert.ok(body.includes("Finding-class tendency"), "must name the digest's tendency section by its heading");
+  assert.ok(body.includes("roles.retro.tendencyRounds"), "must name the config key that sets the window");
+  assert.ok(/design source/i.test(body), "must state that a recurring class belongs at the design source");
+  assert.ok(/blind spot/i.test(body), "must state the accepted blind spot (a disabled or mis-judging retro notices nothing)");
+  // D5: the prompt must not promise engine-fired issue creation the engine deliberately lacks.
+  assert.ok(/table, not a verdict/i.test(body), "must be explicit that the engine tabulates and judgment is the session's");
+});
+
+test("#453: the tendency table lands inside the substituted {{round.digest}} block, not as a second placeholder", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  const runner = new ScriptedRunner(doneResult("role-retro-1"));
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+  const prompt = runner.calls[0]!.prompt;
+  assert.ok(prompt.includes("## Finding-class tendency"), "the engine-rendered table reached the prompt");
+  assert.ok(prompt.includes("roles.retro.tendencyRounds=3"), "the shipped default window is what got rendered");
+  assert.ok(!prompt.includes("{{round.digest}}"), "still exactly one substituted digest placeholder");
+  state.close();
+});
+
 test("prompts/retro.md no longer instructs live gh browsing — it points at the engine-built digest instead", () => {
   const body = readFileSync(defaultRetroPromptPath(), "utf8");
   for (const removed of ["gh pr view", "gh pr list", "gh issue view", "gh issue list"]) {

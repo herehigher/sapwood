@@ -27,13 +27,35 @@ If the digest above says a section was truncated (a hard size cap — see
 as "nothing happened there" — say so in your proposal if it matters, rather than concluding
 from an incomplete picture.
 
+## The finding-class tendency table
+
+Inside the digest above there is a `## Finding-class tendency` section: one row per
+`(kind, path-prefix)` class the engine actually recorded, with how many findings, which PRs,
+and how many distinct rounds raised it. It spans the last `roles.retro.tendencyRounds` rounds
+(default 3), not just this one — so a class that keeps coming back is visible as a class rather
+than as N unrelated review comments you would have had to remember across rounds.
+
+**It is a table, not a verdict.** The engine tabulates and stops there, deliberately: no
+threshold fires, no issue is created, nothing is escalated by count. Deciding whether a
+recurring class is evidence about the DESIGN — rather than three unrelated findings that happen
+to share a directory — requires reading design intent, which is your job and not a lint rule's.
+When you judge that it is, the class belongs **at the design source**: one proposal against the
+design/prompt/config that keeps producing it, through the normal PR path below. Never a batch of
+point-fix issues chasing each instance.
+
+Read the table's empty state honestly too: "no finding records in this window" means the engine
+recorded none, not that nothing went wrong. And the stated blind spot of this whole mechanism is
+that it depends on you — a genuine recurring class goes unnoticed if this role is disabled or if
+you judge it wrong. The table being durable and visible is the mitigation; the engine acting on
+it is not, and by design never will be.
+
 ## Two rules that govern everything you do here
 
 ### 1. Recurring same-class findings are a design signal, not a fix queue
 
-If you see the SAME CATEGORY of gate②/gate⓪ finding repeating — across different lanes,
-different issues, or across rounds (not just this one; look at history, not only the
-numbers above) — that repetition IS the finding. Your output in that case must be a single
+If you see the SAME CATEGORY of gate②/gate⓪ finding repeating — in the tendency table above,
+or across different lanes, different issues, or across rounds (not just this one; look at
+history, not only the numbers above) — that repetition IS the finding. Your output in that case must be a single
 design-level proposal: a PR against docs/prompts/config that questions the underlying
 design or technical direction those findings keep bumping into (a prompt that keeps
 under-specifying the same thing, a gate that keeps catching the same class of gap, a
