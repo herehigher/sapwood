@@ -113,9 +113,17 @@ reads "alive" and startup is refused — deliberately the safe direction (a fals
 never a false takeover). If you've confirmed the named pid is not a sapwood engine
 (`ps -p <pid>`), delete `data/sapwood.lock` and start again.
 
-A crash can also leave a stray `sapwood.lock.tmp-*` or `sapwood.lock.aside-*` file in
-`data/` — sidecars of the lock's atomic create/takeover protocol. Their names are unique
-per process start and are never re-matched by a later engine: harmless, safe to delete.
+Stale-lock takeovers are serialized through a mutex directory, `data/sapwood.lock.takeover`,
+held only for the sub-second takeover itself. If an engine **crashes inside that window**, the
+directory is left behind and every later start that needs a takeover refuses with a message
+naming it — deliberately fail-closed (a visible refusal, never a possible double-drive). The
+check: if `data/sapwood.lock.takeover` exists and **no** sapwood engine is running against
+this data dir, remove the directory (`rmdir data/sapwood.lock.takeover`) and start again.
+Ordinary starts (no stale lock to take over) are unaffected by a leftover mutex directory.
+
+A crash can also leave a stray `sapwood.lock.tmp-*` file in `data/` — a sidecar of the lock's
+atomic create. Its name is unique per process start and is never re-matched by a later
+engine: harmless, safe to delete.
 
 A failure whose structured error output matches an environment-failure signature — an
 LLM-provider issue (429 / usage-limit / credit-exhausted) or a forge issue (network unreachable
