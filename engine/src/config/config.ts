@@ -242,6 +242,9 @@ const Ci = z
     // hangs `IN_PROGRESS` forever otherwise wedges the lane permanently: deriveGate returns WAIT
     // every tick and neither drain arm can see it. Default 6h — GitHub Actions' own hard job
     // ceiling, so nothing legitimately running can cross it.
+    // Review round 2 (P1-1): "neither green nor red" INCLUDES a check that concluded without
+    // passing (cancelled/skipped/neutral/stale/action_required) — gate① is SUCCESS-only (#401), so
+    // that lane cannot progress on its own either and is aged, and escalated, exactly the same.
     pendingEscalateAfterSec: z.number().int().positive().default(21600),
     requiredChecks: z
       .array(

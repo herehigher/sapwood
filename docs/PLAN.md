@@ -1057,8 +1057,12 @@ marker idempotency, output schema, escalation path) see
   the `labels.needsHuman` PR label as the latch, an evidence comment naming the still-pending
   check(s), and a `ci-pending-escalated` event. The clock is a durable pin kept in the event log
   itself (`ci-pending-observed` / `ci-pending-cleared`), so it survives an engine restart with no
-  new column and no new module; a check reaching a real conclusion — or a push moving the head —
-  cancels it, and any later pending episode ages from its own start.
+  new column and no new module. It cancels only when gate① actually RESOLVES (green or red) or the
+  head moves; any later pending episode then ages from its own start. A check that concludes
+  WITHOUT passing (`CANCELLED`/`SKIPPED`/`NEUTRAL`/`STALE`/`ACTION_REQUIRED`) deliberately does NOT
+  cancel it — gate① stays not-green under #401's SUCCESS-only rule, so such a lane is exactly as
+  wedged as one waiting forever, and the evidence comment names those checks alongside the pending
+  ones so the human knows which to re-run.
   **Adjudicated findings stop re-consuming fix rounds (#378, F14):** gate② used to see
   review threads only as an aggregate unresolved COUNT, so a finding that had already
   been human-adjudicated and thread-resolved re-entered the FIXABLE gate every time a

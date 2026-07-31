@@ -226,7 +226,7 @@ export type DriveOutcome = (
    *  behind a decisive gate② verdict (`ciPendingOnDecisiveReview`) and on which head. Reported on
    *  every pass that actually DERIVED a gate, the same contract as `holdObservation`: the conductor
    *  owns the durable pin (open on the first pending pass, cancel the moment a check reaches a real
-   *  conclusion), because MergeDriver deliberately never touches State. ABSENT means "this pass
+   *  RESOLVES green or red), because MergeDriver deliberately never touches State. ABSENT means "this pass
    *  learned nothing" (a mixed-read queue, a fresh review trigger, a forge outage) — a no-op at the
    *  conductor, never a cancel: a loop-wide gh outage must not silently reset every lane's clock. */
   ciPendingObservation?: { pending: boolean; head: string };
@@ -292,7 +292,9 @@ export interface CiPendingPin {
   at: string | null;
 }
 
-/** No pin recorded (never observed pending, or the episode was cancelled by a conclusive check). */
+/** No pin recorded — never observed pending, or the episode was cancelled (gate① resolved GREEN or
+ *  RED, or the head moved). A check that concludes WITHOUT passing does not cancel it: see
+ *  `ciPendingDuration`. */
 export const NO_CI_PENDING_PIN: CiPendingPin = { head: null, at: null };
 
 /** #426 (F26): is gate① STILL PENDING behind a decisive gate② verdict — the exact wedge shape
@@ -307,8 +309,12 @@ export function ciPendingOnDecisiveReview(input: { action: ReviewAction; ciGreen
  * A lane continuously WAIT-on-CI past `escalateAfterSec` returns its pending age (seconds), which
  * the conductor turns into the same three-tier escalation review silence gets: the `needsHuman`
  * PR label, an evidence comment naming the pending check(s), and a durable event. Null means
- * "not aging" — CI reached a conclusion, review is not decisive, the pin is absent/stale-headed,
- * or the bound has not elapsed yet.
+ * "not aging" — gate① RESOLVED (green or red), review is not decisive, the pin is absent/stale-
+ * headed, or the bound has not elapsed yet. A check that CONCLUDED WITHOUT PASSING (cancelled/
+ * skipped/neutral/stale/action_required) is still `ciGreen === false && ciRed === false` under
+ * #401's SUCCESS-only gate①, so it keeps aging here — deliberately (review round 2, P1-1): such a
+ * lane cannot progress on its own any more than one waiting on a job that never finishes, and the
+ * conductor's evidence comment names those checks so the human knows which one to re-run.
  *
  * `needsHumanLabelPresent`/`holdLabelPresent` suppress exactly as they do for review silence (same
  * label latch, same "someone is already looking at this" stance, same pure-suppression semantics:
@@ -553,6 +559,15 @@ export class MergeDriver {
     // OID-bound comment path must not evaluate against this head yet: post a fresh trigger, record it, and queue
     // this tick rather than deriving a verdict a push may have invalidated mid-flight.
     if (triggerPin.head !== status.headOid) {
+      // #426 review round 2 (P1): this branch is the ONE place that detects the head moving, and a
+      // head move ENDS the CI-pending episode — the old head's checks are irrelevant and its pin
+      // must not keep aging (the drain predicate reads the pin without a head, so a stale aged pin
+      // would terminalize a perfectly healthy freshly-pushed lane during a ceiling/kill-switch
+      // drain — exactly the false positive #375's ruling forbids). Reported on BOTH exits below,
+      // including the trigger-post failure: the head-move fact is established by entering this
+      // branch at all, independent of whether the trigger comment or the pin write succeeded.
+      // Same head-scoped clear the #54 fallback lock gets a few lines down, for the same reason.
+      const headMoveCancel: NonNullable<DriveOutcome["ciPendingObservation"]> = { pending: false, head: status.headOid };
       try {
         // #54 R2: a head change ends any failover episode — the fallback lock is head-scoped,
         // so a lock recorded for a previous head is cleared HERE, the one place that detects
@@ -579,9 +594,9 @@ export class MergeDriver {
         // crash the whole tick loop. Retried next tick. If the trigger comment DID post but the
         // pin write failed, the retry re-posts a duplicate trigger comment (harmless) rather
         // than ever counting comments against an unrecorded pin — fail-closed either way.
-        return observed({ kind: "queued", pr, reason: `review-trigger-failed: ${String(e)}` });
+        return observed({ kind: "queued", pr, reason: `review-trigger-failed: ${String(e)}`, ciPendingObservation: headMoveCancel });
       }
-      return observed({ kind: "queued", pr, reason: "review-triggered" });
+      return observed({ kind: "queued", pr, reason: "review-triggered", ciPendingObservation: headMoveCancel });
     }
 
     // #147 P1 (Codex PR #151, rounds 1+2): re-entry review-freshness cutoff — TWO-PHASE.
@@ -678,7 +693,7 @@ export class MergeDriver {
       });
       // #426 (F26): the gate① twin of the silence clock above, computed on the SAME live PR data
       // and the SAME `gateNow`. The observation is reported unconditionally (it is what lets the
-      // conductor cancel the pin the instant a check concludes); the escalation only past the bound.
+      // conductor cancel the pin the instant gate① resolves); the escalation only past the bound.
       const ciPending = ciPendingOnDecisiveReview({ action: verdict.action, ciGreen: status.ciGreen, ciRed: status.ciRed ?? false });
       const ciPendingSec = ciPendingDuration({
         action: verdict.action,

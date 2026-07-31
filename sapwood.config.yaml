@@ -197,8 +197,10 @@ reviewer:
 #                     # how long gate① may stay PENDING (neither green nor red) behind a decisive
 #                     # gate② verdict before sapwood labels the PR needs-human, comments naming the
 #                     # stuck check(s), and treats the lane as terminal for the bounded drain. The
-#                     # clock is a durable pin: it survives a restart, and a conclusive check or a
-#                     # new head cancels it.
+#                     # clock is a durable pin: it survives a restart, and only gate① actually
+#                     # resolving (green or red) or a new head cancels it — a check that concludes
+#                     # WITHOUT passing (cancelled/skipped/neutral) keeps it aging, since gate① is
+#                     # still not green and the lane still cannot progress.
 #   requiredChecks:
 #     - name: test
 #       app: github-actions # default when omitted

@@ -6301,6 +6301,44 @@ test("#426 AC2 (KILL_SWITCH drain, heuristic arm): the same CI-wedged fix_rounds
   }
 });
 
+test("#426 review round 2 (P2): the GATED RECLAIM row transition and its `gated-reentry` reset event land in ONE transaction — row reclaimed <=> reset recorded, so a crash cannot leave an aged pin without its episode boundary", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ ci: { pendingEscalateAfterSec: 3600 } });
+  const gate = new FakeMergeGate();
+  st.upsertWorker({
+    name: "lane-a",
+    issue: 10,
+    session_id: "s-lane-a",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 99,
+    gated_escalation_labeled: 1,
+  });
+  // The lane carries an OLD, already-past-the-bound CI-pending pin from before its escalation.
+  st.appendEvent("ci-pending-observed", { worker: "lane-a", issue: 10, pr: 99, head: "H1", at: "2026-07-19T00:00:00.000Z" });
+  forge.issueLabelsByIssue[10] = []; // human removed needs-human — the reentry signal
+  gate.outcomes[99] = { kind: "queued", pr: 99, reason: "gate-pending:WAIT_REVIEW" };
+
+  const r = await tick({ now: () => new Date("2026-07-20T00:00:00.000Z"), forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+
+  // The pairing invariant, both directions: the row moved AND the reset event exists.
+  assert.deepEqual(r.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-a", issue: 10, pr: 99, attempt: 1 }]);
+  assert.equal(st.getWorker("lane-a")?.state, "driving");
+  assert.equal(st.getWorker("lane-a")?.gated_reentry_attempts, 1);
+  assert.equal(
+    (st.latestEvent("gated-reentry") as { payload: { worker: string; pr: number; attempt: number } } | undefined)?.payload.attempt,
+    1,
+  );
+  // Which is what makes the stale pin invisible: the reset event out-IDS the pin, the exact
+  // comparison the drain predicate makes. (The atomicity itself is state.ts's own primitive —
+  // `upsertWorkerWithEvent`'s rollback is pinned in state.test.ts.)
+  assert.ok(st.maxEventIdForKinds(["gated-reentry"], "lane-a", 99) > st.lastCiPendingEvent("lane-a", 99)!.id);
+  st.close();
+});
+
 test("#426 AC2: a CI-pending pin that a gated reentry already superseded is NOT wedged — the human who reclaimed the lane gets the full bound before the engine calls them again", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
@@ -8062,23 +8100,86 @@ test("#426 AC3: a check reaching a real conclusion CANCELS the pin — the next 
   st.close();
 });
 
-test("#426: a push (new head) supersedes the pin — CI restarts, so the aging clock does too", async () => {
+test("#426 review round 2 (P1): a push cancels the OLD head's pin through the REAL review-trigger branch — an aged pre-push pin never terminalizes the freshly-pushed lane in a drain", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ cost: { drainWindowSec: 60, dailyBudgetUsd: 10 }, ci: { pendingEscalateAfterSec: 3600 } });
+  let clock = new Date("2026-07-20T00:00:00.000Z");
+  const now = () => clock;
+  // A REAL MergeDriver: the head-move path under test is driveOne's own early return (it posts a
+  // fresh review trigger and queues WITHOUT deriving a gate), which a FakeMergeGate cannot exercise
+  // — injecting the new head's observation directly would bypass the very branch this pins.
+  const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg, now });
+  seedDriving(st, "lane-ci", 426, 4260, { review_triggered_head: "H1", review_triggered_at: "2026-07-19T23:00:00.000Z" });
+  seedCiWedgedPr(forge, 4260, "H1");
+  st.recordSpend("lane-earlier", 99, 500, "2026-07-20T00:00:01.000Z"); // daily cap breached from tick 1
+  const tickOpts = () => ({ forge, state: st, supervisor: sup, cfg, mergeGate: gate, now });
+
+  const t1 = await tick(tickOpts());
+  assert.equal(t1.ceilingBreached, true);
+  assert.equal(st.lastCiPendingEvent("lane-ci", 4260)?.kind, "ci-pending-observed");
+  assert.deepEqual(t1.escalated, []); // pin fresh, and the drain window has not elapsed either
+
+  // Two hours later — the OLD pin is well past the 1h bound AND past the drain window — a fix leg
+  // (or a human) pushes. The engine's FIRST sight of H2 is the trigger branch's early return.
+  clock = new Date("2026-07-20T02:00:00.000Z");
+  seedCiWedgedPr(forge, 4260, "H2");
+  const t2 = await tick(tickOpts());
+  assert.deepEqual(t2.driven, [{ kind: "queued", worker: "lane-ci", issue: 426, pr: 4260, reason: "review-triggered" }]);
+  // The drain is past its window on this very tick — and it leaves the healthy lane alone, because
+  // the head move ENDED the episode: the old pin is cancelled on the very pass that first saw H2.
+  assert.deepEqual(t2.escalated, []);
+  assert.equal(st.getWorker("lane-ci")?.state, "driving");
+  assert.equal(st.lastCiPendingEvent("lane-ci", 4260)?.kind, "ci-pending-cleared");
+
+  // And the new head starts its own clock from scratch once the gate actually derives for it.
+  clock = new Date("2026-07-20T02:01:00.000Z");
+  await tick(tickOpts());
+  const repinned = st.lastCiPendingEvent("lane-ci", 4260);
+  assert.deepEqual([repinned?.kind, repinned?.head, repinned?.at], ["ci-pending-observed", "H2", "2026-07-20T02:01:00.000Z"]);
+  st.close();
+});
+
+test("#426 review round 2 (P1-1, adjudicated): a check that CONCLUDES WITHOUT PASSING (CANCELLED) keeps the pin aging — gate① is still not green, so the lane is just as wedged — and the evidence comment names it", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   const cfg = mkCfg({ ci: { pendingEscalateAfterSec: 3600 } });
   let clock = new Date("2026-07-20T00:00:00.000Z");
   const now = () => clock;
-  const gate = new FakeMergeGate();
-  seedDriving(st, "lane-ci", 426, 4260);
-  gate.outcomes[4260] = { kind: "queued", pr: 4260, reason: "gate-pending:MERGE_OK", ciPendingObservation: { pending: true, head: "H1" } };
-  await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate, now });
+  const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg, now });
+  seedDriving(st, "lane-ci", 426, 4260, { review_triggered_head: "H1", review_triggered_at: "2026-07-19T23:00:00.000Z" });
+  seedCiWedgedPr(forge, 4260);
+  const tickOpts = () => ({ forge, state: st, supervisor: sup, cfg, mergeGate: gate, now });
 
-  clock = new Date("2026-07-20T02:00:00.000Z"); // well past the bound for the OLD head
-  gate.outcomes[4260] = { kind: "queued", pr: 4260, reason: "gate-pending:MERGE_OK", ciPendingObservation: { pending: true, head: "H2" } };
-  await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate, now });
+  await tick(tickOpts()); // pin opens while `test` is IN_PROGRESS
+  assert.equal(st.lastCiPendingEvent("lane-ci", 4260)?.at, "2026-07-20T00:00:00.000Z");
+
+  // The job is CANCELLED half an hour in. parsePRStatus keeps ciGreen false (SUCCESS-only, #401)
+  // and ciRed false (CANCELLED is not a failure), so the lane cannot progress on its own — the pin
+  // must NOT be cancelled here, or the F26 wedge returns for exactly this shape.
+  clock = new Date("2026-07-20T00:30:00.000Z");
+  forge.prChecks = [
+    { name: "test", status: "COMPLETED", conclusion: "CANCELLED", state: null },
+    { name: "lint", status: "COMPLETED", conclusion: "SUCCESS", state: null },
+  ];
+  await tick(tickOpts());
   const pin = st.lastCiPendingEvent("lane-ci", 4260);
-  assert.deepEqual([pin?.kind, pin?.head, pin?.at], ["ci-pending-observed", "H2", "2026-07-20T02:00:00.000Z"]);
+  assert.equal(pin?.kind, "ci-pending-observed", "the pin is still open — a non-passing conclusion is not a resolution");
+  assert.equal(pin?.at, "2026-07-20T00:00:00.000Z", "and it still ages from the ORIGINAL observation");
+
+  // Past the bound, measured from the original pin: escalation, naming the CANCELLED check.
+  clock = new Date("2026-07-20T01:00:00.000Z");
+  await tick(tickOpts());
+  assert.deepEqual(forge.prLabelsAdded, [[4260, "needs-human"]]);
+  const comment = forge.prComments.find(([pr]) => pr === 4260)?.[1] ?? "";
+  assert.match(comment, /concluded without passing: test \(CANCELLED\)/);
+  assert.doesNotMatch(comment, /still pending/); // nothing IS pending — the honest evidence says so
+  assert.doesNotMatch(comment, /lint/); // the check that actually passed is not the human's problem
+  const ev = st.latestEvent("ci-pending-escalated") as { payload: { checks: string[]; blockedChecks?: string[] } } | undefined;
+  assert.deepEqual(ev?.payload.checks, []);
+  assert.deepEqual(ev?.payload.blockedChecks, ["test (CANCELLED)"]);
   st.close();
 });
 

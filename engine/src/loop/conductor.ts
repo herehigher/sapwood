@@ -950,27 +950,50 @@ function checkStillPending(c: PRCheckItem): boolean {
   return c.state == null || !CONCLUSIVE_STATUS_STATES.has(c.state.toUpperCase());
 }
 
-async function describePendingChecks(forge: IForge, pr: number): Promise<{ names: string[]; note: string }> {
+/** #426 review round 2 (P1-1b): a check that DID conclude, but not by passing — `CANCELLED`,
+ *  `SKIPPED`, `NEUTRAL`, `STALE`, `ACTION_REQUIRED`. gate① stays not-green for these (parsePRStatus
+ *  is SUCCESS-only per #401) and `ciRed` deliberately excludes them, so the lane is exactly as
+ *  wedged as one waiting on a check that never finishes — and the pin correctly keeps aging. They
+ *  must still be NAMED in the evidence: "which check do I re-run" is the whole point of the
+ *  comment, and reporting only "nothing is pending" would send the human looking for a running job
+ *  that isn't there. */
+function checkConcludedWithoutPassing(c: PRCheckItem): boolean {
+  if (checkStillPending(c)) return false;
+  if (c.conclusion != null) return c.conclusion.toUpperCase() !== "SUCCESS";
+  return (c.state ?? "").toUpperCase() !== "SUCCESS";
+}
+
+function describeCheck(c: PRCheckItem): string {
+  const verdict = c.conclusion ?? c.state;
+  return verdict ? `${c.name} (${verdict})` : c.name;
+}
+
+async function describePendingChecks(forge: IForge, pr: number): Promise<{ names: string[]; blocked: string[]; note: string }> {
   let page: Awaited<ReturnType<IForge["getPRChecks"]>>;
   try {
     page = await forge.getPRChecks(pr, CI_PENDING_EVIDENCE_CHECK_CAP);
   } catch (e) {
-    return { names: [], note: `the check list could not be read (${String(e)})` };
+    return { names: [], blocked: [], note: `the check list could not be read (${String(e)})` };
   }
+  const truncated = page.total > page.checks.length ? ` (+${page.total - page.checks.length} further check(s) not shown)` : "";
   const names = page.checks.filter(checkStillPending).map((c) => c.name);
-  if (names.length === 0) {
-    // An EMPTY rollup is itself the wedge on a repo whose workflows never started — say so rather
-    // than imply the checks concluded (they did not: gate① is still not green and not red).
+  const blocked = page.checks.filter(checkConcludedWithoutPassing).map(describeCheck);
+  const parts: string[] = [];
+  if (names.length > 0) parts.push(`still pending: ${names.join(", ")}`);
+  if (blocked.length > 0) parts.push(`concluded without passing: ${blocked.join(", ")}`);
+  if (parts.length === 0) {
+    // Neither shape present: an EMPTY rollup is itself the wedge on a repo whose workflows never
+    // started, and a full-but-all-green page can only mean the cap truncated the interesting one.
     return {
       names,
+      blocked,
       note:
         page.checks.length === 0
           ? "no check has reported on this head at all"
-          : "no check is still pending in the first " + `${CI_PENDING_EVIDENCE_CHECK_CAP} reported`,
+          : `no blocking check is visible in the first ${CI_PENDING_EVIDENCE_CHECK_CAP} reported${truncated}`,
     };
   }
-  const truncated = page.total > page.checks.length ? ` (+${page.total - page.checks.length} further check(s) not shown)` : "";
-  return { names, note: `still pending: ${names.join(", ")}${truncated}` };
+  return { names, blocked, note: `${parts.join("; ")}${truncated}` };
 }
 
 /** #245: the fix-loop's dependency seam — deliberately narrower than the full TickDeps a caller
@@ -3247,16 +3270,28 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         continue;
       }
       // RECLAIM: back to `driving`, same worker/PR — the DRIVE loop below picks it up this tick.
+      //
+      // #426 review round 2 (P2): ONE transaction (`upsertWorkerWithEvent`, the #447 shape), not
+      // an upsert followed by an append. The `gated-reentry` event is an EPISODE-RESET BOUNDARY
+      // for four separate readers now (DRIVE_QUEUED / FIX_LEG_DISPATCH_BLOCKED /
+      // CONVERGENCE_EPISODE / CI_PENDING reset kinds), so a crash between the two writes used to
+      // leave a durably-reclaimed `driving` lane with NO reset on record — and #426 made that
+      // load-bearing rather than merely noisy: the lane's pre-escalation CI-pending pin would
+      // still read past the bound, terminalizing it in the very next drain after the restart.
+      // Pre-existing code, promoted to atomic because this issue made the missing event harmful.
       const attempt = attempts + 1;
-      state.upsertWorker({
-        ...w,
-        state: "driving",
-        ended_at: iso(),
-        review_triggered_head: null,
-        review_triggered_at: null,
-        gated_reentry_attempts: attempt,
-      });
-      state.appendEvent("gated-reentry", { worker: w.name, issue: w.issue, pr, attempt });
+      state.upsertWorkerWithEvent(
+        {
+          ...w,
+          state: "driving",
+          ended_at: iso(),
+          review_triggered_head: null,
+          review_triggered_at: null,
+          gated_reentry_attempts: attempt,
+        },
+        "gated-reentry",
+        { worker: w.name, issue: w.issue, pr, attempt },
+      );
       gatedReclaimed.push({ kind: "reclaimed", worker: w.name, issue: w.issue, pr, attempt });
     }
   }
@@ -3498,8 +3533,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             state.appendEvent("ci-pending-observed", { worker: w.name, issue: w.issue, pr, head: obs.head, at: iso() });
           }
         } else if (openCiPin != null) {
-          // A check reached a real conclusion (or gate② stopped being decisive) — cancel, so the
-          // NEXT pending episode ages from its own start rather than inheriting this one's clock.
+          // gate① RESOLVED (green or red), gate② stopped being decisive, or the head moved — cancel,
+          // so the NEXT pending episode ages from its own start rather than inheriting this clock.
+          // #426 review round 2 (P1-1, adjudicated): a check that CONCLUDES WITHOUT PASSING
+          // (cancelled/skipped/neutral/stale/action_required) never reaches here — `ciGreen` stays
+          // false and `ciRed` stays false for those, so the observation is still `pending: true`
+          // and the pin correctly keeps aging. That is deliberate, not an oversight: such a lane
+          // cannot progress on its own either, and cancelling would reintroduce the F26 wedge.
           state.appendEvent("ci-pending-cleared", { worker: w.name, issue: w.issue, pr, head: obs.head });
         }
       }
@@ -3545,6 +3585,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               head: s.head,
               pendingSec: s.pendingSec,
               checks: evidence.names,
+              // #426 review round 2 (P1-1b): a check that concluded WITHOUT passing keeps gate①
+              // not-green, so it wedges the lane exactly like a never-finishing one — recorded
+              // separately (with each check's own conclusion) so the audit row says which.
+              ...(evidence.blocked.length > 0 ? { blockedChecks: evidence.blocked } : {}),
             });
           } catch {
             // Same as above: no label, no latch, no event — retried next tick.

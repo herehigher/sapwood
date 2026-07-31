@@ -2197,7 +2197,8 @@ export class State {
    *  and the same event-log-as-memory contract `lastHoldEvent` documents).
    *
    *  LATEST-wins by id, never by timestamp: `kind === "ci-pending-observed"` is an OPEN pin,
-   *  `"ci-pending-cleared"` a cancelled one (a check reached a real conclusion). `at` is the
+   *  `"ci-pending-cleared"` a cancelled one (gate① resolved green or red, or the head moved — a
+   *  check that concludes WITHOUT passing keeps the lane wedged and does NOT cancel). `at` is the
    *  conductor's own injected-clock stamp carried in the payload — read ONLY as a duration input
    *  (merge-driver.ts's `pinElapsedSec`), never for before/after ordering; ordering is the `id`.
    *  `head` scopes the pin: a pin recorded for a superseded head never ages the current one.
