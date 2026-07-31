@@ -187,10 +187,20 @@ reviewer:
   #   retryAfterSec: 900 # backoff between paid attempts on the same head after unavailable
   #   treeRetentionCap: 10 # retained review trees; in-flight/escalated heads are excluded
 
-# Engine-agent execution evidence. Every pair must match a SUCCESS CheckRun on the reviewed head
-# from the named owning GitHub App; a same-named check from another app is not evidence. Empty is
-# legal, but mode: engine-agent warns and queues fail-closed before a paid review session.
+# CI signal handling: how long gate① may stay PENDING, and (engine-agent only) which CheckRuns
+# count as trusted execution evidence — every requiredChecks pair must match a SUCCESS CheckRun on
+# the reviewed head from the named owning GitHub App; a same-named check from another app is not
+# evidence. An empty requiredChecks list is legal, but mode: engine-agent warns and queues
+# fail-closed before a paid review session.
 # ci:
+#   pendingEscalateAfterSec: 21600
+#                     # how long gate① may stay PENDING (neither green nor red) behind a decisive
+#                     # gate② verdict before sapwood labels the PR needs-human, comments naming the
+#                     # stuck check(s), and treats the lane as terminal for the bounded drain. The
+#                     # clock is a durable pin: it survives a restart, and only gate① actually
+#                     # resolving (green or red) or a new head cancels it — a check that concludes
+#                     # WITHOUT passing (cancelled/skipped/neutral) keeps it aging, since gate① is
+#                     # still not green and the lane still cannot progress.
 #   requiredChecks:
 #     - name: test
 #       app: github-actions # default when omitted

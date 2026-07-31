@@ -14,7 +14,7 @@
 
 import { existsSync } from "node:fs";
 import type { SapwoodConfig } from "../config/config.js";
-import type { IForge, Issue, PRChangedFile } from "../forge/forge.js";
+import type { IForge, Issue, PRChangedFile, PRCheckItem } from "../forge/forge.js";
 import { firstMatchingLabel, labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge/labels.js";
 import { capDigest } from "../retro/retro-digest.js";
 import { buildAcSnapshot, checkAcSnapshotDrift } from "../review/ac-snapshot.js";
@@ -29,7 +29,8 @@ import {
 import type { EngineAgentDriveDeps } from "../review/drive.js";
 import { effectiveSeverity, type FindingKind, type FindingSeverity } from "../review/finding-axes.js";
 import { boundRecords, classicThreadFindingKey, engineAgentFindingKey } from "../review/finding-key.js";
-import type { DriveOutcome } from "../roles/merge-driver.js";
+import type { CiPendingPin, DriveOutcome } from "../roles/merge-driver.js";
+import { NO_CI_PENDING_PIN, pinElapsedSec } from "../roles/merge-driver.js";
 import type { ReviewFallbackLock, ReviewTriggerPin } from "../roles/reviewer.js";
 import { isReviewerKind } from "../roles/reviewer.js";
 import { UnresumableLaneError, type WorkerProxyOpts } from "../roles/worker.js";
@@ -886,10 +887,134 @@ const FIX_LEG_DISPATCH_BLOCKED_RESET_KINDS = ["drive-fixup", "fix-leg-started", 
  *  adjudication names fix-capped lanes terminal-for-drain unconditionally). The recovery path is
  *  #147's GATED RECLAIM: a human clears the `needs-human` label once they see the false positive
  *  (or once review lands and the PR is simply mergeable), and the SAME lane/PR/branch reclaims
- *  back into `driving` — no data loss, no fresh dispatch, just one extra manual step. */
-export function drivingLaneTerminalForDrain(fixRounds: number, prFixCap: number, dailyBudgetBreached: boolean): boolean {
+ *  back into `driving` — no data loss, no fresh dispatch, just one extra manual step.
+ *
+ *  #426 (F26): `ciWedged` is the THIRD such fact, and it is the caller's INPUT rather than
+ *  something derived here (this function stays pure and column-only) — a lane whose CI-pending pin
+ *  has already outlived `ci.pendingEscalateAfterSec` (see `ciPendingWedgedForDrain`) can never
+ *  progress on its own either: gate① is stuck pending, so DRIVE returns WAIT forever, and unlike
+ *  the two facts above this one is invisible in `fix_rounds` (a CI-wedged lane typically has
+ *  `fix_rounds === 0`). A pin that is merely FRESH is deliberately NOT terminal — that is an
+ *  ordinary, healthy WAIT while CI runs, and escalating it would be exactly the false positive
+ *  #375's ruling exists to prevent. */
+export function drivingLaneTerminalForDrain(fixRounds: number, prFixCap: number, dailyBudgetBreached: boolean, ciWedged = false): boolean {
   if (fixRounds >= prFixCap) return true;
+  if (ciWedged) return true;
   return fixRounds > 0 && dailyBudgetBreached;
+}
+
+/** #426 (F26): the CI-pending pin's episode boundary. A human-mediated re-entry (#147 gated
+ *  reclaim) or a park revival ends the wedge episode: the lane is being looked at, so its aging
+ *  clock must not still be past the bound the instant it comes back — a fresh pin starts, and the
+ *  human gets the full bound to unstick CI before the engine calls them again. Compared by event
+ *  ID against the pin's own id (never timestamps), the same episode-reset shape
+ *  `DRIVE_QUEUED_RESET_KINDS` and `CONVERGENCE_EPISODE_RESET_KINDS` use. */
+const CI_PENDING_RESET_KINDS = ["gated-reentry", "lane-revived"];
+
+/** #426 (F26): is this lane's CI-pending pin past `ci.pendingEscalateAfterSec` — the durable,
+ *  forge-free definition of "CI-wedged" BOTH drain arms consult (the kill-switch heuristic's
+ *  `ciWedged` input above, and the observed set the ceiling path populates in tick()'s DRIVE
+ *  loop). Reads the log, never a mirror: an OPEN pin is the latest `ci-pending-observed` for
+ *  (worker, pr) that no `ci-pending-cleared` and no episode reset supersedes. Cheap enough for a
+ *  kill-switch-frozen tick (one indexed event read per driving lane, zero forge calls).
+ *
+ *  ACCEPTED, DOCUMENTED BLIND SPOT (#426 review round 3, P3 — marginal-complexity principle: no new
+ *  machinery for a bounded, self-recovering edge). This predicate is HEAD-BLIND on purpose: it must
+ *  stay forge-free to be safe inside a kill-switch-frozen tick, so it cannot verify that the pinned
+ *  head is still the PR's head. Every path where the engine actually LOOKS at the PR closes the gap
+ *  (any post-coherent-read pass reports the live head and the conductor cancels a superseded pin —
+ *  see the DRIVE loop). What remains is exactly one sequence: an aged pin on H1, a push to H2, and a
+ *  crash BEFORE any pass observes H2, with the restart landing in a drain that runs before DRIVE.
+ *  No drive-layer fix can close that — no pass ran. Blast radius is one recoverable false
+ *  `needs-human` during an active drain; the recovery is the standard label-clear + #147 gated
+ *  reentry, with the lane, PR, and branch all preserved. Verifying the head here would mean a forge
+ *  read on the one code path that must never make one. */
+function ciPendingWedgedForDrain(state: State, cfg: SapwoodConfig, worker: string, pr: number, now: Date): boolean {
+  const pin = openCiPendingPin(state, worker, pr);
+  const pendingSec = pinElapsedSec(pin?.at ?? null, now);
+  return pendingSec != null && pendingSec >= cfg.ci.pendingEscalateAfterSec;
+}
+
+/** #426 (F26): the lane's OPEN CI-pending pin, or null when none stands — the single reader both
+ *  the aging arm (threaded into `MergeDriver.driveOne`) and the drain predicate above go through.
+ *  Open means: the latest `ci-pending-*` event for (worker, pr) is an `observed` one (a conclusive
+ *  check appends `ci-pending-cleared`, which cancels it) AND it post-dates this lane's last
+ *  episode reset (`CI_PENDING_RESET_KINDS`, compared by event ID). */
+function openCiPendingPin(state: State, worker: string, pr: number): { id: number; head: string | null; at: string | null } | null {
+  const pin = state.lastCiPendingEvent(worker, pr);
+  if (pin == null || pin.kind !== "ci-pending-observed") return null;
+  if (pin.id < state.maxEventIdForKinds(CI_PENDING_RESET_KINDS, worker, pr)) return null;
+  return { id: pin.id, head: pin.head, at: pin.at };
+}
+
+/** #426 (F26) AC1: the evidence a CI-pending escalation must carry — the NAMES of the checks that
+ *  are still running on the wedged head, so the human who gets the `needsHuman` label knows which
+ *  check to go look at. Bounded (the same capped `getPRChecks` read the proxy uses) and
+ *  best-effort: an unreadable rollup degrades to a stated reason, never to a silent escalation. */
+const CI_PENDING_EVIDENCE_CHECK_CAP = 50;
+
+/** A check has NOT concluded: a modern CheckRun with no `conclusion` (queued/in-progress/waiting),
+ *  or a legacy status context still reporting a non-terminal state. Mirrors parsePRStatus's own
+ *  conclusive-vs-pending split (forge.ts) — the signal that put the lane in WAIT to begin with. */
+const CONCLUSIVE_STATUS_STATES = new Set(["SUCCESS", "FAILURE", "ERROR"]);
+function checkStillPending(c: PRCheckItem): boolean {
+  if (c.conclusion != null) return false;
+  return c.state == null || !CONCLUSIVE_STATUS_STATES.has(c.state.toUpperCase());
+}
+
+/** #426 review round 2 (P1-1b): a check that DID conclude, but not by passing — `CANCELLED`,
+ *  `SKIPPED`, `NEUTRAL`, `STALE`, `ACTION_REQUIRED`. gate① stays not-green for these (parsePRStatus
+ *  is SUCCESS-only per #401) and `ciRed` deliberately excludes them, so the lane is exactly as
+ *  wedged as one waiting on a check that never finishes — and the pin correctly keeps aging. They
+ *  must still be NAMED in the evidence: "which check do I re-run" is the whole point of the
+ *  comment, and reporting only "nothing is pending" would send the human looking for a running job
+ *  that isn't there. */
+function checkConcludedWithoutPassing(c: PRCheckItem): boolean {
+  if (checkStillPending(c)) return false;
+  if (c.conclusion != null) return c.conclusion.toUpperCase() !== "SUCCESS";
+  return (c.state ?? "").toUpperCase() !== "SUCCESS";
+}
+
+function describeCheck(c: PRCheckItem): string {
+  const verdict = c.conclusion ?? c.state;
+  return verdict ? `${c.name} (${verdict})` : c.name;
+}
+
+/** #426 (rebase onto #398): the deterministic marker embedded in the CI-pending escalation
+ *  comment, keyed on (worker, pr, head) — the same shape `reviewDisputedCommentMarker` uses, and
+ *  read back by `commentOnEscalationCarrier` immediately before every post attempt. `head` is the
+ *  right episode key here for exactly the reason the pin itself is head-scoped: a push restarts CI,
+ *  so a later wedge on a NEW head is a genuinely new escalation and must comment again. */
+function ciPendingCommentMarker(worker: string, pr: number, head: string): string {
+  return `<!-- sapwood:ci-pending:${worker}:${pr}:${head} -->`;
+}
+
+async function describePendingChecks(forge: IForge, pr: number): Promise<{ names: string[]; blocked: string[]; note: string }> {
+  let page: Awaited<ReturnType<IForge["getPRChecks"]>>;
+  try {
+    page = await forge.getPRChecks(pr, CI_PENDING_EVIDENCE_CHECK_CAP);
+  } catch (e) {
+    return { names: [], blocked: [], note: `the check list could not be read (${String(e)})` };
+  }
+  const truncated = page.total > page.checks.length ? ` (+${page.total - page.checks.length} further check(s) not shown)` : "";
+  const names = page.checks.filter(checkStillPending).map((c) => c.name);
+  const blocked = page.checks.filter(checkConcludedWithoutPassing).map(describeCheck);
+  const parts: string[] = [];
+  if (names.length > 0) parts.push(`still pending: ${names.join(", ")}`);
+  if (blocked.length > 0) parts.push(`concluded without passing: ${blocked.join(", ")}`);
+  if (parts.length === 0) {
+    // Neither shape present: an EMPTY rollup is itself the wedge on a repo whose workflows never
+    // started, and a full-but-all-green page can only mean the cap truncated the interesting one.
+    return {
+      names,
+      blocked,
+      note:
+        page.checks.length === 0
+          ? "no check has reported on this head at all"
+          : `no blocking check is visible in the first ${CI_PENDING_EVIDENCE_CHECK_CAP} reported${truncated}`,
+    };
+  }
+  return { names, blocked, note: `${parts.join("; ")}${truncated}` };
 }
 
 /** #245: the fix-loop's dependency seam — deliberately narrower than the full TickDeps a caller
@@ -1163,6 +1288,10 @@ export interface MergeGate {
     reentered?: boolean,
     recordVerdict?: (head: string, generation: number, coverageEstablished: boolean) => void,
     engineAgent?: Omit<EngineAgentDriveDeps, "forge" | "cfg" | "reviewerAdapter">,
+    /** #426 (F26): the lane's durable CI-pending pin, read off the event log by tick() (see
+     *  `openCiPendingPin`) — the aging clock for a gate① that never concludes. Optional, and
+     *  omitting it simply never ages: pre-#426 fakes still satisfy this type. */
+    ciPendingPin?: CiPendingPin,
   ): Promise<DriveOutcome>;
 }
 
@@ -1721,18 +1850,28 @@ async function drainThenEscalate(
     // one extra tick, never a fresh drain window.
     for (const w of state.drivingWorkers()) {
       const fixRounds = w.fix_rounds ?? 0;
+      // #426 (F26): the CI-wedge fact, durable and forge-free — safe to read even under a
+      // kill-switch-frozen tick (see `ciPendingWedgedForDrain`). It DECIDES terminality only on the
+      // heuristic arm; the observed arm's membership was already decided by THIS tick's DRIVE loop
+      // (which populates `blockedLanes` from the very same predicate — the ground-truth-vs-
+      // inference split `DrivingDrainMode` documents, and why the fix lands in both arms rather
+      // than inside the shared heuristic). It is read on both arms so the escalation EVIDENCE
+      // names the real blocker instead of an admission-block reason the lane never hit.
+      const ciWedged = w.pr != null && ciPendingWedgedForDrain(state, cfg, w.name, w.pr, nowDate);
       const terminal =
         drivingDrain.mode === "heuristic"
-          ? drivingLaneTerminalForDrain(fixRounds, cfg.lanes.prFixCap, drivingDrain.dailyBudgetBreached)
+          ? drivingLaneTerminalForDrain(fixRounds, cfg.lanes.prFixCap, drivingDrain.dailyBudgetBreached, ciWedged)
           : drivingDrain.blockedLanes.has(w.name);
       if (!terminal) continue;
       if (w.pr == null) continue; // a PR-less driving row is DRIVE's own fail-safe, not drain's
       const reason =
         fixRounds >= cfg.lanes.prFixCap
           ? `drain-fix-rounds-capped:${fixRounds}/${cfg.lanes.prFixCap}`
-          : drivingDrain.mode === "heuristic"
-            ? `drain-daily-budget-blocked:fix-rounds=${fixRounds}`
-            : `drain-ceiling-admission-blocked:fix-rounds=${fixRounds}`;
+          : ciWedged
+            ? `drain-ci-pending-wedged:fix-rounds=${fixRounds}`
+            : drivingDrain.mode === "heuristic"
+              ? `drain-daily-budget-blocked:fix-rounds=${fixRounds}`
+              : `drain-ceiling-admission-blocked:fix-rounds=${fixRounds}`;
       try {
         await forge.addLabel(w.issue, cfg.labels.needsHuman);
       } catch (e) {
@@ -3152,16 +3291,28 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         continue;
       }
       // RECLAIM: back to `driving`, same worker/PR — the DRIVE loop below picks it up this tick.
+      //
+      // #426 review round 2 (P2): ONE transaction (`upsertWorkerWithEvent`, the #447 shape), not
+      // an upsert followed by an append. The `gated-reentry` event is an EPISODE-RESET BOUNDARY
+      // for four separate readers now (DRIVE_QUEUED / FIX_LEG_DISPATCH_BLOCKED /
+      // CONVERGENCE_EPISODE / CI_PENDING reset kinds), so a crash between the two writes used to
+      // leave a durably-reclaimed `driving` lane with NO reset on record — and #426 made that
+      // load-bearing rather than merely noisy: the lane's pre-escalation CI-pending pin would
+      // still read past the bound, terminalizing it in the very next drain after the restart.
+      // Pre-existing code, promoted to atomic because this issue made the missing event harmful.
       const attempt = attempts + 1;
-      state.upsertWorker({
-        ...w,
-        state: "driving",
-        ended_at: iso(),
-        review_triggered_head: null,
-        review_triggered_at: null,
-        gated_reentry_attempts: attempt,
-      });
-      state.appendEvent("gated-reentry", { worker: w.name, issue: w.issue, pr, attempt });
+      state.upsertWorkerWithEvent(
+        {
+          ...w,
+          state: "driving",
+          ended_at: iso(),
+          review_triggered_head: null,
+          review_triggered_at: null,
+          gated_reentry_attempts: attempt,
+        },
+        "gated-reentry",
+        { worker: w.name, issue: w.issue, pr, attempt },
+      );
       gatedReclaimed.push({ kind: "reclaimed", worker: w.name, issue: w.issue, pr, attempt });
     }
   }
@@ -3285,6 +3436,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // live PR data before it can gate anything.)
       const storedKind = w.review_fallback_kind ?? null;
       const lockKind = isReviewerKind(storedKind) ? storedKind : null;
+      // #426 (F26): the lane's durable CI-pending pin, read BEFORE the gate call (the same
+      // read-pin/thread-it-in shape the review trigger pin above uses). The pin lives entirely in
+      // the event log — there is no mirror column to fall out of sync with, and a restart mid-wait
+      // re-reads the same `at`, so the clock never resets (AC3).
+      const openCiPin = openCiPendingPin(state, w.name, pr);
       const outcome = await gate.driveOne(
         pr,
         w.issue,
@@ -3308,6 +3464,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         (w.gated_reentry_attempts ?? 0) > 0,
         (head, generation, coverageEstablished) => state.recordReviewVerdict(w.name, head, generation, coverageEstablished),
         deps.engineAgentDriveDeps?.(w, pr),
+        openCiPin ? { head: openCiPin.head, at: openCiPin.at } : NO_CI_PENDING_PIN,
       );
       // #54: announce a reviewer-failover switch/revert — structured event + PR comment.
       // driveOne reports the signal STATELESSLY every tick it holds (resolveReviewVerdict is
@@ -3381,6 +3538,126 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           });
         }
       }
+      // #426 (F26): the gate① twin of the silence clock above — the CI-PENDING PIN's lifecycle.
+      // The pin IS the log (no mirror column, no in-process clock), so there is nothing here that
+      // could disagree with the ledger and nothing to replay: `openCiPin` above read the pin, and
+      // the appends below are the only writes. A pass that reported no observation at all (a
+      // mixed-read queue, a gate-data outage before either read landed) leaves the pin exactly as it
+      // was — never a cancel, because a loop-wide gh outage must not reset every lane's clock.
+      //
+      // #426 review round 3 (P2): HEAD and PENDING are decided separately, because a pass knows them
+      // separately (see DriveOutcome.ciPendingObservation's own doc).
+      if (outcome.ciPendingObservation) {
+        const obs = outcome.ciPendingObservation;
+        // A pin recorded for a SUPERSEDED head: the episode is over regardless of what this pass
+        // knows about gate① — the old head's checks are irrelevant, and leaving the pin open is what
+        // let an aged pre-push pin terminalize a healthy freshly-pushed lane in a drain (round 2's
+        // P1-2). Any post-coherent-read pass can be the first to see the new head, so this arm
+        // deliberately fires on `pending: "unknown"` too.
+        const openForThisHead = openCiPin != null && openCiPin.head === obs.head ? openCiPin : null;
+        if (openCiPin != null && openForThisHead == null) {
+          state.appendEvent("ci-pending-cleared", { worker: w.name, issue: w.issue, pr, head: obs.head });
+        }
+        if (obs.pending === true) {
+          // Open a pin on the first pending pass for THIS head (the cancel above, if it fired, has
+          // already closed whatever preceded it — latest-wins by id).
+          if (openForThisHead == null) {
+            state.appendEvent("ci-pending-observed", { worker: w.name, issue: w.issue, pr, head: obs.head, at: iso() });
+          }
+        } else if (obs.pending === false && openForThisHead != null) {
+          // gate① RESOLVED (green or red) or gate② stopped being decisive — cancel, so the NEXT
+          // pending episode ages from its own start rather than inheriting this clock.
+          // #426 review round 2 (P1-1, adjudicated): a check that CONCLUDES WITHOUT PASSING
+          // (cancelled/skipped/neutral/stale/action_required) never reaches here — `ciGreen` stays
+          // false and `ciRed` stays false for those, so the observation is still `pending: true`
+          // and the pin correctly keeps aging. That is deliberate, not an oversight: such a lane
+          // cannot progress on its own either, and cancelling would reintroduce the F26 wedge.
+          state.appendEvent("ci-pending-cleared", { worker: w.name, issue: w.issue, pr, head: obs.head });
+        }
+        // `pending: "unknown"` on the SAME head falls through both arms: a pass that never derived a
+        // gate can neither open nor close an episode it has no information about.
+      }
+      // #426 (F26) AC1: aged past `ci.pendingEscalateAfterSec` — the same three-tier escalation
+      // review silence gets (visibility only: the lane stays driving, gate② is untouched), plus the
+      // evidence comment naming the pending check(s).
+      //
+      // CARRIER (#398): PR-born by construction — the fact being escalated is a check on THIS PR's
+      // head, and DRIVE only ever runs for a lane that has one. It therefore goes through the SAME
+      // `escalationCarrier`/`labelEscalationCarrier`/`commentOnEscalationCarrier` pair every other
+      // escalation uses, rather than an inline PR write that happens to agree with the rule today:
+      // "one carrier per escalation" stays structural, and the marker-checked comment helper gives
+      // this site the ambiguous-write protection #451 round 3 built for the others. No
+      // `gated_escalation_carrier` is recorded here because this escalation deliberately does NOT
+      // move the row — the lane stays `driving` (visibility only, exactly like #170's silence
+      // escalation); the label it writes is what makes the NEXT tick's gate return HUMAN, and that
+      // pass's `escalateNeedsHuman` performs the terminal transition and records the carrier.
+      //
+      // ORDER (comment -> label -> event), deliberately NOT the review-silence branch's label-first:
+      // the label is the LATCH here too (the next pass reads it live and `ciPendingDuration` returns
+      // null), so landing it before the evidence would leave a `needsHuman` PR with no explanation
+      // and no retry path. A failed comment post writes nothing at all — the pin keeps aging and the
+      // signal re-fires next tick. A comment that lands with a failed label write no longer re-posts
+      // a duplicate next tick: the marker read inside `commentOnEscalationCarrier` sees the existing
+      // comment and skips the post (keyed on head, so a genuinely new episode still comments). Dedup
+      // for the ESCALATION itself is the live PR LABEL, not the log, so the event append trailing the
+      // label cannot cause a re-escalation — only, in the ambiguous label-write case (label lands,
+      // client reports an error), a missing audit row: the identical accepted residual documented on
+      // `review-silence-escalated` above.
+      if (outcome.ciPendingEscalation) {
+        const s = outcome.ciPendingEscalation;
+        const evidence = await describePendingChecks(forge, pr);
+        const carrier = escalationCarrier(pr);
+        let posted = false;
+        try {
+          await commentOnEscalationCarrier(
+            forge,
+            cfg,
+            carrier,
+            w.issue,
+            pr,
+            ciPendingCommentMarker(w.name, pr, s.head),
+            `${ciPendingCommentMarker(w.name, pr, s.head)}\n` +
+              `sapwood: gate① has been PENDING for ${s.pendingSec}s on \`${s.head}\` (bound: ` +
+              `${cfg.ci.pendingEscalateAfterSec}s) while gate② is already decisive — CI is neither green ` +
+              `nor red, so this PR can never progress on its own (${evidence.note}). Escalating to ` +
+              `\`${cfg.labels.needsHuman}\`: re-run or fix the stuck check, then remove the label ` +
+              `${carrierNoun(carrier)} to reclaim this PR (#147 gated reentry).`,
+          );
+          posted = true;
+        } catch {
+          // No comment means no latch and no event: retry next tick. Never let a visibility-write
+          // outage turn a queued gate into a terminal lane transition.
+        }
+        if (posted) {
+          try {
+            await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
+            state.appendEvent("ci-pending-escalated", {
+              worker: w.name,
+              issue: w.issue,
+              pr,
+              head: s.head,
+              pendingSec: s.pendingSec,
+              checks: evidence.names,
+              // #426 review round 2 (P1-1b): a check that concluded WITHOUT passing keeps gate①
+              // not-green, so it wedges the lane exactly like a never-finishing one — recorded
+              // separately (with each check's own conclusion) so the audit row says which.
+              ...(evidence.blocked.length > 0 ? { blockedChecks: evidence.blocked } : {}),
+            });
+          } catch {
+            // Same as above: no label, no latch, no event — retried next tick.
+          }
+        }
+      }
+      // #426 (F26) AC2: the OBSERVED drain arm. A lane whose pin is already past the bound cannot
+      // progress on its own, so THIS tick's ceiling drain (which runs after this loop) may treat it
+      // as terminal — the ground-truth half of the two-arm placement (`drivingLaneTerminalForDrain`
+      // owns the kill-switch half). Keyed on the durable pin, NOT on `ciPendingEscalation` above:
+      // once the `needsHuman` label lands the signal stops firing, but the lane is still wedged.
+      // `tickNow` (this tick's single heartbeat read), not a fresh `now()`: unlike the fix-leg
+      // admission gate — which must re-read the clock because wall-clock ceilings can cross mid-loop
+      // — this bound is hours wide, so sub-tick precision buys nothing and an extra clock read would
+      // only make the DRIVE loop's now() sequence depend on how many lanes it happens to visit.
+      if (ciPendingWedgedForDrain(state, cfg, w.name, pr, tickNow)) driveFixBlockedLanes.add(w.name);
       // #294: hold-visibility. A hold is the one human-INITIATED carrier in the three-tier
       // escalation model, and until now it lived only inside gate derivation — deriveGate reads
       // the label live and appends nothing, so a held PR was indistinguishable from "waiting on

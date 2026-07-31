@@ -420,6 +420,33 @@ test("lastHoldEvent (#294, Codex P2): scoped to (worker, pr) — a lane repointe
   s.close();
 });
 
+test("lastCiPendingEvent (#426): none -> null; LATEST-wins by id, scoped to (worker, pr), and a malformed payload degrades to nulls rather than a bogus pin", () => {
+  const s = mem();
+  assert.equal(s.lastCiPendingEvent("lane-a", 55), null);
+
+  s.appendEvent("drive-queued", { worker: "lane-a", pr: 55 }); // unrelated kinds never match
+  assert.equal(s.lastCiPendingEvent("lane-a", 55), null);
+
+  s.appendEvent("ci-pending-observed", { worker: "lane-a", issue: 2, pr: 55, head: "H1", at: "2026-07-20T00:00:00.000Z" });
+  s.appendEvent("ci-pending-observed", { worker: "lane-b", issue: 3, pr: 56, head: "H9", at: "2026-07-20T00:00:00.000Z" });
+  const open = s.lastCiPendingEvent("lane-a", 55);
+  assert.deepEqual([open?.kind, open?.head, open?.at], ["ci-pending-observed", "H1", "2026-07-20T00:00:00.000Z"]);
+  // Same lane name, different PR: a repointed lane never inherits the prior PR's pin.
+  assert.equal(s.lastCiPendingEvent("lane-a", 72), null);
+
+  // A conclusive check cancels it; lane-b's own episode is untouched.
+  s.appendEvent("ci-pending-cleared", { worker: "lane-a", issue: 2, pr: 55, head: "H1" });
+  const cleared = s.lastCiPendingEvent("lane-a", 55);
+  assert.deepEqual([cleared?.kind, cleared?.head, cleared?.at], ["ci-pending-cleared", "H1", null]);
+  assert.equal(s.lastCiPendingEvent("lane-b", 56)?.kind, "ci-pending-observed");
+
+  // A hand-edited/forged row with the wrong payload types is read as "no usable pin", never cast.
+  s.appendEvent("ci-pending-observed", { worker: "lane-a", issue: 2, pr: 55, head: 7, at: 1234 });
+  const junk = s.lastCiPendingEvent("lane-a", 55);
+  assert.deepEqual([junk?.kind, junk?.head, junk?.at], ["ci-pending-observed", null, null]);
+  s.close();
+});
+
 test("lastDriveQueuedEvent (#383): none -> null; returns the LATEST id+reason for the right (worker, pr) only", () => {
   const s = mem();
   assert.equal(s.lastDriveQueuedEvent("lane-a", 55), null);

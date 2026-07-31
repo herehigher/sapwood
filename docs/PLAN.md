@@ -459,7 +459,12 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   `drainWindowSec`, exactly like a hard-killed running/fixing lane, so the engine always
   exits within the drain window. A driving lane that has never needed a fix leg
   (MERGE-/WAIT-gated) is left alone — it isn't stuck for a budget reason, and resumes the
-  instant the breach/switch clears. The fix leg pulls its own PR's review findings via the
+  instant the breach/switch clears. **#426 adds the one exception that is not a budget fact at
+  all:** a lane whose CI-pending pin (above) is already past `ci.pendingEscalateAfterSec` is
+  terminal-for-drain too, in BOTH drain arms — the kill-switch heuristic's own input and the
+  ceiling path's observed set — because gate① being permanently stuck is exactly "can never make
+  forward progress", and it is invisible in `fix_rounds` (such a lane has spent none). A pin that
+  is merely fresh stays a healthy WAIT, which is what preserves #375's no-false-escalation rule. The fix leg pulls its own PR's review findings via the
   PR-facing forge MCP
   proxy tools (#244, attached to `resume()` too) rather than having them relayed through its
   prompt — no prompt-injection transport, no forge credentials handed to the leg — and, per
@@ -1045,6 +1050,19 @@ marker idempotency, output schema, escalation path) see
   label plus a structured event. The label is the latch and routes through the existing
   human hold/re-entry behavior; the lane remains driving, polling continues, and gate②
   is never softened. Configured failover receives its full evaluation window first.
+  **CI-pending visibility (#426, F26) — the gate① twin of that clock:** gate① is fail-closed, so
+  a check that never concludes (a runner that never picks the job up, a required workflow that
+  never starts) leaves a decisive-review lane in WAIT forever. A lane observed continuously
+  WAIT-on-CI past `ci.pendingEscalateAfterSec` (6h default) gets the same three-tier treatment:
+  the `labels.needsHuman` PR label as the latch, an evidence comment naming the still-pending
+  check(s), and a `ci-pending-escalated` event. The clock is a durable pin kept in the event log
+  itself (`ci-pending-observed` / `ci-pending-cleared`), so it survives an engine restart with no
+  new column and no new module. It cancels only when gate① actually RESOLVES (green or red) or the
+  head moves; any later pending episode then ages from its own start. A check that concludes
+  WITHOUT passing (`CANCELLED`/`SKIPPED`/`NEUTRAL`/`STALE`/`ACTION_REQUIRED`) deliberately does NOT
+  cancel it — gate① stays not-green under #401's SUCCESS-only rule, so such a lane is exactly as
+  wedged as one waiting forever, and the evidence comment names those checks alongside the pending
+  ones so the human knows which to re-run.
   **Adjudicated findings stop re-consuming fix rounds (#378, F14):** gate② used to see
   review threads only as an aggregate unresolved COUNT, so a finding that had already
   been human-adjudicated and thread-resolved re-entered the FIXABLE gate every time a
