@@ -18,7 +18,10 @@ import type { IForge, Issue } from "../forge/forge.js";
 import { firstMatchingLabel, labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge/labels.js";
 import { capDigest } from "../retro/retro-digest.js";
 import { buildAcSnapshot, checkAcSnapshotDrift } from "../review/ac-snapshot.js";
+import { parseEngineReviewArtifact } from "../review/audit.js";
 import type { EngineAgentDriveDeps } from "../review/drive.js";
+import { effectiveSeverity, type FindingKind, type FindingSeverity } from "../review/finding-axes.js";
+import { boundRecords, classicThreadFindingKey, engineAgentFindingKey } from "../review/finding-key.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { ReviewFallbackLock, ReviewTriggerPin } from "../roles/reviewer.js";
 import { isReviewerKind } from "../roles/reviewer.js";
@@ -455,6 +458,117 @@ export function priorFixLegForVerdict(state: Pick<State, "eventsSince">, worker:
     }
   }
   return tripped;
+}
+
+/** #449 (design #402 R2, §3a): one `drive-fixup` payload's identity record — the `findings` array
+ *  (`{key, severity, kind}`) and `fixDiffPaths` bound, both truncation-marked rather than
+ *  silently dropped (`review/finding-key.ts`'s `boundRecords`). A fixed, arbitrary-but-documented
+ *  entry count, not config-exposed: design #402's own marginal-complexity accounting (§9) lists
+ *  ZERO new config keys for R2, and a reviewer producing more than this many findings, or a fix
+ *  leg touching more than this many files, is itself an anomaly worth a bounded, marked
+ *  truncation rather than a new tunable. */
+const MAX_FIXUP_FINDINGS = 50;
+const MAX_FIXUP_DIFF_PATHS = 200;
+
+interface FixupFindingRecordEntry {
+  key: string;
+  severity: FindingSeverity;
+  kind?: FindingKind;
+}
+
+/**
+ * #449 (design #402 R2): gathers the `findings` + `fixDiffPaths` a `drive-fixup` event now
+ * carries alongside its existing `reason` string — finding IDENTITY, not just a gate-reason
+ * sentence (#402 §3a's own framing of what was missing). NEVER THROWS: this is ancillary
+ * bookkeeping for design #402 R3's future convergence classifier, never gate input, so every
+ * forge read degrades to an empty array on failure rather than propagating into the caller's
+ * `startFixLeg`/`drive-fixup` try/catch (which exists to distinguish a genuine dispatch failure
+ * from everything else — see that catch's own doc).
+ *
+ * **Engine-agent path** (`verdictRunId` present, #457's own discriminator for "this fixable was
+ * caused by an engine-agent rejected verdict"): re-keys the SAME validated findings
+ * `review/audit.ts`'s audit comment already renders, read straight off the WAL row
+ * (`state.getEngineReviewWal`, runId-guarded against a superseded attempt) — no second review, no
+ * re-classification, `effectiveSeverity` (`review/finding-axes.ts`, reused verbatim, D2/D3's
+ * single source of truth for the gate-consuming bit) decides `severity`.
+ *
+ * **Classic path** (`verdictRunId` absent — classic-reviewer, conflict, and CI-red-repair
+ * fixables alike, per `DriveOutcome`'s own doc on when `verdictRunId` is populated): no persisted
+ * artifact exists for a classic review (GitHub's own threads ARE the record), so this reads
+ * `forge.getPRReviewData(pr)` live and keys every currently-UNRESOLVED thread — the SAME "still
+ * blocking" set `deriveGate`'s `HANDLE_THREADS` path already treats as gate-relevant, matching
+ * design #402 §1's "classic path: unchanged in v1, every unresolved thread still blocks."
+ * `severity` is unconditionally `"blocking"`: GitHub threads carry no severity axis (§1's stated
+ * blind spot), so recording anything else here would be inventing a signal the classic reviewer
+ * never supplied. A conflict/CI-red fixable legitimately has zero unresolved review threads to
+ * report — an honest empty `findings` array, not an omission (the `reason` string already carries
+ * what actually caused THIS dispatch).
+ *
+ * `fixDiffPaths` — DISCLOSED APPROXIMATION. Design #402 §3a specs "changed paths of the PRECEDING
+ * fix leg," i.e. a range diff (prior-round head .. this head). No bounded, already-existing
+ * primitive gives that exact range without adding a NEW forge capability (an arbitrary-commit-
+ * range compare) — outside this issue's own file list (`finding-key.ts`, `conductor.ts`,
+ * `production.ts`; no `forge.ts` change). This instead uses `IForge.getPRChangedFiles`, the PR's
+ * FULL base..head changed-path set — the SAME call `review/instruction-path-escalation.ts`
+ * already makes for exactly the same "is this path touched" question. This over-approximates:
+ * every path the preceding fix leg actually touched is a subset of the PR's total changed paths,
+ * but an EARLIER leg's path (untouched by the preceding one) can also appear. The failure
+ * direction is fail-closed-safe for design #402 §3b's eventual classifier: a WIDER `fixDiffPaths`
+ * can only make MORE round-over-round pairs look like `recurrence`/`marginal-complexity` (i.e.
+ * escalate to a human sooner), never fewer — it can never hide a genuine stall.
+ */
+async function gatherFixupFindingRecord(
+  state: State,
+  forge: IForge,
+  worker: WorkerRow,
+  pr: number,
+  verdictRunId: string | undefined,
+): Promise<{ findings: FixupFindingRecordEntry[]; findingsTruncated: boolean; fixDiffPaths: string[]; fixDiffPathsTruncated: boolean }> {
+  let rawFindings: FixupFindingRecordEntry[] = [];
+  try {
+    if (verdictRunId !== undefined) {
+      const wal = state.getEngineReviewWal(worker.name);
+      const artifact = wal?.runId === verdictRunId && wal.reviewArtifactJson ? parseEngineReviewArtifact(wal.reviewArtifactJson) : null;
+      if (artifact) {
+        rawFindings = artifact.findings.map((f) => ({
+          key: engineAgentFindingKey({
+            id: f.id,
+            ...(f.kind !== undefined ? { kind: f.kind } : {}),
+            ...(f.path !== undefined ? { path: f.path } : {}),
+          }).key,
+          severity: effectiveSeverity(f),
+          ...(f.kind !== undefined ? { kind: f.kind } : {}),
+        }));
+      }
+    } else {
+      const data = await forge.getPRReviewData(pr);
+      rawFindings = (data.threads ?? [])
+        .filter((t) => !t.isResolved)
+        .map((t) => ({
+          key: classicThreadFindingKey({ id: t.id, path: t.path, findingDigest: t.findingDigest }).key,
+          severity: "blocking" as const,
+        }));
+    }
+  } catch {
+    rawFindings = [];
+  }
+  const boundedFindings = boundRecords(rawFindings, MAX_FIXUP_FINDINGS);
+
+  let rawPaths: string[] = [];
+  try {
+    const changed = await forge.getPRChangedFiles(pr);
+    rawPaths = [...new Set(changed.files.map((f) => f.filename))];
+  } catch {
+    rawPaths = [];
+  }
+  const boundedPaths = boundRecords(rawPaths, MAX_FIXUP_DIFF_PATHS);
+
+  return {
+    findings: boundedFindings.entries,
+    findingsTruncated: boundedFindings.truncated,
+    fixDiffPaths: boundedPaths.entries,
+    fixDiffPathsTruncated: boundedPaths.truncated,
+  };
 }
 
 /** #383 round 2 (PM P2) + round 3 (Codex secondary review P2 x2): the events that end a
@@ -3226,6 +3340,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               );
               // #457: the `verdictRunId` recorded here is what priorFixLegForVerdict matches on —
               // the breaker's one durable memory of "this verdict already got its leg".
+              // #449 (design #402 R2): `findings`/`fixDiffPaths` gathered AFTER startFixLeg has
+              // already confirmed the spawn — a failure inside gatherFixupFindingRecord (it never
+              // throws; see its own doc) must not be mistaken by the catch below for a dispatch
+              // failure the row hasn't actually had.
+              const findingRecord = await gatherFixupFindingRecord(state, forge, w, pr, outcome.verdictRunId);
               state.appendEvent("drive-fixup", {
                 worker: w.name,
                 issue: w.issue,
@@ -3233,6 +3352,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
                 fixRounds: fixRounds + 1,
                 reason: outcome.reason,
                 ...(outcome.verdictRunId !== undefined ? { verdictRunId: outcome.verdictRunId } : {}),
+                findings: findingRecord.findings,
+                ...(findingRecord.findingsTruncated ? { findingsTruncated: true as const } : {}),
+                fixDiffPaths: findingRecord.fixDiffPaths,
+                ...(findingRecord.fixDiffPathsTruncated ? { fixDiffPathsTruncated: true as const } : {}),
               });
               driven.push({ kind: "fixup", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
             } catch (e) {
