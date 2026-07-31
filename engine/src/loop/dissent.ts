@@ -417,13 +417,14 @@ const RECEIPT_KIND = "concern-posted";
  *  triageProgress), now backed by an index rather than a sequential scan — concern volume is
  *  expected to be low (structured objections are rare, not a bulk mechanism) either way, so no
  *  cursor/bookkeeping machinery was added on top of the index (PM ruling). */
-export async function reconcileDurableConcerns(
-  forge: IForge,
-  state: State,
-  cfg: SapwoodConfig,
-  log?: (message: string) => void,
-): Promise<void> {
-  const warn = log ?? console.error;
+/** #432 round 4 (PM adjudication, gate② review 3): the pure-local HALF of
+ *  `reconcileDurableConcerns` below, factored out so `round.ts`'s `probeHasWork` can ask "is
+ *  there unposted durable-concern work" as a cheap local SQLite read — no forge call, same
+ *  economics as `state.pendingRollbacks()`. Dissent intentionally writes NO labels (module doc,
+ *  #237 AC3), so this durable-event fact is invisible to every label-driven exemption the probe's
+ *  milestone catch-all could ever carry; a decision whose comment-post transiently failed would
+ *  otherwise sit unswept until unrelated backlog work happened to wake the loop again. */
+export function pendingDurableConcerns(state: State): Array<{ roundId: number; concern: Concern }> {
   const events = state.eventsAfterId(0, [...DECISION_KINDS, RECEIPT_KIND]);
   const receiptKeys = new Set<string>();
   const decisionEvents: typeof events = [];
@@ -445,7 +446,17 @@ export async function reconcileDurableConcerns(
       if (!receiptKeys.has(key)) pending.push({ roundId: parsed.data.round_id, concern });
     }
   }
-  for (const { roundId, concern } of pending) {
+  return pending;
+}
+
+export async function reconcileDurableConcerns(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  log?: (message: string) => void,
+): Promise<void> {
+  const warn = log ?? console.error;
+  for (const { roundId, concern } of pendingDurableConcerns(state)) {
     await postConcernIfNew(forge, state, cfg, roundId, concern, warn);
   }
 }

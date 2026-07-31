@@ -38,6 +38,7 @@ import {
   type TickResult,
   tick,
 } from "./conductor.js";
+import { pendingDurableConcerns } from "./dissent.js";
 import { issuesMergedThisTick, prsOpenedThisTick, type StopConditionHit, type StopConfig } from "./driver.js";
 import { emptySpinBreached, parkDurationExceededSec, probeBackoffSec, probeDueWithHint } from "./env-failure.js";
 import { buildRoundArtifact, persistRoundArtifact, type RoundArtifact } from "./round-artifact.js";
@@ -1146,9 +1147,20 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *
    *  An all-empty probe is still not proof of "nothing to do" — the PO can decompose the plan
    *  doc alone — which is why standby additionally requires the idle-round precondition (see
-   *  lastRoundIdle). Known ceiling: a plan-doc edit made DURING standby is invisible to this
-   *  pure-API probe — the operator files an issue (any probe signal) or restarts the run to
-   *  wake the PO.
+   *  lastRoundIdle). Known ceilings, all WAITING-ON-HUMAN or observation-only work this probe
+   *  deliberately does NOT hold rounds open for (the #212 stance: a human-latency window must
+   *  never pin the probe true) — each is bounded and self-corrects the next time ANY other
+   *  signal legitimately wakes the loop:
+   *   - a plan-doc edit made DURING standby is invisible to this pure-API probe — the operator
+   *     files an issue (any probe signal) or restarts the run to wake the PO;
+   *   - dissent.ts's `scanForAdjudication` (a human REPLYING to an already-posted concern) needs
+   *     live forge reads (getIssueMeta/getIssueBody/getIssueComments) per open concern — not a
+   *     cheap local fact like `pendingDurableConcerns` above, so it is not probed here; a
+   *     still-open concern simply stays unadjudicated in `sapwood status` until the next
+   *     legitimate wake re-runs the scan (bounded: a stale dashboard row, never a stuck decision);
+   *   - escalation-reconcile.ts's `reconcileEscalations` (recording `escalation-resolved` after a
+   *     human removes a hold label) is likewise a live-forge read, not a local fact — a resolved
+   *     escalation's attention entry stays stale until the next legitimate wake sweeps it.
    *
    *  Contained, fail-OPEN to round-opening (gate② on PR #150; same tick-error containment as
    *  checkFinalMilestone above): standby is exactly the long-idle mode where this probe runs
@@ -1165,6 +1177,15 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // so an outstanding row counts as work, or standby would starve the retry indefinitely.
       // Local SQLite read: the cheapest signal, checked first.
       if (deps.state.pendingRollbacks().length > 0) return true;
+      // #432 round 4 (Codex P1 finding 2, gate② review 3): a durable dissent CONCERN whose
+      // comment-post transiently failed (dissent.ts's postConcernIfNew) is engine-owned pending
+      // work — reconcileDurableConcerns' own retry sweep runs every round regardless of
+      // roles.po.enabled, so this is consumable no matter what's enabled. Dissent intentionally
+      // writes NO labels (module doc, #237 AC3), so no label-driven exemption in the milestone
+      // catch-all below could ever represent it; pendingDurableConcerns (dissent.ts) is the
+      // SAME pure-local SQLite read reconcileDurableConcerns folds over — cheap, checked here
+      // beside pendingRollbacks, before any network call.
+      if (pendingDurableConcerns(deps.state).length > 0) return true;
       // #433 (F33): a CARRIED lane is work. Rounds are dispatch windows and lanes cross them by
       // design, but every phase that finishes a lane — reclaim, resume, drive, gated reentry —
       // only ever runs inside a round's own executing tick. So withholding the next round over an
@@ -1192,6 +1213,23 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // burns the remaining peripheral sessions doing nothing, indefinitely.
       if (cfg.roles.planReviewer.enabled && (await forge.getIssuesNeedingPlanReview()).length > 0) return true;
       if (cfg.roles.po.enabled && (await forge.getIssuesNeedingPlanTriage()).length > 0) return true;
+      // #432 round 4 (Codex P1 finding 1, gate② review 3): the round-pool's OWN candidate set —
+      // forge.ts's selectPoolEligibleIssues/isPoolEligible (#214) — is Ready-lane-scoped,
+      // hold-excluding (needsHuman/blocked), and excludes the #94 forbidden verifyNa+planApproved
+      // mixed state, but is DELIBERATELY body-independent otherwise: a Ready, plan:approved issue
+      // whose body/AC became unparseable AFTER approval is still pool-eligible by design (forge.ts
+      // ~2256-2289's own doc), because that is EXACTLY the class-2 self-heal shape
+      // plan-review.ts's confirmOneIssue (~737-805) repairs once the issue re-enters the pool.
+      // Round-pool selection itself runs UNCONDITIONALLY every round regardless of
+      // roles.po.enabled (round-defaults.ts ~200), but the REPAIR session is gated on
+      // roles.planReviewer.enabled (createPlanReviewStub's own gate) — same disabled-consumer
+      // rule as the two lines above. Probe and consumer are now literally the SAME selector, not
+      // a label proxy for it — this replaces the round-3 `plan:approved` label exemption below,
+      // which over-counted (a valid approved issue demoted off Ready, or the #94 forbidden
+      // verifyNa+planApproved state, both pinned the probe true with nothing able to consume
+      // them) and under-delivered (the broken-body case it was cited for never needed it — a
+      // broken body already fails `planCompleteOrExempt` below and counts on its own).
+      if (cfg.roles.planReviewer.enabled && (await forge.getPoolEligibleIssues()).length > 0) return true;
       // #127 gate② R1 (same disabled-consumer rule): the milestone catch-all exists because an
       // open not-yet-Ready issue in the round's milestone is exactly what the PO/aligning pass
       // decomposes (or gate⓪ approves) — with BOTH gate⓪ roles off, nothing enabled can consume
@@ -1237,21 +1275,22 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         // deliberate one — it errs toward opening a round, the same fail-toward-more-work stance
         // this probe's own catch uses.
         //
-        // #432 (F32, PM gate⓪ adjudication 2026-07-31, round 3 — the ONLY correct-scope fix,
-        // after round 2's full-block deletion was refuted at gate② review): a fully-specified
-        // issue (plan/AC already drafted, or explicitly plan-exempt) that carries NONE of the
-        // three labels below is nothing any enabled role can act on — it is just waiting on a
-        // human Ready-promotion, the exact F32 churn (8 such issues in v0.2.1 pinned this probe
-        // true for six empty rounds). This is a MINIMAL, label-driven exclusion layered on top of
-        // the #212/#397/#391 exclusions above — it does NOT replace the catch-all's own
-        // repo-wide `listOpenIssues()` read (board-scoped selectors like selectPlanTriageCandidates
-        // iterate ProjectV2 `project.items` only and would miss an off-board milestone issue
-        // entirely — the exact gap round 2's deletion opened).
+        // #432 (F32, PM gate⓪ adjudication 2026-07-31, round 4 — round 3's shape narrowed
+        // further after gate② review found the label set itself wrong in BOTH directions): a
+        // fully-specified issue (plan/AC already drafted, or explicitly plan-exempt) that carries
+        // NONE of the two labels below is nothing any enabled role can act on — it is just
+        // waiting on a human Ready-promotion, the exact F32 churn (8 such issues in v0.2.1 pinned
+        // this probe true for six empty rounds). This is a MINIMAL, label-driven exclusion
+        // layered on top of the #212/#397/#391 exclusions above — it does NOT replace the
+        // catch-all's own repo-wide `listOpenIssues()` read (board-scoped selectors like
+        // selectPlanTriageCandidates iterate ProjectV2 `project.items` only and would miss an
+        // off-board milestone issue entirely — the exact gap round 2's deletion opened).
         //
         // "Plan-complete-or-exempt" = extractVerificationPlan(body) != null (forge.ts, the same
-        // read isDispatchable/needsPlanReview/needsPlanTriage all share) OR the issue carries
-        // verifyNa (the doc-gate path — no plan is ever expected). An issue in EITHER state is
-        // only excluded when it ALSO carries none of:
+        // read isDispatchable/needsPlanTriage share — needsPlanReview does NOT: it is a pure
+        // label-only predicate, forge.ts ~2229, so it is not part of this list) OR the issue
+        // carries verifyNa (the doc-gate path — no plan is ever expected). An issue in EITHER
+        // state is only excluded when it ALSO carries none of:
         //  - cfg.labels.split: a human-fired decompose request. isDecomposeCandidate (decompose.ts)
         //    is exactly `split ∧ ¬decomposed ∧ ¬needsHuman ∧ ¬blocked` — consumed by
         //    runDecompositionPass, called from align.ts's aligning-phase handler (~1486-1490)
@@ -1268,22 +1307,34 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         //    — same "residual, stated rather than overclaimed" stance as the claimed-issue
         //    comment above — every decomposed-labelled issue counts, even ones whose journal is
         //    ALREADY fully reconciled: a same-round-idle over-count, never a missed recovery.
-        //  - cfg.labels.planApproved: a Ready-lane issue whose body/AC was edited AFTER approval
-        //    and no longer parses (isDispatchable/needsPlanReview both fail closed on it — forge.ts
-        //    ~2181-2246 — so it is invisible to getReadyIssues AND the review line above). It
-        //    remains pool-eligible by DELIBERATE body-independent design (forge.ts's
-        //    selectPoolEligibleIssues/isPoolEligible, ~2256-2289) and is repaired by plan-review.ts's
-        //    class-2 `confirmOneIssue` (~737-805) once it re-enters the pool — reached via
-        //    createPlanReviewStub, gated on `cfg.roles.planReviewer.enabled`
-        //    (round-defaults.ts's `if (deps.cfg.roles.planReviewer.enabled) peripherals.plan_review
-        //    = createPlanReviewStub(shared);`) — fed by round-pool selection, which runs
-        //    UNCONDITIONALLY every round regardless of `roles.po.enabled` (round-defaults.ts
-        //    ~200, "#212 AC7/#233: the aligning phase's round-pool selection is NEVER gated by
-        //    roles.po.enabled"). Excluding a plan:approved issue here would strand that repair in
-        //    standby whenever po is off and planReviewer is on.
+        //
+        // #432 round 4 (Codex P1 finding 1): `cfg.labels.planApproved` was HERE in round 3 and is
+        // now deliberately REMOVED — it was wrong in both directions. Over-counting: a VALID
+        // approved issue demoted off Ready back to a non-Ready status (or an issue stuck in the
+        // #94 forbidden verifyNa+planApproved mixed state, which every real selector treats as
+        // human-cleanup-only) still carries the label, so this probe pinned itself true forever
+        // with nothing enabled able to consume either shape — violating this very issue's own
+        // acceptance criteria. Under-delivering: the ONE case it was actually cited for — a Ready,
+        // approved issue whose body/AC became unparseable — never needed the label at all, since a
+        // broken body already fails `planCompleteOrExempt` above and counts on its own. The real
+        // gap (Ready + approved + a plan SECTION present but otherwise unparseable, e.g. a
+        // malformed checkbox AC list — a shape `extractVerificationPlan` alone can't distinguish
+        // from "fine") is now covered by the STATUS-AWARE `getPoolEligibleIssues()` probe line
+        // above instead: a single selector shared with the class-2 repair consumer, not a label
+        // proxy that can drift from what that selector actually requires (Ready-lane scoping,
+        // hold-exclusion, #94-exclusion — none of which a label check alone can express).
+        //
+        // #432 round 4 (Codex P2 finding 3): `cfg.labels.roundPool` joins the signal set — a
+        // stale pool label is an engine-OWNED artifact (align.ts's `reconcilePoolLabels`, on
+        // every round-open pool-selection pass, and round.ts's own round-close removal sweep,
+        // ~1701) whose retry is unconditional, not role-gated; a milestone issue carrying a stale
+        // `roundPool` label the LAST cleanup attempt failed to strip is exactly the kind of
+        // engine-owned residue #391's claimed-issue exclusion above already treats as "the round
+        // wasn't idle" for — this label just needed the same "still counts" treatment split/
+        // decomposed get, so the retry net isn't withheld by an otherwise-fully-specified body.
         // No new prose heuristic: every check above reuses an existing predicate/label-config key
-        // (extractVerificationPlan, cfg.labels.verifyNa/split/decomposed/planApproved) already
-        // shared with the consumers cited.
+        // (extractVerificationPlan, cfg.labels.verifyNa/split/decomposed/roundPool) already shared
+        // with the consumers cited.
         const openIssues = await forge.listOpenIssues();
         return openIssues.some((i) => {
           if (i.milestone !== cfg.round.milestone) return false;
@@ -1294,7 +1345,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           const carriesConsumableSignal =
             labelsInclude(i.labels, cfg.labels.split) ||
             labelsInclude(i.labels, cfg.labels.decomposed) ||
-            labelsInclude(i.labels, cfg.labels.planApproved);
+            labelsInclude(i.labels, cfg.labels.roundPool);
           if (planCompleteOrExempt && !carriesConsumableSignal) return false;
           return true;
         });

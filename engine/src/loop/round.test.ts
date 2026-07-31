@@ -201,6 +201,13 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return this.planTriageCandidates;
   }
+  // #432 round 4: the round-pool's own candidate set (forge.ts's selectPoolEligibleIssues) — the
+  // probe's new status-aware plan-review signal reads this directly, same fixture pattern as
+  // planReviewCandidates/planTriageCandidates above.
+  poolEligible: Issue[] = [];
+  override async getPoolEligibleIssues(): Promise<Issue[]> {
+    return this.poolEligible;
+  }
 }
 
 test("#311 FakeForge reconciles same-parent duplicate adds but rejects a second parent with GitHub's fingerprint", async () => {
@@ -3243,8 +3250,8 @@ test("runRounds standby (#212 probe residual fix): a mixed milestone (one held, 
   state.close();
 });
 
-// ── #432 (F32, PM gate⓪ adjudication 2026-07-31): round 3. Rounds 1-2's approach (a shape
-//    filter, then a full deletion) both turned out wrong — gate② review (Codex, gpt-5.6-sol
+// ── #432 (F32, PM gate⓪ adjudication 2026-07-31): three prior rounds. Round 1 (a shape filter)
+//    and round 2 (a full deletion) both turned out wrong — gate② review (Codex, gpt-5.6-sol
 //    high) refuted round 2's subset proof with file:line evidence: `selectPlanTriageCandidates`
 //    iterates ProjectV2 board membership (`project.items`), while the catch-all's own
 //    `listOpenIssues()` read is the FULL repo backlog — an off-board milestone issue is real work
@@ -3253,19 +3260,28 @@ test("runRounds standby (#212 probe residual fix): a mixed milestone (one held, 
 //    journal recovery — both via decompose.ts/align.ts) and that plan-reviewer self-heals
 //    `plan:approved` Ready issues with a broken body through the deliberately body-independent
 //    pool (plan-review.ts's class-2 `confirmOneIssue`), which runs even with `po.enabled: false`.
-//    Round 3 restores the catch-all EXACTLY as it stood on origin/main, then layers ONE minimal,
-//    label-driven exclusion on top — see round.ts's own comment at the exclusion site for the
-//    full citation of each exemption's consumer. Every test below is RED-TO-GREEN BY
-//    CONSTRUCTION: the F32 negative case was verified to FAIL (probe stays pinned true, no
-//    standby) against an unmodified checkout of origin/main's round.ts — see the PR body for the
-//    exact repro command — and each "still counts as work" case below was verified to FAIL
-//    against this issue's OWN round-2 commit (the full-block deletion), proving both that the
-//    restored catch-all is necessary (round 2 broke these) and that the new exclusion is not
-//    over-broad (it doesn't accidentally re-break them). ──────────────────────────────────────
+//    Round 3 restored the catch-all EXACTLY as it stood on origin/main and added a label-driven
+//    exclusion — but a SECOND gate② confirm round found that exclusion wrong in BOTH directions:
+//    `cfg.labels.planApproved` over-counted (a valid approved issue demoted off Ready, or the #94
+//    forbidden verifyNa+planApproved mixed state, both pinned the probe true with nothing able to
+//    consume them) and under-delivered (the broken-body case it was cited for never needed it — a
+//    broken body already fails `planCompleteOrExempt` and counts on its own). Round 4 removes
+//    `planApproved` from the label set entirely and replaces its real coverage (Ready + approved +
+//    a plan section present but otherwise unparseable) with a STATUS-AWARE probe line —
+//    `getPoolEligibleIssues()`, the EXACT selector the class-2 repair consumes (#214) — so probe
+//    and consumer are literally one selector, not a label proxy that can drift. `roundPool` joins
+//    the label set (a stale pool-label cleanup retry is engine-owned, not role-gated). See
+//    round.ts's own comment at each site for the full citation of every exemption's consumer.
+//    Every test below is RED-TO-GREEN BY CONSTRUCTION: the F32 negative case was verified to FAIL
+//    against an unmodified checkout of origin/main's round.ts, each "still counts as work" wake
+//    case was verified to FAIL against this issue's OWN round-2 commit (the full-block deletion),
+//    and round 4's NEW cases (verifyNa, verifyNa+planApproved, demoted-approved, the pool-line
+//    wake, roundPool) were verified against round 3's own commit (2cb8656) — see the PR body for
+//    the exact repro commands. ─────────────────────────────────────────────────────────────────
 
 const SPECIFIED_BODY = "## Acceptance criteria\n- [ ] x\n\n## Verification plan\n- npm test";
 
-test("runRounds standby (#432 F32): a milestone whose open non-Ready issues are ALL fully-specified (plan+AC present) and carry NONE of split/decomposed/plan:approved does not count as work — standby engages after one idle round", async () => {
+test("runRounds standby (#432 F32): a milestone whose open non-Ready issues are ALL fully-specified (plan+AC present) and carry NONE of split/decomposed/roundPool does not count as work — standby engages after one idle round", async () => {
   const forge = new FakeForge();
   forge.ready = []; // none are Ready yet — awaiting only human promotion
   forge.planReviewCandidates = []; // Ready-lane-only signal, moot here
@@ -3431,14 +3447,15 @@ test("runRounds standby (#432 F32, Codex P1-1 decomposed): a decomposed parent s
   state.close();
 });
 
-test("runRounds standby (#432 F32, Codex P1-2 plan:approved broken body): po.enabled: false, planReviewer.enabled: true — a Ready-lane issue carrying plan:approved whose body no longer has a verification-plan section still counts as work, through the catch-all alone", async () => {
-  // po.enabled: false is load-bearing here, not incidental: with po ON, getIssuesNeedingPlanTriage
-  // (line ~1157) would ALSO return this issue true — needsPlanTriage (forge.ts) never checks
-  // planApproved, only extractVerificationPlan(body). That would catch this exact case via the
-  // triage line, making the test pass for the wrong reason and leaving the catch-all's own
-  // plan:approved exemption unexercised. Disabling po isolates the catch-all as the ONLY signal
-  // that can see this issue — precisely Codex's P1-2 scenario ("With PO off and planReviewer on,
-  // the post-deletion probe returns false. The old milestone catch-all returned true.").
+test("runRounds standby (#432 F32): a Ready-lane issue carrying plan:approved with NO verification-plan section AT ALL still counts as work, through the catch-all's planCompleteOrExempt check alone — round 4 removed planApproved from the label set, and this shape never needed it", async () => {
+  // po.enabled: false isolates the catch-all as the ONLY signal that can see this issue: with po
+  // ON, getIssuesNeedingPlanTriage would ALSO return it true (needsPlanTriage never checks
+  // planApproved, only extractVerificationPlan(body)). planReviewer stays enabled so the NEW
+  // getPoolEligibleIssues probe line is live too — but forge.poolEligible is deliberately left at
+  // its default [] below, so THAT line can't be what makes this pass either. The only path left is
+  // the catch-all: a body with NO plan section at all fails planCompleteOrExempt on its own,
+  // regardless of any label — proving round 3's planApproved exemption was never load-bearing for
+  // this exact shape (Codex P1-1's own observation).
   const forge = new FakeForge();
   forge.ready = []; // isDispatchable fails closed: no verification-plan section in the body
   forge.planReviewCandidates = []; // needsPlanReview fails closed too: plan:approved is already present
@@ -3447,15 +3464,10 @@ test("runRounds standby (#432 F32, Codex P1-2 plan:approved broken body): po.ena
     roles: { po: { enabled: false }, planReviewer: { enabled: true } },
     round: { milestone: "M4", standby: { enabled: true } },
   });
-  // plan-review.ts's confirmOneIssue (class 2, ~737-805) is reached via the round-pool's
-  // getPoolEligibleIssues (forge.ts, deliberately body-independent) -> createPlanReviewStub,
-  // gated on roles.planReviewer.enabled — and the pool itself runs even with roles.po.enabled:
-  // false (round-defaults.ts's "the aligning phase's round-pool selection is NEVER gated by
-  // roles.po.enabled").
   forge.openIssues = [
     {
       number: 900,
-      title: "approved, broken body",
+      title: "approved, no plan section at all",
       labels: [cfg.labels.planApproved],
       body: "the plan section got deleted",
       milestone: "M4",
@@ -3472,8 +3484,173 @@ test("runRounds standby (#432 F32, Codex P1-2 plan:approved broken body): po.ena
   assert.equal(
     result.rounds,
     2,
-    "round 2 opened straight after idle round 1 — the broken-body plan:approved issue was still counted, via the catch-all alone",
+    "round 2 opened straight after idle round 1 — the no-plan-section plan:approved issue was still counted, via the catch-all's body check alone",
   );
+  assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
+  state.close();
+});
+
+// ── #432 round 4 (PM adjudication of Codex confirm round): the corners round 3's `planApproved`
+//    label got wrong in both directions, plus the new status-aware pool line and `roundPool`
+//    exemption. Each fixture below leaves EVERY OTHER candidate set at its realistic value for
+//    the shape described (never an impossible state a live forge couldn't produce). ────────────
+
+const BROKEN_AC_BODY = "## Verification plan\n- npm test\n\n## Acceptance criteria\nno checkboxes here, just prose";
+
+test("runRounds standby (#432 round 4): a milestone issue carrying ONLY verify:n/a (no plan expected, no consumable-signal label) does not count as work", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // not Ready
+  forge.planReviewCandidates = []; // verifyNa -> needsPlanReview false
+  forge.planTriageCandidates = []; // verifyNa -> needsPlanTriage false
+  forge.milestoneOpenCounts = [1];
+  const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [{ number: 1000, title: "doc-gate, no plan expected", labels: [cfg.labels.verifyNa], milestone: "M4" }];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop();
+  };
+  const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 5, cfg, peripherals: allPeripherals(log) });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby actually engaged — verifyNa alone is plan-exempt, not consumable",
+  );
+  state.close();
+});
+
+test("runRounds standby (#432 round 4, P1-1 regression pin): the #94 forbidden verifyNa+plan:approved mixed state does NOT count as work — every real selector treats it as human-cleanup-only, and round 3's planApproved label would have wrongly pinned this true", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // isDispatchable fail-closes the forbidden mixed state
+  forge.planReviewCandidates = []; // needsPlanReview fail-closes it too
+  forge.planTriageCandidates = []; // verifyNa alone already excludes it from triage
+  forge.poolEligible = []; // isPoolEligible fail-closes the SAME forbidden mixed state (forge.ts)
+  forge.milestoneOpenCounts = [1];
+  const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 1001, title: "forbidden mixed state", labels: [cfg.labels.verifyNa, cfg.labels.planApproved], milestone: "M4" },
+  ];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop();
+  };
+  const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 5, cfg, peripherals: allPeripherals(log) });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby actually engaged — the forbidden mixed state has no enabled consumer anywhere",
+  );
+  state.close();
+});
+
+test("runRounds standby (#432 round 4, P1-1 regression pin): a VALID approved issue demoted off Ready (plan:approved, full plan+AC, no split/decomposed/roundPool) does NOT count as work — round 3's planApproved exemption would have pinned this true forever", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // demoted off Ready — not dispatchable regardless of body quality
+  forge.planReviewCandidates = []; // already approved, and not Ready-lane either way — not a review candidate
+  forge.planTriageCandidates = []; // has a full valid plan — needsPlanTriage false
+  forge.poolEligible = []; // demoted off Ready — selectPoolEligibleIssues is Ready-lane-scoped, so NOT pool-eligible either
+  forge.milestoneOpenCounts = [1];
+  const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    {
+      number: 1002,
+      title: "demoted, still approved, valid plan",
+      labels: [cfg.labels.planApproved],
+      body: SPECIFIED_BODY,
+      milestone: "M4",
+    },
+  ];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop();
+  };
+  const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 5, cfg, peripherals: allPeripherals(log) });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby actually engaged — a demoted-but-valid approved issue has no enabled consumer left; nothing can act on it until a human re-promotes it",
+  );
+  state.close();
+});
+
+test("runRounds standby (#432 round 4): a Ready issue carrying plan:approved with a verification-plan SECTION present but a malformed (non-checkbox) acceptance-criteria list counts as work via the NEW status-aware getPoolEligibleIssues() probe line — no milestone scoping needed, this signal is general", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // isDispatchable fails: extractAcceptanceCriteria returns null for a malformed list
+  forge.planReviewCandidates = []; // already plan:approved — not a review candidate
+  forge.planTriageCandidates = []; // extractVerificationPlan(body) IS non-null (a real section exists) — not a triage candidate
+  const cfg = mkCfg({ round: { standby: { enabled: true } } }); // milestone UNSET — this signal must carry alone
+  // The one signal a live forge WOULD carry for this shape: selectPoolEligibleIssues is
+  // deliberately body-independent (forge.ts), so a Ready + plan:approved issue is pool-eligible
+  // regardless of whether its AC list actually parses — exactly the class-2 repair's own job.
+  forge.poolEligible = [{ number: 1003, title: "approved, broken AC list", labels: [cfg.labels.planApproved], body: BROKEN_AC_BODY }];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(
+    result.rounds,
+    2,
+    "round 2 opened straight after idle round 1 — the pool-eligible broken-AC issue was work, via the new probe line alone",
+  );
+  assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
+  state.close();
+});
+
+test("runRounds standby (#432 round 4, P2-3): a fully-specified milestone issue carrying a stale `roundPool` label still counts as work — the engine-owned label-cleanup retry (align.ts's reconcilePoolLabels, round.ts's round-close removal) must not be withheld by an otherwise-consumable-shape exclusion", async () => {
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.planReviewCandidates = [];
+  forge.planTriageCandidates = []; // fully specified -> needsPlanTriage false, same as a real forge
+  forge.milestoneOpenCounts = [1];
+  const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 1004, title: "stale pool label, fully specified", labels: [cfg.labels.roundPool], body: SPECIFIED_BODY, milestone: "M4" },
+  ];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — the stale roundPool-labeled issue was still counted");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
   state.close();
 });
