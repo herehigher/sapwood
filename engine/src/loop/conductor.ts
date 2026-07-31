@@ -367,37 +367,75 @@ export function priorFixLegForVerdict(state: Pick<State, "eventsSince">, worker:
   return tripped;
 }
 
-/** #383 round 2 (PM P2): the events that end a `drive-queued` STEADY-STATE episode for a
- *  (worker, pr) — tick()'s reset boundary for the latest-wins dedupe below. Same-kind-only
- *  comparison conflates "the last time we announced this state" with "the state we most
- *  recently announced": a lane can leave "queued", do something else, and come BACK to the
- *  identical reason string, and that recurrence must still announce. Comparing the last
- *  `drive-queued` event's id against the MAX id of this set (scoped to the same (worker, pr))
- *  is how tick() tells "still the same observed episode" apart from "a genuinely new one" —
- *  mirrors `priorFixLegForVerdict`'s own event-id-ordered-scan discipline above, just phrased as
- *  a max-id comparison instead of a linear fold.
+/** #383 round 2 (PM P2) + round 3 (Codex secondary review P2 x2): the events that end a
+ *  `drive-queued` STEADY-STATE episode for a (worker, pr) — tick()'s reset boundary for the
+ *  latest-wins dedupe below. Same-kind-only comparison conflates "the last time we announced
+ *  this state" with "the state we most recently announced": a lane can leave "queued", do
+ *  something else, and come BACK to the identical reason string, and that recurrence must still
+ *  announce. Comparing the last `drive-queued` event's id against the MAX id of this set
+ *  (scoped to the same (worker, pr)) is how tick() tells "still the same observed episode" apart
+ *  from "a genuinely new one" — mirrors `priorFixLegForVerdict`'s own event-id-ordered-scan
+ *  discipline above, just phrased as a max-id comparison instead of a linear fold.
+ *   - `fix-leg-started`: appended INSIDE `startFixLeg` (conductor.ts:536) the moment the lane's
+ *     row flips to `fixing` — BEFORE the FIXUP branch's own `drive-fixup` append below. Round 2
+ *     only reset on `drive-fixup`, which left a real crash window open (round 3, Codex P2): a
+ *     kill -9 landing after the `fixing` upsert + `fix-leg-started` but before `drive-fixup`
+ *     leaves the excursion with NO reset event on record under the round-2 set, so a WAIT reason
+ *     that recurs once the leg is later rescued/completed stays wrongly suppressed. Listing
+ *     `fix-leg-started` directly closes that window — it is the earliest fact ANY fix-leg
+ *     excursion durably leaves behind, `drive-fixup` or not.
  *   - `drive-fixup`: the lane left "queued" to dispatch a fix leg. Its eventual return to
  *     `driving` commonly re-triggers a fresh review (the pin-clear on fixing->driving), and once
  *     that trigger is itself awaited, the reason string is often the SAME WAIT_REVIEW shape as
- *     before the excursion — a fresh wait, not the one already announced.
+ *     before the excursion — a fresh wait, not the one already announced. Kept alongside
+ *     `fix-leg-started` above (harmless redundancy — MAX() over the set only ever picks the
+ *     later of the two for a completed leg).
  *   - `fix-leg-resumed`: a crash-continuation of that SAME fix leg (RESUME phase) — later in the
  *     same excursion as drive-fixup, included for the identical reason.
  *   - `lane-revived`: a park-recovery reentry (#447) — the first queued observation after a park
  *     episode is a fresh one, never a continuation of whatever was (or wasn't) announced before
  *     the park.
- *  All three verified present on `main` and carrying `worker`+`pr` in their payload
- *  (conductor.ts's own drive-fixup/fix-leg-resumed appendEvent calls; reconcile.ts's
+ *   - `gated-reentry` (round 3, Codex P2): GATED RECLAIM's failed->driving transition
+ *     (conductor.ts:2593-2604) — it explicitly CLEARS the review-trigger pin and re-enters DRIVE
+ *     fresh. The classic driver then posts a brand-new trigger, and that trigger's own reason
+ *     ("review-triggered", then again "gate-pending:WAIT_REVIEW" once it's awaited) can be
+ *     BYTE-IDENTICAL to whatever was last announced before the escalation-then-human-release
+ *     cycle. Suppressing that recurrence is exactly the F34 invisibility class this repo already
+ *     spent a batch killing — a human just intervened; the next observation must be heard.
+ *  All five verified present on `main` and carrying `worker`+`pr` at the exact
+ *  `$.worker`/`$.pr` payload paths this file's own `maxEventIdForKinds` queries (conductor.ts's
+ *  own fix-leg-started/drive-fixup/fix-leg-resumed/gated-reentry appendEvent calls; reconcile.ts's
  *  lane-revived). */
-const DRIVE_QUEUED_RESET_KINDS = ["drive-fixup", "fix-leg-resumed", "lane-revived"];
+const DRIVE_QUEUED_RESET_KINDS = ["fix-leg-started", "drive-fixup", "fix-leg-resumed", "lane-revived", "gated-reentry"];
 
-/** #383 round 2 (PM P2): the one event that ends a `fix-leg-dispatch-blocked` episode. Unlike
- *  `drive-queued`'s reset set above, the admission-block branch has exactly ONE way out for a
- *  still-`fixable` lane: the block clears and the leg actually dispatches — `drive-fixup` fires
- *  in the very same branch, immediately after this one (see the FIXUP dispatch below). A LATER
- *  re-block with the identical `blockReason` (an operator re-applying PAUSE after a completed
- *  fix leg, the concrete case the review round flagged) is provably a NEW episode once a
- *  `drive-fixup` with a higher event id sits between the two observations. */
-const FIX_LEG_DISPATCH_BLOCKED_RESET_KINDS = ["drive-fixup"];
+/** #383 round 2 (PM P2) + round 3 (Codex secondary review P2 x2): the events that end a
+ *  `fix-leg-dispatch-blocked` episode. Round 2 claimed `drive-fixup` was the ONE way out for a
+ *  still-`fixable` lane — that claim was too narrow (round 3, Codex P2 x2): a cleared admission
+ *  block can also reach a real dispatch ATTEMPT that then fails, or the lane can leave and later
+ *  re-enter this branch via a completely different door.
+ *   - `drive-fixup`: the block cleared and the leg actually dispatched — the round-2 case.
+ *   - `fix-leg-started` (round 3): same crash-window reasoning as `DRIVE_QUEUED_RESET_KINDS`
+ *     above — it fires (conductor.ts:536) strictly BEFORE `drive-fixup` in the very same
+ *     dispatch, so it independently closes the "upsert landed, drive-fixup didn't" crash window
+ *     for this event too. Kept alongside `drive-fixup` for the same harmless-redundancy reason.
+ *   - `fix-leg-dispatch-failed` (round 3, Codex P2): `startFixLeg`'s `resume()` throwing
+ *     (conductor.ts:3025-3031) proves the admission block ALREADY cleared and a dispatch was
+ *     genuinely attempted — the lane stays `driving`, un-upserted, but the OLD block episode is
+ *     over regardless of whether the attempt itself succeeded. A LATER re-block with the
+ *     identical `blockReason` (PAUSE reapplied after a failed attempt, same shape as the
+ *     round-2 successful-dispatch case) must still announce.
+ *   - `gated-reentry` (round 3, judged by the SAME criterion as `DRIVE_QUEUED_RESET_KINDS`):
+ *     INCLUDED. A `fixable`+blocked lane can be escalated to `failed` by an ENTIRELY SEPARATE
+ *     gate outcome on a later tick (e.g. a HUMAN verdict, or the fix-rounds-cap ESCALATE branch
+ *     — neither is reachable FROM the blocked branch itself, which always stays `driving`, but
+ *     both are reachable for the same (worker, pr) on a different tick's fresh gate read), then
+ *     GATED-RECLAIMed back to `driving` by a human clearing that escalation. That reclaim is not
+ *     merely "more of the same block" — it is a human-mediated round trip through a terminal
+ *     state, exactly the intervening event class this file already treats as reset-worthy
+ *     everywhere else. A `fixable`+blocked recurrence with the identical `blockReason` AFTER
+ *     that round trip must announce, not dedupe against whatever was recorded before the
+ *     escalation. */
+const FIX_LEG_DISPATCH_BLOCKED_RESET_KINDS = ["drive-fixup", "fix-leg-started", "fix-leg-dispatch-failed", "gated-reentry"];
 
 /** #375 AC2: is a `driving` lane TERMINAL-for-drain — i.e. can it NEVER make forward progress
  *  while DRIVE stays frozen (an active kill switch skips the whole DRIVE loop entirely, #69)?
@@ -2778,14 +2816,20 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // append per silence episode, contingent only on the addPRLabel write above succeeding),
       // with no separate durable-log dedup needed.
       //
-      // #383 round 2 (PM P3, accepted residual): if `addPRLabel` keeps FAILING, `labeled` stays
-      // false every tick and this event re-appends on every retry for the outage's duration —
-      // real per-tick spam, structurally identical to the drive-queued/fix-leg-dispatch-blocked
-      // shape above. Deliberately left as-is: it is bounded by the outage window, and each
-      // append coincides 1:1 with a genuine retry attempt (never a no-op tick), so the log reads
-      // as "N label-write attempts during this outage" rather than N copies of one static fact —
-      // arguably useful signal, not noise. Revisit only if a real run shows this outage-shaped
-      // spam actually hurts (matching this repo's degrade-to-human-over-new-machinery stance).
+      // #383 round 2 (PM P3) + round 3 (Codex secondary review P3 — round 2's note above
+      // mis-described this): the append below is guarded by `if (labeled)`, so a HARD
+      // `addPRLabel` failure (the `catch` right below) produces ZERO `review-silence-escalated`
+      // events — not one per retry. There is no per-tick spam here to accept; round 2's "N
+      // label-write attempts" framing did not match the code. The real accepted residual is the
+      // opposite shape: an AMBIGUOUS failure — the label write actually lands on GitHub but the
+      // client call still reports an error (a timeout after the request went through, say) —
+      // leaves `labeled = false` here, so this episode gets NO durable audit row at all, even
+      // though `needsHumanLabelPresent` will read true on the very next fetch (the label IS
+      // there) and silently close the window from that point on. Left as-is: the label itself
+      // (the load-bearing latch HUMAN/gated-reentry actually key off) still lands correctly
+      // either way; only the AUDIT TRAIL for that one escalation is missing, a narrower and
+      // strictly less harmful gap than a stuck gate. Revisit only if a real run shows this
+      // specific ambiguous-failure gap actually hurts.
       if (outcome.reviewSilenceEscalation) {
         const s = outcome.reviewSilenceEscalation;
         let labeled = false;

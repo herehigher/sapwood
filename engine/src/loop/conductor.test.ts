@@ -1887,6 +1887,62 @@ test("tick DRIVE (#383 round 2, PM P2): drive-queued RE-emits after a fix-leg ex
   st.close();
 });
 
+test("tick DRIVE (#383 round 3, Codex P2): drive-queued RE-emits when a ledger-seeded fix-leg-started sits between two identical WAIT observations (the fixing-upsert-but-pre-drive-fixup crash window)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW" };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-queued"]).length, 1);
+
+  // Ledger-seeded: simulate the crash window Codex's secondary review flagged directly, rather
+  // than reproducing it via an actual kill -9 — `startFixLeg` (conductor.ts:536) appends
+  // `fix-leg-started` the instant the lane's row flips to `fixing`, STRICTLY BEFORE the FIXUP
+  // branch's own `drive-fixup` append. A process kill in that gap leaves exactly this: a
+  // `fix-leg-started` on record with no `drive-fixup` to follow it.
+  st.appendEvent("fix-leg-started", { worker: "lane-a", issue: 2, pr: 55, fixRounds: 1, journalCursor: 0, at: new Date().toISOString() });
+
+  // Re-observe the IDENTICAL WAIT reason (the lane is later rescued/reclaimed and DRIVE lands on
+  // the same live gate state it saw before the excursion).
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-queued"]);
+  assert.equal(
+    events.length,
+    2,
+    "fix-leg-started ALONE (no drive-fixup required) must reset the episode — closing the crash window drive-fixup-only missed",
+  );
+  st.close();
+});
+
+test("tick DRIVE (#383 round 3, Codex P2): drive-queued RE-emits when a ledger-seeded gated-reentry sits between two identical review-triggered observations (post-human-release reclaim is a new episode)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "review-triggered" };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-queued"]).length, 1);
+
+  // Ledger-seeded: GATED RECLAIM's failed->driving transition (conductor.ts:2593-2604) clears
+  // the review-trigger pin and re-enters DRIVE fresh — a human-mediated round trip through a
+  // terminal state, not a continuation of whatever was announced before the escalation.
+  st.appendEvent("gated-reentry", { worker: "lane-a", issue: 2, pr: 55, attempt: 1 });
+
+  // The classic driver posts a fresh trigger and DRIVE observes the IDENTICAL reason string
+  // again ("review-triggered" recurring is exactly how a freshly-posted trigger looks).
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-queued"]);
+  assert.equal(
+    events.length,
+    2,
+    "the post-gated-reentry trigger is a NEW episode and must re-announce, even though the reason string repeats exactly",
+  );
+  st.close();
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // #246: FIXABLE gate wiring — the DRIVE loop's own "fixable" branch (driveDecision's
 // FIXUP/ESCALATE refinement, fed by THIS lane's fix_rounds/cfg.lanes.prFixCap/round budget).
@@ -2613,6 +2669,58 @@ test("tick DRIVE (#383 round 2, PM P2): fix-leg-dispatch-blocked RE-emits after 
     assert.deepEqual(
       events.map((e) => (e.payload as { blockReason: string }).blockReason),
       ["paused", "paused"],
+    );
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick DRIVE (#383 round 3, Codex P2): fix-leg-dispatch-blocked RE-emits when a ledger-seeded fix-leg-dispatch-failed sits between two identical blockReason observations (a cleared block that failed to dispatch still ended the episode)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-fix-blocked-dispatch-fail-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55);
+    const gate = new FakeMergeGate();
+    const fixable: DriveOutcome = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+    gate.outcomes[55] = fixable;
+    writeFileSync(join(dir, "PAUSE"), "");
+    await tick({
+      now: realClock,
+      forge,
+      state: st,
+      supervisor: sup,
+      cfg: mkCfg(),
+      mergeGate: gate,
+      fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+    });
+    assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-dispatch-blocked"]).length, 1);
+
+    // Ledger-seeded: `startFixLeg`'s `resume()` throwing (conductor.ts:3025-3031) proves the OLD
+    // admission block already cleared and a genuine dispatch attempt was made, even though the
+    // attempt itself failed and the lane stays `driving`, un-upserted. Simulated directly rather
+    // than actually wiring a throwing supervisor — the throw path itself is already covered by
+    // the existing "#246: fixable + FIXUP but startFixLeg's resume() throws" test above; this
+    // test is only about whether the resulting event resets the dedup episode.
+    st.appendEvent("fix-leg-dispatch-failed", { worker: "lane-a", issue: 2, pr: 55, error: "boom" });
+
+    // PAUSE is still set — re-observe the IDENTICAL blockReason ("paused").
+    await tick({
+      now: realClock,
+      forge,
+      state: st,
+      supervisor: sup,
+      cfg: mkCfg(),
+      mergeGate: gate,
+      fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+    });
+    const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-dispatch-blocked"]);
+    assert.equal(
+      events.length,
+      2,
+      "a failed dispatch attempt (fix-leg-dispatch-failed) still ended the OLD block episode — the re-block must announce",
     );
     st.close();
   } finally {
