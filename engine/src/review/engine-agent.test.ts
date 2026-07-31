@@ -13,6 +13,7 @@ import type { IForge, PRReviewData } from "../forge/forge.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import type { ApprovalResult, ReviewContext } from "../roles/reviewer.js";
 import type { AcSnapshot } from "./ac-snapshot.js";
+import type { EngineReviewArtifact } from "./audit.js";
 import {
   defaultEngineReviewerPromptPath,
   type EngineAgentReviewer,
@@ -83,7 +84,10 @@ function mkForge(overrides: Partial<IForge> = {}): IForge & { getPRDiffCalls: nu
 }
 
 /** A resultText carrying a valid sentinel-wrapped structured block for MANIFEST. */
-function validResultText(perAC: { id: string; status: string }[], findings: { id: string; body: string }[] = []): string {
+function validResultText(
+  perAC: { id: string; status: string }[],
+  findings: { id: string; body: string; severity?: string; kind?: string; path?: string }[] = [],
+): string {
   return `reasoning preamble\n\n<<<SAPWOOD_RESULT>>>\n${JSON.stringify({ perAC, findings })}\n<<<END_SAPWOOD_RESULT>>>`;
 }
 
@@ -123,6 +127,10 @@ interface Deps {
   materializeCalls: string[];
   runner: FakeRunner;
   getAcSnapshotCalls: number[];
+  /** #472 fix round: every `onReviewArtifact` invocation, in call order — the production-path
+   *  assertion surface for "the persisted artifact carries what the fix round requires" (path
+   *  retention + advisories on both branches), distinct from `evaluate()`'s own return value. */
+  artifactCalls: { headOid: string; artifact: EngineReviewArtifact }[];
   build: () => EngineAgentReviewer;
 }
 
@@ -135,6 +143,7 @@ function mkDeps(opts: {
 }): Deps {
   const materializeCalls: string[] = [];
   const getAcSnapshotCalls: number[] = [];
+  const artifactCalls: { headOid: string; artifact: EngineReviewArtifact }[] = [];
   const runner = new FakeRunner(opts.runnerQueue);
   const materializeFn = async (headOid: string): Promise<MaterializeResult> => {
     materializeCalls.push(headOid);
@@ -145,6 +154,7 @@ function mkDeps(opts: {
     materializeCalls,
     runner,
     getAcSnapshotCalls,
+    artifactCalls,
     build: () =>
       makeEngineAgentReviewer({
         materialize: materializeFn,
@@ -156,6 +166,9 @@ function mkDeps(opts: {
         getWorkerActualModels: () => opts.workerActualModels ?? [WORKER_MODEL],
         cfg: opts.cfg ?? mkCfg(),
         now: () => new Date("2026-07-22T00:00:00Z"),
+        onReviewArtifact: (headOid, artifact) => {
+          artifactCalls.push({ headOid, artifact });
+        },
       }),
   };
 }
@@ -507,4 +520,79 @@ test("evaluate(): fallbackModel is 'none' — engine-agent never silently swaps 
   await build().evaluate(ctx());
   assert.equal(runner.calls[0]!.fallbackModel, "none");
   assert.equal(runner.calls[0]!.model, AGENT_MODEL);
+});
+
+// ── #472 fix round (gate② P1): production wiring — changed-path threading + artifact advisories ──
+// Both items were previously true ONLY inside finding-axes.ts/agent-output.ts's own unit tests;
+// this section proves each through the REAL evaluate() -> attempt() -> onReviewArtifact pipeline,
+// per the verification plan's item 10 (engine-agent.test.ts/production.test.ts).
+
+const IN_DIFF_PATH = "src/foo.ts";
+const DIFF_TOUCHING_FOO = `diff --git a/${IN_DIFF_PATH} b/${IN_DIFF_PATH}\nindex 1111111..2222222 100644\n--- a/${IN_DIFF_PATH}\n+++ b/${IN_DIFF_PATH}\n@@ -1,1 +1,1 @@\n-old\n+new\n`;
+
+test("evaluate() [#472 P1 item 1]: a finding's path GENUINELY IN the reviewed diff is RETAINED end to end into the persisted artifact (resolveFindingPath's retention branch is live in production)", async () => {
+  const text = validResultText(
+    MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    [{ id: "f1", body: "a real defect", path: IN_DIFF_PATH }],
+  );
+  const { build, artifactCalls } = mkDeps({ runnerQueue: [mkSessionResult({ resultText: text })] });
+  const result = await build().evaluate(ctx({ diffText: DIFF_TOUCHING_FOO }));
+  assert.equal(result.kind, "rejected"); // absent severity -> blocking, unchanged
+  assert.equal(artifactCalls.length, 1);
+  const finding = artifactCalls[0]!.artifact.findings.find((f) => f.id === "f1");
+  assert.ok(finding, "expected the persisted artifact to carry finding f1");
+  assert.equal(finding!.path, IN_DIFF_PATH); // KEPT — this diff genuinely touches it
+  assert.equal(finding!.pathDropped, undefined); // never marked dropped when it wasn't
+});
+
+test("evaluate() [#472 P1 item 1]: a finding's path NOT in the reviewed diff is dropped, pathDropped now means what it says (regression pin for the pre-fix 'every path drops unconditionally' bug)", async () => {
+  const text = validResultText(
+    MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    [{ id: "f1", body: "a real defect", path: "src/somewhere-else.ts" }],
+  );
+  const { build, artifactCalls } = mkDeps({ runnerQueue: [mkSessionResult({ resultText: text })] });
+  await build().evaluate(ctx({ diffText: DIFF_TOUCHING_FOO }));
+  const finding = artifactCalls[0]!.artifact.findings.find((f) => f.id === "f1");
+  assert.ok(finding);
+  assert.equal(finding!.path, undefined);
+  assert.equal(finding!.pathDropped, true); // a REAL check happened — the diff just didn't touch it
+});
+
+test("evaluate() [#472 P1 item 2]: an APPROVED verdict's persisted artifact still carries its advisory finding(s) — the audit trail no longer requires rejection to record advisories", async () => {
+  const text = validResultText(
+    MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    [{ id: "f1", body: "trivial style nit", severity: "advisory", kind: "style" }],
+  );
+  const { build, artifactCalls } = mkDeps({ runnerQueue: [mkSessionResult({ resultText: text })] });
+  const result = await build().evaluate(ctx());
+  assert.equal(result.kind, "approved"); // gate semantics unchanged — advisory-only still approves
+  assert.equal(artifactCalls.length, 1);
+  assert.deepEqual(
+    artifactCalls[0]!.artifact.findings.map((f) => f.id),
+    ["f1"],
+  );
+  assert.equal(artifactCalls[0]!.artifact.findings[0]!.severity, "advisory");
+});
+
+test("evaluate() [#472 P1 item 2]: a REJECTED verdict's persisted artifact carries BOTH the blocking and the advisory finding, while the GATE result (result.findings) stays blocking-only per design §1", async () => {
+  const text = validResultText(
+    MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    [
+      { id: "f-block", body: "a real defect" },
+      { id: "f-adv", body: "trivial style nit", severity: "advisory", kind: "style" },
+    ],
+  );
+  const { build, artifactCalls } = mkDeps({ runnerQueue: [mkSessionResult({ resultText: text })] });
+  const result = await build().evaluate(ctx());
+  assert.equal(result.kind, "rejected");
+  if (result.kind !== "rejected") throw new Error("unreachable");
+  // Gate semantics unchanged: rejected.findings is blocking-only — the advisory never reaches it.
+  assert.deepEqual(
+    result.findings.map((f) => f.id),
+    ["f-block"],
+  );
+  // The persisted artifact, independently, carries BOTH.
+  assert.deepEqual(artifactCalls[0]!.artifact.findings.map((f) => f.id).sort(), ["f-adv", "f-block"]);
+  const advisory = artifactCalls[0]!.artifact.findings.find((f) => f.id === "f-adv");
+  assert.equal(advisory!.severity, "advisory");
 });

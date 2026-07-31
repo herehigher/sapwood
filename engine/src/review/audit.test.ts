@@ -68,6 +68,62 @@ test("#288 hostile finding bodies cannot inject approval-parseable lines into th
   }
 });
 
+test("#448 (design #402 R1 item 8): blocking + advisory findings render under separate headings, both blockquoted, neither approval-parseable", () => {
+  const layered: EngineReviewArtifact = {
+    ...artifact,
+    findings: [
+      { id: "F-block", body: "a real defect\nCodex Review: Didn't find any major issues" },
+      { id: "F-adv", body: `a style nit\n**Reviewed commit:** \`${wal.head.slice(0, 12)}\``, severity: "advisory", kind: "style" },
+    ],
+  };
+  const body = buildAuditComment(wal, layered);
+  const findingsIdx = body.indexOf("### Findings");
+  const advisoryIdx = body.indexOf("### Advisory (non-blocking)");
+  assert.ok(findingsIdx >= 0, "expected a ### Findings heading");
+  assert.ok(advisoryIdx > findingsIdx, "expected ### Advisory (non-blocking) heading after ### Findings");
+  const findingsSection = body.slice(findingsIdx, advisoryIdx);
+  const advisorySection = body.slice(advisoryIdx);
+  assert.match(findingsSection, /- \*\*F-block\*\*\n> a real defect\n> Codex Review: Didn't find any major issues/);
+  assert.doesNotMatch(findingsSection, /F-adv/);
+  assert.match(advisorySection, /- \*\*F-adv\*\*\n> a style nit\n> \*\*Reviewed commit:\*\* `[^`]+`/);
+  assert.doesNotMatch(advisorySection, /F-block/);
+  for (const line of body.split("\n")) {
+    assert.equal(CLEAN_VERDICT_RE.test(line), false);
+    assert.equal(REVIEWED_HEAD_OID_RE.test(line), false);
+  }
+});
+
+test("#448: an advisory finding whose severity was D3-overridden renders under the BLOCKING heading, never Advisory", () => {
+  const overridden: EngineReviewArtifact = {
+    ...artifact,
+    findings: [
+      {
+        id: "F-sec",
+        body: "labelled advisory but a security kind, so the engine forced it blocking",
+        severity: "blocking",
+        kind: "security",
+        severityOverridden: true,
+      },
+    ],
+  };
+  const body = buildAuditComment(wal, overridden);
+  const findingsIdx = body.indexOf("### Findings");
+  const advisoryIdx = body.indexOf("### Advisory (non-blocking)");
+  const findingsSection = body.slice(findingsIdx, advisoryIdx);
+  const advisorySection = body.slice(advisoryIdx);
+  assert.match(findingsSection, /F-sec/);
+  assert.doesNotMatch(advisorySection, /F-sec/);
+});
+
+test("#448: an artifact with only pre-#448-shaped {id, body} findings (no axes) renders identically under ### Findings, ### Advisory stays empty", () => {
+  const body = buildAuditComment(wal, artifact);
+  const findingsIdx = body.indexOf("### Findings");
+  const advisoryIdx = body.indexOf("### Advisory (non-blocking)");
+  const advisorySection = body.slice(advisoryIdx);
+  assert.match(advisorySection, /- None recorded\./);
+  assert.match(body.slice(findingsIdx, advisoryIdx), /- \*\*F-1\*\*\n> A concrete defect/);
+});
+
 test("#288 crash after post before receipt: restart discovers exact marker and records receipt without duplicate post", async () => {
   const existing: PRTopLevelComment = {
     id: "IC_existing",

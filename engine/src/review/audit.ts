@@ -3,16 +3,22 @@
 // Markdown body is human evidence only and is never consumed by reviewer.ts.
 
 import type { IForge, PRTopLevelComment } from "../forge/forge.js";
-import type { Finding } from "../roles/reviewer.js";
 import type { PerAcResult } from "./agent-output.js";
 import type { AuditDeliveryResult, EngineReviewWal } from "./drive.js";
+import { type ClassifiedFinding, effectiveSeverity } from "./finding-axes.js";
 
 export const AUDIT_MARKER_PREFIX = "<!-- sapwood-audit ";
 const MARKER_RE = /^<!-- sapwood-audit kind=([a-z0-9-]+) head=([0-9a-f]+) diff=([0-9a-f]+) run=([A-Za-z0-9._:-]+) -->$/m;
 
 export interface EngineReviewArtifact {
   perAC: PerAcResult[];
-  findings: Finding[];
+  /** #448 (design #402 R1): `ClassifiedFinding[]`, not bare `Finding[]` — a persisted finding may
+   *  carry `severity`/`kind`/`path` (and the engine-recorded `severityOverridden`/`pathDropped`
+   *  bookkeeping), which `buildAuditComment` below reads to split the rendering into the
+   *  blocking/advisory sections. A finding carrying neither axis (every artifact persisted before
+   *  #448) still round-trips and renders identically — `effectiveSeverity` defaults absent
+   *  `severity` to `"blocking"`. */
+  findings: ClassifiedFinding[];
   sessionActualModels: string[];
   promptHash: string;
 }
@@ -46,27 +52,39 @@ function escapeCell(value: string): string {
   return value.replaceAll("|", "\\|").replaceAll("\n", " ");
 }
 
+/** Write-boundary sanitization, shared by BOTH the blocking and advisory sections below: never
+ *  trust session prose. Blockquoting every body line structurally breaks reviewer.ts's ^ {0,3}
+ *  line-start anchors in CLEAN_VERDICT_RE and REVIEWED_HEAD_OID_RE, so finding text — blocking OR
+ *  advisory — can never become an approval-parseable engine comment (#448, design #402 §2: the
+ *  Advisory section gets "the SAME blockquoted, write-boundary-sanitized rendering `audit.ts`
+ *  already applies"). */
+function renderFindingsList(findings: readonly ClassifiedFinding[]): string {
+  return findings.length > 0
+    ? findings
+        .map(
+          (f) =>
+            `- **${escapeCell(f.id)}**\n${f.body
+              .split("\n")
+              .map((line) => `> ${line}`)
+              .join("\n")}`,
+        )
+        .join("\n")
+    : "- None recorded.";
+}
+
 /** Render a stable human record. The wording deliberately contains neither reviewer.ts's
  *  Codex-clean sentence nor its `Reviewed commit/head OID:` assertion format. */
 export function buildAuditComment(wal: EngineReviewWal, artifact: EngineReviewArtifact): string {
   const outcome = wal.decisiveOutcome ?? "unknown";
   const acRows =
     artifact.perAC.length > 0 ? artifact.perAC.map((a) => `| ${escapeCell(a.id)} | ${a.status} |`).join("\n") : "| — | no AC entries |";
-  // Write-boundary sanitization: never trust session prose. Blockquoting every body line
-  // structurally breaks reviewer.ts's ^ {0,3} line-start anchors in CLEAN_VERDICT_RE and
-  // REVIEWED_HEAD_OID_RE, so finding text cannot become an approval-parseable engine comment.
-  const findings =
-    artifact.findings.length > 0
-      ? artifact.findings
-          .map(
-            (f) =>
-              `- **${escapeCell(f.id)}**\n${f.body
-                .split("\n")
-                .map((line) => `> ${line}`)
-                .join("\n")}`,
-          )
-          .join("\n")
-      : "- None recorded.";
+  // #448 (design #402 §1/§2): split by EFFECTIVE severity (D2's fail-closed default — a finding
+  // carrying neither axis is "blocking", so every pre-#448 artifact renders under "### Findings"
+  // exactly as it always has) rather than the raw `severity` field, so a D3-overridden finding
+  // (severity requested "advisory" but forced back to "blocking") renders under the BLOCKING
+  // heading — the heading a reader must act on, never the one a session tried to file it under.
+  const blocking = artifact.findings.filter((f) => effectiveSeverity(f) !== "advisory");
+  const advisory = artifact.findings.filter((f) => effectiveSeverity(f) === "advisory");
   const models = artifact.sessionActualModels.length > 0 ? artifact.sessionActualModels.join(", ") : "unknown";
   return `${buildAuditMarker(markerForWal(wal))}
 
@@ -81,7 +99,11 @@ ${acRows}
 
 ### Findings
 
-${findings}
+${renderFindingsList(blocking)}
+
+### Advisory (non-blocking)
+
+${renderFindingsList(advisory)}
 
 Provenance: reviewer model(s) \`${models}\`; prompt template sha256 \`${artifact.promptHash}\`; projection manifest sha256 \`${wal.treeManifestHash ?? "unavailable"}\`; reviewed object \`${wal.head}\`; diff sha256 \`${wal.diffHash}\`; run \`${wal.runId}\`.
 `;
