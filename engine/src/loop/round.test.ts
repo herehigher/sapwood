@@ -4031,29 +4031,46 @@ test("runRounds (#431 round 4, codex finding 5): the ROUND-WAIT clear site's wri
   st.close();
 });
 
-test("runRounds (#431 round 5, codex P1): the round-wait green-light clear respects a NON-LLM park — llm ping green + rapid-restart open keeps the loop waiting, no paid round ever opens", async () => {
+test("runRounds (#431 rounds 5-6, codex P1): the round-wait green-light clear respects a NON-LLM park — a green llm probe INSIDE the wait iteration never opens round 2 while rapid-restart stands", async () => {
+  // Round 6 (codex): the round-5 version of this test was not genuinely red-first — with a
+  // real clock and a non-advancing fake sleep, round 1's own tick consumed the one due ping
+  // and the wait loop never observed a green probe, so the pre-fix predicate was never
+  // exercised. This rewrite injects an ADVANCING clock (each fake sleep moves it 120s, past
+  // the 30s probe backoff), captures an event-id cursor when round 1's LAST phase completes,
+  // and PROVES a successful llm park-probe lands AFTER that cursor — i.e. inside the wait —
+  // before asserting the gate held. Red-verified on ccb8a85 (the pre-fix predicate): the
+  // wait's first green ping cleared the gate and opened round 2.
   const forge = new FakeForge();
   forge.ready = [];
   const state = new State(":memory:");
-  const t0 = "2026-07-24T00:00:00.000Z"; // old entered/probe stamps -> the llm probe is due every iteration
+  const t0 = "2026-07-24T00:00:00.000Z"; // old entered/probe stamps -> the llm probe starts due
   state.enterPark("llm", "quota exhausted", null, t0);
   state.appendEvent("rapid-restart-detected", { births: 5, windowSec: 600, maxBirths: 5, enteredAt: t0 });
   state.enterPark("rapid-restart", "crash loop suspected", null, t0);
+  let ms = Date.parse("2026-07-31T00:00:00.000Z");
+  const now = () => new Date(ms);
   let pings = 0;
+  let round1ClosedAtEventId: number | null = null;
   let stop = (): void => {};
   const sleepCalls: number[] = [];
-  const sleep = async (ms: number): Promise<void> => {
-    sleepCalls.push(ms);
+  const sleep = async (requestedMs: number): Promise<void> => {
+    sleepCalls.push(requestedMs);
+    ms += 120_000; // every wait advances the clock past the 30s probe backoff -> the NEXT wait iteration's probe is due
     if (sleepCalls.length >= 6) stop(); // several wait iterations, then wind down
   };
   const deps = baseDeps({
     forge,
     state,
     sleep,
+    now,
+    processStartedAt: new Date(ms),
     tickIntervalSec: 1,
     probeLlmReachable: async () => {
       pings++;
-      return true; // ALWAYS green — under round-4 code this cleared the gate and opened round 2
+      return true; // ALWAYS green — under the pre-fix predicate this cleared the gate and opened round 2
+    },
+    onRoundPhase: (roundId, phase) => {
+      if (roundId === 1 && phase === "retro") round1ClosedAtEventId = state.maxEventId();
     },
   });
   deps.registerSignals = (requestStop) => {
@@ -4062,9 +4079,18 @@ test("runRounds (#431 round 5, codex P1): the round-wait green-light clear respe
   };
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "signal");
+  assert.ok(round1ClosedAtEventId !== null, "round 1 ran to its last phase");
+  const waitProbes = state
+    .eventsAfterId(round1ClosedAtEventId as unknown as number, ["park-probe"])
+    .map((e) => e.payload as { source: string; success: boolean })
+    .filter((p) => p.source === "llm" && p.success === true);
+  assert.ok(
+    waitProbes.length >= 1,
+    "a SUCCESSFUL llm probe provably ran INSIDE the wait (after round 1 closed) — the gate was genuinely exercised",
+  );
   assert.equal(result.rounds, 1, "round 1 only (its unconditional open) — the green light never cleared the gate");
   assert.equal(state.getRound(2), undefined, "no paid round 2 while the rapid-restart park stands");
-  assert.ok(pings >= 1, "the llm probe genuinely ran green during the wait");
+  assert.ok(pings >= 2, "the probe ran in round 1's tick AND in the wait");
   assert.ok(state.parkRow("rapid-restart") !== null, "the non-llm park stands throughout");
   state.close();
 });

@@ -926,15 +926,19 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  open (the round's own peripheral role sessions become the real canary, via item 1's
    *  runSessionWithRetry env-classification wiring: a non-classified attempt clears the episode
    *  for real, a re-classified one simply continues it). Gated the SAME way conductor.ts gates
-   *  its own canary: only when no FORGE episode is ALSO open (`state.parkRow("forge") == null`)
-   *  — a mixed storm never opens a round that would just fail on forge writes anyway. `forge`
-   *  itself IS a genuine recovery signal (conductor.ts's own doc: "the cheap IForge read is a
-   *  GENUINE recovery signal") and clears outright on success, same as conductor.ts.
+   *  its own canary, by the SAME shared predicate (#431 round 5, nonLlmParkOpen): the green
+   *  light counts only when NO park of any non-llm source is open — forge, rapid-restart, or
+   *  any future ParkSource (source-agnostic by construction, so a new source blocks by
+   *  default). A mixed storm never opens a round that would just fail on forge writes anyway,
+   *  and a rapid-restart park is an independent "dispatch is parked" fact no llm recovery can
+   *  override. `forge` itself IS a genuine recovery signal (conductor.ts's own doc: "the cheap
+   *  IForge read is a GENUINE recovery signal") and clears outright on success, same as
+   *  conductor.ts.
    *
    *  Returns (clear to open) the instant ceiling is clear AND (nothing is parked OR the llm
-   *  episode alone just got a green light), or immediately when KILL_SWITCH is active or a
-   *  signal arrives — same "let the round open & block normally at its first peripheral phase"
-   *  contract the standby loop above already documents for KILL_SWITCH.
+   *  episode is the ONLY open park and just got a green light), or immediately when KILL_SWITCH
+   *  is active or a signal arrives — same "let the round open & block normally at its first
+   *  peripheral phase" contract the standby loop above already documents for KILL_SWITCH.
    *
    *  #374 review (Codex sol-high finding 2, P1): the llm ping is skipped entirely while
    *  ceiling-breached (same `!ceilingBreached` gate conductor.ts's own llm-probe section uses) —

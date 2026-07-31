@@ -852,7 +852,9 @@ validate` catches all three).
   again. The ping proves network + auth + *some* account capacity on the cheapest model —
   but **not** that the worker's own model/tier has quota (model-specific caps,
   primary-model-only overload), so a green ping is only a *gate*, never a recovery signal.
-  When the backoff interval elapses and the ping succeeds (and no forge episode is open), the
+  When the backoff interval elapses and the ping succeeds (and **no other park of any source is
+  open** — forge, rapid-restart, or any future park source: a green LLM light may bypass only
+  the LLM's own episode, #431), the
   engine dispatches exactly **one canary lane**. The llm episode clears only when that canary
   reaches a terminal state that is *not* itself env-classified; a canary that env-fails
   continues the *same* episode — the entry time (and therefore the escalation clock) is
