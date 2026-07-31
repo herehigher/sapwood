@@ -187,59 +187,97 @@ test("release after the lock is already gone: silent no-op", () => {
 
 // ── race interleaves (scripted fs — not reproducible deterministically on a real fs) ───────
 
-/** In-memory LockFsOps with optional hooks to script a peer's interleaved action. */
-function fakeFs(initial: string | null = null): LockFsOps & { content: string | null; afterCreate: (() => void) | undefined } {
+const FAKE_LOCK = join("fake", "sapwood.lock");
+
+/** In-memory multi-path LockFsOps. `beforeLockPathClaim` fires ONCE, just before the first
+ *  operation that removes the lock path's current name (unlink OR rename of the lock path) —
+ *  the exact interleave point where a whole peer takeover can be scripted (codex PR #467
+ *  finding 1's delayed-actor probe). Hard-link aliasing is modeled as a content copy, which is
+ *  observationally equivalent for these string payloads. */
+function fakeFs(initialLock: string | null = null): LockFsOps & {
+  files: Map<string, string>;
+  beforeLockPathClaim: (() => void) | undefined;
+} {
+  const files = new Map<string, string>();
+  if (initialLock !== null) files.set(FAKE_LOCK, initialLock);
+  const err = (code: string) => Object.assign(new Error(code), { code });
+  const fireClaimHook = (path: string) => {
+    if (path === FAKE_LOCK && fs.beforeLockPathClaim !== undefined) {
+      const hook = fs.beforeLockPathClaim;
+      fs.beforeLockPathClaim = undefined; // once — a second firing would recurse forever
+      hook();
+    }
+  };
   const fs = {
-    content: initial,
-    afterCreate: undefined as (() => void) | undefined,
-    readFile(_path: string): string {
-      if (fs.content === null) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-      return fs.content;
+    files,
+    beforeLockPathClaim: undefined as (() => void) | undefined,
+    readFile(path: string): string {
+      const content = files.get(path);
+      if (content === undefined) throw err("ENOENT");
+      return content;
     },
-    writeFileExclusive(_path: string, data: string): void {
-      if (fs.content !== null) throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
-      fs.content = data;
-      fs.afterCreate?.();
+    writeFileExclusive(path: string, data: string): void {
+      if (files.has(path)) throw err("EEXIST");
+      files.set(path, data);
     },
-    unlink(_path: string): void {
-      if (fs.content === null) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-      fs.content = null;
+    unlink(path: string): void {
+      fireClaimHook(path);
+      if (!files.has(path)) throw err("ENOENT");
+      files.delete(path);
+    },
+    rename(oldPath: string, newPath: string): void {
+      fireClaimHook(oldPath);
+      const content = files.get(oldPath);
+      if (content === undefined) throw err("ENOENT");
+      files.delete(oldPath);
+      files.set(newPath, content); // renameSync clobbers newPath — real semantics
+    },
+    link(existingPath: string, newPath: string): void {
+      const content = files.get(existingPath);
+      if (content === undefined) throw err("ENOENT");
+      if (files.has(newPath)) throw err("EEXIST"); // link never clobbers — real semantics
+      files.set(newPath, content);
     },
   };
   return fs;
 }
 
-test("verify race: a peer replaces our fresh lock between create and verify -> we back off (refuse), never double-drive", () => {
-  const fs = fakeFs(JSON.stringify({ pid: 999999, token: "stale", acquiredAt: "2026-07-30T00:00:00.000Z" }));
-  fs.afterCreate = () => {
-    // The peer (which read the SAME stale lock before our takeover) unlinks our fresh file and
-    // installs its own — the exact interleave the module doc's concurrent-takeover residual
-    // describes, scripted deterministically here.
-    fs.content = JSON.stringify({ pid: 8888, token: "peer", acquiredAt: "2026-07-31T00:00:00.001Z" });
-    fs.afterCreate = undefined;
+function lockPid(fs: { files: Map<string, string> }): number | null {
+  const raw = fs.files.get(FAKE_LOCK);
+  return raw === undefined ? null : (JSON.parse(raw) as { pid: number }).pid;
+}
+
+test("REGRESSION (codex PR #467 finding 1): two contenders racing the SAME stale lock never BOTH acquire — a delayed claim must not evict the winner's fresh lock", () => {
+  const stale = JSON.stringify({ pid: 999999, token: "stale", acquiredAt: "2026-07-30T00:00:00.000Z" });
+  const fs = fakeFs(stale);
+  let b: ReturnType<typeof acquireInstanceLock> | null = null;
+  // A reads the stale lock and judges it dead; just before A's FIRST claim operation on the
+  // lock path, B's ENTIRE takeover runs to completion (reads the same stale lock, claims it,
+  // creates its own fresh lock, returns acquired). A then resumes acting on its stale decision.
+  fs.beforeLockPathClaim = () => {
+    b = acquireInstanceLock(FAKE_LOCK, { now: NOW, pid: 2222, isPidAlive: () => false, fs });
   };
-  const result = acquireInstanceLock(join("fake", "sapwood.lock"), { now: NOW, pid: 1212, isPidAlive: () => false, fs });
-  assert.equal(result.acquired, false);
-  if (!result.acquired) {
-    assert.equal(result.holder.pid, 8888);
-    assert.match(result.message, /during a concurrent start/);
-  }
-  assert.equal((JSON.parse(fs.content ?? "") as { pid: number }).pid, 8888, "the peer's lock survives our back-off");
+  const a = acquireInstanceLock(FAKE_LOCK, { now: NOW, pid: 1111, isPidAlive: (pid) => pid !== 999999, fs });
+  assert.ok(b !== null, "the scripted peer takeover ran");
+  const bResult = b as ReturnType<typeof acquireInstanceLock>;
+  assert.equal(bResult.acquired, true, "B (whose takeover completed first) holds the lock");
+  assert.equal(a.acquired, false, "A's delayed claim must back off, never evict B");
+  if (!a.acquired) assert.equal(a.holder.pid, 2222, "A's refusal names the actual live holder");
+  assert.equal(lockPid(fs), 2222, "B's fresh lock survives A's delayed claim");
 });
 
 test("lock vanishes between failed create and read (holder released): retried, then acquired", () => {
   const fs = fakeFs(JSON.stringify({ pid: 1, token: "leaving", acquiredAt: "2026-07-30T00:00:00.000Z" }));
   const plainRead = fs.readFile.bind(fs);
-  let reads = 0;
+  let lockReads = 0;
   fs.readFile = (path: string): string => {
-    reads++;
-    if (reads === 1) {
+    if (path === FAKE_LOCK && ++lockReads === 1) {
       // The holder's release lands between our EEXIST and this read.
-      fs.content = null;
+      fs.files.delete(FAKE_LOCK);
     }
     return plainRead(path);
   };
-  const result = acquireInstanceLock(join("fake", "sapwood.lock"), {
+  const result = acquireInstanceLock(FAKE_LOCK, {
     now: NOW,
     pid: 1313,
     isPidAlive: () => {
@@ -248,25 +286,46 @@ test("lock vanishes between failed create and read (holder released): retried, t
     fs,
   });
   assert.equal(result.acquired, true);
-  assert.equal((JSON.parse(fs.content ?? "") as { pid: number }).pid, 1313);
+  assert.equal(lockPid(fs), 1313);
 });
 
 test("acquire attempts are bounded: pathological churn ends in a refusal, not an infinite loop", () => {
-  // Script a lock that is ALWAYS present at create (EEXIST) and ALWAYS gone at read — every
-  // pass takes the vanished-between branch, so only the attempt bound can end the loop.
+  // Script a lock that is ALWAYS present at name-creation time (EEXIST) and ALWAYS gone at
+  // read — every pass takes the vanished-between branch, so only the bound can end the loop.
   const fs = fakeFs(null);
-  fs.writeFileExclusive = () => {
-    throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
+  fs.link = (_existingPath: string, newPath: string) => {
+    if (newPath === FAKE_LOCK) throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
+    throw new Error("unexpected link target");
   };
-  const result = acquireInstanceLock(join("fake", "sapwood.lock"), { now: NOW, pid: 1414, fs });
+  fs.writeFileExclusive = (path: string, data: string) => {
+    if (path === FAKE_LOCK) throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
+    fs.files.set(path, data); // temp-file writes proceed normally
+  };
+  const result = acquireInstanceLock(FAKE_LOCK, { now: NOW, pid: 1414, fs });
   assert.equal(result.acquired, false);
   if (!result.acquired) assert.match(result.message, /after 3 attempts/);
 });
 
-test("unexpected fs errors (EACCES) propagate — fail closed at startup with the real error", () => {
+test("unexpected fs errors (EACCES) on create propagate — fail closed at startup with the real error", () => {
   const fs = fakeFs(null);
   fs.writeFileExclusive = () => {
     throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
   };
-  assert.throws(() => acquireInstanceLock(join("fake", "sapwood.lock"), { now: NOW, pid: 1515, fs }), /EACCES/);
+  assert.throws(() => acquireInstanceLock(FAKE_LOCK, { now: NOW, pid: 1515, fs }), /EACCES/);
+});
+
+test("P2-5 (codex PR #467 finding 5): a non-ENOENT READ error after EEXIST propagates — never misreported as churn", () => {
+  const fs = fakeFs(JSON.stringify({ pid: 1, token: "t", acquiredAt: "2026-07-30T00:00:00.000Z" }));
+  fs.readFile = () => {
+    throw Object.assign(new Error("EACCES: permission denied, read"), { code: "EACCES" });
+  };
+  assert.throws(() => acquireInstanceLock(FAKE_LOCK, { now: NOW, pid: 1616, fs }), /EACCES/);
+});
+
+test("P2-5: a non-ENOENT RENAME error during takeover propagates", () => {
+  const fs = fakeFs(JSON.stringify({ pid: 999999, token: "stale", acquiredAt: "2026-07-30T00:00:00.000Z" }));
+  fs.rename = () => {
+    throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+  };
+  assert.throws(() => acquireInstanceLock(FAKE_LOCK, { now: NOW, pid: 1717, isPidAlive: () => false, fs }), /EIO/);
 });

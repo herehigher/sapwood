@@ -1375,6 +1375,16 @@ export interface ForgeProxyBundleRow {
   createdAt: string;
 }
 
+/** The default DB path `sapwood run`/`status` use, exported (#382 round 2, codex finding 3) so
+ *  cli.ts can derive the data-dir lock path WITHOUT constructing a State — lock arbitration must
+ *  precede the DB open/migration a State construction performs, or a refused second engine
+ *  (possibly a newer binary) would migrate the live holder's database on its way to exit 1. */
+export const DEFAULT_DB_PATH = "data/sapwood.sqlite";
+
+/** #382: the single-instance lockfile's basename, shared by State.instanceLockPath() below and
+ *  cli.ts's pre-State lock-path derivation so the two can never drift. */
+export const INSTANCE_LOCK_FILENAME = "sapwood.lock";
+
 export class State {
   private readonly db: DatabaseSync;
   // The on-disk directory holding this engine's data (sqlite + sentinels). null for the
@@ -1400,7 +1410,7 @@ export class State {
    *  (reads the main DB directly, ZERO file creation) AND warn on stderr that a running
    *  engine's uncommitted-to-main WAL frames won't be visible (a possibly-stale snapshot is
    *  the honest best a read-only FS allows). Write methods throw at the SQLite layer. */
-  constructor(path = "data/sapwood.sqlite", opts: { readOnly?: boolean } = {}) {
+  constructor(path = DEFAULT_DB_PATH, opts: { readOnly?: boolean } = {}) {
     // SQLite won't create missing parent dirs, and data/ is gitignored (absent on a
     // fresh checkout). Create it first. (Codex P2, PR #22.) Skip for special handles.
     const isMemory = path === ":memory:" || path.startsWith("file::memory:");
@@ -2233,7 +2243,7 @@ export class State {
    *  cli.ts run path is its one consumer). null dir (in-memory State, tests) -> no lock, same
    *  convention as killSwitchPath/pausePath — no shared data dir means nothing to double-drive. */
   instanceLockPath(): string | null {
-    return this.dataDir ? join(this.dataDir, "sapwood.lock") : null;
+    return this.dataDir ? join(this.dataDir, INSTANCE_LOCK_FILENAME) : null;
   }
 
   // ── Environment-failure park (#168) ─────────────────────────────────────────────────────

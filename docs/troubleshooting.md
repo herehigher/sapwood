@@ -113,6 +113,10 @@ reads "alive" and startup is refused — deliberately the safe direction (a fals
 never a false takeover). If you've confirmed the named pid is not a sapwood engine
 (`ps -p <pid>`), delete `data/sapwood.lock` and start again.
 
+A crash can also leave a stray `sapwood.lock.tmp-*` or `sapwood.lock.aside-*` file in
+`data/` — sidecars of the lock's atomic create/takeover protocol. Their names are unique
+per process start and are never re-matched by a later engine: harmless, safe to delete.
+
 A failure whose structured error output matches an environment-failure signature — an
 LLM-provider issue (429 / usage-limit / credit-exhausted) or a forge issue (network unreachable
 / 5xx / `gh` auth errors) — is treated as a fault in *sapwood's own environment*, not in the

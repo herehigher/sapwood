@@ -656,6 +656,7 @@ checklist item**):
 | `retro-pr-opened` | The loop proposed an improvement to itself — PR #{pr} awaits review |
 | `retro-pr-degraded` | A self-improvement proposal didn't come together this round |
 | `run-started` | Engine started a new run |
+| `instance-lock-taken-over` | Took over the engine lock left by a crashed run (pid {previousPid}) |
 | `round-phase` | Round {round_id} moved into {phase} |
 
 The same module captions lane states (`running` → "writing", `driving` → "PR
