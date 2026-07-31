@@ -3160,8 +3160,8 @@ test("migration v25->v26 clears a decisive engine-review pin whose WAL has no ve
     raw.close();
 
     const s = new State(dbPath);
-    assert.equal(SCHEMA_VERSION, 29); // #407: park_state CHECK gains 'consecutive-stalls' (28 -> 29)
-    assert.equal(s.userVersion(), 29);
+    assert.equal(SCHEMA_VERSION, 30); // #398: workers.gated_escalation_carrier (29 -> 30)
+    assert.equal(s.userVersion(), 30);
     assert.equal(s.getEngineReviewAttemptPin("lane-v25"), null, "the lane is re-reviewable on its unchanged head");
     const row = s.getWorker("lane-v25");
     assert.equal(row?.engine_review_pin_head, null);
@@ -3192,8 +3192,8 @@ test("migration v26->v27: a populated v26 DB (predating park_state.reset_hint_at
     raw.close();
 
     const s = new State(dbPath);
-    assert.equal(SCHEMA_VERSION, 29); // #407: park_state CHECK gains 'consecutive-stalls' (28 -> 29)
-    assert.equal(s.userVersion(), 29);
+    assert.equal(SCHEMA_VERSION, 30); // #398: workers.gated_escalation_carrier (29 -> 30)
+    assert.equal(s.userVersion(), 30);
     const row = s.parkRow("llm");
     assert.equal(row?.reason, "pre-existing v26 episode");
     assert.equal(row?.triggerIssue, 42);
@@ -3236,6 +3236,67 @@ test("migration v27->v28 (#431): a populated v27 DB opens with its park episode 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("migration v29->v30 (#398 AC5): a lane escalated BEFORE the carrier split keeps the issue-side handshake — the new column defaults to 'issue', which is what those rows actually are", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 29; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 29");
+    // A pre-#398 gated-reentry candidate: failed + PR + the engine provably applied the label.
+    // Where it applied it is not recorded anywhere, because before this migration there was only
+    // ONE possible answer — the issue.
+    raw
+      .prepare(
+        `INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr, gated_escalation_labeled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run("lane-legacy", 144, "sess-144", "failed", "2026-07-25T00:00:00Z", "2026-07-25T01:00:00Z", 1440, 1);
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    const row = s.getWorker("lane-legacy");
+    // THE CUTOVER, and it is the fail-closed direction: reading the PR's labels for this row
+    // would find nothing (its label is on the issue) and re-admit it with no human act at all.
+    assert.equal(row?.gated_escalation_carrier, "issue");
+    assert.equal(row?.gated_escalation_labeled, 1, "the proof marker survives the migration unchanged");
+    assert.deepEqual(
+      s.gatedFailedWorkers().map((w) => w.name),
+      ["lane-legacy"],
+      "the row is still a gated-reentry candidate — the carrier column changes WHERE the handshake looks, never WHETHER it applies",
+    );
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#398: gated_escalation_carrier round-trips through upsertWorker, and a re-escalation can move a lane's carrier back to the issue", () => {
+  const s = mem();
+  const base = {
+    name: "lane-carrier",
+    issue: 398,
+    session_id: "sess-398",
+    state: "failed" as const,
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 3980,
+    gated_escalation_labeled: 1,
+  };
+  s.upsertWorker({ ...base, gated_escalation_carrier: "pr" });
+  assert.equal(s.getWorker("lane-carrier")?.gated_escalation_carrier, "pr");
+  // A later ISSUE-writing escalation of the same row must be able to move it back — a stale "pr"
+  // carrier would send GATED RECLAIM to look for a hold on an object nobody labelled.
+  s.upsertWorker({ ...base, gated_escalation_carrier: "issue" });
+  assert.equal(s.getWorker("lane-carrier")?.gated_escalation_carrier, "issue");
+  // Omitting the field entirely is the same fail-closed default the migration uses.
+  s.upsertWorker({ ...base, name: "lane-unset" });
+  assert.equal(s.getWorker("lane-unset")?.gated_escalation_carrier, "issue");
+  s.close();
 });
 
 // ── #142: dashboard reads (docs/frontend-design.md §8) ──────────────────────────────────────

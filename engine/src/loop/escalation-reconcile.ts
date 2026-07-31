@@ -21,8 +21,8 @@
 // append a TRANSITION-ONLY event, never write to the forge and never touch the escalation
 // machinery itself.
 //
-// STRUCTURALLY READ-ONLY (#295 AC3): the only IForge calls in this file are `getPRStatus` and
-// `getIssueMeta`. There is no addLabel/removeLabel/setBoardStatus/mergePR/comment call site
+// STRUCTURALLY READ-ONLY (#295 AC3): the only IForge calls in this file are `getPRStatus`,
+// `getIssueMeta` and (#398) `getPRLabels`. There is no addLabel/removeLabel/setBoardStatus/mergePR/comment call site
 // anywhere below, and this module never gates anything — the `escalation-resolved` event is a
 // RECORD, never a decision input for escalation or merge. Existing escalation and gating behavior
 // is byte-identical with this module present or absent.
@@ -326,6 +326,15 @@ export interface OpenEscalation {
   pr?: number;
   /** Whether label absence may be read as "a human removed it" — module doc. */
   labelProven: boolean;
+  /** #398: WHICH object the escalation wrote its `needs-human` label on, from the event's own
+   *  `carrier` payload field. `"pr"` only for the kinds that emit it and only when they chose the
+   *  PR; ABSENT (never `undefined`) otherwise, which reads as `"issue"` — the accurate default
+   *  for every pre-#398 ledger event and every escalation that still writes the issue. Load-
+   *  bearing for `observeResolution`'s `label-removed` arm ONLY: reading the issue's labels for a
+   *  PR-carried hold would see the label missing from the very first pass and report "a human
+   *  resolved this" about work nobody has looked at — the FALSE CLEAR this module's own doctrine
+   *  calls strictly worse than the zombie rows it exists to remove. */
+  carrier?: "pr";
   /** #295 round 6: the clear kind whose own operation PRODUCED this escalation, if any. That one
    *  clear kind cannot be evidence this escalation was resolved (see CLEAR_PRODUCES); every other
    *  clear kind still clears it. Absent for the overwhelming majority of escalations. */
@@ -405,6 +414,11 @@ export function openEscalations(events: readonly { kind: string; payload: unknow
       issue,
       ...(pr !== undefined ? { pr } : {}),
       labelProven: proof === "always" || (proof === "payload" && payload?.labeled === 1),
+      // #398: only ever set when the event says so AND it actually carries the pr to read labels
+      // from — an escalation claiming a "pr" carrier without a pr number is malformed, and the
+      // safe reading of it is the issue-side default (a hold that outlives its resolution costs a
+      // zombie strip row; a false clear releases a lane nobody looked at).
+      ...(payload?.carrier === "pr" && pr !== undefined ? { carrier: "pr" as const } : {}),
       ...(producedBy !== undefined ? { producedBy } : {}),
     });
   }
@@ -432,10 +446,18 @@ async function observeResolution(
   }
   const meta = await forge.getIssueMeta(esc.issue);
   if (meta.state === "CLOSED") return "issue-closed";
+  if (!esc.labelProven) return null;
+  // #398: the hold is only observable on the object the escalation WROTE — reading the issue for
+  // a PR-carried hold would see it absent immediately and report a resolution nobody performed.
+  // Costs one extra read (`getPRLabels`) for the PR-carried kinds only, and only while they are
+  // genuinely open, so the module doc's "at most 2 read-only calls each per round" bound holds:
+  // this arm is reached only when the PR is still OPEN and the issue still open, i.e. exactly the
+  // case where the older code was about to make its second call anyway.
+  const carrierLabels = esc.carrier === "pr" && esc.pr !== undefined ? await forge.getPRLabels(esc.pr) : meta.labels;
   // The WHOLE human-hold set, matching GATED RECLAIM's own eligibility rule (conductor.ts: "the
-  // ISSUE carries NONE of cfg.escalation.humanLabels") — so this module and the reclaim path can
-  // never disagree about whether a human is still holding the issue.
-  if (esc.labelProven && !cfg.escalation.humanLabels.some((label) => labelsInclude(meta.labels, label))) {
+  // carrier carries NONE of cfg.escalation.humanLabels") — so this module and the reclaim path
+  // can never disagree about whether a human is still holding the lane.
+  if (!cfg.escalation.humanLabels.some((label) => labelsInclude(carrierLabels, label))) {
     return "label-removed";
   }
   return null;

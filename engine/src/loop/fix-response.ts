@@ -485,7 +485,7 @@ function provenance(row: PendingThreadWrite): {
  *  (State.completeThreadReply/completeThreadResolve) — never separate writes a crash could
  *  split. */
 export async function attemptThreadWrite(
-  forge: Pick<IForge, "replyToReviewThread" | "resolveReviewThread" | "getReviewThreadCommentsTail" | "addLabel" | "addPRLabel">,
+  forge: Pick<IForge, "replyToReviewThread" | "resolveReviewThread" | "getReviewThreadCommentsTail" | "addPRLabel">,
   state: Pick<State, "completeThreadReply" | "completeThreadResolve" | "bumpThreadWriteAttempt" | "clearThreadWrite" | "appendEvent">,
   cfg: Pick<SapwoodConfig, "recovery" | "labels" | "proxy">,
   row: PendingThreadWrite,
@@ -561,12 +561,20 @@ export async function attemptThreadWrite(
  *  human's escalation depends on (the needs-human label) must land BEFORE the evidence it
  *  depends on disappears. Round 1's order (clear the row FIRST, label best-effort/swallowed)
  *  let a FAILED label write leave NOTHING pending: DRIVE would resume the lane the very same
- *  tick with zero trace anything had gone wrong. Now: the label writes are attempted FIRST: on
+ *  tick with zero trace anything had gone wrong. Now: the label write is attempted FIRST: on
  *  failure the row is KEPT (pending — DRIVE keeps skipping this lane) and the WHOLE escalation
- *  is retried next tick (never silently re-admits the lane); only once both labels have landed
- *  does the row actually clear and the escalation event fire. */
+ *  is retried next tick (never silently re-admits the lane); only once the label has landed does
+ *  the row actually clear and the escalation event fire.
+ *
+ *  #398 — CARRIER: ONE label, on the PR. This escalation is PR-born by construction — the write
+ *  that failed is a reply to, or a resolution of, a REVIEW THREAD on this lane's pull request —
+ *  so the PR is where the fact belongs and where the merge gate reads it. It used to write both
+ *  objects, which meant a human had to strip the label TWICE before the lane was released; that
+ *  is the F19–F21 residue class the 2026-07-27 retro named (dogfood lanes 144 and 295 both
+ *  needed the manual double removal). `row.pr` is non-nullable on `PendingThreadWrite`, so there
+ *  is no PR-less arm to fall back to here. */
 async function escalateOrRetry(
-  forge: Pick<IForge, "addLabel" | "addPRLabel">,
+  forge: Pick<IForge, "addPRLabel">,
   state: Pick<State, "bumpThreadWriteAttempt" | "clearThreadWrite" | "appendEvent">,
   cfg: Pick<SapwoodConfig, "recovery" | "labels">,
   row: PendingThreadWrite,
@@ -576,7 +584,6 @@ async function escalateOrRetry(
   const attempts = row.attempts + 1;
   if (attempts >= cfg.recovery.rollbackRetryCap) {
     try {
-      await forge.addLabel(row.issue, cfg.labels.needsHuman);
       await forge.addPRLabel(row.pr, cfg.labels.needsHuman);
     } catch (labelError) {
       state.bumpThreadWriteAttempt(row.id, iso());

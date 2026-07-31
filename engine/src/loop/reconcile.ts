@@ -1,8 +1,8 @@
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { type BoardPlacement, type IForge, type OpenPrBody, referencedIssue } from "../forge/forge.js";
-import { labelsInclude, labelsIncludeAny } from "../forge/labels.js";
-import type { State, WorkerRow } from "../state/state.js";
+import { labelsIncludeAny } from "../forge/labels.js";
+import type { EscalationCarrier, State, WorkerRow } from "../state/state.js";
 
 export type StartupOrphan =
   | { kind: "issue"; issue: number; reason: "in-progress" | "unplaced" }
@@ -166,10 +166,22 @@ export async function reconcileStartup(
  *  would fire reentry at a lane nobody has looked at. Those surface as `gated-flag-unprovable` —
  *  one event per engine start, an honest standing alarm for a lane only a human can move.
  *
- *  Read-only against the forge, one `getIssueMeta` per candidate; the candidate set is the number
- *  of lanes stuck in this residue state, which is small by construction. */
+ *  #398 — BOTH CARRIERS, because the evidence can now live on either (this is the issue's own
+ *  "make its audit carrier-agnostic" requirement, #391 already being in the tree). The residue
+ *  class this function exists to recover is "the label write landed on GitHub but the local flag
+ *  never committed", and since #398 routes a PR-bearing lane's `needs-human` onto the PR, most of
+ *  those rows now carry their proof there. An issue-only read would call them unprovable and
+ *  leave them permanently invisible to every read path — failing safe, but silently deleting the
+ *  recovery #391 was built to provide. Reading both is not a breach of "one carrier, never both":
+ *  that rule governs WRITES, and this is precisely the case where the engine does not know what
+ *  its own interrupted attempt managed to do. The heal records the SINGLE carrier the hold was
+ *  actually found on, so the handshake downstream is single-carrier again.
+ *
+ *  Read-only against the forge: one `getIssueMeta` per candidate, plus one `getPRLabels` ONLY for
+ *  a PR-bearing candidate whose issue came back clean; the candidate set is the number of lanes
+ *  stuck in this residue state, which is small by construction. */
 export async function auditGatedEscalationFlags(
-  forge: Pick<IForge, "getIssueMeta">,
+  forge: Pick<IForge, "getIssueMeta" | "getPRLabels">,
   state: Pick<State, "unlabeledGatedWorkers" | "upsertWorkerWithEvent" | "appendEvent">,
   cfg: { escalation: { humanLabels: string[] } },
   log: (message: string) => void = console.error,
@@ -184,11 +196,12 @@ export async function auditGatedEscalationFlags(
   for (const w of candidates) {
     try {
       const meta = await forge.getIssueMeta(w.issue);
-      if (!cfg.escalation.humanLabels.some((label) => labelsInclude(meta.labels, label))) {
+      const carrier = await observeHoldCarrier(forge, cfg, w, meta.labels);
+      if (carrier === null) {
         state.appendEvent("gated-flag-unprovable", { worker: w.name, issue: w.issue, pr: w.pr ?? null });
         continue;
       }
-      handGatedLaneToReentry(state, w);
+      handGatedLaneToReentry(state, w, carrier);
     } catch (error) {
       // Per-lane containment, same shape as escalation-reconcile.ts's own sweep: a read failure
       // leaves this lane exactly as it was and the next startup re-audits it.
@@ -197,21 +210,58 @@ export async function auditGatedEscalationFlags(
   }
 }
 
+/** #398: WHICH object currently carries a human hold for this lane — `null` if neither does.
+ *  Shared by the #391 gated-flag audit and #447's revival fence so the two can never disagree
+ *  about where a hold counts, the same one-owner discipline `handGatedLaneToReentry` itself has.
+ *
+ *  ORDER IS LOAD-BEARING, in two ways. The issue is checked first from labels the caller ALREADY
+ *  fetched, so a lane whose issue answers costs no second forge call at all — the PR read is a
+ *  fallback, not an addition. And when BOTH objects carry a hold, "issue" is the fail-safe
+ *  answer: healing to the issue means clearing the ISSUE reclaims the lane, whereupon DRIVE's own
+ *  `deriveGate` reads the PR's still-standing hold and re-escalates — one bounded reentry attempt,
+ *  self-correcting. Healing to the PR instead would let a lane whose issue still says `blocked`
+ *  drive on with nothing left to stop it.
+ *
+ *  A PR read that THROWS propagates to the caller's own per-lane containment (it must not be
+ *  swallowed into a `null`): unreadable is not the same fact as "no hold present", and reporting
+ *  the latter would emit a false `gated-flag-unprovable` alarm for a lane the next start could
+ *  have healed. */
+async function observeHoldCarrier(
+  forge: Pick<IForge, "getPRLabels">,
+  cfg: { escalation: { humanLabels: string[] } },
+  w: WorkerRow,
+  issueLabels: string[],
+): Promise<EscalationCarrier | null> {
+  if (labelsIncludeAny(issueLabels, cfg.escalation.humanLabels)) return "issue";
+  if (w.pr == null) return null;
+  return labelsIncludeAny(await forge.getPRLabels(w.pr), cfg.escalation.humanLabels) ? "pr" : null;
+}
+
 /** #391 F19's per-lane heal, shared with #447's revival pass below (PR #463 gate② P1): record
  *  that this lane's escalation label is observably present, which is the ONLY thing standing
  *  between it and gated reentry. Extracted rather than duplicated so the two callers can never
  *  drift — one heal, one event kind, one owner. Both writes land together (see
  *  State.upsertWorkerWithEvent): a marker corrected with no `gated-flag-healed` in the ledger
- *  would silently move a lane between owners. */
-function handGatedLaneToReentry(state: Pick<State, "upsertWorkerWithEvent">, w: WorkerRow): void {
-  state.upsertWorkerWithEvent({ ...w, gated_escalation_labeled: 1 }, "gated-flag-healed", {
+ *  would silently move a lane between owners.
+ *
+ *  #398: `carrier` is the object the caller's own `observeHoldCarrier` actually FOUND the hold on
+ *  — never assumed. Recording it explicitly (rather than leaning on the column default) matters
+ *  because these rows arrive with `gated_escalation_labeled = 0`, which can mean an escalation
+ *  whose PR-side write failed: a stale carrier left standing would send GATED RECLAIM to look for
+ *  a hold on the object this audit just proved does NOT have one. */
+function handGatedLaneToReentry(state: Pick<State, "upsertWorkerWithEvent">, w: WorkerRow, carrier: EscalationCarrier): void {
+  state.upsertWorkerWithEvent({ ...w, gated_escalation_labeled: 1, gated_escalation_carrier: carrier }, "gated-flag-healed", {
     worker: w.name,
     issue: w.issue,
     pr: w.pr ?? null,
+    // #398: WHICH object the hold was found on rides in the receipt too — an operator reading the
+    // ledger to answer "what do I have to clear to release this lane?" gets the answer from the
+    // heal itself, not by inferring it from the row's shape.
+    carrier,
   });
 }
 
-export type LaneRevivalForge = Pick<IForge, "getIssueLabels" | "getPRStatus">;
+export type LaneRevivalForge = Pick<IForge, "getIssueLabels" | "getPRLabels" | "getPRStatus">;
 
 /** The three ONE-WAY facts the revival pass reads back out of the ledger to decide a lane
  *  WITHOUT touching the forge: the environment failure that is its entire remit, #397's
@@ -317,8 +367,14 @@ export async function reviveEnvFailedPrLanes(
       if (!state.laneEventRecorded(ENV_FAILURE_PRESERVED_EVENT, w.name, pr)) continue;
       if (state.laneEventRecorded(HUMAN_MERGE_ONLY_EVENT, w.name, pr)) continue;
       if (state.laneEventRecorded(REVIVAL_TERMINAL_EVENT, w.name, pr)) continue;
-      if (labelsIncludeAny(await forge.getIssueLabels(w.issue), cfg.escalation.humanLabels)) {
-        handGatedLaneToReentry(state, w);
+      // #398: the same both-carriers observation the gated-flag audit makes, through the same
+      // helper — a human holding this lane may well have put the label on the PR, and revival
+      // must see that hold wherever it sits. Less severe than the audit's own miss (a wrongly
+      // revived lane meets deriveGate's PR-label veto on the very next DRIVE tick and escalates),
+      // but there is no reason for the two fences to disagree about where a hold counts.
+      const holdCarrier = await observeHoldCarrier(forge, cfg, w, await forge.getIssueLabels(w.issue));
+      if (holdCarrier !== null) {
+        handGatedLaneToReentry(state, w, holdCarrier);
         continue;
       }
       const prState = (await forge.getPRStatus(pr)).state;

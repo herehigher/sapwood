@@ -886,6 +886,26 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       ALTER TABLE park_state_new RENAME TO park_state;
     `);
   },
+  // 29 -> 30 (#398): WHICH object the escalation's needs-human label was written on. #147's
+  // reentry handshake is "the label the engine provably applied is now ABSENT" — and #398 moves
+  // the label for a PR-BORN escalation off the issue and onto the PR (the object the merge gate
+  // already reads, and the object a human is actually looking at when they decide the finding is
+  // addressed). Absence therefore has to be checked on the object the write went to, so the
+  // engine has to remember which one that was: with only `gated_escalation_labeled` to go on, a
+  // pre-#398 row (label on the ISSUE) and a post-#398 row (label on the PR) are the same shape —
+  // `failed` + pr + marker 1 — and reading the PR's labels for BOTH would see nothing on every
+  // legacy row and re-admit it with no human act at all.
+  //
+  // DEFAULT 'issue' IS THE CUTOVER, and it is the fail-closed direction. Every row that existed
+  // before this migration was escalated by the pre-#398 code, which wrote the ISSUE — so the
+  // default describes them accurately rather than approximating them, and no backfill is needed
+  // or possible (nothing in the ledger could distinguish a carrier that had only one value).
+  // Every escalation path that sets `gated_escalation_labeled = 1` now sets this column
+  // explicitly in the same write, so a lane that escalates on the PR, is reclaimed, and later
+  // re-escalates through an ISSUE-writing path cannot keep a stale 'pr' carrier.
+  (db) => {
+    db.exec(`ALTER TABLE workers ADD COLUMN gated_escalation_carrier TEXT NOT NULL DEFAULT 'issue';`);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -947,6 +967,14 @@ function openReadOnly(path: string, isMemory: boolean): DatabaseSync {
 // `driving` with a cleared review-trigger pin (see State.fixingWorkers' doc). done/failed/handoff
 // = terminal.
 export type WorkerState = "running" | "driving" | "fixing" | "done" | "failed" | "handoff";
+
+/** #398: WHICH forge object an escalation's `needs-human` label was written on. The rule adopted
+ *  with the owner (2026-07-27 retro) is "the label lives where the escalation was born": a
+ *  PR-caused escalation belongs on the PR, an issue-caused one (no PR exists yet, or the fact is
+ *  about the work item) on the issue — never both. Persisted per lane because the #147 reentry
+ *  handshake reads label ABSENCE, and absence is only meaningful on the object the write went to.
+ *  The pure rule that picks one is conductor.ts's `escalationCarrier`. */
+export type EscalationCarrier = "issue" | "pr";
 
 export interface WorkerRow {
   name: string;
@@ -1012,6 +1040,13 @@ export interface WorkerRow {
    *  schema v8->v9 migration comment, incl. the deliberate pre-migration back-compat).
    *  Optional; DB default 0. */
   gated_escalation_labeled?: number;
+  /** #398: WHICH object that label write went to — `"pr"` for a PR-BORN escalation (the label
+   *  lives on the PR, where the merge gate reads labels and where the human deciding the lane's
+   *  fate is looking), `"issue"` for an issue-born one. GATED RECLAIM checks the absence of the
+   *  human-hold labels on THIS object, so the handshake reads the same carrier the escalation
+   *  wrote. Meaningful only alongside `gated_escalation_labeled = 1`. Optional; DB default
+   *  `"issue"` — the accurate description of every pre-#398 row (see the v29->v30 migration). */
+  gated_escalation_carrier?: EscalationCarrier;
   /** #172: successful handoff -> running reentries for this lane. The initial dispatch is leg
    *  zero and is not counted; bounded by cfg.worker.maxResumes. Optional; DB default 0. */
   resume_attempts?: number;
@@ -1548,8 +1583,9 @@ export class State {
             review_covered_head,
             review_fallback_head, review_fallback_kind,
             gated_reentry_attempts, gated_reentry_capped, gated_escalation_labeled,
+            gated_escalation_carrier,
             resume_attempts, resume_capped, fix_rounds, fixing_handoff, ac_body_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            issue = excluded.issue, session_id = excluded.session_id,
            state = excluded.state, started_at = excluded.started_at,
@@ -1570,6 +1606,7 @@ export class State {
            gated_reentry_attempts = excluded.gated_reentry_attempts,
            gated_reentry_capped = excluded.gated_reentry_capped,
            gated_escalation_labeled = excluded.gated_escalation_labeled,
+           gated_escalation_carrier = excluded.gated_escalation_carrier,
            resume_attempts = excluded.resume_attempts,
            resume_capped = excluded.resume_capped,
            fix_rounds = excluded.fix_rounds,
@@ -1597,6 +1634,7 @@ export class State {
         row.gated_reentry_attempts ?? 0,
         row.gated_reentry_capped ?? 0,
         row.gated_escalation_labeled ?? 0,
+        row.gated_escalation_carrier ?? "issue",
         row.resume_attempts ?? 0,
         row.resume_capped ?? 0,
         row.fix_rounds ?? 0,

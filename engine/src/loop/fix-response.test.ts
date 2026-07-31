@@ -558,14 +558,14 @@ function mkCfg(): Pick<SapwoodConfig, "recovery" | "labels" | "proxy"> {
 }
 
 class FakeThreadForge
-  implements Pick<IForge, "replyToReviewThread" | "resolveReviewThread" | "getReviewThreadCommentsTail" | "addLabel" | "addPRLabel">
+  implements Pick<IForge, "replyToReviewThread" | "resolveReviewThread" | "getReviewThreadCommentsTail" | "addPRLabel">
 {
   calls: string[] = [];
   throwOnReply = false;
   throwOnResolve = false;
   throwOnCheckOnce = false;
-  throwOnAddLabel = false;
-  labelsAdded: Array<[number, string]> = [];
+  /** #398: the escalation's ONE carrier is the PR now, so this is the write that can fail. */
+  throwOnAddPRLabel = false;
   prLabelsAdded: Array<[number, string]> = [];
   /** Simulates GitHub's own live state: threadId -> posted comment bodies (F2(b): the read is
    *  scoped to ONE thread's own node id now, no PR bucketing needed at all). Seeded by
@@ -591,11 +591,8 @@ class FakeThreadForge
     // oldest (F2(b)'s whole point).
     return (this.threads[threadId] ?? []).slice(-cap);
   }
-  async addLabel(n: number, l: string): Promise<void> {
-    if (this.throwOnAddLabel) throw new Error("label write failed");
-    this.labelsAdded.push([n, l]);
-  }
   async addPRLabel(n: number, l: string): Promise<void> {
+    if (this.throwOnAddPRLabel) throw new Error("label write failed");
     this.prLabelsAdded.push([n, l]);
   }
 }
@@ -706,7 +703,9 @@ test("attemptThreadWrite (F4): escalates (needs-human label, clears the row) onc
   const finalOutcome = await attemptThreadWrite(forge, st, cfg, row, () => new Date().toISOString());
   assert.equal(finalOutcome.kind, "escalated");
   assert.deepEqual(st.pendingThreadWrites(), [], "escalated rows are cleared — never retried forever");
-  assert.deepEqual(forge.labelsAdded, [[9, "needs-human"]]);
+  // #398: ONE carrier, the PR — this escalation is PR-born (the write that failed is a reply to /
+  // resolution of a REVIEW THREAD on this PR). The issue-side twin is gone: two carriers meant a
+  // human had to strip the label twice before the lane was released (dogfood lanes 144, 295).
   assert.deepEqual(forge.prLabelsAdded, [[90, "needs-human"]]);
   st.close();
 });
@@ -715,7 +714,7 @@ test("attemptThreadWrite (F4): a FAILED label write at the cap KEEPS the row pen
   const st = new State(":memory:");
   const forge = new FakeThreadForge();
   forge.throwOnReply = true;
-  forge.throwOnAddLabel = true; // the label write itself fails
+  forge.throwOnAddPRLabel = true; // the label write itself fails
   const cfg = mkCfg();
   let row = seedRow(st);
   for (let i = 0; i < 3; i++) {
@@ -727,14 +726,13 @@ test("attemptThreadWrite (F4): a FAILED label write at the cap KEEPS the row pen
     assert.equal(rows.length, 1, "the row is NEVER cleared while the escalation label write keeps failing");
     row = rows[0]!;
   }
-  assert.deepEqual(forge.labelsAdded, [], "no label ever actually landed");
+  assert.deepEqual(forge.prLabelsAdded, [], "no label ever actually landed");
 
   // The forge recovers; the very next attempt both lands the label AND finalizes the escalation.
-  forge.throwOnAddLabel = false;
+  forge.throwOnAddPRLabel = false;
   const recovered = await attemptThreadWrite(forge, st, cfg, row, () => new Date().toISOString());
   assert.equal(recovered.kind, "escalated");
   assert.deepEqual(st.pendingThreadWrites(), [], "cleared only NOW, after the label successfully landed");
-  assert.deepEqual(forge.labelsAdded, [[9, "needs-human"]]);
   assert.deepEqual(forge.prLabelsAdded, [[90, "needs-human"]]);
   st.close();
 });

@@ -454,9 +454,10 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   **Narrowed by #147 (gated-PR reentry, 2026-07-13):** a `needs-human` escalated on
   gate②'s findings (`gate:HUMAN:HANDLE_THREADS`, the most frequent shape per the #122
   live-run report) is no longer a dead end requiring a manual fix→re-review→merge
-  drive — the conductor's **GATED RECLAIM** phase treats a human clearing the
-  issue of *every* `escalation.humanLabels` entry (`sapwood:needs-human` and `sapwood:blocked` by
-  default — dispatch's exact hold set, not `needs-human` alone) as the explicit
+  drive — the conductor's **GATED RECLAIM** phase treats a human clearing *every*
+  `escalation.humanLabels` entry (`sapwood:needs-human` and `sapwood:blocked` by
+  default — dispatch's exact hold set, not `needs-human` alone) **from the object the
+  escalation was written on** as the explicit
   re-entry signal (autonomy principle: humans decide *why/what*, here "is this
   actually fixed") and reclaims the SAME
   worker row/PR/branch straight back to `driving`, letting the existing DRIVE loop
@@ -470,7 +471,24 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   speak for another reviewer's undismissed block, so the lane re-escalates); and
   label absence only counts as a human act when the engine durably recorded that
   its escalation label write actually *succeeded* (a transient label failure must
-  not read as human approval next tick). Bounded by
+  not read as human approval next tick).
+  **The carrier (#398, 2026-07-27 retro): the label lives where the escalation was
+  born.** A PR-caused escalation — a gate-`HUMAN` verdict, the FIXABLE degrade, a
+  thread-write that could not be posted, a dispute-priced or non-converging review —
+  is written on the **PR**, which is where
+  `deriveGate` reads labels and where the human deciding "is this actually fixed" is
+  already looking; an issue-caused one (no PR exists yet, or the fact is about the work
+  item itself) is written on the **issue**. Never both, so a release is always ONE
+  removal. The reentry handshake reads back the same object: the row records which
+  carrier the write went to (`workers.gated_escalation_carrier`), so a lane escalated
+  before this split keeps its issue-side handshake unchanged rather than being re-admitted
+  by a PR read that would find nothing. For a PR-carried lane the carrier read also sees a
+  PR-level `escalation.holdLabels` hold and SKIPs — a human investigating the PR no longer
+  spends a reentry attempt. The four #69 retained-worktree paths (ceiling drain,
+  reclaim-terminal ESCALATE, DEAD lane, fixing-DEAD lane) are the named exception and
+  deliberately write both: their issue-side write is the salvage fact about the work item,
+  and their PR-side write is a merge-gate flag that stops an incomplete PR from driving on,
+  not a duplicate of it. Bounded by
   `lanes.gatedReentryCap` (prFixCap's shape); a lane that keeps
   re-escalating past the cap is permanently excluded and re-labeled for a manual
   merge. This is reentry for an *already-produced* PR, distinct from the fix loop above
@@ -544,14 +562,14 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
 
   | label | meaning | carrier | removal |
   |---|---|---|---|
-  | `needs-human` | the machine STOPPED; a human owes the next decision | issue (and PR, for visibility) | the #147 reentry handshake, unchanged |
+  | `needs-human` | the machine STOPPED; a human owes the next decision | **#398: exactly one — the PR if the escalation was PR-born, else the issue** | the #147 reentry handshake, read on that same carrier |
   | `human-merge-only` | a human must MERGE this PR; nothing is stuck | PR only, written once | never removed by any automated act |
   | `planless` | **not an escalation** — no verification plan yet | issue | add a plan; nobody is on the hook |
 
-  `human-merge-only` is deliberately NOT a member of `escalation.humanLabels`. That array is
-  checked against ISSUE-side labels (the gated-reentry reclaim fence, `orderForDispatch`, the
-  standby probe, `round.ts`'s pool-consumability check), none of which a PR-only label could ever
-  satisfy — so adding it there would be a no-op for those checks while quietly widening
+  `human-merge-only` is deliberately NOT a member of `escalation.humanLabels`. Of the checks that
+  array feeds, all but one read ISSUE-side labels (`orderForDispatch`, the standby probe,
+  `round.ts`'s pool-consumability check; #398 made the gated-reentry reclaim fence read whichever
+  carrier its own escalation used), and a PR-only label could never satisfy those — so adding it there would be a no-op for those checks while quietly widening
   `deriveGate`'s veto set and the config collision guard for no benefit. Instead, a lane settling
   on this verdict terminates WITHOUT `gated_escalation_labeled`, the same mechanism `state.ts`
   already uses to keep no-PR-failed and label-write-failed rows permanently invisible to

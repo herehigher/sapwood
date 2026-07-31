@@ -56,6 +56,19 @@
 //     escalation on the same issue (e.g. an `env-failure-preserved` whose PR is never touched)
 //     defers its sibling's sweep indefinitely. Fail-safe direction: a label left on is visible
 //     and human-clearable; a label taken off wrongly is the bug this module exists to prevent.
+//   - #398 (recorded here rather than fixed, and this is the acceptance criterion's own
+//     "record that decision instead" arm): once an escalation may carry its label on the PR, this
+//     sweep's `removeLabel(issue, …)` is a no-op for that hold and the PR keeps the label. No
+//     `IForge.removePRLabel` was added, because neither authorizing witness leaves a PR label
+//     that gates anything. `merged` — the PR is merged; `deriveGate` never runs on it again and
+//     no reentry can reclaim it. `issue-closed` — the work item is closed, so the lane is over on
+//     the issue side too. `pr-closed`, the one witness where an open-ish PR could plausibly keep a
+//     live label, is deliberately NOT sweepable (see `SWEEPABLE_VIA`). What is left is cosmetic:
+//     a `needs-human` label on a merged or abandoned PR. Adding an engine-side PR-label removal
+//     to erase that would put a NEW write capability into the loop — one the #147 handshake does
+//     not want (reentry is human-removal-only, by the PLAN.md autonomy principle) — to buy tidier
+//     history. If a case ever appears where a stale PR-side label actually gates something, that
+//     is the trigger to add the method, and this note is the record that it was weighed first.
 //
 // COST: zero forge calls in steady state — the receipt drops each candidate out of the fold, so
 // a swept escalation is never re-read. At most ONE `removeLabel` per resolved escalation, ever.
