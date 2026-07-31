@@ -44,7 +44,7 @@
 // pr_review_threads read) before any repost attempt.
 import { z } from "zod";
 import type { SapwoodConfig } from "../config/config.js";
-import type { IForge } from "../forge/forge.js";
+import type { IForge, ReviewThreadsPage } from "../forge/forge.js";
 import { TOOL_PR_REVIEW_THREADS } from "../proxy/tools.js";
 import type { FixResponseSettleOutcome, ForgeProxyJournalRow, PendingThreadWrite, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
@@ -223,7 +223,18 @@ export function fixResponseBatchKey(worker: string, pr: number, fixRounds: numbe
  *  the identical batch from the SAME resultText/journal). */
 export function computeFixResponseHarvest(
   state: Pick<State, "listForgeProxyJournalForSession" | "eventsSince">,
-  input: { worker: string; issue: number; fixRounds: number; prNumber: number | null; resultText: string },
+  input: {
+    worker: string;
+    issue: number;
+    fixRounds: number;
+    prNumber: number | null;
+    resultText: string;
+    /** #451: the head this fix round answered — see FixResponseSettleBatch.headOid's own doc.
+     *  Threaded straight through to the batch; this function does not itself validate it against
+     *  anything (the caller, conductor.ts's reclaimTerminalLane, is the one place that still has
+     *  it, read from the lane's own row before its terminal write clears it). */
+    headOid: string | null;
+  },
 ): FixResponseSettleOutcome {
   if (input.prNumber == null) {
     // Fail-safe only — a fixing lane always already carries a PR (startFixLeg's own invariant).
@@ -248,8 +259,158 @@ export function computeFixResponseHarvest(
       fixRounds: input.fixRounds,
       batchKey: fixResponseBatchKey(input.worker, input.prNumber, input.fixRounds),
       writes: validated.responses,
+      headOid: input.headOid,
     },
   };
+}
+
+// ── Dispute escalation (#451, design #402 §4/§4a/D4) ───────────────────────────────────────
+
+/** One thread's LATEST durably-recorded resolution for a (worker, pr) — see
+ *  `latestThreadResolutions`' own doc for why this must come from the event log rather than a
+ *  live GitHub read. */
+export interface ThreadResolutionRecord {
+  resolution: "addressed" | "disputed";
+  reply: string;
+  /** The head this resolution was recorded against (`fix-response-queued`'s own `headOid`) —
+   *  `null` only for a pre-#451 event, read fail-closed (never matches a live head). */
+  headOid: string | null;
+  fixRounds: number;
+}
+
+/** Every thread's LATEST recorded resolution for (worker, pr), folded from `fix-response-queued`
+ *  receipt events (state.ts's settleTerminalWorker) in ledger order — newest event wins per
+ *  threadId, the same last-event-wins fold escalation-reconcile.ts's `openEscalations` uses for
+ *  the identical reason (a thread can be re-disputed across more than one fix round; the LATEST
+ *  fact is the only one that matters).
+ *
+ *  This is the ONE durable source of "was this thread disputed, and against which head" — see
+ *  `fix-response-queued`'s own doc (state.ts) for why live GitHub state cannot answer it: an
+ *  unresolved thread with our reply already posted is indistinguishable, from a pure live read,
+ *  between `disputed` (final, by design) and `addressed` with its resolve call still retrying
+ *  (the same pending_thread_writes queue's bounded-retry path). A malformed event (missing/wrong-
+ *  typed fields) contributes nothing for that entry, never throws — same best-effort-bookkeeping
+ *  stance escalation-reconcile.ts's `openEscalations` takes over the identical ledger. */
+export function latestThreadResolutions(
+  events: readonly { kind: string; payload: unknown }[],
+  worker: string,
+  pr: number,
+): Map<string, ThreadResolutionRecord> {
+  const latest = new Map<string, ThreadResolutionRecord>();
+  for (const e of events) {
+    if (e.kind !== "fix-response-queued") continue;
+    const payload = e.payload as {
+      worker?: unknown;
+      pr?: unknown;
+      fixRounds?: unknown;
+      headOid?: unknown;
+      writes?: readonly { threadId?: unknown; resolution?: unknown; reply?: unknown }[];
+    } | null;
+    if (payload?.worker !== worker || payload?.pr !== pr) continue;
+    const fixRounds = typeof payload.fixRounds === "number" ? payload.fixRounds : 0;
+    const headOid = typeof payload.headOid === "string" ? payload.headOid : null;
+    for (const w of payload.writes ?? []) {
+      if (typeof w.threadId !== "string") continue;
+      if (w.resolution !== "addressed" && w.resolution !== "disputed") continue;
+      latest.set(w.threadId, { resolution: w.resolution, reply: typeof w.reply === "string" ? w.reply : "", headOid, fixRounds });
+    }
+  }
+  return latest;
+}
+
+/** One thread's evidence for a `review-disputed` escalation comment (design §4's five items,
+ *  minus the two the caller already has — worker/issue/pr are the lane's own, fix rounds spent is
+ *  `w.fix_rounds`). */
+export interface DisputedThreadEvidence {
+  threadId: string;
+  findingBody: string;
+  reply: string;
+}
+
+export interface DisputeEscalation {
+  headOid: string;
+  threads: DisputedThreadEvidence[];
+}
+
+/** #451 (design #402 §4/D4): true iff EVERY unresolved review thread on the PR's CURRENT head has
+ *  a durably-recorded `disputed` resolution for that SAME head — the one condition under which a
+ *  FIXABLE tick escalates directly to `needs-human` instead of dispatching a fix leg, at zero paid
+ *  fix-round cost. Returns `null` for every other case (nothing to adjudicate, a mix of
+ *  addressed/unanswered threads, a stale-head dispute, a capped/partial thread page, or an
+ *  unreadable live read) — the caller falls through to the pre-existing FIXUP/ESCALATE decision
+ *  unchanged.
+ *
+ *  CLASSIC-REVIEWER-PATH ONLY, structurally (design §4a): on the engine-agent path
+ *  `getPRReviewThreads` returns zero threads (review/drive.ts's synthetic HANDLE_THREADS mapping
+ *  never creates one — merge-driver.ts's own module doc, "the engine has no thread-CREATING forge
+ *  write"), so `unresolved.length === 0` below is reached and this returns `null` unconditionally
+ *  — this function needs no `verdictRunId`/reviewer-kind branch to stay correct on that path. The
+ *  CALLER (conductor.ts) additionally skips calling this function at all when
+ *  `outcome.verdictRunId !== undefined` (#451 gate② P3(b)) — a pure cost optimization layered on
+ *  top of this correctness property, not a substitute for it: `outcome.verdictRunId` is set only
+ *  for an engine-agent-caused fixable, so the two live forge reads below are structurally
+ *  guaranteed to end in `null` there, and skipping them is free. Either way, this predicate is
+ *  naturally disjoint from #457's verdict-rerun breaker (conductor.ts) — see
+ *  conductor.test.ts's disjointness assertion.
+ *
+ *  FAIL-CLOSED on an unreadable live read, a capped/partial thread page, or an unknown/absent
+ *  recorded head (never escalates on an unproven current-head match) — a forge error or an
+ *  incomplete view here must never be read as "go ahead," the same posture every other DRIVE
+ *  branch in this file's caller takes.
+ *
+ *  TOCTOU (gate② round 3, Codex P1): the two initial reads (`getPRStatus`, `getPRReviewThreads`)
+ *  race a push — the same class of split-read hazard merge-driver.ts's driveOne already guards
+ *  against for gate①/gate② (`status.headOid !== data.headOid` -> queue). A push landing
+ *  between/during them could let `headOid` (from `getPRStatus`) and `threadsPage` (from
+ *  `getPRReviewThreads`, fetched independently) describe two DIFFERENT moments — a durably
+ *  recorded `disputed` resolution for head H could then validate against a `threadsPage` view
+ *  that is ALREADY stale relative to a newer push, escalating (and writing evidence) against a
+ *  head the PR has since moved past. Closed by a THIRD read, `getPRStatus` again, immediately
+ *  before returning — the one point every side effect (the label, the comment, the terminal
+ *  escalation) is triggered from: the PR must still be OPEN and still be at the SAME `headOid`
+ *  every unresolved thread was just validated against, or this returns `null` and the caller
+ *  falls through, retried fresh next tick. */
+export async function computeDisputeEscalation(
+  forge: Pick<IForge, "getPRStatus" | "getPRReviewThreads">,
+  state: Pick<State, "eventsSince">,
+  cfg: Pick<SapwoodConfig, "proxy">,
+  worker: string,
+  pr: number,
+): Promise<DisputeEscalation | null> {
+  let headOid: string;
+  let threadsPage: ReviewThreadsPage;
+  try {
+    const [status, page] = await Promise.all([forge.getPRStatus(pr), forge.getPRReviewThreads(pr, cfg.proxy.caps.maxCommentsPerThread)]);
+    headOid = status.headOid;
+    threadsPage = page;
+  } catch {
+    return null; // fail-closed: cannot prove the current head — never escalate on an unreadable read
+  }
+  // #451 gate② P3(a): `pageCapped` (forge.ts's ReviewThreadsPage doc) means `threads` is only a
+  // PARTIAL view — an unresolved, undisputed thread beyond the page ceiling would be invisible,
+  // and "every unresolved thread is disputed" could be satisfied by a view that simply never saw
+  // the one that isn't. Fail-closed, same posture as the unreadable-read case above: a proof over
+  // an admittedly-incomplete set is no proof at all.
+  if (threadsPage.pageCapped) return null;
+  const unresolved = threadsPage.threads.filter((t) => !t.isResolved);
+  if (unresolved.length === 0) return null; // nothing to adjudicate (also the whole §4a engine-agent case)
+  const records = latestThreadResolutions(state.eventsSince("1970-01-01T00:00:00.000Z", ["fix-response-queued"]), worker, pr);
+  const threads: DisputedThreadEvidence[] = [];
+  for (const t of unresolved) {
+    const record = records.get(t.id);
+    if (record === undefined || record.resolution !== "disputed" || record.headOid !== headOid) return null;
+    threads.push({ threadId: t.id, findingBody: t.comments[0]?.body ?? "(no comment body available)", reply: record.reply });
+  }
+  // #451 gate② round 3 (Codex P1): TOCTOU close — re-validate immediately before the caller acts
+  // on this result. See this function's own doc for the race the two reads above are exposed to.
+  let recheck: { state: string; headOid: string };
+  try {
+    recheck = await forge.getPRStatus(pr);
+  } catch {
+    return null; // fail-closed: cannot reconfirm — never escalate on an unproven current state
+  }
+  if (recheck.state !== "OPEN" || recheck.headOid !== headOid) return null;
+  return { headOid, threads };
 }
 
 // ── Durable-queue execution (mirrors conductor.ts's attemptRollback shape, #31) ─────────────

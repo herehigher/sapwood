@@ -830,6 +830,46 @@ test("reconcileEscalations: a fix-leg-verdict-rerun lane whose PR was hand-merge
   state.close();
 });
 
+// #451 (design #402 §4/D4, architectural review amendment 2026-07-31): review-disputed must be
+// a tracked source too — same F34 invisible-escalation class the two tests above guard against,
+// for conductor.ts's `escalateReviewDisputed` (the dispute-pricing escalation).
+
+test("openEscalations: review-disputed is a tracked source — the dispute-pricing escalation must surface on the strip, never the F34 invisible class (#451)", () => {
+  const open = openEscalations([
+    { kind: "review-disputed", payload: { worker: "w1", issue: 7, pr: 12, headOid: "head-1", fixRounds: 1, threads: ["T1"] } },
+  ]);
+  assert.equal(open.size, 1);
+  assert.deepEqual(open.get("review-disputed:7"), { source: "review-disputed", issue: 7, pr: 12, labelProven: true });
+});
+
+test("reconcileEscalations: a review-disputed lane whose PR was hand-merged resolves via 'merged' — same clear semantics as fix-rounds-capped/fix-leg-verdict-rerun (#451)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("review-disputed", { worker: "w1", issue: 7, pr: 12, headOid: "head-1", fixRounds: 1, threads: ["T1"] });
+  forge.prStates[12] = "MERGED";
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source: "review-disputed", via: "merged" }]);
+  state.close();
+});
+
+test("reconcileEscalations: a review-disputed lane resolves via 'label-removed' once a human clears needs-human without merging — the #147 gated-reentry reclaim path (#451)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("review-disputed", { worker: "w1", issue: 7, pr: 12, headOid: "head-1", fixRounds: 1, threads: ["T1"] });
+  forge.prStates[12] = "OPEN";
+  forge.issueStates[7] = "OPEN";
+  forge.issueLabels[7] = []; // the human removed needs-human — #147's reclaim signal
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source: "review-disputed", via: "label-removed" }]);
+  state.close();
+});
+
 // #447: `lane-revived` is the OTHER return of a `failed` lane to `driving` — same clear rule.
 // #457 review round 1 (P1): `fix-leg-verdict-rerun` rides the same parametrized sweep — it must
 // clear on every issue-moving kind exactly like the sources it shares the fold with.

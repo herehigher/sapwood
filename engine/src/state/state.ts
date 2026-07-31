@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import { capDigest } from "../retro/retro-digest.js";
 import type { AcceptanceCriterion, AcSnapshot } from "../review/ac-snapshot.js";
 
 // Ordered migrations. index N upgrades schema from user_version N to N+1. Append-only:
@@ -1254,6 +1255,17 @@ export interface FixResponseSettleBatch {
   fixRounds: number;
   batchKey: string;
   writes: FixResponseSettleWrite[];
+  /** #451 (design #402 §4/D4): the head this fix round's session actually answered — sourced by
+   *  the caller from the lane's OWN `review_triggered_head` (state.ts's WorkerRow), read BEFORE
+   *  `settleTerminalWorker`'s own write clears it for a `fixing` lane (reclaimTerminalLane's
+   *  `fixingPinClear`). A FIXABLE gate can only be derived once `triggerPin.head ===
+   *  status.headOid` (merge-driver.ts's driveOne, the trigger-pin branch above the gate switch),
+   *  so this durably records EXACTLY the head the dispute/finding was raised against — the one
+   *  fact `review-disputed` escalation needs to tell "still current" from "the PR moved since" and
+   *  no live GitHub read can answer (a review thread's `isOutdated` only flags a changed SPAN, not
+   *  an unrelated push elsewhere on the PR). `null` only for a pre-#451 fixture/caller that omits
+   *  it — treated as "head unknown," which the escalation predicate below reads fail-closed. */
+  headOid: string | null;
 }
 
 export interface FixResponseSettleInvalid {
@@ -1443,6 +1455,21 @@ export const DEFAULT_DB_PATH = "data/sapwood.sqlite";
 /** #382: the single-instance lockfile's basename, shared by State.instanceLockPath() below and
  *  cli.ts's pre-State lock-path derivation so the two can never drift. */
 export const INSTANCE_LOCK_FILENAME = "sapwood.lock";
+
+/** #451 (gate② P2, PM adjudication): the deterministic-truncation cap on a fix leg's `reply`
+ *  prose as it's copied into the `fix-response-queued` receipt event (settleTerminalWorker,
+ *  below) — never the `pending_thread_writes` row itself, which stays untouched (that copy is
+ *  what actually gets POSTED to GitHub, already bounded by GitHub's own comment-length ceiling).
+ *  Design #402 §3 rejected UNbounded prose in the ledger, not prose per se; this event is
+ *  append-only, once per fix round per thread, and its purpose is audit evidence, not a
+ *  full-fidelity copy — the durable ledger and the live thread are supposed to diverge slightly
+ *  in exactly this way (see fix-response.ts's `latestThreadResolutions` doc). A hardcoded
+ *  internal safety bound, not a user-tunable digest size (logger.ts's `MAX_MESSAGE_BYTES`
+ *  precedent, not the config-key `xMaxChars` convention roles.retro.digestMaxChars/
+ *  round.directiveMaxChars use for LLM-context budgets) — this exists to keep one append-only
+ *  ledger row's prose bounded, not to trade off prompt budget. Truncation is marked, never
+ *  silent (capDigest, retro-digest.ts's shared deterministic-truncation primitive). */
+const FIX_RESPONSE_LEDGER_REPLY_MAX_CHARS = 4_000;
 
 export class State {
   private readonly db: DatabaseSync;
@@ -2124,6 +2151,37 @@ export class State {
     return p.blockReason == null ? null : { id: row.id, blockReason: p.blockReason };
   }
 
+  /** #451 (gate② P1, PM adjudication; gate② round 3 P2, Codex): the SAME id+value dedup shape as
+   *  `lastDriveQueuedEvent`/`lastFixLegDispatchBlockedEvent` above, PARAMETRIZED over the two
+   *  `review-disputed-*-failed` kinds (round 3, Codex P2: the label-write failure gets the SAME
+   *  treatment the comment-write failure already had — both are genuinely PERMANENT failure
+   *  classes an over-limit comment or a standing permission problem can make un-retriable-into-
+   *  success, so without this dedup either would re-append its `-failed` event EVERY tick forever —
+   *  the exact #383/F30 steady-state event-spam class). Keyed on `headOid` (the escalation
+   *  evidence's own stable identity — see `DisputeEscalation`, fix-response.ts): a re-attempt
+   *  against the SAME head is the SAME episode; a different head (or a write that finally succeeds)
+   *  is a genuinely new one. Scoped to (worker, pr), same lane-repointing rationale as its two
+   *  DRIVE-side siblings. Carries `id` for the same episode-reset comparison — see
+   *  `REVIEW_DISPUTED_ESCALATION_FAILURE_RESET_KINDS` (conductor.ts), shared by both callers. */
+  lastReviewDisputedFailureEvent(
+    kind: "review-disputed-label-failed" | "review-disputed-comment-failed",
+    worker: string,
+    pr: number,
+  ): { id: number; headOid: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, payload FROM events
+         WHERE kind = ?
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.pr') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(kind, worker, pr) as { id: number; payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { headOid?: string };
+    return p.headOid == null ? null : { id: row.id, headOid: p.headOid };
+  }
+
   /** #383 round 2 (PM P2): the highest event id among `kinds`, scoped to this (worker, pr) — the
    *  EPISODE-RESET boundary `lastDriveQueuedEvent`/`lastFixLegDispatchBlockedEvent`'s callers
    *  compare their own last-announcement id against. Returns 0 (lower than any real event id,
@@ -2245,6 +2303,15 @@ export class State {
               spend.at,
             );
           }
+          // #451: `headOid` + per-thread `writes` (threadId/resolution/reply) ride this SAME
+          // receipt event — the only durable record of a `disputed` resolution once its
+          // pending_thread_writes row clears (attemptThreadWrite drops a disputed row the instant
+          // its reply posts; fix-response.ts's own `completeThreadReply` receipt carries no
+          // resolution/reply at all). Live GitHub state cannot substitute: an unresolved thread
+          // with our reply already posted is indistinguishable, from a pure live read, between
+          // "disputed" (final, by design — speak-not-act) and "addressed, resolve still retrying"
+          // (the SAME queue's bounded-retry path) — only this durable field tells them apart.
+          // fix-response.ts's `latestThreadResolutions` is the one reader.
           this.appendEvent("fix-response-queued", {
             worker: batch.worker,
             issue: batch.issue,
@@ -2252,6 +2319,15 @@ export class State {
             batchKey: batch.batchKey,
             fixRounds: batch.fixRounds,
             count: batch.writes.length,
+            headOid: batch.headOid,
+            // #451 (gate② P2): `reply` is capDigest-bounded here (marked, never silent) — see
+            // FIX_RESPONSE_LEDGER_REPLY_MAX_CHARS's own doc for why the ledger copy is bounded
+            // while the pending_thread_writes row (the one actually posted to GitHub) is not.
+            writes: batch.writes.map((w) => ({
+              threadId: w.threadId,
+              resolution: w.resolution,
+              reply: capDigest(w.reply, FIX_RESPONSE_LEDGER_REPLY_MAX_CHARS),
+            })),
           });
         }
       }

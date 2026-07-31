@@ -16,6 +16,7 @@ import { existsSync } from "node:fs";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { firstMatchingLabel, labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge/labels.js";
+import { capDigest } from "../retro/retro-digest.js";
 import { buildAcSnapshot, checkAcSnapshotDrift } from "../review/ac-snapshot.js";
 import type { EngineAgentDriveDeps } from "../review/drive.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
@@ -33,7 +34,13 @@ import {
   probeDueWithHint,
 } from "./env-failure.js";
 import { isHumanMergeOnlyVerdict } from "./escalation-buckets.js";
-import { attemptThreadWrite, computeFixResponseHarvest, type FixResponseWriteOutcome } from "./fix-response.js";
+import {
+  attemptThreadWrite,
+  computeDisputeEscalation,
+  computeFixResponseHarvest,
+  type DisputeEscalation,
+  type FixResponseWriteOutcome,
+} from "./fix-response.js";
 import { reviveEnvFailedPrLanes } from "./reconcile.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1746,6 +1753,13 @@ async function reclaimTerminalLane(
               fixRounds: w.fix_rounds ?? 0,
               prNumber: p.prNumber ?? w.pr ?? null,
               resultText: p.resultText ?? "",
+              // #451: `w.review_triggered_head` is read HERE, before fixingPinClear's own write
+              // (below, same settleTerminalWorker transaction) nulls it out — it is exactly the
+              // head this fix round's FIXABLE gate was derived against (merge-driver.ts's driveOne
+              // only reaches a verdict once `triggerPin.head === status.headOid`), so it durably
+              // anchors this round's disputed/addressed resolutions to the head they actually
+              // answered. See FixResponseSettleBatch.headOid's own doc.
+              headOid: w.review_triggered_head ?? null,
             })
           : undefined;
       // PR produced: hold the lane in `driving` (it still occupies a lane until the #13 review
@@ -3084,6 +3098,42 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           // budget; see that constant's own doc for what still bounds it).
           const fixRounds = w.fix_rounds ?? 0;
           const cap = cfg.lanes.prFixCap;
+          // #451 (design #402 §4/§4a/D4): a disputed thread is priced at ZERO paid fix legs, not
+          // a threshold — checked BEFORE driveDecision below even runs, because when it fires it
+          // REPLACES the whole FIXUP/ESCALATE decision for this tick rather than refining it.
+          // `prescription === "findings"` scopes this to the thread-bearing branch of FIXABLE
+          // (never the merge-conflict prescription, which has no threads at all — see
+          // `DriveOutcome`'s own doc, merge-driver.ts). computeDisputeEscalation is itself the
+          // structural gate for classic-vs-engine-agent (see its own doc): an engine-agent-caused
+          // fixable has zero live review threads, so it always returns `null` here and this whole
+          // branch is a no-op for that path, naturally disjoint from #457's verdictRunId-keyed
+          // breaker below — never both on the same tick (conductor.test.ts pins this).
+          //
+          // #451 gate② P3(b): `outcome.verdictRunId !== undefined` ALONE already proves this
+          // fixable is engine-agent-caused (merge-driver.ts's finalizeVerdict sets it only there —
+          // see DriveOutcome's own doc), so computeDisputeEscalation is structurally guaranteed to
+          // return `null` on that path (it has zero live threads to prove disputed). Skipping the
+          // call there saves two read-only forge calls (getPRStatus + getPRReviewThreads) every
+          // FIXABLE:findings tick in the reviewer.mode: engine-agent configuration this repo
+          // actually dogfoods — a pure cost cut, not a behavior change (computeDisputeEscalation's
+          // own doc keeps proving the `null` result independently, for when this IS called).
+          const disputeEscalation =
+            outcome.prescription === "findings" && outcome.verdictRunId === undefined
+              ? await computeDisputeEscalation(forge, state, cfg, w.name, pr)
+              : null;
+          if (disputeEscalation) {
+            const escalated = await escalateReviewDisputed(forge, state, cfg, w, pr, fixRounds, disputeEscalation, iso);
+            if (escalated) {
+              driveFixBlockedLanes.add(w.name);
+              driven.push(escalated);
+              break;
+            }
+            // A forge write (label or comment) failed — same "leave the row driving, retry the
+            // WHOLE branch next tick" contract the cap-exhausted escalation below takes; nothing
+            // to do here but fall through to the ordinary retry-next-tick queued outcome.
+            driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "review-disputed-escalation-write-failed" });
+            break;
+          }
           const action = driveDecision("FIXABLE", fixRounds, cap, driveOverBudget);
           // #457 (F36): verdict-rerun breaker — see priorFixLegForVerdict's own doc. A prior
           // `drive-fixup` for this exact engine-agent verdict means its one leg already ran and
@@ -3881,4 +3931,173 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     fixingReclaimed,
     fixResponses,
   };
+}
+
+/** #451 (gate② P1): per-item excerpt cap for the escalation comment's reviewer-finding / producer-
+ *  reply text. GitHub's single-comment ceiling is 65,536 chars; BOTH excerpts are
+ *  producer/reviewer-controlled prose this comment concatenates once per disputed thread, so an
+ *  unbounded assembly is a PERMANENT `addIssueComment` failure — not a transient one, unlike every
+ *  other forge hiccup this branch's retry-next-tick contract assumes — and unilaterally
+ *  constructible by a producer's own dispute reply. Marked truncation (capDigest,
+ *  retro-digest.ts's shared deterministic-truncation primitive); nothing is actually lost — the
+ *  full finding and the full reply are already durably on the thread itself, which the comment
+ *  links by id. */
+const REVIEW_DISPUTED_EXCERPT_MAX_CHARS = 4_000;
+
+/** #451 (gate② P1): final whole-comment safety net, same two-layer discipline capDigest's own doc
+ *  describes ("used BOTH per-item ... and as ... final whole-digest safety net") — comfortably
+ *  under GitHub's 65,536-char ceiling even with several disputed threads each near
+ *  REVIEW_DISPUTED_EXCERPT_MAX_CHARS, plus this function's own fixed boilerplate. */
+const REVIEW_DISPUTED_COMMENT_MAX_CHARS = 60_000;
+
+/** #451 (gate② P1; round 3, Codex P2): episode-reset kinds shared by BOTH `review-disputed-*-failed`
+ *  dedup call sites (see `State.lastReviewDisputedFailureEvent`'s own doc for why the dedup exists
+ *  at all — round 3 extended it from comment-only to label-too, same permanent-failure reasoning
+ *  applying to a standing label-write problem as to an over-limit comment). `review-disputed` is
+ *  the terminal SUCCESS this same function can also produce — once it fires the lane leaves
+ *  `driving` and this branch is never reached again for it, but listing it keeps the reset set
+ *  semantically complete. `gated-reentry`/`lane-revived` are the two ways a `failed` lane returns
+ *  to `driving` (#147 / #447) — a human-initiated or engine-initiated fresh look at the SAME
+ *  (worker, pr) is a genuinely new episode even if it re-derives the identical headOid (e.g. a
+ *  human clears needs-human without resolving the underlying dispute). Deliberately NOT
+ *  `drive-fixup`/`fix-leg-started`/etc. (unlike `DRIVE_QUEUED_RESET_KINDS`/
+ *  `FIX_LEG_DISPATCH_BLOCKED_RESET_KINDS`): this branch runs BEFORE any fix-leg dispatch decision
+ *  and returns before reaching one whenever `disputeEscalation` is truthy — a fix leg can only
+ *  dispatch for this (worker, pr) on a tick where `computeDisputeEscalation` returned `null`,
+ *  which the `headOid` discriminator already tells apart from a genuine same-episode retry. */
+const REVIEW_DISPUTED_ESCALATION_FAILURE_RESET_KINDS = ["review-disputed", "gated-reentry", "lane-revived"];
+
+/** #451 (gate② round 3, Codex P2): the deterministic marker embedded in the escalation comment's
+ *  own body, keyed on (worker, pr, headOid) — checked via a live `getIssueComments` read
+ *  immediately before every post attempt. Closes the AMBIGUOUS comment-write-failure class: a
+ *  `gh`/network timeout can leave a comment successfully created on GitHub while the client still
+ *  sees an error, and the ordinary retry-next-tick posture (correct for a genuinely FAILED post)
+ *  would otherwise re-post a duplicate escalation comment every such tick. Same marker-then-
+ *  live-read-before-repost shape as fix-response.ts's `replyMarker`/`replyAlreadyPosted`
+ *  (#247 D3/F2) — this repo's one existing write-ahead precedent for "a forge write whose
+ *  CLIENT-side outcome is unknown, but whose SERVER-side outcome is checkable" — reused rather
+ *  than invented fresh. Keyed on `headOid` specifically (not just worker+pr) so a re-escalation
+ *  against a NEW head after a prior one succeeded is never mistaken for the same, already-posted
+ *  episode. */
+function reviewDisputedCommentMarker(worker: string, pr: number, headOid: string): string {
+  return `<!-- sapwood:review-disputed:${worker}:${pr}:${headOid} -->`;
+}
+
+/** #451 (design #402 §4/D4): the `review-disputed` escalation — a FIXABLE tick whose every
+ *  unresolved current-head thread is durably recorded `disputed` (computeDisputeEscalation,
+ *  fix-response.ts) escalates straight to `needs-human`, spending ZERO fix rounds (unlike the
+ *  cap-exhausted branch below it, this is never reached having dispatched a fix leg this tick —
+ *  `w.fix_rounds` is carried through UNCHANGED on the terminal upsert). Defined here, at module
+ *  end (a hoisted function declaration, called from `tick()`'s FIXABLE branch above), so its own
+ *  `addLabel` call physically follows every OTHER needsHuman-labeled write site in this file —
+ *  escalation-buckets.test.ts's SITE_INVENTORY is keyed by (file, scan-order ordinal), and this
+ *  placement adds ONE new trailing entry instead of renumbering the twenty-two that already exist.
+ *
+ *  Same forge-before-terminal-upsert discipline as the fix-rounds-capped branch (#69/#147): the
+ *  needs-human label AND the evidence comment land BEFORE the terminal upsert, and — the amendment
+ *  requirement driving `ESCALATION_SOURCES["review-disputed"] = "always"` — the `review-disputed`
+ *  event is appended STRICTLY AFTER both writes succeed, never before, and (gate② round 3, Codex
+ *  P1) IN THE SAME TRANSACTION as the terminal worker-row write (`state.upsertWorkerWithEvent`,
+ *  the same atomic shape `settleTerminalWorker`/#447's revival pass use): a crash between a bare
+ *  `upsertWorker` and a separate `appendEvent` would otherwise leave the row `failed` with NO
+ *  durable escalation record — permanently, since a `failed` lane with the label already applied
+ *  is never driven again to re-derive one. A label-write failure leaves the row untouched (still
+ *  `driving`) so next tick's fresh FIXABLE re-derivation retries the whole branch from scratch
+ *  (idempotent-quiet: `addLabel` is idempotent on GitHub's side and a SUCCESSFUL retry appends
+ *  nothing); a comment-write failure does the same, EXCEPT (gate② P1, extended round 3 P2 to the
+ *  label path too) each failure kind's own event is deduped exactly like
+ *  `drive-queued`/`fix-leg-dispatch-blocked` (#383/#465) rather than re-appended every tick — see
+ *  `REVIEW_DISPUTED_ESCALATION_FAILURE_RESET_KINDS`'s own doc for why: an over-limit comment (or a
+ *  standing label-permission problem) is a PERMANENT failure a producer can unilaterally
+ *  construct, so the ordinary "transient forge hiccup" per-tick-retry posture would otherwise
+ *  wedge this lane into the exact steady-state event-spam class #383/F30 already fixed elsewhere.
+ *  The comment write ALSO checks `reviewDisputedCommentMarker` via a live read (gate② round 3,
+ *  Codex P2) before every post attempt — closes the AMBIGUOUS-failure class (GitHub creates the
+ *  comment, the client sees a timeout) that dedup alone does not: dedup stops re-ANNOUNCING a
+ *  failure, but without the marker check a client-side-only timeout would still re-POST a
+ *  duplicate comment on the very next retry. Returns `null` on either failure kind — the caller
+ *  pushes its own `queued` outcome and retries next tick, same shape escalateNeedsHuman's callers
+ *  do not need because THAT function tolerates a labelError inline; this one cannot, because the
+ *  comment carries load-bearing adjudication evidence a `.catch(() => {})` would silently lose. */
+async function escalateReviewDisputed(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  w: WorkerRow,
+  pr: number,
+  fixRoundsSpent: number,
+  escalation: DisputeEscalation,
+  iso: () => string,
+): Promise<DrivenOutcome | null> {
+  // #451 gate② round 3 (Codex P2): label-write failure now gets the SAME head-scoped dedup the
+  // comment path already had — see REVIEW_DISPUTED_ESCALATION_FAILURE_RESET_KINDS's own doc.
+  const dedupeFailure = (kind: "review-disputed-label-failed" | "review-disputed-comment-failed", error: unknown): void => {
+    const lastFailed = state.lastReviewDisputedFailureEvent(kind, w.name, pr);
+    const resetId = state.maxEventIdForKinds(REVIEW_DISPUTED_ESCALATION_FAILURE_RESET_KINDS, w.name, pr);
+    const sameEpisode = lastFailed != null && lastFailed.id > resetId && lastFailed.headOid === escalation.headOid;
+    if (!sameEpisode) {
+      state.appendEvent(kind, { worker: w.name, issue: w.issue, pr, headOid: escalation.headOid, error: String(error) });
+    }
+  };
+  try {
+    await forge.addLabel(w.issue, cfg.labels.needsHuman);
+  } catch (e) {
+    dedupeFailure("review-disputed-label-failed", e);
+    return null;
+  }
+  // #451 gate② P1: each excerpt is capped BEFORE assembly, then the whole comment is capped again
+  // as a backstop — the same two-layer discipline capDigest's own doc describes. Full texts stay
+  // authoritative on the thread itself (linked by id, right below).
+  const evidence = escalation.threads
+    .map(
+      (t) =>
+        `- thread \`${t.threadId}\`\n  reviewer finding: ${capDigest(t.findingBody, REVIEW_DISPUTED_EXCERPT_MAX_CHARS)}\n  producer reply (disputed, unresolved): ${capDigest(t.reply, REVIEW_DISPUTED_EXCERPT_MAX_CHARS)}`,
+    )
+    .join("\n\n");
+  const marker = reviewDisputedCommentMarker(w.name, pr, escalation.headOid);
+  const comment =
+    capDigest(
+      `sapwood: PR #${pr} — every unresolved review thread on the current head (\`${escalation.headOid}\`) carries a ` +
+        `recorded **disputed** resolution (${fixRoundsSpent} fix round(s) already spent). A dispute is a producer/reviewer ` +
+        `disagreement, not something more fix rounds can resolve (design #402 §4/D4) — escalating directly to ` +
+        `\`${cfg.labels.needsHuman}\` for adjudication instead of dispatching another fix leg. Evidence per thread ` +
+        `(excerpted — the full text is on each thread by id):\n\n${evidence}\n\n` +
+        `Adjudicate each: side with the reviewer (resolve the thread yourself, or ask for another fix round) or side with the ` +
+        `producer (resolve it as not-a-defect). Remove \`${cfg.labels.needsHuman}\` once done to reclaim (#147 gated reentry).`,
+      REVIEW_DISPUTED_COMMENT_MAX_CHARS,
+    ) + `\n\n${marker}`;
+  // #451 gate② round 3 (Codex P2): a live read for the marker BEFORE every post attempt — the
+  // SAME shape fix-response.ts's replyAlreadyPosted (#247 D3/F2) takes for the identical
+  // ambiguous-write-outcome problem. A FAILED check fails CLOSED (never assume "not posted yet",
+  // which would risk a duplicate post through exactly the crash/timeout window this exists to
+  // close) — treated as a comment failure for dedup purposes, same as a post failure.
+  let alreadyPosted: boolean;
+  try {
+    const comments = await forge.getIssueComments(w.issue);
+    alreadyPosted = comments.some((c) => c.body.includes(marker));
+  } catch (e) {
+    dedupeFailure("review-disputed-comment-failed", e);
+    return null;
+  }
+  if (!alreadyPosted) {
+    try {
+      await forge.addIssueComment(w.issue, comment);
+    } catch (e) {
+      dedupeFailure("review-disputed-comment-failed", e);
+      return null;
+    }
+  }
+  // #451 gate② round 3 (Codex P1): the terminal worker-row write and the `review-disputed`
+  // receipt land in ONE transaction — see this function's own doc for the crash window this
+  // closes. Zero fix-round cost (AC): `fix_rounds` carried through unchanged — this branch never
+  // called startFixLeg, so there is nothing to bump.
+  state.upsertWorkerWithEvent({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 }, "review-disputed", {
+    worker: w.name,
+    issue: w.issue,
+    pr,
+    headOid: escalation.headOid,
+    fixRounds: fixRoundsSpent,
+    threads: escalation.threads.map((t) => t.threadId),
+  });
+  return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `review-disputed:${escalation.threads.length}` };
 }

@@ -20,10 +20,12 @@ import { State } from "../state/state.js";
 import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import {
   attemptThreadWrite,
+  computeDisputeEscalation,
   computeFixResponseHarvest,
   fixLegJournalCursor,
   fixResponseBatchKey,
   journaledReviewThreadIds,
+  latestThreadResolutions,
   validateFixResponseOutput,
 } from "./fix-response.js";
 
@@ -152,7 +154,14 @@ test("D1(b): a resultText in EXACTLY fix.md's documented shape flows through val
     fetchedAt: "2026-07-19T00:00:01Z",
   });
 
-  const outcome = computeFixResponseHarvest(st, { worker: "lane-fix", issue: 9, fixRounds: 1, prNumber: 30, resultText });
+  const outcome = computeFixResponseHarvest(st, {
+    worker: "lane-fix",
+    issue: 9,
+    fixRounds: 1,
+    prNumber: 30,
+    resultText,
+    headOid: "head-x",
+  });
   assert.equal(outcome.kind, "batch");
   if (outcome.kind !== "batch") return;
   assert.equal(outcome.batch.writes.length, 1);
@@ -346,7 +355,14 @@ test("computeFixResponseHarvest (D2 adversarial, cross-leg): round 2 must NOT tr
   st.appendEvent("fix-leg-started", { worker: "lane-fix", issue: 9, pr: 30, fixRounds: 2, journalCursor: round2Cursor });
 
   const resultText = sapwoodResult({ threadResponses: [{ threadId: "ROUND1_ONLY", reply: "handled", resolution: "addressed" }] });
-  const outcome = computeFixResponseHarvest(st, { worker: "lane-fix", issue: 9, fixRounds: 2, prNumber: 30, resultText });
+  const outcome = computeFixResponseHarvest(st, {
+    worker: "lane-fix",
+    issue: 9,
+    fixRounds: 2,
+    prNumber: 30,
+    resultText,
+    headOid: "head-x",
+  });
   assert.equal(outcome.kind, "invalid", "round 2 must never validate a threadId only round 1's journal ever saw");
   st.close();
 });
@@ -377,7 +393,14 @@ test("computeFixResponseHarvest (F1): an EQUAL journal row id to the cursor is E
   const cursor = id1;
   st.appendEvent("fix-leg-started", { worker: "lane-fix", issue: 9, pr: 30, fixRounds: 1, journalCursor: cursor });
   const resultText = sapwoodResult({ threadResponses: [{ threadId: "PRIOR", reply: "handled", resolution: "addressed" }] });
-  const outcome = computeFixResponseHarvest(st, { worker: "lane-fix", issue: 9, fixRounds: 1, prNumber: 30, resultText });
+  const outcome = computeFixResponseHarvest(st, {
+    worker: "lane-fix",
+    issue: 9,
+    fixRounds: 1,
+    prNumber: 30,
+    resultText,
+    headOid: "head-x",
+  });
   assert.equal(outcome.kind, "invalid", "a row AT the cursor (not strictly after it) must be excluded");
   st.close();
 });
@@ -405,7 +428,14 @@ test("computeFixResponseHarvest (F1): a row created in the SAME instant resume()
     fetchedAt: "2026-07-19T00:00:00Z",
   });
   const resultText = sapwoodResult({ threadResponses: [{ threadId: "FIRST_CALL", reply: "handled", resolution: "addressed" }] });
-  const outcome = computeFixResponseHarvest(st, { worker: "lane-fix", issue: 9, fixRounds: 1, prNumber: 30, resultText });
+  const outcome = computeFixResponseHarvest(st, {
+    worker: "lane-fix",
+    issue: 9,
+    fixRounds: 1,
+    prNumber: 30,
+    resultText,
+    headOid: "head-x",
+  });
   assert.equal(
     outcome.kind,
     "batch",
@@ -436,7 +466,14 @@ test("computeFixResponseHarvest (D2 adversarial, F1 adoption): a crash-adopted l
     fetchedAt: "2026-07-19T00:00:00Z",
   });
   const resultText = sapwoodResult({ threadResponses: [{ threadId: "ADOPTED", reply: "handled", resolution: "addressed" }] });
-  const outcome = computeFixResponseHarvest(st, { worker: "lane-fix", issue: 9, fixRounds: 1, prNumber: 30, resultText });
+  const outcome = computeFixResponseHarvest(st, {
+    worker: "lane-fix",
+    issue: 9,
+    fixRounds: 1,
+    prNumber: 30,
+    resultText,
+    headOid: "head-x",
+  });
   assert.equal(
     outcome.kind,
     "batch",
@@ -469,14 +506,28 @@ test("computeFixResponseHarvest: round 2 DOES trust a threadId ITS OWN journal s
     fetchedAt: "2026-07-19T02:00:01Z",
   });
   const resultText = sapwoodResult({ threadResponses: [{ threadId: "ROUND2", reply: "handled", resolution: "addressed" }] });
-  const outcome = computeFixResponseHarvest(st, { worker: "lane-fix", issue: 9, fixRounds: 2, prNumber: 30, resultText });
+  const outcome = computeFixResponseHarvest(st, {
+    worker: "lane-fix",
+    issue: 9,
+    fixRounds: 2,
+    prNumber: 30,
+    resultText,
+    headOid: "head-x",
+  });
   assert.equal(outcome.kind, "batch");
   st.close();
 });
 
 test("computeFixResponseHarvest: no PR -> invalid descriptor, never throws", () => {
   const st = new State(":memory:");
-  const outcome = computeFixResponseHarvest(st, { worker: "lane-fix", issue: 9, fixRounds: 1, prNumber: null, resultText: "" });
+  const outcome = computeFixResponseHarvest(st, {
+    worker: "lane-fix",
+    issue: 9,
+    fixRounds: 1,
+    prNumber: null,
+    resultText: "",
+    headOid: null,
+  });
   assert.equal(outcome.kind, "invalid");
   if (outcome.kind === "invalid") assert.equal(outcome.invalid.pr, null);
   st.close();
@@ -586,6 +637,17 @@ test("attemptThreadWrite: a 'disputed' row checks + replies ONLY (never resolve)
   assert.deepEqual(forge.calls, ["check:T1", "reply:T1:disagree\n\n<!-- sapwood:fix-reply:lane-fix#90#1:T1 -->"]);
   assert.equal(outcome.kind, "recorded");
   assert.deepEqual(st.pendingThreadWrites(), []);
+  // #451 (design #402 §4/D4 amendment, verification plan item 6): this mechanics-level guard
+  // stays exactly as it was — attemptThreadWrite itself is untouched by #451. What #451 adds
+  // sits one layer up, at the settleTerminalWorker receipt (state.test.ts) and the
+  // latestThreadResolutions/computeDisputeEscalation reader below: resolveReviewThread must
+  // NEVER appear in the call log for a disputed row, restated explicitly here (not merely via
+  // deepEqual's exclusion above) so a future call added to FakeThreadForge.calls can't silently
+  // widen this assertion's tolerance.
+  assert.ok(
+    forge.calls.every((c) => !c.startsWith("resolve:")),
+    "no resolveReviewThread call, ever, for a disputed row",
+  );
   st.close();
 });
 
@@ -820,5 +882,298 @@ test("F3: completeThreadReply is atomic — a thrown appendEvent rolls back the 
   st.appendEvent = originalAppendEvent;
   const rows = st.pendingThreadWrites();
   assert.equal(rows[0]!.replyPosted, false, "the whole transaction rolled back — reply_posted was never committed without its receipt");
+  st.close();
+});
+
+// ── #451 (design #402 §4/§4a/D4): latestThreadResolutions + computeDisputeEscalation ───────
+
+test("latestThreadResolutions: folds fix-response-queued events, scoped to (worker, pr), newest wins per threadId", () => {
+  const st = new State(":memory:");
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-1",
+    writes: [{ threadId: "T1", resolution: "addressed", reply: "fixed" }],
+  });
+  // A LATER fix round for the SAME thread re-disputes it against a NEW head — the newest fact
+  // must win.
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#2",
+    fixRounds: 2,
+    count: 1,
+    headOid: "head-2",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree now" }],
+  });
+  // A different worker/pr must never leak in.
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-b",
+    issue: 3,
+    pr: 66,
+    batchKey: "lane-b#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-9",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "unrelated" }],
+  });
+  const records = latestThreadResolutions(st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-response-queued"]), "lane-a", 55);
+  assert.equal(records.size, 1);
+  assert.deepEqual(records.get("T1"), { resolution: "disputed", reply: "disagree now", headOid: "head-2", fixRounds: 2 });
+  st.close();
+});
+
+test("latestThreadResolutions: a malformed event (missing worker/pr, non-string threadId, unrecognized resolution) contributes nothing for that entry — never throws", () => {
+  const st = new State(":memory:");
+  st.appendEvent("fix-response-queued", { pr: 55, writes: [{ threadId: "T1", resolution: "disputed", reply: "x" }] }); // no worker
+  st.appendEvent("fix-response-queued", { worker: "lane-a", writes: [{ threadId: "T1", resolution: "disputed", reply: "x" }] }); // no pr
+  st.appendEvent("fix-response-queued", { worker: "lane-a", pr: 55, writes: [{ resolution: "disputed", reply: "x" }] }); // no threadId
+  st.appendEvent("fix-response-queued", { worker: "lane-a", pr: 55, writes: [{ threadId: "T1", resolution: "maybe", reply: "x" }] }); // bad resolution
+  const records = latestThreadResolutions(st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-response-queued"]), "lane-a", 55);
+  assert.equal(records.size, 0);
+  st.close();
+});
+
+test("latestThreadResolutions: a pre-#451 event with no headOid/writes fields is read fail-closed (headOid null, empty map — nothing to match a live head against)", () => {
+  const st = new State(":memory:");
+  st.appendEvent("fix-response-queued", { worker: "lane-a", issue: 2, pr: 55, batchKey: "lane-a#1", fixRounds: 1, count: 1 });
+  const records = latestThreadResolutions(st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-response-queued"]), "lane-a", 55);
+  assert.equal(records.size, 0, "no `writes` array -> nothing recorded, never a crash");
+  st.close();
+});
+
+class FakeDisputeForge implements Pick<IForge, "getPRStatus" | "getPRReviewThreads"> {
+  headOid = "head-1";
+  threads: { id: string; isResolved: boolean; comments: { author: string; body: string; createdAt: string }[] }[] = [];
+  throwOnStatus = false;
+  throwOnThreads = false;
+  /** #451 gate② P3(a): when true, the live thread page reports itself PARTIAL — see
+   *  computeDisputeEscalation's own fail-closed guard. */
+  pageCapped = false;
+  /** #451 gate② round 3 (Codex P1, TOCTOU): every `getPRStatus` call AFTER the first returns THIS
+   *  headOid instead of `headOid` — simulates a push landing between the initial parallel read and
+   *  the re-validation immediately before any side effect. `undefined` (default) -> every call
+   *  returns the same `headOid`, byte-for-byte the pre-round-3 fake. */
+  headOidAfterFirstCall: string | undefined = undefined;
+  /** Same shape, for the PR-closed-between-reads variant. */
+  stateAfterFirstCall: "OPEN" | "CLOSED" | "MERGED" | undefined = undefined;
+  getPRStatusCalls = 0;
+  async getPRStatus(pr: number) {
+    if (this.throwOnStatus) throw new Error("simulated forge outage");
+    this.getPRStatusCalls++;
+    const stale = this.getPRStatusCalls > 1;
+    return {
+      number: pr,
+      headOid: stale && this.headOidAfterFirstCall !== undefined ? this.headOidAfterFirstCall : this.headOid,
+      state: (stale && this.stateAfterFirstCall !== undefined ? this.stateAfterFirstCall : "OPEN") as "OPEN" | "CLOSED" | "MERGED",
+      mergeable: "MERGEABLE" as const,
+      ciGreen: true,
+    };
+  }
+  async getPRReviewThreads(_pr: number, _commentsCap: number) {
+    if (this.throwOnThreads) throw new Error("simulated forge outage");
+    return { threads: this.threads.map((t) => ({ ...t, commentsComplete: true })), pageCapped: this.pageCapped };
+  }
+}
+
+function disputeCfg(): Pick<SapwoodConfig, "proxy"> {
+  return { proxy: { caps: { maxCommentsPerThread: 20 } } as SapwoodConfig["proxy"] };
+}
+
+test("computeDisputeEscalation: every unresolved current-head thread durably disputed -> evidence for all of them", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeDisputeForge();
+  forge.headOid = "head-1";
+  forge.threads = [{ id: "T1", isResolved: false, comments: [{ author: "codex", body: "the finding", createdAt: "t0" }] }];
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-1",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree" }],
+  });
+  const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
+  assert.deepEqual(result, { headOid: "head-1", threads: [{ threadId: "T1", findingBody: "the finding", reply: "disagree" }] });
+  st.close();
+});
+
+test("computeDisputeEscalation (#451 gate② P3a): pageCapped (a partial thread view) -> null, fail-closed, even when every VISIBLE unresolved thread is disputed", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeDisputeForge();
+  forge.headOid = "head-1";
+  forge.pageCapped = true;
+  forge.threads = [{ id: "T1", isResolved: false, comments: [{ author: "codex", body: "the finding", createdAt: "t0" }] }];
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-1",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree" }],
+  });
+  const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
+  assert.equal(result, null, "a partial view can never prove EVERY unresolved thread is disputed");
+  st.close();
+});
+
+test("computeDisputeEscalation (#451 gate② round 3, Codex P1 — TOCTOU): a push landing between the initial read and the pre-side-effect recheck (head moves) -> null, fail-closed", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeDisputeForge();
+  forge.headOid = "head-1";
+  forge.headOidAfterFirstCall = "head-2"; // the push that lands mid-flight
+  forge.threads = [{ id: "T1", isResolved: false, comments: [{ author: "codex", body: "the finding", createdAt: "t0" }] }];
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-1",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree" }],
+  });
+  const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
+  assert.equal(result, null, "the head moved between the initial read and the recheck — never escalate against a superseded head");
+  assert.equal(forge.getPRStatusCalls, 2, "the recheck is a REAL second read, not a reuse of the first");
+  st.close();
+});
+
+test("computeDisputeEscalation (#451 gate② round 3, Codex P1 — TOCTOU): the PR closes/merges between the initial read and the recheck -> null, fail-closed", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeDisputeForge();
+  forge.headOid = "head-1";
+  forge.stateAfterFirstCall = "MERGED";
+  forge.threads = [{ id: "T1", isResolved: false, comments: [{ author: "codex", body: "the finding", createdAt: "t0" }] }];
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-1",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree" }],
+  });
+  const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
+  assert.equal(result, null, "a PR that merged/closed between reads must never be escalated against");
+  st.close();
+});
+
+test("computeDisputeEscalation (#451 gate② round 3, Codex P1 — TOCTOU): the recheck read itself failing -> null, fail-closed (never assume the head still matches)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeDisputeForge();
+  forge.headOid = "head-1";
+  forge.threads = [{ id: "T1", isResolved: false, comments: [{ author: "codex", body: "the finding", createdAt: "t0" }] }];
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-1",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree" }],
+  });
+  const originalGetPRStatus = forge.getPRStatus.bind(forge);
+  forge.getPRStatus = (async (pr: number) => {
+    if (forge.getPRStatusCalls >= 1) throw new Error("simulated recheck outage");
+    return originalGetPRStatus(pr);
+  }) as typeof forge.getPRStatus;
+  const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
+  assert.equal(result, null);
+  st.close();
+});
+
+test("computeDisputeEscalation: a resolved thread is excluded from consideration entirely (isResolved:true never counts as unresolved-and-disputed)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeDisputeForge();
+  forge.headOid = "head-1";
+  forge.threads = [{ id: "T1", isResolved: true, comments: [{ author: "codex", body: "finding", createdAt: "t0" }] }];
+  const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
+  assert.equal(result, null, "no unresolved threads at all -> nothing to adjudicate");
+  st.close();
+});
+
+test("computeDisputeEscalation: a mix (one disputed, one never answered) -> null, not partial evidence", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeDisputeForge();
+  forge.headOid = "head-1";
+  forge.threads = [
+    { id: "T1", isResolved: false, comments: [{ author: "codex", body: "finding A", createdAt: "t0" }] },
+    { id: "T2", isResolved: false, comments: [{ author: "codex", body: "finding B", createdAt: "t0" }] },
+  ];
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-1",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree" }],
+  });
+  const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
+  assert.equal(result, null);
+  st.close();
+});
+
+test("computeDisputeEscalation: a disputed record against a STALE head -> null, fail-closed", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeDisputeForge();
+  forge.headOid = "head-NEW";
+  forge.threads = [{ id: "T1", isResolved: false, comments: [{ author: "codex", body: "finding", createdAt: "t0" }] }];
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-OLD",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree" }],
+  });
+  const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
+  assert.equal(result, null);
+  st.close();
+});
+
+test("computeDisputeEscalation: zero live unresolved threads (the §4a engine-agent case) -> null unconditionally, even with disputed records on file", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeDisputeForge();
+  forge.headOid = "head-1";
+  forge.threads = []; // engine-agent: no thread-creating forge write exists at all
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-1",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree" }],
+  });
+  const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
+  assert.equal(result, null);
+  st.close();
+});
+
+test("computeDisputeEscalation: an unreadable live read (getPRStatus or getPRReviewThreads throws) fails CLOSED -> null, never escalates on an unproven read", async () => {
+  const st = new State(":memory:");
+  const forgeA = new FakeDisputeForge();
+  forgeA.throwOnStatus = true;
+  assert.equal(await computeDisputeEscalation(forgeA, st, disputeCfg(), "lane-a", 55), null);
+  const forgeB = new FakeDisputeForge();
+  forgeB.throwOnThreads = true;
+  assert.equal(await computeDisputeEscalation(forgeB, st, disputeCfg(), "lane-a", 55), null);
   st.close();
 });
