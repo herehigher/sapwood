@@ -1911,6 +1911,32 @@ export class State {
     return row?.kind === "pr-held" || row?.kind === "pr-released" ? row.kind : null;
   }
 
+  /** #441: the kind of the LATEST event among `kinds` for this exact (worker, issue), or null if
+   *  none exists — the issue-scoped twin of `lastHoldEvent`, generalized over a caller-supplied
+   *  kind set because the RESUME phase's episode boundary is "any of several outcomes", not one
+   *  pair. Same event-log-as-memory contract (#169/#294): the caller re-derives its observation
+   *  statelessly every tick and asks this whether the current episode was already announced, so a
+   *  `kill -9` between the observation and the next tick re-reads the same answer and re-emits
+   *  nothing.
+   *
+   *  Scoped to (worker, issue), not (worker, pr): the RESUME phase's events precede any PR for an
+   *  ordinary lane, and a lane name reassigned to a new ISSUE must not inherit the prior issue's
+   *  episode — same rationale `lastHoldEvent` gives for its own (worker, pr) scope. LATEST-wins,
+   *  so it is for facts a later event reverses; use `laneEventRecorded` for one-way ones. */
+  latestLaneEventKind(kinds: readonly string[], worker: string, issue: number): string | null {
+    if (kinds.length === 0) throw new Error("latestLaneEventKind: kinds must be non-empty");
+    const row = this.db
+      .prepare(
+        `SELECT kind FROM events
+         WHERE kind IN (${kinds.map(() => "?").join(", ")})
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.issue') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(...kinds, worker, issue) as { kind: string } | undefined;
+    return row?.kind ?? null;
+  }
+
   /** #447: has an event of `kind` EVER been recorded for this exact (worker, pr)? The two facts
    *  loop/reconcile.ts's lane revival must remember across ticks — "#397 already settled this PR
    *  as bucket 2" and "this lane's PR was observed MERGED/CLOSED" — are both ONE-WAY, and this

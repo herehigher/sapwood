@@ -321,7 +321,7 @@ test("reconcileEscalations: a removed needs-human label resolves a label-proven 
   state.close();
 });
 
-test("reconcileEscalations: a closed issue resolves via 'closed'", async () => {
+test("reconcileEscalations: a closed issue resolves via 'issue-closed'", async () => {
   const forge = new FakeForge();
   const state = new State(":memory:");
   state.appendEvent("drive-no-pr", { worker: "w1", issue: 7 });
@@ -331,11 +331,11 @@ test("reconcileEscalations: a closed issue resolves via 'closed'", async () => {
 
   await reconcileEscalations(forge, state, mkCfg());
 
-  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, source: "drive-no-pr", via: "closed" }]);
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, source: "drive-no-pr", via: "issue-closed" }]);
   state.close();
 });
 
-test("reconcileEscalations: a PR closed without merging resolves via 'closed'", async () => {
+test("reconcileEscalations: a PR closed without merging resolves via 'pr-closed' — distinct from issue closure (#441 r2)", async () => {
   const forge = new FakeForge();
   const state = new State(":memory:");
   state.appendEvent("env-failure-preserved", { worker: "w1", issue: 7, source: "auth", pr: 12, worktreePath: "/tmp/x" });
@@ -345,7 +345,7 @@ test("reconcileEscalations: a PR closed without merging resolves via 'closed'", 
 
   await reconcileEscalations(forge, state, mkCfg());
 
-  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source: "env-failure-preserved", via: "closed" }]);
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source: "env-failure-preserved", via: "pr-closed" }]);
   state.close();
 });
 
@@ -460,7 +460,7 @@ test("reconcileEscalations: a NON-merge-produced rollback-escalated still resolv
 
   await reconcileEscalations(forge, state, mkCfg());
 
-  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, source: "rollback-escalated", via: "closed" }]);
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, source: "rollback-escalated", via: "issue-closed" }]);
   state.close();
 });
 
@@ -476,7 +476,7 @@ test("reconcileEscalations: ceiling-escalated and resume-undecidable both resolv
   await reconcileEscalations(forge, state, mkCfg());
 
   assert.deepEqual(resolvedEvents(logged), [
-    { issue: 7, source: "ceiling-escalated", via: "closed" },
+    { issue: 7, source: "ceiling-escalated", via: "issue-closed" },
     { issue: 8, source: "resume-undecidable", via: "label-removed" },
   ]);
   state.close();
@@ -779,7 +779,7 @@ test("reconcileEscalations (#295 r2): fix-leg-undecidable resolves via external 
 test("openEscalations (#295 r3): a closed-then-reopened entity's genuine re-escalation is NOT suppressed — only merged is terminal", () => {
   const events = [
     { kind: "resume-capped", payload: { issue: 6 } }, // pr-less source: stored/new pr are both undefined
-    { kind: "escalation-resolved", payload: { issue: 6, source: "resume-capped", via: "closed" } },
+    { kind: "escalation-resolved", payload: { issue: 6, source: "resume-capped", via: "issue-closed" } },
     // The issue was reopened and the lane re-escalated — a genuinely new attention item.
     { kind: "resume-capped", payload: { issue: 6 } },
   ];
@@ -953,7 +953,7 @@ test("reconcileEscalations: a plan-review-escalated resolves when its issue is c
 
   await reconcileEscalations(forge, state, mkCfg());
 
-  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, source: "plan-review-escalated", via: "closed" }]);
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, source: "plan-review-escalated", via: "issue-closed" }]);
   state.close();
 });
 

@@ -16,6 +16,7 @@
 // than needing its own cancellation machinery.
 import { type TickDeps, type TickResult, tick } from "./conductor.js";
 import { reconcileEscalations } from "./escalation-reconcile.js";
+import { sweepResolvedHolds } from "./escalation-sweep.js";
 import { startProgressWatchdog, systemWatchdogTimer } from "./watchdog.js";
 
 /** How the loop decides to stop ticking. Default ("forever") is the normal daemon mode — only a
@@ -290,6 +291,11 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
         // Never throws (contained internally, see its own doc) — inside this try only so an
         // impossible throw still lands in the structured tick-error path, not a crash.
         await reconcileEscalations(deps.forge, deps.state, deps.cfg, deps.log);
+        // #441 (F34): the sweep rides with the reconciler on BOTH drivers, for the same reason
+        // the reconciler itself does — an `escalation-resolved` that never sweeps its own
+        // `needs-human` leaves a dead hold suppressing RESUME. Zero forge calls once every
+        // resolution has its receipt (the common case); also contained internally, never throws.
+        await sweepResolvedHolds(deps.forge, deps.state, deps.cfg, deps.log);
       } catch (e) {
         tickErrors++;
         // Structured + durable — never a silent swallow. Guarded itself: if even the event

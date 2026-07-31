@@ -501,6 +501,35 @@ test("maxEventIdForKinds (#383 round 2, PM P2): 0 when none of `kinds` has fired
   s.close();
 });
 
+test("latestLaneEventKind (#441): none -> null; returns the LATEST of the requested kinds for that (worker, issue) only", () => {
+  const s = mem();
+  const kinds = ["resume-held", "resumed", "resume-capped"];
+  assert.equal(s.latestLaneEventKind(kinds, "lane-a", 441), null);
+
+  s.appendEvent("fix-leg-resume-no-pr", { worker: "lane-a", issue: 441 }); // a kind outside the set never matches
+  assert.equal(s.latestLaneEventKind(kinds, "lane-a", 441), null);
+
+  s.appendEvent("resume-held", { worker: "lane-a", issue: 441, label: "sapwood:needs-human" });
+  s.appendEvent("resume-held", { worker: "lane-b", issue: 442, label: "sapwood:needs-human" });
+  assert.equal(s.latestLaneEventKind(kinds, "lane-a", 441), "resume-held");
+
+  // A later episode-ending event supersedes it for that lane only — this is what makes the next
+  // hold on lane-a a new episode while lane-b's stays deduped.
+  s.appendEvent("resumed", { worker: "lane-a", issue: 441, attempt: 1 });
+  assert.equal(s.latestLaneEventKind(kinds, "lane-a", 441), "resumed");
+  assert.equal(s.latestLaneEventKind(kinds, "lane-b", 442), "resume-held");
+  s.close();
+});
+
+test("latestLaneEventKind (#441): scoped to (worker, issue) — a lane repointed to a NEW issue never inherits the prior issue's episode; empty kinds throws", () => {
+  const s = mem();
+  s.appendEvent("resume-held", { worker: "lane-a", issue: 441, label: "sapwood:needs-human" });
+  assert.equal(s.latestLaneEventKind(["resume-held"], "lane-a", 999), null);
+  assert.equal(s.latestLaneEventKind(["resume-held"], "lane-a", 441), "resume-held");
+  assert.throws(() => s.latestLaneEventKind([], "lane-a", 441), /kinds must be non-empty/);
+  s.close();
+});
+
 test("laneEventRecorded (#447): matches only the SAME kind for the SAME (worker, pr) — and once true, stays true", () => {
   const s = mem();
   assert.equal(s.laneEventRecorded("drive-human-merge-only", "lane-a", 55), false);

@@ -629,6 +629,7 @@ checklist item**):
 | `reviewer-fallback-revert` | The usual reviewer is back — switched back |
 | `pr-held` | A person put PR #{pr} on hold — nothing moves until they lift it |
 | `pr-released` | Hold released — PR #{pr} resumes |
+| `resume-held` | Lane {worker}'s handoff can't resume — issue #{issue} still carries `{label}`. Deliberately **not** an attention item (§3): it is the *consequence* of a hold, not a new thing waiting on a person — whoever owns that label already has the strip row (an engine escalation) or applied it themselves (a human). Its job is to make an idle lane legible; one per suppression episode, never per tick (#441) |
 | `worktree-retained` | Kept lane {worker}'s working folder for inspection |
 | `worktree-released` | Lane {worker}'s retained folder was cleaned up |
 | `env-failure` | Lane {worker} hit an environment problem — not the work itself (subsequent events narrate the disposition; this sentence claims none of it — `hasPr` alone cannot pick the outcome) |
@@ -652,7 +653,8 @@ checklist item**):
 | `lane-revived` | Issue #{issue}'s PR picked back up after an environment failure — back under review |
 | `gated-reentry-capped` | Issue #{issue} was unblocked too many times without landing — flagged for a human |
 | `gated-reentry-capped-label-failed` | Couldn't re-flag issue #{issue} — please check it manually |
-| `escalation-resolved` | Branches on `payload.via`: merged → "Issue #{issue} no longer needs you — PR #{pr} was merged"; closed → "Issue #{issue} no longer needs you — it was closed"; label-removed → "Issue #{issue} no longer needs you — the flag was cleared"; board-fixed → "Issue #{issue} no longer needs you — the board was set to Done". Never an attention item — this is the event that *clears* one (§3) |
+| `escalation-resolved` | Branches on `payload.via`: merged → "Issue #{issue} no longer needs you — PR #{pr} was merged"; issue-closed → "Issue #{issue} no longer needs you — it was closed"; pr-closed → "Issue #{issue} no longer needs you — PR #{pr} was closed without merging"; label-removed → "Issue #{issue} no longer needs you — the flag was cleared"; board-fixed → "Issue #{issue} no longer needs you — the board was set to Done". Never an attention item — this is the event that *clears* one (§3) |
+| `needs-human-swept` | Issue #{issue} no longer carries `{label}` — the engine removed the flag it had applied itself, now that its escalation is resolved. Never an attention item; it is the receipt that a cleared item's *carrier* was cleared too. Only ever follows a `merged` or `issue-closed` resolution; a PR closed without merging still owes a human decision and keeps its flag (#441) |
 | `retro-pr-opened` | The loop proposed an improvement to itself — PR #{pr} awaits review |
 | `retro-pr-degraded` | A self-improvement proposal didn't come together this round |
 | `run-started` | Engine started a new run |

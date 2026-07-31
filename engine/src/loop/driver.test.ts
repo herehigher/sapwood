@@ -45,7 +45,12 @@ class FakeForge extends UnstubbedForge implements IForge {
     return [];
   }
   override async addLabel(): Promise<void> {}
-  override async removeLabel(): Promise<void> {}
+  /** #441: the escalation sweep's only write — recorded so its wiring on THIS driver is
+   *  assertable, exactly as the #295 test below asserts the reconciler's. */
+  labelsRemoved: Array<[number, string]> = [];
+  override async removeLabel(issue: number, label: string): Promise<void> {
+    this.labelsRemoved.push([issue, label]);
+  }
   override async addPRLabel(): Promise<void> {}
   override async openPR(): Promise<number> {
     return 1;
@@ -787,6 +792,24 @@ test("runDriver (#295): a no-clear escalation resolved externally (PR merged) ge
   const resolved = deps.state.eventsAfterId(0, ["escalation-resolved"]);
   assert.equal(resolved.length, 1, "the tick driver swept and resolved the open escalation");
   assert.deepEqual(resolved[0]!.payload, { issue: 9, pr: 90, source: "drive-needs-human", via: "merged" });
+  // #441 (F34): the sweep rides with the reconciler on this driver too — the resolution and the
+  // label removal land in the SAME tick, so the dead hold never gets a chance to wedge RESUME.
+  assert.deepEqual(forge.labelsRemoved, [[9, deps.cfg.labels.needsHuman]]);
+  assert.equal(deps.state.eventsAfterId(0, ["needs-human-swept"]).length, 1);
+  deps.state.close();
+});
+
+test("runDriver (#441): the sweep NEVER touches a label the engine cannot prove it applied — a hand-held issue with no escalation row is left alone", async () => {
+  const forge = new FakeForge();
+  forge.getPRStatus = async (n: number) => ({ number: n, headOid: "x", state: "MERGED", mergeable: "MERGEABLE", ciGreen: true });
+  const deps = baseDeps({ forge, stopMode: "once" });
+  // Ordinary lane history for #9 and a merged PR — but no escalation ever fired, so any
+  // needs-human on that issue is a human's and stays a human's.
+  deps.state.appendEvent("dispatched", { worker: "lane-9", issue: 9 });
+  deps.state.appendEvent("merged", { worker: "lane-9", issue: 9, pr: 90 });
+  await runDriver(deps);
+  assert.deepEqual(forge.labelsRemoved, []);
+  assert.equal(deps.state.eventsAfterId(0, ["needs-human-swept"]).length, 0);
   deps.state.close();
 });
 

@@ -96,8 +96,10 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async openPR(): Promise<number> {
     return 1;
   }
+  /** #441: per-PR state so the escalation reconciler's external-merge arm is scriptable here. */
+  prStates: Record<number, "OPEN" | "CLOSED" | "MERGED"> = {};
   override async getPRStatus(n: number): Promise<PRStatus> {
-    return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+    return { number: n, headOid: "x", state: this.prStates[n] ?? "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
   override async mergePR(): Promise<void> {}
   override async addPRComment(): Promise<void> {}
@@ -495,6 +497,28 @@ test("createDefaultPeripherals (#109 gate② P2): with round.milestone set, the 
   assert.equal(triageCalls.length, 1, "exactly one triage session — the in-milestone candidate only");
   assert.match(triageCalls[0]!.prompt, /in-scope triage candidate/);
   assert.doesNotMatch(triageCalls[0]!.prompt, /out-of-scope/);
+  state.close();
+});
+
+test("createDefaultPeripherals (#441): the aligning hook sweeps a resolved escalation's OWN needs-human, and never a hand-applied one", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, cfg);
+  // #7: an engine escalation whose label is PROVEN (fix-rounds-capped appends strictly after its
+  // own addLabel returned), whose PR a human then merged by hand — the F34 shape.
+  state.appendEvent("fix-rounds-capped", { worker: "w1", issue: 7, pr: 70 });
+  forge.issueLabels[7] = [cfg.labels.needsHuman];
+  forge.prStates[70] = "MERGED";
+  // #8: no escalation ever fired. Whatever is on it, a person put there.
+  forge.issueLabels[8] = [cfg.labels.needsHuman];
+
+  const peripherals = createDefaultPeripherals({ now: realClock, forge, state, cfg, runner });
+  await peripherals.aligning!.run({ roundId: 1, phase: "aligning", marker: null });
+
+  assert.deepEqual(forge.issueLabels[7], [], "the round hook resolved AND swept in one pass");
+  assert.deepEqual(forge.issueLabels[8], [cfg.labels.needsHuman], "no proof, no write — ever");
+  assert.equal(state.eventsAfterId(0, ["needs-human-swept"]).length, 1);
   state.close();
 });
 

@@ -148,11 +148,18 @@ export async function reconcileStartup(
  *  What makes correcting it SAFE rather than a false clear: the marker exists to encode "the
  *  engine provably applied the label", because reentry fires on label ABSENCE and absence is only
  *  a human act if the label was ever there. Observing the hold label PRESENT right now is an even
- *  stronger fact than the marker was — whoever applied it, it is on the issue, and the engine
- *  never removes a human-hold label (round.ts's removeRoundPoolLabel refuses to remove anything
- *  but the pool label), so its future disappearance can only be a human. Correcting the marker on
- *  that evidence therefore restores exactly the intended contract, with removing the label as the
- *  ONLY manual step (#391 AC1).
+ *  stronger fact than the marker was — whoever applied it, it is on the issue, and its future
+ *  disappearance is a human act in every case but one. Correcting the marker on that evidence
+ *  therefore restores exactly the intended contract, with removing the label as the ONLY manual
+ *  step (#391 AC1).
+ *
+ *  The one exception (#441, F34), stated rather than left as a stale absolute: escalation-sweep.ts
+ *  may remove `needs-human` when the ledger PROVES the engine applied it AND the escalation
+ *  resolved by a `merged`/`issue-closed` witness (round.ts's `removeRoundPoolLabel` doc lists both
+ *  authorized removal paths). Reentry firing off that removal costs exactly ONE
+ *  `gated_reentry_attempts` slot — DRIVE re-derives the gate on reclaim, a merged/closed PR maps
+ *  straight back to HUMAN, and the lane re-escalates and re-labels — which is the same bounded,
+ *  cap-limited cost #400 already accepts for a human who clears the label too early.
  *
  *  The other direction is deliberately NOT healed: with no hold label present we cannot tell
  *  "the escalation never labelled it" from "a human already removed it", and guessing the latter
