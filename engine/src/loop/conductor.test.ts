@@ -17,8 +17,8 @@ import {
   type Issue,
   type PRReviewData,
   type PRStatus,
-  type ReviewThreadsPage,
   type ReviewThreadSpan,
+  type ReviewThreadsPage,
   readPrOwner,
 } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
@@ -213,11 +213,22 @@ class FakeForge extends UnstubbedForge implements IForge {
     return "";
   }
   /** #449 (design #402 R2): mutable so a test can populate the changed-file set
-   *  `gatherFixupFindingRecord`'s `fixDiffPaths` reads (conductor.ts). Defaults reproduce every
-   *  pre-#449 fixture byte-for-byte (an empty, complete set). */
+   *  `gatherFixDiffPaths`'s ROUND-1 (no previous drive-fixup) branch reads (conductor.ts).
+   *  Defaults reproduce every pre-#449 fixture byte-for-byte (an empty, complete set). */
   changedFiles: { files: { filename: string; previousFilename?: string }[]; complete: boolean } = { files: [], complete: true };
   override async getPRChangedFiles() {
     return this.changedFiles;
+  }
+  /** #449 gate② P1 fix: mutable per-range compare result, keyed by `"${base}...${head}"` —
+   *  `gatherFixDiffPaths`'s round-2+ branch. Default (unscripted range) is an empty, complete
+   *  result, matching `getPRChangedFiles`'s own zero-changes default. */
+  compareResults: Record<string, { files: { filename: string; previousFilename?: string }[]; complete: boolean }> = {};
+  compareCalls: Array<[string, string]> = [];
+  throwOnCompareChangedFiles = false;
+  override async compareChangedFiles(base: string, head: string) {
+    this.compareCalls.push([base, head]);
+    if (this.throwOnCompareChangedFiles) throw new Error("simulated forge failure");
+    return this.compareResults[`${base}...${head}`] ?? { files: [], complete: true };
   }
   override async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
@@ -2353,14 +2364,23 @@ test("tick DRIVE (#449, design #402 R2, classic path): drive-fixup carries findi
   });
   const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
   assert.equal(events.length, 1);
-  const payload = events[0]!.payload as { findings: { key: string; severity: string; kind?: string }[]; fixDiffPaths: string[] };
+  const payload = events[0]!.payload as {
+    findings: { key: string; severity: string; kind?: string }[];
+    fixDiffPaths: string[];
+    fixDiffPathsUnavailable?: boolean;
+    head?: string;
+  };
   assert.equal(payload.findings.length, 1, "the resolved thread must not appear — only the unresolved one caused this dispatch");
   assert.equal(payload.findings[0]!.severity, "blocking", "classic path: unconditionally blocking, no kind axis");
   assert.equal(payload.findings[0]!.kind, undefined);
   assert.match(payload.findings[0]!.key, /src\/x\.ts/);
   assert.match(payload.findings[0]!.key, /open-digest/);
   assert.doesNotMatch(payload.findings[0]!.key, /resolved-digest/);
+  // Round 1 (no previous drive-fixup for this PR) — the full base..head set IS the preceding
+  // leg's own diff (the producer's whole PR), not an approximation of it (#449 gate② P1 fix).
   assert.deepEqual(payload.fixDiffPaths, ["src/x.ts", "src/y.ts"]);
+  assert.equal(payload.fixDiffPathsUnavailable, undefined);
+  assert.equal(payload.head, "x", "the recorded head (PRReviewData.headOid) — the NEXT round's range start");
   st.close();
 });
 
@@ -2476,8 +2496,13 @@ test("tick DRIVE (#449, design #402 R2, engine-agent path): a stale/mismatched W
   });
   assert.equal(r.driven[0]?.kind, "fixup");
   const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
-  const payload = events[0]!.payload as { findings: unknown[] };
+  const payload = events[0]!.payload as { findings: unknown[]; fixDiffPaths: unknown[]; fixDiffPathsUnavailable?: boolean; head?: string };
   assert.deepEqual(payload.findings, []);
+  // No trustworthy head either (the WAL lookup failed) — fixDiffPaths has no range to compute at
+  // all, so it fails narrow rather than falling back to anything (#449 gate② P1 fix).
+  assert.deepEqual(payload.fixDiffPaths, []);
+  assert.equal(payload.fixDiffPathsUnavailable, true);
+  assert.equal(payload.head, undefined);
   st.close();
 });
 
@@ -2546,6 +2571,7 @@ test("tick DRIVE (#449, design #402 R2): under the bound -> no truncation flag a
   const payload = events[0]!.payload as Record<string, unknown>;
   assert.equal("findingsTruncated" in payload, false);
   assert.equal("fixDiffPathsTruncated" in payload, false);
+  assert.equal("fixDiffPathsUnavailable" in payload, false);
   st.close();
 });
 
@@ -2647,6 +2673,296 @@ test("state.eventsAfterId (#449 verification item 5): round r-1's finding set ro
   assert.deepEqual(roundOneMinusOne.fixDiffPaths, ["src/x.ts"]);
   const roundR = all[1]!;
   assert.deepEqual(roundR.fixDiffPaths, ["src/x.ts", "src/y.ts"]);
+  st.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #449 gate② P1 fix (design #402 R2): `fixDiffPaths` reworked after gate② review confirmed the
+// shipped v1 (the PR's FULL base..head changed-path set, every round) made design §3b's
+// `recurrence`/`marginal-complexity` predicates trivially true for every located finding — since
+// R1 constrains every located finding's `path` to that SAME full set. The fix: a RANGE diff off
+// the PRECEDING drive-fixup's own recorded `head` (`IForge.compareChangedFiles`), falling back to
+// the full set ONLY for the genuinely exact round-1 case, and failing NARROW (empty + marked
+// `fixDiffPathsUnavailable`) everywhere else — never a silent full-set fallback, which would just
+// reproduce the same defect one round later.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("tick DRIVE (#449 gate② P1 fix): round 2's fixDiffPaths is the RANGE since the PRECEDING round's head, not the PR's full changed-path set", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const openThread = (id: string): ReviewThreadSpan => ({
+    id,
+    isResolved: false,
+    isOutdated: false,
+    path: "src/x.ts",
+    line: 1,
+    originalLine: 1,
+    findingDigest: `digest-${id}`,
+    anchorCommitOid: "c1",
+  });
+  // Round 1: head H1, the full PR touches ONLY src/full-pr-file.ts. No previous drive-fixup for
+  // this PR — the full base..head set is EXACT here, unchanged from before the fix.
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H1", unresolvedThreads: 1, threads: [openThread("T1")] };
+  forge.changedFiles = { files: [{ filename: "src/full-pr-file.ts" }], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const deps = {
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+  await tick(deps);
+  const round1 = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"])[0]!.payload as { fixDiffPaths: string[]; head?: string };
+  assert.deepEqual(round1.fixDiffPaths, ["src/full-pr-file.ts"], "round 1: the full base..head set, exact");
+  assert.equal(round1.head, "H1");
+  assert.equal(forge.compareCalls.length, 0, "round 1 never calls the range primitive — getPRChangedFiles is exact there");
+
+  // The fix leg pushes: head moves H1 -> H2. Land the lane back in `driving` (mirrors #457's own
+  // fixture pattern) so DRIVE re-evaluates a SECOND fixable.
+  st.upsertWorker({ ...st.getWorker("lane-a")!, state: "driving", ended_at: "t3" });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", threads: [openThread("T2")] };
+  // Script the RANGE result: only src/round2-only-file.ts changed between H1 and H2 — a file the
+  // full-PR set (still "src/full-pr-file.ts" only, unchanged) does NOT contain, so this proves
+  // the range read is actually driving the result, not a coincidental overlap.
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/round2-only-file.ts" }], complete: true };
+
+  await tick(deps);
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
+  assert.equal(events.length, 2);
+  const round2 = events[1]!.payload as { fixDiffPaths: string[]; fixDiffPathsUnavailable?: boolean; head?: string };
+  assert.deepEqual(round2.fixDiffPaths, ["src/round2-only-file.ts"], "round 2: the RANGE since round 1's head — never the full PR set");
+  assert.equal(round2.fixDiffPathsUnavailable, undefined);
+  assert.equal(round2.head, "H2");
+  assert.deepEqual(forge.compareCalls, [["H1", "H2"]], "exactly one range compare, against the PRECEDING round's recorded head");
+  st.close();
+});
+
+test("tick DRIVE (#449 gate② P1 fix, P3b): compareChangedFiles renames carry BOTH filename and previousFilename into fixDiffPaths", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r",
+    findings: [],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 0, threads: [] };
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/new-name.ts", previousFilename: "src/old-name.ts" }], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false" };
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
+  const payload = events[1]!.payload as { fixDiffPaths: string[] };
+  assert.deepEqual(new Set(payload.fixDiffPaths), new Set(["src/new-name.ts", "src/old-name.ts"]));
+  st.close();
+});
+
+test("tick DRIVE (#449 gate② P1 fix): identical previous/current head (a classic fix leg that resolved threads without pushing) -> EXACT empty range, never a compare call", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r",
+    findings: [],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H1", unresolvedThreads: 1, threads: [] }; // SAME head as the recorded round
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
+  const payload = events[1]!.payload as { fixDiffPaths: string[]; fixDiffPathsUnavailable?: boolean };
+  assert.deepEqual(payload.fixDiffPaths, []);
+  assert.equal(payload.fixDiffPathsUnavailable, undefined, "a genuinely zero-width range is EXACT, not unavailable");
+  assert.equal(forge.compareCalls.length, 0, "short-circuited — no compare call for a same-head range");
+  st.close();
+});
+
+test("tick DRIVE (#449 gate② P1 fix, P4): compareChangedFiles throwing (e.g. a 404 on a force-pushed-away prior head) -> EMPTY + marked unavailable, NEVER a silent full-set fallback", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r",
+    findings: [],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 0, threads: [] };
+  forge.throwOnCompareChangedFiles = true;
+  // If the rejected fallback ever regresses back in, THIS is what it would wrongly return —
+  // asserting fixDiffPaths is empty (not this) is the regression pin.
+  forge.changedFiles = { files: [{ filename: "src/the-forbidden-full-set-fallback.ts" }], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false" };
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
+  const payload = events[1]!.payload as { fixDiffPaths: string[]; fixDiffPathsUnavailable?: boolean };
+  assert.deepEqual(payload.fixDiffPaths, []);
+  assert.equal(payload.fixDiffPathsUnavailable, true);
+  st.close();
+});
+
+test("tick DRIVE (#449 gate② P1 fix, P3a): compareChangedFiles complete:false (GitHub's own file-count ceiling) -> EMPTY + marked unavailable, never trusted as a partial list", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r",
+    findings: [],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 0, threads: [] };
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/partial.ts" }], complete: false };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false" };
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
+  const payload = events[1]!.payload as { fixDiffPaths: string[]; fixDiffPathsUnavailable?: boolean };
+  assert.deepEqual(payload.fixDiffPaths, []);
+  assert.equal(payload.fixDiffPathsUnavailable, true, "a possibly-partial file list is never trusted for path-membership testing");
+  st.close();
+});
+
+test("tick DRIVE (#449 gate② P1 fix): round-1's OWN getPRChangedFiles returning complete:false is ALSO treated as unavailable (not just the compare path)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  forge.changedFiles = { files: [{ filename: "src/partial.ts" }], complete: false };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false" };
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
+  const payload = events[0]!.payload as { fixDiffPaths: string[]; fixDiffPathsUnavailable?: boolean };
+  assert.deepEqual(payload.fixDiffPaths, []);
+  assert.equal(payload.fixDiffPathsUnavailable, true);
+  st.close();
+});
+
+test("tick DRIVE (#449 gate② P1 fix): a previous drive-fixup that PREDATES the `head` field (deploy-transition edge) fails narrow, never the rejected full-set fallback", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  // A pre-#449-P1-fix drive-fixup event — no `head` field at all (the exact shape every event
+  // before this fix round carries).
+  st.appendEvent("drive-fixup", { worker: "lane-a", issue: 2, pr: 55, fixRounds: 1, reason: "r", findings: [], fixDiffPaths: [] });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 0, threads: [] };
+  forge.changedFiles = { files: [{ filename: "src/the-forbidden-full-set-fallback.ts" }], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false" };
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
+  const payload = events[1]!.payload as { fixDiffPaths: string[]; fixDiffPathsUnavailable?: boolean };
+  assert.deepEqual(payload.fixDiffPaths, []);
+  assert.equal(payload.fixDiffPathsUnavailable, true);
+  assert.equal(forge.compareCalls.length, 0, "no known range start — never even attempts a compare call");
+  st.close();
+});
+
+test("tick DRIVE (#449 gate② P2 fix): the confirmed-spawn -> drive-fixup-append window is a single synchronous call — gathering happens BEFORE startFixLeg", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false" };
+  // A startFixLeg failure (resume() throws) must land the pre-#449 "row untouched, retried next
+  // tick" outcome regardless of how much gathering work already ran — proving gathering moved
+  // before the spawn attempt introduces no new failure coupling.
+  sup.resumeShouldThrow = "simulated resume failure";
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(r.driven[0]?.kind, "queued");
+  assert.match((r.driven[0] as { reason: string }).reason, /fix-leg-dispatch-failed/);
+  assert.equal(st.getWorker("lane-a")?.state, "driving", "untouched — startFixLeg's own thrown-resume contract");
+  assert.equal(st.getWorker("lane-a")?.fix_rounds ?? 0, 0);
+  assert.equal(st.countEvents("drive-fixup"), 0, "no drive-fixup for a leg that never actually spawned");
   st.close();
 });
 

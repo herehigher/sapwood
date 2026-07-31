@@ -450,6 +450,62 @@ test("lastDriveQueuedEvent (#383): scoped to (worker, pr) — a lane repointed t
   s.close();
 });
 
+test("lastDriveFixupEvent (#449 gate② P1 fix): none -> null; returns the LATEST id+head for the right (worker, pr) only, id-ordered, no timestamp comparison", () => {
+  const s = mem();
+  assert.equal(s.lastDriveFixupEvent("lane-a", 55), null);
+
+  s.appendEvent("drive-queued", { worker: "lane-a", issue: 2, pr: 55, reason: "x" }); // unrelated kinds never match
+  assert.equal(s.lastDriveFixupEvent("lane-a", 55), null);
+
+  s.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r",
+    findings: [],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  const firstId = s.lastDriveFixupEvent("lane-a", 55)!.id;
+  s.appendEvent("drive-fixup", {
+    worker: "lane-b",
+    issue: 3,
+    pr: 56,
+    fixRounds: 1,
+    reason: "r",
+    findings: [],
+    fixDiffPaths: [],
+    head: "OTHER",
+  });
+  assert.deepEqual(s.lastDriveFixupEvent("lane-a", 55), { id: firstId, head: "H1" });
+
+  s.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 2,
+    reason: "r",
+    findings: [],
+    fixDiffPaths: [],
+    head: "H2",
+  });
+  const second = s.lastDriveFixupEvent("lane-a", 55)!;
+  assert.equal(second.head, "H2");
+  assert.ok(second.id > firstId);
+  assert.equal(s.lastDriveFixupEvent("lane-b", 56)?.head, "OTHER");
+  s.close();
+});
+
+test("lastDriveFixupEvent (#449 gate② P1 fix): a drive-fixup event that predates the `head` field returns { head: null }, distinguishable from no-event-at-all (null)", () => {
+  const s = mem();
+  s.appendEvent("drive-fixup", { worker: "lane-a", issue: 2, pr: 55, fixRounds: 1, reason: "r", findings: [], fixDiffPaths: [] }); // no head
+  const result = s.lastDriveFixupEvent("lane-a", 55);
+  assert.notEqual(result, null, "an event WAS recorded — this must not be confused with round 1's true null");
+  assert.equal(result!.head, null);
+  s.close();
+});
+
 test("lastFixLegDispatchBlockedEvent (#383): none -> null; returns the LATEST id+blockReason for the right (worker, pr) only", () => {
   const s = mem();
   assert.equal(s.lastFixLegDispatchBlockedEvent("lane-a", 55), null);

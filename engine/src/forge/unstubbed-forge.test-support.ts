@@ -37,6 +37,7 @@ const IFORGE_MEMBERS = [
   "addSubIssue",
   "branchExists",
   "claimIssue",
+  "compareChangedFiles",
   "countOpenIssuesInMilestone",
   "createIssue",
   "detectOwnerKind",

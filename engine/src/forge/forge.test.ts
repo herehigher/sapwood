@@ -22,6 +22,7 @@ import {
   hasPrOwnerMarker,
   hasVerificationPlan,
   OPEN_ISSUES_LIMIT,
+  parseCompareChangedFiles,
   parseIssueLabels,
   parseIssueMeta,
   parseIssueRelations,
@@ -251,6 +252,54 @@ test("#292 GithubForge.getPRChangedFiles: marks the 3,000-file API ceiling incom
     JSON.stringify([Array.from({ length: 3000 }, (_, index) => ({ filename: `generated/${index}.txt` }))]);
   const result = await forge.getPRChangedFiles(29);
   assert.equal(result.files.length, 3000);
+  assert.equal(result.complete, false);
+});
+
+// #449 gate② P1 fix: `compareChangedFiles` / `parseCompareChangedFiles` — the range-diff
+// primitive `loop/conductor.ts`'s `gatherFixDiffPaths` uses to compute the PRECEDING fix leg's
+// own changed-path set, replacing the rejected `getPRChangedFiles`-as-a-stand-in first cut.
+
+test("#449 parseCompareChangedFiles: reads the compare endpoint's `.files` array, preserving rename provenance", () => {
+  assert.deepEqual(
+    parseCompareChangedFiles(
+      JSON.stringify({
+        status: "ahead",
+        files: [{ filename: "docs/CLAUDE.md", previous_filename: "CLAUDE.md" }, { filename: "src/x.ts" }],
+      }),
+    ),
+    [{ filename: "docs/CLAUDE.md", previousFilename: "CLAUDE.md" }, { filename: "src/x.ts" }],
+  );
+});
+
+test("#449 parseCompareChangedFiles: an absent `files` field is a legitimate zero-changes answer, not a parse error", () => {
+  assert.deepEqual(parseCompareChangedFiles(JSON.stringify({ status: "identical" })), []);
+});
+
+test("#449 parseCompareChangedFiles: malformed entries reject fail-closed, same shape as parsePRChangedFiles", () => {
+  assert.throws(() => parseCompareChangedFiles(JSON.stringify({ files: [{ previous_filename: "CLAUDE.md" }] })), /no filename/);
+  assert.throws(() => parseCompareChangedFiles(JSON.stringify([])), /expected an object/);
+  assert.throws(() => parseCompareChangedFiles(JSON.stringify({ files: "not-an-array" })), /files is not an array/);
+});
+
+test("#449 GithubForge.compareChangedFiles: hits the three-dot compare endpoint with NO --paginate (single-object response, not a page array)", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify({ files: [{ filename: "AGENTS.md" }] });
+  };
+  assert.deepEqual(await forge.compareChangedFiles("H1", "H2"), { files: [{ filename: "AGENTS.md" }], complete: true });
+  assert.deepEqual(seen[0], ["api", "repos/o/r/compare/H1...H2"]);
+});
+
+test("#449 GithubForge.compareChangedFiles: marks the 300-file compare ceiling incomplete (no Link-header pagination on this endpoint)", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  (forge as unknown as { gh: () => Promise<string> }).gh = async () =>
+    JSON.stringify({ files: Array.from({ length: 300 }, (_, index) => ({ filename: `generated/${index}.txt` })) });
+  const result = await forge.compareChangedFiles("H1", "H2");
+  assert.equal(result.files.length, 300);
   assert.equal(result.complete, false);
 });
 

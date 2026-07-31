@@ -2182,6 +2182,37 @@ export class State {
     return p.headOid == null ? null : { id: row.id, headOid: p.headOid };
   }
 
+  /** #449 gate② P1 fix (design #402 R2): the most recent `drive-fixup` event's id + recorded
+   *  `head` for (worker, pr), or `null` if none has ever been recorded — `conductor.ts`'s
+   *  `gatherFixDiffPaths` reads this to find the PRECEDING round's head, the start of the range
+   *  `IForge.compareChangedFiles` diffs against. Same id-ordered, no-timestamp-comparison shape
+   *  as `lastDriveQueuedEvent`/`lastFixLegDispatchBlockedEvent` above — a direct id-DESC query,
+   *  not a timestamp read, satisfying design #402's own "no timestamp-based read on this path"
+   *  requirement without needing the `eventsAfterId` cursor machinery those two helpers don't
+   *  need either.
+   *
+   *  Distinguishes two DIFFERENT reasons a caller might see no usable head: `null` (no
+   *  `drive-fixup` has ever been recorded for this (worker, pr) — round 1, whose exact "preceding
+   *  leg" is the whole PR production) from `{ head: null }` (a `drive-fixup` DOES exist but
+   *  predates this field — a #449-deploy-transition edge, not a genuine round 1). The caller
+   *  tells them apart by checking for a `null` return vs. a non-null return whose `head` is
+   *  `null`, and must NOT treat the two identically (see `gatherFixDiffPaths`'s own doc for why:
+   *  only the true round-1 case is safe to widen to the full base..head set). */
+  lastDriveFixupEvent(worker: string, pr: number): { id: number; head: string | null } | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, payload FROM events
+         WHERE kind = 'drive-fixup'
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.pr') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker, pr) as { id: number; payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { head?: unknown };
+    return { id: row.id, head: typeof p.head === "string" ? p.head : null };
+  }
+
   /** #383 round 2 (PM P2): the highest event id among `kinds`, scoped to this (worker, pr) — the
    *  EPISODE-RESET boundary `lastDriveQueuedEvent`/`lastFixLegDispatchBlockedEvent`'s callers
    *  compare their own last-announcement id against. Returns 0 (lower than any real event id,

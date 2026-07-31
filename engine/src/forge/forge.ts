@@ -258,6 +258,16 @@ export interface IForge {
    *  gate callers queue fail-closed. `complete` is false at GitHub's 3,000-file REST ceiling so
    *  a potentially partial list degrades to human review rather than being treated as safe. */
   getPRChangedFiles(pr: number): Promise<PRChangedFilesResult>;
+  /** #449 gate② P1 fix (design #402 R2): the changed-file set between two arbitrary commits —
+   *  GitHub's own three-dot compare, `GET /repos/{owner}/{repo}/compare/{base}...{head}`. Unlike
+   *  `getPRChangedFiles` (the PR's FULL base..head, paginated to 3,000), this is a RANGE read
+   *  used to isolate exactly what changed BETWEEN two specific commits — `base`/`head` are always
+   *  full commit OIDs here (never a ref name needing URL-encoding). `complete` is a HEURISTIC
+   *  ceiling check (GitHub does not paginate the compare endpoint's `files` array via Link
+   *  headers — it silently caps instead), same shape as `getPRChangedFiles`'s own guard; `false`
+   *  means the file list may be partial and callers must treat the WHOLE read as unavailable for
+   *  path-membership testing, never trust a partial list as if it were complete. */
+  compareChangedFiles(base: string, head: string): Promise<PRChangedFilesResult>;
   /** #111 PR-A: commit history since `sinceIso` — the digest's "git log since round start"
    *  source. Deliberately sourced from the GitHub API (`gh api .../commits`), NOT a local
    *  `git log` subprocess: worker.test.ts's #69 grep-invariant pins that the ONLY engine
@@ -595,6 +605,12 @@ export interface PRChecksPage {
   total: number;
 }
 
+/** #449 gate② P1 fix: GitHub's documented ceiling on the compare endpoint's `files` array — it
+ *  does not paginate via Link headers (unlike `pulls/{pr}/files`), so a response landing AT this
+ *  count is treated as possibly-truncated rather than exactly-300-files-by-coincidence, the same
+ *  fail-closed-on-ambiguity stance `getPRChangedFiles`'s own 3,000-entry guard takes. */
+const COMPARE_FILES_CAP = 300;
+
 export class GithubForge implements IForge {
   constructor(private readonly cfg: SapwoodConfig) {}
 
@@ -815,6 +831,14 @@ export class GithubForge implements IForge {
     ]);
     const files = parsePRChangedFiles(out);
     return { files, complete: files.length < 3000 };
+  }
+
+  /** #449 gate② P1 fix: no `--paginate` — the compare endpoint returns ONE object (not an
+   *  array), so `--paginate --slurp` (getPRChangedFiles' own mechanism) does not apply here. */
+  async compareChangedFiles(base: string, head: string): Promise<PRChangedFilesResult> {
+    const out = await this.gh(["api", `repos/${this.cfg.board.owner}/${this.repo()}/compare/${base}...${head}`]);
+    const files = parseCompareChangedFiles(out);
+    return { files, complete: files.length < COMPARE_FILES_CAP };
   }
 
   async getCommitsSince(sinceIso: string): Promise<CommitInfo[]> {
@@ -2435,6 +2459,28 @@ export function parsePRStatus(json: string): PRStatus {
   };
 }
 
+/** #449 gate② P1 fix: shared per-entry validation between `parsePRChangedFiles` (a page-array of
+ *  entries) and `parseCompareChangedFiles` (one compare object's `.files` array) — same
+ *  fail-closed shape, same rename provenance (`previous_filename`), different top-level envelope.
+ *  `context` names the calling parser in a thrown message so a malformed-entry error is
+ *  attributable at a glance. */
+function mapChangedFileEntries(entries: readonly unknown[], context: string): PRChangedFile[] {
+  return entries.map((entry, index) => {
+    if (entry === null || typeof entry !== "object") throw new Error(`${context}: entry ${index} is not an object`);
+    const value = entry as { filename?: unknown; previous_filename?: unknown };
+    if (typeof value.filename !== "string" || value.filename.length === 0) {
+      throw new Error(`${context}: entry ${index} has no filename`);
+    }
+    if (value.previous_filename !== undefined && typeof value.previous_filename !== "string") {
+      throw new Error(`${context}: entry ${index} has an invalid previous_filename`);
+    }
+    return {
+      filename: value.filename,
+      ...(value.previous_filename !== undefined ? { previousFilename: value.previous_filename } : {}),
+    };
+  });
+}
+
 /**
  * #292: parse every paginated pull-file entry without dropping rename provenance. Accepts the
  * `gh api --paginate --slurp` page-array shape (and a single flat page for focused tests), and
@@ -2444,20 +2490,21 @@ export function parsePRChangedFiles(json: string): PRChangedFile[] {
   const raw: unknown = JSON.parse(json);
   if (!Array.isArray(raw)) throw new Error("getPRChangedFiles: expected an array");
   const entries: unknown[] = raw.every(Array.isArray) ? raw.flat() : raw;
-  return entries.map((entry, index) => {
-    if (entry === null || typeof entry !== "object") throw new Error(`getPRChangedFiles: entry ${index} is not an object`);
-    const value = entry as { filename?: unknown; previous_filename?: unknown };
-    if (typeof value.filename !== "string" || value.filename.length === 0) {
-      throw new Error(`getPRChangedFiles: entry ${index} has no filename`);
-    }
-    if (value.previous_filename !== undefined && typeof value.previous_filename !== "string") {
-      throw new Error(`getPRChangedFiles: entry ${index} has an invalid previous_filename`);
-    }
-    return {
-      filename: value.filename,
-      ...(value.previous_filename !== undefined ? { previousFilename: value.previous_filename } : {}),
-    };
-  });
+  return mapChangedFileEntries(entries, "getPRChangedFiles");
+}
+
+/** #449 gate② P1 fix: the compare endpoint's top-level shape is ONE object carrying a `files`
+ *  array (not the bare array `parsePRChangedFiles` expects) — no `--paginate --slurp` page-array
+ *  wrapping applies here (see `compareChangedFiles`'s own doc). An absent `files` field is a
+ *  legitimate "zero changes between these two commits" answer (e.g. `base === head`), not a
+ *  parse error. */
+export function parseCompareChangedFiles(json: string): PRChangedFile[] {
+  const raw: unknown = JSON.parse(json);
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("compareChangedFiles: expected an object");
+  const files = (raw as { files?: unknown }).files;
+  if (files === undefined) return [];
+  if (!Array.isArray(files)) throw new Error("compareChangedFiles: files is not an array");
+  return mapChangedFileEntries(files, "compareChangedFiles");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

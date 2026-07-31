@@ -14,7 +14,7 @@
 
 import { existsSync } from "node:fs";
 import type { SapwoodConfig } from "../config/config.js";
-import type { IForge, Issue } from "../forge/forge.js";
+import type { IForge, Issue, PRChangedFile } from "../forge/forge.js";
 import { firstMatchingLabel, labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge/labels.js";
 import { capDigest } from "../retro/retro-digest.js";
 import { buildAcSnapshot, checkAcSnapshotDrift } from "../review/ac-snapshot.js";
@@ -476,6 +476,23 @@ interface FixupFindingRecordEntry {
   kind?: FindingKind;
 }
 
+interface FixupFindingRecord {
+  findings: FixupFindingRecordEntry[];
+  findingsTruncated: boolean;
+  fixDiffPaths: string[];
+  fixDiffPathsTruncated: boolean;
+  /** #449 gate② P1 fix: `true` whenever `fixDiffPaths` could not be computed to a trustworthy,
+   *  COMPLETE range — see `gatherFixDiffPaths`'s own doc for every case that sets it. `fixDiffPaths`
+   *  is always `[]` when this is `true`: never a partial or approximated list standing in silently. */
+  fixDiffPathsUnavailable: boolean;
+  /** The head this dispatch's findings were evaluated against — engine-agent: the WAL's own
+   *  `head` (runId-guarded); classic: `PRReviewData.headOid` from the SAME live read the thread
+   *  findings come from. Recorded on the event so the NEXT round's `gatherFixDiffPaths` has a
+   *  range start (#449 gate② P1 fix item 1) — `null` only when neither source was available
+   *  (e.g. a stale/mismatched WAL runId), which also forces `fixDiffPathsUnavailable: true`. */
+  head: string | null;
+}
+
 /**
  * #449 (design #402 R2): gathers the `findings` + `fixDiffPaths` a `drive-fixup` event now
  * carries alongside its existing `reason` string — finding IDENTITY, not just a gate-reason
@@ -504,18 +521,9 @@ interface FixupFindingRecordEntry {
  * report — an honest empty `findings` array, not an omission (the `reason` string already carries
  * what actually caused THIS dispatch).
  *
- * `fixDiffPaths` — DISCLOSED APPROXIMATION. Design #402 §3a specs "changed paths of the PRECEDING
- * fix leg," i.e. a range diff (prior-round head .. this head). No bounded, already-existing
- * primitive gives that exact range without adding a NEW forge capability (an arbitrary-commit-
- * range compare) — outside this issue's own file list (`finding-key.ts`, `conductor.ts`,
- * `production.ts`; no `forge.ts` change). This instead uses `IForge.getPRChangedFiles`, the PR's
- * FULL base..head changed-path set — the SAME call `review/instruction-path-escalation.ts`
- * already makes for exactly the same "is this path touched" question. This over-approximates:
- * every path the preceding fix leg actually touched is a subset of the PR's total changed paths,
- * but an EARLIER leg's path (untouched by the preceding one) can also appear. The failure
- * direction is fail-closed-safe for design #402 §3b's eventual classifier: a WIDER `fixDiffPaths`
- * can only make MORE round-over-round pairs look like `recurrence`/`marginal-complexity` (i.e.
- * escalate to a human sooner), never fewer — it can never hide a genuine stall.
+ * `fixDiffPaths` sourcing lives in `gatherFixDiffPaths` below — see that function's own doc for
+ * the range-diff mechanics (#449 gate② P1 fix). `currentHead`, needed there, comes off the SAME
+ * data already fetched for `findings` above (`wal.head` / `data.headOid`) — no extra forge call.
  */
 async function gatherFixupFindingRecord(
   state: State,
@@ -523,25 +531,30 @@ async function gatherFixupFindingRecord(
   worker: WorkerRow,
   pr: number,
   verdictRunId: string | undefined,
-): Promise<{ findings: FixupFindingRecordEntry[]; findingsTruncated: boolean; fixDiffPaths: string[]; fixDiffPathsTruncated: boolean }> {
+): Promise<FixupFindingRecord> {
   let rawFindings: FixupFindingRecordEntry[] = [];
+  let currentHead: string | null = null;
   try {
     if (verdictRunId !== undefined) {
       const wal = state.getEngineReviewWal(worker.name);
-      const artifact = wal?.runId === verdictRunId && wal.reviewArtifactJson ? parseEngineReviewArtifact(wal.reviewArtifactJson) : null;
-      if (artifact) {
-        rawFindings = artifact.findings.map((f) => ({
-          key: engineAgentFindingKey({
-            id: f.id,
+      if (wal?.runId === verdictRunId) {
+        currentHead = wal.head;
+        const artifact = wal.reviewArtifactJson ? parseEngineReviewArtifact(wal.reviewArtifactJson) : null;
+        if (artifact) {
+          rawFindings = artifact.findings.map((f) => ({
+            key: engineAgentFindingKey({
+              id: f.id,
+              ...(f.kind !== undefined ? { kind: f.kind } : {}),
+              ...(f.path !== undefined ? { path: f.path } : {}),
+            }).key,
+            severity: effectiveSeverity(f),
             ...(f.kind !== undefined ? { kind: f.kind } : {}),
-            ...(f.path !== undefined ? { path: f.path } : {}),
-          }).key,
-          severity: effectiveSeverity(f),
-          ...(f.kind !== undefined ? { kind: f.kind } : {}),
-        }));
+          }));
+        }
       }
     } else {
       const data = await forge.getPRReviewData(pr);
+      currentHead = data.headOid;
       rawFindings = (data.threads ?? [])
         .filter((t) => !t.isResolved)
         .map((t) => ({
@@ -553,22 +566,101 @@ async function gatherFixupFindingRecord(
     rawFindings = [];
   }
   const boundedFindings = boundRecords(rawFindings, MAX_FIXUP_FINDINGS);
-
-  let rawPaths: string[] = [];
-  try {
-    const changed = await forge.getPRChangedFiles(pr);
-    rawPaths = [...new Set(changed.files.map((f) => f.filename))];
-  } catch {
-    rawPaths = [];
-  }
-  const boundedPaths = boundRecords(rawPaths, MAX_FIXUP_DIFF_PATHS);
+  const diffPaths = await gatherFixDiffPaths(state, forge, worker.name, pr, currentHead);
 
   return {
     findings: boundedFindings.entries,
     findingsTruncated: boundedFindings.truncated,
-    fixDiffPaths: boundedPaths.entries,
-    fixDiffPathsTruncated: boundedPaths.truncated,
+    fixDiffPaths: diffPaths.paths,
+    fixDiffPathsTruncated: diffPaths.truncated,
+    fixDiffPathsUnavailable: diffPaths.unavailable,
+    head: currentHead,
   };
+}
+
+/**
+ * #449 gate② P1 fix (design #402 R2): `fixDiffPaths` — REWORKED after gate② review confirmed the
+ * shipped v1 was unusable for design §3b. That version used `IForge.getPRChangedFiles` (the PR's
+ * FULL base..head set) as a stand-in for "the preceding fix leg's own diff." Since R1 constrains
+ * every located finding's `path` to that SAME reviewed diff (`resolveFindingPath`,
+ * `finding-axes.ts`), `path ∈ fixDiffPaths` was true for essentially every located finding —
+ * §3b's `recurrence` and `marginal-complexity` rows both degenerate to "any surviving/new located
+ * finding ⇒ stall," erasing the "the code actually changed in between" boundary those rows exist
+ * to test. Failure direction: false-STALL escalation of productive lanes.
+ *
+ * The correct range is `(previous drive-fixup event's recorded `head`) .. currentHead` — exactly
+ * what the PRECEDING fix leg itself changed, via the NEW `IForge.compareChangedFiles` range
+ * primitive (`forge.ts`, unprotected; adding it here was gate②-pre-authorized beyond this issue's
+ * original file list). `state.lastDriveFixupEvent` is the id-ordered (never timestamp-based) read
+ * that finds that previous event.
+ *
+ * FAIL-NARROW, never a silent full-set fallback (the exact defect being fixed):
+ *  - No previous `drive-fixup` for this (worker, pr) — round 1: EXACT, not an approximation. The
+ *    "preceding leg" of a lane's first fix round IS the whole PR (the producer's original work),
+ *    so base..head (`getPRChangedFiles`) is the correct range, unchanged from v1's mechanism for
+ *    this one case only.
+ *  - A previous `drive-fixup` exists but carries no recorded `head` (a pre-#449-P1-fix event,
+ *    written before this field existed) — unavailable. No known range start; reproducing the
+ *    rejected full-set fallback here would just move the same defect one round later.
+ *  - The previous and current heads are IDENTICAL — a real, exact answer (`[]`, not unavailable):
+ *    a classic-path fix leg can resolve threads without pushing a commit (`DriveOutcome`'s own
+ *    doc), so two dispatches can legitimately share one head with zero paths between them.
+ *  - `compareChangedFiles`/`getPRChangedFiles` throws (404 on a force-pushed-away prior head,
+ *    network/rate-limit failure, ...) or returns `complete: false` (GitHub's own file-count
+ *    ceiling, #449 gate② P3a) — unavailable. A partial file list is worse than no list for
+ *    path-membership testing: it can silently omit the very path a finding needs to match.
+ *  - `currentHead` itself is unknown (`gatherFixupFindingRecord`'s own degrade) — unavailable,
+ *    trivially: there is no range to compute at all.
+ *
+ * `unavailable: true` always pairs with `paths: []` — downstream (design #402 R3), an empty,
+ * marked `fixDiffPaths` degrades that round's classifier to count-only convergence, the design's
+ * own sanctioned narrower direction (§3a's "accepted blind spot" for unlocated findings takes the
+ * identical shape), never a false signal in either direction.
+ */
+async function gatherFixDiffPaths(
+  state: State,
+  forge: IForge,
+  workerName: string,
+  pr: number,
+  currentHead: string | null,
+): Promise<{ paths: string[]; truncated: boolean; unavailable: boolean }> {
+  if (currentHead === null) return { paths: [], truncated: false, unavailable: true };
+  try {
+    const prev = state.lastDriveFixupEvent(workerName, pr);
+    let files: readonly PRChangedFile[];
+    let complete: boolean;
+    if (prev === null) {
+      const changed = await forge.getPRChangedFiles(pr);
+      files = changed.files;
+      complete = changed.complete;
+    } else if (prev.head === null) {
+      return { paths: [], truncated: false, unavailable: true };
+    } else if (prev.head === currentHead) {
+      return { paths: [], truncated: false, unavailable: false };
+    } else {
+      const compared = await forge.compareChangedFiles(prev.head, currentHead);
+      files = compared.files;
+      complete = compared.complete;
+    }
+    if (!complete) return { paths: [], truncated: false, unavailable: true };
+    const bounded = boundRecords(changedFilePaths(files), MAX_FIXUP_DIFF_PATHS);
+    return { paths: bounded.entries, truncated: bounded.truncated, unavailable: false };
+  } catch {
+    return { paths: [], truncated: false, unavailable: true };
+  }
+}
+
+/** #449 gate② P3b: both `filename` and `previousFilename` (renames) — a finding located on the
+ *  pre-rename path in an earlier round must still match. Same both-names inclusion
+ *  `review/instruction-path-escalation.ts`'s `matchedInstructionPaths` already applies to its own
+ *  changed-file reads. */
+function changedFilePaths(files: readonly PRChangedFile[]): string[] {
+  const paths = new Set<string>();
+  for (const f of files) {
+    paths.add(f.filename);
+    if (f.previousFilename !== undefined) paths.add(f.previousFilename);
+  }
+  return [...paths];
 }
 
 /** #383 round 2 (PM P2) + round 3 (Codex secondary review P2 x2): the events that end a
@@ -3331,6 +3423,16 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               break;
             }
             try {
+              // #449 gate② P2 fix (design #402 R2): gathered BEFORE startFixLeg, not after — the
+              // confirmed-spawn -> drive-fixup-append window is #457's `priorFixLegForVerdict`
+              // breaker's own durable memory boundary ("the breaker's one durable memory of 'this
+              // verdict already got its leg'"), and two live forge reads sitting in that window
+              // widened it from ~zero to real network-round-trip time: a crash there leaves a
+              // spawned leg + `fix-leg-started` on record with NO `drive-fixup` to follow it, so
+              // the breaker misses and a duplicate leg is admitted for the same verdict.
+              // gatherFixupFindingRecord never throws (see its own doc), so moving it here costs
+              // nothing on the error path below — only startFixLeg itself can land in the catch.
+              const findingRecord = await gatherFixupFindingRecord(state, forge, w, pr, outcome.verdictRunId);
               await startFixLeg(
                 { state, supervisor, renderFixPrompt: deps.fixLegResume.renderFixPrompt },
                 w,
@@ -3339,12 +3441,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
                 outcome.prescription,
               );
               // #457: the `verdictRunId` recorded here is what priorFixLegForVerdict matches on —
-              // the breaker's one durable memory of "this verdict already got its leg".
-              // #449 (design #402 R2): `findings`/`fixDiffPaths` gathered AFTER startFixLeg has
-              // already confirmed the spawn — a failure inside gatherFixupFindingRecord (it never
-              // throws; see its own doc) must not be mistaken by the catch below for a dispatch
-              // failure the row hasn't actually had.
-              const findingRecord = await gatherFixupFindingRecord(state, forge, w, pr, outcome.verdictRunId);
+              // the breaker's one durable memory of "this verdict already got its leg". Now a
+              // single synchronous call immediately after startFixLeg confirms the spawn — no
+              // intervening await, no widened crash window.
               state.appendEvent("drive-fixup", {
                 worker: w.name,
                 issue: w.issue,
@@ -3352,10 +3451,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
                 fixRounds: fixRounds + 1,
                 reason: outcome.reason,
                 ...(outcome.verdictRunId !== undefined ? { verdictRunId: outcome.verdictRunId } : {}),
+                ...(findingRecord.head !== null ? { head: findingRecord.head } : {}),
                 findings: findingRecord.findings,
                 ...(findingRecord.findingsTruncated ? { findingsTruncated: true as const } : {}),
                 fixDiffPaths: findingRecord.fixDiffPaths,
                 ...(findingRecord.fixDiffPathsTruncated ? { fixDiffPathsTruncated: true as const } : {}),
+                ...(findingRecord.fixDiffPathsUnavailable ? { fixDiffPathsUnavailable: true as const } : {}),
               });
               driven.push({ kind: "fixup", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
             } catch (e) {

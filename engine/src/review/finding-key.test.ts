@@ -162,6 +162,12 @@ test("#449: no PROTECTED_SUFFIXES source file contains this issue's new symbols 
     "gatherFixupFindingRecord",
     "FixupFindingRecordEntry",
     "finding-key",
+    // #449 gate② P1/P2 fix additions (loop/conductor.ts, forge/forge.ts, state/state.ts) — same
+    // guarantee, extended to the fix round's own new symbols.
+    "gatherFixDiffPaths",
+    "changedFilePaths",
+    "compareChangedFiles",
+    "lastDriveFixupEvent",
   ];
   for (const url of protectedFiles) {
     const source = readFileSync(url, "utf8");
@@ -169,4 +175,48 @@ test("#449: no PROTECTED_SUFFIXES source file contains this issue's new symbols 
       assert.doesNotMatch(source, new RegExp(symbol), `${url.pathname} unexpectedly references ${symbol}`);
     }
   }
+});
+
+// ── key grammar contract (#449 gate② P3c) ────────────────────────────────────────────────────
+// R3 (design #402's convergence classifier, #450) must extract a key's `path` segment to test
+// membership in `fixDiffPaths` — the persisted `drive-fixup` payload's finding entries are
+// `{key, severity, kind}`, no separate `path` field (issue #449's own payload shape). These tests
+// pin the EXACT string shapes so an innocent format tweak here cannot silently break that future
+// parse. Every shape asserted here is also what makes the disclosed cross-round id-collision
+// residual (unlocated keys) structurally harmless for recurrence: the unlocated tail can never be
+// mistaken for — or collide with — a real path segment.
+
+test("#449 gate② P3c: engineAgentFindingKey grammar is pinned — located key is exactly `engine-agent:<kind>:<path>`", () => {
+  assert.equal(engineAgentFindingKey({ id: "f1", kind: "security", path: "src/x.ts" }).key, "engine-agent:security:src/x.ts");
+  assert.equal(
+    engineAgentFindingKey({ id: "f1", path: "src/x.ts" }).key,
+    "engine-agent:unclassified:src/x.ts",
+    "kind absent -> the literal 'unclassified' token",
+  );
+});
+
+test("#449 gate② P3c: engineAgentFindingKey grammar is pinned — unlocated key is exactly `engine-agent:<kind>:«unlocated»:<id>`", () => {
+  assert.equal(engineAgentFindingKey({ id: "f1", kind: "security" }).key, "engine-agent:security:«unlocated»:f1");
+  assert.equal(engineAgentFindingKey({ id: "f1" }).key, "engine-agent:unclassified:«unlocated»:f1");
+});
+
+test("#449 gate② P3c: classicThreadFindingKey grammar is pinned — located key is exactly `classic:<path>:<findingDigest>`", () => {
+  assert.equal(classicThreadFindingKey({ id: "T1", path: "src/x.ts", findingDigest: "abc123" }).key, "classic:src/x.ts:abc123");
+});
+
+test("#449 gate② P3c: classicThreadFindingKey grammar is pinned — thread-id fallback is exactly `classic:thread:<id>`", () => {
+  assert.equal(classicThreadFindingKey({ id: "T1" }).key, "classic:thread:T1");
+  assert.equal(classicThreadFindingKey({ id: "T1", path: "src/x.ts", findingDigest: null }).key, "classic:thread:T1");
+  assert.equal(classicThreadFindingKey({ id: "T1", path: null, findingDigest: "abc" }).key, "classic:thread:T1");
+});
+
+test("#449 gate② P3c: the `«unlocated»` marker can never collide with a real path segment R3 would extract", () => {
+  // A real path from either grammar never contains the marker glyph, and the marker's own
+  // position (after the LAST colon-delimited path-shaped segment) makes it unambiguous even under
+  // a naive split(':') — R3 can therefore treat any key containing this literal substring as
+  // structurally unlocated without re-deriving `located` from the original finding.
+  const located = engineAgentFindingKey({ id: "f1", kind: "security", path: "src/x.ts" }).key;
+  const unlocated = engineAgentFindingKey({ id: "f1", kind: "security" }).key;
+  assert.doesNotMatch(located, /«unlocated»/);
+  assert.match(unlocated, /«unlocated»/);
 });
