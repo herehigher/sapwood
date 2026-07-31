@@ -1761,6 +1761,81 @@ test("tick DRIVE (#294) crash-rerun: a kill -9 between the hold observation and 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// #383 (F4): drive-queued steady-state dedupe. driveOne reports "queued" STATELESSLY on every
+// DRIVE pass a lane sits on a gate-pending outcome (it has no memory) — these tests are about
+// what conductor.ts DOES with that: dedupe the EVENT, not the signal (#169), the exact shape the
+// #294 hold-visibility tests above pin, applied to a second per-tick steady-state site.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("tick DRIVE (#383): a WAIT-gated lane ticked repeatedly with an UNCHANGED reason emits exactly ONE drive-queued", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW" };
+  const runTick = () => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await runTick();
+  await runTick();
+  await runTick();
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-queued"]);
+  assert.equal(events.length, 1, "steady-state re-emits nothing after the first observation");
+  assert.deepEqual(events[0]!.payload, { worker: "lane-a", issue: 2, pr: 55, reason: "gate-pending:WAIT_REVIEW" });
+  st.close();
+});
+
+test("tick DRIVE (#383): a reason CHANGE (e.g. a fresh review trigger swapping in) re-emits drive-queued", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW" };
+  const runTick = () => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  await runTick();
+  await runTick(); // steady-state — dedupes
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "review-triggered" };
+  await runTick();
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-queued"]);
+  assert.deepEqual(
+    events.map((e) => (e.payload as { reason: string }).reason),
+    ["gate-pending:WAIT_REVIEW", "review-triggered"],
+    "one append per REASON, not per tick",
+  );
+  st.close();
+});
+
+test("tick DRIVE (#383) crash-rerun: a kill -9 between the drive-queued observation and the next tick never double-emits (the durable event log IS the dedupe memory)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-queued-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const queued: DriveOutcome = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW" };
+    const before = new State(path);
+    seedDriving(before, "lane-a", 2, 55);
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = queued;
+    await tick({ now: realClock, forge: new FakeForge(), state: before, supervisor: new FakeSupervisor(), cfg: mkCfg(), mergeGate: gate });
+    assert.equal(before.eventsSince("1970-01-01T00:00:00.000Z", ["drive-queued"]).length, 1);
+    before.close(); // kill -9 — no in-memory dedupe flag survives this
+
+    // Reopen and re-tick against the STILL-queued PR. The rerun re-observes the identical
+    // reason; recognising it as already announced can only come from on-disk state.
+    const after = new State(path);
+    const gate2 = new FakeMergeGate();
+    gate2.outcomes[55] = queued;
+    await tick({ now: realClock, forge: new FakeForge(), state: after, supervisor: new FakeSupervisor(), cfg: mkCfg(), mergeGate: gate2 });
+    assert.equal(
+      after.eventsSince("1970-01-01T00:00:00.000Z", ["drive-queued"]).length,
+      1,
+      "exactly one drive-queued survives the restart — no duplicate for the same steady state",
+    );
+    after.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // #246: FIXABLE gate wiring — the DRIVE loop's own "fixable" branch (driveDecision's
 // FIXUP/ESCALATE refinement, fed by THIS lane's fix_rounds/cfg.lanes.prFixCap/round budget).
 // Seeds a `driving` row directly (seedDriving, defined below) and scripts the FakeMergeGate's
@@ -2304,6 +2379,134 @@ test("tick DRIVE (#246 C2): a run-level spend stop blocks a FIXUP dispatch — s
   assert.equal(r.driven[0]!.kind, "queued");
   assert.match((r.driven[0] as { reason: string }).reason, /fix-leg-admission-blocked:run-spend-stop/);
   st.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #383 (F30): fix-leg-dispatch-blocked steady-state dedupe — same paradigm and same fix as
+// drive-queued above, applied to the FIXUP admission-block branch. A real 90-minute llm park
+// measured 77 duplicate events (one unchanged blockReason) before this existed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("tick DRIVE (#383): a fix leg blocked by a human PAUSE sentinel, ticked repeatedly with the SAME blockReason, emits exactly ONE fix-leg-dispatch-blocked", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-fix-blocked-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55);
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+    writeFileSync(join(dir, "PAUSE"), "");
+    const runTick = () =>
+      tick({
+        now: realClock,
+        forge,
+        state: st,
+        supervisor: sup,
+        cfg: mkCfg(),
+        mergeGate: gate,
+        fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+      });
+    await runTick();
+    await runTick();
+    await runTick();
+    const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-dispatch-blocked"]);
+    assert.equal(events.length, 1, "steady-state re-emits nothing after the first observation");
+    assert.deepEqual(events[0]!.payload, { worker: "lane-a", issue: 2, pr: 55, blockReason: "paused" });
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick DRIVE (#383): a blockReason CHANGE (paused -> ceiling) re-emits fix-leg-dispatch-blocked", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-fix-blocked-change-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55);
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+    writeFileSync(join(dir, "PAUSE"), "");
+    await tick({
+      now: realClock,
+      forge,
+      state: st,
+      supervisor: sup,
+      cfg: mkCfg(),
+      mergeGate: gate,
+      fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+    });
+    rmSync(join(dir, "PAUSE"));
+    st.recordSpend("lane-earlier", 99, 500, new Date().toISOString()); // now over a tiny daily cap
+    await tick({
+      now: realClock,
+      forge,
+      state: st,
+      supervisor: sup,
+      cfg: mkCfg({ cost: { dailyBudgetUsd: 10 } }),
+      mergeGate: gate,
+      fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+    });
+    const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-dispatch-blocked"]);
+    assert.deepEqual(
+      events.map((e) => (e.payload as { blockReason: string }).blockReason),
+      ["paused", "ceiling"],
+      "one append per blockReason, not per tick",
+    );
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick DRIVE (#383) crash-rerun: a kill -9 between the fix-leg-dispatch-blocked observation and the next tick never double-emits (the durable event log IS the dedupe memory)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-fix-blocked-crash-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    writeFileSync(join(dir, "PAUSE"), "");
+    const fixable: DriveOutcome = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+    const before = new State(path);
+    seedDriving(before, "lane-a", 2, 55);
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = fixable;
+    await tick({
+      now: realClock,
+      forge: new FakeForge(),
+      state: before,
+      supervisor: new FakeSupervisor(),
+      cfg: mkCfg(),
+      mergeGate: gate,
+      fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+    });
+    assert.equal(before.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-dispatch-blocked"]).length, 1);
+    before.close(); // kill -9 — no in-memory dedupe flag survives this
+
+    // Reopen and re-tick against the STILL-blocked lane (PAUSE file untouched). The rerun
+    // re-observes the identical blockReason; recognising it as already announced can only come
+    // from on-disk state.
+    const after = new State(path);
+    const gate2 = new FakeMergeGate();
+    gate2.outcomes[55] = fixable;
+    await tick({
+      now: realClock,
+      forge: new FakeForge(),
+      state: after,
+      supervisor: new FakeSupervisor(),
+      cfg: mkCfg(),
+      mergeGate: gate2,
+      fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+    });
+    assert.equal(
+      after.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-dispatch-blocked"]).length,
+      1,
+      "exactly one fix-leg-dispatch-blocked survives the restart — no duplicate for the same steady state",
+    );
+    after.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("tick DRIVE (#246 C2): with EVERY admission gate clear and fixLegResume configured, a FIXUP dispatch proceeds normally (admission check is not a permanent regression)", async () => {

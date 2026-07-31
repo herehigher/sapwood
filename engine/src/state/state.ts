@@ -1974,6 +1974,51 @@ export class State {
     return { kind: row.kind, mode: p.mode ?? "", pr: p.pr ?? -1, head: p.head ?? "" };
   }
 
+  /** #383 (F4): the most recent `drive-queued` REASON recorded for `worker`'s (worker, pr) lane,
+   *  or null if none has ever been recorded — conductor.ts tick()'s dedup source for the
+   *  DRIVE-queued steady-state event, the same event-log-as-memory pattern `lastHoldEvent` and
+   *  `lastReviewerFallbackEvent` use above (#169/#294: dedupe the EVENT, not the signal).
+   *  driveOne reports "queued" STATELESSLY on every DRIVE pass a lane sits on a gate-pending
+   *  outcome — without this, an unchanged reason re-appends identically every tick (measured
+   *  ~30 appends in 600ms against a single WAIT-gated lane). Scoped to (worker, pr), not worker
+   *  alone, for the same reason `lastHoldEvent` is: a lane repointed to a new PR must not
+   *  inherit the prior PR's last-queued reason. */
+  lastDriveQueuedReason(worker: string, pr: number): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT payload FROM events
+         WHERE kind = 'drive-queued'
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.pr') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker, pr) as { payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { reason?: string };
+    return p.reason ?? null;
+  }
+
+  /** #383 (F30): the same dedup shape as `lastDriveQueuedReason`, for the
+   *  `fix-leg-dispatch-blocked` steady-state event — a real 90-minute llm park measured 77
+   *  duplicate events (one unchanged blockReason) before this existed. Keyed on the durable
+   *  payload's bare `blockReason` field (`paused`/`ceiling`/`park`/`run-spend-stop`), not the
+   *  FIXUP branch's own composed `fix-leg-admission-blocked:${blockReason}` string. Scoped to
+   *  (worker, pr) for the same lane-repointing reason `lastDriveQueuedReason` is. */
+  lastFixLegDispatchBlockedReason(worker: string, pr: number): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT payload FROM events
+         WHERE kind = 'fix-leg-dispatch-blocked'
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.pr') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker, pr) as { payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { blockReason?: string };
+    return p.blockReason ?? null;
+  }
+
   // ── Engine cost ceiling + kill switch (#14) ───────────────────────────────────────────
 
   /** Record a completed worker's terminal cost (from stream-json, worker.ts). Call exactly

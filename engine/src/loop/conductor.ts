@@ -2737,6 +2737,14 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // head, non-decisive, past both the silence threshold and any active failover window.
       // The PR label is the latch: once it lands, the next live gate read sees it and follows
       // the existing HUMAN -> gated-reentry path. This tick remains queued/driving.
+      //
+      // #383 evaluated this site for the same per-tick steady-state spam as drive-queued/
+      // fix-leg-dispatch-blocked and deliberately left it undeduped: unlike those two,
+      // `reviewSilenceDuration` (merge-driver.ts) itself returns null once `needsHumanLabelPresent`
+      // reads true on the NEXT freshly-fetched PR data — the label this branch just wrote closes
+      // the loop on its own, so the event is already transition-shaped by construction (one
+      // append per silence episode, contingent only on the addPRLabel write above succeeding),
+      // with no separate durable-log dedup needed.
       if (outcome.reviewSilenceEscalation) {
         const s = outcome.reviewSilenceEscalation;
         let labeled = false;
@@ -2821,14 +2829,31 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           // (shared with #246's fixLegResume-unwired degrade, C1) for the full rationale.
           driven.push(await escalateNeedsHuman(forge, state, cfg, w, pr, outcome.reason, iso));
           break;
-        case "queued":
+        case "queued": {
           // Stays driving — retried next tick. Covers gate-pending (WAIT), a review-unavailable
           // (rate-limit/timeout) signal (#13 requires the latter to queue, never skip/soften
           // gate②), and a freshly-posted review trigger (#55 P1-B "review-triggered" — the pin
           // was just recorded into State above; next tick re-reads it and proceeds to gating).
-          state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+          //
+          // #383 (F4): driveOne reports "queued" STATELESSLY on EVERY DRIVE pass that lands here
+          // (it has no memory), so an unconfirmed append-every-tick reappended the identical
+          // reason all the way through a lane's whole WAIT dwell — measured ~30 appends in 600ms
+          // against one WAIT-gated lane. Same paradigm as #294's pr-held/pr-released and #54's
+          // reviewer-fallback-* above: dedupe the EVENT, not the signal, against the durable log.
+          // Announce only when `reason` differs from the last drive-queued recorded for this
+          // (worker, pr) — steady state re-emits nothing, a reason change (e.g. a fresh review
+          // trigger swapping in) re-emits, and a kill -9 between the observation and the next
+          // tick re-reads the same durable answer and re-emits nothing either (the log IS the
+          // memory — no in-process flag to lose). #395/#405: this cannot regress the liveness
+          // watchdog — it samples the TUPLE (maxEventId, last_tick_at), and last_tick_at
+          // advances every tick regardless of what this branch appends (see watchdog.ts).
+          const lastQueuedReason = state.lastDriveQueuedReason(w.name, pr);
+          if (lastQueuedReason !== outcome.reason) {
+            state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+          }
           driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
           break;
+        }
         case "stopped":
           // produce-pr-and-stop: gates passed but the driver never merges. Stays driving so a
           // human sees it (sapwood status / the PR itself) and merges by hand.
@@ -2898,7 +2923,16 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             });
             if (admissionBlock != null) {
               const reason = `fix-leg-admission-blocked:${admissionBlock}`;
-              state.appendEvent("fix-leg-dispatch-blocked", { worker: w.name, issue: w.issue, pr, blockReason: admissionBlock });
+              // #383 (F30): same steady-state shape and same fix as drive-queued above — this
+              // branch re-evaluates every tick a lane stays blocked, and a real 90-minute llm
+              // park measured 77 duplicate events (2757-2833) for one unchanged blockReason.
+              // Announce only when blockReason differs from the last fix-leg-dispatch-blocked
+              // recorded for this (worker, pr); see drive-queued's own comment for the full
+              // event-log-as-memory/crash-rerun/watchdog rationale, identical here.
+              const lastBlockReason = state.lastFixLegDispatchBlockedReason(w.name, pr);
+              if (lastBlockReason !== admissionBlock) {
+                state.appendEvent("fix-leg-dispatch-blocked", { worker: w.name, issue: w.issue, pr, blockReason: admissionBlock });
+              }
               driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason });
               // #375 review round 1 (P1): ONLY a ceiling-caused block belongs in the observed
               // set the CEILING section's drain consults below — `paused`/`park`/`run-spend-stop`

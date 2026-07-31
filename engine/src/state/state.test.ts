@@ -420,6 +420,57 @@ test("lastHoldEvent (#294, Codex P2): scoped to (worker, pr) — a lane repointe
   s.close();
 });
 
+test("lastDriveQueuedReason (#383): none -> null; returns the LATEST reason for the right (worker, pr) only", () => {
+  const s = mem();
+  assert.equal(s.lastDriveQueuedReason("lane-a", 55), null);
+
+  s.appendEvent("pr-held", { worker: "lane-a", issue: 2, pr: 55 }); // unrelated kinds never match
+  assert.equal(s.lastDriveQueuedReason("lane-a", 55), null);
+
+  s.appendEvent("drive-queued", { worker: "lane-a", issue: 2, pr: 55, reason: "gate-pending:WAIT_REVIEW" });
+  s.appendEvent("drive-queued", { worker: "lane-b", issue: 3, pr: 56, reason: "gate-pending:WAIT_REVIEW" });
+  assert.equal(s.lastDriveQueuedReason("lane-a", 55), "gate-pending:WAIT_REVIEW");
+
+  // A later reason for the same (worker, pr) supersedes; lane-b's row is untouched.
+  s.appendEvent("drive-queued", { worker: "lane-a", issue: 2, pr: 55, reason: "review-triggered" });
+  assert.equal(s.lastDriveQueuedReason("lane-a", 55), "review-triggered");
+  assert.equal(s.lastDriveQueuedReason("lane-b", 56), "gate-pending:WAIT_REVIEW");
+  s.close();
+});
+
+test("lastDriveQueuedReason (#383): scoped to (worker, pr) — a lane repointed to a NEW PR never inherits the prior PR's last reason", () => {
+  const s = mem();
+  s.appendEvent("drive-queued", { worker: "lane-a", issue: 2, pr: 55, reason: "gate-pending:WAIT_REVIEW" });
+  assert.equal(s.lastDriveQueuedReason("lane-a", 72), null);
+  assert.equal(s.lastDriveQueuedReason("lane-a", 55), "gate-pending:WAIT_REVIEW"); // the old episode is still on record
+  s.close();
+});
+
+test("lastFixLegDispatchBlockedReason (#383): none -> null; returns the LATEST blockReason for the right (worker, pr) only", () => {
+  const s = mem();
+  assert.equal(s.lastFixLegDispatchBlockedReason("lane-a", 55), null);
+
+  s.appendEvent("drive-queued", { worker: "lane-a", issue: 2, pr: 55, reason: "x" }); // unrelated kinds never match
+  assert.equal(s.lastFixLegDispatchBlockedReason("lane-a", 55), null);
+
+  s.appendEvent("fix-leg-dispatch-blocked", { worker: "lane-a", issue: 2, pr: 55, blockReason: "paused" });
+  s.appendEvent("fix-leg-dispatch-blocked", { worker: "lane-b", issue: 3, pr: 56, blockReason: "paused" });
+  assert.equal(s.lastFixLegDispatchBlockedReason("lane-a", 55), "paused");
+
+  s.appendEvent("fix-leg-dispatch-blocked", { worker: "lane-a", issue: 2, pr: 55, blockReason: "ceiling" });
+  assert.equal(s.lastFixLegDispatchBlockedReason("lane-a", 55), "ceiling");
+  assert.equal(s.lastFixLegDispatchBlockedReason("lane-b", 56), "paused");
+  s.close();
+});
+
+test("lastFixLegDispatchBlockedReason (#383): scoped to (worker, pr) — a lane repointed to a NEW PR never inherits the prior PR's last blockReason", () => {
+  const s = mem();
+  s.appendEvent("fix-leg-dispatch-blocked", { worker: "lane-a", issue: 2, pr: 55, blockReason: "paused" });
+  assert.equal(s.lastFixLegDispatchBlockedReason("lane-a", 72), null);
+  assert.equal(s.lastFixLegDispatchBlockedReason("lane-a", 55), "paused"); // the old episode is still on record
+  s.close();
+});
+
 test("laneEventRecorded (#447): matches only the SAME kind for the SAME (worker, pr) — and once true, stays true", () => {
   const s = mem();
   assert.equal(s.laneEventRecorded("drive-human-merge-only", "lane-a", 55), false);
