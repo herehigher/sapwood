@@ -1566,13 +1566,24 @@ export async function escalatePark(
         `escalation threshold. There is NO probe for this episode: dispatch stays parked until an ` +
         `engine start observes the restart window drained (or the park is cleared by hand) — see ` +
         `docs/troubleshooting.md and docs/security.md (supervisor circuit-breaker prerequisite).`
-      : `sapwood: engine parked since ${park.enteredAt} due to a ${park.source} environment failure ` +
-        `(${park.reason}) — this has exceeded the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
-        `escalation threshold. The engine is still probing on a bounded exponential backoff and will ` +
-        `auto-resume dispatch on the first successful probe; this notification does not stop that. ` +
-        (suspendedRequeues > 0 ? `${suspendedRequeues} issue requeue(s) are held durably and will drain on resume. ` : "") +
-        `Informational only — no action is required unless the underlying outage is expected to ` +
-        `persist.`;
+      : park.source === "consecutive-stalls"
+        ? // #407: same probe-less honesty as the rapid-restart arm above — this episode's own
+          // clearing story (stall-breaker.ts: a graceful stop breaks the streak) must be the one
+          // the message promises. In practice the breaker escalates at trip time (its
+          // escalateLocally sets the latch), so this ladder only reaches it through an exotic
+          // latch loss — same residual as rapid-restart.
+          `sapwood: engine parked since ${park.enteredAt} — consecutive-stall breaker (${park.reason}). ` +
+          `This episode has now stood for over the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
+          `escalation threshold. There is NO probe for this episode: fix the recurring wedge, stop the ` +
+          `engine gracefully (SIGTERM), and start it again — a clean stop breaks the stall streak and ` +
+          `the next start resumes automatically. See docs/troubleshooting.md.`
+        : `sapwood: engine parked since ${park.enteredAt} due to a ${park.source} environment failure ` +
+          `(${park.reason}) — this has exceeded the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
+          `escalation threshold. The engine is still probing on a bounded exponential backoff and will ` +
+          `auto-resume dispatch on the first successful probe; this notification does not stop that. ` +
+          (suspendedRequeues > 0 ? `${suspendedRequeues} issue requeue(s) are held durably and will drain on resume. ` : "") +
+          `Informational only — no action is required unless the underlying outage is expected to ` +
+          `persist.`;
   const intended = escalationChannel(park.source, forgeParked);
   // P2-3 (PR #180 review): the event below records the channel ACTUALLY used — when the forge
   // comment fails and this degrades to the local fallback, the audit trail must say "local",

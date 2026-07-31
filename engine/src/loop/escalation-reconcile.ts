@@ -208,6 +208,14 @@ export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   //    detection event here would double-count the episode and give the reconciler a row no
   //    external merge/close/label-removal could ever resolve.
   //
+  // DELIBERATELY ABSENT (#407): `consecutive-stalls-detected` — the stall breaker
+  // (loop/stall-breaker.ts) reuses the rapid-restart shape verbatim, so the #431 ruling above
+  // applies verbatim too: its waiting-on-a-human state is carried by its durable
+  // `consecutive-stalls` park episode (row + park-escalated/park-resumed lifecycle + ESCALATION
+  // marker + `sapwood status`), the event carries no issue and applies no label, and its
+  // clearing story is the breaker's own (a later start observing the stall streak broken —
+  // stall-breaker.ts's module doc), never this table's label/close/merge reconciliation.
+  //
   // KNOWN, BOUNDED GAP (#295 review round 10, deferred to #404): frontend-design.md §3 also
   // flags two PREDICATE kinds — `reclaim-failed` when `payload.next` is not an automatic
   // continuation, and `reclaim-done` on its no-PR branch. They are attention items only for

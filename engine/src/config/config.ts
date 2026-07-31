@@ -884,6 +884,17 @@ const Liveness = z
     // tickIntervalSec default (60s) that's a 10-minute window with no progress at all —
     // comfortably longer than any healthy heartbeat cadence (hbMs defaults to 30s).
     watchdogTickMultiplier: z.number().positive().default(10),
+    // #407: the consecutive-stall breaker (loop/stall-breaker.ts) — the watchdog's OTHER half.
+    // The watchdog above diagnoses ONE stall (durable `engine-stalled` + nonzero exit, so a
+    // supervisor can restart); this threshold decides when restarting stops being the answer:
+    // once this many CONSECUTIVE runs have each ended in a self-diagnosed stall with no round
+    // closed anywhere between them (a deterministic wedge — the same bug re-wedging every
+    // restart), the next start parks autonomous dispatch and escalates to a human instead of
+    // blind-retrying forever. A transient wedge (host sleep, a passing outage) closes rounds
+    // between its stalls, which resets the streak — it never accumulates strikes. User-tunable
+    // per the config rule (never hardcoded); 3 gives a supervisor two honest retries before the
+    // breaker decides the wedge is deterministic.
+    maxConsecutiveStalls: z.number().int().positive().default(3),
   })
   .strict();
 

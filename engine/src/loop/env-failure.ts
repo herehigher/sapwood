@@ -21,6 +21,8 @@
 //    caller actually wired one (deps.probeLlmReachable); the forge probe always has a consumer
 //    (forge is a required TickDeps field), so it always runs.
 
+import type { ParkSource } from "../state/state.js";
+
 export type EnvFailureSource = "llm" | "forge";
 
 export interface EnvFailurePatterns {
@@ -236,9 +238,11 @@ export type EscalationChannel = "forge" | "local";
  * mixed storm, PR #180 review): then the forge is known-broken and the llm escalation degrades
  * to the local channel too, never attempting a doomed GitHub write.
  */
-export function escalationChannel(source: EnvFailureSource | "rapid-restart", forgeParked = false): EscalationChannel {
+export function escalationChannel(source: ParkSource, forgeParked = false): EscalationChannel {
   // #431: `rapid-restart` (state.ts's ParkSource, the crash-loop detector's episode) rides the
   // non-forge branch — an intact forge is still the preferred channel. In practice its episodes
   // carry no trigger issue, so escalatePark's own triggerIssue branch routes them local anyway.
+  // #407: `consecutive-stalls` (the stall breaker's episode) is the identical shape — no
+  // trigger issue, escalates locally at trip time — and rides the same branch.
   return source === "forge" || forgeParked ? "local" : "forge";
 }

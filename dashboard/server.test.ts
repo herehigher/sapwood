@@ -13,7 +13,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { State } from "../engine/src/state/state.js";
-import { allowlistedConfig, CONFIG_ALLOWLIST, createDashboardServer, deriveEngineState, type EngineFacts } from "./server.js";
+import {
+  allowlistedConfig,
+  CONFIG_ALLOWLIST,
+  createDashboardServer,
+  deriveEngineState,
+  type EngineFacts,
+  latestRunTerminal,
+} from "./server.js";
 
 // ── engine-state derivation (§8) ───────────────────────────────────────────────────────────
 
@@ -27,7 +34,13 @@ const FRESH: EngineFacts = {
   staleGapSec: 900,
   roundOpen: true,
   standbyWaiting: false,
+  terminal: null,
 };
+
+// #407: the three terminal shapes for the dead-engine truth table below.
+const STALE_TICK = "2026-07-24T11:00:00.000Z"; // an hour ago — past the 900s gap
+const CLEAN_STOP = { kind: "run-ended", payload: { stoppedBy: "signal" } } as const;
+const SELF_STALL = { kind: "engine-stalled", payload: { openRoundPhase: "executing", lastEventKind: "park-wait-heartbeat" } } as const;
 
 test("engine state: a ticking engine with an open round is running", () => {
   assert.equal(deriveEngineState(FRESH), "running");
@@ -68,6 +81,76 @@ test("engine state: the kill switch is stopping while lanes drain, stopped once 
 
 test("engine state: kill switch + stale stays stopped (truthful either way, §8)", () => {
   assert.equal(deriveEngineState({ ...FRESH, killSwitch: true, activeLanes: 0, lastTickAt: null }), "stopped");
+});
+
+// ── #407 (item 5): the dead-engine truth table — the stale branch partitions on the newest
+// run's terminal event instead of one undifferentiated "stalled" ──────────────────────────
+
+test("#407 engine state truth table: stale + run-ended is a CLEAN stop; stale + engine-stalled is a self-diagnosed stall; stale + no terminal is the bare crashed-or-killed stalled", () => {
+  assert.equal(deriveEngineState({ ...FRESH, lastTickAt: STALE_TICK, terminal: CLEAN_STOP }), "stopped");
+  assert.equal(deriveEngineState({ ...FRESH, lastTickAt: STALE_TICK, terminal: SELF_STALL }), "stalled");
+  assert.equal(deriveEngineState({ ...FRESH, lastTickAt: STALE_TICK, terminal: null }), "stalled");
+});
+
+test("#407 engine state: within the tick-age gap the terminal changes nothing — the derivation stays scoped to the stale branch (the issue's own scoping)", () => {
+  assert.equal(deriveEngineState({ ...FRESH, terminal: CLEAN_STOP }), "running");
+  assert.equal(deriveEngineState({ ...FRESH, terminal: SELF_STALL }), "running");
+});
+
+test("#407 engine state: a stopped engine with a PAUSE file renders stopped, not paused — same dead-beats-sentinel precedence as staleness-beats-PAUSE", () => {
+  assert.equal(deriveEngineState({ ...FRESH, pause: true, lastTickAt: STALE_TICK, terminal: CLEAN_STOP }), "stopped");
+});
+
+test("#407 engine state: KILL_SWITCH still outranks the terminal (a kill-switch stop is already truthfully stopped/stopping)", () => {
+  assert.equal(deriveEngineState({ ...FRESH, killSwitch: true, activeLanes: 2, lastTickAt: STALE_TICK, terminal: SELF_STALL }), "stopping");
+});
+
+test("#407 latestRunTerminal: newest of the run-lifecycle triple decides — run-started newest is null (alive or crashed), a terminal newest belongs to the newest run, restart resets to null", () => {
+  const fold = (kinds: [string, Record<string, unknown>][]) =>
+    latestRunTerminal({
+      eventsAfterId: (_after: number, _kinds: string[]) => kinds.map(([kind, payload]) => ({ kind, payload })),
+    });
+  assert.equal(fold([]), null, "an engine that has never run has no terminal");
+  assert.equal(fold([["run-started", {}]]), null, "no terminal yet — alive, or crashed");
+  assert.deepEqual(
+    fold([
+      ["run-started", {}],
+      ["run-ended", { stoppedBy: "signal" }],
+    ]),
+    {
+      kind: "run-ended",
+      payload: { stoppedBy: "signal" },
+    },
+  );
+  assert.deepEqual(
+    fold([
+      ["run-started", {}],
+      ["engine-stalled", { windowMs: 600000 }],
+    ]),
+    {
+      kind: "engine-stalled",
+      payload: { windowMs: 600000 },
+    },
+  );
+  assert.equal(
+    fold([
+      ["run-started", {}],
+      ["engine-stalled", { windowMs: 600000 }],
+      ["run-started", {}],
+    ]),
+    null,
+    "a restart opens a fresh run — the old terminal no longer describes the newest run",
+  );
+  assert.deepEqual(
+    fold([
+      ["run-started", {}],
+      ["run-ended", { stoppedBy: "once" }],
+      ["run-started", {}],
+      ["run-ended", { stoppedBy: "stop-condition", stopCondition: "afterIssuesMerged" }],
+    ]),
+    { kind: "run-ended", payload: { stoppedBy: "stop-condition", stopCondition: "afterIssuesMerged" } },
+    "the newest run's own terminal wins, never an older run's",
+  );
 });
 
 // ── config allowlist (§3 E) ────────────────────────────────────────────────────────────────
@@ -140,8 +223,9 @@ test("/api/loop/state matches the §8 shape against a seeded DB", async () => {
     const body = await getJson(fx, "/api/loop/state");
 
     assert.deepEqual(Object.keys(body).sort(), ["config", "engine", "lanes", "logPath", "rings", "round", "spend"]);
-    assert.deepEqual(Object.keys(body.engine).sort(), ["lastTickAt", "reasons", "state"]);
+    assert.deepEqual(Object.keys(body.engine).sort(), ["lastTickAt", "reasons", "state", "terminal"]);
     assert.deepEqual(body.engine.reasons, []);
+    assert.equal(body.engine.terminal, null, "#407: no terminal has been written for the newest run");
 
     assert.equal(body.lanes.max, 3);
     const [w1, w2] = body.lanes.items;
@@ -241,6 +325,22 @@ test("/api/loop/state round is null when no round is open", async () => {
   });
   try {
     assert.equal((await getJson(fx, "/api/loop/state")).round, null);
+  } finally {
+    fx.close();
+  }
+});
+
+test("#407 /api/loop/state serves the newest run's terminal event verbatim — the UI's reason for a dead engine", async () => {
+  const fx = await fixture((s) => {
+    s.appendEvent("run-started", { configHash: "h" });
+    s.appendEvent("run-ended", { stoppedBy: "stop-condition", stopCondition: "afterIssuesMerged" });
+  });
+  try {
+    const body = await getJson(fx, "/api/loop/state");
+    assert.deepEqual(body.engine.terminal, {
+      kind: "run-ended",
+      payload: { stoppedBy: "stop-condition", stopCondition: "afterIssuesMerged" },
+    });
   } finally {
     fx.close();
   }

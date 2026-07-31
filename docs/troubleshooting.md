@@ -225,6 +225,45 @@ prerequisite), fix the crash's cause, and start the engine once the window has d
 (`park-resumed`, `via: restart-window-clear`). No state surgery is needed; deleting the
 `park_state` row by hand also works but should never be necessary.
 
+## Consecutive-stalls park (#407)
+
+The progress watchdog ([configuration.md](configuration.md)'s `liveness.watchdogTickMultiplier`)
+diagnoses a *single* stall: it appends a durable `engine-stalled` event and exits nonzero so a
+supervisor can restart the engine. At startup the engine reads that record back: a restart after
+a stalled run appends `engine-restart-after-stall` and proceeds through the normal startup
+reconcile (rerun-not-resume — no manual step). But once the last `liveness.maxConsecutiveStalls`
+runs (default 3) have **all** ended stalled with **no round closed between them**, the wedge is
+deterministic — the same bug re-wedging every restart — and restarting again would loop forever.
+The engine then emits `consecutive-stalls-detected`, **parks** autonomous dispatch (the same park
+machinery as an environment failure — `PARKED (consecutive-stalls)` in `sapwood status`, plus
+`data/ESCALATION`), and stays up without dispatching.
+
+Recovery: diagnose the wedge — each `engine-stalled` event's payload names the open round/phase,
+the last event, and the tick age — and fix the cause. Then stop the parked engine **gracefully**
+(SIGTERM / Ctrl-C): the clean stop writes a `run-ended` terminal, which is what breaks the stall
+streak, and the next start clears the park automatically (`park-resumed`,
+`via: stall-streak-clear`). A `kill -9` deliberately does *not* clear it — a run that dies
+without a terminal is indistinguishable from another crash, so the park stands. Deleting the
+`park_state` row by hand also works but should never be necessary. A *transient* wedge (a host
+sleeping mid-round, a passing outage) closes rounds between its stalls and never trips the
+breaker at all.
+
+## How a dead engine says why it died (#407)
+
+Every run's fate is the **last run-lifecycle event** in the ledger after its `run-started`:
+
+- `run-ended` — a clean stop; the payload's `stoppedBy` names the path (`signal`, `once`,
+  `idle`, `stop-condition` + the condition's name, `kill-switch`, or `error` with the thrown
+  message).
+- `engine-stalled` — the watchdog self-diagnosed a stall and exited nonzero; the payload carries
+  the round/phase, last event, and tick age at fire time.
+- *neither* — the process died without getting to write anything: a crash, an OOM kill, or a
+  `kill -9`. The absence is itself the record.
+
+The dashboard derives its dead-engine state from exactly this partition (`stopped` with a
+reason / `stalled` with a reason / bare crashed-or-killed), so it and the ledger can never
+disagree.
+
 ## Where to look after an unattended run
 
 The run log (`logging.path`, default `data/logs/sapwood.log`) is the disposable human/LLM

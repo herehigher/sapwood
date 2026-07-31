@@ -47,6 +47,17 @@ const DEFAULT_PAGE_LIMIT = 500;
 
 export type EngineState = "running" | "standby" | "stalled" | "paused" | "winding-down" | "stopping" | "stopped";
 
+/** #407 (item 5): the newest run's terminal event, when it has one — how a dead engine finally
+ *  gets to say WHY it is dead. The engine writes exactly one terminal per controlled exit
+ *  (cli.ts's appendRunEnded doc): `run-ended` on a clean stop (payload: stoppedBy +
+ *  stopCondition?), `engine-stalled` when the watchdog self-diagnosed a stall (payload: the
+ *  fire-time enrichment — round/phase, last event, lastTickAt), and NOTHING on a crash/kill —
+ *  so a null here under a stale tick age honestly means "crashed or killed". */
+export interface RunTerminal {
+  kind: "run-ended" | "engine-stalled";
+  payload: Record<string, unknown>;
+}
+
 /** Everything §8's derivation reads, lifted out of the DB so the rules are unit-testable
  *  against synthetic sentinel/ceiling/PAUSE fixtures without a live engine. */
 export interface EngineFacts {
@@ -62,6 +73,9 @@ export interface EngineFacts {
   roundOpen: boolean;
   /** The newest standby-wait is newer than any standby-exit (#125: parked, healthy). */
   standbyWaiting: boolean;
+  /** #407: latestRunTerminal(state) — null while the newest run has no terminal yet (alive, or
+   *  crashed; the tick age decides which reading the derivation gives it). */
+  terminal: RunTerminal | null;
 }
 
 /** §8's engine-state derivation, verbatim, in its fixed precedence order:
@@ -75,12 +89,25 @@ export interface EngineFacts {
  *  outranks staleness: a stopped engine IS stale, and `stopped` is the truthful word for it.
  *
  *  An engine that has never ticked (`lastTickAt === null`) counts as stale — the fail-honest
- *  direction: nothing is ticking, so nothing may render green. */
+ *  direction: nothing is ticking, so nothing may render green.
+ *
+ *  #407 (item 5): the stale branch now consults the newest run's terminal event (RunTerminal) to
+ *  partition the three dead-engine states instead of one undifferentiated `stalled`:
+ *    - `run-ended` -> "stopped": a CLEAN stop, with the stop reason in the terminal payload;
+ *    - `engine-stalled` -> "stalled", now with the watchdog's reason payload attached;
+ *    - no terminal -> the bare "stalled" of old, now honestly meaning "crashed or killed" —
+ *      the engine died without getting to write anything, and that absence IS the record.
+ *  Deliberately INSIDE the staleness branch only (the issue's own scoping): a just-stopped
+ *  engine keeps its existing within-gap rendering until the tick age crosses the same threshold
+ *  every other dead-engine reading already waits for. */
 export function deriveEngineState(f: EngineFacts): EngineState {
   if (f.killSwitch) return f.activeLanes > 0 ? "stopping" : "stopped";
   if (f.ceilingBreach) return "winding-down";
   const tickAgeSec = f.lastTickAt === null ? Number.POSITIVE_INFINITY : (f.now.getTime() - Date.parse(f.lastTickAt)) / 1000;
-  if (!(tickAgeSec <= f.staleGapSec)) return "stalled"; // NaN (unparseable timestamp) is stale too
+  if (!(tickAgeSec <= f.staleGapSec)) {
+    // NaN (unparseable timestamp) is stale too
+    return f.terminal?.kind === "run-ended" ? "stopped" : "stalled";
+  }
   if (f.pause) return "paused";
   if (!f.roundOpen && f.standbyWaiting) return "standby";
   return "running";
@@ -213,6 +240,21 @@ function standbyWaiting(state: State): boolean {
   return trail[trail.length - 1]?.kind === "standby-wait";
 }
 
+/** #407 (item 5): the newest run's terminal event, or null — the same last-event-wins fold shape
+ *  as standbyWaiting above, over the run-lifecycle triple. The trick that makes "since the last
+ *  run-started" a one-liner: after a terminal lands the process EXITS, so nothing else from that
+ *  run can follow it, and the next event of these kinds is necessarily the next run's own
+ *  `run-started` — the newest of the three therefore fully decides the newest run's fate:
+ *  `run-started` newest = no terminal yet (alive, or crashed — RunTerminal's doc), a terminal
+ *  newest = that terminal belongs to the newest run. All three kinds are once-per-process-life
+ *  rare, so the whole-history read stays cheap forever. Exported for the truth-table tests. */
+export function latestRunTerminal(state: Pick<State, "eventsAfterId">): RunTerminal | null {
+  const trail = state.eventsAfterId(0, ["run-started", "run-ended", "engine-stalled"]);
+  const last = trail[trail.length - 1];
+  if (last === undefined || last.kind === "run-started") return null;
+  return { kind: last.kind as RunTerminal["kind"], payload: (last.payload ?? {}) as Record<string, unknown> };
+}
+
 /** Read the live facts out of the DB + sentinels and derive §8's engine state word. Shared by
  *  `/api/loop/state` and `POST /api/control` (whose response is exactly this, read AFTER the
  *  signal lands — so the UI renders the real transition, never an optimistic flip). */
@@ -228,6 +270,7 @@ export function currentEngineState(state: State, cfg: SapwoodConfig | null, now:
     staleGapSec: heartbeatStaleGapSec(cfg?.engine.tickIntervalSec ?? 0),
     roundOpen: round !== undefined,
     standbyWaiting: standbyWaiting(state),
+    terminal: latestRunTerminal(state),
   });
 }
 
@@ -247,6 +290,15 @@ export function loopState(state: State, cfg: SapwoodConfig | null, now: Date): R
       // dashboard from surfacing an irrelevant budget/kill reason (Codex review P2).
       reasons: engineState === "winding-down" ? (breach?.reasons ?? []) : [],
       lastTickAt,
+      // #407 (item 5): the newest run's terminal event, verbatim — how the UI attaches a REASON
+      // to a dead engine. `run-ended` carries {stoppedBy, stopCondition?}; `engine-stalled`
+      // carries the watchdog's fire-time enrichment (round/phase, last event, lastTickAt);
+      // null = the newest run has written no terminal (alive — or, under a stale tick age,
+      // crashed/killed: the absence is the record, deriveEngineState's own doc). Served
+      // unconditionally (unlike `reasons` above) because it is a plain durable fact about the
+      // last run, not a claim about the CURRENT state — the UI gates its own rendering on
+      // `state` exactly as deriveEngineState does.
+      terminal: latestRunTerminal(state),
     },
     lanes: {
       max: cfg?.lanes.max ?? null, // null, never a fabricated 3, when the config is unreadable

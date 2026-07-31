@@ -37,6 +37,7 @@ import {
 } from "./loop/reconcile.js";
 import { type PeripheralPhase, type RoundStopHit, type RoundsResult, runRounds } from "./loop/round.js";
 import { createDefaultPeripherals } from "./loop/round-defaults.js";
+import { detectConsecutiveStalls } from "./loop/stall-breaker.js";
 import { createProxyMint } from "./proxy/mint.js";
 import { makeProductionEngineAgent } from "./review/production.js";
 import { MergeDriver } from "./roles/merge-driver.js";
@@ -505,11 +506,14 @@ export function formatStatus(s: StatusSnapshot): string {
       // reads this string's duration (they assert the park's own fields, not the rendered "Ns").
       const durationSec = Math.max(0, Math.floor((Date.now() - Date.parse(p.enteredAt)) / 1000));
       // #431: a rapid-restart episode has NO probe — its clearing story is different, and the
-      // status line must not promise probing that will never happen.
+      // status line must not promise probing that will never happen. #407: consecutive-stalls
+      // is the same probe-less shape with its own clearing story (stall-breaker.ts's doc).
       const recovery =
         p.source === "rapid-restart"
           ? "clears on a later start outside the restart window (docs/troubleshooting.md)"
-          : "probing on backoff, auto-resumes on recovery";
+          : p.source === "consecutive-stalls"
+            ? "clears on a later start after a graceful stop breaks the stall streak (docs/troubleshooting.md)"
+            : "probing on backoff, auto-resumes on recovery";
       lines.push(
         `park: PARKED (${p.source}) since ${p.enteredAt} (${durationSec}s) — ` +
           `reason: ${p.reason} — no new dispatch; in-flight lanes proceed normally; ` +
@@ -1128,6 +1132,30 @@ interface LockTakeoverRecord {
   previousPid: number | null;
 }
 
+/** #407 (item 1): the run boundary's CLOSING bracket — `run-ended`, appended on every exit path
+ *  the process itself controls, so together with the watchdog's `engine-stalled` the three
+ *  dead-engine states partition cleanly for any later reader (the dashboard's
+ *  latestRunTerminal, the stall breaker's streak fold):
+ *    - `run-ended` newest since `run-started`  -> a CLEAN stop (payload names stoppedBy — the
+ *      driver's own StopReason/RoundsResult value: signal / once / idle / stop-condition /
+ *      kill-switch — plus the stop condition's name when one fired, and `error` + its message
+ *      when a thrown startup/driver error is exiting the run through cli.ts's catch);
+ *    - `engine-stalled` newest -> the watchdog self-diagnosed a stall and called process.exit
+ *      DIRECTLY from its timer, which skips every pending finally/catch in the suspended driver
+ *      frames — so no `run-ended` can follow it, by construction, not by convention;
+ *    - NEITHER -> a crash or kill (SIGKILL, OOM): the process never got to write anything, and
+ *      that ABSENCE is itself the meaningful record — "this engine died without knowing why",
+ *      which is exactly what the dashboard renders as its bare `stalled`/crashed state.
+ *  Best-effort by design: a failed append (the disk dying at exit) must never mask the run's own
+ *  result or exit code — the absence then reads as a crash, which is the honest degradation. */
+function appendRunEnded(state: Pick<State, "appendEvent">, payload: Record<string, unknown>, log: (message: string) => void): void {
+  try {
+    state.appendEvent("run-ended", payload);
+  } catch (error) {
+    log(`[sapwood:run] run-ended append failed (non-fatal — the exit proceeds): ${String(error)}`);
+  }
+}
+
 /** The M4 tick-driver path (`driver.ts`'s `runDriver`) — unchanged behavior, kept reachable via
  *  `engine.driver: tick` (#106's explicit escape hatch) now that the round orchestrator
  *  (runRoundsEngine below) is the default. */
@@ -1160,112 +1188,140 @@ async function runTickEngine(
   // undisturbed). A trip parks autonomous dispatch via the existing park paradigm; startup
   // itself continues (reconcile passes are engine hygiene, not dispatch).
   detectRapidRestart(state, cfg, systemClock, log);
-  const forge = overrides.forge ?? new GithubForge(cfg);
-  // #253: the tick driver's TickDeps.fixLegResume — undefined (no handle/listener/token/journal
-  // write/argv change on any production session — see buildTickFixLegResume's own doc for the
-  // exact observable guarantee) unless cfg.proxy is in its production-attach state (enabled:
-  // true, shadow: false).
-  const fixLegResume = buildTickFixLegResume(cfg, forge, state, renderFixPrompt, systemClock, log);
-  const engineReviewRunner =
-    cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state, now: systemClock }) : null;
-  const engineAgent = engineReviewRunner
-    ? makeProductionEngineAgent(cfg, forge, state, engineReviewRunner, {
-        now: systemClock,
-        ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
-      })
-    : null;
-  const reviewer = engineAgent?.reviewer ?? makeReviewer(cfg);
-  // #54: the ordered reviewer-failover chain (cfg.reviewer.fallback) — empty by default, in
-  // which case MergeDriver.driveOne behaves exactly as before this existed.
-  const fallbackReviewers = makeFallbackReviewers(cfg);
-  const mergeGate = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers });
-  const supervisor = new WorkerSupervisor({
-    cfg,
-    log,
-    now: systemClock,
-    // #377: lane->PR association keyed on the lane's own branch + the engine-authored PR-owner
-    // marker (forge.ts's associateLanePr) — never a PR body's prose mention of the issue number,
-    // which is what handed lane-294 a stranger's PR in the 2026-07-24 F15 case.
-    lanePr: buildLanePrAssociator(forge, log),
-    renderPrompt,
-    // #244 (Codex sol-high PR #260 review round 2, P2): wires the durable `proxy-mint-failed`
-    // event into the REAL tick-driver run — without this, a mint failure on a live proxy-
-    // attached leg (no shipped caller attaches one yet, but the observability must be live the
-    // instant one does) would only ever reach a log line, never the queryable state event
-    // WorkerDeps.state's own doc promises.
-    state,
-  });
-  const stopMode = parseRunStopMode(argv);
-  const stop = resolveStopConfig(argv, cfg);
-  // #76: same fail-fast stance as buildRenderPrompt above — a typo'd milestone goal must abort
-  // startup with zero dispatch, not silently stop the run after the first wave of workers.
-  await assertStopMilestoneExists(forge, stop);
-  await normalizeUnplacedBoardItems(forge, state, log);
-  // #379 F1: same best-effort startup-pass stance as the board normalization above — provisions
-  // any workflow label this repo is missing so the round's own label writes can land.
-  await reconcileWorkflowLabels(forge, state, cfg, log);
-  // #410 amendment: same best-effort startup-pass stance as the board normalization above —
-  // detects, never blocks, never mutates.
-  checkWebAccessSettingsDenial(cfg, state, log);
-  await reconcileStartup(forge, state, cfg, log);
-  // #391 F19: same best-effort startup pass — correct the gated-reentry marker on lanes whose
-  // hold label is observably live, so removing that label is the only manual step a human needs.
-  await auditGatedEscalationFlags(forge, state, cfg, log);
-  // #447 F28 residual: same best-effort startup pass, deliberately AFTER the F19 audit — a lane
-  // whose hold label is live has just been handed back to gated reentry, so it is already out of
-  // this pass's candidate set and only the never-escalated ones remain. A restart DURING a park
-  // episode revives nothing: the episode is durable, and the pass suspends itself on it exactly
-  // as the tick does (PR #463 round 2).
-  await reviveEnvFailedPrLanes(forge, state, cfg, log);
-  sweepStaleRoleSessions(state, {
-    log,
-    ...(overrides.roleRunnerDeps?.stateDir !== undefined ? { stateDir: overrides.roleRunnerDeps.stateDir } : {}),
-    ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
-  });
-  log(`[sapwood:run] driver=tick tickIntervalSec=${cfg.engine.tickIntervalSec} stopMode=${stopMode}`);
-  // NOTE: roundSpendUsd (the per-round hard budget gate, cfg.cost.roundBudgetUsd) is left at
-  // its TickDeps default (0, i.e. never over-budget) — computing a live "this round's spend"
-  // figure needs a round-tracking concept (nextRoundId exists as a pure helper but nothing
-  // wires it to a live round yet) that predates this PR and isn't part of #46's scope. The
-  // engine-wide daily/wall-clock/kill-switch ceiling (cfg.cost.dailyBudgetUsd /
-  // maxWallClockSec / KILL_SWITCH) is fully live regardless — that's the actual hard safety
-  // boundary; roundBudgetUsd is a softer per-round throttle.
-  // #168 (P1-1 amendment): the real LLM-source park probe — a minimal inference ping on the
-  // cheapest model (worker.ts's probeLlmPing), resolved against the SAME claude binary
-  // WorkerSupervisor's dispatch() would use. The rich {ok, detail} result flows into the
-  // park-probe event so a failing probe names its own cause.
-  const probeLlmReachable = () =>
-    probeLlmPing(
-      discoverClaudeBin(process.env),
-      cfg.envFailure.probeModel,
-      cfg.envFailure.probeMaxBudgetUsd,
-      cfg.envFailure.probeTimeoutSec,
+  // #407: the stall breaker — the SAME placement pattern as the rapid-restart detector above
+  // (strictly after the run boundary, same park paradigm on a trip, startup itself continues),
+  // reading back whether the PREVIOUS run ended in a watchdog stall and whether the streak has
+  // reached liveness.maxConsecutiveStalls. See stall-breaker.ts's own doc.
+  detectConsecutiveStalls(state, cfg, systemClock, log);
+  // #407 (item 1): everything from here to process exit sits inside this run's open boundary, so
+  // EVERY path out of it must close the bracket with exactly one `run-ended` — the success path
+  // below, or the catch (a thrown startup pass / driver error, exiting through main()'s own
+  // exit(1)). The two paths that must NOT reach the catch stay out by construction: the watchdog
+  // exits via process.exit from its own timer (no unwinding, `engine-stalled` is its terminal),
+  // and a hard kill unwinds nothing at all (the ABSENCE is the record — appendRunEnded's doc).
+  try {
+    const forge = overrides.forge ?? new GithubForge(cfg);
+    // #253: the tick driver's TickDeps.fixLegResume — undefined (no handle/listener/token/journal
+    // write/argv change on any production session — see buildTickFixLegResume's own doc for the
+    // exact observable guarantee) unless cfg.proxy is in its production-attach state (enabled:
+    // true, shadow: false).
+    const fixLegResume = buildTickFixLegResume(cfg, forge, state, renderFixPrompt, systemClock, log);
+    const engineReviewRunner =
+      cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state, now: systemClock }) : null;
+    const engineAgent = engineReviewRunner
+      ? makeProductionEngineAgent(cfg, forge, state, engineReviewRunner, {
+          now: systemClock,
+          ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
+        })
+      : null;
+    const reviewer = engineAgent?.reviewer ?? makeReviewer(cfg);
+    // #54: the ordered reviewer-failover chain (cfg.reviewer.fallback) — empty by default, in
+    // which case MergeDriver.driveOne behaves exactly as before this existed.
+    const fallbackReviewers = makeFallbackReviewers(cfg);
+    const mergeGate = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers });
+    const supervisor = new WorkerSupervisor({
+      cfg,
+      log,
+      now: systemClock,
+      // #377: lane->PR association keyed on the lane's own branch + the engine-authored PR-owner
+      // marker (forge.ts's associateLanePr) — never a PR body's prose mention of the issue number,
+      // which is what handed lane-294 a stranger's PR in the 2026-07-24 F15 case.
+      lanePr: buildLanePrAssociator(forge, log),
+      renderPrompt,
+      // #244 (Codex sol-high PR #260 review round 2, P2): wires the durable `proxy-mint-failed`
+      // event into the REAL tick-driver run — without this, a mint failure on a live proxy-
+      // attached leg (no shipped caller attaches one yet, but the observability must be live the
+      // instant one does) would only ever reach a log line, never the queryable state event
+      // WorkerDeps.state's own doc promises.
+      state,
+    });
+    const stopMode = parseRunStopMode(argv);
+    const stop = resolveStopConfig(argv, cfg);
+    // #76: same fail-fast stance as buildRenderPrompt above — a typo'd milestone goal must abort
+    // startup with zero dispatch, not silently stop the run after the first wave of workers.
+    await assertStopMilestoneExists(forge, stop);
+    await normalizeUnplacedBoardItems(forge, state, log);
+    // #379 F1: same best-effort startup-pass stance as the board normalization above — provisions
+    // any workflow label this repo is missing so the round's own label writes can land.
+    await reconcileWorkflowLabels(forge, state, cfg, log);
+    // #410 amendment: same best-effort startup-pass stance as the board normalization above —
+    // detects, never blocks, never mutates.
+    checkWebAccessSettingsDenial(cfg, state, log);
+    await reconcileStartup(forge, state, cfg, log);
+    // #391 F19: same best-effort startup pass — correct the gated-reentry marker on lanes whose
+    // hold label is observably live, so removing that label is the only manual step a human needs.
+    await auditGatedEscalationFlags(forge, state, cfg, log);
+    // #447 F28 residual: same best-effort startup pass, deliberately AFTER the F19 audit — a lane
+    // whose hold label is live has just been handed back to gated reentry, so it is already out of
+    // this pass's candidate set and only the never-escalated ones remain. A restart DURING a park
+    // episode revives nothing: the episode is durable, and the pass suspends itself on it exactly
+    // as the tick does (PR #463 round 2).
+    await reviveEnvFailedPrLanes(forge, state, cfg, log);
+    sweepStaleRoleSessions(state, {
+      log,
+      ...(overrides.roleRunnerDeps?.stateDir !== undefined ? { stateDir: overrides.roleRunnerDeps.stateDir } : {}),
+      ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
+    });
+    log(`[sapwood:run] driver=tick tickIntervalSec=${cfg.engine.tickIntervalSec} stopMode=${stopMode}`);
+    // NOTE: roundSpendUsd (the per-round hard budget gate, cfg.cost.roundBudgetUsd) is left at
+    // its TickDeps default (0, i.e. never over-budget) — computing a live "this round's spend"
+    // figure needs a round-tracking concept (nextRoundId exists as a pure helper but nothing
+    // wires it to a live round yet) that predates this PR and isn't part of #46's scope. The
+    // engine-wide daily/wall-clock/kill-switch ceiling (cfg.cost.dailyBudgetUsd /
+    // maxWallClockSec / KILL_SWITCH) is fully live regardless — that's the actual hard safety
+    // boundary; roundBudgetUsd is a softer per-round throttle.
+    // #168 (P1-1 amendment): the real LLM-source park probe — a minimal inference ping on the
+    // cheapest model (worker.ts's probeLlmPing), resolved against the SAME claude binary
+    // WorkerSupervisor's dispatch() would use. The rich {ok, detail} result flows into the
+    // park-probe event so a failing probe names its own cause.
+    const probeLlmReachable = () =>
+      probeLlmPing(
+        discoverClaudeBin(process.env),
+        cfg.envFailure.probeModel,
+        cfg.envFailure.probeMaxBudgetUsd,
+        cfg.envFailure.probeTimeoutSec,
+      );
+    const result = await runDriver({
+      forge,
+      state,
+      supervisor,
+      cfg,
+      mergeGate,
+      now: systemClock,
+      tickIntervalSec: cfg.engine.tickIntervalSec,
+      stopMode,
+      stop,
+      probeLlmReachable,
+      log,
+      ...(fixLegResume !== undefined ? { fixLegResume } : {}),
+      ...(engineAgent !== null ? { engineAgentDriveDeps: engineAgent.driveDepsForLane } : {}),
+      onTick: (result) => {
+        log(formatTickSummary(result));
+        overrides.onTick?.(result);
+      },
+    });
+    // #76: name the condition that fired BEFORE the generic stop-summary line, when one did.
+    if (result.stopCondition) {
+      log(formatStopConditionLine(result.stopCondition));
+    }
+    log(`[sapwood:run] stopped after ${result.ticks} tick(s), ${result.tickErrors} tick error(s) (${result.stoppedBy})`);
+    // #407 (item 1): the clean-exit terminal — stoppedBy is driver.ts's own StopReason verbatim;
+    // stopCondition names the goal that fired, when one did (with --once the hit is named but
+    // stoppedBy stays "once" — runDriver's own contract, mirrored here unchanged).
+    appendRunEnded(
+      state,
+      { stoppedBy: result.stoppedBy, ...(result.stopCondition !== undefined ? { stopCondition: result.stopCondition.name } : {}) },
+      log,
     );
-  const result = await runDriver({
-    forge,
-    state,
-    supervisor,
-    cfg,
-    mergeGate,
-    now: systemClock,
-    tickIntervalSec: cfg.engine.tickIntervalSec,
-    stopMode,
-    stop,
-    probeLlmReachable,
-    log,
-    ...(fixLegResume !== undefined ? { fixLegResume } : {}),
-    ...(engineAgent !== null ? { engineAgentDriveDeps: engineAgent.driveDepsForLane } : {}),
-    onTick: (result) => {
-      log(formatTickSummary(result));
-      overrides.onTick?.(result);
-    },
-  });
-  // #76: name the condition that fired BEFORE the generic stop-summary line, when one did.
-  if (result.stopCondition) {
-    log(formatStopConditionLine(result.stopCondition));
+    return runExitCode(result, stopMode);
+  } catch (error) {
+    // #407 (item 1): a thrown startup pass / driver error still exits THROUGH the process's own
+    // control (main()'s catch -> exit 1) — a controlled failure, not a crash, so it closes the
+    // run boundary too, with the error preserved. Best-effort: appendRunEnded never masks the
+    // real error below.
+    appendRunEnded(state, { stoppedBy: "error", error: String(error) }, log);
+    throw error;
   }
-  log(`[sapwood:run] stopped after ${result.ticks} tick(s), ${result.tickErrors} tick error(s) (${result.stoppedBy})`);
-  return runExitCode(result, stopMode);
 }
 
 /** #106: the round-orchestrator path (`round.ts`'s `runRounds`), wired with the REAL default
@@ -1303,135 +1359,154 @@ async function runRoundsEngine(
   // undisturbed). A trip parks autonomous dispatch via the existing park paradigm; startup
   // itself continues (reconcile passes are engine hygiene, not dispatch).
   detectRapidRestart(state, cfg, systemClock, log);
-  const forge = overrides.forge ?? new GithubForge(cfg);
-  const engineReviewRunner =
-    cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state, now: systemClock }) : null;
-  const engineAgent = engineReviewRunner
-    ? makeProductionEngineAgent(cfg, forge, state, engineReviewRunner, {
-        now: systemClock,
-        ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
-      })
-    : null;
-  const reviewer = engineAgent?.reviewer ?? makeReviewer(cfg);
-  const fallbackReviewers = makeFallbackReviewers(cfg);
-  const mergeGate = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers });
-  const supervisor = new WorkerSupervisor({
-    cfg,
-    log,
-    now: systemClock,
-    // #377: same branch+marker association as the tick driver above.
-    lanePr: buildLanePrAssociator(forge, log),
-    renderPrompt,
-    // #244 (Codex sol-high PR #260 review round 2, P2): same durable mint-failure observability
-    // as the tick-driver path above, wired into the round-orchestrator's own WorkerSupervisor.
-    state,
-  });
-  // #253: a default forge MCP proxy mint, shared by every peripheral role session this
-  // RoleRunner instance ever runs across the whole `sapwood run` (round 0 / phase "peripheral"
-  // is its own fixed SENTINEL audit identity, informational only — see buildTickFixLegResume's
-  // own doc for why this never claims a real (round, phase, attempt) tuple; peripheral role
-  // sessions have no single round at RoleRunner-construction time, unlike the round-scoped
-  // fix-loop mint below, which is built fresh per round). A per-session RoleSessionOpts.proxy
-  // (none of round-defaults.ts's stubs supply one today) would still win — see peripheral.ts's
-  // RoleRunnerDeps.defaultProxy doc.
-  //
-  // #253 review round 2 (H1, PM-narrowed three-state ruling — see buildTickFixLegResume's own
-  // doc for the full rationale): `enabled && !shadow` gates PRODUCTION ATTACHMENT here too — with
-  // `shadow: true` (the default once enabled), NO RoleRunner ever gets a defaultProxy, so no
-  // peripheral session anywhere holds a handle; the shadow guarantee is structural rather than a
-  // per-consumer effect check. Only `enabled: true, shadow: false` (the deliberate go-live flip)
-  // constructs one. `enabled: false` (the default): unchanged, today's behavior.
-  const defaultProxy =
-    cfg.proxy.enabled && !cfg.proxy.shadow
-      ? { mint: createProxyMint({ cfg, forge, state, roundId: 0, phase: "peripheral", now: systemClock, log }) }
-      : undefined;
-  const runner = new RoleRunner({
-    cfg,
-    ...overrides.roleRunnerDeps,
-    log,
-    state,
-    now: systemClock,
-    ...(defaultProxy !== undefined ? { defaultProxy } : {}),
-  });
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner, now: systemClock, log });
-  const stop = resolveStopConfig(argv, cfg);
-  // #76: same fail-fast stance as the tick driver — a typo'd milestone goal must abort startup
-  // with zero dispatch, checked here identically for the round path's own FINAL stop condition.
-  await assertStopMilestoneExists(forge, stop);
-  await normalizeUnplacedBoardItems(forge, state, log);
-  // #379 F1: same best-effort startup-pass stance as the board normalization above — provisions
-  // any workflow label this repo is missing so the round's own label writes can land.
-  await reconcileWorkflowLabels(forge, state, cfg, log);
-  // #410 amendment: same best-effort startup-pass stance as the board normalization above —
-  // detects, never blocks, never mutates.
-  checkWebAccessSettingsDenial(cfg, state, log);
-  await reconcileStartup(forge, state, cfg, log);
-  // #391 F19: same best-effort startup pass — correct the gated-reentry marker on lanes whose
-  // hold label is observably live, so removing that label is the only manual step a human needs.
-  await auditGatedEscalationFlags(forge, state, cfg, log);
-  // #447 F28 residual: same best-effort startup pass, deliberately AFTER the F19 audit — a lane
-  // whose hold label is live has just been handed back to gated reentry, so it is already out of
-  // this pass's candidate set and only the never-escalated ones remain. A restart DURING a park
-  // episode revives nothing: the episode is durable, and the pass suspends itself on it exactly
-  // as the tick does (PR #463 round 2).
-  await reviveEnvFailedPrLanes(forge, state, cfg, log);
-  sweepStaleRoleSessions(state, {
-    log,
-    ...(overrides.roleRunnerDeps?.stateDir !== undefined ? { stateDir: overrides.roleRunnerDeps.stateDir } : {}),
-    ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
-  });
-  log(`[sapwood:run] driver=rounds tickIntervalSec=${cfg.engine.tickIntervalSec}`);
-  // #168 (P1-1 amendment): same real LLM-source ping probe as the tick driver above.
-  const probeLlmReachable = () =>
-    probeLlmPing(
-      discoverClaudeBin(process.env),
-      cfg.envFailure.probeModel,
-      cfg.envFailure.probeMaxBudgetUsd,
-      cfg.envFailure.probeTimeoutSec,
+  // #407: the stall breaker — same placement pattern as the rapid-restart detector above; see
+  // runTickEngine's own comment and stall-breaker.ts's doc.
+  detectConsecutiveStalls(state, cfg, systemClock, log);
+  // #407 (item 1): the run boundary's closing bracket — same try/catch contract as
+  // runTickEngine's own comment above: every path out appends exactly one `run-ended`; the
+  // watchdog's process.exit and a hard kill stay out by construction.
+  try {
+    const forge = overrides.forge ?? new GithubForge(cfg);
+    const engineReviewRunner =
+      cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state, now: systemClock }) : null;
+    const engineAgent = engineReviewRunner
+      ? makeProductionEngineAgent(cfg, forge, state, engineReviewRunner, {
+          now: systemClock,
+          ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
+        })
+      : null;
+    const reviewer = engineAgent?.reviewer ?? makeReviewer(cfg);
+    const fallbackReviewers = makeFallbackReviewers(cfg);
+    const mergeGate = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers });
+    const supervisor = new WorkerSupervisor({
+      cfg,
+      log,
+      now: systemClock,
+      // #377: same branch+marker association as the tick driver above.
+      lanePr: buildLanePrAssociator(forge, log),
+      renderPrompt,
+      // #244 (Codex sol-high PR #260 review round 2, P2): same durable mint-failure observability
+      // as the tick-driver path above, wired into the round-orchestrator's own WorkerSupervisor.
+      state,
+    });
+    // #253: a default forge MCP proxy mint, shared by every peripheral role session this
+    // RoleRunner instance ever runs across the whole `sapwood run` (round 0 / phase "peripheral"
+    // is its own fixed SENTINEL audit identity, informational only — see buildTickFixLegResume's
+    // own doc for why this never claims a real (round, phase, attempt) tuple; peripheral role
+    // sessions have no single round at RoleRunner-construction time, unlike the round-scoped
+    // fix-loop mint below, which is built fresh per round). A per-session RoleSessionOpts.proxy
+    // (none of round-defaults.ts's stubs supply one today) would still win — see peripheral.ts's
+    // RoleRunnerDeps.defaultProxy doc.
+    //
+    // #253 review round 2 (H1, PM-narrowed three-state ruling — see buildTickFixLegResume's own
+    // doc for the full rationale): `enabled && !shadow` gates PRODUCTION ATTACHMENT here too — with
+    // `shadow: true` (the default once enabled), NO RoleRunner ever gets a defaultProxy, so no
+    // peripheral session anywhere holds a handle; the shadow guarantee is structural rather than a
+    // per-consumer effect check. Only `enabled: true, shadow: false` (the deliberate go-live flip)
+    // constructs one. `enabled: false` (the default): unchanged, today's behavior.
+    const defaultProxy =
+      cfg.proxy.enabled && !cfg.proxy.shadow
+        ? { mint: createProxyMint({ cfg, forge, state, roundId: 0, phase: "peripheral", now: systemClock, log }) }
+        : undefined;
+    const runner = new RoleRunner({
+      cfg,
+      ...overrides.roleRunnerDeps,
+      log,
+      state,
+      now: systemClock,
+      ...(defaultProxy !== undefined ? { defaultProxy } : {}),
+    });
+    const peripherals = createDefaultPeripherals({ forge, state, cfg, runner, now: systemClock, log });
+    const stop = resolveStopConfig(argv, cfg);
+    // #76: same fail-fast stance as the tick driver — a typo'd milestone goal must abort startup
+    // with zero dispatch, checked here identically for the round path's own FINAL stop condition.
+    await assertStopMilestoneExists(forge, stop);
+    await normalizeUnplacedBoardItems(forge, state, log);
+    // #379 F1: same best-effort startup-pass stance as the board normalization above — provisions
+    // any workflow label this repo is missing so the round's own label writes can land.
+    await reconcileWorkflowLabels(forge, state, cfg, log);
+    // #410 amendment: same best-effort startup-pass stance as the board normalization above —
+    // detects, never blocks, never mutates.
+    checkWebAccessSettingsDenial(cfg, state, log);
+    await reconcileStartup(forge, state, cfg, log);
+    // #391 F19: same best-effort startup pass — correct the gated-reentry marker on lanes whose
+    // hold label is observably live, so removing that label is the only manual step a human needs.
+    await auditGatedEscalationFlags(forge, state, cfg, log);
+    // #447 F28 residual: same best-effort startup pass, deliberately AFTER the F19 audit — a lane
+    // whose hold label is live has just been handed back to gated reentry, so it is already out of
+    // this pass's candidate set and only the never-escalated ones remain. A restart DURING a park
+    // episode revives nothing: the episode is durable, and the pass suspends itself on it exactly
+    // as the tick does (PR #463 round 2).
+    await reviveEnvFailedPrLanes(forge, state, cfg, log);
+    sweepStaleRoleSessions(state, {
+      log,
+      ...(overrides.roleRunnerDeps?.stateDir !== undefined ? { stateDir: overrides.roleRunnerDeps.stateDir } : {}),
+      ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
+    });
+    log(`[sapwood:run] driver=rounds tickIntervalSec=${cfg.engine.tickIntervalSec}`);
+    // #168 (P1-1 amendment): same real LLM-source ping probe as the tick driver above.
+    const probeLlmReachable = () =>
+      probeLlmPing(
+        discoverClaudeBin(process.env),
+        cfg.envFailure.probeModel,
+        cfg.envFailure.probeMaxBudgetUsd,
+        cfg.envFailure.probeTimeoutSec,
+      );
+    const result = await runRounds({
+      forge,
+      state,
+      supervisor,
+      cfg,
+      mergeGate,
+      now: systemClock,
+      ...(engineAgent !== null ? { engineAgentDriveDeps: engineAgent.driveDepsForLane } : {}),
+      tickIntervalSec: cfg.engine.tickIntervalSec,
+      peripherals,
+      // #212: restrict the executing phase's dispatch to this round's pool (round-defaults.ts's
+      // aligning wrapper always populates it, PO on or off — see selectRoundPool/AC7).
+      poolLabel: cfg.labels.roundPool,
+      stop,
+      probeLlmReachable,
+      log,
+      // #253: paired with cfg.proxy.enabled inside round.ts's own buildFixLegResume — see this
+      // function's own comment above for why the mint itself is built per-round, there, rather
+      // than passed in from here.
+      renderFixPrompt,
+      onTick: (tickResult) => {
+        log(formatTickSummary(tickResult));
+        overrides.onTick?.(tickResult);
+      },
+      ...(overrides.sleep !== undefined ? { sleep: overrides.sleep } : {}),
+      ...(overrides.registerSignals !== undefined ? { registerSignals: overrides.registerSignals } : {}),
+      onRoundPhase: (roundId, phase) => {
+        log(`[sapwood:round] round ${roundId}: phase ${phase} completed`);
+        overrides.onRoundPhase?.(roundId, phase);
+      },
+      onRoundStop: (roundId, hit) => {
+        log(`[sapwood:round] round ${roundId}: stop ${hit.name} (${hit.detail})`);
+        overrides.onRoundStop?.(roundId, hit);
+      },
+    });
+    if (result.stopCondition) {
+      log(formatStopConditionLine(result.stopCondition));
+    }
+    log(
+      `[sapwood:run] stopped after ${result.rounds} round(s), ${result.ticks} tick(s), ` +
+        `${result.tickErrors} tick error(s) (${result.stoppedBy})`,
     );
-  const result = await runRounds({
-    forge,
-    state,
-    supervisor,
-    cfg,
-    mergeGate,
-    now: systemClock,
-    ...(engineAgent !== null ? { engineAgentDriveDeps: engineAgent.driveDepsForLane } : {}),
-    tickIntervalSec: cfg.engine.tickIntervalSec,
-    peripherals,
-    // #212: restrict the executing phase's dispatch to this round's pool (round-defaults.ts's
-    // aligning wrapper always populates it, PO on or off — see selectRoundPool/AC7).
-    poolLabel: cfg.labels.roundPool,
-    stop,
-    probeLlmReachable,
-    log,
-    // #253: paired with cfg.proxy.enabled inside round.ts's own buildFixLegResume — see this
-    // function's own comment above for why the mint itself is built per-round, there, rather
-    // than passed in from here.
-    renderFixPrompt,
-    onTick: (tickResult) => {
-      log(formatTickSummary(tickResult));
-      overrides.onTick?.(tickResult);
-    },
-    ...(overrides.sleep !== undefined ? { sleep: overrides.sleep } : {}),
-    ...(overrides.registerSignals !== undefined ? { registerSignals: overrides.registerSignals } : {}),
-    onRoundPhase: (roundId, phase) => {
-      log(`[sapwood:round] round ${roundId}: phase ${phase} completed`);
-      overrides.onRoundPhase?.(roundId, phase);
-    },
-    onRoundStop: (roundId, hit) => {
-      log(`[sapwood:round] round ${roundId}: stop ${hit.name} (${hit.detail})`);
-      overrides.onRoundStop?.(roundId, hit);
-    },
-  });
-  if (result.stopCondition) {
-    log(formatStopConditionLine(result.stopCondition));
+    // #407 (item 1): the clean-exit terminal — stoppedBy is RoundsResult's own value verbatim
+    // (signal / stop-condition / kill-switch).
+    appendRunEnded(
+      state,
+      { stoppedBy: result.stoppedBy, ...(result.stopCondition !== undefined ? { stopCondition: result.stopCondition.name } : {}) },
+      log,
+    );
+    return roundsExitCode(result);
+  } catch (error) {
+    // #407 (item 1): same controlled-failure bracket as runTickEngine's own catch.
+    appendRunEnded(state, { stoppedBy: "error", error: String(error) }, log);
+    throw error;
   }
-  log(
-    `[sapwood:run] stopped after ${result.rounds} round(s), ${result.ticks} tick(s), ` +
-      `${result.tickErrors} tick error(s) (${result.stoppedBy})`,
-  );
-  return roundsExitCode(result);
 }
 
 /** #106 (gate② P2): the tick-only flags a rounds run must REJECT, not silently ignore. A user
