@@ -8256,3 +8256,35 @@ test("tick ceiling (#431 round 3, codex P2-1): the clear transition's WRITE ORDE
   );
   st.close();
 });
+
+test("tick PARK (#431 round 5, codex P1): an open NON-LLM park (rapid-restart) blocks the llm-canary exception — a green ping arms NO canary, claims nothing, spawns nothing", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"] }];
+  const sup = new FakeSupervisor();
+  const t0 = new Date("2026-07-14T00:00:00Z");
+  st.enterPark("llm", "rate_limit_error", 7, t0.toISOString());
+  // A faithful open rapid-restart episode (log fact + row mirror) — the codex repro's shape:
+  // both parks open, NO forge park, ping green.
+  st.appendEvent("rapid-restart-detected", { births: 5, windowSec: 600, maxBirths: 5, enteredAt: t0.toISOString() });
+  st.enterPark("rapid-restart", "5 engine starts within 600s (threshold 5) — crash loop suspected", null, t0.toISOString());
+  let pings = 0;
+  const r = await tick({
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    probeLlmReachable: async () => {
+      pings++;
+      return true;
+    },
+    now: () => new Date(t0.getTime() + 31_000), // past the base backoff — the ping runs
+  });
+  assert.equal(pings, 1, "the ping itself still runs (mixed-storm pacing behavior, unchanged)");
+  assert.deepEqual(forge.claimed, [], "codex repro claimed:[7] — must be zero claims");
+  assert.deepEqual(sup.dispatched, [], "codex repro spawned:[7] — must be zero spawns");
+  assert.equal(st.parkRow("llm")?.canaryWorker ?? null, null, "no canary armed while an independent non-llm park stands");
+  assert.equal(r.dispatched.filter((d) => d.kind === "dispatched").length, 0);
+  assert.ok(st.parkRow("rapid-restart") !== null, "the rapid-restart park stands throughout");
+  st.close();
+});

@@ -950,8 +950,10 @@ marker idempotency, output schema, escalation path) see
   `--match-head-commit` TOCTOU pin. Key decisions + deferrals in "M3 review gate + merge
   modes" above. ~~Live end-to-end merge-gate run moves to M4 with the loop driver.~~
 - **M4 — UX surface + CLI:** ✅ **loop driver delivered (#46, PR TBD):** `driver.ts`
-  runs `tick()` on `cfg.engine.tickIntervalSec`'s cadence (wired into `TickDeps` so the
-  wall-clock ceiling sees the real cadence, not its floor default), stops cleanly on
+  runs `tick()` on `cfg.engine.tickIntervalSec`'s cadence (then also wired into `TickDeps`
+  for the wall-clock ceiling's session-gap scaling; #431 later deleted that scaling — the
+  wall clock now anchors to in-memory process start and never reads the cadence, which
+  drives only the inter-tick sleep and the watchdog window), stops cleanly on
   SIGINT/SIGTERM after the in-flight tick (never mid-tick), and supports `--once` /
   `--until-idle` alongside the daemon default — `sapwood run [--once|--until-idle]` in
   `cli.ts`. Resumed per-leg cost is recorded directly in `State.recordSpend` (see M3
@@ -1072,7 +1074,8 @@ marker idempotency, output schema, escalation path) see
   enforced; the rate table is explicitly a hand-maintained snapshot (see `pricing.yaml`'s
   header), not a live pricing lookup. **Live end-to-end verification delivered (#46),
   closing M4:** on the sapwood repo itself, the driver ran at real cadence with the
-  wall-clock ceiling seeing it; gate② carried the issue's verification plan on every
+  then-current wall-clock ceiling seeing it (that cadence-fed session machinery was
+  deleted by #431 — the ceiling is per-process now); gate② carried the issue's verification plan on every
   review trigger; the **first autonomous conductor-merge** landed (PR #51 for issue
   #49 — TOCTOU-pinned, gated on CI green + an identity-gated, pin-fresh Codex
   verdict, lane→done, board→Done, driver exited idle); and a live kill-switch drill

@@ -31,6 +31,7 @@ import {
   evaluateCeiling,
   type FixLegResumeDeps,
   type MergeGate,
+  nonLlmParkOpen,
   probeForgeReachable,
   reconcileCeilingAnnouncements,
   type Supervisor,
@@ -1050,7 +1051,11 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         }
       }
 
-      const parkClearToOpen = !deps.state.isParked() || (llmGreenLight && deps.state.parkRow("forge") == null);
+      // #431 round 5 (codex P1): a green llm light clears the way ONLY when no independent
+      // non-llm park stands — the same shared source-agnostic guard as tick()'s canary arm
+      // (conductor.ts's nonLlmParkOpen; this used to check the forge row alone, so an open
+      // rapid-restart park could let this loop open a paid round).
+      const parkClearToOpen = !deps.state.isParked() || (llmGreenLight && !nonLlmParkOpen(deps.state));
       if (ceilingReasons.length === 0 && parkClearToOpen) return;
 
       // #374 review (Codex sol-high verify-pass finding 2, P2): about to actually sit out a wait

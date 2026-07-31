@@ -148,6 +148,20 @@ export function drainEscalationDue(breachAtIso: string, nowMs: number, drainWind
  *  absent — the switch has its own visibility and its own reasons row via drainThenEscalate. */
 const ANNOUNCEABLE_CEILINGS = ["daily-budget", "wall-clock"] as const;
 
+/** #431 round 5 (codex P1): is any park OTHER than the llm's own episode open? The llm-canary
+ *  exception — a green ping arming ONE canary in tick()'s PARK section, and the round-wait
+ *  loop's green-light clear — may bypass ONLY the llm episode itself: the canary exists to test
+ *  whether the LLM is back, and a round-open consumes LLM spend. Every other ParkSource
+ *  (forge, rapid-restart, and anything added later) is an INDEPENDENT "dispatch is parked"
+ *  fact that a canary spawn or a round open must respect. Deliberately source-AGNOSTIC
+ *  (`source !== "llm"`, never an enumerated deny-list): a future ParkSource blocks by default
+ *  and can never silently reopen this hole (the round-4 code checked the forge row alone, so
+ *  the rapid-restart park was bypassed by a green ping — codex's claimed:[7]/spawned:[7]
+ *  repro). Both call sites share this ONE definition. */
+export function nonLlmParkOpen(state: Pick<State, "parkedSources">): boolean {
+  return state.parkedSources().some((p) => p.source !== "llm");
+}
+
 /** #431 AC3 (F29, rounds 2-3): the reason-bearing breach narration — the F29 breach was
  *  INVISIBLE (the only signal was `park-wait-heartbeat {parked:false}`), so the ceiling-wait
  *  paths now keep a PER-REASON entered/cleared pair in the event log, exactly one transition
@@ -3411,9 +3425,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           state.bumpParkProbe("llm", iso());
         } else {
           // Ping green: pace the next check (touch, NOT bump — the exponent only grows on a
-          // FAILED outcome) and, forge permitting, arm exactly one canary for DISPATCH below.
+          // FAILED outcome) and arm exactly one canary for DISPATCH below — but ONLY when no
+          // independent non-llm park stands (#431 round 5, codex P1: this used to check the
+          // forge row alone, so an open rapid-restart park was bypassed by a green ping —
+          // see nonLlmParkOpen's own doc for the source-agnostic invariant).
           state.touchParkProbe("llm", iso());
-          if (state.parkRow("forge") == null) canaryBudget = 1;
+          if (!nonLlmParkOpen(state)) canaryBudget = 1;
         }
       }
     }

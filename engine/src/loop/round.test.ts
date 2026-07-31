@@ -4030,3 +4030,41 @@ test("runRounds (#431 round 4, codex finding 5): the ROUND-WAIT clear site's wri
   );
   st.close();
 });
+
+test("runRounds (#431 round 5, codex P1): the round-wait green-light clear respects a NON-LLM park — llm ping green + rapid-restart open keeps the loop waiting, no paid round ever opens", async () => {
+  const forge = new FakeForge();
+  forge.ready = [];
+  const state = new State(":memory:");
+  const t0 = "2026-07-24T00:00:00.000Z"; // old entered/probe stamps -> the llm probe is due every iteration
+  state.enterPark("llm", "quota exhausted", null, t0);
+  state.appendEvent("rapid-restart-detected", { births: 5, windowSec: 600, maxBirths: 5, enteredAt: t0 });
+  state.enterPark("rapid-restart", "crash loop suspected", null, t0);
+  let pings = 0;
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 6) stop(); // several wait iterations, then wind down
+  };
+  const deps = baseDeps({
+    forge,
+    state,
+    sleep,
+    tickIntervalSec: 1,
+    probeLlmReachable: async () => {
+      pings++;
+      return true; // ALWAYS green — under round-4 code this cleared the gate and opened round 2
+    },
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "round 1 only (its unconditional open) — the green light never cleared the gate");
+  assert.equal(state.getRound(2), undefined, "no paid round 2 while the rapid-restart park stands");
+  assert.ok(pings >= 1, "the llm probe genuinely ran green during the wait");
+  assert.ok(state.parkRow("rapid-restart") !== null, "the non-llm park stands throughout");
+  state.close();
+});
