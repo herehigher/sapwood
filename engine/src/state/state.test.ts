@@ -420,6 +420,41 @@ test("lastHoldEvent (#294, Codex P2): scoped to (worker, pr) — a lane repointe
   s.close();
 });
 
+test("laneEventRecorded (#447): matches only the SAME kind for the SAME (worker, pr) — and once true, stays true", () => {
+  const s = mem();
+  assert.equal(s.laneEventRecorded("drive-human-merge-only", "lane-a", 55), false);
+
+  s.appendEvent("drive-needs-human", { worker: "lane-a", issue: 2, pr: 55, labeled: 1 }); // bucket 1 never matches
+  assert.equal(s.laneEventRecorded("drive-human-merge-only", "lane-a", 55), false);
+
+  s.appendEvent("drive-human-merge-only", { worker: "lane-a", issue: 2, pr: 55, reason: "gate:HUMAN:instruction-path-change:x" });
+  assert.equal(s.laneEventRecorded("drive-human-merge-only", "lane-a", 55), true);
+  assert.equal(s.laneEventRecorded("drive-human-merge-only", "lane-b", 55), false, "another lane's PR number is not this lane's verdict");
+  assert.equal(s.laneEventRecorded("drive-human-merge-only", "lane-a", 72), false, "a repointed lane never inherits the prior PR's");
+  assert.equal(s.laneEventRecorded("lane-revival-terminal", "lane-a", 55), false, "kinds do not bleed into each other");
+
+  // One-way: no later event of any kind can un-record it (the loop never re-decides bucket 2).
+  s.appendEvent("lane-revived", { worker: "lane-a", issue: 2, pr: 55 });
+  assert.equal(s.laneEventRecorded("drive-human-merge-only", "lane-a", 55), true);
+  s.close();
+});
+
+test("upsertWorkerWithEvent (#447): row write and its event land together — a failing event write rolls the row back", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-a", issue: 2, session_id: "s", state: "failed", started_at: "t", ended_at: "t", pr: 55 });
+  s.upsertWorkerWithEvent({ ...s.getWorker("lane-a")!, state: "driving" }, "lane-revived", { worker: "lane-a", issue: 2, pr: 55 });
+  assert.equal(s.getWorker("lane-a")?.state, "driving");
+  assert.equal(s.eventsSince("1970-01-01T00:00:00.000Z", ["lane-revived"]).length, 1);
+
+  // A payload sqlite cannot store aborts the whole pair: the row must not move without its record.
+  assert.throws(() =>
+    s.upsertWorkerWithEvent({ ...s.getWorker("lane-a")!, state: "failed" }, "lane-revived", { bad: 1n as unknown as number }),
+  );
+  assert.equal(s.getWorker("lane-a")?.state, "driving", "rolled back — never the move without the event");
+  assert.equal(s.eventsSince("1970-01-01T00:00:00.000Z", ["lane-revived"]).length, 1);
+  s.close();
+});
+
 test("lastReviewerFallbackEvent (#54 R2): none -> null; returns the LATEST switch/revert for the right worker only", () => {
   const s = mem();
   assert.equal(s.lastReviewerFallbackEvent("lane-a"), null);

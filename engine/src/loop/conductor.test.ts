@@ -5052,6 +5052,34 @@ test("#397 AC2 lane shape: a failed worker + PR settling on a HUMAN-MERGE-ONLY v
   st.close();
 });
 
+test("#397 (PR #463 gate② P2): the bucket-2 verdict event is written BEFORE the terminal row — no crash window in which the row looks like env-failure residue with no verdict on record", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const gate = new FakeMergeGate();
+  seedRunning(st, "lane-ipe", 397);
+  sup.probes["lane-ipe"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 397 };
+  gate.outcomes[397] = { kind: "needs-human", pr: 397, reason: "gate:HUMAN:instruction-path-change:CLAUDE.md" };
+  forge.issueLabelsByIssue[397] = [];
+
+  // The row write is what a crash could truncate; the verdict #447's revival reads must already
+  // be on record by then, or that pass sees `failed` + PR + marker 0 with no verdict — the exact
+  // shape an env failure leaves — and re-drives the one lane #397 closed structurally.
+  let verdictOnRecordAtRowWrite: boolean | null = null;
+  const realUpsert = st.upsertWorker.bind(st);
+  st.upsertWorker = (row) => {
+    if (row.name === "lane-ipe" && row.state === "failed") {
+      verdictOnRecordAtRowWrite = st.laneEventRecorded("drive-human-merge-only", "lane-ipe", 397);
+    }
+    realUpsert(row);
+  };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(verdictOnRecordAtRowWrite, true, "the verdict was already durable when the terminal row landed");
+  assert.equal(st.getWorker("lane-ipe")?.state, "failed");
+  assert.equal(st.laneEventRecorded("drive-human-merge-only", "lane-ipe", 397), true);
+  st.close();
+});
+
 test("#397: the SAME lane shape with an ordinary bucket-1 verdict still escalates needs-human and stays gate-reclaimable — the split is by reason, not by lane shape", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
@@ -5370,6 +5398,90 @@ test("#168 P2-B auto-resume (forge): a successful probe clears the episode, but 
     [701],
   );
   assert.equal(r2.dispatched.filter((d) => d.kind === "dispatched").length, 1);
+  st.close();
+});
+
+test("#447 park-resume: an env-failed lane holding an OPEN PR is NOT revived while parked; the first tick after the resume returns it to `driving` with fix_rounds intact, while a held sibling stays gated reentry's", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const t0 = new Date("2026-07-30T08:28:00Z");
+  // The 2026-07-30 storm's residue, twice over: env-failure-preserved lanes (`failed` + PR +
+  // gated_escalation_labeled=0, zero forge writes — nothing was ever labelled). #378 is free;
+  // a human has since put needs-human on #433, which makes THAT lane gated reentry's property.
+  const preserve = (name: string, issue: number, pr: number, fixRounds: number): void => {
+    st.upsertWorker({
+      name,
+      issue,
+      session_id: `s-${name}`,
+      state: "failed",
+      started_at: t0.toISOString(),
+      ended_at: t0.toISOString(),
+      pr,
+      gated_escalation_labeled: 0,
+      fix_rounds: fixRounds,
+    });
+    // The environment failure's own durable record — the positive evidence revival requires
+    // (PR #463 round 2, P1); reclaimTerminalLane's env branch always writes both.
+    st.appendEvent("env-failure-preserved", { worker: name, issue, source: "llm", pr, worktreePath: `/w/${name}` });
+  };
+  preserve("lane-378", 378, 445, 2);
+  preserve("lane-433", 433, 444, 1);
+  forge.issueLabelsByIssue[433] = ["needs-human"];
+  st.enterPark("forge", "could not resolve host", 378, t0.toISOString());
+
+  // Parked tick (probe not yet due): the environment is still what killed the lane — no revival.
+  await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 5_000) });
+  assert.equal(st.isParked(), true);
+  assert.equal(st.getWorker("lane-378")?.state, "failed");
+
+  // Recovery tick: the probe clears the episode, but revival runs at the TOP of the tick and
+  // still saw a live episode — same one-tick deferral P2-B applies to dispatch.
+  await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 31_000) });
+  assert.equal(st.isParked(), false);
+  assert.equal(st.eventsSince("2020-01-01T00:00:00Z", ["park-resumed"]).length, 1);
+  assert.equal(st.getWorker("lane-378")?.state, "failed", "revival is gated on the resume, not on the probe that produced it");
+
+  // First tick after the resume: revived, with everything the DRIVE loop re-enters on intact.
+  await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 62_000) });
+  const revived = st.getWorker("lane-378");
+  assert.equal(revived?.state, "driving");
+  assert.equal(revived?.pr, 445);
+  assert.equal(revived?.fix_rounds, 2);
+  assert.equal(st.getWorker("lane-433")?.state, "failed", "a live hold is the gated path's signal — never a second owner");
+  assert.deepEqual(
+    st.eventsSince("2020-01-01T00:00:00Z", ["lane-revived"]).map((e) => e.payload),
+    [{ worker: "lane-378", issue: 378, pr: 445 }],
+  );
+
+  // Idempotent across later ticks: the revived row is `driving` and no longer a candidate.
+  await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 93_000) });
+  assert.equal(st.eventsSince("2020-01-01T00:00:00Z", ["lane-revived"]).length, 1);
+  st.close();
+});
+
+test("#447 park-resume: a lane whose PR merged or closed while the engine was parked is left to the terminal paths, never revived to `driving`", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const t0 = new Date("2026-07-30T08:28:00Z");
+  st.upsertWorker({
+    name: "lane-378",
+    issue: 378,
+    session_id: "s-lane-378",
+    state: "failed",
+    started_at: t0.toISOString(),
+    ended_at: t0.toISOString(),
+    pr: 445,
+    gated_escalation_labeled: 0,
+  });
+  st.appendEvent("env-failure-preserved", { worker: "lane-378", issue: 378, source: "llm", pr: 445, worktreePath: "/w" });
+  forge.prStatus = { ...forge.prStatus, state: "MERGED" };
+
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date(t0.getTime() + 1_000) });
+  assert.equal(st.getWorker("lane-378")?.state, "failed");
+  assert.equal(st.eventsSince("2020-01-01T00:00:00Z", ["lane-revived"]).length, 0);
   st.close();
 });
 

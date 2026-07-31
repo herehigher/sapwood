@@ -3,13 +3,15 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { type IssueMeta, referencedIssue, type StartupReconcileData } from "../forge/forge.js";
+import { type IssueMeta, type PRStatus, referencedIssue, type StartupReconcileData } from "../forge/forge.js";
 import { State, type WorkerRow } from "../state/state.js";
 import {
   auditGatedEscalationFlags,
   diffStartupOrphans,
+  type LaneRevivalForge,
   type ReconcileForge,
   reconcileStartup,
+  reviveEnvFailedPrLanes,
   sweepStaleRoleSessions,
 } from "./reconcile.js";
 
@@ -287,6 +289,288 @@ test("#391 F19: a per-issue read failure leaves that lane's flag untouched and n
     );
     assert.equal(state.getWorker("lane-294")?.gated_escalation_labeled, 0);
     assert.equal(state.getWorker("lane-295")?.gated_escalation_labeled, 1, "the second lane is still audited");
+    assert.match(logs.join("\n"), /gh rate limited/);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── #447 (F28 residual): the env-failed, PR-BEARING, never-escalated lane's revival path ─────
+
+const REVIVAL_CFG = { escalation: { humanLabels: ["needs-human", "blocked"] } };
+
+/** A revival-shaped forge: per-issue labels and per-PR state, both defaulting to the lane-378
+ *  shape (no hold label on the issue, PR still OPEN). */
+function mkRevivalForge(
+  labels: Record<number, string[]> = {},
+  prState: Record<number, PRStatus["state"]> = {},
+): LaneRevivalForge & { prReads: number[] } {
+  const prReads: number[] = [];
+  return {
+    prReads,
+    async getIssueLabels(issue: number) {
+      return labels[issue] ?? [];
+    },
+    async getPRStatus(pr: number): Promise<PRStatus> {
+      prReads.push(pr);
+      return { number: pr, headOid: "h", state: prState[pr] ?? "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+    },
+  };
+}
+
+/** The 2026-07-30 lane-378 shape: env-failure-preserved left it `failed` with its PR and
+ *  gated_escalation_labeled=0 (zero forge writes on that path — nothing was ever labelled), and
+ *  recorded the environment failure itself — the evidence revival requires. */
+function seedEnvFailedPrLane(state: State, issue: number, pr: number, fixRounds = 0): void {
+  state.upsertWorker({ ...worker(issue, "failed", pr), gated_escalation_labeled: 0, fix_rounds: fixRounds });
+  state.appendEvent("env-failure-preserved", {
+    worker: `lane-${issue}`,
+    issue,
+    source: "llm",
+    pr,
+    worktreePath: `/w/lane-${issue}`,
+  });
+}
+
+/** The OTHER marker-0 producer, byte-identical in the workers table: a real gate escalation
+ *  whose `needs-human` write failed. #147 fail-closes it to manual drive — no env record. */
+function seedUnprovableEscalation(state: State, issue: number, pr: number): void {
+  state.upsertWorker({ ...worker(issue, "failed", pr), gated_escalation_labeled: 0 });
+  state.appendEvent("drive-needs-human", { worker: `lane-${issue}`, issue, pr, reason: "gate:HUMAN", labeled: 0 });
+}
+
+test("#447: an env-failed lane holding an OPEN PR with no hold label is revived to `driving` — fix_rounds, PR and the gated marker untouched, one event naming lane/issue/PR", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-revive-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    seedEnvFailedPrLane(state, 378, 445, 2);
+    assert.deepEqual(state.gatedFailedWorkers(), [], "not gated reentry's property — nothing ever labelled it");
+    assert.deepEqual(await reviveEnvFailedPrLanes(mkRevivalForge(), state, REVIVAL_CFG), ["lane-378"]);
+    const revived = state.getWorker("lane-378");
+    assert.equal(revived?.state, "driving", "exactly what the four manual UPDATEs did");
+    assert.equal(revived?.pr, 445);
+    assert.equal(revived?.fix_rounds, 2, "the fix context the DRIVE loop re-enters with survives");
+    assert.equal(revived?.gated_escalation_labeled, 0, "gated-reentry semantics unchanged — no proof fabricated");
+    assert.deepEqual(
+      state.eventsSince("1970-01-01T00:00:00.000Z", ["lane-revived"]).map((e) => e.payload),
+      [{ worker: "lane-378", issue: 378, pr: 445 }],
+    );
+    // Idempotent: the revived row is `driving`, so it is no longer a candidate.
+    assert.deepEqual(await reviveEnvFailedPrLanes(mkRevivalForge(), state, REVIVAL_CFG), []);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#447: a hold label HANDS the lane to gated reentry, a MERGED/CLOSED PR to the terminal paths, and #397's human-merge-only latch is never re-driven", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-revive-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    seedEnvFailedPrLane(state, 378, 445); // revivable
+    seedEnvFailedPrLane(state, 379, 446); // needs-human -> the gated path's property
+    seedEnvFailedPrLane(state, 380, 447); // blocked -> the FULL hold set, not needs-human alone
+    seedEnvFailedPrLane(state, 381, 448); // PR merged -> terminal, nothing to drive
+    seedEnvFailedPrLane(state, 382, 449); // PR closed -> nothing to drive (but reversible, so not remembered)
+    // #397 bucket 2 settles to the IDENTICAL row shape with nothing on the issue — only the
+    // durable verdict tells it apart from an env failure.
+    seedEnvFailedPrLane(state, 383, 450);
+    state.appendEvent("drive-human-merge-only", {
+      worker: "lane-383",
+      issue: 383,
+      pr: 450,
+      reason: "gate:HUMAN:instruction-path-change:CLAUDE.md",
+    });
+    const forge = mkRevivalForge({ 379: ["needs-human"], 380: ["blocked"] }, { 447: "MERGED", 448: "MERGED", 449: "CLOSED" });
+    assert.deepEqual(await reviveEnvFailedPrLanes(forge, state, REVIVAL_CFG), ["lane-378"]);
+    for (const [name, issue] of [
+      ["lane-379", 379],
+      ["lane-380", 380],
+      ["lane-381", 381],
+      ["lane-382", 382],
+      ["lane-383", 383],
+    ] as const) {
+      assert.equal(state.getWorker(name)?.state, "failed", `#${issue} must stay where its own owner can find it`);
+    }
+    assert.deepEqual(forge.prReads, [445, 448, 449], "a held or bucket-2 lane is decided before any PR read");
+    assert.deepEqual(
+      state.eventsSince("1970-01-01T00:00:00.000Z", ["lane-revived"]).map((e) => e.payload),
+      [{ worker: "lane-378", issue: 378, pr: 445 }],
+    );
+    // The two held lanes did not merely get skipped — they were handed to their real owner.
+    assert.deepEqual(
+      state.gatedFailedWorkers().map((w) => w.name),
+      ["lane-379", "lane-380"],
+    );
+    assert.deepEqual(
+      state.eventsSince("1970-01-01T00:00:00.000Z", ["gated-flag-healed"]).map((e) => e.payload),
+      [
+        { worker: "lane-379", issue: 379, pr: 446 },
+        { worker: "lane-380", issue: 380, pr: 447 },
+      ],
+    );
+    // The terminal observation is durable, so the next pass never re-reads those PRs.
+    assert.deepEqual(
+      state.eventsSince("1970-01-01T00:00:00.000Z", ["lane-revival-terminal"]).map((e) => e.payload),
+      [{ worker: "lane-381", issue: 381, pr: 448, prState: "MERGED" }],
+      "MERGED is irreversible and remembered; CLOSED reopens, so it is skipped without a record",
+    );
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#447 (PR #463 gate② P1): a hold applied MID-RUN hands the lane to gated reentry for good — after the human removes the label, revival never picks it up again", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-revive-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    seedEnvFailedPrLane(state, 378, 445, 2);
+    // A human applies needs-human mid-run (no engine restart, so the F19 startup audit never
+    // runs). The revival pass is the only thing that sees this lane.
+    assert.deepEqual(await reviveEnvFailedPrLanes(mkRevivalForge({ 378: ["needs-human"] }), state, REVIVAL_CFG), []);
+    assert.equal(state.getWorker("lane-378")?.state, "failed");
+    assert.equal(state.getWorker("lane-378")?.gated_escalation_labeled, 1, "the live hold is the proof F19 heals on");
+    assert.deepEqual(state.eventsSince("1970-01-01T00:00:00.000Z", ["gated-flag-healed"]).length, 1);
+    assert.deepEqual(
+      state.gatedFailedWorkers().map((w) => w.name),
+      ["lane-378"],
+    );
+
+    // The human removes the label. Revival must NOT be what wakes the lane: gated reentry owns
+    // it now, and only that path arms the fresh-review protection label removal depends on.
+    const forge = mkRevivalForge();
+    assert.deepEqual(await reviveEnvFailedPrLanes(forge, state, REVIVAL_CFG), []);
+    assert.equal(state.getWorker("lane-378")?.state, "failed", "still gated reentry's to reclaim, not this pass's");
+    assert.deepEqual(forge.prReads, [], "the row left the candidate set entirely — not even a read");
+    assert.equal(state.eventsSince("1970-01-01T00:00:00.000Z", ["lane-revived"]).length, 0);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#447 (PR #463 round 2, P1): only an ACTUAL environment failure is revived — an escalation whose needs-human write failed has the same row shape and is never touched", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-revive-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    // Same shape, different history: #147 fail-closes the unprovable escalation to manual drive.
+    // Reviving it would resume autonomous drive/review/merge of a PR a human owes a look at.
+    seedUnprovableEscalation(state, 400, 500);
+    seedEnvFailedPrLane(state, 378, 445, 2);
+    const forge = mkRevivalForge();
+    assert.deepEqual(await reviveEnvFailedPrLanes(forge, state, REVIVAL_CFG), ["lane-378"]);
+    assert.equal(state.getWorker("lane-400")?.state, "failed", "still fail-closed to a human");
+    assert.deepEqual(forge.prReads, [445], "decided locally — the unprovable lane costs no forge read at all");
+    assert.deepEqual(
+      state.eventsSince("1970-01-01T00:00:00.000Z", ["lane-revived"]).map((e) => (e.payload as { issue: number }).issue),
+      [378],
+      "no lane-revived for #400 — its attention item is untouched, not cleared",
+    );
+
+    // The accepted compound case: that same lane is LATER killed by an environment failure. The
+    // last thing that happened to it is an env kill, so it revives; DRIVE re-derives the human
+    // condition from live PR state next tick and re-escalates, with a label write that can land.
+    state.appendEvent("env-failure-preserved", { worker: "lane-400", issue: 400, source: "llm", pr: 500, worktreePath: "/w" });
+    assert.deepEqual(await reviveEnvFailedPrLanes(mkRevivalForge(), state, REVIVAL_CFG), ["lane-400"]);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#447 (PR #463 round 2, P1): an OPEN park episode suspends the whole pass — a restart mid-park revives nothing, and the resume lets it through", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-revive-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    seedEnvFailedPrLane(state, 378, 445, 2);
+    state.enterPark("llm", "rate_limit_error", 378, "2026-07-30T08:28:00.000Z");
+
+    // Startup during the storm that killed the lane: the environment is still unproven, and
+    // DRIVE would act on anything returned to `driving`.
+    const parked = mkRevivalForge();
+    assert.deepEqual(await reviveEnvFailedPrLanes(parked, state, REVIVAL_CFG), []);
+    assert.deepEqual(parked.prReads, [], "suspended before it reads anything at all");
+    assert.equal(state.getWorker("lane-378")?.state, "failed");
+
+    state.clearPark("llm");
+    assert.deepEqual(await reviveEnvFailedPrLanes(mkRevivalForge(), state, REVIVAL_CFG), ["lane-378"]);
+    assert.equal(state.getWorker("lane-378")?.state, "driving");
+    assert.equal(state.getWorker("lane-378")?.fix_rounds, 2);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#447 (PR #463 round 2, P2): a CLOSED PR is skipped but never remembered — it reopens, and the next pass revives the lane", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-revive-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    seedEnvFailedPrLane(state, 382, 449);
+    assert.deepEqual(await reviveEnvFailedPrLanes(mkRevivalForge({}, { 449: "CLOSED" }), state, REVIVAL_CFG), []);
+    assert.equal(state.getWorker("lane-382")?.state, "failed");
+    assert.equal(
+      state.eventsSince("1970-01-01T00:00:00.000Z", ["lane-revival-terminal"]).length,
+      0,
+      "closed is reversible — remembering it would strand the lane if a human reopened the PR",
+    );
+
+    // A human reopens it. Nothing durable stands in the way.
+    assert.deepEqual(await reviveEnvFailedPrLanes(mkRevivalForge(), state, REVIVAL_CFG), ["lane-382"]);
+    assert.equal(state.getWorker("lane-382")?.state, "driving");
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#447 (PR #463 gate② P2): a MERGED lane is read from the forge ONCE — the second pass decides it with zero forge reads", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-revive-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    seedEnvFailedPrLane(state, 381, 448);
+    const first = mkRevivalForge({}, { 448: "MERGED" });
+    let labelReads = 0;
+    first.getIssueLabels = async () => {
+      labelReads++;
+      return [];
+    };
+    assert.deepEqual(await reviveEnvFailedPrLanes(first, state, REVIVAL_CFG), []);
+    assert.deepEqual(first.prReads, [448]);
+    assert.equal(labelReads, 1);
+
+    // The row is still `failed` + PR + marker 0 — permanently a candidate by shape. Without the
+    // durable observation it would re-cost both reads on every tick, forever.
+    const second = mkRevivalForge({}, { 448: "MERGED" });
+    second.getIssueLabels = async () => {
+      throw new Error("the second pass must not read the forge for this lane");
+    };
+    assert.deepEqual(await reviveEnvFailedPrLanes(second, state, REVIVAL_CFG), []);
+    assert.deepEqual(second.prReads, []);
+    assert.equal(state.eventsSince("1970-01-01T00:00:00.000Z", ["lane-revival-terminal"]).length, 1, "recorded once, not per pass");
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#447: a per-lane forge failure leaves that lane exactly as it was and never aborts the pass", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-revive-"));
+  const state = new State(join(root, "state.sqlite"));
+  const logs: string[] = [];
+  try {
+    seedEnvFailedPrLane(state, 378, 445);
+    seedEnvFailedPrLane(state, 379, 446);
+    const forge = mkRevivalForge();
+    forge.getIssueLabels = async (issue: number) => {
+      if (issue === 378) throw new Error("gh rate limited");
+      return [];
+    };
+    await assert.doesNotReject(() => reviveEnvFailedPrLanes(forge, state, REVIVAL_CFG, (m) => logs.push(m)));
+    assert.equal(state.getWorker("lane-378")?.state, "failed", "still a candidate for the next pass");
+    assert.equal(state.getWorker("lane-379")?.state, "driving", "the second lane is still revived");
     assert.match(logs.join("\n"), /gh rate limited/);
   } finally {
     state.close();

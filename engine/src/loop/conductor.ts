@@ -34,6 +34,7 @@ import {
 } from "./env-failure.js";
 import { isHumanMergeOnlyVerdict } from "./escalation-buckets.js";
 import { attemptThreadWrite, computeFixResponseHarvest, type FixResponseWriteOutcome } from "./fix-response.js";
+import { reviveEnvFailedPrLanes } from "./reconcile.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure scheduling core (parity targets — keep semantics identical to guard's bash twin)
@@ -1873,10 +1874,19 @@ async function escalateNeedsHuman(
  *
  *  The returned outcome still reports `kind: "needs-human"` because that is DrivenOutcome's shape
  *  for "this lane is a human's now"; the distinguishing record is the `drive-human-merge-only`
- *  event, so the two buckets are told apart in the durable ledger, not just in a label. */
+ *  event, so the two buckets are told apart in the durable ledger, not just in a label.
+ *
+ *  ORDERING (PR #463 gate② P2): the event is appended BEFORE the terminal upsert, and that order
+ *  is load-bearing now that #447's revival pass uses this event as its discriminator. The other
+ *  order left a crash window in which the row was already `failed` + PR + marker 0 — the exact
+ *  shape an env failure leaves — with no verdict on record, so revival would have re-driven the
+ *  one lane #397 closed structurally. The remaining window is the harmless direction: a crash
+ *  after the event leaves the lane `driving` (not terminal), which re-drives next tick and
+ *  re-settles idempotently off the PR's own `humanMergeOnly` latch, while the standing event
+ *  only ever makes revival MORE conservative about this PR. */
 function settleHumanMergeOnly(state: State, w: WorkerRow, pr: number, reason: string, iso: () => string): DrivenOutcome {
-  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 0 });
   state.appendEvent("drive-human-merge-only", { worker: w.name, issue: w.issue, pr, reason });
+  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 0 });
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason };
 }
 
@@ -2185,6 +2195,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     if (forgeParkedThisTick && suspendRollbackDuringForgePark(pending.reason)) continue;
     rollbacks.push(await attemptRollback(forge, state, cfg, pending, iso));
   }
+
+  // ── LANE REVIVAL (#447): the OTHER thing an environment failure froze — a lane it killed
+  //   while that lane held an OPEN PR, never escalated (`failed` + pr + gated_escalation_labeled
+  //   = 0, see the env-failure-preserved branch of reclaimTerminalLane). Neither the PR-less
+  //   orphan heal nor GATED RECLAIM below can reach it, so four live occurrences each took a
+  //   manual `UPDATE workers SET state='driving'`. Drained here on the same "recover before this
+  //   tick does anything else" convention as ROLLBACK RETRY above. The park suspension is the
+  //   pass's OWN (PR #463 round 2: one owner, so the startup call sites cannot forget it) and
+  //   covers BOTH sources, unlike the rollback suspension's forge-only gate — an llm park is
+  //   precisely the quota storm this class comes from. Idempotent by construction: a revived row
+  //   is `driving` and leaves the candidate set. Runs BEFORE DRIVE below, so a revived lane is
+  //   re-driven from live PR state this same tick.
+  await reviveEnvFailedPrLanes(forge, state, cfg, deps.log);
 
   // ── FIX RESPONSE RETRY (#247): same "drain every durably-persisted recovery-path write
   //   before this tick does anything else" convention as ROLLBACK RETRY above, for the

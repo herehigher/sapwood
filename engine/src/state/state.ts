@@ -1911,6 +1911,49 @@ export class State {
     return row?.kind === "pr-held" || row?.kind === "pr-released" ? row.kind : null;
   }
 
+  /** #447: has an event of `kind` EVER been recorded for this exact (worker, pr)? The two facts
+   *  loop/reconcile.ts's lane revival must remember across ticks — "#397 already settled this PR
+   *  as bucket 2" and "this lane's PR was observed MERGED/CLOSED" — are both ONE-WAY, and this
+   *  is how the pass remembers them: event-log-as-memory, the #169/#294 pattern, with no new
+   *  column and no new table.
+   *
+   *  ONLY FOR ONE-WAY FACTS. `EXISTS`, not "latest", so nothing can un-record one — that is what
+   *  makes the answer ordering-free (no ranking against other terminal kinds), and it is exactly
+   *  wrong for any fact a later event can reverse; use `lastHoldEvent`'s latest-wins shape for
+   *  those. Scoped to (worker, pr) for the same reason `lastHoldEvent` is: a lane name
+   *  reassigned to a new PR must not inherit the prior PR's verdict. */
+  laneEventRecorded(kind: string, worker: string, pr: number): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM events
+         WHERE kind = ?
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.pr') = ?
+         LIMIT 1`,
+      )
+      .get(kind, worker, pr);
+    return row != null;
+  }
+
+  /** #447: one worker-row write and the event announcing it, in ONE sqlite transaction — the
+   *  same shape (and the same reason) as `settleTerminalWorker` above. A recovery pass that
+   *  moves a lane must not be able to leave the move without its record: the row would be
+   *  `driving` with nothing in the ledger saying who moved it or why, and a pass whose own
+   *  skip-decisions are read back OUT of that ledger (see `laneEventRecorded`) would then be
+   *  reasoning from an incomplete history. Either both land or neither does, so a crashed pass
+   *  is always re-runnable from an unchanged row. */
+  upsertWorkerWithEvent(row: WorkerRow, kind: string, payload: unknown): void {
+    this.db.exec("BEGIN");
+    try {
+      this.upsertWorker(row);
+      this.appendEvent(kind, payload);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
   /** The most recent reviewer-failover announcement for `worker`'s lane (#54 R2) — tick()'s
    *  dedup source: driveOne reports the switch/revert signal STATELESSLY on every tick the
    *  condition holds (resolveReviewVerdict is pure and has no memory), so the durable event
