@@ -179,7 +179,17 @@ class FakeForge extends UnstubbedForge implements IForge {
    *  as a label failure, not a bare best-effort `.catch(() => {})` right before a terminal
    *  upsert that would otherwise permanently lose the adjudication context. */
   throwOnAddIssueComment = false;
+  /** #451 gate② round 3 (Codex P2): simulates the AMBIGUOUS write outcome — GitHub creates the
+   *  comment (it lands in `issueComments`, so a later `getIssueComments` read finds it), but the
+   *  client still sees an error, distinct from `throwOnAddIssueComment` (a CONFIRMED failure —
+   *  nothing lands). Proves the marker-check-before-post path skips a re-post rather than
+   *  duplicating the comment on the next retry. */
+  ambiguousAddIssueComment = false;
   override async addIssueComment(n: number, body: string): Promise<void> {
+    if (this.ambiguousAddIssueComment) {
+      this.issueComments.push([n, body]);
+      throw new Error("simulated ambiguous forge failure (client timeout, server may have succeeded)");
+    }
     if (this.throwOnAddIssueComment) throw new Error("simulated forge failure");
     this.issueComments.push([n, body]);
   }
@@ -221,8 +231,11 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async getIssueLabels(n: number): Promise<string[]> {
     return this.issueLabelsByIssue[n] ?? [];
   }
-  override async getIssueComments() {
-    return [];
+  /** #451 gate② round 3 (Codex P2): reflects `issueComments` (the same array `addIssueComment`
+   *  writes to) — needed so `escalateReviewDisputed`'s marker-check-before-post read can actually
+   *  observe a comment the fake just "posted", the same way GithubForge's real read would. */
+  override async getIssueComments(n: number) {
+    return this.issueComments.filter(([issue]) => issue === n).map(([, body]) => ({ login: "sapwood", createdAt: "t", body }));
   }
   override async createIssue(): Promise<number> {
     return 0;
@@ -2691,6 +2704,51 @@ test("tick DRIVE (#451, gate② P3b contrast): a classic-reviewer fixable (no ve
   st.close();
 });
 
+test("tick DRIVE (#451, gate② round 3 P1): the terminal worker update + review-disputed event are ONE transaction — a failing event append rolls the worker row back too, never a `failed` lane with no durable escalation record", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  forge.prStatus = { ...forge.prStatus, headOid: "head-2" };
+  forge.reviewThreadsOverride = {
+    threads: [
+      { id: "PRRT_1", isResolved: false, commentsComplete: true, comments: [{ author: "codex", body: "finding", createdAt: "t0" }] },
+    ],
+    pageCapped: false,
+  };
+  seedFixResponseQueued(st, "lane-a", 2, 55, "head-2", [{ threadId: "PRRT_1", resolution: "disputed", reply: "disagree" }]);
+  const originalAppendEvent = st.appendEvent.bind(st);
+  st.appendEvent = ((kind: string, payload: unknown) => {
+    if (kind === "review-disputed") throw new Error("simulated event-append failure");
+    return originalAppendEvent(kind, payload);
+  }) as typeof st.appendEvent;
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = disputedGate();
+  const deps = {
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+  await assert.rejects(() => tick(deps));
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.state, "driving", "rolled back — the OLD two-write shape would have left this `failed` with no event");
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed"]), []);
+
+  // The forge-side writes (label, comment) already landed — external, outside the transaction —
+  // and the system self-heals: restore appendEvent and retry. The comment-idempotency marker
+  // (gate② round 3 P2) means the SECOND attempt does not re-post a duplicate comment.
+  st.appendEvent = originalAppendEvent;
+  const r2 = await tick(deps);
+  assert.equal(r2.driven[0]?.kind, "needs-human");
+  assert.equal(st.getWorker("lane-a")!.state, "failed");
+  assert.equal(forge.issueComments.length, 1, "no duplicate comment on the self-healed retry");
+  st.close();
+});
+
 test("tick DRIVE (#451, AC7): a review-disputed escalation is reclaimable through the existing #147 GATED RECLAIM path once a human clears the label — no new re-entry channel", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
@@ -2897,6 +2955,92 @@ test("tick DRIVE (#451, gate② P1): the assembled comment stays under GitHub's 
   const comment = forge.issueComments[0]![1];
   assert.ok(comment.length < 65_536, `comment length ${comment.length} must stay under GitHub's limit`);
   assert.match(comment, /truncated/, "the cut is marked, never silent");
+  st.close();
+});
+
+test("tick DRIVE (#451, gate② round 3 P2): a label-write failure that keeps failing across MANY ticks appends review-disputed-label-failed ONCE, not per tick — the SAME transition-dedupe the comment path already had", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  forge.prStatus = { ...forge.prStatus, headOid: "head-2" };
+  forge.reviewThreadsOverride = {
+    threads: [
+      { id: "PRRT_1", isResolved: false, commentsComplete: true, comments: [{ author: "codex", body: "finding", createdAt: "t0" }] },
+    ],
+    pageCapped: false,
+  };
+  seedFixResponseQueued(st, "lane-a", 2, 55, "head-2", [{ threadId: "PRRT_1", resolution: "disputed", reply: "disagree" }]);
+  forge.throwOnAddLabel = true;
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = disputedGate();
+  const deps = {
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+  for (let i = 0; i < 5; i++) await tick(deps);
+  assert.equal(
+    st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed-label-failed"]).length,
+    1,
+    "same episode (same headOid, no reset in between) — one announcement, not five",
+  );
+
+  // A genuinely new episode (a different head) re-announces.
+  forge.reviewThreadsOverride = {
+    threads: [
+      { id: "PRRT_2", isResolved: false, commentsComplete: true, comments: [{ author: "codex", body: "finding 2", createdAt: "t0" }] },
+    ],
+    pageCapped: false,
+  };
+  forge.prStatus = { ...forge.prStatus, headOid: "head-3" };
+  seedFixResponseQueued(st, "lane-a", 2, 55, "head-3", [{ threadId: "PRRT_2", resolution: "disputed", reply: "disagree again" }], 2);
+  await tick(deps);
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed-label-failed"]);
+  assert.equal(events.length, 2, "a different headOid is a genuinely new episode, not eaten by the dedup");
+  assert.equal((events[1]!.payload as { headOid: string }).headOid, "head-3");
+  st.close();
+});
+
+test("tick DRIVE (#451, gate② round 3 P2): an AMBIGUOUS comment-write failure (GitHub created it, client saw an error) does NOT re-post a duplicate comment on retry — the marker-check-before-post path", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  forge.prStatus = { ...forge.prStatus, headOid: "head-2" };
+  forge.reviewThreadsOverride = {
+    threads: [
+      { id: "PRRT_1", isResolved: false, commentsComplete: true, comments: [{ author: "codex", body: "finding", createdAt: "t0" }] },
+    ],
+    pageCapped: false,
+  };
+  seedFixResponseQueued(st, "lane-a", 2, 55, "head-2", [{ threadId: "PRRT_1", resolution: "disputed", reply: "disagree" }]);
+  forge.ambiguousAddIssueComment = true;
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = disputedGate();
+  const deps = {
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+  const r1 = await tick(deps);
+  assert.equal(r1.driven[0]?.kind, "queued", "the client-visible outcome is still a failure this tick");
+  assert.equal(forge.issueComments.length, 1, "but the comment DID land server-side");
+  assert.equal(st.getWorker("lane-a")!.state, "driving");
+
+  // The client's next retry must not duplicate it — the marker-check finds it and skips the post.
+  const r2 = await tick(deps);
+  assert.equal(r2.driven[0]?.kind, "needs-human", "the marker-check finds it already posted -> proceeds straight to success");
+  assert.equal(forge.issueComments.length, 1, "no duplicate comment");
+  assert.equal(st.getWorker("lane-a")!.state, "failed");
   st.close();
 });
 

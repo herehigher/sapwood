@@ -2151,27 +2151,32 @@ export class State {
     return p.blockReason == null ? null : { id: row.id, blockReason: p.blockReason };
   }
 
-  /** #451 (gate② P1, PM adjudication): the SAME id+value dedup shape as `lastDriveQueuedEvent`/
-   *  `lastFixLegDispatchBlockedEvent` above, for `review-disputed-comment-failed` — a comment-post
-   *  failure caused by an over-limit assembled comment is a genuinely PERMANENT failure (not the
-   *  transient forge hiccup every other retry-next-tick branch in conductor.ts assumes), so
-   *  without this dedup the lane would re-append this event EVERY tick forever — the exact #383/
-   *  F30 steady-state event-spam class, here unilaterally constructible by a producer's own
-   *  dispute-reply length. Keyed on `headOid` (the escalation evidence's own stable identity — see
-   *  `DisputeEscalation`, fix-response.ts): a re-attempt against the SAME head is the SAME episode;
-   *  a different head (or a comment that finally succeeds) is a genuinely new one. Scoped to
-   *  (worker, pr), same lane-repointing rationale as its two siblings. Carries `id` for the same
-   *  episode-reset comparison — see `REVIEW_DISPUTED_COMMENT_FAILED_RESET_KINDS` (conductor.ts). */
-  lastReviewDisputedCommentFailedEvent(worker: string, pr: number): { id: number; headOid: string } | null {
+  /** #451 (gate② P1, PM adjudication; gate② round 3 P2, Codex): the SAME id+value dedup shape as
+   *  `lastDriveQueuedEvent`/`lastFixLegDispatchBlockedEvent` above, PARAMETRIZED over the two
+   *  `review-disputed-*-failed` kinds (round 3, Codex P2: the label-write failure gets the SAME
+   *  treatment the comment-write failure already had — both are genuinely PERMANENT failure
+   *  classes an over-limit comment or a standing permission problem can make un-retriable-into-
+   *  success, so without this dedup either would re-append its `-failed` event EVERY tick forever —
+   *  the exact #383/F30 steady-state event-spam class). Keyed on `headOid` (the escalation
+   *  evidence's own stable identity — see `DisputeEscalation`, fix-response.ts): a re-attempt
+   *  against the SAME head is the SAME episode; a different head (or a write that finally succeeds)
+   *  is a genuinely new one. Scoped to (worker, pr), same lane-repointing rationale as its two
+   *  DRIVE-side siblings. Carries `id` for the same episode-reset comparison — see
+   *  `REVIEW_DISPUTED_ESCALATION_FAILURE_RESET_KINDS` (conductor.ts), shared by both callers. */
+  lastReviewDisputedFailureEvent(
+    kind: "review-disputed-label-failed" | "review-disputed-comment-failed",
+    worker: string,
+    pr: number,
+  ): { id: number; headOid: string } | null {
     const row = this.db
       .prepare(
         `SELECT id, payload FROM events
-         WHERE kind = 'review-disputed-comment-failed'
+         WHERE kind = ?
            AND json_extract(payload, '$.worker') = ?
            AND json_extract(payload, '$.pr') = ?
          ORDER BY id DESC LIMIT 1`,
       )
-      .get(worker, pr) as { id: number; payload: string } | undefined;
+      .get(kind, worker, pr) as { id: number; payload: string } | undefined;
     if (!row) return null;
     const p = JSON.parse(row.payload) as { headOid?: string };
     return p.headOid == null ? null : { id: row.id, headOid: p.headOid };

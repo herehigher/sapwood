@@ -356,7 +356,20 @@ export interface DisputeEscalation {
  *  FAIL-CLOSED on an unreadable live read, a capped/partial thread page, or an unknown/absent
  *  recorded head (never escalates on an unproven current-head match) — a forge error or an
  *  incomplete view here must never be read as "go ahead," the same posture every other DRIVE
- *  branch in this file's caller takes. */
+ *  branch in this file's caller takes.
+ *
+ *  TOCTOU (gate② round 3, Codex P1): the two initial reads (`getPRStatus`, `getPRReviewThreads`)
+ *  race a push — the same class of split-read hazard merge-driver.ts's driveOne already guards
+ *  against for gate①/gate② (`status.headOid !== data.headOid` -> queue). A push landing
+ *  between/during them could let `headOid` (from `getPRStatus`) and `threadsPage` (from
+ *  `getPRReviewThreads`, fetched independently) describe two DIFFERENT moments — a durably
+ *  recorded `disputed` resolution for head H could then validate against a `threadsPage` view
+ *  that is ALREADY stale relative to a newer push, escalating (and writing evidence) against a
+ *  head the PR has since moved past. Closed by a THIRD read, `getPRStatus` again, immediately
+ *  before returning — the one point every side effect (the label, the comment, the terminal
+ *  escalation) is triggered from: the PR must still be OPEN and still be at the SAME `headOid`
+ *  every unresolved thread was just validated against, or this returns `null` and the caller
+ *  falls through, retried fresh next tick. */
 export async function computeDisputeEscalation(
   forge: Pick<IForge, "getPRStatus" | "getPRReviewThreads">,
   state: Pick<State, "eventsSince">,
@@ -388,6 +401,15 @@ export async function computeDisputeEscalation(
     if (record === undefined || record.resolution !== "disputed" || record.headOid !== headOid) return null;
     threads.push({ threadId: t.id, findingBody: t.comments[0]?.body ?? "(no comment body available)", reply: record.reply });
   }
+  // #451 gate② round 3 (Codex P1): TOCTOU close — re-validate immediately before the caller acts
+  // on this result. See this function's own doc for the race the two reads above are exposed to.
+  let recheck: { state: string; headOid: string };
+  try {
+    recheck = await forge.getPRStatus(pr);
+  } catch {
+    return null; // fail-closed: cannot reconfirm — never escalate on an unproven current state
+  }
+  if (recheck.state !== "OPEN" || recheck.headOid !== headOid) return null;
   return { headOid, threads };
 }
 

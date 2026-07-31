@@ -955,9 +955,25 @@ class FakeDisputeForge implements Pick<IForge, "getPRStatus" | "getPRReviewThrea
   /** #451 gate② P3(a): when true, the live thread page reports itself PARTIAL — see
    *  computeDisputeEscalation's own fail-closed guard. */
   pageCapped = false;
+  /** #451 gate② round 3 (Codex P1, TOCTOU): every `getPRStatus` call AFTER the first returns THIS
+   *  headOid instead of `headOid` — simulates a push landing between the initial parallel read and
+   *  the re-validation immediately before any side effect. `undefined` (default) -> every call
+   *  returns the same `headOid`, byte-for-byte the pre-round-3 fake. */
+  headOidAfterFirstCall: string | undefined = undefined;
+  /** Same shape, for the PR-closed-between-reads variant. */
+  stateAfterFirstCall: "OPEN" | "CLOSED" | "MERGED" | undefined = undefined;
+  getPRStatusCalls = 0;
   async getPRStatus(pr: number) {
     if (this.throwOnStatus) throw new Error("simulated forge outage");
-    return { number: pr, headOid: this.headOid, state: "OPEN" as const, mergeable: "MERGEABLE" as const, ciGreen: true };
+    this.getPRStatusCalls++;
+    const stale = this.getPRStatusCalls > 1;
+    return {
+      number: pr,
+      headOid: stale && this.headOidAfterFirstCall !== undefined ? this.headOidAfterFirstCall : this.headOid,
+      state: (stale && this.stateAfterFirstCall !== undefined ? this.stateAfterFirstCall : "OPEN") as "OPEN" | "CLOSED" | "MERGED",
+      mergeable: "MERGEABLE" as const,
+      ciGreen: true,
+    };
   }
   async getPRReviewThreads(_pr: number, _commentsCap: number) {
     if (this.throwOnThreads) throw new Error("simulated forge outage");
@@ -1007,6 +1023,74 @@ test("computeDisputeEscalation (#451 gate② P3a): pageCapped (a partial thread 
   });
   const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
   assert.equal(result, null, "a partial view can never prove EVERY unresolved thread is disputed");
+  st.close();
+});
+
+test("computeDisputeEscalation (#451 gate② round 3, Codex P1 — TOCTOU): a push landing between the initial read and the pre-side-effect recheck (head moves) -> null, fail-closed", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeDisputeForge();
+  forge.headOid = "head-1";
+  forge.headOidAfterFirstCall = "head-2"; // the push that lands mid-flight
+  forge.threads = [{ id: "T1", isResolved: false, comments: [{ author: "codex", body: "the finding", createdAt: "t0" }] }];
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-1",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree" }],
+  });
+  const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
+  assert.equal(result, null, "the head moved between the initial read and the recheck — never escalate against a superseded head");
+  assert.equal(forge.getPRStatusCalls, 2, "the recheck is a REAL second read, not a reuse of the first");
+  st.close();
+});
+
+test("computeDisputeEscalation (#451 gate② round 3, Codex P1 — TOCTOU): the PR closes/merges between the initial read and the recheck -> null, fail-closed", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeDisputeForge();
+  forge.headOid = "head-1";
+  forge.stateAfterFirstCall = "MERGED";
+  forge.threads = [{ id: "T1", isResolved: false, comments: [{ author: "codex", body: "the finding", createdAt: "t0" }] }];
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-1",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree" }],
+  });
+  const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
+  assert.equal(result, null, "a PR that merged/closed between reads must never be escalated against");
+  st.close();
+});
+
+test("computeDisputeEscalation (#451 gate② round 3, Codex P1 — TOCTOU): the recheck read itself failing -> null, fail-closed (never assume the head still matches)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeDisputeForge();
+  forge.headOid = "head-1";
+  forge.threads = [{ id: "T1", isResolved: false, comments: [{ author: "codex", body: "the finding", createdAt: "t0" }] }];
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-1",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree" }],
+  });
+  const originalGetPRStatus = forge.getPRStatus.bind(forge);
+  forge.getPRStatus = (async (pr: number) => {
+    if (forge.getPRStatusCalls >= 1) throw new Error("simulated recheck outage");
+    return originalGetPRStatus(pr);
+  }) as typeof forge.getPRStatus;
+  const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
+  assert.equal(result, null);
   st.close();
 });
 
