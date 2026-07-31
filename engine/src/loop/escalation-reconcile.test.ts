@@ -809,7 +809,8 @@ test("reconcileEscalations: a fix-rounds-capped lane whose PR was hand-merged re
   state.close();
 });
 
-for (const clearKind of ["dispatched", "merged", "gated-reentry"]) {
+// #447: `lane-revived` is the OTHER return of a `failed` lane to `driving` — same clear rule.
+for (const clearKind of ["dispatched", "merged", "gated-reentry", "lane-revived"]) {
   test(`openEscalations: a later '${clearKind}' on the same issue clears the item — the strip's own fold rule (round 4 P2)`, () => {
     const open = openEscalations([
       { kind: "ceiling-escalated", payload: { worker: "w1", issue: 7, reasons: ["x"] } },

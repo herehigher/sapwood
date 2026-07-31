@@ -1911,30 +1911,47 @@ export class State {
     return row?.kind === "pr-held" || row?.kind === "pr-released" ? row.kind : null;
   }
 
-  /** #447: has this lane's PR ever settled as #397 bucket 2 — "a human must MERGE this PR"?
-   *  That verdict produces a row shape (`failed` + PR + `gated_escalation_labeled = 0`, and
-   *  deliberately NOTHING on the issue) IDENTICAL to an env-failure-preserved lane's, so the
-   *  workers table alone cannot tell the two apart and loop/reconcile.ts's revival pass would
-   *  re-drive a lane #397 closed structurally. The discriminator is the durable event, which is
-   *  what settleHumanMergeOnly's own doc names as the record that tells the buckets apart
-   *  ("not just in a label").
+  /** #447: has an event of `kind` EVER been recorded for this exact (worker, pr)? The two facts
+   *  loop/reconcile.ts's lane revival must remember across ticks — "#397 already settled this PR
+   *  as bucket 2" and "this lane's PR was observed MERGED/CLOSED" — are both ONE-WAY, and this
+   *  is how the pass remembers them: event-log-as-memory, the #169/#294 pattern, with no new
+   *  column and no new table.
    *
-   *  EVER, not most-recently: the verdict is ONE-WAY (written once, never removed or
-   *  re-decided), so a single occurrence for this (worker, pr) settles it for good and no
-   *  ordering against other terminal events is needed. Scoped to (worker, pr) for the same
-   *  reason `lastHoldEvent` is — a lane name reassigned to a new PR must not inherit the prior
-   *  PR's verdict. Event-log-as-memory, the #169/#294 pattern: no new column, no new table. */
-  humanMergeOnlySettled(worker: string, pr: number): boolean {
+   *  ONLY FOR ONE-WAY FACTS. `EXISTS`, not "latest", so nothing can un-record one — that is what
+   *  makes the answer ordering-free (no ranking against other terminal kinds), and it is exactly
+   *  wrong for any fact a later event can reverse; use `lastHoldEvent`'s latest-wins shape for
+   *  those. Scoped to (worker, pr) for the same reason `lastHoldEvent` is: a lane name
+   *  reassigned to a new PR must not inherit the prior PR's verdict. */
+  laneEventRecorded(kind: string, worker: string, pr: number): boolean {
     const row = this.db
       .prepare(
         `SELECT 1 FROM events
-         WHERE kind = 'drive-human-merge-only'
+         WHERE kind = ?
            AND json_extract(payload, '$.worker') = ?
            AND json_extract(payload, '$.pr') = ?
          LIMIT 1`,
       )
-      .get(worker, pr);
+      .get(kind, worker, pr);
     return row != null;
+  }
+
+  /** #447: one worker-row write and the event announcing it, in ONE sqlite transaction — the
+   *  same shape (and the same reason) as `settleTerminalWorker` above. A recovery pass that
+   *  moves a lane must not be able to leave the move without its record: the row would be
+   *  `driving` with nothing in the ledger saying who moved it or why, and a pass whose own
+   *  skip-decisions are read back OUT of that ledger (see `laneEventRecorded`) would then be
+   *  reasoning from an incomplete history. Either both land or neither does, so a crashed pass
+   *  is always re-runnable from an unchanged row. */
+  upsertWorkerWithEvent(row: WorkerRow, kind: string, payload: unknown): void {
+    this.db.exec("BEGIN");
+    try {
+      this.upsertWorker(row);
+      this.appendEvent(kind, payload);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
   }
 
   /** The most recent reviewer-failover announcement for `worker`'s lane (#54 R2) — tick()'s

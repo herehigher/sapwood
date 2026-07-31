@@ -248,12 +248,12 @@ run** — a restart must not empty the strip while the human task remains
 still does). Clearing uses only events that actually resolve the item:
 issue-scoped items (including `ceiling-escalated`, which the engine emits
 **per hard-stopped worker**, and `env-failure-preserved`) clear when a
-later event moves that issue (`dispatched`, `merged`, `gated-reentry`) — with
-one exemption: a clear event never clears an escalation **that same
-operation produced**, because an operation's own effects are not evidence
-it was resolved (a merge whose Done-board write failed emits
-`rollback-escalated` *before* its own `merged` event; the board is still
-wrong) —
+later event moves that issue (`dispatched`, `merged`, `gated-reentry`,
+`lane-revived`) — with one exemption: a clear event never clears an
+escalation **that same operation produced**, because an operation's own
+effects are not evidence it was resolved (a merge whose Done-board write
+failed emits `rollback-escalated` *before* its own `merged` event; the
+board is still wrong) —
 **or, since #295, when `escalation-resolved` reports the human resolved it
 outside the loop entirely.** That event is what makes the empty-strip
 contract survivable: the 2026-07-21 audit found most escalation classes had
@@ -648,6 +648,7 @@ checklist item**):
 | `plan-review-escalated` | Issue #{issue}'s plan needs a human — automated review couldn't approve it |
 | `verify-na-proposed` | Issue #{issue} proposed as not separately verifiable — a person decides |
 | `gated-reentry` | Issue #{issue}'s PR was unblocked by a human — back through review |
+| `lane-revived` | Issue #{issue}'s PR picked back up after an environment failure — back under review |
 | `gated-reentry-capped` | Issue #{issue} was unblocked too many times without landing — flagged for a human |
 | `gated-reentry-capped-label-failed` | Couldn't re-flag issue #{issue} — please check it manually |
 | `escalation-resolved` | Branches on `payload.via`: merged → "Issue #{issue} no longer needs you — PR #{pr} was merged"; closed → "Issue #{issue} no longer needs you — it was closed"; label-removed → "Issue #{issue} no longer needs you — the flag was cleared"; board-fixed → "Issue #{issue} no longer needs you — the board was set to Done". Never an attention item — this is the event that *clears* one (§3) |

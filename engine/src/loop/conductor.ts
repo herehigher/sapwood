@@ -1874,10 +1874,19 @@ async function escalateNeedsHuman(
  *
  *  The returned outcome still reports `kind: "needs-human"` because that is DrivenOutcome's shape
  *  for "this lane is a human's now"; the distinguishing record is the `drive-human-merge-only`
- *  event, so the two buckets are told apart in the durable ledger, not just in a label. */
+ *  event, so the two buckets are told apart in the durable ledger, not just in a label.
+ *
+ *  ORDERING (PR #463 gate② P2): the event is appended BEFORE the terminal upsert, and that order
+ *  is load-bearing now that #447's revival pass uses this event as its discriminator. The other
+ *  order left a crash window in which the row was already `failed` + PR + marker 0 — the exact
+ *  shape an env failure leaves — with no verdict on record, so revival would have re-driven the
+ *  one lane #397 closed structurally. The remaining window is the harmless direction: a crash
+ *  after the event leaves the lane `driving` (not terminal), which re-drives next tick and
+ *  re-settles idempotently off the PR's own `humanMergeOnly` latch, while the standing event
+ *  only ever makes revival MORE conservative about this PR. */
 function settleHumanMergeOnly(state: State, w: WorkerRow, pr: number, reason: string, iso: () => string): DrivenOutcome {
-  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 0 });
   state.appendEvent("drive-human-merge-only", { worker: w.name, issue: w.issue, pr, reason });
+  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 0 });
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason };
 }
 

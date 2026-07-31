@@ -4954,6 +4954,34 @@ test("#397 AC2 lane shape: a failed worker + PR settling on a HUMAN-MERGE-ONLY v
   st.close();
 });
 
+test("#397 (PR #463 gate② P2): the bucket-2 verdict event is written BEFORE the terminal row — no crash window in which the row looks like env-failure residue with no verdict on record", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const gate = new FakeMergeGate();
+  seedRunning(st, "lane-ipe", 397);
+  sup.probes["lane-ipe"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 397 };
+  gate.outcomes[397] = { kind: "needs-human", pr: 397, reason: "gate:HUMAN:instruction-path-change:CLAUDE.md" };
+  forge.issueLabelsByIssue[397] = [];
+
+  // The row write is what a crash could truncate; the verdict #447's revival reads must already
+  // be on record by then, or that pass sees `failed` + PR + marker 0 with no verdict — the exact
+  // shape an env failure leaves — and re-drives the one lane #397 closed structurally.
+  let verdictOnRecordAtRowWrite: boolean | null = null;
+  const realUpsert = st.upsertWorker.bind(st);
+  st.upsertWorker = (row) => {
+    if (row.name === "lane-ipe" && row.state === "failed") {
+      verdictOnRecordAtRowWrite = st.laneEventRecorded("drive-human-merge-only", "lane-ipe", 397);
+    }
+    realUpsert(row);
+  };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(verdictOnRecordAtRowWrite, true, "the verdict was already durable when the terminal row landed");
+  assert.equal(st.getWorker("lane-ipe")?.state, "failed");
+  assert.equal(st.laneEventRecorded("drive-human-merge-only", "lane-ipe", 397), true);
+  st.close();
+});
+
 test("#397: the SAME lane shape with an ordinary bucket-1 verdict still escalates needs-human and stays gate-reclaimable — the split is by reason, not by lane shape", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

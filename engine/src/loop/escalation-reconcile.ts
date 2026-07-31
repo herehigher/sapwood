@@ -166,8 +166,13 @@ const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
  *  a per-round forge read each, growing monotonically, plus a misleading late resolution event
  *  for an item the strip already considers cleared. Folding the same clear kinds keeps the two
  *  folds over one ledger from disagreeing. Deliberately NOT terminal (unlike a merged
- *  resolution): a lane that is re-dispatched and escalates AGAIN is a genuine new episode. */
-const CLEAR_KINDS = ["dispatched", "merged", "gated-reentry"] as const;
+ *  resolution): a lane that is re-dispatched and escalates AGAIN is a genuine new episode.
+ *
+ *  #447 (PR #463 gate② P2): `lane-revived` belongs here for the same reason `gated-reentry`
+ *  does — it is the OTHER way a `failed` lane returns to `driving`, and the attention item it
+ *  clears (`env-failure-preserved`) is precisely the one revival exists to answer. Without it a
+ *  revived, actively-driving lane keeps its strip row and keeps costing a per-round forge read. */
+const CLEAR_KINDS = ["dispatched", "merged", "gated-reentry", "lane-revived"] as const;
 
 /** #295 review round 5 (Codex P2), narrowed in round 6: a clear event must not erase an escalation
  *  THAT SAME OPERATION produced. conductor's `case "merged"` calls `handleRollbackFailure` — which

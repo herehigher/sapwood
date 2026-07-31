@@ -163,7 +163,7 @@ export async function reconcileStartup(
  *  of lanes stuck in this residue state, which is small by construction. */
 export async function auditGatedEscalationFlags(
   forge: Pick<IForge, "getIssueMeta">,
-  state: Pick<State, "unlabeledGatedWorkers" | "upsertWorker" | "appendEvent">,
+  state: Pick<State, "unlabeledGatedWorkers" | "upsertWorkerWithEvent" | "appendEvent">,
   cfg: { escalation: { humanLabels: string[] } },
   log: (message: string) => void = console.error,
 ): Promise<void> {
@@ -175,15 +175,13 @@ export async function auditGatedEscalationFlags(
     return;
   }
   for (const w of candidates) {
-    const where = { worker: w.name, issue: w.issue, pr: w.pr ?? null };
     try {
       const meta = await forge.getIssueMeta(w.issue);
       if (!cfg.escalation.humanLabels.some((label) => labelsInclude(meta.labels, label))) {
-        state.appendEvent("gated-flag-unprovable", where);
+        state.appendEvent("gated-flag-unprovable", { worker: w.name, issue: w.issue, pr: w.pr ?? null });
         continue;
       }
-      state.upsertWorker({ ...w, gated_escalation_labeled: 1 });
-      state.appendEvent("gated-flag-healed", where);
+      handGatedLaneToReentry(state, w);
     } catch (error) {
       // Per-lane containment, same shape as escalation-reconcile.ts's own sweep: a read failure
       // leaves this lane exactly as it was and the next startup re-audits it.
@@ -192,7 +190,26 @@ export async function auditGatedEscalationFlags(
   }
 }
 
+/** #391 F19's per-lane heal, shared with #447's revival pass below (PR #463 gate② P1): record
+ *  that this lane's escalation label is observably present, which is the ONLY thing standing
+ *  between it and gated reentry. Extracted rather than duplicated so the two callers can never
+ *  drift — one heal, one event kind, one owner. Both writes land together (see
+ *  State.upsertWorkerWithEvent): a marker corrected with no `gated-flag-healed` in the ledger
+ *  would silently move a lane between owners. */
+function handGatedLaneToReentry(state: Pick<State, "upsertWorkerWithEvent">, w: WorkerRow): void {
+  state.upsertWorkerWithEvent({ ...w, gated_escalation_labeled: 1 }, "gated-flag-healed", {
+    worker: w.name,
+    issue: w.issue,
+    pr: w.pr ?? null,
+  });
+}
+
 export type LaneRevivalForge = Pick<IForge, "getIssueLabels" | "getPRStatus">;
+
+/** #397's bucket-2 verdict and #447's own terminal-PR observation — the two ONE-WAY facts the
+ *  revival pass reads back out of the ledger to decide a lane WITHOUT touching the forge. */
+const HUMAN_MERGE_ONLY_EVENT = "drive-human-merge-only";
+const REVIVAL_TERMINAL_EVENT = "lane-revival-terminal";
 
 /** #447 (F28 residual): return an env-failed lane that still holds an OPEN PR to `driving`.
  *  This class sits exactly between the two designed owners and was reachable by NEITHER:
@@ -205,21 +222,32 @@ export type LaneRevivalForge = Pick<IForge, "getIssueLabels" | "getPRStatus">;
  *
  *  The candidate set is `unlabeledGatedWorkers()` — already the exact complement of
  *  `gatedFailedWorkers()`, so consuming it here creates no second owner for an escalated lane
- *  and needs no new column or table. Four-way split per candidate:
+ *  and needs no new column or table. Four-way split per candidate — the two LOCAL, one-way
+ *  exclusions are read from the ledger FIRST, so a permanently excluded lane costs zero forge
+ *  reads per tick rather than two:
  *   - the lane's PR already settled as #397 bucket 2 -> LEAVE IT. "A human must MERGE this PR"
  *     settles to the SAME row shape as an env failure (`failed` + PR + marker 0, and
  *     deliberately nothing on the issue), so the workers table alone cannot tell them apart;
- *     the durable verdict (State.humanMergeOnlySettled) can. Checked FIRST and locally, before
- *     any forge read, because it is the one branch that must never be re-driven at all: #397
- *     closed that reclaim loop structurally and re-driving would re-escalate it every tick.
- *     This is the ONE exclusion this issue's stated rule does not name — bucket 2 landed on
- *     main after #447 was filed.
- *   - the issue carries ANY of cfg.escalation.humanLabels -> LEAVE IT. That lane is the gated
- *     path's property: the startup audit corrects its marker from the live hold and removing
- *     the label is then the human's one act. (Same predicate GATED RECLAIM applies via
- *     conductor.ts's hasReserveLabel — the FULL hold set, not needs-human alone.)
- *   - the PR is MERGED/CLOSED -> LEAVE IT. Nothing to drive; the lane is terminal and the
- *     existing terminal paths already own it. Revival is for LIVE work only.
+ *     the durable verdict can. This branch must never be re-driven at all: #397 closed that
+ *     reclaim loop structurally and re-driving would re-escalate it every tick. It is the ONE
+ *     exclusion this issue's stated rule does not name — bucket 2 landed on main after #447
+ *     was filed.
+ *   - the PR was already observed MERGED/CLOSED by an earlier pass -> LEAVE IT, without asking
+ *     the forge again. Recorded once as `lane-revival-terminal`; a merged or closed PR does not
+ *     reopen into work this lane could drive, so the observation is one-way and the row would
+ *     otherwise re-cost that read on every tick, forever.
+ *   - the issue carries ANY of cfg.escalation.humanLabels -> HAND IT TO GATED REENTRY. Not a
+ *     bare skip (PR #463 gate② P1): a bare skip left the lane in this pass's candidate set, so
+ *     the moment the human removed the label mid-run, revival — not gated reentry — picked it
+ *     up, re-driving with the old trigger pin and `gated_reentry_attempts` still 0, i.e. with
+ *     the stale-review filter that makes label-removal safe never armed. Correcting the marker
+ *     instead is F19's own heal on F19's own evidence (the hold is observably present, and the
+ *     engine never removes a human-hold label), and it is ONE-WAY: the row leaves
+ *     `unlabeledGatedWorkers()` for good, so the label's later removal reaches exactly one
+ *     owner. (Hold set = the FULL cfg.escalation.humanLabels, the same predicate GATED RECLAIM
+ *     applies via conductor.ts's hasReserveLabel — not needs-human alone.)
+ *   - the PR is MERGED/CLOSED -> record that, and leave the lane to the existing terminal
+ *     paths. Revival is for LIVE work only.
  *   - otherwise -> `driving`, and the DRIVE loop re-derives everything else from live PR state,
  *     which is exactly what the manual surgery relied on. A lane whose escalation was real but
  *     whose `needs-human` WRITE failed (the other marker-0 producer) is deliberately included:
@@ -233,12 +261,13 @@ export type LaneRevivalForge = Pick<IForge, "getIssueLabels" | "getPRStatus">;
  *  all left exactly as the failure left them.
  *
  *  Callers own the "is it safe to revive NOW" question: startup runs after the F19 audit, and
- *  the conductor's tick suspends this pass while any park episode is open. Read-only against
- *  the forge until a lane actually qualifies, and the candidate set is the number of lanes
- *  stuck in this residue state — small by construction. */
+ *  the conductor's tick suspends this pass while any park episode is open. Every forge call is
+ *  a READ (this pass never writes to the forge — the lane's issue and PR are left exactly as a
+ *  human left them), and every candidate reaches a durable, one-way answer, so the per-tick
+ *  cost trends to zero rather than accruing on a permanently stuck row. */
 export async function reviveEnvFailedPrLanes(
   forge: LaneRevivalForge,
-  state: Pick<State, "unlabeledGatedWorkers" | "humanMergeOnlySettled" | "upsertWorker" | "appendEvent">,
+  state: Pick<State, "unlabeledGatedWorkers" | "laneEventRecorded" | "upsertWorkerWithEvent" | "appendEvent">,
   cfg: { escalation: { humanLabels: string[] } },
   log: (message: string) => void = console.error,
 ): Promise<string[]> {
@@ -254,15 +283,23 @@ export async function reviveEnvFailedPrLanes(
     if (w.pr == null) continue; // fail-safe; unlabeledGatedWorkers() already filters this
     const pr = w.pr;
     try {
-      if (state.humanMergeOnlySettled(w.name, pr)) continue;
-      if (labelsIncludeAny(await forge.getIssueLabels(w.issue), cfg.escalation.humanLabels)) continue;
-      if ((await forge.getPRStatus(pr)).state !== "OPEN") continue;
-      state.upsertWorker({ ...w, state: "driving" });
-      state.appendEvent("lane-revived", { worker: w.name, issue: w.issue, pr });
+      if (state.laneEventRecorded(HUMAN_MERGE_ONLY_EVENT, w.name, pr)) continue;
+      if (state.laneEventRecorded(REVIVAL_TERMINAL_EVENT, w.name, pr)) continue;
+      if (labelsIncludeAny(await forge.getIssueLabels(w.issue), cfg.escalation.humanLabels)) {
+        handGatedLaneToReentry(state, w);
+        continue;
+      }
+      const prState = (await forge.getPRStatus(pr)).state;
+      if (prState !== "OPEN") {
+        state.appendEvent(REVIVAL_TERMINAL_EVENT, { worker: w.name, issue: w.issue, pr, prState });
+        continue;
+      }
+      state.upsertWorkerWithEvent({ ...w, state: "driving" }, "lane-revived", { worker: w.name, issue: w.issue, pr });
       revived.push(w.name);
     } catch (error) {
-      // Per-lane containment, same stance as the gated-flag audit above: a forge hiccup leaves
-      // this lane exactly as it was and the next pass (startup or park-resume) retries it.
+      // Per-lane containment, same stance as the gated-flag audit above. Every write this loop
+      // makes is a single atomic statement or one transaction, so a throw anywhere leaves this
+      // lane exactly as the pass found it and the next pass (startup or park-resume) retries it.
       log(`[sapwood:reconcile] lane revival of ${w.name} (#${w.issue}, PR #${pr}) failed; continuing: ${String(error)}`);
     }
   }
