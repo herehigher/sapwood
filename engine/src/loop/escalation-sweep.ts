@@ -20,6 +20,15 @@
 // swept. A hand-applied label on an issue with NO engine escalation in the ledger has no proof
 // and is therefore untouchable, forever — which is the correct answer, not a limitation.
 //
+// OWNERSHIP IS NOT PERMISSION (#441 review round 2, Codex P1). Proving the engine applied the
+// label answers "may we remove OUR label"; it does not answer "has this work been released back
+// to automation". Those are different facts, and only the second justifies lifting a stop sign.
+// So a sweep needs a second, independent condition: an AUTHORIZING witness, `SWEEPABLE_VIA` =
+// {merged, issue-closed}. Notably `pr-closed` is NOT one — a closed-unmerged PR is reopenable,
+// producer-reachable (the guard permits `gh pr close`), and mapped to HUMAN by the merge gate, so
+// sweeping it would let a lane clear its own human gate and churn. See `SWEEPABLE_VIA` for the
+// per-value reasoning and the exact failure it prevents.
+//
 // ORDERING: WRITE FIRST, RECEIPT SECOND — deliberately the OPPOSITE of PR #463's
 // event-before-upsert. The direction is not a house style; it follows from which side is
 // idempotent and which failure is worse. There, the event was a fail-CLOSED discriminator: a
@@ -64,11 +73,42 @@ export const SWEPT_KIND = "needs-human-swept";
  *  the same array to both folds (`openEscalations` ignores kinds it does not know). */
 export const SWEEP_EVENT_KINDS = [...Object.keys(ESCALATION_SOURCES), ...CLEAR_KINDS, RESOLVED_KIND, SWEPT_KIND];
 
+/** The ONLY resolution witnesses that authorize removing the engine's hold — an allowlist, so a
+ *  `via` this module has never heard of (a future arm, a legacy ledger row) can never sweep.
+ *
+ *  #441 review round 2 (Codex P1, blocking): ownership proof is necessary but NOT sufficient. The
+ *  engine may have provably applied the label AND the escalation may be provably over as a strip
+ *  row, and it can still be wrong to lift the hold — because "no longer an open attention item"
+ *  and "a person released this work back to automation" are different facts. The witness must be
+ *  the second one:
+ *    - `merged` — the work landed. Producers cannot merge (guard.ts blocks `gh pr merge`), so a
+ *      merge is a reviewer/merger act by construction.
+ *    - `issue-closed` — the work item was closed, and `gh issue close|reopen|transfer|delete` is
+ *      blocked outright for producers (#353), so this is an engine/human act.
+ *  Everything else is excluded, each for its own reason:
+ *    - `pr-closed` — the P1. A CLOSED PR is neither terminal (it can reopen) nor authorized (the
+ *      guard permits `gh pr close`, so a producer can close its own PR) nor complete (the merge
+ *      gate maps every non-OPEN PR to HUMAN — "never touch"). Sweeping it would let a lane clear
+ *      its OWN human gate: GATED RECLAIM reads the label's absence as authorization, reclaims the
+ *      still-CLOSED PR, DRIVE re-derives HUMAN, re-escalates, and the sweep clears it again —
+ *      churn until `gated-reentry-capped` latches the row permanently AND has its own fresh label
+ *      swept, leaving the lane both invisible and unlabelled. The label stays: a closed-unmerged
+ *      PR still owes a human decision.
+ *    - `board-fixed` — only ever reachable for merge-produced `rollback-escalated`, which is
+ *      `never`-proof and so unreachable here anyway; excluded explicitly rather than by accident.
+ *    - `label-removed` — that resolution IS the observation that the hold set is already gone.
+ *    - a bare legacy `"closed"` (written before this split) — genuinely ambiguous: the ledger
+ *      cannot say whether a PR or the issue closed. Fails closed, permanently, by design. The
+ *      cost is a stale label on pre-existing rows that a human clears once; the alternative is
+ *      replaying the P1 against every historical PR closure on upgrade. */
+const SWEEPABLE_VIA: ReadonlySet<string> = new Set(["merged", "issue-closed"]);
+
 export interface SweepableHold {
   /** The escalation kind whose label this is — the ownership key. */
   source: string;
   issue: number;
-  /** How the escalation was observed resolved, carried into the receipt for the audit trail. */
+  /** The authorizing witness — always a member of `SWEEPABLE_VIA`; carried into the receipt so
+   *  the audit trail records WHICH release justified the write. */
   via: string;
 }
 
@@ -81,15 +121,19 @@ function payloadString(payload: Record<string, unknown> | null, key: string): st
  *  swept, keyed `${source}:${issue}` — a last-event-wins fold over the durable ledger, the same
  *  shape (and for the same re-escalation reason) as `openEscalations`.
  *
- *  Each key's proof comes from its OWN latest escalation event, so a `drive-needs-human` that
- *  re-escalates with `labeled: 0` after a proven one cannot inherit the earlier proof. Three
- *  things drop a key back out: a later escalation for it (the label is live again), its own
- *  receipt (already swept), and a `via: "label-removed"` resolution (that resolution IS the
- *  observation that the whole human-hold set is already gone — there is nothing to remove).
+ *  TWO independent conditions must hold, and the fold enforces both: the engine must PROVABLY own
+ *  the label (`ESCALATION_SOURCES`, from the key's OWN latest escalation event — so a
+ *  `drive-needs-human` re-escalating with `labeled: 0` cannot inherit an earlier proof), and the
+ *  resolution must carry an AUTHORIZING witness (`SWEEPABLE_VIA` — proof of ownership alone is
+ *  not permission to lift a hold; see that constant's doc for the round-2 P1 this closes).
+ *
+ *  Three things drop a key back out: a later escalation for it (the label is a live hold again),
+ *  its own receipt (already swept), and any resolution whose `via` is not in `SWEEPABLE_VIA`.
  *
  *  A resolution whose escalation event is not in the ledger at all (a truncated or hand-edited
  *  history) yields NO proof and is therefore never swept — fail closed, exactly as the module
- *  doc's ownership rule requires. */
+ *  doc's ownership rule requires. So does a legacy `via: "closed"` row from before the
+ *  pr-closed/issue-closed split, for the reason `SWEEPABLE_VIA` records. */
 export function sweepableHolds(events: readonly { kind: string; payload: unknown }[]): Map<string, SweepableHold> {
   const proven = new Map<string, boolean>();
   const sweepable = new Map<string, SweepableHold>();
@@ -102,11 +146,11 @@ export function sweepableHolds(events: readonly { kind: string; payload: unknown
       if (source === undefined) continue;
       const key = `${source}:${issue}`;
       const via = payloadString(payload, "via");
-      if (e.kind === SWEPT_KIND || via === "label-removed" || proven.get(key) !== true) {
+      if (e.kind === SWEPT_KIND || via === undefined || !SWEEPABLE_VIA.has(via) || proven.get(key) !== true) {
         sweepable.delete(key);
         continue;
       }
-      sweepable.set(key, { source, issue, via: via ?? "" });
+      sweepable.set(key, { source, issue, via });
       continue;
     }
     const proof = ESCALATION_SOURCES[e.kind];

@@ -218,9 +218,26 @@ const CLEAR_PRODUCES: Record<string, (kind: string, payload: Record<string, unkn
 
 export const RESOLVED_KIND = "escalation-resolved";
 
-/** How an escalation was observed to have been resolved. See the module doc for why
- *  `board-fixed` (named in issue #295's sketch) is deliberately absent. */
-export type ResolutionVia = "merged" | "closed" | "label-removed" | "board-fixed";
+/** How an escalation was observed to have been resolved.
+ *
+ *  #441 review round 2 (Codex P1): the single `"closed"` value was SPLIT into `pr-closed` and
+ *  `issue-closed`, because `observeResolution` reaches it down two paths that are not remotely
+ *  the same fact, and a downstream consumer cannot tell them apart:
+ *    - a CLOSED **PR** is not a completion witness and not a human act. `deriveGate` maps every
+ *      non-OPEN PR to HUMAN ("already merged/closed -> never touch", merge-driver.ts), the fold
+ *      below deliberately keeps closure NON-terminal because a PR can reopen, and the producer
+ *      guard blocks `gh pr merge`/`ready`/`review --approve` but NOT `gh pr close` (guard.ts's
+ *      checkCategoryC) — so a worker can put its own lane into this state.
+ *    - a CLOSED **issue** is engine/human-owned: `gh issue close|reopen|transfer|delete` is
+ *      blocked outright for producers (#353, guard.ts's ISSUE_LIFECYCLE_VERBS), so the closure
+ *      was performed by a person or by a merge carrying `Closes #N`.
+ *  This module treats both as "no longer waiting on a human" exactly as before — the strip clears
+ *  either way, and nothing here changed behaviour. The distinction exists for
+ *  `escalation-sweep.ts`, which may only act on a witness that genuinely represents completion or
+ *  release; see its own `SWEEPABLE_VIA`. Recording the two separately is a payload REFINEMENT,
+ *  not a new contract: this module still writes one transition event per resolution and still
+ *  gates nothing. */
+export type ResolutionVia = "merged" | "pr-closed" | "issue-closed" | "label-removed" | "board-fixed";
 
 export interface OpenEscalation {
   /** The escalation event kind this came from — the `source` the dashboard folds on. */
@@ -329,7 +346,7 @@ async function observeResolution(
   if (esc.pr !== undefined) {
     const pr = await forge.getPRStatus(esc.pr);
     if (pr.state === "MERGED") return "merged";
-    if (pr.state === "CLOSED") return "closed";
+    if (pr.state === "CLOSED") return "pr-closed"; // #441 r2: NOT a completion witness — see ResolutionVia
   }
   // #295 review round 7: for an escalation the MERGE ITSELF produced, the board is the only honest
   // witness. Checked BEFORE the issue read, and it is the only arm this class has — see below.
@@ -337,7 +354,7 @@ async function observeResolution(
     return (await boardStatus(esc.issue)) === cfg.board.status.done ? "board-fixed" : null;
   }
   const meta = await forge.getIssueMeta(esc.issue);
-  if (meta.state === "CLOSED") return "closed";
+  if (meta.state === "CLOSED") return "issue-closed";
   // The WHOLE human-hold set, matching GATED RECLAIM's own eligibility rule (conductor.ts: "the
   // ISSUE carries NONE of cfg.escalation.humanLabels") — so this module and the reclaim path can
   // never disagree about whether a human is still holding the issue.

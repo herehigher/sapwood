@@ -63,7 +63,7 @@ test("sweepableHolds: a NOT-label-proven source (best-effort addLabel) is never 
   // ceiling-escalated `.catch(() => {})`s its addLabel, so a label on this issue may be anyone's.
   const holds = sweepableHolds([
     { kind: "ceiling-escalated", payload: { worker: "w1", issue: 7 } },
-    { kind: "escalation-resolved", payload: { issue: 7, source: "ceiling-escalated", via: "closed" } },
+    { kind: "escalation-resolved", payload: { issue: 7, source: "ceiling-escalated", via: "issue-closed" } },
   ]);
   assert.equal(holds.size, 0);
 });
@@ -105,6 +105,37 @@ test("sweepableHolds: a via:'label-removed' resolution sweeps nothing — that r
   assert.equal(holds.size, 0);
 });
 
+// ── #441 review round 2 (Codex P1): ownership proof is not permission ────────────────────────
+// The label may be provably the engine's AND the escalation may be provably over as a strip row,
+// and lifting the hold can still be wrong. Only a witness that represents completion or release
+// authorizes the write.
+
+test("sweepableHolds (r2 P1): a via:'pr-closed' resolution is NOT sweepable even with full ownership proof — a closed-unmerged PR still owes a human decision", () => {
+  const holds = sweepableHolds([
+    { kind: "fix-rounds-capped", payload: { worker: "w1", issue: 7, pr: 12 } }, // `always`-proven
+    { kind: "escalation-resolved", payload: { issue: 7, pr: 12, source: "fix-rounds-capped", via: "pr-closed" } },
+  ]);
+  assert.equal(holds.size, 0, "closing a PR is producer-reachable and reopenable — never a release");
+});
+
+test("sweepableHolds (r2 P1): a LEGACY bare via:'closed' row is not sweepable — the ledger cannot say which entity closed, so it fails closed forever", () => {
+  const holds = sweepableHolds([
+    { kind: "fix-rounds-capped", payload: { worker: "w1", issue: 7, pr: 12 } },
+    { kind: "escalation-resolved", payload: { issue: 7, pr: 12, source: "fix-rounds-capped", via: "closed" } },
+  ]);
+  assert.equal(holds.size, 0, "an upgrade must not replay the P1 against every historical PR closure");
+});
+
+test("sweepableHolds (r2 P1): the via allowlist is closed — board-fixed and an unknown future via both sweep nothing", () => {
+  for (const via of ["board-fixed", "some-future-arm", ""]) {
+    const holds = sweepableHolds([
+      { kind: "fix-rounds-capped", payload: { worker: "w1", issue: 7, pr: 12 } },
+      { kind: "escalation-resolved", payload: { issue: 7, pr: 12, source: "fix-rounds-capped", via } },
+    ]);
+    assert.equal(holds.size, 0, `via ${JSON.stringify(via)} must not authorize a write`);
+  }
+});
+
 test("sweepableHolds: its own receipt drops the key; a LATER re-escalation + resolution makes it sweepable again", () => {
   const base = [
     { kind: "fix-rounds-capped", payload: { worker: "w1", issue: 7, pr: 12 } },
@@ -116,7 +147,7 @@ test("sweepableHolds: its own receipt drops the key; a LATER re-escalation + res
     sweepableHolds([
       ...base,
       { kind: "fix-rounds-capped", payload: { worker: "w1", issue: 7, pr: 13 } },
-      { kind: "escalation-resolved", payload: { issue: 7, source: "fix-rounds-capped", via: "closed", pr: 13 } },
+      { kind: "escalation-resolved", payload: { issue: 7, source: "fix-rounds-capped", via: "issue-closed", pr: 13 } },
     ]).size,
     1,
     "a second episode gets its own sweep — the receipt is scoped to the resolution it latched",
@@ -202,7 +233,7 @@ test("sweepResolvedHolds: an issue whose OTHER escalation is still open is left 
 
   // Once that one resolves too, the sweep proceeds: ONE removal for the shared carrier, but a
   // receipt each, so a later re-escalation of either source can still earn its own sweep.
-  state.appendEvent("escalation-resolved", { issue: 7, source: "resume-capped", via: "closed" });
+  state.appendEvent("escalation-resolved", { issue: 7, source: "resume-capped", via: "issue-closed" });
   await sweepResolvedHolds(forge, state, mkCfg());
   assert.deepEqual(forge.removed, [[7, NEEDS_HUMAN]], "two owners, one label, one write");
   assert.deepEqual(
@@ -219,7 +250,7 @@ test("sweepResolvedHolds: a steady-state re-sweep writes NOTHING — the receipt
   const forge = new FakeForge();
   const state = new State(":memory:");
   state.appendEvent("resume-capped", { worker: "w1", issue: 7 });
-  state.appendEvent("escalation-resolved", { issue: 7, source: "resume-capped", via: "closed" });
+  state.appendEvent("escalation-resolved", { issue: 7, source: "resume-capped", via: "issue-closed" });
 
   await sweepResolvedHolds(forge, state, mkCfg());
   await sweepResolvedHolds(forge, state, mkCfg());
@@ -257,7 +288,7 @@ test("sweepResolvedHolds crash window 2 (removal landed, process dies BEFORE the
     const path = join(dir, "sapwood.sqlite");
     const before = new State(path);
     before.appendEvent("resume-undecidable", { worker: "w1", issue: 7 });
-    before.appendEvent("escalation-resolved", { issue: 7, source: "resume-undecidable", via: "closed" });
+    before.appendEvent("escalation-resolved", { issue: 7, source: "resume-undecidable", via: "issue-closed" });
     const forge = new FakeForge();
     forge.issueLabels[7] = [NEEDS_HUMAN];
     // Simulate the crash: the removal happens, the receipt append does not.
@@ -287,7 +318,7 @@ test("sweepResolvedHolds: a removeLabel failure writes NO receipt and is retried
   const forge = new FakeForge();
   const state = new State(":memory:");
   state.appendEvent("verify-na-proposed", { worker: "w1", issue: 7 });
-  state.appendEvent("escalation-resolved", { issue: 7, source: "verify-na-proposed", via: "closed" });
+  state.appendEvent("escalation-resolved", { issue: 7, source: "verify-na-proposed", via: "issue-closed" });
   forge.failRemovalsFor.add(7);
   const logs: string[] = [];
 
@@ -339,5 +370,63 @@ test("reconcile + sweep in ONE pass (F34): a fix-rounds-capped escalation whose 
   await sweepResolvedHolds(forge, state, cfg);
   assert.equal(forge.removed.length, 1);
   assert.equal(state.eventsAfterId(0, ["escalation-resolved"]).length, 1);
+  state.close();
+});
+
+test("reconcile + sweep (r2 P1, the negative case): an escalation resolved by a CLOSED-unmerged PR keeps its needs-human and writes no receipt", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  // Same ownership proof as the F34 case above — the ONLY difference is how it resolved.
+  state.appendEvent("fix-rounds-capped", { worker: "w1", issue: 403, pr: 430 });
+  forge.issueLabels[403] = [NEEDS_HUMAN];
+  forge.prStates[430] = "CLOSED";
+
+  await reconcileEscalations(forge, state, cfg);
+  await sweepResolvedHolds(forge, state, cfg);
+
+  // The strip row still clears — that half is unchanged and is what #295 is for.
+  assert.deepEqual(state.eventsAfterId(0, ["escalation-resolved"])[0]?.payload, {
+    issue: 403,
+    pr: 430,
+    source: "fix-rounds-capped",
+    via: "pr-closed",
+  });
+  // But the HOLD stays: a closed-unmerged PR is not a completion witness.
+  assert.deepEqual(forge.removed, []);
+  assert.deepEqual(forge.issueLabels[403], [NEEDS_HUMAN]);
+  assert.deepEqual(sweptEvents(state), []);
+  state.close();
+});
+
+test("reconcile + sweep (r2 P1, no churn): repeated passes over a CLOSED-PR escalation never remove the label, however many rounds run", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  state.appendEvent("drive-needs-human", { worker: "w1", issue: 403, pr: 430, labeled: 1 });
+  forge.issueLabels[403] = [NEEDS_HUMAN];
+  forge.prStates[430] = "CLOSED";
+
+  // The churn loop codex described starts with ONE wrongful removal: label gone -> GATED RECLAIM
+  // reads absence as authorization -> reclaims the still-CLOSED PR -> DRIVE re-derives HUMAN ->
+  // re-escalates -> swept again ... until gated-reentry-capped latches an unlabelled, invisible
+  // lane. Cutting it at the source means the label must survive EVERY pass, not just the first.
+  for (let round = 0; round < 5; round++) {
+    await reconcileEscalations(forge, state, cfg);
+    await sweepResolvedHolds(forge, state, cfg);
+    assert.deepEqual(forge.issueLabels[403], [NEEDS_HUMAN], `round ${round}: the human gate still stands`);
+  }
+  assert.deepEqual(forge.removed, []);
+  assert.deepEqual(sweptEvents(state), []);
+
+  // The restriction is about the WITNESS, not a blanket refusal. Reopen the PR, let the lane
+  // re-escalate (which is what re-opens the fold entry — a resolved key is not re-observed), and
+  // land it for real: the very next pass sweeps.
+  forge.prStates[430] = "MERGED";
+  state.appendEvent("drive-needs-human", { worker: "w1", issue: 403, pr: 430, labeled: 1 });
+  await reconcileEscalations(forge, state, cfg);
+  await sweepResolvedHolds(forge, state, cfg);
+  assert.deepEqual(forge.removed, [[403, NEEDS_HUMAN]]);
+  assert.equal(sweptEvents(state).length, 1);
   state.close();
 });

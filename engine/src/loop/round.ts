@@ -734,24 +734,53 @@ export class PoolScopedForge implements IForge {
   }
 }
 
-/** #212 (2026-07-16 AC addendum): `IForge.removeLabel` is a new capability this issue
- *  introduces, and label REMOVAL is otherwise reserved for an explicit human act — #147's gated
- *  reentry reads a human clearing `needs-human`/`blocked` as the very signal that authorizes
- *  reclaiming a lane, and gate⓪ treats `plan:approved`/`verify:n/a` presence as a human-trusted
- *  adjudication. An engine- or session-driven removal of any of those would forge that
- *  signature. This function is the ONE place engine code may call `forge.removeLabel` — it
- *  fails CLOSED (throws, never removes) for any label other than the engine-owned
- *  `cfg.labels.roundPool`, so a future call site (or a schema field a session could ever
- *  populate) accidentally wired to a different label can never silently slip through. Two
- *  callers today, both engine-only: round close (below) and align.ts's pool-selection reconcile
- *  pass (clears a stray pool label from an open issue outside this round's selected target, at
- *  selection time rather than waiting for close). */
+/** #212 (2026-07-16 AC addendum): `IForge.removeLabel` is a capability this issue introduced, and
+ *  label REMOVAL is a governance-significant act — #147's gated reentry reads a human clearing
+ *  `needs-human`/`blocked` as the very signal that authorizes reclaiming a lane, and gate⓪ treats
+ *  `plan:approved`/`verify:n/a` presence as a human-trusted adjudication. An engine- or
+ *  session-driven removal of any of those forges that signature unless the engine can prove it is
+ *  removing its OWN mark for a reason a person would recognise.
+ *
+ *  THE AUTHORIZED ENGINE REMOVAL PATHS — the complete list. `forge.removeLabel` is called from
+ *  exactly two places in engine code, each narrowly scoped by a DIFFERENT provenance check, and a
+ *  third call site is a defect until it is added here with one of its own:
+ *
+ *  1. **`removeRoundPoolLabel` (this function) — round-pool label, checked by ROUND OWNERSHIP.**
+ *     Fails CLOSED (throws, never removes) for any label other than the engine-owned
+ *     `cfg.labels.roundPool`, so a future call site — or a schema field a session could ever
+ *     populate — accidentally wired to a different label can never silently slip through. Two
+ *     callers today, both engine-only: round close (below) and align.ts's pool-selection
+ *     reconcile pass (clears a stray pool label from an open issue outside this round's selected
+ *     target, at selection time rather than waiting for close).
+ *
+ *  2. **`escalation-sweep.ts`'s `sweepResolvedHolds` — `cfg.labels.needsHuman` ONLY, checked by
+ *     event-log PROOF plus an authorizing WITNESS** (#441, F34). The `needs-human`-is-human-only
+ *     rule this comment used to state absolutely was itself the bug: nothing ever removed the
+ *     label on the paths where the ENGINE knows its own escalation is over, so a resolved
+ *     escalation kept suppressing automation forever. That path is now permitted, and it is
+ *     permitted narrowly, on two independent conditions that must BOTH hold:
+ *       - ownership: the escalation kind's entry in `escalation-reconcile.ts`'s
+ *         `ESCALATION_SOURCES` proves the ENGINE applied that label (`always`, or `payload` with
+ *         `labeled: 1`). A hand-applied label — anything with no engine escalation in the ledger
+ *         — has no proof and is never touched, which is exactly the #147 invariant preserved.
+ *       - authorization: the resolution's witness is in `SWEEPABLE_VIA` = {merged, issue-closed},
+ *         both producer-unreachable (the guard blocks `gh pr merge` and every `gh issue`
+ *         lifecycle verb). A `pr-closed` witness is explicitly NOT sufficient — see that
+ *         constant's doc.
+ *     It does not route through this function on purpose: this one's whole value is that it
+ *     rejects every label but `roundPool`, and widening it to a second label with different
+ *     provenance rules would destroy that guarantee rather than extend it.
+ *
+ *  Everything else — `blocked`, `plan:approved`, `verify:n/a`, and `needs-human` outside the
+ *  proven-and-authorized case above — remains removable by a human only. */
 export async function removeRoundPoolLabel(forge: IForge, cfg: SapwoodConfig, issue: number, label: string): Promise<void> {
   if (!labelsInclude([label], cfg.labels.roundPool)) {
     throw new Error(
-      `removeRoundPoolLabel: refusing to remove label "${label}" — engine code may only ever remove ` +
-        `cfg.labels.roundPool ("${cfg.labels.roundPool}"); every other label (needs-human, blocked, ` +
-        `plan:approved, verify:n/a, ...) is removable by a human only (#147 invariant)`,
+      `removeRoundPoolLabel: refusing to remove label "${label}" — this entry point may only ever ` +
+        `remove cfg.labels.roundPool ("${cfg.labels.roundPool}"). The only other authorized engine ` +
+        `removal is escalation-sweep.ts clearing an engine-applied needs-human whose escalation is ` +
+        `provably resolved (#441); every other label (blocked, plan:approved, verify:n/a, ...) is ` +
+        `removable by a human only (#147 invariant)`,
     );
   }
   await forge.removeLabel(issue, label);

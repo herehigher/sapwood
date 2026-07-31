@@ -56,6 +56,8 @@ import {
   startFixLeg,
   tick,
 } from "./conductor.js";
+import { reconcileEscalations } from "./escalation-reconcile.js";
+import { sweepResolvedHolds } from "./escalation-sweep.js";
 
 /** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
  *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
@@ -4283,6 +4285,43 @@ test("#172 pause + full hold-set: a handoff does not resume until PAUSE and conf
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("#441 review round 2 (Codex P1): a CLOSED-unmerged PR must not let a lane clear its OWN human gate — sweep + GATED RECLAIM produce no churn across five rounds", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+
+  // The exact shape gatedFailedWorkers() requires: a failed lane holding a PR, with the engine's
+  // own escalation label provably applied (gated_escalation_labeled = 1).
+  seedRunning(st, "lane-c", 403);
+  const lane = st.getWorker("lane-c")!;
+  st.upsertWorker({ ...lane, state: "failed", pr: 430, ended_at: "t1", gated_escalation_labeled: 1 });
+  st.appendEvent("drive-needs-human", { worker: "lane-c", issue: 403, pr: 430, labeled: 1 });
+  forge.issueLabelsByIssue[403] = [cfg.labels.needsHuman];
+  // The producer guard permits `gh pr close`, so a worker can put its own lane here.
+  forge.prStatus = { ...forge.prStatus, state: "CLOSED" };
+
+  for (let round = 0; round < 5; round++) {
+    await reconcileEscalations(forge, st, cfg);
+    await sweepResolvedHolds(forge, st, cfg);
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    assert.deepEqual(r.gatedReclaimed, [], `round ${round}: the hold still stands — no reentry`);
+  }
+
+  assert.deepEqual(forge.issueLabelsByIssue[403], [cfg.labels.needsHuman], "the human gate survived every round");
+  assert.equal(st.eventsAfterId(0, ["needs-human-swept"]).length, 0);
+  assert.equal(st.eventsAfterId(0, ["gated-reentry"]).length, 0);
+  assert.equal(st.eventsAfterId(0, ["gated-reentry-capped"]).length, 0, "the cap was never burned by engine-manufactured reentries");
+  assert.equal(st.getWorker("lane-c")?.state, "failed");
+  assert.equal(st.getWorker("lane-c")?.gated_reentry_attempts ?? 0, 0);
+  // The strip row still clears exactly once — visibility is unchanged, only the WRITE is refused.
+  const resolved = st.eventsAfterId(0, ["escalation-resolved"]);
+  assert.equal(resolved.length, 1);
+  assert.equal((resolved[0]!.payload as { via: string }).via, "pr-closed");
+  st.close();
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
