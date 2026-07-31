@@ -61,9 +61,14 @@ The session never approves, labels, comments on, fixes, or merges a PR. Its stri
 only per-AC statuses and findings; it cannot name an overall verdict or head OID. The deterministic
 engine owns the approval/blocking split:
 
-- zero findings and only `confirmed`/`claim-accepted` AC states derive `approved`; any
-  `claim-accepted` IDs remain explicit unreproduced claims in the evidence;
-- any finding or `cannot-confirm` AC derives `rejected`, which enters the existing FIXABLE path;
+- zero BLOCKING findings and only `confirmed`/`claim-accepted` AC states derive `approved`; any
+  `claim-accepted` IDs remain explicit unreproduced claims in the evidence, and any advisory
+  finding is recorded alongside them (#448, design #402 R1) rather than silently dropped;
+- any blocking finding or `cannot-confirm` AC derives `rejected`, which enters the existing
+  FIXABLE path. `severity: "advisory"` is honored only for an engine-side kind allowlist
+  (`style`, `test-coverage`); every other kind is forced back to blocking and the override is
+  recorded — the session cannot lower its own gate. The per-AC path blocks independently: a
+  `cannot-confirm` rejects regardless of how any finding is labelled;
 - malformed output, setup failure, indistinguishable worker/reviewer models, or unavailable
   execution evidence never approves: they retry/back off as allowed, then queue unavailable;
 - unresolved threads, standing current-head `CHANGES_REQUESTED`, human/hold labels, instruction-
@@ -74,6 +79,33 @@ An engine-agent decisive result is consumed only after its sanitized, non-author
 comment has a delivery receipt and a final live refetch still matches the pinned head/base and
 gate state. This keeps the review session a bounded judgment source while the engine remains the
 only component that turns that judgment into gate behavior.
+
+### The reviewer prompt's enforced/judged split (#454, design #402 §6a)
+
+The reviewer's behavior has two halves, and the shipped prompt
+(`engine/prompts/engine-reviewer.md`, operator-tunable via `reviewer.agent.promptFile`) states
+which half each of its own instructions belongs to. This is the same producer≠reviewer discipline
+applied one level down: what the engine *enforces* is a property of the code, what the reviewer
+*judges* is a property of the session — and a prompt that blurs the two invites a tuner to
+"tighten" a rule the engine already enforces (a no-op) or to loosen one nothing checks (an
+unbounded change).
+
+**Engine-enforced, prompt-independent** — each backed by a live check, not by the prompt saying
+so: exactly one `perAC` entry per manifest id (unknown/missing/duplicate voids the whole output);
+the finding key allowlist plus closed `severity`/`kind` enums; the advisory-eligible kind
+allowlist; a `rejected` verdict always carrying a non-empty findings array; model separation
+checked both pre-session (configured models) and post-session (recorded model usage); head/base/
+diff identity and snapshotted-body drift, both fail-closed; the hardcoded `Read`/`Grep`/`Glob`-only
+tool profile, which a caller cannot widen.
+
+**Agent-judged, unverifiable by the engine** — no schema can check these, and the prompt says so
+rather than implying otherwise: whether a named test is substantive rather than merely present;
+the evidence-tier choice itself; which `severity` and `kind` a finding deserves; whether a finding
+is worth writing at all; the finding classes the prompt names; and the rest of its prose. This
+half is where a review earns or loses its value, which is why the shipped default also carries the
+triage doctrine (§6b) — triage before writing, name the target `path` and the `kind`, do not
+re-raise an adjudicated finding, scope honestly — repeated hand-tuning converged on. Those are
+durable defaults in a shipped, reviewable artifact, not one operator's habits.
 
 ## The write-scope tier ladder
 
