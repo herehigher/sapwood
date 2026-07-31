@@ -19,7 +19,7 @@
 // responsible for treating a non-null marker as "already externalized, don't duplicate."
 
 import type { SapwoodConfig } from "../config/config.js";
-import type { IForge, Issue } from "../forge/forge.js";
+import { type IForge, type Issue, isPlanless, needsPlanTriage } from "../forge/forge.js";
 import { type LabelSpec, labelsInclude } from "../forge/labels.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import { createProxyMint } from "../proxy/mint.js";
@@ -1226,13 +1226,35 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         // as a board write but whose addLabel failed still pins this probe. That direction is the
         // deliberate one — it errs toward opening a round, the same fail-toward-more-work stance
         // this probe's own catch uses.
+        //
+        // #432 (F32, PM gate⓪ adjudication 2026-07-31): consumable-SHAPE, not just consumable-
+        // LANE, is the last rung. Everything above this line excludes an issue by where it sits
+        // (held, claimed, fenced); this excludes by what's actually IN it. A milestone issue that
+        // is open, unclaimed, unheld, and not planless can STILL be nothing the PO/aligning pass
+        // can act on — a fully-specified issue (plan + AC already drafted, just waiting on a
+        // human to flip it to Ready) is invisible to getReadyIssues (not Ready yet) AND to
+        // getIssuesNeedingPlanReview (Ready-lane only, this one isn't) AND to the PO's own triage
+        // pass (it already has a plan — triage's whole job is filling the gap, not re-drafting).
+        // Nothing enabled can consume it; counting it anyway is exactly the F32 churn (8 such
+        // issues in v0.2.1 pinned this probe true for six empty rounds, po-align yielding zero
+        // every time). `needsPlanTriage` (forge.ts, #89) is reused UNCHANGED rather than
+        // re-derived here — it is the literal predicate behind getIssuesNeedingPlanTriage, so
+        // probe and consumer can never drift into the two ever disagreeing about the same issue
+        // (the PM adjudication's hard constraint: a parallel prose heuristic over the body would
+        // silently reopen this exact bug, possibly as its mirror image). A genuinely RAW issue —
+        // no verification-plan section at all — makes needsPlanTriage true, so it still counts:
+        // cold-start decomposition (AC2) is unaffected, this rung only ever narrows the SPECIFIED
+        // case. Zero new persistence (the REJECTED zero-yield-memory alternative): this is a pure
+        // per-issue shape read off the SAME listOpenIssues() fetch already in hand, so it is
+        // restart-proof by construction — there is no hash or memory to go stale.
         const openIssues = await forge.listOpenIssues();
         return openIssues.some(
           (i) =>
             i.milestone === cfg.round.milestone &&
             !labelsInclude(i.labels, cfg.labels.inProgress) &&
             !cfg.escalation.humanLabels.some((label) => labelsInclude(i.labels, label)) &&
-            !labelsInclude(i.labels, cfg.labels.planless),
+            !isPlanless(i.labels, cfg.labels) &&
+            needsPlanTriage(i.body ?? "", i.labels, cfg.labels),
         );
       }
       return false;

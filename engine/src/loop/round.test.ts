@@ -3243,6 +3243,101 @@ test("runRounds standby (#212 probe residual fix): a mixed milestone (one held, 
   state.close();
 });
 
+// ── #432 (F32, PM gate⓪ adjudication 2026-07-31): the consumable-SHAPE rung. Everything above
+//    excludes an issue by LANE (held, claimed, fenced); this excludes by SHAPE — a milestone
+//    issue that is open/unclaimed/unheld/unfenced can still be un-consumable if it already
+//    carries a full plan+AC and is simply waiting on a human Ready-promotion (dogfood 2026-07-29,
+//    rounds 244-249: 8 such issues in v0.2.1 pinned the probe true for six straight empty
+//    rounds). The new rung reuses forge.ts's `needsPlanTriage` — the EXACT predicate behind
+//    `getIssuesNeedingPlanTriage` — never a parallel prose heuristic. Fixture matrix per the
+//    issue's verification plan: raw / specified / mixed / all-human-hold (all-human-hold is
+//    already covered by the #212 tests above). ──────────────────────────────────────────────
+
+const SPECIFIED_BODY = "## Acceptance criteria\n- [ ] x\n\n## Verification plan\n- npm test";
+
+test("runRounds standby (#432 F32): a milestone whose open non-Ready issues are ALL fully-specified (plan+AC present, no triage signal) does not count as work — standby engages after one idle round", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // none are Ready yet — awaiting only human promotion
+  forge.planReviewCandidates = []; // Ready-lane-only signal, moot here
+  forge.planTriageCandidates = []; // #89: neither has a plan gap — nothing for the PO to triage
+  forge.milestoneOpenCounts = [2];
+  const cfg = mkCfg({ round: { milestone: "v0.2.1", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 460, title: "fully specified a", labels: [], body: SPECIFIED_BODY, milestone: "v0.2.1" },
+    { number: 461, title: "fully specified b", labels: [], body: SPECIFIED_BODY, milestone: "v0.2.1" },
+  ];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop(); // bounded safety net, same idiom as the #212/#391 tests above
+  };
+  const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 5, cfg, peripherals: allPeripherals(log) });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby actually engaged — a milestone of fully-specified, human-Ready-gated issues no longer pins the probe true",
+  );
+  assert.ok(forge.milestoneQueries.includes("v0.2.1"), "the cheap count was still checked first");
+  state.close();
+});
+
+test("runRounds standby (#432 F32, AC2): a genuinely raw issue (no plan/AC structure) in the milestone still counts as work — cold-start decomposition is unaffected", async () => {
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.planReviewCandidates = [];
+  forge.planTriageCandidates = []; // this probe's milestone rung must carry the signal on its own
+  forge.milestoneOpenCounts = [1];
+  const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 500, title: "brand new, no plan yet", labels: [], body: "just an idea, nothing structured", milestone: "M4" },
+  ];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — the raw issue is still work, no standby");
+  assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
+  state.close();
+});
+
+test("runRounds standby (#432 F32): a MIXED milestone (one fully-specified, one raw) still counts as work — the raw issue alone is enough", async () => {
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.planReviewCandidates = [];
+  forge.planTriageCandidates = [];
+  forge.milestoneOpenCounts = [2];
+  const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 460, title: "fully specified", labels: [], body: SPECIFIED_BODY, milestone: "M4" },
+    { number: 500, title: "raw", labels: [], body: "just an idea", milestone: "M4" },
+  ];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — never entered standby");
+  assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "the one raw issue was enough to count as work");
+  state.close();
+});
+
 // ── #253: engine-side proxy manager — buildFixLegResume + fix-loop mint wiring ──────────────
 
 /** Mirrors proxy/mint.test.ts's own fakeForge() — a minimal ProxyForge satisfying every method
