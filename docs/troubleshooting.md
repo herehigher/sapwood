@@ -290,6 +290,14 @@ What startup does, in order, and the state events it names each repair with:
 | An issue stuck in the `In Progress` column with a stale `labels.inProgress` label, whose lane is gone and which has **no open PR** | Moves it back to `Ready` and strips the label, restoring pool eligibility | `orphan-healed` (and `orphan-heal-failed` if a write is refused) |
 | A `failed` lane holding a PR whose escalation never recorded that its `needs-human` write landed | If the hold label is **observably present**, records it, so removing the label later triggers gated reentry | `gated-flag-healed` |
 | The same lane with **no** hold label present | Left alone and surfaced — the engine cannot tell "never labelled" from "already cleared", and guessing would re-dispatch a lane nobody has looked at | `gated-flag-unprovable` |
+| A lane an **environment failure** killed while it held an **open PR**, never escalated (nothing on its issue) | Returns it to `driving`, so the ordinary drive/merge path picks the PR back up. Its rework-round count and preserved worktree are untouched | `lane-revived` |
+
+The last repair also runs mid-run, on the first tick after an [environment-failure
+park](#environment-failure-park-168) resumes — while the engine is parked, the
+environment is still the thing that killed the lane, so revival waits. It is skipped for a lane
+whose issue carries a hold label (that one belongs to gated reentry), whose PR is already
+merged or closed, and for a PR marked `labels.humanMergeOnly` (a human must merge that one; the
+loop never drives it again).
 
 Two deliberate limits:
 

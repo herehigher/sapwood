@@ -420,6 +420,24 @@ test("lastHoldEvent (#294, Codex P2): scoped to (worker, pr) — a lane repointe
   s.close();
 });
 
+test("humanMergeOnlySettled (#447): only a drive-human-merge-only verdict for the SAME (worker, pr) counts — and it counts forever", () => {
+  const s = mem();
+  assert.equal(s.humanMergeOnlySettled("lane-a", 55), false);
+
+  s.appendEvent("drive-needs-human", { worker: "lane-a", issue: 2, pr: 55, labeled: 1 }); // bucket 1 never matches
+  assert.equal(s.humanMergeOnlySettled("lane-a", 55), false);
+
+  s.appendEvent("drive-human-merge-only", { worker: "lane-a", issue: 2, pr: 55, reason: "gate:HUMAN:instruction-path-change:x" });
+  assert.equal(s.humanMergeOnlySettled("lane-a", 55), true);
+  assert.equal(s.humanMergeOnlySettled("lane-b", 55), false, "another lane's PR number is not this lane's verdict");
+  assert.equal(s.humanMergeOnlySettled("lane-a", 72), false, "a lane repointed to a NEW PR never inherits the prior verdict");
+
+  // One-way: no later event of any kind can un-settle it (the loop never re-decides bucket 2).
+  s.appendEvent("lane-revived", { worker: "lane-a", issue: 2, pr: 55 });
+  assert.equal(s.humanMergeOnlySettled("lane-a", 55), true);
+  s.close();
+});
+
 test("lastReviewerFallbackEvent (#54 R2): none -> null; returns the LATEST switch/revert for the right worker only", () => {
   const s = mem();
   assert.equal(s.lastReviewerFallbackEvent("lane-a"), null);

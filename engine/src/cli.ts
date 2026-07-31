@@ -29,6 +29,7 @@ import {
   auditGatedEscalationFlags,
   parseReconcileCompleted,
   reconcileStartup,
+  reviveEnvFailedPrLanes,
   type StartupOrphan,
   sweepStaleRoleSessions,
 } from "./loop/reconcile.js";
@@ -1172,6 +1173,10 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // #391 F19: same best-effort startup pass — correct the gated-reentry marker on lanes whose
   // hold label is observably live, so removing that label is the only manual step a human needs.
   await auditGatedEscalationFlags(forge, state, cfg, log);
+  // #447 F28 residual: same best-effort startup pass, deliberately AFTER the F19 audit — a lane
+  // whose hold label is live has just been handed back to gated reentry, so it is already out of
+  // this pass's candidate set and only the never-escalated ones remain.
+  await reviveEnvFailedPrLanes(forge, state, cfg, log);
   sweepStaleRoleSessions(state, {
     log,
     ...(overrides.roleRunnerDeps?.stateDir !== undefined ? { stateDir: overrides.roleRunnerDeps.stateDir } : {}),
@@ -1313,6 +1318,10 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // #391 F19: same best-effort startup pass — correct the gated-reentry marker on lanes whose
   // hold label is observably live, so removing that label is the only manual step a human needs.
   await auditGatedEscalationFlags(forge, state, cfg, log);
+  // #447 F28 residual: same best-effort startup pass, deliberately AFTER the F19 audit — a lane
+  // whose hold label is live has just been handed back to gated reentry, so it is already out of
+  // this pass's candidate set and only the never-escalated ones remain.
+  await reviveEnvFailedPrLanes(forge, state, cfg, log);
   sweepStaleRoleSessions(state, {
     log,
     ...(overrides.roleRunnerDeps?.stateDir !== undefined ? { stateDir: overrides.roleRunnerDeps.stateDir } : {}),

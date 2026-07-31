@@ -34,6 +34,7 @@ import {
 } from "./env-failure.js";
 import { isHumanMergeOnlyVerdict } from "./escalation-buckets.js";
 import { attemptThreadWrite, computeFixResponseHarvest, type FixResponseWriteOutcome } from "./fix-response.js";
+import { reviveEnvFailedPrLanes } from "./reconcile.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure scheduling core (parity targets — keep semantics identical to guard's bash twin)
@@ -2185,6 +2186,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     if (forgeParkedThisTick && suspendRollbackDuringForgePark(pending.reason)) continue;
     rollbacks.push(await attemptRollback(forge, state, cfg, pending, iso));
   }
+
+  // ── LANE REVIVAL (#447): the OTHER thing an environment failure froze — a lane it killed
+  //   while that lane held an OPEN PR, never escalated (`failed` + pr + gated_escalation_labeled
+  //   = 0, see the env-failure-preserved branch of reclaimTerminalLane). Neither the PR-less
+  //   orphan heal nor GATED RECLAIM below can reach it, so four live occurrences each took a
+  //   manual `UPDATE workers SET state='driving'`. Drained here on the same "recover before this
+  //   tick does anything else" convention as ROLLBACK RETRY above, and suspended under the same
+  //   condition: while ANY park episode is open the environment is still the thing that killed
+  //   the lane, so revival waits for the resume (BOTH sources, unlike the rollback suspension's
+  //   forge-only gate — an llm park is precisely the quota storm this class comes from).
+  //   Idempotent by construction: a revived row is `driving` and leaves the candidate set. Runs
+  //   BEFORE DRIVE below, so a revived lane is re-driven from live PR state this same tick.
+  if (!state.isParked()) await reviveEnvFailedPrLanes(forge, state, cfg, deps.log);
 
   // ── FIX RESPONSE RETRY (#247): same "drain every durably-persisted recovery-path write
   //   before this tick does anything else" convention as ROLLBACK RETRY above, for the

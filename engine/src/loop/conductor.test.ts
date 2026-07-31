@@ -5275,6 +5275,84 @@ test("#168 P2-B auto-resume (forge): a successful probe clears the episode, but 
   st.close();
 });
 
+test("#447 park-resume: an env-failed lane holding an OPEN PR is NOT revived while parked; the first tick after the resume returns it to `driving` with fix_rounds intact, while a held sibling stays gated reentry's", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const t0 = new Date("2026-07-30T08:28:00Z");
+  // The 2026-07-30 storm's residue, twice over: env-failure-preserved lanes (`failed` + PR +
+  // gated_escalation_labeled=0, zero forge writes — nothing was ever labelled). #378 is free;
+  // a human has since put needs-human on #433, which makes THAT lane gated reentry's property.
+  const preserved = (name: string, issue: number, pr: number, fixRounds: number): WorkerRow => ({
+    name,
+    issue,
+    session_id: `s-${name}`,
+    state: "failed",
+    started_at: t0.toISOString(),
+    ended_at: t0.toISOString(),
+    pr,
+    gated_escalation_labeled: 0,
+    fix_rounds: fixRounds,
+  });
+  st.upsertWorker(preserved("lane-378", 378, 445, 2));
+  st.upsertWorker(preserved("lane-433", 433, 444, 1));
+  forge.issueLabelsByIssue[433] = ["needs-human"];
+  st.enterPark("forge", "could not resolve host", 378, t0.toISOString());
+
+  // Parked tick (probe not yet due): the environment is still what killed the lane — no revival.
+  await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 5_000) });
+  assert.equal(st.isParked(), true);
+  assert.equal(st.getWorker("lane-378")?.state, "failed");
+
+  // Recovery tick: the probe clears the episode, but revival runs at the TOP of the tick and
+  // still saw a live episode — same one-tick deferral P2-B applies to dispatch.
+  await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 31_000) });
+  assert.equal(st.isParked(), false);
+  assert.equal(st.eventsSince("2020-01-01T00:00:00Z", ["park-resumed"]).length, 1);
+  assert.equal(st.getWorker("lane-378")?.state, "failed", "revival is gated on the resume, not on the probe that produced it");
+
+  // First tick after the resume: revived, with everything the DRIVE loop re-enters on intact.
+  await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 62_000) });
+  const revived = st.getWorker("lane-378");
+  assert.equal(revived?.state, "driving");
+  assert.equal(revived?.pr, 445);
+  assert.equal(revived?.fix_rounds, 2);
+  assert.equal(st.getWorker("lane-433")?.state, "failed", "a live hold is the gated path's signal — never a second owner");
+  assert.deepEqual(
+    st.eventsSince("2020-01-01T00:00:00Z", ["lane-revived"]).map((e) => e.payload),
+    [{ worker: "lane-378", issue: 378, pr: 445 }],
+  );
+
+  // Idempotent across later ticks: the revived row is `driving` and no longer a candidate.
+  await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 93_000) });
+  assert.equal(st.eventsSince("2020-01-01T00:00:00Z", ["lane-revived"]).length, 1);
+  st.close();
+});
+
+test("#447 park-resume: a lane whose PR merged or closed while the engine was parked is left to the terminal paths, never revived to `driving`", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const t0 = new Date("2026-07-30T08:28:00Z");
+  st.upsertWorker({
+    name: "lane-378",
+    issue: 378,
+    session_id: "s-lane-378",
+    state: "failed",
+    started_at: t0.toISOString(),
+    ended_at: t0.toISOString(),
+    pr: 445,
+    gated_escalation_labeled: 0,
+  });
+  forge.prStatus = { ...forge.prStatus, state: "MERGED" };
+
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date(t0.getTime() + 1_000) });
+  assert.equal(st.getWorker("lane-378")?.state, "failed");
+  assert.equal(st.eventsSince("2020-01-01T00:00:00Z", ["lane-revived"]).length, 0);
+  st.close();
+});
+
 test("#168 P2-B fairness: the outage VICTIM's suspended requeue drains before a competitor can fill the lanes — recovery tick dispatches nothing, next tick's rollback-then-dispatch order admits the victim first", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
