@@ -8049,9 +8049,16 @@ test("#426 AC1: a permanently IN_PROGRESS check opens the pin ONCE, ages across 
     // And the label latches it: the next tick routes through the ordinary HUMAN path, with no
     // second escalation comment/event (the same one-per-episode contract #170 has).
     clock = new Date("2026-07-20T02:00:00.000Z");
-    await tick(tickOpts());
+    const t4 = await tick(tickOpts());
     assert.equal(rawEventKinds(path).filter((k) => k === "ci-pending-escalated").length, 1);
     assert.equal(forge.prComments.filter(([pr]) => pr === 4260).length, 1);
+    // #398 carrier handshake: the latch surface `ciPendingDuration` reads (the PR's labels) is the
+    // same object this escalation wrote, so the next gate pass sees it and escalates for real —
+    // and THAT pass is the one that moves the row and records where the label went.
+    assert.deepEqual(t4.driven, [{ kind: "needs-human", worker: "lane-ci", issue: 426, pr: 4260, reason: "gate:HUMAN:MERGE_OK" }]);
+    assert.equal(st.getWorker("lane-ci")?.state, "failed");
+    assert.equal(st.getWorker("lane-ci")?.gated_escalation_carrier, "pr");
+    assert.deepEqual(forge.labelsAdded, [], "never a second carrier: the issue is untouched throughout");
     st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

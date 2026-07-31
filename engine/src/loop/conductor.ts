@@ -980,6 +980,15 @@ function describeCheck(c: PRCheckItem): string {
   return verdict ? `${c.name} (${verdict})` : c.name;
 }
 
+/** #426 (rebase onto #398): the deterministic marker embedded in the CI-pending escalation
+ *  comment, keyed on (worker, pr, head) — the same shape `reviewDisputedCommentMarker` uses, and
+ *  read back by `commentOnEscalationCarrier` immediately before every post attempt. `head` is the
+ *  right episode key here for exactly the reason the pin itself is head-scoped: a push restarts CI,
+ *  so a later wedge on a NEW head is a genuinely new escalation and must comment again. */
+function ciPendingCommentMarker(worker: string, pr: number, head: string): string {
+  return `<!-- sapwood:ci-pending:${worker}:${pr}:${head} -->`;
+}
+
 async function describePendingChecks(forge: IForge, pr: number): Promise<{ names: string[]; blocked: string[]; note: string }> {
   let page: Awaited<ReturnType<IForge["getPRChecks"]>>;
   try {
@@ -3572,28 +3581,47 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // review silence gets (visibility only: the lane stays driving, gate② is untouched), plus the
       // evidence comment naming the pending check(s).
       //
+      // CARRIER (#398): PR-born by construction — the fact being escalated is a check on THIS PR's
+      // head, and DRIVE only ever runs for a lane that has one. It therefore goes through the SAME
+      // `escalationCarrier`/`labelEscalationCarrier`/`commentOnEscalationCarrier` pair every other
+      // escalation uses, rather than an inline PR write that happens to agree with the rule today:
+      // "one carrier per escalation" stays structural, and the marker-checked comment helper gives
+      // this site the ambiguous-write protection #451 round 3 built for the others. No
+      // `gated_escalation_carrier` is recorded here because this escalation deliberately does NOT
+      // move the row — the lane stays `driving` (visibility only, exactly like #170's silence
+      // escalation); the label it writes is what makes the NEXT tick's gate return HUMAN, and that
+      // pass's `escalateNeedsHuman` performs the terminal transition and records the carrier.
+      //
       // ORDER (comment -> label -> event), deliberately NOT the review-silence branch's label-first:
       // the label is the LATCH here too (the next pass reads it live and `ciPendingDuration` returns
       // null), so landing it before the evidence would leave a `needsHuman` PR with no explanation
       // and no retry path. A failed comment post writes nothing at all — the pin keeps aging and the
-      // signal re-fires next tick. A comment that lands with a failed label write re-posts a
-      // duplicate comment next tick: a harmless re-poke, the same no-new-dedup-machinery stance the
-      // fix-rounds-cap branch takes. Dedup for this escalation is the live PR LABEL, not the log, so
-      // the event append trailing the label cannot cause a re-escalation — only, in the ambiguous
-      // failure case (label lands, client reports an error), a missing audit row, the identical
-      // accepted residual documented on `review-silence-escalated` above.
+      // signal re-fires next tick. A comment that lands with a failed label write no longer re-posts
+      // a duplicate next tick: the marker read inside `commentOnEscalationCarrier` sees the existing
+      // comment and skips the post (keyed on head, so a genuinely new episode still comments). Dedup
+      // for the ESCALATION itself is the live PR LABEL, not the log, so the event append trailing the
+      // label cannot cause a re-escalation — only, in the ambiguous label-write case (label lands,
+      // client reports an error), a missing audit row: the identical accepted residual documented on
+      // `review-silence-escalated` above.
       if (outcome.ciPendingEscalation) {
         const s = outcome.ciPendingEscalation;
         const evidence = await describePendingChecks(forge, pr);
+        const carrier = escalationCarrier(pr);
         let posted = false;
         try {
-          await forge.addPRComment(
+          await commentOnEscalationCarrier(
+            forge,
+            cfg,
+            carrier,
+            w.issue,
             pr,
-            `sapwood: gate① has been PENDING for ${s.pendingSec}s on \`${s.head}\` (bound: ` +
+            ciPendingCommentMarker(w.name, pr, s.head),
+            `${ciPendingCommentMarker(w.name, pr, s.head)}\n` +
+              `sapwood: gate① has been PENDING for ${s.pendingSec}s on \`${s.head}\` (bound: ` +
               `${cfg.ci.pendingEscalateAfterSec}s) while gate② is already decisive — CI is neither green ` +
               `nor red, so this PR can never progress on its own (${evidence.note}). Escalating to ` +
-              `\`${cfg.labels.needsHuman}\`: re-run or fix the stuck check, then remove the label to ` +
-              `reclaim this PR (#147 gated reentry).`,
+              `\`${cfg.labels.needsHuman}\`: re-run or fix the stuck check, then remove the label ` +
+              `${carrierNoun(carrier)} to reclaim this PR (#147 gated reentry).`,
           );
           posted = true;
         } catch {
@@ -3602,7 +3630,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         }
         if (posted) {
           try {
-            await forge.addPRLabel(pr, cfg.labels.needsHuman);
+            await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
             state.appendEvent("ci-pending-escalated", {
               worker: w.name,
               issue: w.issue,
