@@ -224,6 +224,15 @@ const SITE_INVENTORY: Record<string, { bucket: "human-merge-only" | "needs-human
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
     why: "review-disputed — every unresolved current-head thread is durably disputed",
   },
+  // #450 (design #402 R3, §3c): the convergence-stop escalation (escalateNonConvergent, defined at
+  // module end AFTER escalateReviewDisputed — same "physically follows every other needsHuman
+  // write" placement reasoning that function's own doc gives, so this adds one new trailing entry
+  // rather than renumbering #0-#22 above).
+  "loop/conductor.ts#23": {
+    bucket: "needs-human",
+    src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
+    why: "review-non-convergent — the progress classifier returned a STALLED verdict",
+  },
   // 1b — the PO decomposition path's genuine give-ups (distinct from the class-6 fence above).
   "loop/decompose.ts#0": {
     bucket: "needs-human",
@@ -391,7 +400,7 @@ test("#397 AC: EVERY escalation write site in engine source is classified into e
   }
 });
 
-test("#397 AC: the corrected site inventory — 7 PR-side label writes, 31 issue-side (#432 round 6's shared writer collapsed round 5's 2 sites into 1; #451 added the review-disputed escalation), and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
+test("#397 AC: the corrected site inventory — 7 PR-side label writes, 32 issue-side (#432 round 6's shared writer collapsed round 5's 2 sites into 1; #451 added review-disputed; #450 added review-non-convergent), and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
   const sites = scanEscalationSites();
   const labelSites = sites.filter(
     (s) => SITE_INVENTORY[s.key]!.src.includes("addLabel(") || SITE_INVENTORY[s.key]!.src.includes("addPRLabel("),
@@ -400,8 +409,8 @@ test("#397 AC: the corrected site inventory — 7 PR-side label writes, 31 issue
   assert.equal(prSide.length, 7, "PR-side escalation writes (#397's corrected count)");
   assert.equal(
     labelSites.length - prSide.length,
-    31,
-    "issue-side escalation writes (#397's corrected count + #432 round 6's shared retry-cap escalation writer + #451's review-disputed)",
+    32,
+    "issue-side escalation writes (#397's corrected count + #432 round 6's shared retry-cap escalation writer + #451's review-disputed + #450's review-non-convergent)",
   );
   // The four sites the AC names explicitly because they carry no `gate:HUMAN:` reason prefix.
   for (const key of ["roles/merge-driver.ts#4", "roles/merge-driver.ts#5", "roles/merge-driver.ts#6", "loop/conductor.ts#0"]) {

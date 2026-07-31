@@ -377,16 +377,44 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   exhausted or the round count is malformed. Of those two, both are terminal — they
   escalate to `needs-human`, the same escalation #147's GATED RECLAIM below can then
   reclaim once a human clears the label.
-  **`prFixCap` is a COST ceiling being used as a quality ceiling — the known gap, designed
-  (#402, proposed).** "Rounds spent" and "no longer making progress" are different facts
-  sharing one signal today: every round looks identical to the engine, so a lane still
-  finding real defects escalates at the cap while a lane going nowhere pays the full cap
-  first. [`design/402-review-layering-convergence-tendency.md`](design/402-review-layering-convergence-tendency.md)
-  is the adjudicated-design deliverable for that: finding severity layering (only a
-  blocking/advisory bit reaches the gate), a per-round convergence definition over the
-  event ledger, immediate human routing for a `disputed` thread, and cross-PR finding-class
-  tendency accounting in retro. Nothing there is implemented yet — its §11 names the
-  follow-up issues, and §8 the `prFixCap` migration (semantics unchanged, default 2→4).
+  **`prFixCap` is a COST ceiling; convergence (#450, design #402 R3, shipped 2026-07-31) is
+  the quality stop.** "Rounds spent" and "no longer making progress" used to share one
+  signal — every round looked identical to the engine, so a lane still finding real defects
+  escalated at the cap while a lane going nowhere paid the full cap first.
+  `review/convergence.ts`'s pure `classifyProgress` now evaluates each `FIXABLE` tick's
+  finding record against the PRECEDING round's (both from #449's per-round `drive-fixup`
+  identity key, the append-only event ledger, no new storage) over **blocking findings
+  only** (R1's severity axis; a count that rises only through advisories classifies as if
+  they were absent). Six shapes, evaluated in order: round 1 is always `converging`; a
+  falling count or a fully-disjoint finding set is `converging` ("new areas"); a SHARED key
+  whose path the fix leg's own diff touched is `recurrence` (deliberately distinct from
+  #378's identity-on-unchanged-code filter, which this classifier consumes rather than
+  re-implements); a non-decreasing count for two consecutive rounds is `flat`; a NEW key
+  inside the touched path is `marginal-complexity`; anything else is `converging` (one bad
+  round is not a trend). An unlocated finding (no verified diff path) still counts, but
+  never triggers recurrence. When the range diff itself is unavailable (R2's own
+  degradation rule), `recurrence`/`marginal-complexity` cannot fire — `flat` still can
+  (count-only convergence, narrower, never a false signal). `driveDecision` (`conductor.ts`)
+  escalates a STALLED verdict to `needs-human` (`review-non-convergent:<signal>`, its own
+  event kind, registered in `escalation-reconcile.ts`'s `ESCALATION_SOURCES` so it clears
+  like every other engine-applied label) **before** the `fixRounds < cap` check — a stalled
+  lane never pays another fix round regardless of budget remaining. The escalation comment
+  cites the signal, both rounds' finding keys, and the doctrine's design-re-entry principle
+  (`docs/REVIEW-DOCTRINE.md` adjudication principle 4 — re-examine the design, not just
+  escalate to a human); return path is the existing #147 gated reclaim, no new channel.
+  Three-way precedence with #457's verdict-rerun breaker (a byte-identical rerun's own fix
+  leg already ran and pushed nothing): **verdict-rerun → convergence-stalled → cap** — a
+  futile rerun wins outright regardless of measured progress, a stalled lane escalates
+  before paying, and the cap remains the cost backstop for a lane still genuinely
+  converging. With the quality stop now live, `prFixCap`'s default rose 2 → 4 (semantics
+  unchanged; an explicit config is unaffected; `prFixCap: 0` still folds straight to
+  `needs-human`) — evidence: two dogfood PRs needed 4 and 5 review rounds respectively,
+  every round finding a real bug, and both would have escalated at the old default of 2
+  with real defects still in them. See
+  [`design/402-review-layering-convergence-tendency.md`](design/402-review-layering-convergence-tendency.md)
+  §3/§8 for the full design and the rejected alternatives. Layering (severity axis, R1) and
+  dispute-pricing (R4, #451) shipped alongside; tendency accounting in retro (R5) and the
+  reviewer-prompt doctrine writeup (R6) are the design's remaining follow-ups.
   **Round budget paces new work; it never blocks finishing an open PR (#375, fixing two
   dogfood-observed permanent wedges, F7/F8).** A driving lane's fix leg is exempt from
   `cost.roundBudgetUsd` outright — an already-open PR has no other completion path (merge

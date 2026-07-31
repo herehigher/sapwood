@@ -23,6 +23,7 @@ import {
 } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { EngineReviewArtifact } from "../review/audit.js";
+import { classicThreadFindingKey, engineAgentFindingKey } from "../review/finding-key.js";
 import { type DriveOutcome, MergeDriver } from "../roles/merge-driver.js";
 import { CODEX_REVIEWER_LOGINS, CodexReviewer, type ReviewFallbackLock, type ReviewTriggerPin } from "../roles/reviewer.js";
 import { WorkerSupervisor } from "../roles/worker.js";
@@ -2058,7 +2059,7 @@ test("tick DRIVE (#270): conflict at the shared fix-round cap preserves label + 
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
-  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 });
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 4 }); // #450: default lanes.prFixCap raised 2 -> 4
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" };
   const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
@@ -2147,7 +2148,7 @@ test("tick DRIVE (#460, real engine-agent path): CONFLICTING at the shared fix-r
   const forge = new FakeForge();
   forge.prStatus = { ...forge.prStatus, mergeable: "CONFLICTING", ciGreen: false };
   const sup = new FakeSupervisor();
-  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // == default prFixCap
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 4 }); // == default prFixCap (#450: 2 -> 4)
   const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "x" }) };
   const cfg = mkCfg({ reviewer: { mode: "engine-agent", agent: { model: "sonnet" } } });
   const gate = new MergeDriver({ forge, reviewer, cfg });
@@ -4282,14 +4283,511 @@ test("tick DRIVE (#375): fixable + round budget exceeded -> the fix leg is EXEMP
   st.close();
 });
 
+// ── #450 (design #402 R3, §3c; architectural review amendment 2026-07-31): the convergence-stop
+// escalation — a STALLED progress verdict escalates before ANOTHER fix leg is dispatched, and
+// before the fix-rounds cap is even consulted. `classicThreadFindingKey` builds the SAME identity
+// key `gatherFixupFindingRecord` (conductor.ts) derives from a live unresolved thread, so a fixture
+// can pin "this round's finding is the SAME one as last round's" without re-deriving finding-key.ts's
+// own formula. ────────────────────────────────────────────────────────────────────────────────
+
+const cvThread = (id: string, path: string, findingDigest: string): ReviewThreadSpan => ({
+  id,
+  isResolved: false,
+  isOutdated: false,
+  path,
+  line: 1,
+  originalLine: 1,
+  findingDigest,
+  anchorCommitOid: "c1",
+});
+
+test("tick DRIVE (#450, recurrence): a shared finding whose path the preceding fix leg's diff touched escalates review-non-convergent:recurrence — zero further fix rounds spent", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  // Round 1's recorded findings (as #449's `drive-fixup` would have written them) — the SAME
+  // finding (path src/a.ts, digest dA) is still open after the fix leg touched exactly that path.
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true }; // the fix leg touched src/a.ts
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-a", issue: 2, pr: 55, reason: "review-non-convergent:recurrence" }]);
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.state, "failed");
+  assert.equal(row.fix_rounds, 1, "zero further fix rounds spent on a stalled lane");
+  assert.equal(row.gated_escalation_labeled, 1);
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  assert.equal(sup.resumeCalls.length, 0, "no fix leg dispatched");
+  const nonConvergent = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]);
+  assert.equal(nonConvergent.length, 1);
+  assert.equal((nonConvergent[0]!.payload as { signal: string }).signal, "recurrence");
+  // The two facts stay separable (issue #450 verification item 6): a stalled lane's escalation
+  // NEVER also appends fix-rounds-capped, even though it shares the same terminal shape.
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-rounds-capped"]), []);
+  st.close();
+});
+
+test("tick DRIVE (#450, recurrence pair — #378 boundary): the SAME finding surviving on a path the fix leg did NOT touch is ordinary continued convergence, not recurrence — dispatches another fix leg", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  // The fix leg touched a DIFFERENT file entirely — src/a.ts (the finding's own path) was never
+  // in its diff, so this is #378's case: unchanged code, not recurrence.
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/unrelated.ts" }], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(r.driven[0]?.kind, "fixup", "no escalation — the classifier must not fire recurrence on unchanged code");
+  assert.equal(st.getWorker("lane-a")?.state, "fixing");
+  assert.equal(st.getWorker("lane-a")?.fix_rounds, 2);
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]), []);
+  st.close();
+});
+
+test("tick DRIVE (#450, marginal-complexity): curr shares ONE prior finding (row 2's disjoint-continue does not apply) plus a NEW finding inside the touched path -> marginal-complexity", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  // Round 2: keyA is STILL open (unresolved, but on a path the fix leg did NOT touch — never
+  // recurrence) AND a brand-new finding (keyD, src/d.ts) appears inside the touched path.
+  forge.prReviewData = {
+    ...forge.prReviewData,
+    headOid: "H2",
+    unresolvedThreads: 2,
+    threads: [cvThread("TA", "src/a.ts", "dA"), cvThread("TD", "src/d.ts", "dD")],
+  };
+  // The range diff touches ONLY src/d.ts — never src/a.ts, so recurrence cannot fire for keyA.
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/d.ts" }], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=2:ciRed=false" };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.deepEqual(r.driven, [
+    { kind: "needs-human", worker: "lane-a", issue: 2, pr: 55, reason: "review-non-convergent:marginal-complexity" },
+  ]);
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]);
+  assert.equal((events[0]!.payload as { signal: string }).signal, "marginal-complexity");
+  st.close();
+});
+
+test("tick DRIVE (#450, flat): non-decreasing finding count for two consecutive rounds escalates review-non-convergent:flat", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  const keyB = classicThreadFindingKey({ id: "TB", path: "src/b.ts", findingDigest: "dB" }).key;
+  // (round 3's third key, "keyC"/TC/src/c.ts/dC, is built inline via cvThread below — no separate
+  // binding needed since nothing else references its raw key string.)
+  // Round 1: one finding. Round 2: two findings (shares keyA, adds keyB) — count rose once, not
+  // yet a trend (flatStreak 1 at round 2). Neither seeded round records a `head` collision with
+  // the live round below, and both are deliberately never referenced by any fixDiffPaths entry —
+  // isolating this fixture to the COUNT signal alone (rows 3/5 must never fire here).
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 2,
+    reason: "r2",
+    findings: [
+      { key: keyA, severity: "blocking" },
+      { key: keyB, severity: "blocking" },
+    ],
+    fixDiffPaths: [],
+    head: "H2",
+  });
+  // Round 3 (live): shares keyA with round 2 (non-empty intersection — row 2's disjoint-continue
+  // does not apply), drops keyB, adds keyC — count stays at 2 (non-decreasing a SECOND consecutive
+  // time: flatStreak reaches 2). The range diff is EMPTY, so neither recurrence (keyA's path is
+  // not in it) nor marginal-complexity (keyC's path is not in it) can fire — isolates row 4.
+  forge.prReviewData = {
+    ...forge.prReviewData,
+    headOid: "H3",
+    unresolvedThreads: 2,
+    threads: [cvThread("TA", "src/a.ts", "dA"), cvThread("TC", "src/c.ts", "dC")],
+  };
+  forge.compareResults["H2...H3"] = { files: [], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=2:ciRed=false" };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-a", issue: 2, pr: 55, reason: "review-non-convergent:flat" }]);
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]);
+  assert.equal((events[0]!.payload as { signal: string }).signal, "flat");
+  st.close();
+});
+
+test("tick DRIVE (#450, advisories excluded, engine-agent path): a NEW advisory finding inside the touched path never trips marginal-complexity — filtered before the classifier ever sees it", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = engineAgentFindingKey({ id: "f1", kind: "security", path: "src/a.ts" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    verdictRunId: "run-1",
+    findings: [{ key: keyA, severity: "blocking", kind: "security" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  // Round 2's WAL artifact (the ONLY path that can produce a genuine `severity: "advisory"`
+  // finding at all — the classic thread path is unconditionally "blocking", gatherFixupFindingRecord's
+  // own doc): keyA survives unchanged (its own path, src/a.ts, is NOT in this round's touched-path
+  // set), and a brand-NEW advisory finding (style, src/b.ts) lands INSIDE the touched path. Without
+  // the blocking-only filter, that new key would trip row 5 (marginal-complexity) — WITH it, an
+  // advisory finding is invisible to the classifier entirely.
+  st.recordEngineReviewWal("lane-a", { runId: "run-9", head: "H2", base: "H1", diffHash: "d2", attemptStart: "2026-01-01T00:00:00.000Z" });
+  const artifact: EngineReviewArtifact = {
+    perAC: [],
+    findings: [
+      { id: "f1", body: "still open", severity: "blocking", kind: "security", path: "src/a.ts" },
+      { id: "f2", body: "nit: naming", severity: "advisory", kind: "style", path: "src/b.ts" },
+    ],
+    sessionActualModels: ["sonnet"],
+    promptHash: "hash",
+  };
+  st.recordEngineReviewWalArtifact("lane-a", "run-9", "rejected", JSON.stringify(artifact));
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/b.ts" }], complete: true }; // touched src/b.ts, NEVER src/a.ts
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = {
+    kind: "fixable",
+    pr: 55,
+    reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false",
+    verdictRunId: "run-9",
+  };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(r.driven[0]?.kind, "fixup", "the advisory finding must not fake marginal-complexity");
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]), []);
+  st.close();
+});
+
+test("tick DRIVE (#450, degradation rule): fixDiffPaths unavailable -> recurrence cannot fire, count-only convergence dispatches a fix leg instead of escalating", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  // The SAME finding survives — this would be `recurrence` if the range diff were trustworthy.
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  // GitHub's own file-count ceiling: an INCOMPLETE compare result -> gatherFixDiffPaths degrades
+  // to `{ paths: [], unavailable: true }` (never a partial list standing in silently).
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: false };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(r.driven[0]?.kind, "fixup", "the degradation rule must fail NARROW — a fix leg still dispatches, never a false stall");
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]), []);
+  const dispatchEvents = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
+  const round2 = dispatchEvents[1]!.payload as { fixDiffPathsUnavailable?: boolean; fixDiffPaths: string[] };
+  assert.equal(round2.fixDiffPathsUnavailable, true, "the degradation this fixture exercises is genuinely on record");
+  assert.deepEqual(round2.fixDiffPaths, []);
+  st.close();
+});
+
+test("tick DRIVE (#450, three-way precedence): a verdict-rerun wins over a stalled progress verdict — precedence is verdict-rerun -> convergence-stalled -> cap", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = engineAgentFindingKey({ id: "f1", kind: "security", path: "src/a.ts" }).key;
+  // A prior `drive-fixup` for this EXACT verdictRunId — priorFixLegForVerdict trips the #457
+  // breaker regardless of what the (recurring, would-be-stalled) findings say.
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    verdictRunId: "run-9",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: ["src/a.ts"],
+    head: "H1",
+  });
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = {
+    kind: "fixable",
+    pr: 55,
+    reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false",
+    verdictRunId: "run-9",
+  };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(
+    (r.driven[0] as { reason: string }).reason,
+    "fix-leg-no-op:verdict-rerun",
+    "verdict-rerun wins outright — never review-non-convergent",
+  );
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]), []);
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-verdict-rerun"]).length, 1);
+  st.close();
+});
+
+test("tick DRIVE (#450, two lanes, one tick): the two facts stay separable — a stalled lane escalates review-non-convergent, a SEPARATE converging lane at the cap escalates fix-rounds-capped, never each other's event", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  // Lane A: stalled (recurrence), well under the cap — proves the progress signal, not the cap,
+  // drove this escalation.
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  // Lane B: round 1 (no prior drive-fixup at all — always `converging` by definition) sitting
+  // AT the cap — a converging lane that simply ran out of budget.
+  const cap = mkCfg().lanes.prFixCap;
+  seedDriving(st, "lane-b", 20, 66, { fix_rounds: cap });
+
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  gate.outcomes[66] = { kind: "fixable", pr: 66, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const byWorker = new Map(r.driven.map((d) => [(d as { worker: string }).worker, d]));
+  assert.equal((byWorker.get("lane-a") as { reason: string }).reason, "review-non-convergent:recurrence");
+  assert.equal((byWorker.get("lane-b") as { reason: string }).reason, `fix-rounds-cap:${cap}/${cap}`);
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]).length, 1);
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-rounds-capped"]).length, 1);
+  // Cross-check: neither lane's own event carries the OTHER lane's kind.
+  const nonConvergentPrs = st
+    .eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"])
+    .map((e) => (e.payload as { pr: number }).pr);
+  const cappedPrs = st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-rounds-capped"]).map((e) => (e.payload as { pr: number }).pr);
+  assert.deepEqual(nonConvergentPrs, [55]);
+  assert.deepEqual(cappedPrs, [66]);
+  st.close();
+});
+
+test("tick DRIVE (#450, escalation comment content): cites the signal, both rounds' finding keys, and design re-entry (docs/REVIEW-DOCTRINE.md adjudication principle 4)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(forge.issueComments.length, 1);
+  const comment = forge.issueComments[0]![1];
+  assert.match(comment, /\*\*recurrence\*\*/, "the signal name");
+  assert.match(comment, new RegExp(keyA.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "round r-1's finding key");
+  assert.match(comment, /adjudication principle 4/i, "design re-entry citation");
+  assert.match(comment, /REVIEW-DOCTRINE\.md/, "the doctrine file, by name");
+  assert.match(comment, /design re-entry/i, "design re-entry, not merely human escalation");
+  assert.match(comment, /#147 gated reentry/, "the existing return path — no new re-entry channel");
+  st.close();
+});
+
+test("tick DRIVE (#450, gated reclaim): a review-non-convergent escalation is reclaimable through the existing #147 GATED RECLAIM path once a human clears the label — no new re-entry channel", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(st.getWorker("lane-a")!.state, "failed");
+  assert.equal(st.getWorker("lane-a")!.gated_escalation_labeled, 1);
+  assert.equal(st.gatedFailedWorkers().length, 1, "visible to GATED RECLAIM's own read path");
+
+  // A human clears the label — the existing #147 mechanism, unmodified, reclaims it.
+  forge.issueLabelsByIssue[2] = [];
+  const r2 = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.deepEqual(r2.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-a", issue: 2, pr: 55, attempt: 1 }]);
+  st.close();
+});
+
 test("tick DRIVE (#246): fix_rounds cap reached (not over budget) -> needs-human label + escalation comment land BEFORE the terminal upsert, failed+pr+gated_escalation_labeled=1 (the ONLY producer of that shape besides prFixCap:0)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
-  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // == default cfg.lanes.prFixCap (2): cap reached
+  // #450: default cfg.lanes.prFixCap rose 2 -> 4 — pin this test's own cap explicitly rather than
+  // renumber every literal below, since an explicit config is completely unaffected by that change.
+  const cfg = mkCfg({ lanes: { prFixCap: 2 } });
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // == this test's own prFixCap (2): cap reached
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
-  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   const row = st.getWorker("lane-a")!;
   assert.equal(row.state, "failed");
   assert.equal(row.pr, 55);
@@ -4307,10 +4805,11 @@ test("tick DRIVE (#246): fix_rounds cap reached but the needs-human label write 
   const forge = new FakeForge();
   forge.throwOnAddLabel = true;
   const sup = new FakeSupervisor();
+  const cfg = mkCfg({ lanes: { prFixCap: 2 } }); // #450: pin this test's own cap (default rose 2 -> 4)
   seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 });
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
-  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   const row = st.getWorker("lane-a")!;
   assert.equal(row.state, "driving", "no latch — untouched, so the next tick's FIXABLE-at-cap re-derivation retries the label write");
   assert.equal(row.fix_rounds, 2);
@@ -4325,10 +4824,11 @@ test("tick DRIVE (#246 review round 1, C3): fix_rounds cap reached, LABEL succee
   const forge = new FakeForge();
   forge.throwOnAddIssueComment = true;
   const sup = new FakeSupervisor();
+  const cfg = mkCfg({ lanes: { prFixCap: 2 } }); // #450: pin this test's own cap (default rose 2 -> 4)
   seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 });
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
-  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   const row = st.getWorker("lane-a")!;
   assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]], "the label write itself DID succeed");
   assert.equal(
@@ -4817,9 +5317,9 @@ test("tick: KILL_SWITCH drain — a driving lane AT the fix-rounds cap is TERMIN
     const st = new State(join(dir, "sapwood.sqlite"));
     const forge = new FakeForge();
     const sup = new FakeSupervisor();
-    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // at the default lanes.prFixCap (2)
+    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // at this test's own lanes.prFixCap (2) — #450: default rose 2 -> 4
     writeFileSync(join(dir, "KILL_SWITCH"), "");
-    const cfg = mkCfg({ cost: { drainWindowSec: 60 } });
+    const cfg = mkCfg({ cost: { drainWindowSec: 60 }, lanes: { prFixCap: 2 } });
     let clock = new Date("2026-07-20T00:00:00Z");
     const now = () => clock;
 
@@ -4858,9 +5358,9 @@ test("tick: KILL_SWITCH drain — a failed EVIDENCE COMMENT (label already succe
     const st = new State(join(dir, "sapwood.sqlite"));
     const forge = new FakeForge();
     const sup = new FakeSupervisor();
-    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // at the default lanes.prFixCap (2)
+    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // at this test's own lanes.prFixCap (2) — #450: default rose 2 -> 4
     writeFileSync(join(dir, "KILL_SWITCH"), "");
-    const cfg = mkCfg({ cost: { drainWindowSec: 60 } });
+    const cfg = mkCfg({ cost: { drainWindowSec: 60 }, lanes: { prFixCap: 2 } });
     let clock = new Date("2026-07-20T00:00:00Z");
     const now = () => clock;
 
@@ -4899,9 +5399,9 @@ test("tick: KILL_SWITCH drain — a driving lane's escalation honors the #69/#14
     const st = new State(join(dir, "sapwood.sqlite"));
     const forge = new FakeForge();
     const sup = new FakeSupervisor();
-    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // at the default lanes.prFixCap (2)
+    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // at this test's own lanes.prFixCap (2) — #450: default rose 2 -> 4
     writeFileSync(join(dir, "KILL_SWITCH"), "");
-    const cfg = mkCfg({ cost: { drainWindowSec: 60 } });
+    const cfg = mkCfg({ cost: { drainWindowSec: 60 }, lanes: { prFixCap: 2 } });
     let clock = new Date("2026-07-20T00:00:00Z");
     const now = () => clock;
 
@@ -6502,6 +7002,30 @@ test("driveDecision: gate + fix rounds -> scheduling action (fail-safe ESCALATE)
   assert.equal(driveDecision("HUMAN", 0, 3, false), "ESCALATE");
   assert.equal(driveDecision("", 0, 3, false), "ESCALATE"); // empty/unknown gate -> fail-safe
   assert.equal(driveDecision("WHATEVER", 0, 3, false), "ESCALATE");
+});
+
+// #450 (design #402 R3, §3c): driveDecision's fifth argument, `progress` — a STALLED verdict
+// escalates BEFORE the fixRounds < cap check, and every pre-#450 call (four args, no `progress`
+// at all) keeps its EXACT prior behavior via the `"converging"` default.
+test("driveDecision (#450): a STALLED progress verdict escalates even with rounds REMAINING under the cap — the progress check precedes the cap check", () => {
+  assert.equal(
+    driveDecision("FIXABLE", 0, 4, false, { stalled: "recurrence" }),
+    "ESCALATE",
+    "fixRounds (0) is nowhere near cap (4) — only the stalled verdict explains this ESCALATE",
+  );
+  assert.equal(driveDecision("FIXABLE", 0, 4, false, { stalled: "flat" }), "ESCALATE");
+  assert.equal(driveDecision("FIXABLE", 0, 4, false, { stalled: "marginal-complexity" }), "ESCALATE");
+});
+
+test("driveDecision (#450): a converging verdict is unaffected — FIXUP under cap, ESCALATE at cap, identical to the pre-#450 shape", () => {
+  assert.equal(driveDecision("FIXABLE", 0, 4, false, "converging"), "FIXUP");
+  assert.equal(driveDecision("FIXABLE", 4, 4, false, "converging"), "ESCALATE");
+});
+
+test("driveDecision (#450): omitting `progress` entirely defaults to converging — every pre-#450 four-argument call site keeps its exact prior behavior", () => {
+  assert.equal(driveDecision("FIXABLE", 0, 3, false), "FIXUP");
+  assert.equal(driveDecision("FIXABLE", 3, 3, false), "ESCALATE");
+  assert.equal(driveDecision("MERGE", 0, 3, false), "MERGE");
 });
 
 // ── #375 AC2: drivingLaneTerminalForDrain — the wind-down predicate that decides whether a

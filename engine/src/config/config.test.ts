@@ -720,11 +720,20 @@ test("lanes.gatedReentryCap: defaults to 2 (prFixCap's shape), overridable, nonn
 
 // ── #246: lanes.prFixCap (the FIXABLE gate's fix_rounds cap) — first real consumer of a key
 // accepted since #147 as "reserved, not yet wired" ──
-test("lanes.prFixCap: defaults to 2, overridable, nonnegative-int-guarded, 0 is legal (disables the FIXABLE gate)", () => {
+// #450 (design #402 R3, §8, D6, issue #450 verification item 8): default raised 2 -> 4 —
+// convergence (review/convergence.ts) now supplies the quality stop, so prFixCap goes back to
+// being a pure cost ceiling. Schema shape, key name, and semantics are UNCHANGED: still
+// nonnegative-int-guarded, still overridable to any value (an explicit config is completely
+// unaffected — this test's own `over`/`zero`/throwing cases are byte-identical to before #450),
+// and `prFixCap: 0` still folds straight to needs-human exactly as today (pinned explicitly below,
+// same assertion this test already made pre-#450).
+test("lanes.prFixCap: defaults to 4 (#450: was 2), overridable, nonnegative-int-guarded, 0 is legal (disables the FIXABLE gate)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.lanes.prFixCap, 2);
+  assert.equal(cfg.lanes.prFixCap, 4);
   const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { prFixCap: 5 }");
   assert.equal(over.lanes.prFixCap, 5);
+  const explicitOldDefault = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { prFixCap: 2 }");
+  assert.equal(explicitOldDefault.lanes.prFixCap, 2, "an explicit config setting the OLD default is completely unaffected by this issue");
   const zero = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { prFixCap: 0 }");
   assert.equal(zero.lanes.prFixCap, 0);
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { prFixCap: -1 }"), /prFixCap/);

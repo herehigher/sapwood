@@ -79,7 +79,21 @@ const Lanes = z
     // cap; reaching it escalates needs-human for adjudication (#147's gated reentry is the
     // post-adjudication channel back in). Accepted at parse time since #147 (this was the
     // "reserved, not yet wired" `prFixCap` key); #246 is the first real consumer.
-    prFixCap: z.number().int().nonnegative().default(2),
+    //
+    // #450 (design #402 R3, §8, D6): default raised 2 -> 4. Semantics UNCHANGED — still a hard
+    // per-PR ceiling on paid fix legs, not repurposed or renamed; `prFixCap: 0` still folds
+    // straight to needs-human exactly as today (config.test.ts's own pin). What changed is that
+    // this is no longer the ONLY stop: `review/convergence.ts`'s classifier now escalates a
+    // STALLED lane before it ever reaches this cap (`loop/conductor.ts`'s `driveDecision`), so the
+    // cap is reached only by lanes still measurably converging by the engine's own progress
+    // signal. Evidence for 4 specifically (not left at 2, not raised to match the single worst
+    // observed case): PR#388 needed 4 review rounds and PR#389 needed 5, every round finding a
+    // real bug — at the old default of 2 both would have escalated with real defects still in
+    // them. 4, not 5: with convergence live, a lane STILL converging at round 4 is an outlier
+    // worth a human look; the #147 gated-reentry path already lets a human wave such a lane back
+    // in for more rounds without a config change. A config that sets this explicitly is completely
+    // unaffected — same number, same semantics; only the default-relying case changes.
+    prFixCap: z.number().int().nonnegative().default(4),
     frictionMin: z.number().nonnegative().default(0),
     // #147: sapwood-native (no 0day LOOP_* counterpart) — bounds the GATED RECLAIM phase
     // (conductor.ts tick()): how many times a gate②-escalated PR may be reclaimed back to
