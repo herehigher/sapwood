@@ -227,7 +227,7 @@ export type DriveOutcome = (
    *  every pass that actually DERIVED a gate, the same contract as `holdObservation`: the conductor
    *  owns the durable pin (open on the first pending pass, cancel the moment a check reaches a real
    *  RESOLVES green or red), because MergeDriver deliberately never touches State. ABSENT means "this pass
-   *  learned nothing" (a mixed-read queue, a fresh review trigger, a forge outage) — a no-op at the
+   *  learned nothing" (a mixed-read queue, a forge outage) — a no-op at the
    *  conductor, never a cancel: a loop-wide gh outage must not silently reset every lane's clock. */
   ciPendingObservation?: { pending: boolean; head: string };
   /** #426 (F26): stateless aging escalation for a lane held WAIT-on-CI past `ci.pendingEscalateAfterSec`
