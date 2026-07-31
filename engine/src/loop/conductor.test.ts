@@ -4285,6 +4285,128 @@ test("#172 pause + full hold-set: a handoff does not resume until PAUSE and conf
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// #441 (F34): the RESUME phase's hold-suppression event. The SKIP branch itself is unchanged
+// (AC3 — the label still suppresses, its removal is still the go-ahead); what these cover is
+// that the suppression is now VISIBLE, exactly once per episode, restart-safe, and deduped
+// against the durable event log rather than a per-process flag.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const resumeHeldEvents = (st: State) => st.eventsAfterId(0, ["resume-held"]).map((e) => e.payload as Record<string, unknown>);
+
+test("#441 (AC2): a hold-suppressed resume emits exactly ONE resume-held across three ticks, naming the label that suppressed it", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  st.upsertWorker({ name: "lane-h", issue: 441, session_id: "s", state: "handoff", started_at: "t", ended_at: "t" });
+  forge.issueLabelsByIssue[441] = [cfg.labels.needsHuman];
+
+  for (let i = 0; i < 3; i++) {
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+    assert.deepEqual(r.resumed, [], "AC3: the label still means SKIP, every tick");
+  }
+
+  assert.deepEqual(resumeHeldEvents(st), [{ worker: "lane-h", issue: 441, label: cfg.labels.needsHuman, attempts: 0 }]);
+  assert.equal(sup.resumed.length, 0);
+  assert.equal(st.getWorker("lane-h")?.state, "handoff");
+  st.close();
+});
+
+test("#441 (AC3 + episode boundary): removing the label resumes the lane next tick, and a LATER hold announces a NEW episode", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  st.upsertWorker({ name: "lane-h", issue: 441, session_id: "s", state: "handoff", started_at: "t", ended_at: "t" });
+  forge.issueLabelsByIssue[441] = [cfg.labels.needsHuman];
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+  assert.equal(resumeHeldEvents(st).length, 1);
+
+  // The human clears the hold — removal IS the go-ahead, unchanged by #441.
+  forge.issueLabelsByIssue[441] = [];
+  const resumedTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+  assert.deepEqual(resumedTick.resumed, [{ kind: "resumed", worker: "lane-h", issue: 441, attempt: 1 }]);
+
+  // That `resumed` ENDED the episode. A second handoff under a fresh hold is a second episode.
+  st.upsertWorker({ ...st.getWorker("lane-h")!, state: "handoff", ended_at: "t" });
+  forge.issueLabelsByIssue[441] = ["blocked"]; // any of cfg.escalation.humanLabels, not just needs-human
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+  assert.deepEqual(
+    resumeHeldEvents(st).map((p) => p.label),
+    [cfg.labels.needsHuman, "blocked"],
+    "one event per episode — and the second names the label a human actually applied",
+  );
+  st.close();
+});
+
+test("#441: a SKIP that is NOT a hold (paused / no free lane) announces nothing — resume-held means a person, never a budget", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-resume-held-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    st.upsertWorker({ name: "lane-p", issue: 441, session_id: "s", state: "handoff", started_at: "t", ended_at: "t" });
+    writeFileSync(join(dir, "PAUSE"), "");
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+    assert.deepEqual(resumeHeldEvents(st), [], "a paused lane carries no hold — PAUSE is already narrated elsewhere");
+
+    // Lanes full is likewise silent here: same SKIP, still not a human's doing.
+    rmSync(join(dir, "PAUSE"), { force: true });
+    seedRunning(st, "lane-busy", 442);
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }) });
+    assert.deepEqual(resumeHeldEvents(st), []);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#441 crash-rerun: a kill -9 between the hold observation and the next tick never double-emits resume-held", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-resume-held-crash-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const cfg = mkCfg();
+    const forge = new FakeForge();
+    forge.issueLabelsByIssue[441] = [cfg.labels.needsHuman];
+
+    const before = new State(path);
+    before.upsertWorker({ name: "lane-h", issue: 441, session_id: "s", state: "handoff", started_at: "t", ended_at: "t" });
+    await tick({ now: realClock, forge, state: before, supervisor: new FakeSupervisor(), cfg });
+    assert.equal(resumeHeldEvents(before).length, 1);
+    before.close(); // no in-memory dedupe flag survives this
+
+    const after = new State(path);
+    await tick({ now: realClock, forge, state: after, supervisor: new FakeSupervisor(), cfg });
+    await tick({ now: realClock, forge, state: after, supervisor: new FakeSupervisor(), cfg });
+    assert.equal(resumeHeldEvents(after).length, 1, "the durable log IS the memory — one event for one episode");
+    after.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#441: two held lanes announce independently — one lane's episode never dedupes another's", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ lanes: { max: 4, roundDispatchCap: 1 } });
+  st.upsertWorker({ name: "lane-a", issue: 441, session_id: "s", state: "handoff", started_at: "t", ended_at: "t" });
+  st.upsertWorker({ name: "lane-b", issue: 442, session_id: "s", state: "handoff", started_at: "t", ended_at: "t" });
+  forge.issueLabelsByIssue[441] = [cfg.labels.needsHuman];
+  forge.issueLabelsByIssue[442] = [cfg.labels.needsHuman];
+
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+
+  assert.deepEqual(
+    resumeHeldEvents(st).map((p) => p.worker),
+    ["lane-a", "lane-b"],
+  );
+  st.close();
+});
+
 test("#172 ordering: with one free slot, RESUME claims it before a fresh Ready issue reaches DISPATCH", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

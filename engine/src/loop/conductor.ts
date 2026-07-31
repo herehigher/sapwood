@@ -15,7 +15,7 @@
 import { existsSync } from "node:fs";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
-import { labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge/labels.js";
+import { firstMatchingLabel, labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge/labels.js";
 import { buildAcSnapshot, checkAcSnapshotDrift } from "../review/ac-snapshot.js";
 import type { EngineAgentDriveDeps } from "../review/drive.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
@@ -270,6 +270,33 @@ export function resumeDecision(
   if (attempts >= cap) return "CAPPED";
   return !paused && lanesUsed < lanesMax ? "RESUME" : "SKIP";
 }
+
+/** #441 (F34): the RESUME phase's hold-suppression event — see the emit site's own comment for
+ *  the episode definition and the dedupe argument. */
+const RESUME_HELD_KIND = "resume-held";
+
+/** The kind set whose LATEST member decides whether a hold-suppressed resume is a NEW episode
+ *  (`state.latestLaneEventKind`). `resume-held` itself is the "already announced" marker; every
+ *  other kind here is a RESUME-phase outcome reachable ONLY past the hold SKIP — a fresh or
+ *  fix-leg resume, the ADOPT drain, the cap/undecidable escalations, and the two fix-leg
+ *  fail-closed skips — so each is durable proof the lane moved on and the next hold is a new
+ *  episode. `fix-leg-resume-failed`/`resume-failed` are deliberately absent: they rethrow and
+ *  abort the tick, so they end nothing.
+ *
+ *  ADOPT (`resumed` on the ordinary path, `fix-leg-adopted-drained` on the fixing one) bypasses
+ *  the hold check by design — a confirmed child must be supervised regardless. Counting it as an
+ *  episode boundary is deliberate: the lane demonstrably moved, so re-announcing the hold that
+ *  still blocks its NEXT resume is information, not spam. */
+const RESUME_EPISODE_KINDS = [
+  RESUME_HELD_KIND,
+  "resumed",
+  "fix-leg-resumed",
+  "fix-leg-adopted-drained",
+  "resume-capped",
+  "resume-undecidable",
+  "fix-leg-resume-unconfigured",
+  "fix-leg-resume-no-pr",
+];
 
 export type DriveAction = "MERGE" | "WAIT" | "FIXUP" | "ESCALATE";
 /**
@@ -3344,10 +3371,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // Confirmed adoption ignores human holds and needs no forge context: the child already
     // exists, and DB supervision must catch up even while forge access/spend is gated.
     const labels = intentState === "confirmed" ? [] : await forge.getIssueLabels(w.issue);
+    // #441: the witness, not just the boolean — a hold-suppressed resume names the label that
+    // suppressed it (the `pr-held` payload shape), so an operator reading the ledger learns WHICH
+    // of cfg.escalation.humanLabels to lift. `firstMatchingLabel(...) != null` is interchangeable
+    // with `hasReserveLabel` (labels.ts): identical normalized-exact matching, no gate change.
+    const holdLabel = firstMatchingLabel(labels, cfg.escalation.humanLabels);
     const decision = resumeDecision(
       resumeSpendPaused,
       killSwitchActive,
-      hasReserveLabel(labels, cfg.escalation.humanLabels),
+      holdLabel != null,
       intentState === "confirmed",
       intentState === "unconfirmed",
       attempts,
@@ -3355,7 +3387,28 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       resumeLanesUsed,
       cfg.lanes.max,
     );
-    if (decision === "SKIP") continue;
+    if (decision === "SKIP") {
+      // #441 (F34): a hold-suppressed resume used to emit NOTHING, which made it indistinguishable
+      // from "nothing to do" — three dogfood rounds burned with a lane wedged in `handoff` and no
+      // observable signal at all (diagnosis required reading this decision table's source). Every
+      // OTHER suppression on this path already carries an event; this one now does too.
+      //
+      // Exactly once per EPISODE, deduped against the durable event log — the #169/#294
+      // dedupe-the-event-not-the-signal paradigm, since this loop re-derives the same live
+      // observation every tick and has no memory of its own. An episode is the maximal run of
+      // consecutive hold-suppressed evaluations of THIS lane, and it ends at any RESUME-phase
+      // event that proves the lane moved on: a resume/adoption, a cap or undecidable escalation,
+      // or a fix-leg misconfiguration skip. Every one of those is reachable only past this SKIP,
+      // so the next hold after one of them is genuinely a new episode and announces again.
+      // Restart-safe for free (the log IS the memory) and no new state column.
+      //
+      // The `paused`/lanes-full SKIP is deliberately NOT announced here: it is not a hold, it
+      // recurs every tick of a long pause, and `run-paused`/round-stop already narrate it.
+      if (holdLabel != null && state.latestLaneEventKind(RESUME_EPISODE_KINDS, w.name, w.issue) !== RESUME_HELD_KIND) {
+        state.appendEvent(RESUME_HELD_KIND, { worker: w.name, issue: w.issue, label: holdLabel, attempts });
+      }
+      continue;
+    }
     if (decision === "UNDECIDABLE") {
       const outcome = await escalateUndecidableResume(forge, state, cfg, w, attempts, iso);
       if (outcome) resumed.push(outcome);

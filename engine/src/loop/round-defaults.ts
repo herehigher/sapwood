@@ -26,6 +26,7 @@ import type { State } from "../state/state.js";
 import { alignMarker, createAligningStub, runPoolSelection } from "./align.js";
 import { reconcileDurableConcerns, scanForAdjudication } from "./dissent.js";
 import { reconcileEscalations } from "./escalation-reconcile.js";
+import { sweepResolvedHolds } from "./escalation-sweep.js";
 import { createHarvestStub } from "./harvest.js";
 import { type PeripheralPhase, type PeripheralStub, RoundScopedForge } from "./round.js";
 import { type AlignSection, mergeAlignSummary, type RoundArtifact, RoundArtifactSchema } from "./round-artifact.js";
@@ -213,6 +214,12 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
       // are enabled. Read-only and transition-only (see escalation-reconcile.ts's module doc);
       // it can neither change what the rest of this phase does nor be skipped by it.
       await reconcileEscalations(forge, deps.state, deps.cfg, deps.log);
+      // #441 (F34): the WRITE half, deliberately a separate module at this CALL SITE rather than
+      // inside the observe-only reconciler — a resolved escalation must also lose the
+      // `needs-human` the engine itself applied, or the dead label keeps suppressing RESUME and
+      // GATED RECLAIM forever. Runs immediately after, so a resolution observed above is swept in
+      // this same pass; keyed off the ledger, so a crash between the two heals on the next one.
+      await sweepResolvedHolds(forge, deps.state, deps.cfg, deps.log);
       const result = deps.cfg.roles.po.enabled ? await alignStub.run(ctx) : { marker: alignMarker(ctx.roundId) };
       // #394 (F23 gate② fix): the aligning round-phase's THIRD possible session dispatch —
       // #212/#233's round-pool selection — is a separate call from alignStub.run above, so its

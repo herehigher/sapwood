@@ -23,9 +23,19 @@
 //
 // STRUCTURALLY READ-ONLY (#295 AC3): the only IForge calls in this file are `getPRStatus` and
 // `getIssueMeta`. There is no addLabel/removeLabel/setBoardStatus/mergePR/comment call site
-// anywhere below, and nothing this module computes feeds a write path — the `escalation-resolved`
-// event is a RECORD for the dashboard fold, never a gate. Existing escalation and gating
-// behavior is byte-identical with this module present or absent.
+// anywhere below, and this module never gates anything — the `escalation-resolved` event is a
+// RECORD, never a decision input for escalation or merge. Existing escalation and gating behavior
+// is byte-identical with this module present or absent.
+//
+// #441 amendment (honesty, not a relaxation): the sentence that used to sit here — "nothing this
+// module computes feeds a write path" — is no longer true, and pretending otherwise would be
+// exactly the kind of stale doc this codebase treats as a defect. `escalation-sweep.ts` reads the
+// `escalation-resolved` events appended below and removes the `needs-human` label an engine
+// escalation provably applied (F34: a resolved escalation kept suppressing automation forever
+// because nothing ever swept its hold carrier). What is preserved is the part that MATTERS: the
+// write lives at the CALL SITE, in its own module, and this file stays a pure observer whose
+// forge surface is two read methods. `ESCALATION_SOURCES` is exported for that consumer so the
+// label-ownership proof below stays the ONE definition of "the engine applied this label".
 //
 // EXACTLY ONCE, WITHOUT A NEW LATCH COLUMN. The dedupe is a LAST-EVENT-WINS fold over the ledger
 // itself (`openEscalations` below): per `(source, issue)` key, the key is open iff the newest
@@ -100,7 +110,7 @@ import { MERGED_BOARD_DONE_REASON } from "./conductor.js";
  *  `always`: the event cannot exist unless the label landed. `payload`: the event records the
  *  outcome itself (`labeled`). `never`: best-effort or no label at all — label absence proves
  *  nothing, so these resolve only by closure/merge. */
-const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
+export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
   "gated-reentry-capped": "always",
   "resume-capped": "always",
   "resume-undecidable": "always",
@@ -155,6 +165,16 @@ const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
   // doctrine requires. Cost: it clears by issue closure only, which is still strictly more
   // clearing than the zero paths it had.
   "plan-review-escalated": "never",
+  // DELIBERATELY ABSENT (#441): `resume-held`. It is a new event kind that leaves a lane stopped,
+  // so the question "does it need a row here?" is exactly the one F34 punishes getting wrong —
+  // answered NO, on purpose, for two independent reasons. (1) It is not a new attention item: it
+  // OBSERVES a `needs-human`/`blocked` label suppressing a handoff resume, and whoever owns that
+  // label already has the item — an engine escalation has its own row above, and a hand-applied
+  // hold's owner is the person who typed it (#397's needs-human split, #400's one-carrier rule).
+  // Listing it would double-count one fact. (2) Structurally it MUST stay out: escalation-sweep.ts
+  // refuses to touch an issue with any open escalation, so a `resume-held` row would block the
+  // sweep of the very stale label that produced it — the F34 wedge, rebuilt by its own fix.
+  //
   // KNOWN, BOUNDED GAP (#295 review round 10, deferred to #404): frontend-design.md §3 also
   // flags two PREDICATE kinds — `reclaim-failed` when `payload.next` is not an automatic
   // continuation, and `reclaim-done` on its no-PR branch. They are attention items only for
@@ -179,7 +199,7 @@ const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
  *  does — it is the OTHER way a `failed` lane returns to `driving`, and the attention item it
  *  clears (`env-failure-preserved`) is precisely the one revival exists to answer. Without it a
  *  revived, actively-driving lane keeps its strip row and keeps costing a per-round forge read. */
-const CLEAR_KINDS = ["dispatched", "merged", "gated-reentry", "lane-revived"] as const;
+export const CLEAR_KINDS = ["dispatched", "merged", "gated-reentry", "lane-revived"] as const;
 
 /** #295 review round 5 (Codex P2), narrowed in round 6: a clear event must not erase an escalation
  *  THAT SAME OPERATION produced. conductor's `case "merged"` calls `handleRollbackFailure` — which
@@ -196,7 +216,7 @@ const CLEAR_PRODUCES: Record<string, (kind: string, payload: Record<string, unkn
   merged: (kind, payload) => kind === "rollback-escalated" && payload?.reason === MERGED_BOARD_DONE_REASON,
 };
 
-const RESOLVED_KIND = "escalation-resolved";
+export const RESOLVED_KIND = "escalation-resolved";
 
 /** How an escalation was observed to have been resolved. See the module doc for why
  *  `board-fixed` (named in issue #295's sketch) is deliberately absent. */
