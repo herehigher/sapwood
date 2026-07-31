@@ -2228,17 +2228,26 @@ export class State {
    *  predates this field — a #449-deploy-transition edge, not a genuine round 1). The caller
    *  tells them apart by checking for a `null` return vs. a non-null return whose `head` is
    *  `null`, and must NOT treat the two identically (see `gatherFixDiffPaths`'s own doc for why:
-   *  only the true round-1 case is safe to widen to the full base..head set). */
-  lastDriveFixupEvent(worker: string, pr: number): { id: number; head: string | null } | null {
+   *  only the true round-1 case is safe to widen to the full base..head set).
+   *
+   *  #450 gate② P1: `afterId` (default `0`, so every pre-#450 call site — and the existing pinned
+   *  test — is byte-for-byte unchanged) restricts the read to `id > afterId`, the SAME id-cursor
+   *  shape `eventsAfterId` already uses elsewhere in this file. `conductor.ts`'s `gatherFixDiffPaths`
+   *  passes `CONVERGENCE_EPISODE_RESET_KINDS`'s boundary here so a `drive-fixup` from a PRIOR
+   *  convergence episode (before the lane's most recent `gated-reentry`/`lane-revived`) is invisible
+   *  to this read — the post-reclaim round then correctly sees "no previous drive-fixup THIS
+   *  episode" (`null`), not a stale pre-escalation head. */
+  lastDriveFixupEvent(worker: string, pr: number, afterId = 0): { id: number; head: string | null } | null {
     const row = this.db
       .prepare(
         `SELECT id, payload FROM events
          WHERE kind = 'drive-fixup'
+           AND id > ?
            AND json_extract(payload, '$.worker') = ?
            AND json_extract(payload, '$.pr') = ?
          ORDER BY id DESC LIMIT 1`,
       )
-      .get(worker, pr) as { id: number; payload: string } | undefined;
+      .get(afterId, worker, pr) as { id: number; payload: string } | undefined;
     if (!row) return null;
     const p = JSON.parse(row.payload) as { head?: unknown };
     return { id: row.id, head: typeof p.head === "string" ? p.head : null };

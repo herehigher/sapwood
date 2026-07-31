@@ -207,7 +207,12 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
   }
+  /** #450 gate② P3c: call-count spy — proves `gatherFixupFindingRecord`'s forge reads are SKIPPED
+   *  (not merely no-op-returned) on a tick where the lane can't dispatch anyway (unconfigured fix
+   *  loop, or admission-blocked), mirroring `getPRStatusCalls`/`getPRReviewThreadsCalls` above. */
+  getPRReviewDataCalls = 0;
   override async getPRReviewData(): Promise<PRReviewData> {
+    this.getPRReviewDataCalls++;
     return this.prReviewData;
   }
   override async getPRDiff(): Promise<string> {
@@ -4774,6 +4779,431 @@ test("tick DRIVE (#450, gated reclaim): a review-non-convergent escalation is re
     fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
   });
   assert.deepEqual(r2.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-a", issue: 2, pr: 55, attempt: 1 }]);
+  st.close();
+});
+
+// ── #450 gate② P1 (architectural review, 2026-07-31; PM adjudication accepted): the CONVERGENCE
+// EPISODE boundary — a #147 gated reclaim (or a #447 park revival) must reset the fold, never
+// classify against pre-escalation history. ────────────────────────────────────────────────────
+
+test("tick DRIVE (#450, gate② P1): stall-escalate -> human clears -> #147 gated reclaim -> the NEXT FIXABLE tick dispatches (round-1-of-episode semantics), NEVER re-escalates, and its drive-fixup's fixDiffPaths derive from the POST-RECLAIM head only (never the human's own intervening diff)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const deps = {
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+
+  const r1 = await tick(deps);
+  assert.deepEqual(r1.driven, [{ kind: "needs-human", worker: "lane-a", issue: 2, pr: 55, reason: "review-non-convergent:recurrence" }]);
+  assert.equal(st.getWorker("lane-a")!.state, "failed");
+  assert.equal(st.getWorker("lane-a")!.fix_rounds, 1);
+
+  // The human pushes a fix AND clears the label — the #147 gated-reclaim signal.
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H3", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  // The WIDE (pre-#450-gate②-P1 buggy) range H1..H3 — what an UNBOUNDED fold would use — is
+  // deliberately scripted to touch src/a.ts, so a regression here re-triggers a false STALL.
+  forge.compareResults["H1...H3"] = { files: [{ filename: "src/a.ts" }, { filename: "src/wide-range-leak.ts" }], complete: true };
+  // The CORRECT round-1-of-episode range: base..H3 (the whole PR), exactly what
+  // `gatherFixDiffPaths`' own round-1 branch computes once it correctly sees NO preceding
+  // `drive-fixup` THIS episode.
+  forge.changedFiles = { files: [{ filename: "src/human-fix.ts" }], complete: true };
+  forge.issueLabelsByIssue[2] = [];
+
+  const r2 = await tick(deps);
+  assert.deepEqual(r2.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-a", issue: 2, pr: 55, attempt: 1 }]);
+  // DRIVE re-evaluates the SAME tick (#147's own "same tick sees the reclaim") — round-1-of-episode
+  // semantics: dispatches a REAL fix leg, never re-escalates.
+  assert.deepEqual(r2.driven, [
+    { kind: "fixup", worker: "lane-a", issue: 2, pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" },
+  ]);
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.state, "fixing");
+  assert.equal(row.fix_rounds, 2, "a REAL fix leg dispatched — never a free re-escalation");
+  assert.equal(
+    st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]).length,
+    1,
+    "exactly one escalation total (round 1's, still on record) — no immediate post-reclaim re-escalation",
+  );
+  const driveFixupEvents = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
+  assert.equal(driveFixupEvents.length, 2);
+  const round2 = driveFixupEvents[1]!.payload as { fixDiffPaths: string[]; head?: string };
+  assert.deepEqual(
+    round2.fixDiffPaths,
+    ["src/human-fix.ts"],
+    "the post-reclaim head's OWN base..head diff — never the wide H1..H3 range spanning the human's own fix",
+  );
+  assert.equal(round2.head, "H3");
+  st.close();
+});
+
+// ── #450 gate② P2 (architectural review, 2026-07-31; accepted): the escalation-comment marker is
+// widened with the head OID — a genuinely SECOND stall episode at a NEW head must never be
+// suppressed by the FIRST escalation's already-posted comment, even when `fix_rounds` (the OLD,
+// sole key component) is unchanged. ────────────────────────────────────────────────────────────
+
+test("tick DRIVE (#450, gate② P2): the escalation-comment marker is keyed on headOid too — a SECOND stall at a DIFFERENT head (identical fix_rounds) posts its OWN fresh comment, never suppressed by the first escalation's marker", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const deps = {
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+  const r1 = await tick(deps);
+  assert.equal((r1.driven[0] as { reason: string }).reason, "review-non-convergent:recurrence");
+  assert.equal(forge.issueComments.length, 1);
+  assert.equal(st.getWorker("lane-a")!.state, "failed");
+
+  // Isolates the MARKER's own discriminating behavior from #450 gate② P1's episode-boundary fix
+  // (which already prevents this specific double-escalation through the SUPPORTED #147 reclaim
+  // path — see the P1 test above): the row returns to `driving` with the SAME `fix_rounds` (no
+  // fix leg ever dispatched) and NO recognized episode-reset event, so the classification history
+  // is genuinely unchanged and a SECOND, real stall (recurrence again, at a NEW head) is exactly
+  // the scenario the marker's own key must not suppress — "independently of P1 it is still wrong"
+  // (gate② review's own words).
+  st.upsertWorker({ ...st.getWorker("lane-a")!, state: "driving", ended_at: null, gated_escalation_labeled: 0 });
+  forge.issueLabelsByIssue[2] = [];
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H3", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  forge.compareResults["H1...H3"] = { files: [{ filename: "src/a.ts" }], complete: true };
+
+  const r2 = await tick(deps);
+  assert.equal((r2.driven[0] as { reason: string }).reason, "review-non-convergent:recurrence");
+  assert.equal(forge.issueComments.length, 2, "a SECOND, fresh comment — never suppressed by the first escalation's marker");
+  assert.notEqual(
+    forge.issueComments[1]![1],
+    forge.issueComments[0]![1],
+    "the two comments carry DIFFERENT markers (different head), so neither's live-read suppresses the other",
+  );
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]).length, 2);
+  st.close();
+});
+
+// ── #450 gate② P3a (accepted): the escalation's own forge-write-failure paths, mirroring
+// escalateReviewDisputed's twin tests exactly — label-failed dedupe, comment-failed dedupe, and a
+// single write-failure's retry-next-tick contract. ─────────────────────────────────────────────
+
+test("tick DRIVE (#450, gate② P3a): a label-write failure leaves the row driving (retried next tick), never escalates without the label landing", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
+  forge.throwOnAddLabel = true;
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.state, "driving", "no terminal transition without the label landing");
+  assert.equal(row.fix_rounds, 1);
+  assert.equal(r.driven[0]?.kind, "queued");
+  assert.match((r.driven[0] as { reason: string }).reason, /review-non-convergent-escalation-write-failed/);
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]), [], "no event without a successful label write");
+  const failedLabelEvents = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent-label-failed"]);
+  assert.equal(failedLabelEvents.length, 1);
+  st.close();
+});
+
+test("tick DRIVE (#450, gate② P3a): a comment-write failure (label already landed) leaves the row driving, never terminalizes, no review-non-convergent event — the comment-failure ordering leg", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
+  forge.throwOnAddIssueComment = true;
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.state, "driving", "no terminal transition without the comment landing");
+  assert.equal(row.fix_rounds, 1);
+  assert.equal(r.driven[0]?.kind, "queued");
+  assert.deepEqual(
+    st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]),
+    [],
+    "no success event without a successful comment write",
+  );
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]], "the label DID land — this is the ordering-after-label leg");
+  const failedCommentEvents = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent-comment-failed"]);
+  assert.equal(failedCommentEvents.length, 1);
+  assert.equal((failedCommentEvents[0]!.payload as { fixRounds: number }).fixRounds, 1);
+  st.close();
+});
+
+test("tick DRIVE (#450, gate② P3a): a comment-write failure that keeps failing across MANY ticks appends review-non-convergent-comment-failed ONCE, not per tick — the #383/#465 transition-dedupe convention, not steady-state spam", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
+  forge.throwOnAddIssueComment = true;
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const deps = {
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+  for (let i = 0; i < 5; i++) await tick(deps);
+  assert.equal(
+    st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent-comment-failed"]).length,
+    1,
+    "same episode (same fix_rounds, no reset in between) — one announcement, not five",
+  );
+
+  // A genuinely LATER round (a real dispatch would have bumped `fix_rounds`) re-announces — the
+  // dedupe's own `fixRounds` equality clause, exercised directly (matching
+  // `lastReviewNonConvergentFailureEvent`'s own doc: "a lane whose fix_rounds later changes has,
+  // by construction, dispatched another fix leg instead").
+  st.upsertWorker({ ...st.getWorker("lane-a")!, fix_rounds: 2 });
+  await tick(deps);
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent-comment-failed"]);
+  assert.equal(events.length, 2, "a different fix_rounds is a genuinely new episode, not eaten by the dedup");
+  assert.equal((events[1]!.payload as { fixRounds: number }).fixRounds, 2);
+  st.close();
+});
+
+test("tick DRIVE (#450, gate② P3a): a label-write failure that keeps failing across MANY ticks appends review-non-convergent-label-failed ONCE, not per tick — the SAME transition-dedupe the comment path already had", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
+  forge.throwOnAddLabel = true;
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const deps = {
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+  for (let i = 0; i < 5; i++) await tick(deps);
+  assert.equal(
+    st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent-label-failed"]).length,
+    1,
+    "same episode (same fix_rounds, no reset in between) — one announcement, not five",
+  );
+
+  st.upsertWorker({ ...st.getWorker("lane-a")!, fix_rounds: 2 });
+  await tick(deps);
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent-label-failed"]);
+  assert.equal(events.length, 2, "a different fix_rounds is a genuinely new episode, not eaten by the dedup");
+  st.close();
+});
+
+// ── #450 gate② P3c (accepted): the fixLegResume/admission checks run BEFORE
+// `gatherFixupFindingRecord`'s forge reads — a paused/parked lane under cap stops paying them every
+// steady-state tick. ─────────────────────────────────────────────────────────────────────────────
+
+test("tick DRIVE (#450, gate② P3c): a lane under cap, PAUSED, never calls gatherFixupFindingRecord's forge reads (getPRReviewData/compareChangedFiles) — the steady-state cost the #383 90-minute-park evidence base flagged", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-p3c-pause-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+    writeFileSync(join(dir, "PAUSE"), ""); // a human touches data/PAUSE
+    const r = await tick({
+      now: realClock,
+      forge,
+      state: st,
+      supervisor: sup,
+      cfg: mkCfg(),
+      mergeGate: gate,
+      fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+    });
+    const row = st.getWorker("lane-a")!;
+    assert.equal(row.state, "driving");
+    assert.equal(row.fix_rounds, 1, "unchanged — no dispatch, no escalation, this tick simply defers");
+    assert.match((r.driven[0] as { reason: string }).reason, /fix-leg-admission-blocked:paused/);
+    assert.equal(forge.getPRReviewDataCalls, 0, "gatherFixupFindingRecord's classic-path read never ran");
+    assert.equal(forge.compareCalls.length, 0, "gatherFixDiffPaths' range-compare read never ran");
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick DRIVE (#450, gate② P3c): once the pause clears, the SAME lane is evaluated normally — progress IS computed and a fix leg dispatches (proves the deferred tick is not a permanent skip)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-p3c-pause-clear-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+    const pausePath = join(dir, "PAUSE");
+    writeFileSync(pausePath, "");
+    const deps = {
+      now: realClock,
+      forge,
+      state: st,
+      supervisor: sup,
+      cfg: mkCfg(),
+      mergeGate: gate,
+      fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+    };
+    await tick(deps);
+    assert.equal(forge.getPRReviewDataCalls, 0);
+
+    rmSync(pausePath);
+    const r2 = await tick(deps);
+    assert.equal(r2.driven[0]?.kind, "fixup");
+    assert.equal(st.getWorker("lane-a")!.state, "fixing");
+    assert.equal(st.getWorker("lane-a")!.fix_rounds, 2);
+    assert.equal(forge.getPRReviewDataCalls, 1, "progress IS gathered once admission clears");
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #450 gate② P3d (accepted): the both-stalled-AND-at-cap precedence, pinned on a SINGLE lane —
+// the two-lanes test above covers the pair on separate lanes; this pins the third leg directly. ──
+
+test("tick DRIVE (#450, gate② P3d): a lane BOTH stalled AND at the fix-rounds cap takes review-non-convergent directly, never fix-rounds-capped", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cap = mkCfg().lanes.prFixCap;
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: cap }); // AT the cap already
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: cap,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal((r.driven[0] as { reason: string }).reason, "review-non-convergent:recurrence");
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]).length, 1);
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-rounds-capped"]), []);
   st.close();
 });
 
