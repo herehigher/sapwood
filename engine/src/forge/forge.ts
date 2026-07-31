@@ -2142,11 +2142,8 @@ type ReadyCfg = {
 /** #397 class 6: the routing fence decompose's remainder path and align's no-plan path apply. It
  *  is NOT an escalation — nobody owes a decision on it — but it must stay off exactly the queues
  *  `needsHuman` kept it off, or renaming it would silently widen pool/triage/review exposure.
- *  Every predicate that excludes on `needsHuman`/`blocked` calls this too. Exported (#432): round.ts's
- *  probeHasWork milestone catch-all reuses this SAME check rather than re-deriving it from a raw
- *  label-array test — see that call site's own comment for why a parallel prose heuristic here
- *  would be the exact bug this issue fixes, mirrored. */
-export function isPlanless(labels: string[], l: ReadyCfg["labels"]): boolean {
+ *  Every predicate that excludes on `needsHuman`/`blocked` calls this too. */
+function isPlanless(labels: string[], l: ReadyCfg["labels"]): boolean {
   return l.planless !== undefined && labelsInclude(labels, l.planless);
 }
 
@@ -2306,15 +2303,8 @@ export function selectPoolEligibleIssues(project: ParsedProject, cfg: ReadyCfg):
  *  issues are excluded (the doc-gate path; no plan is expected). `needsHuman`/`blocked` are
  *  excluded (settled — a human is already in the loop, not a drafting target). An issue that
  *  already has SOME plan section is excluded too — triage's whole job is to fill the gap, not
- *  to re-draft an existing plan (that quality judgment belongs to gate⓪'s plan-reviewer).
- *
- *  Exported (#432, gate⓪ adjudication): this is the exact "is this issue's shape still
- *  consumable by the PO's triage pass" predicate — round.ts's probeHasWork milestone catch-all
- *  calls it directly on its own already-fetched candidates rather than re-deriving a parallel
- *  "has a plan" heuristic over the body. Keeping probe and consumer on ONE function is the point:
- *  if they could drift, the bug #432 fixes comes back as its mirror image (probe says "no work"
- *  while triage would in fact consume the issue, or vice versa). */
-export function needsPlanTriage(body: string, labels: string[], l: ReadyCfg["labels"]): boolean {
+ *  to re-draft an existing plan (that quality judgment belongs to gate⓪'s plan-reviewer). */
+function needsPlanTriage(body: string, labels: string[], l: ReadyCfg["labels"]): boolean {
   if (isDecomposed(labels, l)) return false;
   if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
   if (isPlanless(labels, l)) return false; // #397: same exclusion this fence had while it borrowed needsHuman

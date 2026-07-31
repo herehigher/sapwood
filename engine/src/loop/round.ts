@@ -19,7 +19,7 @@
 // responsible for treating a non-null marker as "already externalized, don't duplicate."
 
 import type { SapwoodConfig } from "../config/config.js";
-import { type IForge, type Issue, isPlanless, needsPlanTriage } from "../forge/forge.js";
+import type { IForge, Issue } from "../forge/forge.js";
 import { type LabelSpec, labelsInclude } from "../forge/labels.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import { createProxyMint } from "../proxy/mint.js";
@@ -1126,13 +1126,17 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  plan-review candidate needs gate⓪; a plan-TRIAGE candidate (any open plan-less issue,
    *  regardless of board status — Codex P1 on PR #150: exactly what the aligning phase's PO
    *  triage pass consumes, so skipping it would back off forever over a backlog the PO exists
-   *  to draft plans into) needs the PO; and — when `round.milestone` scopes this run — an open
-   *  issue still sitting in that milestone (not yet Ready, not yet reviewed) is exactly the PO/
-   *  aligning peripheral's job to decompose, so it counts as work too. Unset milestone can't
-   *  express a "goals exhausted" signal at all (no scoping to ask about, and the future
-   *  goal-file target this parenthetical anticipates — M5 #135 — isn't shipped yet), so it
-   *  contributes no vote either way, same "unset = no scoping" stance as RoundScopedForge. Reads
-   *  the same (possibly milestone-scoped) `forge` runExecuting/checkFinalMilestone already use.
+   *  to draft plans into) needs the PO. Unset milestone can't express a "goals exhausted" signal
+   *  at all (no scoping to ask about, and the future goal-file target this parenthetical
+   *  anticipates — M5 #135 — isn't shipped yet), so it contributes no vote either way, same
+   *  "unset = no scoping" stance as RoundScopedForge. Reads the same (possibly milestone-scoped)
+   *  `forge` runExecuting/checkFinalMilestone already use — when `round.milestone` IS set, that
+   *  means the plan-review and plan-triage reads below are ALREADY milestone-scoped (RoundScopedForge
+   *  wraps `forge` before this closure ever sees it — see its own getIssuesNeedingPlanReview/
+   *  getIssuesNeedingPlanTriage doc comments), so a not-yet-Ready milestone issue is caught by
+   *  whichever of those two shapes it actually is, with no separate milestone-scoped catch-all
+   *  needed (#432, F32: one used to live here — see its deletion-site comment below for why it
+   *  was provably redundant-or-wrong, never a shape worth re-detecting a third way).
    *
    *  An all-empty probe is still not proof of "nothing to do" — the PO can decompose the plan
    *  doc alone — which is why standby additionally requires the idle-round precondition (see
@@ -1182,81 +1186,44 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // burns the remaining peripheral sessions doing nothing, indefinitely.
       if (cfg.roles.planReviewer.enabled && (await forge.getIssuesNeedingPlanReview()).length > 0) return true;
       if (cfg.roles.po.enabled && (await forge.getIssuesNeedingPlanTriage()).length > 0) return true;
-      // #127 gate② R1 (same disabled-consumer rule): the milestone catch-all exists because an
-      // open not-yet-Ready issue in the round's milestone is exactly what the PO/aligning pass
-      // decomposes (or gate⓪ approves) — with BOTH gate⓪ roles off, nothing enabled can consume
-      // that signal either; the only consumable signal left is Ready+dispatchable, already
-      // covered by the getReadyIssues check above. Counting it anyway would pin the probe true
-      // and defeat standby, the same failure class as the two role-gated signals above.
-      if (cfg.round.milestone && (cfg.roles.po.enabled || cfg.roles.planReviewer.enabled)) {
-        // Cheapest read first: zero open issues in the milestone settles the question with no
-        // further fetch.
-        const count = await forge.countOpenIssuesInMilestone(cfg.round.milestone);
-        if (count === 0) return false;
-        // #212 (documented residual, round.ts:426-427 pre-fix): a milestone holding open issues
-        // ALL carrying a human-hold label (cfg.escalation.humanLabels) is not consumable by
-        // anything enabled either — a human is already in the loop for every one of them, same
-        // "only a consumable signal counts" rule as the two role-gated checks above. Nothing
-        // enabled can ever act on a held issue, so it must not pin the probe true forever (a
-        // milestone that's gone all-held would otherwise open an empty round after empty round,
-        // burning every peripheral session on a backlog nothing can consume). One non-held open
-        // issue in the milestone still counts. listOpenIssues() is the full open backlog
-        // (RoundScopedForge deliberately does not milestone-scope it — see its own doc comment),
-        // so the milestone filter is applied here, matching what countOpenIssuesInMilestone
-        // itself counts.
-        // #397: `planless` is excluded here for the SAME disabled-consumer reason as a human
-        // hold — a plan-less fenced issue is invisible to every triage/review/pool predicate
-        // (forge.ts's isPlanless), so nothing enabled can consume it either. It used to be
-        // covered incidentally because the fence borrowed `needsHuman` (a humanLabels member);
-        // spelling it out keeps this probe's behavior byte-for-byte identical under the new name.
-        //
-        // #391 (F21): a CLAIMED issue (cfg.labels.inProgress) doesn't count either — same "only
-        // a consumable signal counts" rule as the human-hold exclusion above, applied to the
-        // other way an issue leaves the Ready lane. A claimed issue is off the Ready column, so
-        // it is invisible to getReadyIssues/getPoolEligibleIssues/getIssuesNeedingPlanReview, and
-        // it has a plan already so triage skips it: no enabled role can consume it. Live claims
-        // are harmless to exclude (an occupied lane means the round wasn't idle, and standby
-        // needs lastRoundIdle); STALE ones — a lane that died leaving the label behind — are
-        // exactly the residue that churned 16 empty rounds on 2026-07-24, pinning this probe true
-        // over a backlog with a provably empty pool. Startup's own F20 heal strips the stale
-        // label and returns the issue to Ready, at which point it counts again, legitimately.
-        //
-        // Residual, stated rather than overclaimed: the label is the only claim signal available
-        // here (listOpenIssues carries labels, not board status), so an issue whose claim landed
-        // as a board write but whose addLabel failed still pins this probe. That direction is the
-        // deliberate one — it errs toward opening a round, the same fail-toward-more-work stance
-        // this probe's own catch uses.
-        //
-        // #432 (F32, PM gate⓪ adjudication 2026-07-31): consumable-SHAPE, not just consumable-
-        // LANE, is the last rung. Everything above this line excludes an issue by where it sits
-        // (held, claimed, fenced); this excludes by what's actually IN it. A milestone issue that
-        // is open, unclaimed, unheld, and not planless can STILL be nothing the PO/aligning pass
-        // can act on — a fully-specified issue (plan + AC already drafted, just waiting on a
-        // human to flip it to Ready) is invisible to getReadyIssues (not Ready yet) AND to
-        // getIssuesNeedingPlanReview (Ready-lane only, this one isn't) AND to the PO's own triage
-        // pass (it already has a plan — triage's whole job is filling the gap, not re-drafting).
-        // Nothing enabled can consume it; counting it anyway is exactly the F32 churn (8 such
-        // issues in v0.2.1 pinned this probe true for six empty rounds, po-align yielding zero
-        // every time). `needsPlanTriage` (forge.ts, #89) is reused UNCHANGED rather than
-        // re-derived here — it is the literal predicate behind getIssuesNeedingPlanTriage, so
-        // probe and consumer can never drift into the two ever disagreeing about the same issue
-        // (the PM adjudication's hard constraint: a parallel prose heuristic over the body would
-        // silently reopen this exact bug, possibly as its mirror image). A genuinely RAW issue —
-        // no verification-plan section at all — makes needsPlanTriage true, so it still counts:
-        // cold-start decomposition (AC2) is unaffected, this rung only ever narrows the SPECIFIED
-        // case. Zero new persistence (the REJECTED zero-yield-memory alternative): this is a pure
-        // per-issue shape read off the SAME listOpenIssues() fetch already in hand, so it is
-        // restart-proof by construction — there is no hash or memory to go stale.
-        const openIssues = await forge.listOpenIssues();
-        return openIssues.some(
-          (i) =>
-            i.milestone === cfg.round.milestone &&
-            !labelsInclude(i.labels, cfg.labels.inProgress) &&
-            !cfg.escalation.humanLabels.some((label) => labelsInclude(i.labels, label)) &&
-            !isPlanless(i.labels, cfg.labels) &&
-            needsPlanTriage(i.body ?? "", i.labels, cfg.labels),
-        );
-      }
+      // #432 (F32, PM gate⓪ adjudication 2026-07-31 + gate② review round 2, deletion over
+      // detection): a `round.milestone` catch-all used to sit here — "count ANY other open,
+      // unclaimed, unheld, non-planless issue in the milestone as work" — reading listOpenIssues()
+      // and re-deriving a lane/shape filter over it (originally #212/#397/#391's exclusion ladder;
+      // round 1 of THIS issue added a `needsPlanTriage` shape rung on top). DELETED, not narrowed
+      // further: it is provably redundant with the two lines directly above, in every configuration.
+      //
+      // The subset proof: `forge` in this closure is RoundScopedForge whenever cfg.round.milestone
+      // is set (its construction a few hundred lines up in runRounds), and RoundScopedForge's own
+      // getIssuesNeedingPlanReview/getIssuesNeedingPlanTriage doc comments say so explicitly — so
+      // the two lines above are ALREADY milestone-scoped here, not a repo-wide read. The deleted
+      // catch-all's condition set was: milestone-match ∧ OPEN ∧ ¬inProgress ∧ ¬humanLabels ∧
+      // ¬planless ∧ needsPlanTriage-shaped. `getIssuesNeedingPlanTriage`'s own selector
+      // (forge.ts's selectPlanTriageCandidates) returns exactly OPEN ∧ repo ∧ needsPlanTriage-shaped
+      // — and needsPlanTriage already excludes needsHuman/blocked/planless/verifyNa internally (it
+      // does not need `inProgress` re-checked to be a STRICT SUBSET relation: adding more
+      // conditions can only narrow, never widen, what counts as true). Any issue the deleted
+      // catch-all could ever return true for was therefore already caught by the triage line above,
+      // milestone for milestone. (The Ready-lane review shape needs no catch-all either, by the
+      // same reasoning: selectPlanReviewCandidates is Ready-lane-scoped, and the review line above
+      // already covers it — a milestone issue that is fully specified but not yet Ready is exactly
+      // the F32 case, correctly invisible to BOTH lines, because nothing enabled can act on it
+      // until a human promotes it: that is the intended "no work" outcome, not a gap.)
+      //
+      // Two consequences of that subset relation, not one:
+      //  - po.enabled: the deleted catch-all was UNREACHABLE-true. Anything that could satisfy it
+      //    already made the triage line return true FIRST — it was dead code paying for an extra
+      //    listOpenIssues() fetch on every probe call for a condition that could never fire.
+      //  - po.enabled: false, planReviewer.enabled: true: the deleted catch-all counted
+      //    triage-shaped work whose only consumer (the PO) is OFF — a live #127-class
+      //    disabled-consumer bug, reintroduced by the very block this probe's comments elsewhere
+      //    exist to keep out. Deleting it removes the bug at its root instead of adding a third
+      //    place to keep role-enablement in sync.
+      // `isPlanless`/`needsPlanTriage` no longer need reuse-by-import here — the triage line above
+      // already calls them, inside getIssuesNeedingPlanTriage's own selector chain. Probe and
+      // consumer are now the SAME call, not two calls kept in sync by convention — a stronger form
+      // of the adjudication's drift-proofing than exporting the predicates for a second call site
+      // ever was.
       return false;
     } catch (e) {
       tickErrors++;
