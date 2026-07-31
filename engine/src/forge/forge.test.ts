@@ -287,7 +287,7 @@ test("#449 GithubForge.compareChangedFiles: hits the three-dot compare endpoint 
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
-    return JSON.stringify({ files: [{ filename: "AGENTS.md" }] });
+    return JSON.stringify({ status: "ahead", files: [{ filename: "AGENTS.md" }] });
   };
   assert.deepEqual(await forge.compareChangedFiles("H1", "H2"), { files: [{ filename: "AGENTS.md" }], complete: true });
   assert.deepEqual(seen[0], ["api", "repos/o/r/compare/H1...H2"]);
@@ -297,10 +297,36 @@ test("#449 GithubForge.compareChangedFiles: marks the 300-file compare ceiling i
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
   (forge as unknown as { gh: () => Promise<string> }).gh = async () =>
-    JSON.stringify({ files: Array.from({ length: 300 }, (_, index) => ({ filename: `generated/${index}.txt` })) });
+    JSON.stringify({ status: "ahead", files: Array.from({ length: 300 }, (_, index) => ({ filename: `generated/${index}.txt` })) });
   const result = await forge.compareChangedFiles("H1", "H2");
   assert.equal(result.files.length, 300);
   assert.equal(result.complete, false);
+});
+
+// #449 gate② delta review (force-push/rebase P2): a force-pushed/rebased `head` does NOT 404 on
+// three-dot compare — it returns 200 with `status: "diverged"` and `files` computed from the
+// MERGE-BASE, a possible SUPERSET of the true base..head range. Silently trusting that response
+// would re-open the P1 this primitive exists to fix, for exactly the rounds where a producer
+// rewrote its branch's history.
+test("#449 GithubForge.compareChangedFiles (gate② delta P2): status 'diverged' -> complete: false, NEVER the merge-base superset trusted as exact", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  (forge as unknown as { gh: () => Promise<string> }).gh = async () =>
+    // Well under COMPARE_FILES_CAP — proves this is the `status` check firing, not the file-count
+    // ceiling; a diverged response can be arbitrarily small and still be a superset.
+    JSON.stringify({ status: "diverged", files: [{ filename: "src/x.ts" }, { filename: "src/y.ts" }] });
+  const result = await forge.compareChangedFiles("H1", "H2");
+  assert.equal(result.files.length, 2, "the raw file list is still parsed — the caller decides what to do with an incomplete answer");
+  assert.equal(result.complete, false);
+});
+
+test("#449 GithubForge.compareChangedFiles (gate② delta P2): status 'behind' or absent also fails narrow — only 'ahead'/'identical' are trusted", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  (forge as unknown as { gh: () => Promise<string> }).gh = async () => JSON.stringify({ status: "behind", files: [] });
+  assert.equal((await forge.compareChangedFiles("H1", "H2")).complete, false);
+  (forge as unknown as { gh: () => Promise<string> }).gh = async () => JSON.stringify({ files: [] }); // no status field at all
+  assert.equal((await forge.compareChangedFiles("H1", "H2")).complete, false);
 });
 
 // A representative ProjectV2 query response. `data.user` or `data.organization` —

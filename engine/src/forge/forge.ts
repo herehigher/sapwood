@@ -611,6 +611,20 @@ export interface PRChecksPage {
  *  fail-closed-on-ambiguity stance `getPRChangedFiles`'s own 3,000-entry guard takes. */
 const COMPARE_FILES_CAP = 300;
 
+/** #449 gate② delta review (force-push/rebase P2): the compare endpoint's `status` field is the
+ *  ONLY signal that `files` is actually a `base..head` diff. `"ahead"` (head strictly ahead of
+ *  base) and `"identical"` (no changes) are the two states where that holds; every other value —
+ *  most commonly `"diverged"`, GitHub's answer once `head`'s branch was force-pushed/rebased out
+ *  from under the `base` this caller still has on record — means GitHub computed `files` from
+ *  their MERGE-BASE instead, which is a SUPERSET of the true range (it additionally contains
+ *  everything the two sides moved independently since diverging). A 200 response is therefore NOT
+ *  by itself proof of a trustworthy range: `complete` must fail narrow on `status` too, not just
+ *  on `COMPARE_FILES_CAP`. Absent/unrecognized `status` (a response shape this code doesn't
+ *  understand) fails narrow the same way — never assumed exact. */
+function isExactCompareRange(status: unknown): boolean {
+  return status === "ahead" || status === "identical";
+}
+
 export class GithubForge implements IForge {
   constructor(private readonly cfg: SapwoodConfig) {}
 
@@ -834,11 +848,16 @@ export class GithubForge implements IForge {
   }
 
   /** #449 gate② P1 fix: no `--paginate` — the compare endpoint returns ONE object (not an
-   *  array), so `--paginate --slurp` (getPRChangedFiles' own mechanism) does not apply here. */
+   *  array), so `--paginate --slurp` (getPRChangedFiles' own mechanism) does not apply here.
+   *  #449 gate② delta review (force-push P2): `complete` additionally requires `status` to be
+   *  `"ahead"`/`"identical"` (`isExactCompareRange`, this file) — a `"diverged"` (or any other
+   *  non-exact) response is a possibly-wider-than-requested file list, not a trustworthy range,
+   *  regardless of how far under `COMPARE_FILES_CAP` it lands. */
   async compareChangedFiles(base: string, head: string): Promise<PRChangedFilesResult> {
     const out = await this.gh(["api", `repos/${this.cfg.board.owner}/${this.repo()}/compare/${base}...${head}`]);
     const files = parseCompareChangedFiles(out);
-    return { files, complete: files.length < COMPARE_FILES_CAP };
+    const status = (JSON.parse(out) as { status?: unknown }).status;
+    return { files, complete: files.length < COMPARE_FILES_CAP && isExactCompareRange(status) };
   }
 
   async getCommitsSince(sinceIso: string): Promise<CommitInfo[]> {
