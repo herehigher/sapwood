@@ -4500,6 +4500,81 @@ test("tick DRIVE (#450, flat): non-decreasing finding count for two consecutive 
   st.close();
 });
 
+// ── #450 gate② Codex cross-vendor (PM-narrowed ruling, 2026-08-01): a capped finding snapshot's
+// COUNT is a floor, not a fact — the EXACT 100->75->51 scenario the finding names, wired end-to-end
+// through gatherFixupFindingRecord/classifyConvergenceProgress. ───────────────────────────────────
+
+test("tick DRIVE (#450, gate② Codex cross-vendor, truncation rule): three truncated 50-item snapshots (a genuinely falling count) never false-stall as flat — dispatches a fix leg instead of escalating", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 });
+
+  // 50 distinct classic-path keys, shared across all three rounds — the VISIBLE count sits at the
+  // cap in every round even though the TRUE count is falling (100 -> 75 -> 51 in the finding's own
+  // framing; this fixture only needs the OBSERVABLE shape: every round's own recorded/read set is
+  // capped at MAX_FIXUP_FINDINGS=50 and marked truncated).
+  const keyFor = (i: number) => classicThreadFindingKey({ id: `T${i}`, path: `src/f${i}.ts`, findingDigest: `d${i}` }).key;
+  const fifty = Array.from({ length: 50 }, (_, i) => ({ key: keyFor(i), severity: "blocking" as const }));
+
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: fifty,
+    findingsTruncated: true,
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 2,
+    reason: "r2",
+    findings: fifty,
+    findingsTruncated: true,
+    fixDiffPaths: [],
+    head: "H2",
+  });
+
+  // Round 3 (live): 51 unresolved threads (the same 50 visible keys plus one more) —
+  // gatherFixupFindingRecord's own boundRecords caps this to 50 and marks findingsTruncated: true,
+  // so round 3's OWN record is genuinely truncated too, not just the seeded history.
+  const threads = Array.from({ length: 51 }, (_, i) => cvThread(`T${i}`, `src/f${i}.ts`, `d${i}`));
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H3", unresolvedThreads: 51, threads };
+  forge.compareResults["H2...H3"] = { files: [], complete: true }; // no path overlap -> never recurrence/marginal-complexity
+
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=51:ciRed=false" };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+
+  assert.equal(r.driven[0]?.kind, "fixup", "never a false review-non-convergent:flat on a truncated-but-genuinely-improving lane");
+  assert.equal(st.getWorker("lane-a")?.state, "fixing");
+  assert.equal(st.getWorker("lane-a")?.fix_rounds, 3);
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]), []);
+  const driveFixupEvents = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]);
+  assert.equal(driveFixupEvents.length, 3);
+  const round3 = driveFixupEvents[2]!.payload as { findingsTruncated?: boolean; findings: unknown[] };
+  assert.equal(
+    round3.findingsTruncated,
+    true,
+    "round 3's own record is genuinely truncated too — the scenario is real, not a test artifact",
+  );
+  assert.equal(round3.findings.length, 50);
+  st.close();
+});
+
 test("tick DRIVE (#450, advisories excluded, engine-agent path): a NEW advisory finding inside the touched path never trips marginal-complexity — filtered before the classifier ever sees it", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

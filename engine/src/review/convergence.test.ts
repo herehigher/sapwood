@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { classifyProgress, computeFlatStreak, countBlocking, type ProgressFinding } from "./convergence.js";
+import { classifyProgress, computeFlatStreak, countBlocking, type FlatStreakRound, type ProgressFinding } from "./convergence.js";
 import { classicThreadFindingKey, engineAgentFindingKey } from "./finding-key.js";
 
 const locatedA = engineAgentFindingKey({ id: "f1", kind: "security", path: "src/a.ts" }).key;
@@ -156,6 +156,62 @@ test("degradation rule: flat STILL fires with empty fixDiffPaths — count-only 
   assert.deepEqual(result, { stalled: "flat" }, "flat never consults fixDiffPaths at all");
 });
 
+// ── truncation rule (#450 gate② Codex cross-vendor, PM-narrowed ruling): a capped snapshot's
+// COUNT is a floor, never a fact — `flat` and the count-falling row are disabled whenever EITHER
+// compared round is truncated; `recurrence`/`marginal-complexity` (key-identity, not count) are
+// UNAFFECTED and evaluate normally over the visible keys. ──────────────────────────────────────
+
+test("truncation rule: the EXACT 100->75->51 finding scenario — a genuinely falling count read through two truncated 50-item snapshots never classifies as flat", () => {
+  // The actual finding sets don't matter here (only their LENGTH and truncation bits do for row
+  // 4) — shared+disjoint shape is irrelevant since flat is checked independently of shared/added.
+  // Use a shared key so row 2's disjoint clause doesn't short-circuit before reaching row 4.
+  const prev = [blocking(locatedA), blocking(locatedB)];
+  const curr = [blocking(locatedA), blocking(locatedC)];
+  // flatStreak: 2 is exactly what the bug would have computed (three constant `50`s read as
+  // non-decreasing) — passed in directly to prove classifyProgress itself refuses to honor it,
+  // independent of whatever computeFlatStreak returns upstream.
+  const untrustedBothTruncated = classifyProgress(prev, curr, [], 2, true, true);
+  assert.equal(untrustedBothTruncated, "converging", "flat must not fire when BOTH compared rounds are truncated");
+  const prevOnlyTruncated = classifyProgress(prev, curr, [], 2, true, false);
+  assert.equal(prevOnlyTruncated, "converging", "flat must not fire when ONLY prev is truncated");
+  const currOnlyTruncated = classifyProgress(prev, curr, [], 2, false, true);
+  assert.equal(currOnlyTruncated, "converging", "flat must not fire when ONLY curr is truncated");
+  // Sanity: the IDENTICAL inputs, untruncated, DO classify as flat — proves the truncation flags
+  // (not some other difference) are what suppressed it above.
+  const untruncated = classifyProgress(prev, curr, [], 2);
+  assert.deepEqual(untruncated, { stalled: "flat" }, "same shapes, untruncated -> flat fires normally");
+});
+
+test("truncation rule: a truncated pair whose SHARED key's path IS in fixDiffPaths still fires recurrence — identity-based rows are unaffected by truncation", () => {
+  const prev = [blocking(locatedA)];
+  const curr = [blocking(locatedA)];
+  const result = classifyProgress(prev, curr, ["src/a.ts"], 0, true, true);
+  assert.deepEqual(result, { stalled: "recurrence" }, "recurrence is key-identity, not count — truncation must not suppress it");
+});
+
+test("truncation rule: a truncated pair with a NEW key inside the touched path still fires marginal-complexity", () => {
+  const prev = [blocking(locatedA)];
+  const curr = [blocking(locatedA), blocking(locatedB)];
+  const result = classifyProgress(prev, curr, ["src/b.ts"], 0, true, true);
+  assert.deepEqual(result, { stalled: "marginal-complexity" });
+});
+
+test("truncation rule: the count-falling continue row is ALSO disabled under truncation, but the final verdict is unaffected when nothing else fires (still converging)", () => {
+  const prev = [blocking(locatedA), blocking(locatedB)];
+  const curr = [blocking(locatedA)]; // fewer VISIBLE findings — would fire row 2 if trusted
+  const result = classifyProgress(prev, curr, [], 0, true, false);
+  assert.equal(result, "converging", "falls through to row 6 instead of row 2's shortcut, same final answer");
+});
+
+test("truncation rule: omitting prevTruncated/currTruncated defaults BOTH to false — every pre-#450-gate②-Codex call is byte-identical", () => {
+  const prev = [blocking(locatedA), blocking(locatedC)];
+  const curr = [blocking(locatedA), blocking(locatedB)];
+  const withoutFlags = classifyProgress(prev, curr, [], 2);
+  const withExplicitFalse = classifyProgress(prev, curr, [], 2, false, false);
+  assert.deepEqual(withoutFlags, withExplicitFalse);
+  assert.deepEqual(withoutFlags, { stalled: "flat" });
+});
+
 // ── unlocated keys: participate in counts, never in recurrence ────────────────────────────────
 
 test("unlocated keys: a shared UNLOCATED key never triggers recurrence, even though it is in curr ∩ prev", () => {
@@ -195,27 +251,69 @@ test("classic-path (thread) keys: recurrence fires the same way as engine-agent 
 
 // ── computeFlatStreak: the pure trailing-streak counter ─────────────────────────────────────────
 
+/** Untruncated round shorthand — `r(3)` === `{ count: 3, truncated: false }`. */
+function r(count: number): FlatStreakRound {
+  return { count, truncated: false };
+}
+/** Truncated round shorthand. */
+function rt(count: number): FlatStreakRound {
+  return { count, truncated: true };
+}
+
 test("computeFlatStreak: empty history -> 0, nothing to compare against", () => {
-  assert.equal(computeFlatStreak([], 3), 0);
+  assert.equal(computeFlatStreak([], r(3)), 0);
 });
 
 test("computeFlatStreak: first non-decreasing observation -> 1 (not yet two)", () => {
-  assert.equal(computeFlatStreak([3], 3), 1);
-  assert.equal(computeFlatStreak([3], 5), 1);
+  assert.equal(computeFlatStreak([r(3)], r(3)), 1);
+  assert.equal(computeFlatStreak([r(3)], r(5)), 1);
 });
 
 test("computeFlatStreak: second consecutive non-decreasing round -> 2", () => {
-  assert.equal(computeFlatStreak([3, 3], 3), 2);
-  assert.equal(computeFlatStreak([1, 2], 3), 2);
+  assert.equal(computeFlatStreak([r(3), r(3)], r(3)), 2);
+  assert.equal(computeFlatStreak([r(1), r(2)], r(3)), 2);
 });
 
 test("computeFlatStreak: a falling round resets the streak to 0", () => {
-  assert.equal(computeFlatStreak([3, 3], 1), 0);
+  assert.equal(computeFlatStreak([r(3), r(3)], r(1)), 0);
 });
 
 test("computeFlatStreak: a streak can restart after a reset", () => {
   // rounds: 5, 5 (non-decreasing, streak=1), 2 (falling, streak=0), 2 (non-decreasing, streak=1)
-  assert.equal(computeFlatStreak([5, 5, 2], 2), 1);
+  assert.equal(computeFlatStreak([r(5), r(5), r(2)], r(2)), 1);
+});
+
+// ── computeFlatStreak: truncated rounds are NEUTRAL (#450 gate② Codex cross-vendor, PM-narrowed
+// ruling) — neither extend nor break a streak; the walk skips over them entirely. ────────────────
+
+test("computeFlatStreak: a truncated round in the MIDDLE of an otherwise non-decreasing run is invisible — the streak bridges the gap, neither broken nor double-counted", () => {
+  // round1=3 (untrunc), round2=TRUNCATED (any count), round3=3 (untrunc, curr): skips round2
+  // entirely, compares round1 directly against round3 -> ONE observation, streak=1.
+  assert.equal(computeFlatStreak([r(3), rt(999)], r(3)), 1);
+});
+
+test("computeFlatStreak: a streak can accumulate to 2 THROUGH a truncated middle round", () => {
+  // round1=3, round2=TRUNCATED, round3=3, round4=3(curr): round1->round3 bridges the gap
+  // (streak=1), round3->round4 extends it (streak=2) — the truncated round contributed neither.
+  assert.equal(computeFlatStreak([r(3), rt(999), r(3)], r(3)), 2);
+});
+
+test("computeFlatStreak: the CURRENT round itself truncated -> its own slot is skipped, but the walk still reports the trailing streak among the PAST rounds behind it (harmless: classifyProgress never consults this value when curr is truncated)", () => {
+  // curr (rt(999)) is skipped entirely; the two PAST rounds behind it (both count 3, untruncated)
+  // are compared to each other instead — a streak that describes THEM, not curr.
+  assert.equal(computeFlatStreak([r(3), r(3)], rt(999)), 1);
+});
+
+test("computeFlatStreak: the EXACT 100->75->51 finding scenario — three truncated 50-item snapshots (a genuinely falling count) never accumulate a streak", () => {
+  // Every round is truncated (all three capped at 50) — every slot is skipped, streak stays 0.
+  assert.equal(computeFlatStreak([rt(50), rt(50)], rt(50)), 0);
+});
+
+test("computeFlatStreak: an ALL-truncated history never breaks a real streak once untruncated rounds resume", () => {
+  // round1=TRUNCATED, round2=TRUNCATED, round3=5(untrunc), round4=5(untrunc,curr): only round3/4
+  // are ever compared (nothing untruncated behind round3 to bridge to) — streak=1, not reset to 0
+  // by the truncated prefix, and not inflated by it either.
+  assert.equal(computeFlatStreak([rt(1), rt(2), r(5)], r(5)), 1);
 });
 
 // ── countBlocking: the shared filter definition ─────────────────────────────────────────────────

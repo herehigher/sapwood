@@ -64,6 +64,22 @@
 // "walk this lane's whole history" need) into a plain `number[]` of per-round blocking counts and
 // calls `computeFlatStreak` fresh every tick. Reuse over new machinery: a bounded, cheap re-fold
 // (prFixCap rounds, never more than a handful) costs nothing extra a stored field would save.
+//
+// TRUNCATION POISONS COUNT-DEPENDENT SHAPES ONLY, NEVER IDENTITY-DEPENDENT ONES (#450 gate②
+// Codex cross-vendor, PM-narrowed ruling, 2026-08-01): a recorded round's findings array is capped
+// at `MAX_FIXUP_FINDINGS` (`loop/conductor.ts`'s `boundRecords`) — a genuinely-shrinking lane
+// (100 -> 75 -> 51 blocking findings) can persist three CONSTANT `50`-count snapshots, which a
+// count-blind `flat` check reads as two non-decreasing rounds and false-stalls a lane that was
+// actually converging. `flat` (row 4) and row 2's count-falling clause are therefore DISABLED
+// (never contribute a verdict) whenever EITHER compared round was truncated — a capped count is a
+// FLOOR, not a fact, and this module never trusts a floor to conclude a DIRECTION. `recurrence`
+// (row 3) and `marginal-complexity` (row 5) are UNAFFECTED: both are KEY-IDENTITY checks over
+// whatever finding keys the (possibly truncated) snapshot actually lists, and a key's mere
+// PRESENCE in a capped snapshot is still genuine evidence — truncation can make a snapshot
+// incomplete, never wrong about what it DOES contain. `computeFlatStreak` mirrors the same rule at
+// the streak-accumulation layer: a truncated round is skipped NEUTRALLY (neither extends nor
+// breaks a streak), the identical "crash-neutral" discipline `loop/stall-breaker.ts` already
+// applies to a round it cannot classify.
 import type { FindingSeverity } from "./finding-axes.js";
 
 /** The classifier's verdict (design #402 §3b's own literal signature). `"converging"` covers
@@ -134,12 +150,20 @@ function extractLocatedPath(key: string): string | undefined {
  * participates in the row-2/row-4 count comparisons below, `null` never does). See this module's
  * header doc for the six rows, the degradation rule, and the unlocated-never-recurs property — all
  * enforced here, none re-explained inline.
+ *
+ * `prevTruncated`/`currTruncated` (#450 gate② Codex cross-vendor, PM-narrowed ruling): `true` when
+ * the respective round's OWN recorded findings array was capped (`loop/conductor.ts`'s
+ * `MAX_FIXUP_FINDINGS`/`boundRecords`). Both default `false` — every pre-existing caller (and every
+ * untruncated round) is BYTE-IDENTICAL to this function's behavior before this ruling landed. See
+ * this module's header doc ("TRUNCATION POISONS COUNT-DEPENDENT SHAPES ONLY") for which rows react.
  */
 export function classifyProgress(
   prev: readonly ProgressFinding[] | null,
   curr: readonly ProgressFinding[],
   fixDiffPaths: readonly string[],
   flatStreak: number,
+  prevTruncated = false,
+  currTruncated = false,
 ): ConvergenceVerdict {
   if (prev === null) return "converging"; // row 1
 
@@ -148,9 +172,16 @@ export function classifyProgress(
   const prevKeys = new Set(prevBlocking.map((f) => f.key));
   const currKeys = new Set(currBlocking.map((f) => f.key));
   const shared = [...currKeys].filter((k) => prevKeys.has(k));
+  // A capped snapshot's LENGTH is a floor on the true count, not the true count — comparing it
+  // against another round's length (truncated or not) can invert the genuine direction (a lane
+  // truly falling 100 -> 75 -> 51 records three constant `50`s). Neither `countTrusted` shape below
+  // is evaluated when either compared round is truncated; KEY-IDENTITY checks (rows 3/5, `shared`/
+  // `added` above) are unaffected — a key's presence in a capped snapshot is still real evidence.
+  const countTrusted = !prevTruncated && !currTruncated;
 
-  // row 2: count falling, or every old finding is gone (new areas) -> converging.
-  if (currBlocking.length < prevBlocking.length || shared.length === 0) return "converging";
+  // row 2: count falling (only when BOTH counts are trusted), or every old finding is gone (new
+  // areas, key-identity based, safe under truncation) -> converging.
+  if ((countTrusted && currBlocking.length < prevBlocking.length) || shared.length === 0) return "converging";
 
   // row 3: a shared key the fix leg's own diff touched, and it is STILL there -> recurrence.
   for (const key of shared) {
@@ -158,8 +189,9 @@ export function classifyProgress(
     if (path !== undefined && fixDiffPaths.includes(path)) return { stalled: "recurrence" };
   }
 
-  // row 4: non-decreasing for two consecutive rounds (this one included) -> flat.
-  if (flatStreak >= 2) return { stalled: "flat" };
+  // row 4: non-decreasing for two consecutive rounds (this one included) -> flat. Disabled when
+  // either round is truncated — see this function's own doc / the module header's truncation rule.
+  if (countTrusted && flatStreak >= 2) return { stalled: "flat" };
 
   // row 5: a NEW key, inside the path the fix leg just touched -> marginal-complexity.
   const added = [...currKeys].filter((k) => !prevKeys.has(k));
@@ -173,27 +205,56 @@ export function classifyProgress(
   return "converging";
 }
 
+/** One round's blocking-finding count, alongside whether that count is a TRUSTED total or a
+ *  truncation FLOOR — `computeFlatStreak`'s own per-round input (#450 gate② Codex cross-vendor,
+ *  PM-narrowed ruling). */
+export interface FlatStreakRound {
+  count: number;
+  truncated: boolean;
+}
+
 /**
  * The trailing run length of consecutive non-decreasing rounds, ending at (and including) the
- * CURRENT round — `classifyProgress`'s own `flatStreak` input, computed fresh from a plain
- * `number[]` of past per-round blocking counts (oldest first) plus this round's own count. No
- * persisted counter (this module's header doc); the caller re-derives `pastCounts` from the event
- * ledger every call.
+ * CURRENT round — `classifyProgress`'s own `flatStreak` input, computed fresh from a plain array of
+ * past per-round `{count, truncated}` pairs (oldest first) plus this round's own. No persisted
+ * counter (this module's header doc); the caller re-derives `pastRounds` from the event ledger
+ * every call.
  *
- * `computeFlatStreak([], anyCount) === 0` — a single count has nothing to compare against, and
- * `classifyProgress`'s own `prev === null` round-1 case never consults this value anyway (stated
- * here so a caller does not need to special-case round 1 before calling this).
- * `computeFlatStreak([3], 3) === 1` — the FIRST non-decreasing observation (issue #450 verification
- * item 4: "flatStreak: 1 -> continue", i.e. not yet two).
- * `computeFlatStreak([3, 3], 3) === 2` — the SECOND consecutive one (verification item 4:
- * "flatStreak: 2 -> flat").
+ * TRUNCATED ROUNDS ARE NEUTRAL (#450 gate② Codex cross-vendor, PM-narrowed ruling): a truncated
+ * round's count is a floor, not a fact, so it can neither EXTEND a streak (its own comparison is
+ * untrustworthy) nor BREAK one (an otherwise-valid streak must not reset just because one round in
+ * the middle was capped) — the walk skips over it entirely and compares across the gap, as if the
+ * truncated round were absent from the sequence. Same "crash-neutral" discipline
+ * `loop/stall-breaker.ts` already applies to a round it cannot classify.
+ *
+ * `computeFlatStreak([], { count: 3, truncated: false }) === 0` — a single count has nothing to
+ * compare against, and `classifyProgress`'s own `prev === null` round-1 case never consults this
+ * value anyway (stated here so a caller does not need to special-case round 1 before calling this).
+ * `computeFlatStreak([{ count: 3, truncated: false }], { count: 3, truncated: false }) === 1` — the
+ * FIRST non-decreasing observation (issue #450 verification item 4: "flatStreak: 1 -> continue",
+ * i.e. not yet two).
+ * `computeFlatStreak([{ count: 3, truncated: false }, { count: 3, truncated: false }], { count: 3,
+ * truncated: false }) === 2` — the SECOND consecutive one (verification item 4: "flatStreak: 2 ->
+ * flat").
  */
-export function computeFlatStreak(pastCounts: readonly number[], currCount: number): number {
-  const counts = [...pastCounts, currCount];
+export function computeFlatStreak(pastRounds: readonly FlatStreakRound[], curr: FlatStreakRound): number {
+  const rounds = [...pastRounds, curr];
   let streak = 0;
-  for (let i = counts.length - 1; i >= 1; i--) {
-    if (counts[i]! >= counts[i - 1]!) streak++;
-    else break;
+  let i = rounds.length - 1;
+  while (i >= 1) {
+    if (rounds[i]!.truncated) {
+      i--; // neutral: this round's OWN comparison is untrustworthy — skip its slot, keep walking.
+      continue;
+    }
+    let j = i - 1;
+    while (j >= 0 && rounds[j]!.truncated) j--; // skip back over any truncated rounds too.
+    if (j < 0) break; // nothing untruncated left behind this round to compare against.
+    if (rounds[j]!.count <= rounds[i]!.count) {
+      streak++;
+      i = j; // continue the walk from the round just compared against, bridging the gap.
+    } else {
+      break;
+    }
   }
   return streak;
 }

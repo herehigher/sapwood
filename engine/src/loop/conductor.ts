@@ -4682,13 +4682,36 @@ function classifyConvergenceProgress(
 ): { verdict: ConvergenceVerdict; prev: FixupFindingRecordEntry[] | null } {
   const episodeResetId = state.maxEventIdForKinds(CONVERGENCE_EPISODE_RESET_KINDS, workerName, pr);
   const events = state.eventsAfterId(episodeResetId, ["drive-fixup"]);
-  const pastFindings: FixupFindingRecordEntry[][] = [];
+  // #450 gate② Codex cross-vendor (PM-narrowed ruling): each PAST round's `findingsTruncated` bit
+  // travels alongside its findings — a capped `MAX_FIXUP_FINDINGS` snapshot's length is a floor,
+  // not a fact, and `review/convergence.ts`'s `classifyProgress`/`computeFlatStreak` must know
+  // which rounds to distrust for COUNT purposes (never for key identity — see that module's own
+  // "TRUNCATION POISONS COUNT-DEPENDENT SHAPES ONLY" doc). `findingsTruncated` is absent (not
+  // `false`) on an untruncated event's payload (`state.appendEvent("drive-fixup", ...)`'s own
+  // conditional-spread shape above) — `=== true` reads that fail-closed correctly either way.
+  const pastRounds: { findings: FixupFindingRecordEntry[]; truncated: boolean }[] = [];
   for (const e of events) {
-    const p = e.payload as { worker?: unknown; pr?: unknown; findings?: unknown };
+    const p = e.payload as { worker?: unknown; pr?: unknown; findings?: unknown; findingsTruncated?: unknown };
     if (p.worker !== workerName || p.pr !== pr) continue;
-    pastFindings.push(Array.isArray(p.findings) ? (p.findings as FixupFindingRecordEntry[]) : []);
+    pastRounds.push({
+      findings: Array.isArray(p.findings) ? (p.findings as FixupFindingRecordEntry[]) : [],
+      truncated: p.findingsTruncated === true,
+    });
   }
-  const prev = pastFindings.length > 0 ? pastFindings[pastFindings.length - 1]! : null;
-  const flatStreak = computeFlatStreak(pastFindings.map(countBlocking), countBlocking(curr.findings));
-  return { verdict: classifyProgress(prev, curr.findings, curr.fixDiffPaths, flatStreak), prev };
+  const prevRound = pastRounds.length > 0 ? pastRounds[pastRounds.length - 1]! : null;
+  const flatStreak = computeFlatStreak(
+    pastRounds.map((r) => ({ count: countBlocking(r.findings), truncated: r.truncated })),
+    { count: countBlocking(curr.findings), truncated: curr.findingsTruncated },
+  );
+  return {
+    verdict: classifyProgress(
+      prevRound?.findings ?? null,
+      curr.findings,
+      curr.fixDiffPaths,
+      flatStreak,
+      prevRound?.truncated ?? false,
+      curr.findingsTruncated,
+    ),
+    prev: prevRound?.findings ?? null,
+  };
 }
