@@ -728,8 +728,10 @@ export class MergeDriver {
    * preflight / identity-WAL / refetch pipeline to review/drive.ts's `driveEngineAgentReview`
    * (see that module's own doc for the exact ordering and every fail-closed branch), then, only
    * on a delivered + refetch-validated decisive verdict, converges on the SAME `finalizeVerdict`
-   * the classic path uses. Never throws (mirrors driveOne's own never-throws contract) — a
-   * missing `engineAgentDeps` fails closed to `queued` rather than crashing the tick loop.
+   * the classic path uses. #460 (F37): a `{kind:"conflict"}` outcome (CONFLICTING preflight)
+   * converges on the SAME CONFLICTING deriveGate block driveOne's classic path uses, below.
+   * Never throws (mirrors driveOne's own never-throws contract) — a missing `engineAgentDeps`
+   * fails closed to `queued` rather than crashing the tick loop.
    */
   private async driveEngineAgentOne(
     pr: number,
@@ -808,6 +810,33 @@ export class MergeDriver {
     }
     if (outcome.kind === "merged") return { kind: "merged", pr, headOid: outcome.headOid };
     if (outcome.kind === "needs-human") return { kind: "needs-human", pr, reason: outcome.reason };
+    if (outcome.kind === "conflict") {
+      // #460 (F37): mirror driveOne's own CONFLICTING block above BYTE-FOR-BYTE — same
+      // deriveGate call (with reviewAction pinned inert, exactly as the classic block does,
+      // since deriveGate checks CONFLICTING before ever consulting reviewAction), same
+      // prFixCap/produce-pr-and-stop precedence, same DriveOutcome shapes. This is what makes
+      // conductor.ts's existing "fixable" handling (fix-leg dispatch, prFixCap accounting, the
+      // `drive-fixup` event) apply unchanged regardless of which reviewer kind produced the
+      // outcome — no parallel routing/prescription mechanism.
+      const conflictGate = deriveGate({
+        ciGreen: outcome.status.ciGreen,
+        ciRed: outcome.status.ciRed ?? false,
+        mergeable: outcome.status.mergeable,
+        reviewAction: "WAIT_REVIEW",
+        isDraft: outcome.data.isDraft,
+        prState: outcome.data.state,
+        labels: outcome.data.labels,
+        humanLabels: this.deps.cfg.escalation.humanLabels,
+        holdLabels: this.deps.cfg.escalation.holdLabels,
+        prFixCap: this.deps.cfg.lanes.prFixCap,
+      });
+      if (conflictGate === "WAIT") return { kind: "queued", pr, reason: "gate-pending:merge-conflict-held" };
+      if (conflictGate === "HUMAN") return { kind: "needs-human", pr, reason: "gate:HUMAN:merge-conflict" };
+      if (this.deps.cfg.merge.mode === "produce-pr-and-stop") {
+        return { kind: "stopped", pr, reason: "gates-passed:FIXABLE:merge-conflict" };
+      }
+      return { kind: "fixable", pr, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" };
+    }
     return this.finalizeVerdict(pr, outcome.status, outcome.data, outcome.verdict);
   }
 }

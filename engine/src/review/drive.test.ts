@@ -436,6 +436,166 @@ test("driveEngineAgentReview: preflight failure -> queued, no WAL, no pin (costs
   assert.equal(recorded.pin, null);
 });
 
+// ── #460 (F37): CONFLICTING preflight routes to {kind:"conflict"}, not an unbounded queue ─────
+
+test("driveEngineAgentReview: mergeable CONFLICTING -> {kind:'conflict'} carrying status/data, no WAL, no pin, no session", async () => {
+  let evaluated = false;
+  const { deps, recorded } = makeDeps({
+    forge: { getPRStatus: async () => status({ mergeable: "CONFLICTING" }) },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, { kind: "conflict", status: status({ mergeable: "CONFLICTING" }), data: data() });
+  assert.equal(evaluated, false, "no session for a structurally conflicted PR");
+  assert.equal(recorded.wal, null);
+  assert.equal(recorded.pin, null);
+});
+
+test("driveEngineAgentReview (#460 P1, review round 2, Codex sol high executable repro): split-generation read — status0 CONFLICTING @H1 races a FRESH data0 @H2 (already conflict-free) -> NOT {kind:'conflict'}; falls through to the ordinary machinery, which queues on the SAME 'not-mergeable:CONFLICTING' preflight reason (no pin exists yet, so no fix leg is ever dispatched against a conflict that may no longer be real on the live head)", async () => {
+  let evaluated = false;
+  const { deps, recorded } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ mergeable: "CONFLICTING", headOid: "H1" }),
+      getPRReviewData: async () => data({ headOid: "H2", unresolvedThreads: 0 }), // fresh, unblocked, DIFFERENT head
+    },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.notEqual(outcome.kind, "conflict", "a mixed-head read must never take the conflict route on a stale/mismatched status");
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /not-mergeable:CONFLICTING/);
+  assert.equal(evaluated, false, "still no paid session — this is a queue, not a fresh attempt");
+  assert.equal(recorded.wal, null);
+  assert.equal(recorded.pin, null);
+});
+
+test("driveEngineAgentReview: mergeable UNKNOWN stays queued (transient) — never routed like CONFLICTING", async () => {
+  let evaluated = false;
+  const { deps } = makeDeps({
+    forge: { getPRStatus: async () => status({ mergeable: "UNKNOWN" }) },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /not-mergeable:UNKNOWN/);
+  assert.equal(evaluated, false);
+});
+
+test("driveEngineAgentReview: CONFLICTING + a higher-precedence preflight failure (draft) still queues plain — checkPreflight's ordering (draft precedes mergeable) wins, same PRECEDENCE deriveGate assumes; the OUTCOME differs deliberately (deriveGate would escalate draft to HUMAN, engine-agent queues — pre-existing, out of #460's scope)", async () => {
+  const { deps } = makeDeps({
+    forge: { getPRStatus: async () => status({ mergeable: "CONFLICTING" }), getPRReviewData: async () => data({ isDraft: true }) },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /pr-is-draft/);
+});
+
+// ── #460 P1 (PR#462 review round 1, Codex gpt-5.6-sol high): the conflict route must be checked
+// BEFORE the attempt-gate/pin machinery — a decisive pin's consume path (refetchStillValid) and
+// an unavailable pin's backoff window both sit between the OLD check site and here, and both
+// would otherwise swallow a CONFLICTING PR as a generic queue/backoff, wedging an already-pinned
+// lane forever (no fix leg would ever move the head). These are pin-aware; every test above this
+// point uses pin:null, which is exactly why the gap was missed the first time.
+
+test("driveEngineAgentReview (#460 P1): decisive APPROVED pin + CONFLICTING (ciGreen=false, base moved) -> {kind:'conflict'}, pin untouched, no session — a decisive-pin consume attempt must NOT swallow this as a generic refetch discard", async () => {
+  let evaluated = false;
+  const { deps, recorded } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ mergeable: "CONFLICTING", ciGreen: false, baseOid: "B2" }),
+    },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+  const pin = { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "decisive" as const };
+  recorded.pin = pin;
+  recorded.wal = {
+    runId: "run-1",
+    head: "H1",
+    base: "B1",
+    diffHash: "d",
+    treeManifestHash: null,
+    attemptStart: "2026-01-01T00:00:00.000Z",
+    decisiveOutcome: "approved",
+    reviewArtifactJson: "{}",
+    auditCommentId: "C1",
+    auditDeliveredAt: "2026-01-01T00:00:01.000Z",
+  };
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, {
+    kind: "conflict",
+    status: status({ mergeable: "CONFLICTING", ciGreen: false, baseOid: "B2" }),
+    data: data(),
+  });
+  assert.equal(evaluated, false, "no session — the pin is decisive, never re-run");
+  assert.deepEqual(recorded.pin, pin, "the conflict route never reads or writes the pin");
+});
+
+test("driveEngineAgentReview (#460 P1): decisive REJECTED pin + CONFLICTING -> {kind:'conflict'}, not the consume-discard queued", async () => {
+  const { deps, recorded } = makeDeps({
+    forge: { getPRStatus: async () => status({ mergeable: "CONFLICTING" }) },
+  });
+  recorded.pin = { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "decisive" };
+  recorded.wal = {
+    runId: "run-1",
+    head: "H1",
+    base: "B1",
+    diffHash: "d",
+    treeManifestHash: null,
+    attemptStart: "2026-01-01T00:00:00.000Z",
+    decisiveOutcome: "rejected",
+    reviewArtifactJson: "{}",
+    auditCommentId: "C1",
+    auditDeliveredAt: "2026-01-01T00:00:01.000Z",
+  };
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "conflict");
+});
+
+test("driveEngineAgentReview (#460 P1): unavailable pin INSIDE the backoff window + CONFLICTING -> {kind:'conflict'}, not the backoff queued", async () => {
+  const { deps, recorded } = makeDeps({
+    forge: { getPRStatus: async () => status({ mergeable: "CONFLICTING" }) },
+    // now() === pin.at -> elapsed 0s, well inside retryAfterSec (900s default) — the OLD code
+    // would return the backoff-queued reason here, before ever reaching a mergeable check.
+    now: () => new Date("2026-01-01T00:00:00.000Z"),
+  });
+  recorded.pin = { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "unavailable" };
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "conflict");
+});
+
+test("driveEngineAgentReview (#460 P1): decisive pin + mergeable MERGEABLE, base moved -> still the ORDINARY consume-discard queued — the hoisted conflict check must not swallow a non-conflict refetch discard", async () => {
+  const { deps, recorded } = makeDeps({
+    forge: { getPRStatus: async () => status({ baseOid: "B2" }) }, // mergeable stays MERGEABLE
+  });
+  recorded.pin = { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "decisive" };
+  recorded.wal = {
+    runId: "run-1",
+    head: "H1",
+    base: "B1",
+    diffHash: "d",
+    treeManifestHash: null,
+    attemptStart: "2026-01-01T00:00:00.000Z",
+    decisiveOutcome: "approved",
+    reviewArtifactJson: "{}",
+    auditCommentId: "C1",
+    auditDeliveredAt: "2026-01-01T00:00:01.000Z",
+  };
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /decisive-pin consume attempt discarded.*base-moved/);
+});
+
 test("driveEngineAgentReview: empty ci.requiredChecks -> preflight CI-evidence never passes, queued, no session", async () => {
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" },

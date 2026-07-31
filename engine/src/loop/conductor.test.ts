@@ -1840,6 +1840,104 @@ test("tick DRIVE (#270): conflict at the shared fix-round cap preserves label + 
   st.close();
 });
 
+// ── #460 (F37, P2 — PR#462 review round 1): end-to-end coverage through the REAL engine-agent
+// drive path, not a FakeMergeGate-scripted outcome — proves the wiring the AC actually names
+// ("one structured event when the route fires") through the whole tick() DRIVE loop: a real
+// MergeDriver, a real engine-agent reviewer, a real CONFLICTING PR, into conductor.ts's existing
+// "fixable" handling (which is source-agnostic — the classic #270 tests above already pin its
+// behavior; this proves the engine-agent route reaches it).
+
+/** Minimal engine-agent drive deps for a lane whose conflict never touches the pin/WAL machinery
+ *  (the #460 conflict route is checked BEFORE either) — still fully implements the shape so
+ *  TypeScript is satisfied, in case a test's config ever drives past the conflict check. */
+function mkEngineAgentDriveDeps() {
+  let pin: { head: string; at: string; runId: string; kind: "decisive" | "unavailable" } | null = null;
+  let wal: {
+    runId: string;
+    head: string;
+    base: string;
+    diffHash: string;
+    treeManifestHash: string | null;
+    attemptStart: string;
+    decisiveOutcome: "approved" | "rejected" | null;
+    reviewArtifactJson: string | null;
+    auditCommentId: string | null;
+    auditDeliveredAt: string | null;
+  } | null = null;
+  return {
+    now: () => new Date("2026-01-01T00:00:00.000Z"),
+    newRunId: () => "run-1",
+    getAttemptPin: () => pin,
+    recordAttemptPin: (p: typeof pin) => {
+      pin = p;
+    },
+    getWal: () => wal,
+    recordWal: (w: { runId: string; head: string; base: string; diffHash: string; attemptStart: string }) => {
+      wal = { ...w, treeManifestHash: null, decisiveOutcome: null, reviewArtifactJson: null, auditCommentId: null, auditDeliveredAt: null };
+    },
+    recordWalDecisiveOutcome: (runId: string, outcome: "approved" | "rejected") => {
+      if (wal && wal.runId === runId) wal = { ...wal, decisiveOutcome: outcome };
+    },
+    auditDelivery: async () => ({ delivered: false, reason: "not exercised by this test" }),
+    reconcileAuditDelivery: async () => ({ delivered: false, reason: "not exercised by this test" }),
+    ciChecksCap: 20,
+  };
+}
+
+test("tick DRIVE (#460, real engine-agent path): CONFLICTING PR -> fixable/prescription:'conflict' -> startFixLeg dispatches, exactly ONE drive-fixup event, fix_rounds incremented", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.prStatus = { ...forge.prStatus, mergeable: "CONFLICTING", ciGreen: false };
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "x" }) };
+  const gate = new MergeDriver({ forge, reviewer, cfg: mkCfg({ reviewer: { mode: "engine-agent", agent: { model: "sonnet" } } }) });
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg({ reviewer: { mode: "engine-agent", agent: { model: "sonnet" } } }),
+    mergeGate: gate,
+    engineAgentDriveDeps: mkEngineAgentDriveDeps,
+    fixLegResume: { renderFixPrompt: () => "base fix prompt", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(r.driven[0]?.kind, "fixup");
+  assert.match((r.driven[0] as { reason: string }).reason, /gate:FIXABLE:merge-conflict/);
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.fix_rounds, 1);
+  assert.equal(row.state, "fixing");
+  assert.equal(sup.resumeCalls.length, 1, "the fix leg actually dispatched");
+  assert.equal(st.countEvents("drive-fixup"), 1, "exactly one structured event for this route firing");
+  st.close();
+});
+
+test("tick DRIVE (#460, real engine-agent path): CONFLICTING at the shared fix-round cap still escalates to needs-human (same cap machinery the classic #270 conflict route uses)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.prStatus = { ...forge.prStatus, mergeable: "CONFLICTING", ciGreen: false };
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // == default prFixCap
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "x" }) };
+  const cfg = mkCfg({ reviewer: { mode: "engine-agent", agent: { model: "sonnet" } } });
+  const gate = new MergeDriver({ forge, reviewer, cfg });
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg,
+    mergeGate: gate,
+    engineAgentDriveDeps: mkEngineAgentDriveDeps,
+    fixLegResume: { renderFixPrompt: () => "base fix prompt", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(r.driven[0]?.kind, "needs-human");
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  assert.equal(st.getWorker("lane-a")?.state, "failed");
+  assert.equal(sup.resumeCalls.length, 0, "capped — no fix leg dispatched");
+  st.close();
+});
+
 test("tick DRIVE (#246 review round 1, C1): fixable but NO fixLegResume dep configured -> DEGRADES to the pre-#246 needs-human escalation (visible, actionable), never a silent retry-forever", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

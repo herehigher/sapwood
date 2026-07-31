@@ -1923,6 +1923,81 @@ test("MergeDriver.driveOne (engine-agent): rejected + delivered -> FIXABLE (cond
   assert.equal(outcome.kind, "fixable");
 });
 
+// ── #460 (F37): engine-agent CONFLICTING preflight -> FIXABLE:merge-conflict, not a re-queue ──
+// PR#452 went CONFLICTING after four same-day merges to main; the engine-agent preflight mapped
+// EVERY failure to re-queue -> 54 consecutive drive-queued ticks with no exit (events 3984-4190,
+// 2026-07-30). These pin the fix: the SAME route driveOne's classic path already has (#270).
+
+test("MergeDriver.driveOne (engine-agent, #460): CONFLICTING -> FIXABLE:merge-conflict, no paid session, prFixCap respected (dispatchable)", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, mergeable: "CONFLICTING", ciGreen: false, ciRed: false };
+  let evaluated = false;
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "pending" as const, headOid: "HEAD" };
+    },
+  };
+  const cfg = mkEngineAgentCfg({ lanes: { prFixCap: 2 } });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.deepEqual(outcome, { kind: "fixable", pr: 7, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" });
+  assert.equal(evaluated, false, "a conflicted head never spawns a paid engine-agent session");
+  assert.equal(recorded.wal, null, "no WAL for a route that never reached identity/session");
+  assert.equal(recorded.pin, null, "no attempt pin for a route that never reached the attempt-gate");
+});
+
+test("MergeDriver.driveOne (engine-agent, #460): mergeable UNKNOWN still re-queues (transient, no fix leg)", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, mergeable: "UNKNOWN" };
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
+  const cfg = mkEngineAgentCfg({ lanes: { prFixCap: 2 } });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /not-mergeable:UNKNOWN/);
+});
+
+test("MergeDriver.driveOne (engine-agent, #460): prFixCap:0 escalates the conflict to needs-human instead of FIXABLE", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, mergeable: "CONFLICTING" };
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
+  const cfg = mkEngineAgentCfg({ lanes: { prFixCap: 0 } });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.deepEqual(outcome, { kind: "needs-human", pr: 7, reason: "gate:HUMAN:merge-conflict" });
+});
+
+test("MergeDriver.driveOne (engine-agent, #460): produce-pr-and-stop reports FIXABLE without acting (same 'stopped' outcome the classic conflict route reuses)", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, mergeable: "CONFLICTING" };
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
+  const cfg = mkEngineAgentCfg({ merge: { mode: "produce-pr-and-stop" } });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.equal(outcome.kind, "stopped");
+  assert.match((outcome as { reason: string }).reason, /FIXABLE:merge-conflict/);
+  assert.deepEqual(forge.merged, []);
+});
+
+test("MergeDriver.driveOne (engine-agent, #460): a hold label on a conflicted PR still queues (WAIT), same precedence as the classic route — checkPreflight's own ordering surfaces 'hold-label-present' before it ever reaches the mergeable check, so the reason text differs from the classic path's 'gate-pending:merge-conflict-held' while the OUTCOME KIND (queued/WAIT) is identical", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, mergeable: "CONFLICTING" };
+  forge.reviewData = { ...forge.reviewData, labels: ["hold"] };
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
+  const cfg = mkEngineAgentCfg({ lanes: { prFixCap: 2 }, escalation: { humanLabels: ["needs-human", "blocked"], holdLabels: ["hold"] } });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /hold-label-present/);
+});
+
 test("MergeDriver.driveOne (engine-agent): produce-pr-and-stop — gates report, never merge; a DECISIVE, delivered verdict on a REPEAT tick still never re-runs a session (permanent pin, tick-loop test)", async () => {
   const forge = new EngineAgentFakeForge();
   let evaluations = 0;
