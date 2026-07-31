@@ -2189,6 +2189,39 @@ export class State {
     return p.blockReason == null ? null : { id: row.id, blockReason: p.blockReason };
   }
 
+  /** #426 (F26): the lane's CI-PENDING pin, read straight back out of the durable log — the most
+   *  recent `ci-pending-observed` / `ci-pending-cleared` event for (worker, pr), or null if this
+   *  lane has never observed a pending check. THE LOG IS THE PIN: there is no mirror column and no
+   *  in-process clock, which is what makes it crash-consistent for free (a `kill -9` mid-wait
+   *  re-reads the SAME `at` on restart, so the elapsed clock never resets — #245-248's pattern,
+   *  and the same event-log-as-memory contract `lastHoldEvent` documents).
+   *
+   *  LATEST-wins by id, never by timestamp: `kind === "ci-pending-observed"` is an OPEN pin,
+   *  `"ci-pending-cleared"` a cancelled one (a check reached a real conclusion). `at` is the
+   *  conductor's own injected-clock stamp carried in the payload — read ONLY as a duration input
+   *  (merge-driver.ts's `pinElapsedSec`), never for before/after ordering; ordering is the `id`.
+   *  `head` scopes the pin: a pin recorded for a superseded head never ages the current one.
+   *  Scoped to (worker, pr) for the same lane-repointing reason `lastHoldEvent` is. */
+  lastCiPendingEvent(worker: string, pr: number): { id: number; kind: string; head: string | null; at: string | null } | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, kind, payload FROM events
+         WHERE kind IN ('ci-pending-observed', 'ci-pending-cleared')
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.pr') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker, pr) as { id: number; kind: string; payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { head?: unknown; at?: unknown };
+    return {
+      id: row.id,
+      kind: row.kind,
+      head: typeof p.head === "string" ? p.head : null,
+      at: typeof p.at === "string" ? p.at : null,
+    };
+  }
+
   /** #451 (gate② P1, PM adjudication; gate② round 3 P2, Codex): the SAME id+value dedup shape as
    *  `lastDriveQueuedEvent`/`lastFixLegDispatchBlockedEvent` above, PARAMETRIZED over the two
    *  `review-disputed-*-failed` kinds (round 3, Codex P2: the label-write failure gets the SAME

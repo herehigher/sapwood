@@ -385,6 +385,7 @@ engine-agent's structured session output.
 
 | Key | Default | Meaning |
 |---|---|---|
+| `pendingEscalateAfterSec` | `21600` (6h) | How long gate① may stay **pending** — a check rollup that is neither green nor red — behind an already-decisive gate② verdict before sapwood applies `needs-human` to the PR, posts an evidence comment naming the still-pending check(s), and emits `ci-pending-escalated`. Visibility only, exactly like `reviewer.escalateAfterSec`: the lane stays driving, polling continues, and no gate is softened. The clock is a durable pin in the event log, so it survives an engine restart; a check reaching a real conclusion, or a push moving the head, cancels it and any later pending episode starts from zero. |
 | `requiredChecks` | `[]` | Trusted CheckRun execution evidence required by the engine-agent preflight. Each entry is an object with `name` (required, non-empty) and `app` (default `github-actions`, non-empty). Every configured pair must match a current-head CheckRun with conclusion `SUCCESS` and the configured owning GitHub App slug. |
 
 The `name` + `app` binding is part of the evidence contract: a same-named check from an
@@ -397,6 +398,15 @@ An empty list is legal so configuration can be adopted incrementally. With
 `reviewer.mode: engine-agent`, config loading warns, and the shipped drive preflight queues
 fail-closed because it has no trusted execution evidence; no paid review session begins until at
 least one required check is configured and satisfied.
+
+**A check that never finishes (`pendingEscalateAfterSec`):** gate① is fail-closed — a queued or
+in-progress check is not green, so the lane waits. A check that hangs forever (a runner that never
+picks the job up, a required workflow that never starts) would therefore wait forever too. Past
+this bound sapwood escalates it the same way it escalates review silence, and — this is the part
+that matters for a wind-down — a lane whose pin is past the bound also counts as terminal for the
+bounded drain, so a cost-ceiling breach or the kill switch can finish draining instead of spinning
+against a lane that can never progress. A pin that is merely fresh is never terminal: that is an
+ordinary healthy wait while CI runs.
 
 ### gate① CI evidence (all reviewer modes)
 

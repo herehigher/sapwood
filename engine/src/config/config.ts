@@ -232,8 +232,17 @@ const ReviewerAgent = z
 // E4a ships the SCHEMA only (this PR's own scope note: "adding the schema here is fine and keeps
 // the [reviewer.mode: engine-agent + empty list] warning implementable"); E4b (#287) is the
 // actual CONSUMER — the getPRChecks query + deriveGate's CI-evidence chain.
+// #426 (F26): this block is now also the home of the gate①-PENDING aging bound — the same
+// section, because both keys answer "how does sapwood treat this repo's CI signal".
 const Ci = z
   .object({
+    // #426 (F26): how long (seconds, wall-clock) a lane may sit continuously WAIT-on-CI — gate②
+    // decisive (MERGE_OK) with a check rollup that is neither green nor red — before the engine
+    // calls a human, exactly like reviewer.escalateAfterSec does for review silence. A check that
+    // hangs `IN_PROGRESS` forever otherwise wedges the lane permanently: deriveGate returns WAIT
+    // every tick and neither drain arm can see it. Default 6h — GitHub Actions' own hard job
+    // ceiling, so nothing legitimately running can cross it.
+    pendingEscalateAfterSec: z.number().int().positive().default(21600),
     requiredChecks: z
       .array(
         z

@@ -10,7 +10,7 @@ import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge
 import { findingDigest } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { AuditDeliveryResult } from "../review/drive.js";
-import { type DriveOutcome, deriveGate, MergeDriver, mergeDecision, reviewSilenceDuration } from "./merge-driver.js";
+import { ciPendingDuration, type DriveOutcome, deriveGate, MergeDriver, mergeDecision, reviewSilenceDuration } from "./merge-driver.js";
 import type {
   ApprovalResult,
   ReviewAction,
@@ -252,6 +252,7 @@ test("#248 review round 1 (G3): reviewSilenceDuration's holdLabelPresent input i
     reason: "gate-pending:WAIT_REVIEW",
     reviewSilenceEscalation: { head: "HEAD", silenceSec: 120 }, // fires — the misconfigured substring never suppressed it
     holdObservation: { held: false }, // #294: same exact-match rule — the substring entry observes NOT held
+    ciPendingObservation: { pending: false, head: "HEAD" }, // #426: gate② is non-decisive, so gate① is not the blocker
   });
 });
 
@@ -512,7 +513,13 @@ test("#292 MergeDriver regression pin: a non-matching PR keeps the pre-#292 merg
     ALREADY_TRIGGERED,
     noopRecord,
   );
-  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD", holdObservation: { held: false } });
+  assert.deepEqual(outcome, {
+    kind: "merged",
+    pr: 7,
+    headOid: "HEAD",
+    holdObservation: { held: false },
+    ciPendingObservation: { pending: false, head: "HEAD" },
+  });
   assert.deepEqual(forge.calls, ["status", "review-data", "changed-files", "merge"]);
   assert.deepEqual(forge.prLabelsAdded, []);
   assert.deepEqual(forge.comments, []);
@@ -606,6 +613,114 @@ test("#248 reviewSilenceDuration: clock resumes on hold removal using the SAME t
   assert.equal(reviewSilenceDuration({ ...base, holdLabelPresent: false }), 86400);
 });
 
+// ── #426 (F26): the CI-PENDING aging arm — reviewSilenceDuration's shape, applied to gate① ────
+
+test("#426 ciPendingDuration: a decisive verdict behind a never-concluding check ages past the bound; every other CI/review state is null", () => {
+  const base = {
+    action: "MERGE_OK" as ReviewAction,
+    ciGreen: false,
+    ciRed: false,
+    headOid: "HEAD",
+    pin: { head: "HEAD", at: "2026-07-15T00:00:00.000Z" },
+    now: new Date("2026-07-15T06:00:00.000Z"), // 21600s pending
+    escalateAfterSec: 21600,
+    needsHumanLabelPresent: false,
+    holdLabelPresent: false,
+  };
+  assert.equal(ciPendingDuration(base), 21600); // exactly at the bound fires (>=, like review silence)
+  assert.equal(ciPendingDuration({ ...base, now: new Date("2026-07-15T05:59:59.000Z") }), null); // one second short
+  // A check that CONCLUDED is never "pending", either way.
+  assert.equal(ciPendingDuration({ ...base, ciGreen: true }), null);
+  assert.equal(ciPendingDuration({ ...base, ciRed: true }), null);
+  // A non-decisive review is reviewSilenceDuration's arm, never this one — the two never both fire.
+  assert.equal(ciPendingDuration({ ...base, action: "WAIT_REVIEW" }), null);
+  assert.equal(ciPendingDuration({ ...base, action: "REVIEW_UNAVAILABLE" }), null);
+  assert.equal(ciPendingDuration({ ...base, action: "HANDLE_THREADS" }), null);
+  // Head-scoped: a pin recorded for a superseded head never ages the live one (a push restarts CI).
+  assert.equal(ciPendingDuration({ ...base, pin: { head: "OLD", at: base.pin.at } }), null);
+  // No usable pin instant -> fail closed to "not aging", never to a bogus age.
+  assert.equal(ciPendingDuration({ ...base, pin: { head: "HEAD", at: null } }), null);
+  assert.equal(ciPendingDuration({ ...base, pin: { head: "HEAD", at: "not-a-date" } }), null);
+  // Same two label latches review silence honors, same rationale.
+  assert.equal(ciPendingDuration({ ...base, needsHumanLabelPresent: true }), null);
+  assert.equal(ciPendingDuration({ ...base, holdLabelPresent: true }), null);
+});
+
+test("#426 ciPendingDuration: a hold suppresses purely — the pin is untouched, so removal resumes off the SAME clock (one shot, no burst)", () => {
+  const base = {
+    action: "MERGE_OK" as ReviewAction,
+    ciGreen: false,
+    ciRed: false,
+    headOid: "HEAD",
+    pin: { head: "HEAD", at: "2026-07-15T00:00:00.000Z" },
+    now: new Date("2026-07-15T12:00:00.000Z"),
+    escalateAfterSec: 21600,
+    needsHumanLabelPresent: false,
+    holdLabelPresent: true,
+  };
+  assert.equal(ciPendingDuration(base), null);
+  assert.equal(ciPendingDuration(base), null);
+  assert.equal(ciPendingDuration({ ...base, holdLabelPresent: false }), 43200); // the FULL elapsed age, once
+});
+
+test("#426 MergeDriver.driveOne: a MERGE_OK verdict with neither CI state reports the pending observation every pass, and escalates once the threaded pin is past the bound", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer(); // MERGE_OK by default
+  forge.status = { ...forge.status, ciGreen: false, ciRed: false }; // the wedge: a check hung IN_PROGRESS
+  const driver = new MergeDriver({
+    forge,
+    reviewer,
+    cfg: mkCfg({ ci: { pendingEscalateAfterSec: 3600 }, labels: { needsHuman: "needs-human" }, escalation: { humanLabels: HUMAN_LABELS } }),
+    now: () => new Date("2026-07-15T02:00:00.000Z"),
+  });
+
+  // No pin yet (the conductor opens one FROM this observation): observation only, never an escalation.
+  const first = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(first.kind, "queued");
+  assert.deepEqual(first.ciPendingObservation, { pending: true, head: "HEAD" });
+  assert.equal(first.ciPendingEscalation, undefined);
+  assert.deepEqual(forge.merged, []); // and gate① still holds the merge, unchanged
+
+  // Pin threaded in, 2h old against a 1h bound -> the aging arm fires.
+  const aged = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, undefined, {
+    head: "HEAD",
+    at: "2026-07-15T00:00:00.000Z",
+  });
+  assert.deepEqual(aged.ciPendingEscalation, { head: "HEAD", pendingSec: 7200 });
+
+  // The label latch closes it, exactly like review silence (#170) — the engine never re-escalates.
+  forge.reviewData = { ...forge.reviewData, labels: ["Needs-Human"] };
+  const latched = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, undefined, {
+    head: "HEAD",
+    at: "2026-07-15T00:00:00.000Z",
+  });
+  assert.equal(latched.kind, "needs-human");
+  assert.equal(latched.ciPendingEscalation, undefined);
+});
+
+test("#426 MergeDriver.driveOne: a check that reaches a real conclusion reports pending:false — the conductor's cancel signal — and gate① proceeds unchanged", async () => {
+  const forge = new FakeForge(); // ciGreen: true by default
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg({ ci: { pendingEscalateAfterSec: 3600 } }) });
+  const green = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, undefined, {
+    head: "HEAD",
+    at: "2000-01-01T00:00:00.000Z", // an ancient pin: a concluded check must still never escalate
+  });
+  assert.equal(green.kind, "merged");
+  assert.deepEqual(green.ciPendingObservation, { pending: false, head: "HEAD" });
+  assert.equal(green.ciPendingEscalation, undefined);
+
+  const red = new FakeForge();
+  red.status = { ...red.status, ciGreen: false, ciRed: true };
+  const redDriver = new MergeDriver({ forge: red, reviewer: new FakeReviewer(), cfg: mkCfg({ ci: { pendingEscalateAfterSec: 3600 } }) });
+  const redOutcome = await redDriver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, undefined, {
+    head: "HEAD",
+    at: "2000-01-01T00:00:00.000Z",
+  });
+  assert.equal(redOutcome.kind, "fixable"); // CI-red is the fix loop's business, not the aging arm's
+  assert.deepEqual(redOutcome.ciPendingObservation, { pending: false, head: "HEAD" });
+  assert.equal(redOutcome.ciPendingEscalation, undefined);
+});
+
 test("#170 MergeDriver: an aged silent current-head review signals once; a fresh head resets the clock", async () => {
   const forge = new FakeForge();
   const reviewer = new FakeReviewer();
@@ -627,6 +742,7 @@ test("#170 MergeDriver: an aged silent current-head review signals once; a fresh
     reason: "gate-pending:WAIT_REVIEW",
     reviewSilenceEscalation: { head: "HEAD", silenceSec: 120 },
     holdObservation: { held: false }, // #294
+    ciPendingObservation: { pending: false, head: "HEAD" }, // #426
   });
 
   forge.reviewData = { ...forge.reviewData, labels: ["Needs-Human"] };
@@ -688,6 +804,7 @@ test("MergeDriver.driveOne (#248): #170 silence escalation is suppressed while a
     reason: "gate-pending:WAIT_REVIEW",
     reviewSilenceEscalation: { head: "HEAD", silenceSec: 120 },
     holdObservation: { held: false }, // #294: the release is observable on this very pass
+    ciPendingObservation: { pending: false, head: "HEAD" }, // #426
   });
 });
 
@@ -754,7 +871,13 @@ test("MergeDriver.driveOne: gates pass (CI green + MERGE_OK) -> merges with the 
   const reviewer = new FakeReviewer();
   const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
-  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD", holdObservation: { held: false } });
+  assert.deepEqual(outcome, {
+    kind: "merged",
+    pr: 7,
+    headOid: "HEAD",
+    holdObservation: { held: false },
+    ciPendingObservation: { pending: false, head: "HEAD" },
+  });
   assert.deepEqual(forge.merged, [[7, "HEAD"]]);
 });
 
@@ -811,6 +934,8 @@ test("MergeDriver.driveOne: PR already MERGED (by a human) -> merged outcome, no
   forge.reviewData = { ...forge.reviewData, state: "MERGED" };
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  // #426: no ciPendingObservation — this is the terminal MERGED early-return, which never derives a
+  // gate at all, and an absent observation is a no-op at the conductor (never a pin cancel).
   assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD", holdObservation: { held: false } });
   assert.deepEqual(forge.merged, []); // recognized as merged; no second merge attempt
 });
@@ -1122,7 +1247,13 @@ test("MergeDriver.driveOne reentered: a FRESH review (submitted after the pin) c
   forge.reviewData = { ...forge.reviewData, reviews: [codexReview("2026-07-02T00:05:00Z")] };
   const driver = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg() });
   const outcome = await driver.driveOne(7, 46, REENTRY_PIN, noopRecord, undefined, true);
-  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD", holdObservation: { held: false } });
+  assert.deepEqual(outcome, {
+    kind: "merged",
+    pr: 7,
+    headOid: "HEAD",
+    holdObservation: { held: false },
+    ciPendingObservation: { pending: false, head: "HEAD" },
+  });
 });
 
 test("MergeDriver.driveOne reentered: a review with NO submittedAt can never prove freshness -> filtered (fail-closed), queued", async () => {
@@ -1139,7 +1270,13 @@ test("MergeDriver.driveOne NOT reentered (param omitted): the same pre-pin revie
   forge.reviewData = { ...forge.reviewData, reviews: [codexReview("2026-07-01T00:00:00Z")] };
   const driver = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg() });
   const outcome = await driver.driveOne(7, 46, REENTRY_PIN, noopRecord);
-  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD", holdObservation: { held: false } });
+  assert.deepEqual(outcome, {
+    kind: "merged",
+    pr: 7,
+    headOid: "HEAD",
+    holdObservation: { held: false },
+    ciPendingObservation: { pending: false, head: "HEAD" },
+  });
 });
 
 test("MergeDriver.driveOne reentered (round-2 P1): a STANDING pre-reentry human CHANGES_REQUESTED skips the time filter — a fresh post-pin clean Codex review cannot speak for it, so the lane re-escalates, never merges", async () => {
