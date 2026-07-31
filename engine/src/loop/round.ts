@@ -461,6 +461,9 @@ export class RoundScopedForge implements IForge {
   getPRChangedFiles(pr: number): ReturnType<IForge["getPRChangedFiles"]> {
     return this.inner.getPRChangedFiles(pr);
   }
+  compareChangedFiles(base: string, head: string): ReturnType<IForge["compareChangedFiles"]> {
+    return this.inner.compareChangedFiles(base, head);
+  }
   getCommitsSince(sinceIso: string) {
     return this.inner.getCommitsSince(sinceIso);
   }
@@ -646,6 +649,9 @@ export class PoolScopedForge implements IForge {
   }
   getPRChangedFiles(pr: number): ReturnType<IForge["getPRChangedFiles"]> {
     return this.inner.getPRChangedFiles(pr);
+  }
+  compareChangedFiles(base: string, head: string): ReturnType<IForge["compareChangedFiles"]> {
+    return this.inner.compareChangedFiles(base, head);
   }
   getCommitsSince(sinceIso: string) {
     return this.inner.getCommitsSince(sinceIso);
