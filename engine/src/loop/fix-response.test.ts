@@ -952,13 +952,16 @@ class FakeDisputeForge implements Pick<IForge, "getPRStatus" | "getPRReviewThrea
   threads: { id: string; isResolved: boolean; comments: { author: string; body: string; createdAt: string }[] }[] = [];
   throwOnStatus = false;
   throwOnThreads = false;
+  /** #451 gate② P3(a): when true, the live thread page reports itself PARTIAL — see
+   *  computeDisputeEscalation's own fail-closed guard. */
+  pageCapped = false;
   async getPRStatus(pr: number) {
     if (this.throwOnStatus) throw new Error("simulated forge outage");
     return { number: pr, headOid: this.headOid, state: "OPEN" as const, mergeable: "MERGEABLE" as const, ciGreen: true };
   }
   async getPRReviewThreads(_pr: number, _commentsCap: number) {
     if (this.throwOnThreads) throw new Error("simulated forge outage");
-    return { threads: this.threads.map((t) => ({ ...t, commentsComplete: true })), pageCapped: false };
+    return { threads: this.threads.map((t) => ({ ...t, commentsComplete: true })), pageCapped: this.pageCapped };
   }
 }
 
@@ -983,6 +986,27 @@ test("computeDisputeEscalation: every unresolved current-head thread durably dis
   });
   const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
   assert.deepEqual(result, { headOid: "head-1", threads: [{ threadId: "T1", findingBody: "the finding", reply: "disagree" }] });
+  st.close();
+});
+
+test("computeDisputeEscalation (#451 gate② P3a): pageCapped (a partial thread view) -> null, fail-closed, even when every VISIBLE unresolved thread is disputed", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeDisputeForge();
+  forge.headOid = "head-1";
+  forge.pageCapped = true;
+  forge.threads = [{ id: "T1", isResolved: false, comments: [{ author: "codex", body: "the finding", createdAt: "t0" }] }];
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: "lane-a#1",
+    fixRounds: 1,
+    count: 1,
+    headOid: "head-1",
+    writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree" }],
+  });
+  const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
+  assert.equal(result, null, "a partial view can never prove EVERY unresolved thread is disputed");
   st.close();
 });
 

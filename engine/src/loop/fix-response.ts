@@ -336,22 +336,27 @@ export interface DisputeEscalation {
  *  a durably-recorded `disputed` resolution for that SAME head — the one condition under which a
  *  FIXABLE tick escalates directly to `needs-human` instead of dispatching a fix leg, at zero paid
  *  fix-round cost. Returns `null` for every other case (nothing to adjudicate, a mix of
- *  addressed/unanswered threads, a stale-head dispute, or an unreadable live read) — the caller
- *  falls through to the pre-existing FIXUP/ESCALATE decision unchanged.
+ *  addressed/unanswered threads, a stale-head dispute, a capped/partial thread page, or an
+ *  unreadable live read) — the caller falls through to the pre-existing FIXUP/ESCALATE decision
+ *  unchanged.
  *
  *  CLASSIC-REVIEWER-PATH ONLY, structurally (design §4a): on the engine-agent path
  *  `getPRReviewThreads` returns zero threads (review/drive.ts's synthetic HANDLE_THREADS mapping
  *  never creates one — merge-driver.ts's own module doc, "the engine has no thread-CREATING forge
- *  write"), so `unresolved.length === 0` below is reached and this returns `null` unconditionally.
- *  No `verdictRunId`/reviewer-kind branch is needed to keep the two paths apart — an empty thread
- *  list does it for free, which is also why this predicate is naturally disjoint from #457's
- *  verdict-rerun breaker (conductor.ts): that breaker fires only when `outcome.verdictRunId` is
- *  set (engine-agent-caused fixables only), while this one can only fire when live threads exist
- *  (classic-reviewer-caused fixables only) — see conductor.test.ts's disjointness assertion.
+ *  write"), so `unresolved.length === 0` below is reached and this returns `null` unconditionally
+ *  — this function needs no `verdictRunId`/reviewer-kind branch to stay correct on that path. The
+ *  CALLER (conductor.ts) additionally skips calling this function at all when
+ *  `outcome.verdictRunId !== undefined` (#451 gate② P3(b)) — a pure cost optimization layered on
+ *  top of this correctness property, not a substitute for it: `outcome.verdictRunId` is set only
+ *  for an engine-agent-caused fixable, so the two live forge reads below are structurally
+ *  guaranteed to end in `null` there, and skipping them is free. Either way, this predicate is
+ *  naturally disjoint from #457's verdict-rerun breaker (conductor.ts) — see
+ *  conductor.test.ts's disjointness assertion.
  *
- *  FAIL-CLOSED on an unreadable live read or an unknown/absent recorded head (never escalates on
- *  an unproven current-head match) — a forge error here must never be read as "go ahead," the
- *  same posture every other DRIVE branch in this file's caller takes. */
+ *  FAIL-CLOSED on an unreadable live read, a capped/partial thread page, or an unknown/absent
+ *  recorded head (never escalates on an unproven current-head match) — a forge error or an
+ *  incomplete view here must never be read as "go ahead," the same posture every other DRIVE
+ *  branch in this file's caller takes. */
 export async function computeDisputeEscalation(
   forge: Pick<IForge, "getPRStatus" | "getPRReviewThreads">,
   state: Pick<State, "eventsSince">,
@@ -368,6 +373,12 @@ export async function computeDisputeEscalation(
   } catch {
     return null; // fail-closed: cannot prove the current head — never escalate on an unreadable read
   }
+  // #451 gate② P3(a): `pageCapped` (forge.ts's ReviewThreadsPage doc) means `threads` is only a
+  // PARTIAL view — an unresolved, undisputed thread beyond the page ceiling would be invisible,
+  // and "every unresolved thread is disputed" could be satisfied by a view that simply never saw
+  // the one that isn't. Fail-closed, same posture as the unreadable-read case above: a proof over
+  // an admittedly-incomplete set is no proof at all.
+  if (threadsPage.pageCapped) return null;
   const unresolved = threadsPage.threads.filter((t) => !t.isResolved);
   if (unresolved.length === 0) return null; // nothing to adjudicate (also the whole §4a engine-agent case)
   const records = latestThreadResolutions(state.eventsSince("1970-01-01T00:00:00.000Z", ["fix-response-queued"]), worker, pr);

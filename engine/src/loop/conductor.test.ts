@@ -159,7 +159,13 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async openPR(): Promise<number> {
     return 1;
   }
+  /** #451 gate② P3(b): call-count spies — proves computeDisputeEscalation's two forge reads are
+   *  SKIPPED (not merely no-op-returned) when the caller already knows the fixable can't be
+   *  classic-reviewer-caused (outcome.verdictRunId set). */
+  getPRStatusCalls = 0;
+  getPRReviewThreadsCalls = 0;
   override async getPRStatus(n: number): Promise<PRStatus> {
+    this.getPRStatusCalls++;
     return { ...this.prStatus, number: n };
   }
   override async mergePR(pr: number, headOid: string): Promise<void> {
@@ -262,6 +268,7 @@ class FakeForge extends UnstubbedForge implements IForge {
    *  byte-for-byte the pre-#451 behavior. */
   reviewThreadsOverride: ReviewThreadsPage | undefined = undefined;
   override async getPRReviewThreads(_pr: number, _commentsCap: number): Promise<ReviewThreadsPage> {
+    this.getPRReviewThreadsCalls++;
     if (this.reviewThreadsOverride) return this.reviewThreadsOverride;
     const byThread: Record<string, string[]> = {};
     for (const [tid, body] of this.threadReplies) {
@@ -2633,6 +2640,57 @@ test("tick DRIVE (#451, disjointness from #457): a review-disputed-eligible tick
   st.close();
 });
 
+test("tick DRIVE (#451, gate② P3b): a fixable carrying verdictRunId (engine-agent-caused) SKIPS computeDisputeEscalation's two forge reads entirely — a cost cut on top of the structural null, not a behavior change", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-b", 3, 66);
+  st.appendEvent("drive-fixup", { worker: "lane-b", issue: 3, pr: 66, fixRounds: 1, reason: "r", verdictRunId: "run-1" });
+  const gate = new FakeMergeGate();
+  gate.outcomes[66] = {
+    kind: "fixable",
+    pr: 66,
+    reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false",
+    prescription: "findings",
+    verdictRunId: "run-1",
+  };
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(forge.getPRStatusCalls, 0, "getPRStatus never called for a verdictRunId-bearing fixable");
+  assert.equal(forge.getPRReviewThreadsCalls, 0, "getPRReviewThreads never called for a verdictRunId-bearing fixable");
+  st.close();
+});
+
+test("tick DRIVE (#451, gate② P3b contrast): a classic-reviewer fixable (no verdictRunId) DOES call both forge reads exactly once", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  forge.prStatus = { ...forge.prStatus, headOid: "head-2" };
+  forge.reviewThreadsOverride = { threads: [], pageCapped: false };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = disputedGate();
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(forge.getPRStatusCalls, 1);
+  assert.equal(forge.getPRReviewThreadsCalls, 1);
+  st.close();
+});
+
 test("tick DRIVE (#451, AC7): a review-disputed escalation is reclaimable through the existing #147 GATED RECLAIM path once a human clears the label — no new re-entry channel", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
@@ -2712,6 +2770,133 @@ test("tick DRIVE (#451, forge-write-failure ordering): a label-write failure lea
   assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed"]), [], "no event without a successful label write");
   const failedLabelEvents = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed-label-failed"]);
   assert.equal(failedLabelEvents.length, 1);
+  st.close();
+});
+
+test("tick DRIVE (#451, gate② P3c): a comment-write failure (label already landed) leaves the row driving, never terminalizes, no review-disputed event — the comment-failure ordering leg", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  forge.prStatus = { ...forge.prStatus, headOid: "head-2" };
+  forge.reviewThreadsOverride = {
+    threads: [
+      { id: "PRRT_1", isResolved: false, commentsComplete: true, comments: [{ author: "codex", body: "finding", createdAt: "t0" }] },
+    ],
+    pageCapped: false,
+  };
+  seedFixResponseQueued(st, "lane-a", 2, 55, "head-2", [{ threadId: "PRRT_1", resolution: "disputed", reply: "disagree" }]);
+  forge.throwOnAddIssueComment = true;
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = disputedGate();
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.state, "driving", "no terminal transition without the comment landing");
+  assert.equal(row.fix_rounds ?? 0, 0);
+  assert.equal(r.driven[0]?.kind, "queued");
+  assert.deepEqual(
+    st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed"]),
+    [],
+    "no success event without a successful comment write",
+  );
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]], "the label DID land — this is the ordering-after-label leg");
+  const failedCommentEvents = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed-comment-failed"]);
+  assert.equal(failedCommentEvents.length, 1);
+  assert.equal((failedCommentEvents[0]!.payload as { headOid: string }).headOid, "head-2");
+  st.close();
+});
+
+test("tick DRIVE (#451, gate② P1): a comment-write failure that keeps failing across MANY ticks appends review-disputed-comment-failed ONCE, not per tick — the #383/#465 transition-dedupe convention, not steady-state spam", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  forge.prStatus = { ...forge.prStatus, headOid: "head-2" };
+  forge.reviewThreadsOverride = {
+    threads: [
+      { id: "PRRT_1", isResolved: false, commentsComplete: true, comments: [{ author: "codex", body: "finding", createdAt: "t0" }] },
+    ],
+    pageCapped: false,
+  };
+  seedFixResponseQueued(st, "lane-a", 2, 55, "head-2", [{ threadId: "PRRT_1", resolution: "disputed", reply: "disagree" }]);
+  forge.throwOnAddIssueComment = true;
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = disputedGate();
+  const deps = {
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+  for (let i = 0; i < 5; i++) await tick(deps);
+  assert.equal(
+    st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed-comment-failed"]).length,
+    1,
+    "same episode (same headOid, no reset in between) — one announcement, not five",
+  );
+
+  // A genuinely NEW episode (the PR moved to a different head) re-announces.
+  forge.reviewThreadsOverride = {
+    threads: [
+      { id: "PRRT_2", isResolved: false, commentsComplete: true, comments: [{ author: "codex", body: "finding 2", createdAt: "t0" }] },
+    ],
+    pageCapped: false,
+  };
+  forge.prStatus = { ...forge.prStatus, headOid: "head-3" };
+  seedFixResponseQueued(st, "lane-a", 2, 55, "head-3", [{ threadId: "PRRT_2", resolution: "disputed", reply: "disagree again" }], 2);
+  await tick(deps);
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed-comment-failed"]);
+  assert.equal(events.length, 2, "a different headOid is a genuinely new episode, not eaten by the dedup");
+  assert.equal((events[1]!.payload as { headOid: string }).headOid, "head-3");
+  st.close();
+});
+
+test("tick DRIVE (#451, gate② P1): the assembled comment stays under GitHub's limit — per-item and whole-comment truncation, marked, never silent, and the write SUCCEEDS (no permanent-failure wedge) on a pathologically long reply", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  forge.prStatus = { ...forge.prStatus, headOid: "head-2" };
+  const longFinding = "F".repeat(100_000);
+  const longReply = "R".repeat(100_000);
+  forge.reviewThreadsOverride = {
+    threads: [
+      { id: "PRRT_1", isResolved: false, commentsComplete: true, comments: [{ author: "codex", body: longFinding, createdAt: "t0" }] },
+      { id: "PRRT_2", isResolved: false, commentsComplete: true, comments: [{ author: "codex", body: longFinding, createdAt: "t0" }] },
+    ],
+    pageCapped: false,
+  };
+  seedFixResponseQueued(st, "lane-a", 2, 55, "head-2", [
+    { threadId: "PRRT_1", resolution: "disputed", reply: longReply },
+    { threadId: "PRRT_2", resolution: "disputed", reply: longReply },
+  ]);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = disputedGate();
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(r.driven[0]?.kind, "needs-human", "the comment posts successfully — no permanent wedge");
+  assert.equal(forge.issueComments.length, 1);
+  const comment = forge.issueComments[0]![1];
+  assert.ok(comment.length < 65_536, `comment length ${comment.length} must stay under GitHub's limit`);
+  assert.match(comment, /truncated/, "the cut is marked, never silent");
   st.close();
 });
 

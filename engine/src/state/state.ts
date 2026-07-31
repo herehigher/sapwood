@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import { capDigest } from "../retro/retro-digest.js";
 import type { AcceptanceCriterion, AcSnapshot } from "../review/ac-snapshot.js";
 
 // Ordered migrations. index N upgrades schema from user_version N to N+1. Append-only:
@@ -1455,6 +1456,21 @@ export const DEFAULT_DB_PATH = "data/sapwood.sqlite";
  *  cli.ts's pre-State lock-path derivation so the two can never drift. */
 export const INSTANCE_LOCK_FILENAME = "sapwood.lock";
 
+/** #451 (gate② P2, PM adjudication): the deterministic-truncation cap on a fix leg's `reply`
+ *  prose as it's copied into the `fix-response-queued` receipt event (settleTerminalWorker,
+ *  below) — never the `pending_thread_writes` row itself, which stays untouched (that copy is
+ *  what actually gets POSTED to GitHub, already bounded by GitHub's own comment-length ceiling).
+ *  Design #402 §3 rejected UNbounded prose in the ledger, not prose per se; this event is
+ *  append-only, once per fix round per thread, and its purpose is audit evidence, not a
+ *  full-fidelity copy — the durable ledger and the live thread are supposed to diverge slightly
+ *  in exactly this way (see fix-response.ts's `latestThreadResolutions` doc). A hardcoded
+ *  internal safety bound, not a user-tunable digest size (logger.ts's `MAX_MESSAGE_BYTES`
+ *  precedent, not the config-key `xMaxChars` convention roles.retro.digestMaxChars/
+ *  round.directiveMaxChars use for LLM-context budgets) — this exists to keep one append-only
+ *  ledger row's prose bounded, not to trade off prompt budget. Truncation is marked, never
+ *  silent (capDigest, retro-digest.ts's shared deterministic-truncation primitive). */
+const FIX_RESPONSE_LEDGER_REPLY_MAX_CHARS = 4_000;
+
 export class State {
   private readonly db: DatabaseSync;
   // The on-disk directory holding this engine's data (sqlite + sentinels). null for the
@@ -2135,6 +2151,32 @@ export class State {
     return p.blockReason == null ? null : { id: row.id, blockReason: p.blockReason };
   }
 
+  /** #451 (gate② P1, PM adjudication): the SAME id+value dedup shape as `lastDriveQueuedEvent`/
+   *  `lastFixLegDispatchBlockedEvent` above, for `review-disputed-comment-failed` — a comment-post
+   *  failure caused by an over-limit assembled comment is a genuinely PERMANENT failure (not the
+   *  transient forge hiccup every other retry-next-tick branch in conductor.ts assumes), so
+   *  without this dedup the lane would re-append this event EVERY tick forever — the exact #383/
+   *  F30 steady-state event-spam class, here unilaterally constructible by a producer's own
+   *  dispute-reply length. Keyed on `headOid` (the escalation evidence's own stable identity — see
+   *  `DisputeEscalation`, fix-response.ts): a re-attempt against the SAME head is the SAME episode;
+   *  a different head (or a comment that finally succeeds) is a genuinely new one. Scoped to
+   *  (worker, pr), same lane-repointing rationale as its two siblings. Carries `id` for the same
+   *  episode-reset comparison — see `REVIEW_DISPUTED_COMMENT_FAILED_RESET_KINDS` (conductor.ts). */
+  lastReviewDisputedCommentFailedEvent(worker: string, pr: number): { id: number; headOid: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, payload FROM events
+         WHERE kind = 'review-disputed-comment-failed'
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.pr') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker, pr) as { id: number; payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { headOid?: string };
+    return p.headOid == null ? null : { id: row.id, headOid: p.headOid };
+  }
+
   /** #383 round 2 (PM P2): the highest event id among `kinds`, scoped to this (worker, pr) — the
    *  EPISODE-RESET boundary `lastDriveQueuedEvent`/`lastFixLegDispatchBlockedEvent`'s callers
    *  compare their own last-announcement id against. Returns 0 (lower than any real event id,
@@ -2273,7 +2315,14 @@ export class State {
             fixRounds: batch.fixRounds,
             count: batch.writes.length,
             headOid: batch.headOid,
-            writes: batch.writes.map((w) => ({ threadId: w.threadId, resolution: w.resolution, reply: w.reply })),
+            // #451 (gate② P2): `reply` is capDigest-bounded here (marked, never silent) — see
+            // FIX_RESPONSE_LEDGER_REPLY_MAX_CHARS's own doc for why the ledger copy is bounded
+            // while the pending_thread_writes row (the one actually posted to GitHub) is not.
+            writes: batch.writes.map((w) => ({
+              threadId: w.threadId,
+              resolution: w.resolution,
+              reply: capDigest(w.reply, FIX_RESPONSE_LEDGER_REPLY_MAX_CHARS),
+            })),
           });
         }
       }
