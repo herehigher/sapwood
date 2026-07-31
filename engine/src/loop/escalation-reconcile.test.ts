@@ -1137,3 +1137,21 @@ test("#398 cutover: a legacy event with NO carrier field is read on the ISSUE, e
   state2.close();
   state.close();
 });
+
+test("#398 (review round 2): review-disputed and review-non-convergent carry the PR carrier too — a clean issue never resolves either", async () => {
+  for (const source of ["review-disputed", "review-non-convergent"]) {
+    const forge = new FakeForge();
+    const state = new State(":memory:");
+    state.appendEvent(source, { worker: "w1", issue: 7, pr: 12, carrier: "pr", fixRounds: 2 });
+    forge.issueLabels[7] = []; // the escalation never labelled the issue — absence here proves nothing
+    forge.prLabels[12] = [NEEDS_HUMAN];
+    const logged = tapEvents(state);
+    await reconcileEscalations(forge, state, mkCfg());
+    assert.deepEqual(resolvedEvents(logged), [], source);
+
+    forge.prLabels[12] = []; // the human clears the one carrier
+    await reconcileEscalations(forge, state, mkCfg());
+    assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source, via: "label-removed" }], source);
+    state.close();
+  }
+});

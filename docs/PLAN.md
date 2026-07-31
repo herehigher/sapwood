@@ -474,7 +474,8 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   not read as human approval next tick).
   **The carrier (#398, 2026-07-27 retro): the label lives where the escalation was
   born.** A PR-caused escalation — a gate-`HUMAN` verdict, the FIXABLE degrade, a
-  thread-write that could not be posted — is written on the **PR**, which is where
+  thread-write that could not be posted, a dispute-priced or non-converging review —
+  is written on the **PR**, which is where
   `deriveGate` reads labels and where the human deciding "is this actually fixed" is
   already looking; an issue-caused one (no PR exists yet, or the fact is about the work
   item itself) is written on the **issue**. Never both, so a release is always ONE

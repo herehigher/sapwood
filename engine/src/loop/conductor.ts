@@ -2366,6 +2366,45 @@ async function labelEscalationCarrier(
   else await forge.addLabel(issue, cfg.labels.needsHuman);
 }
 
+/** #398: how an escalation comment REFERS to its own carrier, so "remove the label" always names
+ *  the object that actually carries it. One helper rather than a ternary at each call site, so
+ *  the wording cannot drift between escalations that mean the same thing. */
+function carrierNoun(carrier: EscalationCarrier): string {
+  return carrier === "pr" ? "from this pull request" : "from this issue";
+}
+
+/** #398: the marker-checked escalation COMMENT, on the same carrier its label went to — because
+ *  every one of these comments ends by telling a human to remove that label, and an instruction
+ *  posted somewhere other than where the label actually is, is a wrong instruction.
+ *
+ *  Preserves each caller's existing ambiguous-write discipline verbatim, just carrier-aware: a
+ *  live read for the marker BEFORE every post attempt (#451 gate② round 3 / #247 D3's shape), so
+ *  a post whose response was lost is never duplicated on the retry. Both halves THROW on failure
+ *  rather than returning a status, because their callers already treat a failed read and a failed
+ *  post identically (one `*-comment-failed` dedupe kind) — a read that fails therefore fails
+ *  CLOSED, never "assume not posted yet".
+ *
+ *  The PR-side read is bounded by `proxy.caps.maxAuditCommentScanWindow` — the same bounded
+ *  newest-first top-level scan the audit-comment channel uses, and the right window for a marker
+ *  that this engine posted at most once per episode. */
+async function commentOnEscalationCarrier(
+  forge: Pick<IForge, "getIssueComments" | "getPRComments" | "addIssueComment" | "addPRComment">,
+  cfg: Pick<SapwoodConfig, "proxy">,
+  carrier: EscalationCarrier,
+  issue: number,
+  pr: number,
+  marker: string,
+  body: string,
+): Promise<void> {
+  const existing =
+    carrier === "pr"
+      ? (await forge.getPRComments(pr, cfg.proxy.caps.maxAuditCommentScanWindow)).comments
+      : await forge.getIssueComments(issue);
+  if (existing.some((c) => c.body.includes(marker))) return;
+  if (carrier === "pr") await forge.addPRComment(pr, body);
+  else await forge.addIssueComment(issue, body);
+}
+
 /** #147 P2 + #246 review round 1 (C1): the SHARED needs-human escalation for a `driving` lane —
  *  label write FIRST (recorded durably via `gated_escalation_labeled` so GATED RECLAIM's
  *  absence-is-a-human-act invariant holds even on a failed write), THEN the terminal upsert,
@@ -4506,8 +4545,14 @@ async function escalateReviewDisputed(
       state.appendEvent(kind, { worker: w.name, issue: w.issue, pr, headOid: escalation.headOid, error: String(error) });
     }
   };
+  // #398 (review round 2): PR-BORN. `pr` is required and non-nullable here, and every word of the
+  // comment below is about that PR — this is the same shape `escalateNeedsHuman` has, so it takes
+  // the same carrier rather than reproducing the "invisible where the decision is made" bug on a
+  // second gate② path. The reentry handshake and the resolution reconciler both read this choice
+  // back (from the row's `gated_escalation_carrier` and the event payload's `carrier`).
+  const carrier = escalationCarrier(pr);
   try {
-    await forge.addLabel(w.issue, cfg.labels.needsHuman);
+    await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
   } catch (e) {
     dedupeFailure("review-disputed-label-failed", e);
     return null;
@@ -4530,7 +4575,8 @@ async function escalateReviewDisputed(
         `\`${cfg.labels.needsHuman}\` for adjudication instead of dispatching another fix leg. Evidence per thread ` +
         `(excerpted — the full text is on each thread by id):\n\n${evidence}\n\n` +
         `Adjudicate each: side with the reviewer (resolve the thread yourself, or ask for another fix round) or side with the ` +
-        `producer (resolve it as not-a-defect). Remove \`${cfg.labels.needsHuman}\` once done to reclaim (#147 gated reentry).`,
+        `producer (resolve it as not-a-defect). Remove \`${cfg.labels.needsHuman}\` ${carrierNoun(carrier)} once done to reclaim ` +
+        `(#147 gated reentry).`,
       REVIEW_DISPUTED_COMMENT_MAX_CHARS,
     ) + `\n\n${marker}`;
   // #451 gate② round 3 (Codex P2): a live read for the marker BEFORE every post attempt — the
@@ -4538,33 +4584,27 @@ async function escalateReviewDisputed(
   // ambiguous-write-outcome problem. A FAILED check fails CLOSED (never assume "not posted yet",
   // which would risk a duplicate post through exactly the crash/timeout window this exists to
   // close) — treated as a comment failure for dedup purposes, same as a post failure.
-  let alreadyPosted: boolean;
   try {
-    const comments = await forge.getIssueComments(w.issue);
-    alreadyPosted = comments.some((c) => c.body.includes(marker));
+    await commentOnEscalationCarrier(forge, cfg, carrier, w.issue, pr, marker, comment);
   } catch (e) {
     dedupeFailure("review-disputed-comment-failed", e);
     return null;
-  }
-  if (!alreadyPosted) {
-    try {
-      await forge.addIssueComment(w.issue, comment);
-    } catch (e) {
-      dedupeFailure("review-disputed-comment-failed", e);
-      return null;
-    }
   }
   // #451 gate② round 3 (Codex P1): the terminal worker-row write and the `review-disputed`
   // receipt land in ONE transaction — see this function's own doc for the crash window this
   // closes. Zero fix-round cost (AC): `fix_rounds` carried through unchanged — this branch never
   // called startFixLeg, so there is nothing to bump.
   state.upsertWorkerWithEvent(
-    { ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1, gated_escalation_carrier: "issue" },
+    { ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1, gated_escalation_carrier: carrier },
     "review-disputed",
     {
       worker: w.name,
       issue: w.issue,
       pr,
+      // #398: escalation-reconcile's `label-removed` arm reads this to know WHICH object to check
+      // for the hold. Omit it and a PR-carried escalation is read on a permanently-clean issue —
+      // resolved on the very first pass, about work nobody has looked at.
+      carrier,
       headOid: escalation.headOid,
       fixRounds: fixRoundsSpent,
       threads: escalation.threads.map((t) => t.threadId),
@@ -4665,8 +4705,11 @@ async function escalateNonConvergent(
       state.appendEvent(kind, { worker: w.name, issue: w.issue, pr, fixRounds: fixRoundsSpent, error: String(error) });
     }
   };
+  // #398 (review round 2): PR-born, for exactly the reasons escalateReviewDisputed above is —
+  // same non-nullable `pr`, same entirely-about-this-PR comment, same gate② branch.
+  const carrier = escalationCarrier(pr);
   try {
-    await forge.addLabel(w.issue, cfg.labels.needsHuman);
+    await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
   } catch (e) {
     dedupeFailure("review-non-convergent-label-failed", e);
     return null;
@@ -4693,35 +4736,26 @@ async function escalateNonConvergent(
         `Current round finding keys${boundedCurr.truncated ? " (truncated)" : ""}:\n` +
         `${boundedCurr.entries.map((k) => `- \`${k}\``).join("\n") || "(none)"}\n\n` +
         `Adjudicate: resolve the underlying design/technical direction, then remove ` +
-        `\`${cfg.labels.needsHuman}\` to reclaim (#147 gated reentry).`,
+        `\`${cfg.labels.needsHuman}\` ${carrierNoun(carrier)} to reclaim (#147 gated reentry).`,
       REVIEW_NON_CONVERGENT_COMMENT_MAX_CHARS,
     ) + `\n\n${marker}`;
-  let alreadyPosted: boolean;
   try {
-    const comments = await forge.getIssueComments(w.issue);
-    alreadyPosted = comments.some((c) => c.body.includes(marker));
+    await commentOnEscalationCarrier(forge, cfg, carrier, w.issue, pr, marker, comment);
   } catch (e) {
     dedupeFailure("review-non-convergent-comment-failed", e);
     return null;
-  }
-  if (!alreadyPosted) {
-    try {
-      await forge.addIssueComment(w.issue, comment);
-    } catch (e) {
-      dedupeFailure("review-non-convergent-comment-failed", e);
-      return null;
-    }
   }
   // Same crash window closed the same way as escalateReviewDisputed's own terminal write: the
   // row and the receipt land in ONE transaction. Zero fix-round cost: `fix_rounds` carried through
   // unchanged — this branch never called startFixLeg, so there is nothing to bump.
   state.upsertWorkerWithEvent(
-    { ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1, gated_escalation_carrier: "issue" },
+    { ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1, gated_escalation_carrier: carrier },
     "review-non-convergent",
     {
       worker: w.name,
       issue: w.issue,
       pr,
+      carrier, // #398 — see escalateReviewDisputed's own note on this field.
       signal,
       fixRounds: fixRoundsSpent,
       prevFindingKeys: boundedPrev.entries,

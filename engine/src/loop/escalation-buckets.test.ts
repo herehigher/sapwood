@@ -157,7 +157,7 @@ const SITE_INVENTORY: Record<
     bucket: "needs-human",
     carrier: "issue",
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: 'drain of a driving lane (#375) — a PR-BEARING lane escalated on the ISSUE. Left as-is by #398, whose scope is escalateNeedsHuman + fix-response; it is single-carrier and self-consistent (it records gated_escalation_carrier: "issue", so the handshake reads the issue it wrote). Moving it is a follow-up, not a silent drive-by',
+    why: "drain of a driving lane (#375) — the ONE remaining PR-BEARING lane that escalates on the ISSUE, and deliberately so: unlike the gate\u2461 verdicts #398 moved, a drain escalation's fact is about the LANE (it could not progress inside a bounded drain window), not about the PR's content. Single-carrier and self-consistent (it records gated_escalation_carrier: \"issue\", so the handshake reads the object it wrote). Named here rather than moved silently; revisiting it is a follow-up",
   },
   "loop/conductor.ts#5": {
     bucket: "needs-human",
@@ -265,18 +265,11 @@ const SITE_INVENTORY: Record<
     src: "await forge.addLabel(w.issue, cfg.labels.needsHuman).catch(() => {});",
     why: "fixing-origin handoff with no PR (fail-safe) — issue-born by definition",
   },
-  "loop/conductor.ts#22": {
-    bucket: "needs-human",
-    carrier: "issue",
-    src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "review-disputed — every unresolved current-head thread is durably disputed",
-  },
-  "loop/conductor.ts#23": {
-    bucket: "needs-human",
-    carrier: "issue",
-    src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
-    why: "review-non-convergent — the progress classifier returned a STALLED verdict",
-  },
+  // #451's review-disputed and #450's review-non-convergent used to sit here as conductor#22/#23,
+  // writing the ISSUE. #398 review round 2 routed both through the shared carrier writer (#9/#10)
+  // instead: `pr` is required and non-nullable in each, and their comment text is entirely about
+  // that PR, so they are PR-born on exactly escalateNeedsHuman's own terms. They are no longer
+  // separate label sites at all, which is why this file's own count assertions moved.
   // 1b — the PO decomposition path's genuine give-ups (distinct from the class-6 fence above).
   "loop/decompose.ts#0": {
     bucket: "needs-human",
@@ -450,7 +443,7 @@ test("#397 AC: EVERY escalation write site in engine source is classified into e
   }
 });
 
-test("#397 AC: the corrected site inventory — 8 PR-side label writes, 30 issue-side (#398 moved fix-response's escalation to the PR and deleted its issue twin, and split escalateNeedsHuman's single write into the shared carrier writer's two arms), and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
+test("#397 AC: the corrected site inventory — 8 PR-side label writes, 28 issue-side (#398 moved fix-response's escalation to the PR and deleted its issue twin, and folded escalateNeedsHuman/review-disputed/review-non-convergent into the shared carrier writer's two arms), and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
   const sites = scanEscalationSites();
   const labelSites = sites.filter(
     (s) => SITE_INVENTORY[s.key]!.src.includes("addLabel(") || SITE_INVENTORY[s.key]!.src.includes("addPRLabel("),
@@ -463,8 +456,8 @@ test("#397 AC: the corrected site inventory — 8 PR-side label writes, 30 issue
   );
   assert.equal(
     labelSites.length - prSide.length,
-    30,
-    "issue-side escalation writes (#397's corrected count, minus #398's deleted fix-response issue twin, minus escalateNeedsHuman's own former issue write now folded into the shared carrier writer)",
+    28,
+    "issue-side escalation writes (#397's count, minus #398's deleted fix-response issue twin, minus the three issue writes — escalateNeedsHuman, review-disputed, review-non-convergent — now folded into the shared carrier writer)",
   );
   // The four sites the AC names explicitly because they carry no `gate:HUMAN:` reason prefix.
   for (const key of ["roles/merge-driver.ts#4", "roles/merge-driver.ts#5", "roles/merge-driver.ts#6", "loop/conductor.ts#0"]) {

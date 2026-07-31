@@ -189,7 +189,18 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async mergePR(pr: number, headOid: string): Promise<void> {
     this.merged.push([pr, headOid]);
   }
+  /** #398: the PR-side twins of `throwOnAddIssueComment` / `ambiguousAddIssueComment` — a
+   *  PR-born escalation's comment now goes here, so its failure legs have to be simulable on
+   *  this carrier too (same two distinct outcomes: a CONFIRMED failure where nothing lands, and
+   *  the AMBIGUOUS one where GitHub created the comment but the client still saw an error). */
+  throwOnAddPRComment = false;
+  ambiguousAddPRComment = false;
   override async addPRComment(pr: number, body: string): Promise<void> {
+    if (this.ambiguousAddPRComment) {
+      this.prComments.push([pr, body]);
+      throw new Error("simulated ambiguous forge failure (client timeout, server may have succeeded)");
+    }
+    if (this.throwOnAddPRComment) throw new Error("simulated forge failure");
     this.prComments.push([pr, body]);
   }
   /** #246 review round 1 (C3): lets a test simulate a transient issue-comment-post failure
@@ -274,6 +285,16 @@ class FakeForge extends UnstubbedForge implements IForge {
    *  observe a comment the fake just "posted", the same way GithubForge's real read would. */
   override async getIssueComments(n: number) {
     return this.issueComments.filter(([issue]) => issue === n).map(([, body]) => ({ login: "sapwood", createdAt: "t", body }));
+  }
+  /** #398: the PR-side twin — reflects `prComments` (the array `addPRComment` writes to) so a
+   *  PR-carried escalation's marker-check-before-post read can observe a comment this fake just
+   *  "posted", exactly as `getIssueComments` does for the issue carrier. */
+  override async getPRComments(n: number, cap: number) {
+    const comments = this.prComments
+      .filter(([pr]) => pr === n)
+      .map(([, body], i) => ({ id: `IC_${n}_${i}`, login: "sapwood", createdAt: "t", body }))
+      .slice(-cap);
+    return { comments, total: comments.length };
   }
   override async createIssue(): Promise<number> {
     return 0;
@@ -3062,7 +3083,8 @@ test("tick DRIVE (#451, AC1): a FIXABLE tick whose ONE unresolved current-head t
   assert.equal(row.state, "failed");
   assert.equal(row.fix_rounds ?? 0, 0, "zero fix rounds spent (AC3)");
   assert.equal(row.gated_escalation_labeled, 1);
-  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  assert.deepEqual(forge.prLabelsAdded, [[55, "needs-human"]]); // #398: PR-born escalation, PR carrier
+  assert.deepEqual(forge.labelsAdded, []);
   assert.equal(r.driven.length, 1);
   assert.equal(r.driven[0]!.kind, "needs-human");
   assert.match((r.driven[0] as { reason: string }).reason, /^review-disputed:/);
@@ -3109,8 +3131,8 @@ test("tick DRIVE (#451, AC4): the escalation comment carries all five evidence i
     mergeGate: gate,
     fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
   });
-  assert.equal(forge.issueComments.length, 1);
-  const comment = forge.issueComments[0]![1];
+  assert.equal(forge.prComments.length, 1);
+  const comment = forge.prComments[0]![1];
   assert.match(comment, /PRRT_evidence/, "thread id");
   assert.match(comment, /THE REVIEWER FINDING BODY/, "reviewer finding body");
   assert.match(comment, /THE PRODUCER REPLY VERBATIM/, "producer reply verbatim");
@@ -3154,6 +3176,7 @@ test("tick DRIVE (#451, AC2): a MIX of unresolved threads (one disputed, one sti
   assert.equal(r.driven[0]?.kind, "fixup", "the deliberate non-escalation — a leg still dispatches");
   assert.equal(st.getWorker("lane-a")?.fix_rounds, 1);
   assert.deepEqual(forge.labelsAdded, [], "no escalation this tick");
+  assert.deepEqual(forge.prLabelsAdded, [], "#398: nor on the carrier this escalation would now use");
   assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed"]), []);
   st.close();
 });
@@ -3254,6 +3277,7 @@ test("tick DRIVE (#451, AC6): a disputed record against an OLDER head does not t
   });
   assert.equal(r.driven[0]?.kind, "fixup", "stale-head dispute never escalates — normal FIXUP proceeds");
   assert.deepEqual(forge.labelsAdded, []);
+  assert.deepEqual(forge.prLabelsAdded, []); // #398: the carrier this escalation would use, also clean
   st.close();
 });
 
@@ -3279,6 +3303,7 @@ test("tick DRIVE (#451, AC6 unknown-head variant): an unreadable live head read 
   });
   assert.equal(r.driven[0]?.kind, "fixup", "unreadable head -> fail closed, never escalates");
   assert.deepEqual(forge.labelsAdded, []);
+  assert.deepEqual(forge.prLabelsAdded, []); // #398: ditto
   st.close();
 });
 
@@ -3303,6 +3328,7 @@ test("tick DRIVE (#451, §4a): zero live unresolved threads (the engine-agent ca
   });
   assert.equal(r.driven[0]?.kind, "fixup");
   assert.deepEqual(forge.labelsAdded, []);
+  assert.deepEqual(forge.prLabelsAdded, []); // #398: ditto
   st.close();
 });
 
@@ -3440,7 +3466,7 @@ test("tick DRIVE (#451, gate② round 3 P1): the terminal worker update + review
   const r2 = await tick(deps);
   assert.equal(r2.driven[0]?.kind, "needs-human");
   assert.equal(st.getWorker("lane-a")!.state, "failed");
-  assert.equal(forge.issueComments.length, 1, "no duplicate comment on the self-healed retry");
+  assert.equal(forge.prComments.length, 1, "no duplicate comment on the self-healed retry");
   st.close();
 });
 
@@ -3478,7 +3504,7 @@ test("tick DRIVE (#451, AC7): a review-disputed escalation is reclaimable throug
   // FakeMergeGate's static outcome re-derives the identical escalation immediately; that is
   // correct, not a test artifact. The claim this test pins is narrower and prior to that: the
   // GENERIC #147 mechanism reclaimed the row at all, with zero review-disputed-specific code.)
-  forge.issueLabelsByIssue[2] = [];
+  forge.prLabelsByPr[55] = []; // #398: the human clears the carrier the escalation used — the PR
   const r2 = await tick({
     now: realClock,
     forge,
@@ -3489,6 +3515,46 @@ test("tick DRIVE (#451, AC7): a review-disputed escalation is reclaimable throug
     fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
   });
   assert.deepEqual(r2.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-a", issue: 2, pr: 55, attempt: 1 }]);
+  st.close();
+});
+
+test("#398 (review round 2): a review-disputed escalation is PR-BORN — label AND adjudication comment land on the PR, the issue stays clean, and the receipt names the carrier", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  forge.prStatus = { ...forge.prStatus, headOid: "head-2" };
+  forge.reviewThreadsOverride = {
+    threads: [
+      { id: "PRRT_1", isResolved: false, commentsComplete: true, comments: [{ author: "codex", body: "finding", createdAt: "t0" }] },
+    ],
+    pageCapped: false,
+  };
+  seedFixResponseQueued(st, "lane-a", 2, 55, "head-2", [{ threadId: "PRRT_1", resolution: "disputed", reply: "disagree" }]);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = disputedGate();
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  // `pr` is a required, non-nullable parameter here and the comment text is entirely about that
+  // PR — this is the same PR-born shape as escalateNeedsHuman, so it takes the same carrier.
+  assert.deepEqual(forge.prLabelsAdded, [[55, "needs-human"]]);
+  assert.deepEqual(forge.labelsAdded, []);
+  assert.deepEqual(forge.issueComments, [], "the adjudication instruction follows the label onto the PR");
+  assert.equal(forge.prComments.length, 1);
+  assert.match(forge.prComments[0]![1], /every unresolved review thread on the current head/);
+  assert.match(forge.prComments[0]![1], /from this pull request/, "the removal instruction names the object that carries the label");
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.gated_escalation_labeled, 1);
+  assert.equal(row.gated_escalation_carrier, "pr");
+  const payload = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed"])[0]!.payload as { carrier: string };
+  assert.equal(payload.carrier, "pr", "the reconciler reads the carrier off this payload — without it, a clean issue false-clears");
   st.close();
 });
 
@@ -3505,7 +3571,7 @@ test("tick DRIVE (#451, forge-write-failure ordering): a label-write failure lea
     pageCapped: false,
   };
   seedFixResponseQueued(st, "lane-a", 2, 55, "head-2", [{ threadId: "PRRT_1", resolution: "disputed", reply: "disagree" }]);
-  forge.throwOnAddLabel = true;
+  forge.throwOnAddPRLabel = true; // #398: the carrier this escalation writes
   const gate = new FakeMergeGate();
   gate.outcomes[55] = disputedGate();
   const r = await tick({
@@ -3539,7 +3605,7 @@ test("tick DRIVE (#451, gate② P3c): a comment-write failure (label already lan
     pageCapped: false,
   };
   seedFixResponseQueued(st, "lane-a", 2, 55, "head-2", [{ threadId: "PRRT_1", resolution: "disputed", reply: "disagree" }]);
-  forge.throwOnAddIssueComment = true;
+  forge.throwOnAddPRComment = true; // #398: the carrier this escalation comments on
   const gate = new FakeMergeGate();
   gate.outcomes[55] = disputedGate();
   const r = await tick({
@@ -3560,7 +3626,7 @@ test("tick DRIVE (#451, gate② P3c): a comment-write failure (label already lan
     [],
     "no success event without a successful comment write",
   );
-  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]], "the label DID land — this is the ordering-after-label leg");
+  assert.deepEqual(forge.prLabelsAdded, [[55, "needs-human"]], "the label DID land — this is the ordering-after-label leg");
   const failedCommentEvents = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed-comment-failed"]);
   assert.equal(failedCommentEvents.length, 1);
   assert.equal((failedCommentEvents[0]!.payload as { headOid: string }).headOid, "head-2");
@@ -3580,7 +3646,7 @@ test("tick DRIVE (#451, gate② P1): a comment-write failure that keeps failing 
     pageCapped: false,
   };
   seedFixResponseQueued(st, "lane-a", 2, 55, "head-2", [{ threadId: "PRRT_1", resolution: "disputed", reply: "disagree" }]);
-  forge.throwOnAddIssueComment = true;
+  forge.throwOnAddPRComment = true;
   const gate = new FakeMergeGate();
   gate.outcomes[55] = disputedGate();
   const deps = {
@@ -3646,8 +3712,8 @@ test("tick DRIVE (#451, gate② P1): the assembled comment stays under GitHub's 
     fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
   });
   assert.equal(r.driven[0]?.kind, "needs-human", "the comment posts successfully — no permanent wedge");
-  assert.equal(forge.issueComments.length, 1);
-  const comment = forge.issueComments[0]![1];
+  assert.equal(forge.prComments.length, 1);
+  const comment = forge.prComments[0]![1];
   assert.ok(comment.length < 65_536, `comment length ${comment.length} must stay under GitHub's limit`);
   assert.match(comment, /truncated/, "the cut is marked, never silent");
   st.close();
@@ -3666,7 +3732,7 @@ test("tick DRIVE (#451, gate② round 3 P2): a label-write failure that keeps fa
     pageCapped: false,
   };
   seedFixResponseQueued(st, "lane-a", 2, 55, "head-2", [{ threadId: "PRRT_1", resolution: "disputed", reply: "disagree" }]);
-  forge.throwOnAddLabel = true;
+  forge.throwOnAddPRLabel = true;
   const gate = new FakeMergeGate();
   gate.outcomes[55] = disputedGate();
   const deps = {
@@ -3714,7 +3780,7 @@ test("tick DRIVE (#451, gate② round 3 P2): an AMBIGUOUS comment-write failure 
     pageCapped: false,
   };
   seedFixResponseQueued(st, "lane-a", 2, 55, "head-2", [{ threadId: "PRRT_1", resolution: "disputed", reply: "disagree" }]);
-  forge.ambiguousAddIssueComment = true;
+  forge.ambiguousAddPRComment = true;
   const gate = new FakeMergeGate();
   gate.outcomes[55] = disputedGate();
   const deps = {
@@ -3728,13 +3794,13 @@ test("tick DRIVE (#451, gate② round 3 P2): an AMBIGUOUS comment-write failure 
   };
   const r1 = await tick(deps);
   assert.equal(r1.driven[0]?.kind, "queued", "the client-visible outcome is still a failure this tick");
-  assert.equal(forge.issueComments.length, 1, "but the comment DID land server-side");
+  assert.equal(forge.prComments.length, 1, "but the comment DID land server-side");
   assert.equal(st.getWorker("lane-a")!.state, "driving");
 
   // The client's next retry must not duplicate it — the marker-check finds it and skips the post.
   const r2 = await tick(deps);
   assert.equal(r2.driven[0]?.kind, "needs-human", "the marker-check finds it already posted -> proceeds straight to success");
-  assert.equal(forge.issueComments.length, 1, "no duplicate comment");
+  assert.equal(forge.prComments.length, 1, "no duplicate comment");
   assert.equal(st.getWorker("lane-a")!.state, "failed");
   st.close();
 });
@@ -4308,6 +4374,7 @@ test("tick DRIVE (#375): fixable + round budget exceeded -> the fix leg is EXEMP
   assert.equal(row.fix_rounds, 1);
   assert.equal(sup.resumeCalls.length, 1, "the fix leg WAS dispatched despite round spend > roundBudgetUsd");
   assert.deepEqual(forge.labelsAdded, []); // no escalation — this is a normal rework dispatch
+  assert.deepEqual(forge.prLabelsAdded, []); // #398: nor on the PR carrier
   assert.equal(r.driven[0]!.kind, "fixup");
   st.close();
 });
@@ -4366,7 +4433,8 @@ test("tick DRIVE (#450, recurrence): a shared finding whose path the preceding f
   assert.equal(row.state, "failed");
   assert.equal(row.fix_rounds, 1, "zero further fix rounds spent on a stalled lane");
   assert.equal(row.gated_escalation_labeled, 1);
-  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  assert.deepEqual(forge.prLabelsAdded, [[55, "needs-human"]]); // #398: PR-born escalation, PR carrier
+  assert.deepEqual(forge.labelsAdded, []);
   assert.equal(sup.resumeCalls.length, 0, "no fix leg dispatched");
   const nonConvergent = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]);
   assert.equal(nonConvergent.length, 1);
@@ -4521,6 +4589,21 @@ test("tick DRIVE (#450, flat): non-decreasing finding count for two consecutive 
   assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-a", issue: 2, pr: 55, reason: "review-non-convergent:flat" }]);
   const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]);
   assert.equal((events[0]!.payload as { signal: string }).signal, "flat");
+  // #398 (review round 2): this escalation is PR-BORN — `pr` is required and non-nullable here and
+  // the comment is entirely about that PR, exactly escalateNeedsHuman's shape — so label AND
+  // comment land on the PR and the issue stays clean. Asserted on THIS fixture rather than a
+  // hand-rolled twin: it is the one that deterministically reaches the stall verdict.
+  assert.deepEqual(forge.prLabelsAdded, [[55, "needs-human"]]);
+  assert.deepEqual(forge.labelsAdded, []);
+  assert.deepEqual(forge.issueComments, []);
+  assert.match(forge.prComments[0]![1], /is not converging/);
+  assert.match(forge.prComments[0]![1], /from this pull request/, "the removal instruction names the object carrying the label");
+  assert.equal(st.getWorker("lane-a")!.gated_escalation_carrier, "pr");
+  assert.equal(
+    (events[0]!.payload as { carrier: string }).carrier,
+    "pr",
+    "the reconciler reads the carrier off this payload — without it, a permanently-clean issue false-clears the escalation",
+  );
   st.close();
 });
 
@@ -4822,8 +4905,8 @@ test("tick DRIVE (#450, escalation comment content): cites the signal, both roun
     mergeGate: gate,
     fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
   });
-  assert.equal(forge.issueComments.length, 1);
-  const comment = forge.issueComments[0]![1];
+  assert.equal(forge.prComments.length, 1);
+  const comment = forge.prComments[0]![1];
   assert.match(comment, /\*\*recurrence\*\*/, "the signal name");
   assert.match(comment, new RegExp(keyA.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "round r-1's finding key");
   assert.match(comment, /adjudication principle 4/i, "design re-entry citation");
@@ -4867,7 +4950,7 @@ test("tick DRIVE (#450, gated reclaim): a review-non-convergent escalation is re
   assert.equal(st.gatedFailedWorkers().length, 1, "visible to GATED RECLAIM's own read path");
 
   // A human clears the label — the existing #147 mechanism, unmodified, reclaims it.
-  forge.issueLabelsByIssue[2] = [];
+  forge.prLabelsByPr[55] = []; // #398: the human clears the carrier the escalation used — the PR
   const r2 = await tick({
     now: realClock,
     forge,
@@ -4929,7 +5012,7 @@ test("tick DRIVE (#450, gate② P1): stall-escalate -> human clears -> #147 gate
   // `gatherFixDiffPaths`' own round-1 branch computes once it correctly sees NO preceding
   // `drive-fixup` THIS episode.
   forge.changedFiles = { files: [{ filename: "src/human-fix.ts" }], complete: true };
-  forge.issueLabelsByIssue[2] = [];
+  forge.prLabelsByPr[55] = []; // #398: the human clears the carrier the escalation used — the PR
 
   const r2 = await tick(deps);
   assert.deepEqual(r2.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-a", issue: 2, pr: 55, attempt: 1 }]);
@@ -4994,7 +5077,7 @@ test("tick DRIVE (#450, gate② P2): the escalation-comment marker is keyed on h
   };
   const r1 = await tick(deps);
   assert.equal((r1.driven[0] as { reason: string }).reason, "review-non-convergent:recurrence");
-  assert.equal(forge.issueComments.length, 1);
+  assert.equal(forge.prComments.length, 1);
   assert.equal(st.getWorker("lane-a")!.state, "failed");
 
   // Isolates the MARKER's own discriminating behavior from #450 gate② P1's episode-boundary fix
@@ -5005,16 +5088,16 @@ test("tick DRIVE (#450, gate② P2): the escalation-comment marker is keyed on h
   // the scenario the marker's own key must not suppress — "independently of P1 it is still wrong"
   // (gate② review's own words).
   st.upsertWorker({ ...st.getWorker("lane-a")!, state: "driving", ended_at: null, gated_escalation_labeled: 0 });
-  forge.issueLabelsByIssue[2] = [];
+  forge.prLabelsByPr[55] = []; // #398: the human clears the carrier the escalation used — the PR
   forge.prReviewData = { ...forge.prReviewData, headOid: "H3", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
   forge.compareResults["H1...H3"] = { files: [{ filename: "src/a.ts" }], complete: true };
 
   const r2 = await tick(deps);
   assert.equal((r2.driven[0] as { reason: string }).reason, "review-non-convergent:recurrence");
-  assert.equal(forge.issueComments.length, 2, "a SECOND, fresh comment — never suppressed by the first escalation's marker");
+  assert.equal(forge.prComments.length, 2, "a SECOND, fresh comment — never suppressed by the first escalation's marker");
   assert.notEqual(
-    forge.issueComments[1]![1],
-    forge.issueComments[0]![1],
+    forge.prComments[1]![1],
+    forge.prComments[0]![1],
     "the two comments carry DIFFERENT markers (different head), so neither's live-read suppresses the other",
   );
   assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]).length, 2);
@@ -5043,7 +5126,7 @@ test("tick DRIVE (#450, gate② P3a): a label-write failure leaves the row drivi
   });
   forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
   forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
-  forge.throwOnAddLabel = true;
+  forge.throwOnAddPRLabel = true;
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
   const r = await tick({
@@ -5084,7 +5167,7 @@ test("tick DRIVE (#450, gate② P3a): a comment-write failure (label already lan
   });
   forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
   forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
-  forge.throwOnAddIssueComment = true;
+  forge.throwOnAddPRComment = true;
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
   const r = await tick({
@@ -5105,7 +5188,7 @@ test("tick DRIVE (#450, gate② P3a): a comment-write failure (label already lan
     [],
     "no success event without a successful comment write",
   );
-  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]], "the label DID land — this is the ordering-after-label leg");
+  assert.deepEqual(forge.prLabelsAdded, [[55, "needs-human"]], "the label DID land — this is the ordering-after-label leg");
   const failedCommentEvents = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent-comment-failed"]);
   assert.equal(failedCommentEvents.length, 1);
   assert.equal((failedCommentEvents[0]!.payload as { fixRounds: number }).fixRounds, 1);
@@ -5130,7 +5213,7 @@ test("tick DRIVE (#450, gate② P3a): a comment-write failure that keeps failing
   });
   forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
   forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
-  forge.throwOnAddIssueComment = true;
+  forge.throwOnAddPRComment = true;
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
   const deps = {
@@ -5179,7 +5262,7 @@ test("tick DRIVE (#450, gate② P3a): a label-write failure that keeps failing a
   });
   forge.prReviewData = { ...forge.prReviewData, headOid: "H2", unresolvedThreads: 1, threads: [cvThread("TA", "src/a.ts", "dA")] };
   forge.compareResults["H1...H2"] = { files: [{ filename: "src/a.ts" }], complete: true };
-  forge.throwOnAddLabel = true;
+  forge.throwOnAddPRLabel = true;
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
   const deps = {
