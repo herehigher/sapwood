@@ -367,6 +367,76 @@ export function priorFixLegForVerdict(state: Pick<State, "eventsSince">, worker:
   return tripped;
 }
 
+/** #383 round 2 (PM P2) + round 3 (Codex secondary review P2 x2): the events that end a
+ *  `drive-queued` STEADY-STATE episode for a (worker, pr) — tick()'s reset boundary for the
+ *  latest-wins dedupe below. Same-kind-only comparison conflates "the last time we announced
+ *  this state" with "the state we most recently announced": a lane can leave "queued", do
+ *  something else, and come BACK to the identical reason string, and that recurrence must still
+ *  announce. Comparing the last `drive-queued` event's id against the MAX id of this set
+ *  (scoped to the same (worker, pr)) is how tick() tells "still the same observed episode" apart
+ *  from "a genuinely new one" — mirrors `priorFixLegForVerdict`'s own event-id-ordered-scan
+ *  discipline above, just phrased as a max-id comparison instead of a linear fold.
+ *   - `fix-leg-started`: appended INSIDE `startFixLeg` (conductor.ts:536) the moment the lane's
+ *     row flips to `fixing` — BEFORE the FIXUP branch's own `drive-fixup` append below. Round 2
+ *     only reset on `drive-fixup`, which left a real crash window open (round 3, Codex P2): a
+ *     kill -9 landing after the `fixing` upsert + `fix-leg-started` but before `drive-fixup`
+ *     leaves the excursion with NO reset event on record under the round-2 set, so a WAIT reason
+ *     that recurs once the leg is later rescued/completed stays wrongly suppressed. Listing
+ *     `fix-leg-started` directly closes that window — it is the earliest fact ANY fix-leg
+ *     excursion durably leaves behind, `drive-fixup` or not.
+ *   - `drive-fixup`: the lane left "queued" to dispatch a fix leg. Its eventual return to
+ *     `driving` commonly re-triggers a fresh review (the pin-clear on fixing->driving), and once
+ *     that trigger is itself awaited, the reason string is often the SAME WAIT_REVIEW shape as
+ *     before the excursion — a fresh wait, not the one already announced. Kept alongside
+ *     `fix-leg-started` above (harmless redundancy — MAX() over the set only ever picks the
+ *     later of the two for a completed leg).
+ *   - `fix-leg-resumed`: a crash-continuation of that SAME fix leg (RESUME phase) — later in the
+ *     same excursion as drive-fixup, included for the identical reason.
+ *   - `lane-revived`: a park-recovery reentry (#447) — the first queued observation after a park
+ *     episode is a fresh one, never a continuation of whatever was (or wasn't) announced before
+ *     the park.
+ *   - `gated-reentry` (round 3, Codex P2): GATED RECLAIM's failed->driving transition
+ *     (conductor.ts:2593-2604) — it explicitly CLEARS the review-trigger pin and re-enters DRIVE
+ *     fresh. The classic driver then posts a brand-new trigger, and that trigger's own reason
+ *     ("review-triggered", then again "gate-pending:WAIT_REVIEW" once it's awaited) can be
+ *     BYTE-IDENTICAL to whatever was last announced before the escalation-then-human-release
+ *     cycle. Suppressing that recurrence is exactly the F34 invisibility class this repo already
+ *     spent a batch killing — a human just intervened; the next observation must be heard.
+ *  All five verified present on `main` and carrying `worker`+`pr` at the exact
+ *  `$.worker`/`$.pr` payload paths this file's own `maxEventIdForKinds` queries (conductor.ts's
+ *  own fix-leg-started/drive-fixup/fix-leg-resumed/gated-reentry appendEvent calls; reconcile.ts's
+ *  lane-revived). */
+const DRIVE_QUEUED_RESET_KINDS = ["fix-leg-started", "drive-fixup", "fix-leg-resumed", "lane-revived", "gated-reentry"];
+
+/** #383 round 2 (PM P2) + round 3 (Codex secondary review P2 x2): the events that end a
+ *  `fix-leg-dispatch-blocked` episode. Round 2 claimed `drive-fixup` was the ONE way out for a
+ *  still-`fixable` lane — that claim was too narrow (round 3, Codex P2 x2): a cleared admission
+ *  block can also reach a real dispatch ATTEMPT that then fails, or the lane can leave and later
+ *  re-enter this branch via a completely different door.
+ *   - `drive-fixup`: the block cleared and the leg actually dispatched — the round-2 case.
+ *   - `fix-leg-started` (round 3): same crash-window reasoning as `DRIVE_QUEUED_RESET_KINDS`
+ *     above — it fires (conductor.ts:536) strictly BEFORE `drive-fixup` in the very same
+ *     dispatch, so it independently closes the "upsert landed, drive-fixup didn't" crash window
+ *     for this event too. Kept alongside `drive-fixup` for the same harmless-redundancy reason.
+ *   - `fix-leg-dispatch-failed` (round 3, Codex P2): `startFixLeg`'s `resume()` throwing
+ *     (conductor.ts:3025-3031) proves the admission block ALREADY cleared and a dispatch was
+ *     genuinely attempted — the lane stays `driving`, un-upserted, but the OLD block episode is
+ *     over regardless of whether the attempt itself succeeded. A LATER re-block with the
+ *     identical `blockReason` (PAUSE reapplied after a failed attempt, same shape as the
+ *     round-2 successful-dispatch case) must still announce.
+ *   - `gated-reentry` (round 3, judged by the SAME criterion as `DRIVE_QUEUED_RESET_KINDS`):
+ *     INCLUDED. A `fixable`+blocked lane can be escalated to `failed` by an ENTIRELY SEPARATE
+ *     gate outcome on a later tick (e.g. a HUMAN verdict, or the fix-rounds-cap ESCALATE branch
+ *     — neither is reachable FROM the blocked branch itself, which always stays `driving`, but
+ *     both are reachable for the same (worker, pr) on a different tick's fresh gate read), then
+ *     GATED-RECLAIMed back to `driving` by a human clearing that escalation. That reclaim is not
+ *     merely "more of the same block" — it is a human-mediated round trip through a terminal
+ *     state, exactly the intervening event class this file already treats as reset-worthy
+ *     everywhere else. A `fixable`+blocked recurrence with the identical `blockReason` AFTER
+ *     that round trip must announce, not dedupe against whatever was recorded before the
+ *     escalation. */
+const FIX_LEG_DISPATCH_BLOCKED_RESET_KINDS = ["drive-fixup", "fix-leg-started", "fix-leg-dispatch-failed", "gated-reentry"];
+
 /** #375 AC2: is a `driving` lane TERMINAL-for-drain — i.e. can it NEVER make forward progress
  *  while DRIVE stays frozen (an active kill switch skips the whole DRIVE loop entirely, #69)?
  *  A `driving` lane has no live process — nothing for supervisor.requestHandoff/reclaim to act
@@ -2737,6 +2807,29 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // head, non-decisive, past both the silence threshold and any active failover window.
       // The PR label is the latch: once it lands, the next live gate read sees it and follows
       // the existing HUMAN -> gated-reentry path. This tick remains queued/driving.
+      //
+      // #383 evaluated this site for the same per-tick steady-state spam as drive-queued/
+      // fix-leg-dispatch-blocked and deliberately left it undeduped: unlike those two,
+      // `reviewSilenceDuration` (merge-driver.ts) itself returns null once `needsHumanLabelPresent`
+      // reads true on the NEXT freshly-fetched PR data — the label this branch just wrote closes
+      // the loop on its own, so the event is already transition-shaped by construction (one
+      // append per silence episode, contingent only on the addPRLabel write above succeeding),
+      // with no separate durable-log dedup needed.
+      //
+      // #383 round 2 (PM P3) + round 3 (Codex secondary review P3 — round 2's note above
+      // mis-described this): the append below is guarded by `if (labeled)`, so a HARD
+      // `addPRLabel` failure (the `catch` right below) produces ZERO `review-silence-escalated`
+      // events — not one per retry. There is no per-tick spam here to accept; round 2's "N
+      // label-write attempts" framing did not match the code. The real accepted residual is the
+      // opposite shape: an AMBIGUOUS failure — the label write actually lands on GitHub but the
+      // client call still reports an error (a timeout after the request went through, say) —
+      // leaves `labeled = false` here, so this episode gets NO durable audit row at all, even
+      // though `needsHumanLabelPresent` will read true on the very next fetch (the label IS
+      // there) and silently close the window from that point on. Left as-is: the label itself
+      // (the load-bearing latch HUMAN/gated-reentry actually key off) still lands correctly
+      // either way; only the AUDIT TRAIL for that one escalation is missing, a narrower and
+      // strictly less harmful gap than a stuck gate. Revisit only if a real run shows this
+      // specific ambiguous-failure gap actually hurts.
       if (outcome.reviewSilenceEscalation) {
         const s = outcome.reviewSilenceEscalation;
         let labeled = false;
@@ -2821,14 +2914,41 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           // (shared with #246's fixLegResume-unwired degrade, C1) for the full rationale.
           driven.push(await escalateNeedsHuman(forge, state, cfg, w, pr, outcome.reason, iso));
           break;
-        case "queued":
+        case "queued": {
           // Stays driving — retried next tick. Covers gate-pending (WAIT), a review-unavailable
           // (rate-limit/timeout) signal (#13 requires the latter to queue, never skip/soften
           // gate②), and a freshly-posted review trigger (#55 P1-B "review-triggered" — the pin
           // was just recorded into State above; next tick re-reads it and proceeds to gating).
-          state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+          //
+          // #383 (F4): driveOne reports "queued" STATELESSLY on EVERY DRIVE pass that lands here
+          // (it has no memory), so an unconfirmed append-every-tick reappended the identical
+          // reason all the way through a lane's whole WAIT dwell — measured ~30 appends in 600ms
+          // against one WAIT-gated lane. Same paradigm as #294's pr-held/pr-released and #54's
+          // reviewer-fallback-* above: dedupe the EVENT, not the signal, against the durable log.
+          // Announce only when `reason` differs from the last drive-queued recorded for this
+          // (worker, pr) — steady state re-emits nothing, a reason change (e.g. a fresh review
+          // trigger swapping in) re-emits, and a kill -9 between the observation and the next
+          // tick re-reads the same durable answer and re-emits nothing either (the log IS the
+          // memory — no in-process flag to lose). #395/#405: this cannot regress the liveness
+          // watchdog — it samples the TUPLE (maxEventId, last_tick_at), and last_tick_at
+          // advances every tick regardless of what this branch appends (see watchdog.ts).
+          //
+          // Round 2 (PM P2): comparing REASONS alone conflated "the last time we announced this
+          // state" with "the state we most recently announced" — a lane that leaves "queued" for
+          // a fix-leg excursion (or a park-recovery reentry) and comes BACK to the identical
+          // reason string is a genuinely NEW episode, and the old comparison silently ate it.
+          // `sameEpisode` additionally requires the last drive-queued's id to be NEWER than every
+          // DRIVE_QUEUED_RESET_KINDS event for this (worker, pr) — a reset in between forces a
+          // re-announcement even when the reason string repeats exactly.
+          const lastQueued = state.lastDriveQueuedEvent(w.name, pr);
+          const queuedResetId = state.maxEventIdForKinds(DRIVE_QUEUED_RESET_KINDS, w.name, pr);
+          const sameEpisode = lastQueued != null && lastQueued.id > queuedResetId && lastQueued.reason === outcome.reason;
+          if (!sameEpisode) {
+            state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+          }
           driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
           break;
+        }
         case "stopped":
           // produce-pr-and-stop: gates passed but the driver never merges. Stays driving so a
           // human sees it (sapwood status / the PR itself) and merges by hand.
@@ -2898,7 +3018,25 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             });
             if (admissionBlock != null) {
               const reason = `fix-leg-admission-blocked:${admissionBlock}`;
-              state.appendEvent("fix-leg-dispatch-blocked", { worker: w.name, issue: w.issue, pr, blockReason: admissionBlock });
+              // #383 (F30): same steady-state shape and same fix as drive-queued above — this
+              // branch re-evaluates every tick a lane stays blocked, and a real 90-minute llm
+              // park measured 77 duplicate events (2757-2833) for one unchanged blockReason.
+              // Announce only when blockReason differs from the last fix-leg-dispatch-blocked
+              // recorded for this (worker, pr); see drive-queued's own comment for the full
+              // event-log-as-memory/crash-rerun/watchdog rationale, identical here.
+              //
+              // Round 2 (PM P2): same episode-reset fix as drive-queued above, scoped to the ONE
+              // event that can end a block episode here — `drive-fixup` (FIX_LEG_DISPATCH_BLOCKED_
+              // RESET_KINDS, above). PAUSE applied -> blocked -> PAUSE removed -> leg dispatches
+              // (drive-fixup) -> PAUSE re-applied is a NEW episode with the identical blockReason
+              // ("paused"), and the old same-kind-only comparison silently ate it — exactly the
+              // invisibility class this repo's F34 batch already spent a round killing.
+              const lastBlocked = state.lastFixLegDispatchBlockedEvent(w.name, pr);
+              const blockedResetId = state.maxEventIdForKinds(FIX_LEG_DISPATCH_BLOCKED_RESET_KINDS, w.name, pr);
+              const sameBlockEpisode = lastBlocked != null && lastBlocked.id > blockedResetId && lastBlocked.blockReason === admissionBlock;
+              if (!sameBlockEpisode) {
+                state.appendEvent("fix-leg-dispatch-blocked", { worker: w.name, issue: w.issue, pr, blockReason: admissionBlock });
+              }
               driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason });
               // #375 review round 1 (P1): ONLY a ceiling-caused block belongs in the observed
               // set the CEILING section's drain consults below — `paused`/`park`/`run-spend-stop`

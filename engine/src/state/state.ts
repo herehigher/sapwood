@@ -1974,6 +1974,83 @@ export class State {
     return { kind: row.kind, mode: p.mode ?? "", pr: p.pr ?? -1, head: p.head ?? "" };
   }
 
+  /** #383 (F4), round 2 (PM P2): the most recent `drive-queued` event's id+REASON recorded for
+   *  `worker`'s (worker, pr) lane, or null if none has ever been recorded — conductor.ts tick()'s
+   *  dedup source for the DRIVE-queued steady-state event, the same event-log-as-memory pattern
+   *  `lastHoldEvent` and `lastReviewerFallbackEvent` use above (#169/#294: dedupe the EVENT, not
+   *  the signal). driveOne reports "queued" STATELESSLY on every DRIVE pass a lane sits on a
+   *  gate-pending outcome — without this, an unchanged reason re-appends identically every tick
+   *  (measured ~30 appends in 600ms against a single WAIT-gated lane). Scoped to (worker, pr),
+   *  not worker alone, for the same reason `lastHoldEvent` is: a lane repointed to a new PR must
+   *  not inherit the prior PR's last-queued reason.
+   *
+   *  Carries `id`, not just `reason` — round 1 compared reasons alone, which silently ate a
+   *  genuinely NEW episode that happens to repeat an earlier reason string after an intervening
+   *  dispatch (drive-fixup) or park-reentry (lane-revived). The id lets the caller compare
+   *  against `maxEventIdForKinds`'s episode-reset boundary; see `DRIVE_QUEUED_RESET_KINDS`
+   *  (conductor.ts) for which kinds count as a reset and why. */
+  lastDriveQueuedEvent(worker: string, pr: number): { id: number; reason: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, payload FROM events
+         WHERE kind = 'drive-queued'
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.pr') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker, pr) as { id: number; payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { reason?: string };
+    return p.reason == null ? null : { id: row.id, reason: p.reason };
+  }
+
+  /** #383 (F30), round 2 (PM P2): the same id+value dedup shape as `lastDriveQueuedEvent`, for
+   *  the `fix-leg-dispatch-blocked` steady-state event — a real 90-minute llm park measured 77
+   *  duplicate events (one unchanged blockReason) before round 1 existed, and round 1's
+   *  same-kind-only comparison itself silently ate a genuine RE-block (PAUSE removed, a fix leg
+   *  dispatches, PAUSE re-applied) because the blockReason string repeated. Keyed on the durable
+   *  payload's bare `blockReason` field (`paused`/`ceiling`/`park`/`run-spend-stop`), not the
+   *  FIXUP branch's own composed `fix-leg-admission-blocked:${blockReason}` string. Scoped to
+   *  (worker, pr) for the same lane-repointing reason `lastDriveQueuedEvent` is. Carries `id` for
+   *  the same episode-reset comparison — see `FIX_LEG_DISPATCH_BLOCKED_RESET_KINDS`
+   *  (conductor.ts). */
+  lastFixLegDispatchBlockedEvent(worker: string, pr: number): { id: number; blockReason: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, payload FROM events
+         WHERE kind = 'fix-leg-dispatch-blocked'
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.pr') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker, pr) as { id: number; payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { blockReason?: string };
+    return p.blockReason == null ? null : { id: row.id, blockReason: p.blockReason };
+  }
+
+  /** #383 round 2 (PM P2): the highest event id among `kinds`, scoped to this (worker, pr) — the
+   *  EPISODE-RESET boundary `lastDriveQueuedEvent`/`lastFixLegDispatchBlockedEvent`'s callers
+   *  compare their own last-announcement id against. Returns 0 (lower than any real event id,
+   *  same sentinel `laneEventRecorded`'s callers rely elsewhere) when none of `kinds` has ever
+   *  fired for this lane's PR — a same-kind announcement's id is then trivially > 0, so a lane
+   *  with no reset history behaves exactly like round 1 (compare reasons alone). See
+   *  `DRIVE_QUEUED_RESET_KINDS`/`FIX_LEG_DISPATCH_BLOCKED_RESET_KINDS` (conductor.ts) for the
+   *  concrete kind sets and why each belongs. */
+  maxEventIdForKinds(kinds: readonly string[], worker: string, pr: number): number {
+    if (kinds.length === 0) return 0;
+    const placeholders = kinds.map(() => "?").join(",");
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(MAX(id), 0) AS m FROM events
+         WHERE kind IN (${placeholders})
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.pr') = ?`,
+      )
+      .get(...kinds, worker, pr) as { m: number };
+    return row.m;
+  }
+
   // ── Engine cost ceiling + kill switch (#14) ───────────────────────────────────────────
 
   /** Record a completed worker's terminal cost (from stream-json, worker.ts). Call exactly
