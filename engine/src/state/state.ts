@@ -2323,11 +2323,20 @@ export class State {
       .run(nowIso, nowIso);
   }
 
-  /** Record a ceiling breach's first-detected time (INSERT OR IGNORE: re-detecting a
-   *  still-active breach on a later tick must NOT reset the drain-window clock). */
+  /** Record a ceiling breach: `at` is the FIRST-detected time (preserved across re-detections —
+   *  re-detecting a still-active breach on a later tick must NOT reset the drain-window clock),
+   *  while `reason` mirrors the CURRENT reason set (#431 round 3, codex P2 — the old INSERT OR
+   *  IGNORE froze the first tick's reasons, so a wall-clock breach joining an open daily-budget
+   *  one was invisible here, and after midnight status/dashboard kept promising "until
+   *  tomorrow" for a breach that actually needed a restart). Per the round-3 write rule
+   *  (conductor.ts's reconcileCeilingAnnouncements doc), this row is the MIRROR: the per-reason
+   *  entered/cleared events land first, and dedup reads only the log — never this row. */
   recordCeilingBreach(reasons: string[], now: Date): void {
     this.db
-      .prepare("INSERT OR IGNORE INTO ceiling_breach (id, reason, at) VALUES (1, ?, ?)")
+      .prepare(
+        `INSERT INTO ceiling_breach (id, reason, at) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET reason = excluded.reason`,
+      )
       .run(JSON.stringify(reasons), now.toISOString());
   }
 
@@ -2840,18 +2849,23 @@ export class State {
     return row ? { kind: row.kind, payload: JSON.parse(row.payload) as unknown } : undefined;
   }
 
-  /** #431 round 2: the single newest event among `kinds` — the id-ordered "which side of a
-   *  paired transition are we on" read (the same event-log-as-memory shape
-   *  latestHoldVisibilityEvent uses for pr-held/pr-released, #169/#294), here consumed by the
-   *  ceiling announcement pair (conductor.ts's announceCeilingBreachOnce/
-   *  announceCeilingClearedOnce). */
-  latestEventOfKinds(kinds: string[]): { kind: string; payload: unknown } | undefined {
-    if (kinds.length === 0) throw new Error("latestEventOfKinds: kinds must be non-empty");
-    const placeholders = kinds.map(() => "?").join(",");
+  /** #431 rounds 2-3: which side of the entered/cleared pair is newest FOR ONE CEILING REASON —
+   *  the id-ordered transition read (the same event-log-as-memory shape
+   *  latestHoldVisibilityEvent uses for pr-held/pr-released, #169/#294, and the same
+   *  json_extract payload filter that query already relies on). Round 3 (codex P2) scoped the
+   *  pair PER REASON: a single global pair could not represent "daily-budget cleared at
+   *  midnight while wall-clock stays open", losing both the departure receipt and the next
+   *  daily re-breach's announcement. Consumed by conductor.ts's reconcileCeilingAnnouncements. */
+  latestCeilingEventForReason(reason: string): "ceiling-breach-entered" | "ceiling-breach-cleared" | null {
     const row = this.db
-      .prepare(`SELECT kind, payload FROM events WHERE kind IN (${placeholders}) ORDER BY id DESC LIMIT 1`)
-      .get(...kinds) as { kind: string; payload: string } | undefined;
-    return row ? { kind: row.kind, payload: JSON.parse(row.payload) as unknown } : undefined;
+      .prepare(
+        `SELECT kind FROM events
+         WHERE kind IN ('ceiling-breach-entered', 'ceiling-breach-cleared')
+           AND json_extract(payload, '$.reason') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(reason) as { kind: "ceiling-breach-entered" | "ceiling-breach-cleared" } | undefined;
+    return row?.kind ?? null;
   }
 
   /** #395 item 2: the single latest event's id + kind (no payload — unlike latestEvent(kind)

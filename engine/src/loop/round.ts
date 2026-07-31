@@ -26,14 +26,13 @@ import { createProxyMint } from "../proxy/mint.js";
 import type { RoundPhase, RoundRow, State } from "../state/state.js";
 import { createHeartbeatGate } from "../util/heartbeat.js";
 import {
-  announceCeilingBreachOnce,
-  announceCeilingClearedOnce,
   type CeilingReason,
   escalatePark,
   evaluateCeiling,
   type FixLegResumeDeps,
   type MergeGate,
   probeForgeReachable,
+  reconcileCeilingAnnouncements,
   type Supervisor,
   type TickDeps,
   type TickResult,
@@ -976,21 +975,21 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         wallClockElapsedSec,
         maxWallClockSec: cfg.cost.maxWallClockSec,
       });
+      // #431 AC3, rounds 2-3: narrate the per-reason lifecycle EVENT-FIRST, then mirror the
+      // row — the round-3 write rule (reconcileCeilingAnnouncements' own doc; same order and
+      // same kill-window reasoning as tick()'s CEILING section, including receipt-BEFORE-delete
+      // on the clear side). Never silent again: F29's only trace was `park-wait-heartbeat
+      // {parked:false}` from this loop's own heartbeat.
+      reconcileCeilingAnnouncements(deps.state, ceilingReasons, {
+        wallClockElapsedSec,
+        maxWallClockSec: cfg.cost.maxWallClockSec,
+        dailySpendUsd: deps.state.dailySpendUsd(nowDate),
+        dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
+      });
       if (ceilingReasons.length > 0) {
-        // #431 AC3, round 2 (codex P2): announce EVENT-FIRST, then record — same order and same
-        // kill-window reasoning as tick()'s CEILING section (announceCeilingBreachOnce's own
-        // doc). Exactly once per episode; never silent again: F29's only trace was
-        // `park-wait-heartbeat {parked:false}` from this loop's own heartbeat.
-        announceCeilingBreachOnce(deps.state, ceilingReasons, {
-          wallClockElapsedSec,
-          maxWallClockSec: cfg.cost.maxWallClockSec,
-          dailySpendUsd: deps.state.dailySpendUsd(nowDate),
-          dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
-        });
         deps.state.recordCeilingBreach(ceilingReasons, nowDate);
       } else {
         deps.state.clearCeilingBreach();
-        announceCeilingClearedOnce(deps.state);
       }
 
       let llmGreenLight = false;

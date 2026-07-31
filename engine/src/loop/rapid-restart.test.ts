@@ -52,7 +52,13 @@ test("trip at the threshold: rapid-restart-detected + a durable park (dispatch-g
 
   const escalated = s.eventsAfterId(0, ["park-escalated"]);
   assert.equal(escalated.length, 1);
-  assert.deepEqual(escalated[0]!.payload, { source: RAPID_RESTART_PARK_SOURCE, channel: "local", triggerIssue: null });
+  assert.deepEqual(escalated[0]!.payload, {
+    source: RAPID_RESTART_PARK_SOURCE,
+    channel: "local",
+    triggerIssue: null,
+    // round 3: the episode identity rides in the payload — the log-keyed dedup/heal key.
+    enteredAt: park!.enteredAt,
+  });
 
   // #382 ordering: every detector event carries a HIGHER id than the last run-started — the
   // detection lands inside this run's replay group, never before the run boundary.
@@ -192,5 +198,58 @@ test("future-dated births never count (#431 round 2, codex P3): rows past the de
   const again = detectRapidRestart(s, mkCfg(), anHourBehind, silentLog);
   assert.equal(again.tripped, false);
   assert.equal(s.parkRow(RAPID_RESTART_PARK_SOURCE), null, "the manual clear sticks");
+  s.close();
+});
+
+test("heal-on-boot (#431 round 3, codex P3): latch set but NO park-escalated event (died between the two under round 2's order) — the log is repaired without touching the latch semantics", () => {
+  const s = new State(":memory:");
+  seedBirths(s, 5);
+  // Codex's exact reproduction state: detection + park + LATCH landed, the event did not.
+  s.appendEvent("rapid-restart-detected", { births: 5, windowSec: 600, maxBirths: 5 });
+  s.enterPark(
+    RAPID_RESTART_PARK_SOURCE,
+    "5 engine starts within 600s (threshold 5) — crash loop suspected",
+    null,
+    "2026-07-31T00:00:00.000Z",
+  );
+  s.recordParkEscalation(RAPID_RESTART_PARK_SOURCE, "2026-07-31T00:00:01.000Z");
+  assert.ok(s.parkRow(RAPID_RESTART_PARK_SOURCE)?.escalatedAt !== null);
+  assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 0, "the round-2 wedge: latched but never logged");
+
+  s.appendEvent("run-started", {}); // the next boot's own birth
+  const outcome = detectRapidRestart(s, mkCfg(), realNow, silentLog);
+  assert.equal(outcome.tripped, true);
+  const escalated = s.eventsAfterId(0, ["park-escalated"]);
+  assert.equal(escalated.length, 1, "the missing audit record is healed — the log is the fact, the latch only mirrors it");
+  assert.deepEqual(escalated[0]!.payload, {
+    source: RAPID_RESTART_PARK_SOURCE,
+    channel: "local",
+    triggerIssue: null,
+    enteredAt: "2026-07-31T00:00:00.000Z",
+  });
+  // And idempotent thereafter.
+  s.appendEvent("run-started", {});
+  detectRapidRestart(s, mkCfg(), realNow, silentLog);
+  assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1);
+  s.close();
+});
+
+test("heal-on-boot (#431 round 3): event present but latch null (died between event and latch under the NEW order) — the latch is mirrored from the log, never a duplicate event", () => {
+  const s = new State(":memory:");
+  seedBirths(s, 5);
+  s.appendEvent("rapid-restart-detected", { births: 5, windowSec: 600, maxBirths: 5 });
+  s.enterPark(RAPID_RESTART_PARK_SOURCE, "storm", null, "2026-07-31T00:00:00.000Z");
+  s.appendEvent("park-escalated", {
+    source: RAPID_RESTART_PARK_SOURCE,
+    channel: "local",
+    triggerIssue: null,
+    enteredAt: "2026-07-31T00:00:00.000Z",
+  });
+  assert.equal(s.parkRow(RAPID_RESTART_PARK_SOURCE)?.escalatedAt, null);
+
+  s.appendEvent("run-started", {});
+  detectRapidRestart(s, mkCfg(), realNow, silentLog);
+  assert.ok(s.parkRow(RAPID_RESTART_PARK_SOURCE)?.escalatedAt !== null, "the latch is mirrored from the log");
+  assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1, "no duplicate event — the log already carries the fact");
   s.close();
 });

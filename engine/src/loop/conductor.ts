@@ -144,46 +144,50 @@ export function drainEscalationDue(breachAtIso: string, nowMs: number, drainWind
   return (nowMs - Date.parse(breachAtIso)) / 1000 > drainWindowSec;
 }
 
-/** #431 AC3 (F29): the reason-bearing breach announcement — the F29 breach was INVISIBLE (the
- *  only signal was `park-wait-heartbeat {parked:false}`), so entering a ceiling wait now emits a
- *  `ceiling-breach-entered` event naming WHICH ceiling(s), the configured threshold, and the
- *  observed values, exactly ONCE per breach episode.
+/** #431 round 3: the ceilings the entered/cleared pair narrates. "kill-switch" is deliberately
+ *  absent — the switch has its own visibility and its own reasons row via drainThenEscalate. */
+const ANNOUNCEABLE_CEILINGS = ["daily-budget", "wall-clock"] as const;
+
+/** #431 AC3 (F29, rounds 2-3): the reason-bearing breach narration — the F29 breach was
+ *  INVISIBLE (the only signal was `park-wait-heartbeat {parked:false}`), so the ceiling-wait
+ *  paths now keep a PER-REASON entered/cleared pair in the event log, exactly one transition
+ *  event per fact.
  *
- *  #431 round 2 (codex P2): EVENT-FIRST, EVENT-LOG-DEDUPED — call strictly BEFORE
- *  recordCeilingBreach. Round 1 keyed the dedup on the breach ROW's first-detected `at` and
- *  appended after the row commit; a kill between the two left a row with no event, and a
- *  restarted process (fresh wall-clock anchor, no current breach) then CLEARED that row
- *  silently — a permanently unannounced episode. Now the episode's identity IS the event pair:
- *  `ceiling-breach-entered` opens it, `ceiling-breach-cleared` (announceCeilingClearedOnce
- *  below) closes it, and the dedup asks only "which side is newest" — the exact
- *  pr-held/pr-released transition-pair shape (#169/#294: dedupe the EVENT, not the signal).
- *  Kill-window truth table, by construction: killed after the event, before the row -> a
- *  still-breached restart re-records the row without a duplicate event, and a recovered
- *  restart closes the episode with `cleared` (the entered announcement survives — never a
- *  silent episode either way); the reverse window (row without event) is unrepresentable,
- *  because the event always lands first. Both ceiling-wait sites reference this: tick()'s
- *  CEILING section and round.ts's waitForDispatchClear (including its standby-wake re-entry). */
-export function announceCeilingBreachOnce(
-  state: Pick<State, "latestEventOfKinds" | "appendEvent">,
-  reasons: CeilingReason[],
+ *  THE WRITE RULE (round 3, stated once here, applied everywhere in this issue's machinery —
+ *  the ceiling row, and rapid-restart.ts's escalation latch): for any fact and its
+ *  receipt/latch/row, the LOG write goes FIRST; the row/latch is a MIRROR written after; and
+ *  dedup reads ONLY the log. A kill between the two writes then always leaves the log ahead of
+ *  the mirror — the next pass repairs the mirror from the log — and never the reverse, which
+ *  is the direction that silently loses facts (rounds 1-2 each had one such window: row-first
+ *  announcement, delete-before-receipt, latch-before-event).
+ *
+ *  PER REASON (round 3, codex P2): a single global pair could not represent overlapping
+ *  lifecycles — daily-budget opens at 23:59, wall-clock joins, midnight clears daily while
+ *  wall-clock stays: the global pair emitted nothing and the frozen row kept saying
+ *  "daily-budget" (status promising "until tomorrow" for a breach that needed a restart), and
+ *  a later daily re-breach under the still-open wall-clock was never announced. Each reason
+ *  now has its own lifecycle keyed in the log (State.latestCeilingEventForReason): a reason
+ *  JOINING the current set appends its `ceiling-breach-entered {reason, ...}`; a reason
+ *  LEAVING appends its `ceiling-breach-cleared {reason}` — including the total-clear case
+ *  (currentReasons = []) and a restart's fresh anchor closing a prior life's episodes. Callers
+ *  then mirror the row: recordCeilingBreach(currentReasons) on breach (reasons always current,
+ *  `at` preserved for the drain window), clearCeilingBreach() AFTER the receipts on total
+ *  clear. Both ceiling-wait sites go through here: tick()'s CEILING section and round.ts's
+ *  waitForDispatchClear (including its standby-wake re-entry). */
+export function reconcileCeilingAnnouncements(
+  state: Pick<State, "latestCeilingEventForReason" | "appendEvent">,
+  currentReasons: CeilingReason[],
   detail: { wallClockElapsedSec: number; maxWallClockSec: number; dailySpendUsd: number; dailyBudgetUsd: number },
 ): void {
-  const last = state.latestEventOfKinds(["ceiling-breach-entered", "ceiling-breach-cleared"]);
-  if (last?.kind === "ceiling-breach-entered") return; // this episode is already announced
-  state.appendEvent("ceiling-breach-entered", { reasons, ...detail });
-}
-
-/** #431 round 2 (codex P2): the pair's closing half — appended when a ceiling episode actually
- *  ENDS (the recovery transition, or a restart's fresh anchor clearing a prior life's stale
- *  row), and only then: with no open `entered` this is a no-op, so healthy steady-state ticks
- *  append nothing. This receipt is what makes "a fresh episode re-announces" true BY
- *  CONSTRUCTION: without it, the event log could not distinguish "still the same episode" from
- *  "recovered, then breached again". Call alongside every clearCeilingBreach on the two
- *  ceiling-wait paths. */
-export function announceCeilingClearedOnce(state: Pick<State, "latestEventOfKinds" | "appendEvent">): void {
-  const last = state.latestEventOfKinds(["ceiling-breach-entered", "ceiling-breach-cleared"]);
-  if (last?.kind !== "ceiling-breach-entered") return; // no open episode to close
-  state.appendEvent("ceiling-breach-cleared", {});
+  for (const reason of ANNOUNCEABLE_CEILINGS) {
+    const open = state.latestCeilingEventForReason(reason) === "ceiling-breach-entered";
+    const breachedNow = currentReasons.includes(reason);
+    if (breachedNow && !open) {
+      state.appendEvent("ceiling-breach-entered", { reason, ...detail });
+    } else if (!breachedNow && open) {
+      state.appendEvent("ceiling-breach-cleared", { reason });
+    }
+  }
 }
 
 /**
@@ -3275,12 +3279,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   let drainRequested: string[] = [];
   let escalated: string[] = [];
   if (ceilingBreached) {
-    // #431 AC3, round 2 (codex P2): announce EVENT-FIRST, then record — the announcement is the
-    // episode's durable identity (see announceCeilingBreachOnce's kill-window truth table), and
-    // both land BEFORE the (long, async) drain below so the breach is visible in the ledger the
-    // moment it is detected (drainThenEscalate's internal recordCeilingBreach call is INSERT OR
-    // IGNORE, so recording here first changes nothing about the drain window).
-    announceCeilingBreachOnce(state, ceilingReasons, {
+    // #431 AC3, rounds 2-3: narrate EVENT-FIRST (per-reason joins AND departures), then mirror
+    // the row with the CURRENT reason set — the round-3 write rule, stated once on
+    // reconcileCeilingAnnouncements. Both land BEFORE the (long, async) drain below so the
+    // breach is visible in the ledger the moment it is detected (drainThenEscalate's internal
+    // recordCeilingBreach call preserves the first-detected `at`, so the drain window is
+    // unaffected by recording here first).
+    reconcileCeilingAnnouncements(state, ceilingReasons, {
       wallClockElapsedSec: (nowDate.getTime() - processStartedAt.getTime()) / 1000,
       maxWallClockSec: cfg.cost.maxWallClockSec,
       dailySpendUsd: state.dailySpendUsd(nowDate),
@@ -3306,12 +3311,18 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     ));
   } else {
     // Resolved (daily cap rolled to a fresh day / wall-clock cfg raised / a restart's fresh
-    // anchor / kill switch lifted before this tick) -> clear so a future re-breach starts a
-    // fresh drain window, and close the episode in the ledger (#431 round 2: the `cleared`
-    // receipt is transition-only — a healthy steady-state tick appends nothing — and it is
-    // what re-arms announceCeilingBreachOnce for the next genuine episode).
+    // anchor / kill switch lifted before this tick) -> RECEIPT-FIRST, then delete the row
+    // (#431 round 3, codex P2: the round-2 order deleted first, so a kill between the two left
+    // neither row nor receipt and the stale `entered` suppressed the NEXT episode's
+    // announcement forever; receipt-first leaves row+receipt, which the next pass no-ops and
+    // deletes). The receipts are transition-only — a healthy steady-state tick appends nothing.
+    reconcileCeilingAnnouncements(state, [], {
+      wallClockElapsedSec: (nowDate.getTime() - processStartedAt.getTime()) / 1000,
+      maxWallClockSec: cfg.cost.maxWallClockSec,
+      dailySpendUsd: state.dailySpendUsd(nowDate),
+      dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
+    });
     state.clearCeilingBreach();
-    announceCeilingClearedOnce(state);
   }
 
   // ── PARK (#168): environment-failure self-healing, per source (PR #180 review P1-1). Read

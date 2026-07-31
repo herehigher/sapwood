@@ -784,12 +784,12 @@ test("touchLastTick (#431 AC1/AC2): the heartbeat advances per call and NOTHING 
   s.close();
 });
 
-test("recordCeilingBreach: first detection sticks (INSERT OR IGNORE) — a re-detect does not reset `at`", () => {
+test("recordCeilingBreach (#431 round 3): `at` sticks (drain-window anchor) while `reason` mirrors the CURRENT set — a joining/leaving ceiling is never frozen out of the row", () => {
   const s = mem();
   s.recordCeilingBreach(["daily-budget"], new Date("2026-07-06T00:00:00Z"));
-  s.recordCeilingBreach(["daily-budget", "wall-clock"], new Date("2026-07-06T01:00:00Z")); // later tick, still breached
+  s.recordCeilingBreach(["daily-budget", "wall-clock"], new Date("2026-07-06T01:00:00Z")); // later tick, wall-clock joins
   const b = s.ceilingBreach();
-  assert.deepEqual(b?.reasons, ["daily-budget"]); // original reasons, not overwritten
+  assert.deepEqual(b?.reasons, ["daily-budget", "wall-clock"]); // the CURRENT reason set (codex round-3 P2)
   assert.equal(b?.at.toISOString(), "2026-07-06T00:00:00.000Z"); // original "at", not reset
   s.close();
 });

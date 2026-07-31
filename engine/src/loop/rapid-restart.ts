@@ -63,19 +63,45 @@ export function detectRapidRestart(
   const nowDate = now();
   const cutoffIso = new Date(nowDate.getTime() - windowSec * 1000).toISOString();
   let births = 0;
+  /** Is this episode's escalation already in the LOG? Episode identity = the park's own
+   *  enteredAt, carried in the payload. The fold is over park-escalated events only (bounded by
+   *  escalation episodes — a handful, ever), and events from other sources / the generic ladder
+   *  (which carries no enteredAt) never match. */
+  const escalatedInLog = (enteredAtIso: string): boolean =>
+    state
+      .eventsAfterId(0, ["park-escalated"])
+      .some(
+        (e) =>
+          (e.payload as { source?: unknown; enteredAt?: unknown }).source === RAPID_RESTART_PARK_SOURCE &&
+          (e.payload as { enteredAt?: unknown }).enteredAt === enteredAtIso,
+      );
   /** The immediate local escalation — NOW, not after envFailure.parkEscalateAfterSec: a crash
    *  loop already IS the escalation-worthy fact, and each of its restarts resets this
    *  process's life anyway. Local channel of the existing park ladder (escalatePark's own
-   *  triggerIssue-less branch): ESCALATION marker + park-escalated event + status surface.
-   *  The recordParkEscalation latch also keeps the per-tick duration ladder from re-firing.
-   *  Idempotent by construction of its callers: only ever invoked while the episode's
-   *  escalated_at is still null. */
+   *  triggerIssue-less branch): park-escalated event + ESCALATION marker + status surface.
+   *
+   *  #431 round 3 (codex P3): ordered by THE WRITE RULE (stated once, on conductor.ts's
+   *  reconcileCeilingAnnouncements): the LOG write (park-escalated, deduped per episode via
+   *  escalatedInLog) goes FIRST; the marker and the escalated_at latch are MIRRORS written
+   *  after. Round 2 latched first — a kill between latch and event left `escalatedAt` set with
+   *  zero park-escalated events, and the heal branch (which keyed on the latch) then skipped
+   *  the repair forever. Now every crash position heals on the next boot: event missing ->
+   *  this function runs in full; event present but latch null -> the caller mirrors the latch
+   *  alone (no duplicate event). */
   const escalateLocally = (reason: string, enteredAtIso: string): void => {
     const message =
       `sapwood: rapid-restart detector tripped — ${reason}. Autonomous dispatch is parked. ` +
       `A crash loop is not a sanctioned restart pattern: stop the supervisor/restart source, fix the cause, ` +
       `and start the engine once the window has drained (a later clean start resumes automatically). ` +
       `See docs/troubleshooting.md and docs/security.md (supervisor circuit-breaker prerequisite).`;
+    if (!escalatedInLog(enteredAtIso)) {
+      state.appendEvent("park-escalated", {
+        source: RAPID_RESTART_PARK_SOURCE,
+        channel: "local",
+        triggerIssue: null,
+        enteredAt: enteredAtIso,
+      });
+    }
     state.writeEscalationMarker({
       source: RAPID_RESTART_PARK_SOURCE,
       reason,
@@ -85,7 +111,6 @@ export function detectRapidRestart(
       at: nowDate.toISOString(),
     });
     state.recordParkEscalation(RAPID_RESTART_PARK_SOURCE, nowDate.toISOString());
-    state.appendEvent("park-escalated", { source: RAPID_RESTART_PARK_SOURCE, channel: "local", triggerIssue: null });
     log(`[sapwood:startup] ${message}`);
   };
   try {
@@ -107,10 +132,15 @@ export function detectRapidRestart(
         // Already parked from a previous birth in this same storm — the durable episode is the
         // dedup carrier (one rapid-restart-detected + one escalation per episode, not per
         // birth: a crash loop must not turn the ledger into spam). Dispatch is already gated.
-        // #431 round 2 (codex P2): heal-on-boot — a prior birth that died between enterPark and
-        // the escalation latch left escalated_at null; complete the escalation now, once.
-        if (existing.escalatedAt === null) {
+        // #431 rounds 2-3: heal-on-boot, keyed on the LOG (the write rule) — a prior birth that
+        // died anywhere in the escalation sequence is repaired here: no park-escalated in the
+        // log for this episode -> run the full escalation (its own log-dedup makes this
+        // idempotent); log entry present but the latch still null (died between event and
+        // latch) -> mirror the latch alone, never a duplicate event.
+        if (!escalatedInLog(existing.enteredAt)) {
           escalateLocally(existing.reason, existing.enteredAt);
+        } else if (existing.escalatedAt === null) {
+          state.recordParkEscalation(RAPID_RESTART_PARK_SOURCE, nowDate.toISOString());
         }
         log(
           `[sapwood:startup] rapid-restart park still open (entered ${existing.enteredAt}): ` +

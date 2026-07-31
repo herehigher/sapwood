@@ -3902,8 +3902,8 @@ test("runRounds (#431 AC3): the ceiling-wait loop announces the breach ONCE — 
   assert.ok(sleepCalls.length >= 4, "the loop actually sat out multiple ceiling-wait iterations");
   const announced = state.eventsAfterId(0, ["ceiling-breach-entered"]);
   assert.equal(announced.length, 1, "one announcement per breach episode — never per wait iteration (F29's silence AND spam both closed)");
-  const payload = announced[0]!.payload as { reasons: string[]; maxWallClockSec: number; wallClockElapsedSec: number };
-  assert.deepEqual(payload.reasons, ["wall-clock"], "the event names WHICH ceiling");
+  const payload = announced[0]!.payload as { reason: string; maxWallClockSec: number; wallClockElapsedSec: number };
+  assert.equal(payload.reason, "wall-clock", "the event names WHICH ceiling (per-reason, round 3)");
   assert.equal(payload.maxWallClockSec, 100);
   assert.equal(payload.wallClockElapsedSec, 200);
   assert.ok(state.ceilingBreach() !== null, "the breach row stands for the whole wait");
@@ -3956,7 +3956,7 @@ test("runRounds (#431 round 2, codex P1): a standby dwell that outlives maxWallC
   );
   const announced = state.eventsAfterId(0, ["ceiling-breach-entered"]);
   assert.equal(announced.length, 1, "the wake's admission gate announced the breach exactly once");
-  assert.deepEqual((announced[0]!.payload as { reasons: string[] }).reasons, ["wall-clock"]);
+  assert.equal((announced[0]!.payload as { reason: string }).reason, "wall-clock");
   assert.ok(state.ceilingBreach() !== null, "the breach row stands — status/dashboard see the winding-down state");
   state.close();
 });

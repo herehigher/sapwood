@@ -4951,12 +4951,12 @@ test("tick ceiling (#431 AC3): entering the ceiling emits ONE reason-bearing cei
   const events = st.eventsAfterId(0, ["ceiling-breach-entered"]);
   assert.equal(events.length, 1, "one announcement per breach episode, not per tick");
   const payload = events[0]!.payload as {
-    reasons: string[];
+    reason: string;
     wallClockElapsedSec: number;
     maxWallClockSec: number;
     dailyBudgetUsd: number;
   };
-  assert.deepEqual(payload.reasons, ["wall-clock"], "the event names WHICH ceiling");
+  assert.equal(payload.reason, "wall-clock", "the event names WHICH ceiling (per-reason, round 3)");
   assert.equal(payload.maxWallClockSec, 600, "the event carries the configured threshold");
   assert.equal(payload.wallClockElapsedSec, 1200, "the event carries the observed elapsed");
   assert.equal(typeof payload.dailyBudgetUsd, "number");
@@ -4987,7 +4987,7 @@ test("tick ceiling (#431 round 2, codex P2): the kill-9 window between the two b
   try {
     const dbPath = join(dir, "sapwood.sqlite");
     let st = new State(dbPath);
-    st.appendEvent("ceiling-breach-entered", { reasons: ["wall-clock"], wallClockElapsedSec: 1200, maxWallClockSec: 600 });
+    st.appendEvent("ceiling-breach-entered", { reason: "wall-clock", wallClockElapsedSec: 1200, maxWallClockSec: 600 });
     st.close();
 
     // 1a: the restart is STILL breached (a daily-budget-style continuation): the row is
@@ -8094,4 +8094,165 @@ test("#210: tick() itself runs the release scan — the strip clears without a d
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("tick ceiling (#431 round 3, codex P2-1): the CLEAR path is receipt-first — a kill between the receipt and the row delete never suppresses the NEXT episode's announcement", async () => {
+  // Codex's round-2 reproduction: delete -> kill -> new breach was silently unannounced,
+  // because the clear path deleted the row FIRST and the stale un-cleared `entered` then
+  // deduped the new episode away. Receipt-first makes the only representable kill state
+  // "receipt appended, row still present" — simulated directly here.
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-clear-crash-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    let st = new State(dbPath);
+    // Episode A ran and began clearing: entered + cleared receipts in the log; the kill landed
+    // before clearCeilingBreach, so the stale row survives.
+    st.appendEvent("ceiling-breach-entered", { reason: "wall-clock", wallClockElapsedSec: 1200, maxWallClockSec: 600 });
+    st.appendEvent("ceiling-breach-cleared", { reason: "wall-clock" });
+    st.recordCeilingBreach(["wall-clock"], new Date("2026-07-06T00:20:00Z"));
+    st.close();
+
+    // Restart, episode B (a NEW wall-clock breach in the new life): MUST announce — the log's
+    // latest for wall-clock is `cleared`, so the pair re-arms regardless of the stale row.
+    st = new State(dbPath);
+    await tick({
+      forge: new FakeForge(),
+      state: st,
+      supervisor: new FakeSupervisor(),
+      cfg: mkCfg({ cost: { maxWallClockSec: 600 } }),
+      now: () => new Date("2026-07-06T02:20:00Z"),
+      processStartedAt: new Date("2026-07-06T02:00:00Z"), // 1200s alive > 600s cap
+    });
+    const kinds = st.eventsAfterId(0, ["ceiling-breach-entered", "ceiling-breach-cleared"]).map((e) => e.kind);
+    assert.deepEqual(
+      kinds,
+      ["ceiling-breach-entered", "ceiling-breach-cleared", "ceiling-breach-entered"],
+      "episode B is announced — the round-2 order would have suppressed it forever",
+    );
+    st.close();
+
+    // And the benign half: a recovered restart against the same kill state just deletes the
+    // stale row with NO further events (the receipt already closed the episode).
+    st = new State(dbPath);
+    st.clearCeilingBreach();
+    st.recordCeilingBreach(["wall-clock"], new Date("2026-07-06T03:00:00Z")); // re-create the kill state
+    st.appendEvent("ceiling-breach-cleared", { reason: "wall-clock" }); // (episode B cleared receipt)
+    const before = st.eventsAfterId(0, ["ceiling-breach-entered", "ceiling-breach-cleared"]).length;
+    await tick({
+      forge: new FakeForge(),
+      state: st,
+      supervisor: new FakeSupervisor(),
+      cfg: mkCfg({ cost: { maxWallClockSec: 600 } }),
+      now: () => new Date("2026-07-06T03:01:00Z"),
+      processStartedAt: new Date("2026-07-06T03:00:30Z"), // 30s alive — clear
+    });
+    assert.equal(st.ceilingBreach(), null, "the stale row is deleted on the next clear pass");
+    assert.equal(
+      st.eventsAfterId(0, ["ceiling-breach-entered", "ceiling-breach-cleared"]).length,
+      before,
+      "and the announce no-ops — no duplicate receipts",
+    );
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick ceiling (#431 round 3, codex P2-2): interleaving reasons get independent lifecycles — daily opens near midnight, wall-clock joins, midnight clears daily (its OWN receipt; wall-clock stays open; the row names the CURRENT blocker), and a later daily re-breach announces", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ cost: { maxWallClockSec: 3000, dailyBudgetUsd: 50 } });
+  const processStartedAt = new Date("2026-07-06T23:00:00Z");
+  let clock = processStartedAt;
+  const now = () => clock;
+  const tickAt = async (iso: string) => {
+    clock = new Date(iso);
+    return tick({ forge, state: st, supervisor: sup, cfg, now, processStartedAt });
+  };
+  const pairLog = () =>
+    st
+      .eventsAfterId(0, ["ceiling-breach-entered", "ceiling-breach-cleared"])
+      .map((e) => `${e.kind === "ceiling-breach-entered" ? "+" : "-"}${(e.payload as { reason: string }).reason}`);
+
+  // 23:40 — daily budget blows ($60 spent on the 6th); wall-clock still under its 3000s cap.
+  st.recordSpend("w1", 1, 60, "2026-07-06T23:50:00.000Z", []);
+  const r1 = await tickAt("2026-07-06T23:40:00Z"); // 2400s alive < 3000s
+  assert.deepEqual(r1.ceilingReasons, ["daily-budget"]);
+  assert.deepEqual(pairLog(), ["+daily-budget"]);
+
+  // 23:55 — wall-clock JOINS (3300s alive): its OWN entered; daily stays open with no dup.
+  const r2 = await tickAt("2026-07-06T23:55:00Z");
+  assert.deepEqual(r2.ceilingReasons, ["daily-budget", "wall-clock"]);
+  assert.deepEqual(pairLog(), ["+daily-budget", "+wall-clock"]);
+  assert.deepEqual(
+    st.ceilingBreach()?.reasons,
+    ["daily-budget", "wall-clock"],
+    "the row reflects BOTH current reasons (no first-tick freeze)",
+  );
+
+  // 00:10 — UTC midnight rolled: daily clears (fresh day, $0) while wall-clock stays breached.
+  // Codex's repro: round 2 emitted NOTHING here and the frozen row kept saying daily-budget —
+  // status promising "until tomorrow" for a breach that actually needs a restart.
+  const r3 = await tickAt("2026-07-07T00:10:00Z");
+  assert.deepEqual(r3.ceilingReasons, ["wall-clock"]);
+  assert.deepEqual(
+    pairLog(),
+    ["+daily-budget", "+wall-clock", "-daily-budget"],
+    "daily's departure gets ITS receipt; wall-clock stays open",
+  );
+  assert.deepEqual(st.ceilingBreach()?.reasons, ["wall-clock"], "the row names the CURRENT blocker after midnight");
+
+  // Later on the 7th — daily RE-breaches while wall-clock is still open: announced again.
+  st.recordSpend("w2", 2, 60, "2026-07-07T00:20:00.000Z", []);
+  const r4 = await tickAt("2026-07-07T00:30:00Z");
+  assert.deepEqual(r4.ceilingReasons, ["daily-budget", "wall-clock"]);
+  assert.deepEqual(
+    pairLog(),
+    ["+daily-budget", "+wall-clock", "-daily-budget", "+daily-budget"],
+    "the re-breach under a still-open wall-clock is announced — round 2's global pair suppressed it",
+  );
+  assert.deepEqual(st.ceilingBreach()?.reasons, ["daily-budget", "wall-clock"]);
+  st.close();
+});
+
+test("tick ceiling (#431 round 3, codex P2-1): the clear transition's WRITE ORDER is receipt-BEFORE-row-delete — the round-3 write rule, observed directly", async () => {
+  const st = new State(":memory:");
+  // Open a wall-clock episode first (entered + row).
+  const processStartedAt = new Date("2026-07-06T00:00:00Z");
+  let clock = new Date("2026-07-06T00:20:00Z");
+  const now = () => clock;
+  const cfg = mkCfg({ cost: { maxWallClockSec: 600 } });
+  await tick({ forge: new FakeForge(), state: st, supervisor: new FakeSupervisor(), cfg, now, processStartedAt });
+  assert.ok(st.ceilingBreach() !== null);
+  // Now observe the clear transition's write sequence through a recording proxy.
+  const writes: string[] = [];
+  const spied = new Proxy(st, {
+    get(target, prop, receiver) {
+      if (prop === "appendEvent") {
+        return (kind: string, payload: unknown) => {
+          writes.push(`append:${kind}`);
+          target.appendEvent(kind, payload);
+        };
+      }
+      if (prop === "clearCeilingBreach") {
+        return () => {
+          writes.push("row:delete");
+          target.clearCeilingBreach();
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as State;
+  clock = new Date("2026-07-06T00:21:00Z");
+  const relaxed = mkCfg({ cost: { maxWallClockSec: 999999 } });
+  await tick({ forge: new FakeForge(), state: spied, supervisor: new FakeSupervisor(), cfg: relaxed, now, processStartedAt });
+  const clearSeq = writes.filter((w) => w === "append:ceiling-breach-cleared" || w === "row:delete");
+  assert.deepEqual(
+    clearSeq,
+    ["append:ceiling-breach-cleared", "row:delete"],
+    "the LOG receipt lands strictly before the row delete — a kill between the two leaves row+receipt (self-healing), never neither (round 2's silent window)",
+  );
+  st.close();
 });
