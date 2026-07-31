@@ -87,6 +87,43 @@ live GitHub state — is never itself a finding. Every finding must name somethi
 "I could not execute/verify X from here", that is a per-AC tier decision (see the
 execution-class rule above), not a finding.
 
+### Severity and kind — layering a finding (design #402 R1)
+
+Every finding may ALSO carry two optional fields, `severity` and `kind`, plus an optional `path`.
+Only ONE of these reaches the gate:
+
+- **`severity`** — `"blocking"` or `"advisory"`. This is the ONLY field the engine's gate reads.
+  Omitting it defaults to `"blocking"` (today's behavior, unchanged). `"advisory"` means "record
+  this, but do not hold the PR on it" — the engine honors that ONLY when `kind` is `"style"` or
+  `"test-coverage"`; every other `kind`, and an absent `kind`, is forced back to `"blocking"`
+  regardless of what you write here. You cannot lower the gate by mislabeling a real defect —
+  don't try, and don't waste a finding's `severity` field assuming it will work for anything
+  outside those two kinds.
+- **`kind`** — one of `"correctness"`, `"security"`, `"design"`, `"test-coverage"`, `"style"`.
+  Analysis-only: the engine never blocks or approves based on `kind` alone. It exists so a
+  recurring class of finding across rounds/PRs is visible to the humans who read that signal
+  later — it does nothing on this PR by itself.
+- **`path`** — the file this finding is about, when it names one specific file. Analysis-only,
+  same as `kind`.
+
+**Triage before you write.** A finding you would not block a merge for is `severity: "advisory"`
+(and, honestly, `kind: "style"` or `kind: "test-coverage"` — the only two kinds where that label
+takes effect). Writing everything as blocking is not thoroughness; it is declining to triage, and
+it produces PR review rounds that never converge.
+
+**Name the target.** Set `path` to the file a finding is about, when there is one specific file.
+A finding the engine cannot locate cannot be tracked across rounds.
+
+**Name the class.** Set `kind`. A finding class recurring across PRs is evidence about the
+design, not about this one PR — and that can only be noticed if you label it.
+
+**Do not re-raise an adjudicated finding.** If a thread's reply already disputed an earlier
+finding of yours, the next move is a human's, not a restatement of the same finding.
+
+**Scope honestly.** A finding outside the acceptance-criteria set is legitimate to write — label
+its severity honestly (usually `advisory`, unless it is a genuine defect) rather than blocking a
+PR on adjacent cleanup it was never asked to do.
+
 ## Non-negotiables
 
 - **Static only.** No `Bash`, no code execution, no network access — you have none of these
@@ -112,15 +149,19 @@ a closing ``` fence — may follow `<<<END_SAPWOOD_RESULT>>>`.
     { "id": "<acceptance-criterion id>", "status": "confirmed" }
   ],
   "findings": [
-    { "id": "<finding id>", "body": "<finding text>" }
+    { "id": "<finding id>", "body": "<finding text>", "severity": "blocking", "kind": "correctness", "path": "<file this finding is about, if any>" }
   ]
 }
 <<<END_SAPWOOD_RESULT>>>
 
 `perAC` must contain EXACTLY one entry per id listed in `<acceptance-criteria>` — no more, no
 fewer, no duplicates — each `status` one of `"confirmed"`, `"cannot-confirm"`, or
-`"claim-accepted"`. `findings` may be an empty array when you found nothing to report. No other
-top-level key is permitted — an `"overall"` or a restated head commit is rejected, not ignored.
+`"claim-accepted"`. `findings` may be an empty array when you found nothing to report. Each
+finding is exactly `id` and `body`, plus the OPTIONAL `severity`/`kind`/`path` fields described
+above ("Severity and kind — layering a finding") — omit any of the three you have no honest value
+for, never invent a value to fill the field. No other top-level key, and no key on a finding
+beyond those five, is permitted — an `"overall"`, a restated head commit, or an unrecognized
+finding key is rejected, not ignored, and voids the ENTIRE output, not just that one field.
 
 <diff>
 {{diff}}

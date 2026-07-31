@@ -10,10 +10,18 @@
 // returns `null` for it, and engine-agent.ts's retry/`unavailable` path (design #279 §6) is what
 // consumes that, never a partial-accept.
 
-import type { ApprovalResult } from "../roles/reviewer.js";
-import { type Finding, isFinding, validateFindings } from "../roles/reviewer.js";
+import type { ApprovalEvidence } from "../roles/reviewer.js";
+import { isFinding, validateFindings } from "../roles/reviewer.js";
 import { parseStructuredBlock, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { AcceptanceCriterion } from "./ac-snapshot.js";
+import {
+  ALLOWED_FINDING_KEYS,
+  applySeverityOverride,
+  type ClassifiedFinding,
+  effectiveSeverity,
+  FINDING_KINDS,
+  resolveFindingPath,
+} from "./finding-axes.js";
 
 /** One AC-manifest id's per-criterion judgment (design #279 §2/§4.1):
  *   - `confirmed`      — code-verifiable AND satisfied by the FULL chain (design #279 §4): a
@@ -39,10 +47,13 @@ export interface PerAcResult {
 
 /** The session's ENTIRE structured output, post-validation — exactly `perAC` + `findings`, never
  *  more (design #279 §1/§6: "Output schema unchanged (perAC + findings; no overall, no
- *  headOid)"). */
+ *  headOid)"). #448 (design #402 R1): `findings` is `ClassifiedFinding[]`, not bare `Finding[]` —
+ *  each entry MAY carry the `severity`/`kind`/`path` axes (finding-axes.ts), with `path` already
+ *  resolved against the reviewed diff's changed-path set (see `validateAgentReviewOutput`'s
+ *  `changedPaths` parameter) by the time it reaches here. */
 export interface AgentReviewOutput {
   perAC: PerAcResult[];
-  findings: Finding[];
+  findings: ClassifiedFinding[];
 }
 
 /** Strict per-entry shape guard: EXACTLY `{id, status}` — an extra key on one entry invalidates
@@ -59,6 +70,12 @@ function isPerAcResult(v: unknown): v is PerAcResult {
   );
 }
 
+/** No diff context supplied ⇒ every `path` is treated as unverifiable (dropped, never voided) —
+ *  the same fail-closed direction as every other default in this module: a caller that doesn't
+ *  thread the reviewed diff's changed-path set through gets the SAFE degraded reading (path
+ *  dropped, `pathDropped` recorded), never a silently-trusted, unverified location. */
+const NO_CHANGED_PATHS: ReadonlySet<string> = new Set();
+
 /**
  * Validate an ALREADY-PARSED value against the strict schema (design #279 §2): exactly the two
  * top-level keys `perAC`/`findings` (an `overall`/`headOid`/anything else fails the WHOLE output
@@ -68,15 +85,27 @@ function isPerAcResult(v: unknown): v is PerAcResult {
  * whole output (design #279 §2: "ids MUST exactly cover the AC-snapshot manifest ids"); the
  * `findings` array is validated via `validateAgentFindings` (below) — reviewer.ts's shared
  * `validateFindings` (reused as the base, never re-implemented; an empty array is valid, see that
- * function's own doc) plus THIS layer's stricter requirements (exact `{id, body}` keys, unique
- * ids — #302 review, Codex P2).
+ * function's own doc) plus THIS layer's stricter requirements (allowlisted keys + closed enums,
+ * unique ids — #302 review Codex P2, extended #448/design #402 R1 §1).
+ *
+ * `changedPaths` (#448, design #402 §1's fail-closed-defaults table): the reviewed diff's
+ * changed-path set, used ONLY to resolve each finding's optional `path` — a `path` present but not
+ * a member of `changedPaths` is dropped to `undefined` with `pathDropped: true` recorded (never a
+ * validation failure; see `finding-axes.ts`'s `resolveFindingPath`). Defaults to the empty set
+ * (`NO_CHANGED_PATHS`) so an existing caller that hasn't been threaded through with diff context
+ * yet degrades safely (every supplied `path` drops) rather than failing to compile or trusting an
+ * unverified location.
  *
  * Returns `null` on ANY violation — fail-closed, never a best-effort partial parse. This is the
  * ONE gate a session's raw output must clear before `deriveApprovalResult` (below) ever runs; a
  * `null` here is engine-agent.ts's signal to retry (once, within the remaining budget) or, on a
  * second failure, return `unavailable` — never a partial/degraded verdict.
  */
-export function validateAgentReviewOutput(raw: unknown, manifest: readonly AcceptanceCriterion[]): AgentReviewOutput | null {
+export function validateAgentReviewOutput(
+  raw: unknown,
+  manifest: readonly AcceptanceCriterion[],
+  changedPaths: ReadonlySet<string> = NO_CHANGED_PATHS,
+): AgentReviewOutput | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const topKeys = Object.keys(raw as Record<string, unknown>);
   if (topKeys.length !== 2 || !topKeys.includes("perAC") || !topKeys.includes("findings")) return null;
@@ -95,23 +124,42 @@ export function validateAgentReviewOutput(raw: unknown, manifest: readonly Accep
   if (seenIds.size !== manifestIds.size) return null; // missing id(s)
 
   if (!validateAgentFindings(obj.findings)) return null;
-  const findings = obj.findings as Finding[];
+  const findings = (obj.findings as ClassifiedFinding[]).map((f) => resolveFindingPath(f, changedPaths));
 
   return { perAC, findings };
 }
 
+const FINDING_SEVERITIES: ReadonlySet<string> = new Set(["blocking", "advisory"]);
+const FINDING_KIND_SET: ReadonlySet<string> = new Set(FINDING_KINDS);
+
 /** #302 review (Codex P2, findings strictness): the ENGINE-AGENT layer's OWN stricter findings
  *  validation — reviewer.ts's shared `validateFindings` (E1's contract for every reviewer kind)
  *  stays untouched; this wraps it and adds what THIS session-output schema additionally requires:
- *   - exact `{id, body}` keys per finding — an extra key on one finding invalidates the WHOLE
- *     output (same no-partial-accept stance as `isPerAcResult` above);
+ *   - #448 (design #402 R1 §1): "the strict-shape guard is relaxed by allowlist, not by
+ *     loosening" — every key on a finding must be a MEMBER of `ALLOWED_FINDING_KEYS`
+ *     (`finding-axes.ts`); a key outside that set still invalidates the WHOLE output, exactly as
+ *     the old `Object.keys(f).length !== 2` count check did (the property it was actually
+ *     protecting — "an unknown key voids everything" — is retained verbatim, membership replaces
+ *     count as the mechanism);
+ *   - a present `severity`/`kind` outside its closed enum invalidates the WHOLE output — schema
+ *     drift, NOT coerced to a default (design #402 §1's fail-closed-defaults table: this is the
+ *     one row that voids rather than degrades); an ABSENT axis is fine (validated/defaulted later,
+ *     see `finding-axes.ts`'s `effectiveSeverity`);
+ *   - a present `path` must be a non-empty string (structural type check only — WHICH string is
+ *     valid, i.e. membership in the reviewed diff's changed-path set, is resolved afterward by
+ *     `validateAgentReviewOutput`'s `resolveFindingPath` call, and never voids the output);
  *   - id UNIQUENESS within the array — a finding id is E4c's (#288) audit/dedup key, so a
  *     duplicate must fail the whole output here, never be discovered downstream. */
-function validateAgentFindings(v: unknown): v is Finding[] {
+function validateAgentFindings(v: unknown): v is ClassifiedFinding[] {
   if (!validateFindings(v)) return false;
   const seen = new Set<string>();
   for (const f of v) {
-    if (Object.keys(f).length !== 2) return false; // exact {id, body} — isFinding checked presence/types
+    const rec = f as unknown as Record<string, unknown>;
+    const keys = Object.keys(rec);
+    if (!keys.every((k) => ALLOWED_FINDING_KEYS.has(k))) return false; // unknown key voids the WHOLE output
+    if ("severity" in rec && !FINDING_SEVERITIES.has(rec.severity as string)) return false; // invalid enum voids
+    if ("kind" in rec && !FINDING_KIND_SET.has(rec.kind as string)) return false; // invalid enum voids
+    if ("path" in rec && (typeof rec.path !== "string" || rec.path.length === 0)) return false;
     if (seen.has(f.id)) return false; // duplicate finding id
     seen.add(f.id);
   }
@@ -197,8 +245,14 @@ function stripSymmetricFence(text: string): string {
  *  own retry-once path is what a `null` here feeds, never a thrown exception (a malformed session
  *  transcript is an expected, not exceptional, outcome). No BODY segment is ever consumed here —
  *  `findings[].body` travels as an ordinary JSON string field inside the metadata block itself
- *  (same convention fix-response.ts's `reply` field uses), never a separate raw-markdown segment. */
-export function parseAgentReviewOutputText(text: string, manifest: readonly AcceptanceCriterion[]): AgentReviewOutput | null {
+ *  (same convention fix-response.ts's `reply` field uses), never a separate raw-markdown segment.
+ *  `changedPaths` (#448) is threaded straight through to `validateAgentReviewOutput` — see that
+ *  function's own doc for its fail-closed default when omitted. */
+export function parseAgentReviewOutputText(
+  text: string,
+  manifest: readonly AcceptanceCriterion[],
+  changedPaths?: ReadonlySet<string>,
+): AgentReviewOutput | null {
   const block = parseStructuredBlock(stripSymmetricFence(text));
   if (!block) return null;
   let raw: unknown;
@@ -207,8 +261,22 @@ export function parseAgentReviewOutputText(text: string, manifest: readonly Acce
   } catch {
     return null;
   }
-  return validateAgentReviewOutput(raw, manifest);
+  return validateAgentReviewOutput(raw, manifest, changedPaths);
 }
+
+/** #448 (design #402 R1 §1): `deriveApprovalResult`'s return type widened, structurally, past
+ *  `ApprovalResult` (`roles/reviewer.ts`, PROTECTED — never edited by this issue) — an ADDITIVE
+ *  extension defined entirely in this UNPROTECTED module, never a patch to the protected type
+ *  itself. `rejected.findings` becomes `ClassifiedFinding[]` (readable severity/kind/path/override
+ *  bookkeeping without a cast) and `approved.evidence` gains an optional `advisories` array — "the
+ *  advisories recorded in the approval evidence" (issue #448's AC). Every value this module
+ *  produces is still structurally assignable to plain `ApprovalResult` (a `ClassifiedFinding` IS a
+ *  `Finding` with optional extra keys, and `evidence.advisories` is optional) — engine-agent.ts's
+ *  existing `result: ApprovalResult`-typed call site keeps compiling and behaving unchanged,
+ *  un-narrowed callers simply don't see the richer fields. */
+export type ClassifiedApprovalResult =
+  | { kind: "approved"; headOid: string; evidence: ApprovalEvidence & { advisories?: ClassifiedFinding[] }; findings?: never }
+  | { kind: "rejected"; headOid: string; findings: [ClassifiedFinding, ...ClassifiedFinding[]]; evidence?: never };
 
 /**
  * Pure engine-side derivation (design #279 §1: "rejected is ENGINE-derived ... the session never
@@ -217,32 +285,48 @@ export function parseAgentReviewOutputText(text: string, manifest: readonly Acce
  * entirely outside a validated output's reach; this function's whole domain is "given a session
  * that ran and produced a well-formed answer, what does gate② do with it."
  *
- *  - Any `findings` entry, OR any `cannot-confirm` perAC entry, ⇒ `rejected`. `rejected.findings`
- *    must be non-empty BY TYPE (reviewer.ts's tuple contract, `[Finding, ...Finding[]]`) — a
- *    `cannot-confirm` entry with NO accompanying finding (the agent flagged a criterion but wrote
- *    no finding body for it) gets ONE synthesized per such entry, ONLY when the session's own
- *    `findings` array was empty (documented decision: design #279 §2's "findings non-empty
- *    guaranteed" requirement — when the session already supplied findings, they're used verbatim,
- *    never padded with redundant per-AC restatements).
- *  - Zero findings AND every perAC entry `confirmed`/`claim-accepted` ⇒ `approved`. Every
- *    `claim-accepted` id is recorded in `ApprovalEvidence.unreproducedClaims` (reviewer.ts's #286
- *    extension) — an explicit, auditable "taken on trust" trail, never silently folded into an
- *    ordinary confirmed approval.
+ * #448 (design #402 R1 §1) generalizes the ORIGINAL binary rule — "any findings entry ⇒ rejected"
+ * — to its severity-aware form, byte-for-byte identical when no finding carries an axis (AC#3, the
+ * fail-closed-default pin): every finding is first passed through `applySeverityOverride` (D3),
+ * then split into `blocking`/`advisory` via `effectiveSeverity`.
+ *
+ *  - `blocking.length > 0` ⇒ `rejected`, `rejected.findings` = the blocking findings ONLY (an
+ *    advisory finding never reaches `rejected.findings` — its home is `approved.evidence.advisories`
+ *    below, on the OTHER branch; a rejected verdict is never reached with any findings still
+ *    present that this same output also carries as advisory, since `blocking.length > 0` here
+ *    means at least one genuinely blocking finding exists — the advisories are simply omitted from
+ *    this branch's array, not lost: they're inert while the PR is rejected on other grounds, and
+ *    the same session's next-round output re-derives them fresh).
+ *  - `blocking.length === 0` AND any `cannot-confirm` perAC entry ⇒ `rejected` with ONE finding
+ *    synthesized per such entry (unchanged mechanism from before #448 — the per-AC path stays
+ *    INDEPENDENTLY blocking: no finding severity, however labeled, waives a `cannot-confirm`).
+ *    Matches the ORIGINAL "when the session already supplied [blocking-shaped] findings, they're
+ *    used verbatim, never padded with redundant per-AC restatements" contract, now gated on
+ *    `blocking` rather than raw `findings` presence.
+ *  - Otherwise ⇒ `approved`. Every `claim-accepted` id is recorded in
+ *    `ApprovalEvidence.unreproducedClaims` (reviewer.ts's #286 extension); every ADVISORY finding
+ *    (i.e. every finding present whose `effectiveSeverity` is `"advisory"`) is recorded in
+ *    `evidence.advisories` (#448) — an explicit, auditable "recorded but not blocking" trail,
+ *    never silently folded into an ordinary confirmed approval.
  */
-export function deriveApprovalResult(output: AgentReviewOutput, headOid: string): ApprovalResult {
+export function deriveApprovalResult(output: AgentReviewOutput, headOid: string): ClassifiedApprovalResult {
   const cannotConfirm = output.perAC.filter((a) => a.status === "cannot-confirm");
   const claimAccepted = output.perAC.filter((a) => a.status === "claim-accepted");
 
-  const findings: Finding[] =
-    output.findings.length > 0
-      ? output.findings
+  const gated = output.findings.map(applySeverityOverride);
+  const blocking = gated.filter((f) => effectiveSeverity(f) === "blocking");
+  const advisories = gated.filter((f) => effectiveSeverity(f) === "advisory");
+
+  const findings: ClassifiedFinding[] =
+    blocking.length > 0
+      ? blocking
       : cannotConfirm.map((a) => ({
           id: `ac-${a.id}`,
           body: `Acceptance criterion ${a.id} could not be confirmed by the engine-agent review session.`,
         }));
 
   if (findings.length > 0) {
-    return { kind: "rejected", headOid, findings: findings as [Finding, ...Finding[]] };
+    return { kind: "rejected", headOid, findings: findings as [ClassifiedFinding, ...ClassifiedFinding[]] };
   }
 
   return {
@@ -252,6 +336,7 @@ export function deriveApprovalResult(output: AgentReviewOutput, headOid: string)
       freshApprovingReviews: 0,
       freshTrustedSignals: 0,
       ...(claimAccepted.length > 0 ? { unreproducedClaims: claimAccepted.map((a) => a.id) } : {}),
+      ...(advisories.length > 0 ? { advisories } : {}),
     },
   };
 }

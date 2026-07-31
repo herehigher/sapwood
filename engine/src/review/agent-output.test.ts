@@ -12,6 +12,7 @@ import {
   parseAgentReviewOutputText,
   validateAgentReviewOutput,
 } from "./agent-output.js";
+import type { ClassifiedFinding } from "./finding-axes.js";
 
 const MANIFEST: AcceptanceCriterion[] = [
   { id: "1-aaaaaaaa", text: "first criterion" },
@@ -621,4 +622,175 @@ test("deriveApprovalResult: an output smuggling an 'overall'-like intent via a r
     "HEAD8",
   );
   assert.equal(result.kind, "rejected");
+});
+
+// ── #448 (design #402 R1): finding layering — allowlist, closed enums, severity gate split ─────
+// Verification plan items 1-7 (issue #448). MANIFEST is reused throughout so perAC coverage stays
+// trivially satisfied; each test's own point is the FINDINGS-array behavior.
+
+const ALL_CONFIRMED = MANIFEST.map((a) => ({ id: a.id, status: "confirmed" as const }));
+
+// item 1: allowlist, not count.
+
+test("#448 validateAgentReviewOutput: a finding with {id, body, severity, kind, path} parses (allowlist, not count)", () => {
+  const out = validateAgentReviewOutput(
+    { perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "styling nit", severity: "advisory", kind: "style", path: "src/a.ts" }] },
+    MANIFEST,
+    new Set(["src/a.ts"]),
+  );
+  assert.ok(out);
+  assert.equal(out.findings.length, 1);
+  assert.equal(out.findings[0]!.severity, "advisory");
+  assert.equal(out.findings[0]!.kind, "style");
+  assert.equal(out.findings[0]!.path, "src/a.ts");
+});
+
+test("#448 validateAgentReviewOutput: a finding with {id, body, overall} (unknown key) voids the WHOLE output, not a partial accept", () => {
+  const out = validateAgentReviewOutput({ perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "x", overall: "approved" }] }, MANIFEST);
+  assert.equal(out, null);
+});
+
+// item 2: invalid enum voids; absent axis does not.
+
+test("#448 validateAgentReviewOutput: severity outside its enum voids the WHOLE output", () => {
+  const out = validateAgentReviewOutput({ perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "x", severity: "maybe" }] }, MANIFEST);
+  assert.equal(out, null);
+});
+
+test("#448 validateAgentReviewOutput: kind outside its enum voids the WHOLE output", () => {
+  const out = validateAgentReviewOutput({ perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "x", kind: "perf" }] }, MANIFEST);
+  assert.equal(out, null);
+});
+
+test("#448 validateAgentReviewOutput: an ABSENT severity/kind does NOT void — only an out-of-enum VALUE does", () => {
+  const out = validateAgentReviewOutput({ perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "x" }] }, MANIFEST);
+  assert.ok(out);
+  assert.equal(out.findings.length, 1);
+  assert.equal(out.findings[0]!.severity, undefined);
+  assert.equal(out.findings[0]!.kind, undefined);
+});
+
+// item 3: fail-closed default is byte-for-byte today's outcome (pinned expectations, unmodified).
+// Covered directly by the PRE-EXISTING "deriveApprovalResult: any finding present -> rejected,
+// findings passed through verbatim" and "...zero findings -> approved..." tests above, which this
+// PR does not alter — see this file's own module-doc requirement (design #402 R1 AC#3: "pin the
+// existing expectations, do not rewrite them"). This test adds the explicit neither-axis case
+// through the FULL validate+derive pipeline for good measure.
+
+test("#448: a finding emitting neither axis produces byte-for-byte today's rejected outcome end to end", () => {
+  const out = validateAgentReviewOutput({ perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "plain finding" }] }, MANIFEST);
+  assert.ok(out);
+  const result = deriveApprovalResult(out, "HEADX");
+  assert.deepEqual(result, { kind: "rejected", headOid: "HEADX", findings: [{ id: "f1", body: "plain finding" }] });
+});
+
+// item 4: D3 downgrade refusal — a session cannot lower its own gate.
+
+test("#448 (D3): severity advisory + kind security -> rejected, finding present in rejected.findings, override recorded", () => {
+  const out = validateAgentReviewOutput(
+    { perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "a real security defect", severity: "advisory", kind: "security" }] },
+    MANIFEST,
+  );
+  assert.ok(out);
+  const result = deriveApprovalResult(out, "HEAD-D3");
+  assert.equal(result.kind, "rejected");
+  if (result.kind !== "rejected") throw new Error("unreachable");
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0]!.id, "f1");
+  assert.equal(result.findings[0]!.severity, "blocking"); // forced back
+  assert.equal(result.findings[0]!.severityOverridden, true); // and the override is recorded
+});
+
+test("#448 (D3): severity advisory + kind ABSENT -> rejected, override recorded the same way", () => {
+  const out = validateAgentReviewOutput(
+    { perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "unclassified but marked advisory", severity: "advisory" }] },
+    MANIFEST,
+  );
+  assert.ok(out);
+  const result = deriveApprovalResult(out, "HEAD-D3b");
+  assert.equal(result.kind, "rejected");
+  if (result.kind !== "rejected") throw new Error("unreachable");
+  assert.equal(result.findings[0]!.severity, "blocking");
+  assert.equal(result.findings[0]!.severityOverridden, true);
+});
+
+// item 5: advisory-only approves.
+
+test("#448: one advisory-eligible finding + every perAC confirmed -> approved, advisory recorded in evidence, NOT rejected", () => {
+  const out = validateAgentReviewOutput(
+    { perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "trivial style nit", severity: "advisory", kind: "style" }] },
+    MANIFEST,
+  );
+  assert.ok(out);
+  const result = deriveApprovalResult(out, "HEAD-ADV");
+  assert.equal(result.kind, "approved");
+  if (result.kind !== "approved") throw new Error("unreachable");
+  const advisories = result.evidence.advisories;
+  assert.equal(advisories?.length, 1);
+  assert.equal(advisories![0]!.id, "f1");
+  assert.equal(advisories![0]!.severity, "advisory");
+});
+
+// item 6: per-AC backstop survives — advisory findings never waive a cannot-confirm.
+
+test("#448: advisory-only finding PLUS one cannot-confirm perAC entry -> still rejected (per-AC backstop unchanged)", () => {
+  const out = validateAgentReviewOutput(
+    {
+      perAC: [
+        { id: MANIFEST[0]!.id, status: "cannot-confirm" },
+        { id: MANIFEST[1]!.id, status: "confirmed" },
+      ],
+      findings: [{ id: "f1", body: "trivial style nit", severity: "advisory", kind: "style" }],
+    },
+    MANIFEST,
+  );
+  assert.ok(out);
+  const result = deriveApprovalResult(out, "HEAD-BACKSTOP");
+  assert.equal(result.kind, "rejected");
+});
+
+// item 7: unlocated path — dropped to undefined/null, drop recorded, finding retained (never voids).
+
+test("#448: path not a member of the reviewed diff's changed-path set -> finding retained, path dropped, drop recorded", () => {
+  const out = validateAgentReviewOutput(
+    { perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "x", path: "src/not-in-diff.ts" }] },
+    MANIFEST,
+    new Set(["src/in-diff.ts"]),
+  );
+  assert.ok(out);
+  assert.equal(out.findings.length, 1);
+  assert.equal(out.findings[0]!.id, "f1");
+  assert.equal(out.findings[0]!.path, undefined);
+  assert.equal(out.findings[0]!.pathDropped, true);
+});
+
+test("#448: path that IS a member of the changed-path set is retained as-is", () => {
+  const out = validateAgentReviewOutput(
+    { perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "x", path: "src/in-diff.ts" }] },
+    MANIFEST,
+    new Set(["src/in-diff.ts"]),
+  );
+  assert.ok(out);
+  assert.equal(out.findings[0]!.path, "src/in-diff.ts");
+  assert.equal(out.findings[0]!.pathDropped, undefined);
+});
+
+test("#448: an invalid-type path (non-string) still voids the WHOLE output — structural check, not the changed-path membership check", () => {
+  const out = validateAgentReviewOutput({ perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "x", path: 42 }] }, MANIFEST);
+  assert.equal(out, null);
+});
+
+// parseAgentReviewOutputText threading a changedPaths set end to end (mirrors the sentinel-wrapped
+// shape every other parseAgentReviewOutputText test above uses).
+
+test("#448 parseAgentReviewOutputText: threads changedPaths through to path resolution", () => {
+  const text = wrap({
+    perAC: ALL_CONFIRMED,
+    findings: [{ id: "f1", body: "x", path: "src/gone.ts" }],
+  });
+  const out = parseAgentReviewOutputText(text, MANIFEST, new Set(["src/kept.ts"]));
+  assert.ok(out);
+  const finding = out.findings[0] as ClassifiedFinding;
+  assert.equal(finding.path, undefined);
+  assert.equal(finding.pathDropped, true);
 });
