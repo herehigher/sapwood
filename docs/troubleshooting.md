@@ -293,11 +293,23 @@ What startup does, in order, and the state events it names each repair with:
 | A lane an **environment failure** killed while it held an **open PR**, never escalated (nothing on its issue) | Returns it to `driving`, so the ordinary drive/merge path picks the PR back up. Its rework-round count and preserved worktree are untouched | `lane-revived` |
 
 The last repair also runs mid-run, on the first tick after an [environment-failure
-park](#environment-failure-park-168) resumes — while the engine is parked, the
-environment is still the thing that killed the lane, so revival waits. It is skipped for a lane
-whose issue carries a hold label (that one belongs to gated reentry), whose PR is already
-merged or closed, and for a PR marked `labels.humanMergeOnly` (a human must merge that one; the
-loop never drives it again).
+park](#environment-failure-park-168) resumes. It **waits while the engine is parked** — on a
+restart as much as mid-run — because until the episode clears, the environment is still the
+thing that killed the lane.
+
+It acts only on lanes an environment failure actually killed, proven by that failure's own
+durable record — never on a lane that reached the same state some other way. Concretely it
+leaves alone:
+
+- a lane whose issue carries a hold label — that one belongs to gated reentry, and startup
+  records the hold so removing the label later wakes it through *that* path (`gated-flag-healed`);
+- a PR marked `labels.humanMergeOnly` — a human must merge that one, and the loop never drives
+  it again;
+- a lane whose escalation was real but whose `needs-human` write failed — it stays fail-closed
+  to a human, exactly as before;
+- a merged or closed PR — there is nothing left to drive. A **merge** is remembered
+  (`lane-revival-terminal`) so the lane is never re-checked; a **closed** PR is not, because
+  reopening it is allowed and should let the lane resume.
 
 Two deliberate limits:
 

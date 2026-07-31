@@ -206,8 +206,12 @@ function handGatedLaneToReentry(state: Pick<State, "upsertWorkerWithEvent">, w: 
 
 export type LaneRevivalForge = Pick<IForge, "getIssueLabels" | "getPRStatus">;
 
-/** #397's bucket-2 verdict and #447's own terminal-PR observation — the two ONE-WAY facts the
- *  revival pass reads back out of the ledger to decide a lane WITHOUT touching the forge. */
+/** The three ONE-WAY facts the revival pass reads back out of the ledger to decide a lane
+ *  WITHOUT touching the forge: the environment failure that is its entire remit, #397's
+ *  bucket-2 verdict, and its own observation that the PR was merged. All three payloads carry
+ *  `worker` + `pr`, which is what makes `laneEventRecorded` able to answer them per lane.
+ *  `lane-revival-terminal` is recorded for MERGED ONLY — see the function doc. */
+const ENV_FAILURE_PRESERVED_EVENT = "env-failure-preserved";
 const HUMAN_MERGE_ONLY_EVENT = "drive-human-merge-only";
 const REVIVAL_TERMINAL_EVENT = "lane-revival-terminal";
 
@@ -222,57 +226,77 @@ const REVIVAL_TERMINAL_EVENT = "lane-revival-terminal";
  *
  *  The candidate set is `unlabeledGatedWorkers()` — already the exact complement of
  *  `gatedFailedWorkers()`, so consuming it here creates no second owner for an escalated lane
- *  and needs no new column or table. Four-way split per candidate — the two LOCAL, one-way
- *  exclusions are read from the ledger FIRST, so a permanently excluded lane costs zero forge
+ *  and needs no new column or table. The row SHAPE alone is not enough to act on, though —
+ *  three different settlements produce `failed` + PR + marker 0 — so the split below is decided
+ *  by EVIDENCE, LOCAL evidence first, so a lane this pass will never act on costs zero forge
  *  reads per tick rather than two:
- *   - the lane's PR already settled as #397 bucket 2 -> LEAVE IT. "A human must MERGE this PR"
- *     settles to the SAME row shape as an env failure (`failed` + PR + marker 0, and
- *     deliberately nothing on the issue), so the workers table alone cannot tell them apart;
- *     the durable verdict can. This branch must never be re-driven at all: #397 closed that
- *     reclaim loop structurally and re-driving would re-escalate it every tick. It is the ONE
- *     exclusion this issue's stated rule does not name — bucket 2 landed on main after #447
- *     was filed.
- *   - the PR was already observed MERGED/CLOSED by an earlier pass -> LEAVE IT, without asking
- *     the forge again. Recorded once as `lane-revival-terminal`; a merged or closed PR does not
- *     reopen into work this lane could drive, so the observation is one-way and the row would
- *     otherwise re-cost that read on every tick, forever.
- *   - the issue carries ANY of cfg.escalation.humanLabels -> HAND IT TO GATED REENTRY. Not a
- *     bare skip (PR #463 gate② P1): a bare skip left the lane in this pass's candidate set, so
- *     the moment the human removed the label mid-run, revival — not gated reentry — picked it
- *     up, re-driving with the old trigger pin and `gated_reentry_attempts` still 0, i.e. with
- *     the stale-review filter that makes label-removal safe never armed. Correcting the marker
- *     instead is F19's own heal on F19's own evidence (the hold is observably present, and the
- *     engine never removes a human-hold label), and it is ONE-WAY: the row leaves
- *     `unlabeledGatedWorkers()` for good, so the label's later removal reaches exactly one
- *     owner. (Hold set = the FULL cfg.escalation.humanLabels, the same predicate GATED RECLAIM
- *     applies via conductor.ts's hasReserveLabel — not needs-human alone.)
- *   - the PR is MERGED/CLOSED -> record that, and leave the lane to the existing terminal
- *     paths. Revival is for LIVE work only.
- *   - otherwise -> `driving`, and the DRIVE loop re-derives everything else from live PR state,
- *     which is exactly what the manual surgery relied on. A lane whose escalation was real but
- *     whose `needs-human` WRITE failed (the other marker-0 producer) is deliberately included:
- *     re-driving it re-attempts that label, which is the same retry-until-success shape GATED
- *     RECLAIM's CAPPED branch already uses, and the moment the write lands the row becomes a
- *     properly gated lane instead of a permanently invisible one.
+ *
+ *   1. no `env-failure-preserved` on record for this (worker, pr) -> NOT THIS PASS'S LANE (PR
+ *      #463 round 2, P1). The set also holds ordinary gate escalations whose `needs-human`
+ *      WRITE failed, which land in the same shape and are deliberately fail-closed: #147's
+ *      "manual drive as before" contract, pinned by conductor.test.ts's own #147 P2 test.
+ *      Reviving one would resume autonomous driving — review and merge — of a PR a human was
+ *      supposed to look at, with no human act, no `gated_reentry_attempts`, no fresh-review
+ *      filter, and would clear its still-valid attention item on the way. Requiring the
+ *      environment failure's own durable record inverts that: revival acts only where it has
+ *      POSITIVE proof of the fault it exists to recover from.
+ *      Accepted, bounded compound case: a lane that escalated with a failed label write and was
+ *      LATER killed by an environment failure carries both records and does revive. That is the
+ *      honest reading of the evidence (the last thing that happened to it was an env kill), and
+ *      it is safe because DRIVE re-derives every durable HUMAN condition from live PR state on
+ *      the next tick and re-escalates — this time with a label write that can succeed.
+ *   2. the lane's PR already settled as #397 bucket 2 -> LEAVE IT. "A human must MERGE this PR"
+ *      settles to the SAME shape (and deliberately nothing on the issue); the durable verdict is
+ *      what tells them apart. This branch must never be re-driven at all: #397 closed that
+ *      reclaim loop structurally and re-driving would re-escalate it every tick. Reachable only
+ *      via the compound case above (a bucket-2 settle after an env kill), which is exactly why
+ *      it is still checked.
+ *   3. the PR was already observed MERGED by an earlier pass -> LEAVE IT, without asking the
+ *      forge again (`lane-revival-terminal`). MERGED ONLY: a merge is irreversible, so the
+ *      observation is one-way, but GitHub reopens an unmerged CLOSED PR — the same asymmetry
+ *      escalation-reconcile.ts's own terminal fold encodes. A CLOSED PR is therefore skipped
+ *      WITHOUT being remembered, keeping its one read per pass; honest, rare, and bounded, and
+ *      the lane revives by itself if a human reopens the PR.
+ *   4. the issue carries ANY of cfg.escalation.humanLabels -> HAND IT TO GATED REENTRY. Not a
+ *      bare skip (PR #463 round 1, P1): a bare skip left the lane in this pass's candidate set,
+ *      so the moment the human removed the label mid-run, revival — not gated reentry — picked
+ *      it up, re-driving with the old trigger pin and `gated_reentry_attempts` still 0, i.e.
+ *      with the stale-review filter that makes label removal safe never armed. Correcting the
+ *      marker instead is F19's own heal on F19's own evidence (the hold is observably present,
+ *      and the engine never removes a human-hold label), and it is ONE-WAY: the row leaves
+ *      `unlabeledGatedWorkers()` for good, so the label's later removal reaches exactly one
+ *      owner. (Hold set = the FULL cfg.escalation.humanLabels, the same predicate GATED RECLAIM
+ *      applies via conductor.ts's hasReserveLabel — not needs-human alone.)
+ *   5. the PR is MERGED/CLOSED -> leave the lane to the existing terminal paths (recording only
+ *      the MERGED case, per 3). Revival is for LIVE work only.
+ *   6. otherwise -> `driving`, and the DRIVE loop re-derives everything else from live PR state,
+ *      which is exactly what the manual surgery relied on.
  *
  *  Deliberately writes ONE column. `fix_rounds`, the preserved worktree, the PR number and
  *  `ended_at` (the honest instant the env-failed leg ended — this transition starts no leg, so
  *  restamping it would be a lie and would need a clock this pass otherwise has no use for) are
  *  all left exactly as the failure left them.
  *
- *  Callers own the "is it safe to revive NOW" question: startup runs after the F19 audit, and
- *  the conductor's tick suspends this pass while any park episode is open. Every forge call is
- *  a READ (this pass never writes to the forge — the lane's issue and PR are left exactly as a
- *  human left them), and every candidate reaches a durable, one-way answer, so the per-tick
- *  cost trends to zero rather than accruing on a permanently stuck row. */
+ *  AN OPEN PARK EPISODE SUSPENDS THE WHOLE PASS. While the engine is parked the environment is
+ *  still the thing that killed these lanes, and DRIVE would act on anything returned to
+ *  `driving`. The check lives HERE rather than at each call site (PR #463 round 2, P1) so it
+ *  cannot be forgotten by one: the episode is durable in the DB, so a restart mid-park reads
+ *  the same open episode the tick does, and startup — which used to call this unconditionally —
+ *  now waits for the resume exactly like the tick.
+ *
+ *  Every forge call is a READ (this pass never writes to the forge — the lane's issue and PR
+ *  are left exactly as a human left them). Callers still own ORDERING: startup runs this after
+ *  the F19 audit, so a lane whose hold the audit already healed is out of the candidate set
+ *  before this pass looks. */
 export async function reviveEnvFailedPrLanes(
   forge: LaneRevivalForge,
-  state: Pick<State, "unlabeledGatedWorkers" | "laneEventRecorded" | "upsertWorkerWithEvent" | "appendEvent">,
+  state: Pick<State, "isParked" | "unlabeledGatedWorkers" | "laneEventRecorded" | "upsertWorkerWithEvent" | "appendEvent">,
   cfg: { escalation: { humanLabels: string[] } },
   log: (message: string) => void = console.error,
 ): Promise<string[]> {
   let candidates: WorkerRow[];
   try {
+    if (state.isParked()) return [];
     candidates = state.unlabeledGatedWorkers();
   } catch (error) {
     log(`[sapwood:reconcile] lane revival could not read the worker table; skipped: ${String(error)}`);
@@ -283,6 +307,7 @@ export async function reviveEnvFailedPrLanes(
     if (w.pr == null) continue; // fail-safe; unlabeledGatedWorkers() already filters this
     const pr = w.pr;
     try {
+      if (!state.laneEventRecorded(ENV_FAILURE_PRESERVED_EVENT, w.name, pr)) continue;
       if (state.laneEventRecorded(HUMAN_MERGE_ONLY_EVENT, w.name, pr)) continue;
       if (state.laneEventRecorded(REVIVAL_TERMINAL_EVENT, w.name, pr)) continue;
       if (labelsIncludeAny(await forge.getIssueLabels(w.issue), cfg.escalation.humanLabels)) {
@@ -291,7 +316,8 @@ export async function reviveEnvFailedPrLanes(
       }
       const prState = (await forge.getPRStatus(pr)).state;
       if (prState !== "OPEN") {
-        state.appendEvent(REVIVAL_TERMINAL_EVENT, { worker: w.name, issue: w.issue, pr, prState });
+        // MERGED only: a merge is irreversible, a CLOSED PR reopens (branch 3 above).
+        if (prState === "MERGED") state.appendEvent(REVIVAL_TERMINAL_EVENT, { worker: w.name, issue: w.issue, pr, prState });
         continue;
       }
       state.upsertWorkerWithEvent({ ...w, state: "driving" }, "lane-revived", { worker: w.name, issue: w.issue, pr });

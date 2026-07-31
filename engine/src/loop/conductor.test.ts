@@ -5312,19 +5312,24 @@ test("#447 park-resume: an env-failed lane holding an OPEN PR is NOT revived whi
   // The 2026-07-30 storm's residue, twice over: env-failure-preserved lanes (`failed` + PR +
   // gated_escalation_labeled=0, zero forge writes — nothing was ever labelled). #378 is free;
   // a human has since put needs-human on #433, which makes THAT lane gated reentry's property.
-  const preserved = (name: string, issue: number, pr: number, fixRounds: number): WorkerRow => ({
-    name,
-    issue,
-    session_id: `s-${name}`,
-    state: "failed",
-    started_at: t0.toISOString(),
-    ended_at: t0.toISOString(),
-    pr,
-    gated_escalation_labeled: 0,
-    fix_rounds: fixRounds,
-  });
-  st.upsertWorker(preserved("lane-378", 378, 445, 2));
-  st.upsertWorker(preserved("lane-433", 433, 444, 1));
+  const preserve = (name: string, issue: number, pr: number, fixRounds: number): void => {
+    st.upsertWorker({
+      name,
+      issue,
+      session_id: `s-${name}`,
+      state: "failed",
+      started_at: t0.toISOString(),
+      ended_at: t0.toISOString(),
+      pr,
+      gated_escalation_labeled: 0,
+      fix_rounds: fixRounds,
+    });
+    // The environment failure's own durable record — the positive evidence revival requires
+    // (PR #463 round 2, P1); reclaimTerminalLane's env branch always writes both.
+    st.appendEvent("env-failure-preserved", { worker: name, issue, source: "llm", pr, worktreePath: `/w/${name}` });
+  };
+  preserve("lane-378", 378, 445, 2);
+  preserve("lane-433", 433, 444, 1);
   forge.issueLabelsByIssue[433] = ["needs-human"];
   st.enterPark("forge", "could not resolve host", 378, t0.toISOString());
 
@@ -5373,6 +5378,7 @@ test("#447 park-resume: a lane whose PR merged or closed while the engine was pa
     pr: 445,
     gated_escalation_labeled: 0,
   });
+  st.appendEvent("env-failure-preserved", { worker: "lane-378", issue: 378, source: "llm", pr: 445, worktreePath: "/w" });
   forge.prStatus = { ...forge.prStatus, state: "MERGED" };
 
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date(t0.getTime() + 1_000) });

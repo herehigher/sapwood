@@ -1175,7 +1175,9 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   await auditGatedEscalationFlags(forge, state, cfg, log);
   // #447 F28 residual: same best-effort startup pass, deliberately AFTER the F19 audit — a lane
   // whose hold label is live has just been handed back to gated reentry, so it is already out of
-  // this pass's candidate set and only the never-escalated ones remain.
+  // this pass's candidate set and only the never-escalated ones remain. A restart DURING a park
+  // episode revives nothing: the episode is durable, and the pass suspends itself on it exactly
+  // as the tick does (PR #463 round 2).
   await reviveEnvFailedPrLanes(forge, state, cfg, log);
   sweepStaleRoleSessions(state, {
     log,
@@ -1320,7 +1322,9 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   await auditGatedEscalationFlags(forge, state, cfg, log);
   // #447 F28 residual: same best-effort startup pass, deliberately AFTER the F19 audit — a lane
   // whose hold label is live has just been handed back to gated reentry, so it is already out of
-  // this pass's candidate set and only the never-escalated ones remain.
+  // this pass's candidate set and only the never-escalated ones remain. A restart DURING a park
+  // episode revives nothing: the episode is durable, and the pass suspends itself on it exactly
+  // as the tick does (PR #463 round 2).
   await reviveEnvFailedPrLanes(forge, state, cfg, log);
   sweepStaleRoleSessions(state, {
     log,
