@@ -254,7 +254,12 @@ class FakeForge extends UnstubbedForge implements IForge {
    *  `gatherFixDiffPaths`'s ROUND-1 (no previous drive-fixup) branch reads (conductor.ts).
    *  Defaults reproduce every pre-#449 fixture byte-for-byte (an empty, complete set). */
   changedFiles: { files: { filename: string; previousFilename?: string }[]; complete: boolean } = { files: [], complete: true };
+  /** #426 review round 3: simulates the changed-file read failing — the instruction-path chain's
+   *  own `unavailable` early return, one of the pre-trigger returns that can be the first pass to
+   *  see a new head. */
+  throwOnGetPRChangedFiles = false;
   override async getPRChangedFiles() {
+    if (this.throwOnGetPRChangedFiles) throw new Error("simulated forge failure");
     return this.changedFiles;
   }
   /** #449 gate② P1 fix: mutable per-range compare result, keyed by `"${base}...${head}"` —
@@ -8138,6 +8143,107 @@ test("#426 review round 2 (P1): a push cancels the OLD head's pin through the RE
   await tick(tickOpts());
   const repinned = st.lastCiPendingEvent("lane-ci", 4260);
   assert.deepEqual([repinned?.kind, repinned?.head, repinned?.at], ["ci-pending-observed", "H2", "2026-07-20T02:01:00.000Z"]);
+  st.close();
+});
+
+test("#426 review round 3 (P2): a PRE-TRIGGER early return (instruction-path read failure) is the first pass to see a new head — it cancels the old head's pin, so the drain leaves the healthy lane alone", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({
+    cost: { drainWindowSec: 60, dailyBudgetUsd: 10 },
+    ci: { pendingEscalateAfterSec: 3600 },
+    escalation: { humanLabels: ["needs-human", "blocked"], instructionPaths: ["CLAUDE.md"] },
+  });
+  let clock = new Date("2026-07-20T00:00:00.000Z");
+  const now = () => clock;
+  const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg, now });
+  seedDriving(st, "lane-ci", 426, 4260, { review_triggered_head: "H1", review_triggered_at: "2026-07-19T23:00:00.000Z" });
+  seedCiWedgedPr(forge, 4260, "H1");
+  st.recordSpend("lane-earlier", 99, 500, "2026-07-20T00:00:01.000Z"); // daily cap breached from tick 1
+  const tickOpts = () => ({ forge, state: st, supervisor: sup, cfg, mergeGate: gate, now });
+
+  await tick(tickOpts()); // pin opens on H1
+  assert.equal(st.lastCiPendingEvent("lane-ci", 4260)?.kind, "ci-pending-observed");
+
+  // A push lands, and on the very first pass that sees H2 the instruction-path changed-file read
+  // fails — driveOne returns from a branch that sits BEFORE the review trigger and never derives a
+  // gate. It still knows which head it is looking at, which is all the conductor needs.
+  clock = new Date("2026-07-20T02:00:00.000Z"); // old pin now past both the bound and the drain window
+  seedCiWedgedPr(forge, 4260, "H2");
+  forge.throwOnGetPRChangedFiles = true;
+  const t2 = await tick(tickOpts());
+  assert.match((t2.driven[0] as { reason: string }).reason, /instruction-path-files-unavailable/);
+  assert.deepEqual(t2.escalated, []); // the drain is past its window — and finds nothing wedged
+  assert.equal(st.getWorker("lane-ci")?.state, "driving");
+  assert.equal(st.lastCiPendingEvent("lane-ci", 4260)?.kind, "ci-pending-cleared");
+  st.close();
+});
+
+test('#426 review round 3 (P2): `pending: "unknown"` on the SAME head is a pure no-op — a pass that never derived a gate can neither open an episode nor cancel a live one', async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ ci: { pendingEscalateAfterSec: 3600 } });
+  let clock = new Date("2026-07-20T00:00:00.000Z");
+  const now = () => clock;
+  const gate = new FakeMergeGate();
+  seedDriving(st, "lane-ci", 426, 4260);
+  const tickOpts = () => ({ forge, state: st, supervisor: sup, cfg, mergeGate: gate, now });
+
+  // No pin yet: an "unknown" pass must not manufacture one out of thin air.
+  gate.outcomes[4260] = {
+    kind: "queued",
+    pr: 4260,
+    reason: "instruction-path-files-unavailable: x",
+    ciPendingObservation: { pending: "unknown", head: "H1" },
+  };
+  await tick(tickOpts());
+  assert.equal(st.lastCiPendingEvent("lane-ci", 4260), null);
+
+  // Pin opened by a real gate-deriving pass…
+  clock = new Date("2026-07-20T00:10:00.000Z");
+  gate.outcomes[4260] = { kind: "queued", pr: 4260, reason: "gate-pending:MERGE_OK", ciPendingObservation: { pending: true, head: "H1" } };
+  await tick(tickOpts());
+  assert.equal(st.lastCiPendingEvent("lane-ci", 4260)?.at, "2026-07-20T00:10:00.000Z");
+
+  // …and a transient same-head failure pass must NOT cancel it (that would silently reset the
+  // clock every time a forge hiccup landed) nor re-stamp it.
+  clock = new Date("2026-07-20T00:20:00.000Z");
+  gate.outcomes[4260] = {
+    kind: "queued",
+    pr: 4260,
+    reason: "instruction-path-files-unavailable: x",
+    ciPendingObservation: { pending: "unknown", head: "H1" },
+  };
+  await tick(tickOpts());
+  const pin = st.lastCiPendingEvent("lane-ci", 4260);
+  assert.deepEqual([pin?.kind, pin?.at], ["ci-pending-observed", "2026-07-20T00:10:00.000Z"]);
+  st.close();
+});
+
+test("#426 review round 3 (P2): the CONFLICT branch — also pre-trigger — cancels the old head's pin on the first pass that sees the new head", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  // prFixCap 0: a conflicting PR routes straight to HUMAN, so this test exercises the conflict
+  // branch's own `observed()` return without dragging a fix-leg dispatch into it.
+  const cfg = mkCfg({ ci: { pendingEscalateAfterSec: 3600 }, lanes: { prFixCap: 0 } });
+  let clock = new Date("2026-07-20T00:00:00.000Z");
+  const now = () => clock;
+  const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg, now });
+  seedDriving(st, "lane-ci", 426, 4260, { review_triggered_head: "H1", review_triggered_at: "2026-07-19T23:00:00.000Z" });
+  seedCiWedgedPr(forge, 4260, "H1");
+  const tickOpts = () => ({ forge, state: st, supervisor: sup, cfg, mergeGate: gate, now });
+
+  await tick(tickOpts());
+  assert.equal(st.lastCiPendingEvent("lane-ci", 4260)?.kind, "ci-pending-observed");
+
+  clock = new Date("2026-07-20T02:00:00.000Z");
+  seedCiWedgedPr(forge, 4260, "H2");
+  forge.prStatus = { ...forge.prStatus, mergeable: "CONFLICTING" };
+  await tick(tickOpts());
+  assert.equal(st.lastCiPendingEvent("lane-ci", 4260)?.kind, "ci-pending-cleared");
   st.close();
 });
 

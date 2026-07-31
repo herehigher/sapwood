@@ -222,14 +222,22 @@ export type DriveOutcome = (
    *  MergeDriver deliberately never touches State. Gate behavior is untouched — deriveGate's
    *  own holdLabels WAIT check remains the sole scheduling effect of a hold. */
   holdObservation?: { held: boolean; label?: string };
-  /** #426 (F26): stateless CI-pending observation for this pass — whether gate① is still pending
-   *  behind a decisive gate② verdict (`ciPendingOnDecisiveReview`) and on which head. Reported on
-   *  every pass that actually DERIVED a gate, the same contract as `holdObservation`: the conductor
-   *  owns the durable pin (open on the first pending pass, cancel the moment a check reaches a real
-   *  RESOLVES green or red), because MergeDriver deliberately never touches State. ABSENT means "this pass
-   *  learned nothing" (a mixed-read queue, a forge outage) — a no-op at the
-   *  conductor, never a cancel: a loop-wide gh outage must not silently reset every lane's clock. */
-  ciPendingObservation?: { pending: boolean; head: string };
+  /** #426 (F26): stateless CI-pending observation for this pass — TWO independent facts, which is
+   *  what review round 3 (P2) separated:
+   *   - `head` — the live head this pass observed, known to EVERY return after the two reads agree
+   *     (the shared `observed()` wrapper attaches it, so a branch nobody remembers to update still
+   *     reports it). A head that differs from the open pin's ends the episode, full stop.
+   *   - `pending` — whether gate① is still pending behind a decisive gate② verdict
+   *     (`ciPendingOnDecisiveReview`). Only a pass that actually DERIVED a gate knows this;
+   *     `"unknown"` is what every earlier return says instead, and it is NEVER a cancel on the same
+   *     head. Reporting a bare `false` from a pass that never gated would wrongly cancel a live pin
+   *     the moment any transient (an instruction-path read failure, a conflict tick) happened to
+   *     land — the exact confusion this three-state field exists to prevent.
+   *  Same conductor contract as `holdObservation`: it owns the durable pin, because MergeDriver
+   *  deliberately never touches State. ABSENT means "this pass learned nothing at all" (a mixed-read
+   *  queue, a forge outage before either read landed) — a no-op at the conductor, never a cancel: a
+   *  loop-wide gh outage must not silently reset every lane's clock. */
+  ciPendingObservation?: { pending: boolean | "unknown"; head: string };
   /** #426 (F26): stateless aging escalation for a lane held WAIT-on-CI past `ci.pendingEscalateAfterSec`
    *  — the gate① twin of `reviewSilenceEscalation`, with the same PR-label latch closing it. */
   ciPendingEscalation?: { head: string; pendingSec: number };
@@ -463,7 +471,20 @@ export class MergeDriver {
       held: heldLabel != null,
       ...(heldLabel != null ? { label: heldLabel } : {}),
     };
-    const observed = (o: DriveOutcome): DriveOutcome => ({ ...o, holdObservation });
+    // #426 review round 3 (P2): every `observed(...)` return additionally reports the LIVE HEAD it
+    // saw, with `pending: "unknown"` — such a pass never derived a gate, so it genuinely does not
+    // know whether gate① is pending, but it DOES know which head it is looking at. That is enough
+    // for the conductor to end a superseded head's episode (see its own rule), and attaching it in
+    // the shared wrapper rather than branch-by-branch is what makes it hold for future branches too.
+    // Placed FIRST in the spread so a branch that really does know `pending` (the trigger branch's
+    // head-move cancel below) overrides it. Safe here: `observed` is only ever CALLED after the
+    // state/head-mismatch checks below have proven the two reads coherent, so `status.headOid` is
+    // the same head `data` was read at — the mixed-read queues themselves stay deliberately bare.
+    const observed = (o: DriveOutcome): DriveOutcome => ({
+      ciPendingObservation: { pending: "unknown", head: status.headOid },
+      ...o,
+      holdObservation,
+    });
 
     // An ALREADY-MERGED PR is terminal success, not human work (Codex PR #42 P2): in
     // produce-pr-and-stop mode the lane deliberately stays driving until a human merges, so

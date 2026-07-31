@@ -916,7 +916,19 @@ const CI_PENDING_RESET_KINDS = ["gated-reentry", "lane-revived"];
  *  `ciWedged` input above, and the observed set the ceiling path populates in tick()'s DRIVE
  *  loop). Reads the log, never a mirror: an OPEN pin is the latest `ci-pending-observed` for
  *  (worker, pr) that no `ci-pending-cleared` and no episode reset supersedes. Cheap enough for a
- *  kill-switch-frozen tick (one indexed event read per driving lane, zero forge calls). */
+ *  kill-switch-frozen tick (one indexed event read per driving lane, zero forge calls).
+ *
+ *  ACCEPTED, DOCUMENTED BLIND SPOT (#426 review round 3, P3 — marginal-complexity principle: no new
+ *  machinery for a bounded, self-recovering edge). This predicate is HEAD-BLIND on purpose: it must
+ *  stay forge-free to be safe inside a kill-switch-frozen tick, so it cannot verify that the pinned
+ *  head is still the PR's head. Every path where the engine actually LOOKS at the PR closes the gap
+ *  (any post-coherent-read pass reports the live head and the conductor cancels a superseded pin —
+ *  see the DRIVE loop). What remains is exactly one sequence: an aged pin on H1, a push to H2, and a
+ *  crash BEFORE any pass observes H2, with the restart landing in a drain that runs before DRIVE.
+ *  No drive-layer fix can close that — no pass ran. Blast radius is one recoverable false
+ *  `needs-human` during an active drain; the recovery is the standard label-clear + #147 gated
+ *  reentry, with the lane, PR, and branch all preserved. Verifying the head here would mean a forge
+ *  read on the one code path that must never make one. */
 function ciPendingWedgedForDrain(state: State, cfg: SapwoodConfig, worker: string, pr: number, now: Date): boolean {
   const pin = openCiPendingPin(state, worker, pr);
   const pendingSec = pinElapsedSec(pin?.at ?? null, now);
@@ -3520,21 +3532,32 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // #426 (F26): the gate① twin of the silence clock above — the CI-PENDING PIN's lifecycle.
       // The pin IS the log (no mirror column, no in-process clock), so there is nothing here that
       // could disagree with the ledger and nothing to replay: `openCiPin` above read the pin, and
-      // the two appends below are the only writes. A pass that reported no observation at all (a
-      // mixed-read queue, a fresh review trigger, a gate-data outage) leaves the pin exactly as it
+      // the appends below are the only writes. A pass that reported no observation at all (a
+      // mixed-read queue, a gate-data outage before either read landed) leaves the pin exactly as it
       // was — never a cancel, because a loop-wide gh outage must not reset every lane's clock.
+      //
+      // #426 review round 3 (P2): HEAD and PENDING are decided separately, because a pass knows them
+      // separately (see DriveOutcome.ciPendingObservation's own doc).
       if (outcome.ciPendingObservation) {
         const obs = outcome.ciPendingObservation;
-        if (obs.pending) {
-          // Open a pin on the first pending pass for THIS head. A head move (push -> CI restarts)
-          // supersedes the old pin with a fresh one: latest-wins by id, so no cancel event is
-          // needed for it, and the aging arm itself refuses a pin whose head is not the live one.
-          if (openCiPin == null || openCiPin.head !== obs.head) {
+        // A pin recorded for a SUPERSEDED head: the episode is over regardless of what this pass
+        // knows about gate① — the old head's checks are irrelevant, and leaving the pin open is what
+        // let an aged pre-push pin terminalize a healthy freshly-pushed lane in a drain (round 2's
+        // P1-2). Any post-coherent-read pass can be the first to see the new head, so this arm
+        // deliberately fires on `pending: "unknown"` too.
+        const openForThisHead = openCiPin != null && openCiPin.head === obs.head ? openCiPin : null;
+        if (openCiPin != null && openForThisHead == null) {
+          state.appendEvent("ci-pending-cleared", { worker: w.name, issue: w.issue, pr, head: obs.head });
+        }
+        if (obs.pending === true) {
+          // Open a pin on the first pending pass for THIS head (the cancel above, if it fired, has
+          // already closed whatever preceded it — latest-wins by id).
+          if (openForThisHead == null) {
             state.appendEvent("ci-pending-observed", { worker: w.name, issue: w.issue, pr, head: obs.head, at: iso() });
           }
-        } else if (openCiPin != null) {
-          // gate① RESOLVED (green or red), gate② stopped being decisive, or the head moved — cancel,
-          // so the NEXT pending episode ages from its own start rather than inheriting this clock.
+        } else if (obs.pending === false && openForThisHead != null) {
+          // gate① RESOLVED (green or red) or gate② stopped being decisive — cancel, so the NEXT
+          // pending episode ages from its own start rather than inheriting this clock.
           // #426 review round 2 (P1-1, adjudicated): a check that CONCLUDES WITHOUT PASSING
           // (cancelled/skipped/neutral/stale/action_required) never reaches here — `ciGreen` stays
           // false and `ciRed` stays false for those, so the observation is still `pending: true`
@@ -3542,6 +3565,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           // cannot progress on its own either, and cancelling would reintroduce the F26 wedge.
           state.appendEvent("ci-pending-cleared", { worker: w.name, issue: w.issue, pr, head: obs.head });
         }
+        // `pending: "unknown"` on the SAME head falls through both arms: a pass that never derived a
+        // gate can neither open nor close an episode it has no information about.
       }
       // #426 (F26) AC1: aged past `ci.pendingEscalateAfterSec` — the same three-tier escalation
       // review silence gets (visibility only: the lane stays driving, gate② is untouched), plus the

@@ -473,7 +473,15 @@ test("#292/#397 MergeDriver: an existing human-merge-only label returns HUMAN be
   // writes — so the "already adjudicated, don't spend another read" short-circuit still holds
   // for the PRs the latch was built for, and only for those.
   const outcome = await new MergeDriver({ forge, reviewer, cfg: mkCfg() }).driveOne(7, 46, NEVER_TRIGGERED, noopRecord);
-  assert.deepEqual(outcome, { kind: "needs-human", pr: 7, reason: "gate:HUMAN:instruction-path-latch", holdObservation: { held: false } });
+  // #426 review round 3 (P2): every post-coherent-read return reports the LIVE HEAD, with
+  // `pending: "unknown"` — this pass never derived a gate, so it cannot claim to know gate①.
+  assert.deepEqual(outcome, {
+    kind: "needs-human",
+    pr: 7,
+    reason: "gate:HUMAN:instruction-path-latch",
+    holdObservation: { held: false },
+    ciPendingObservation: { pending: "unknown", head: "HEAD" },
+  });
   assert.equal(forge.calls.includes("changed-files"), false);
   assert.deepEqual(reviewer.triggered, []);
   assert.deepEqual(forge.comments, []);
@@ -994,6 +1002,7 @@ test("MergeDriver.driveOne (#270): born-CONFLICTING zero-check PR -> conflict FI
     reason: "gate:FIXABLE:merge-conflict",
     prescription: "conflict",
     holdObservation: { held: false },
+    ciPendingObservation: { pending: "unknown", head: "HEAD" }, // #426 R3: head known, gate① not
   });
   assert.deepEqual(forge.comments, [], "moot review is never triggered on a conflicting head");
   assert.deepEqual(forge.merged, []);
