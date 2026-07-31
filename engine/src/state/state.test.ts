@@ -420,54 +420,84 @@ test("lastHoldEvent (#294, Codex P2): scoped to (worker, pr) — a lane repointe
   s.close();
 });
 
-test("lastDriveQueuedReason (#383): none -> null; returns the LATEST reason for the right (worker, pr) only", () => {
+test("lastDriveQueuedEvent (#383): none -> null; returns the LATEST id+reason for the right (worker, pr) only", () => {
   const s = mem();
-  assert.equal(s.lastDriveQueuedReason("lane-a", 55), null);
+  assert.equal(s.lastDriveQueuedEvent("lane-a", 55), null);
 
   s.appendEvent("pr-held", { worker: "lane-a", issue: 2, pr: 55 }); // unrelated kinds never match
-  assert.equal(s.lastDriveQueuedReason("lane-a", 55), null);
+  assert.equal(s.lastDriveQueuedEvent("lane-a", 55), null);
 
   s.appendEvent("drive-queued", { worker: "lane-a", issue: 2, pr: 55, reason: "gate-pending:WAIT_REVIEW" });
+  const firstId = s.lastDriveQueuedEvent("lane-a", 55)!.id;
   s.appendEvent("drive-queued", { worker: "lane-b", issue: 3, pr: 56, reason: "gate-pending:WAIT_REVIEW" });
-  assert.equal(s.lastDriveQueuedReason("lane-a", 55), "gate-pending:WAIT_REVIEW");
+  assert.deepEqual(s.lastDriveQueuedEvent("lane-a", 55), { id: firstId, reason: "gate-pending:WAIT_REVIEW" });
 
-  // A later reason for the same (worker, pr) supersedes; lane-b's row is untouched.
+  // A later reason for the same (worker, pr) supersedes (a strictly HIGHER id); lane-b's row is
+  // untouched.
   s.appendEvent("drive-queued", { worker: "lane-a", issue: 2, pr: 55, reason: "review-triggered" });
-  assert.equal(s.lastDriveQueuedReason("lane-a", 55), "review-triggered");
-  assert.equal(s.lastDriveQueuedReason("lane-b", 56), "gate-pending:WAIT_REVIEW");
+  const second = s.lastDriveQueuedEvent("lane-a", 55)!;
+  assert.equal(second.reason, "review-triggered");
+  assert.ok(second.id > firstId);
+  assert.equal(s.lastDriveQueuedEvent("lane-b", 56)?.reason, "gate-pending:WAIT_REVIEW");
   s.close();
 });
 
-test("lastDriveQueuedReason (#383): scoped to (worker, pr) — a lane repointed to a NEW PR never inherits the prior PR's last reason", () => {
+test("lastDriveQueuedEvent (#383): scoped to (worker, pr) — a lane repointed to a NEW PR never inherits the prior PR's last reason", () => {
   const s = mem();
   s.appendEvent("drive-queued", { worker: "lane-a", issue: 2, pr: 55, reason: "gate-pending:WAIT_REVIEW" });
-  assert.equal(s.lastDriveQueuedReason("lane-a", 72), null);
-  assert.equal(s.lastDriveQueuedReason("lane-a", 55), "gate-pending:WAIT_REVIEW"); // the old episode is still on record
+  assert.equal(s.lastDriveQueuedEvent("lane-a", 72), null);
+  assert.equal(s.lastDriveQueuedEvent("lane-a", 55)?.reason, "gate-pending:WAIT_REVIEW"); // the old episode is still on record
   s.close();
 });
 
-test("lastFixLegDispatchBlockedReason (#383): none -> null; returns the LATEST blockReason for the right (worker, pr) only", () => {
+test("lastFixLegDispatchBlockedEvent (#383): none -> null; returns the LATEST id+blockReason for the right (worker, pr) only", () => {
   const s = mem();
-  assert.equal(s.lastFixLegDispatchBlockedReason("lane-a", 55), null);
+  assert.equal(s.lastFixLegDispatchBlockedEvent("lane-a", 55), null);
 
   s.appendEvent("drive-queued", { worker: "lane-a", issue: 2, pr: 55, reason: "x" }); // unrelated kinds never match
-  assert.equal(s.lastFixLegDispatchBlockedReason("lane-a", 55), null);
+  assert.equal(s.lastFixLegDispatchBlockedEvent("lane-a", 55), null);
 
   s.appendEvent("fix-leg-dispatch-blocked", { worker: "lane-a", issue: 2, pr: 55, blockReason: "paused" });
+  const firstId = s.lastFixLegDispatchBlockedEvent("lane-a", 55)!.id;
   s.appendEvent("fix-leg-dispatch-blocked", { worker: "lane-b", issue: 3, pr: 56, blockReason: "paused" });
-  assert.equal(s.lastFixLegDispatchBlockedReason("lane-a", 55), "paused");
+  assert.deepEqual(s.lastFixLegDispatchBlockedEvent("lane-a", 55), { id: firstId, blockReason: "paused" });
 
   s.appendEvent("fix-leg-dispatch-blocked", { worker: "lane-a", issue: 2, pr: 55, blockReason: "ceiling" });
-  assert.equal(s.lastFixLegDispatchBlockedReason("lane-a", 55), "ceiling");
-  assert.equal(s.lastFixLegDispatchBlockedReason("lane-b", 56), "paused");
+  const second = s.lastFixLegDispatchBlockedEvent("lane-a", 55)!;
+  assert.equal(second.blockReason, "ceiling");
+  assert.ok(second.id > firstId);
+  assert.equal(s.lastFixLegDispatchBlockedEvent("lane-b", 56)?.blockReason, "paused");
   s.close();
 });
 
-test("lastFixLegDispatchBlockedReason (#383): scoped to (worker, pr) — a lane repointed to a NEW PR never inherits the prior PR's last blockReason", () => {
+test("lastFixLegDispatchBlockedEvent (#383): scoped to (worker, pr) — a lane repointed to a NEW PR never inherits the prior PR's last blockReason", () => {
   const s = mem();
   s.appendEvent("fix-leg-dispatch-blocked", { worker: "lane-a", issue: 2, pr: 55, blockReason: "paused" });
-  assert.equal(s.lastFixLegDispatchBlockedReason("lane-a", 72), null);
-  assert.equal(s.lastFixLegDispatchBlockedReason("lane-a", 55), "paused"); // the old episode is still on record
+  assert.equal(s.lastFixLegDispatchBlockedEvent("lane-a", 72), null);
+  assert.equal(s.lastFixLegDispatchBlockedEvent("lane-a", 55)?.blockReason, "paused"); // the old episode is still on record
+  s.close();
+});
+
+test("maxEventIdForKinds (#383 round 2, PM P2): 0 when none of `kinds` has fired for this (worker, pr); otherwise the HIGHEST matching id, scoped correctly", () => {
+  const s = mem();
+  assert.equal(s.maxEventIdForKinds(["drive-fixup"], "lane-a", 55), 0);
+
+  s.appendEvent("drive-queued", { worker: "lane-a", issue: 2, pr: 55, reason: "x" }); // not in `kinds` — ignored
+  assert.equal(s.maxEventIdForKinds(["drive-fixup"], "lane-a", 55), 0);
+
+  s.appendEvent("drive-fixup", { worker: "lane-b", issue: 3, pr: 56, fixRounds: 1, reason: "y" }); // different (worker, pr)
+  assert.equal(s.maxEventIdForKinds(["drive-fixup"], "lane-a", 55), 0);
+
+  s.appendEvent("drive-fixup", { worker: "lane-a", issue: 2, pr: 55, fixRounds: 1, reason: "y" });
+  const firstFixupId = s.maxEventIdForKinds(["drive-fixup"], "lane-a", 55);
+  assert.ok(firstFixupId > 0);
+
+  // A later event of a DIFFERENT kind in the set is picked up too — MAX across the whole set.
+  s.appendEvent("lane-revived", { worker: "lane-a", issue: 2, pr: 55 });
+  const bothId = s.maxEventIdForKinds(["drive-fixup", "lane-revived"], "lane-a", 55);
+  assert.ok(bothId > firstFixupId);
+  // Querying `drive-fixup` alone still returns the OLDER id — the set passed in is what scopes it.
+  assert.equal(s.maxEventIdForKinds(["drive-fixup"], "lane-a", 55), firstFixupId);
   s.close();
 });
 

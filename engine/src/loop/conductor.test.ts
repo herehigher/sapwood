@@ -1835,6 +1835,58 @@ test("tick DRIVE (#383) crash-rerun: a kill -9 between the drive-queued observat
   }
 });
 
+test("tick DRIVE (#383 round 2, PM P2): drive-queued RE-emits after a fix-leg excursion even when the reason repeats EXACTLY (WAIT -> fixable -> dispatch -> WAIT again is a NEW episode, not steady state)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  const waitOutcome: DriveOutcome = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW" };
+
+  // 1. First observation of the WAIT episode.
+  gate.outcomes[55] = waitOutcome;
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-queued"]).length, 1);
+
+  // 2. Steady state — re-observing the SAME reason still dedupes as usual.
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-queued"]).length, 1);
+
+  // 3. Findings land — the lane goes FIXABLE and dispatches a fix leg (drive-fixup fires, the
+  // episode-reset boundary).
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(st.getWorker("lane-a")?.state, "fixing");
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]).length, 1);
+
+  // 4. The fix leg completes and pushes; FIXING RECLAIM lands the lane back in `driving` THIS
+  // SAME tick, and DRIVE re-evaluates — back to the IDENTICAL WAIT reason as step 1.
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  gate.outcomes[55] = waitOutcome;
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-a")?.state, "driving");
+
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-queued"]);
+  assert.equal(
+    events.length,
+    2,
+    "the post-fix-leg WAIT observation is a NEW episode and must re-announce, even though the reason string repeats exactly",
+  );
+  assert.deepEqual(
+    events.map((e) => (e.payload as { reason: string }).reason),
+    ["gate-pending:WAIT_REVIEW", "gate-pending:WAIT_REVIEW"],
+  );
+  st.close();
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // #246: FIXABLE gate wiring — the DRIVE loop's own "fixable" branch (driveDecision's
 // FIXUP/ESCALATE refinement, fed by THIS lane's fix_rounds/cfg.lanes.prFixCap/round budget).
@@ -2504,6 +2556,65 @@ test("tick DRIVE (#383) crash-rerun: a kill -9 between the fix-leg-dispatch-bloc
       "exactly one fix-leg-dispatch-blocked survives the restart — no duplicate for the same steady state",
     );
     after.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick DRIVE (#383 round 2, PM P2): fix-leg-dispatch-blocked RE-emits after an intervening dispatch even when blockReason repeats EXACTLY (PAUSE -> cleared -> dispatched -> PAUSE re-applied is a NEW episode, not steady state)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-fix-blocked-recur-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55);
+    const gate = new FakeMergeGate();
+    const fixable: DriveOutcome = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+    const runTick = () =>
+      tick({
+        now: realClock,
+        forge,
+        state: st,
+        supervisor: sup,
+        cfg: mkCfg(),
+        mergeGate: gate,
+        fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+      });
+
+    // 1. PAUSE applied — the lane is blocked. First observation of the episode.
+    gate.outcomes[55] = fixable;
+    writeFileSync(join(dir, "PAUSE"), "");
+    await runTick();
+    assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-dispatch-blocked"]).length, 1);
+    assert.equal(st.getWorker("lane-a")?.state, "driving");
+
+    // 2. PAUSE removed — the block clears and the leg actually dispatches (drive-fixup fires,
+    // the episode-reset boundary).
+    rmSync(join(dir, "PAUSE"));
+    await runTick();
+    assert.equal(st.getWorker("lane-a")?.state, "fixing");
+    assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]).length, 1);
+
+    // 3. The fix leg completes and pushes; FIXING RECLAIM lands the lane back in `driving` THIS
+    // SAME tick. A human re-applies PAUSE and DRIVE re-evaluates the SAME still-fixable PR —
+    // blocked again with the IDENTICAL blockReason ("paused") as step 1.
+    sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+    writeFileSync(join(dir, "PAUSE"), "");
+    gate.outcomes[55] = fixable;
+    await runTick();
+    assert.equal(st.getWorker("lane-a")?.state, "driving");
+
+    const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-dispatch-blocked"]);
+    assert.equal(
+      events.length,
+      2,
+      "the re-block after a completed fix leg is a NEW episode and must re-announce, even though blockReason repeats exactly",
+    );
+    assert.deepEqual(
+      events.map((e) => (e.payload as { blockReason: string }).blockReason),
+      ["paused", "paused"],
+    );
+    st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
