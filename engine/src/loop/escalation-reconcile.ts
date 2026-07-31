@@ -213,8 +213,9 @@ export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   // applies verbatim too: its waiting-on-a-human state is carried by its durable
   // `consecutive-stalls` park episode (row + park-escalated/park-resumed lifecycle + ESCALATION
   // marker + `sapwood status`), the event carries no issue and applies no label, and its
-  // clearing story is the breaker's own (a later start observing the stall streak broken —
-  // stall-breaker.ts's module doc), never this table's label/close/merge reconciliation.
+  // clearing story is the breaker's own (operator-explicit park_state row deletion, observed
+  // and receipted by the next start — stall-breaker.ts's module doc), never this table's
+  // label/close/merge reconciliation.
   //
   // KNOWN, BOUNDED GAP (#295 review round 10, deferred to #404): frontend-design.md §3 also
   // flags two PREDICATE kinds — `reclaim-failed` when `payload.next` is not an automatic

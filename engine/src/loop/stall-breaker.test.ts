@@ -191,7 +191,8 @@ test("config-driven threshold (user-tunables rule): liveness.maxConsecutiveStall
   s.close();
 });
 
-// ── the clearing story (module doc): only a CLOSED ROUND breaks a standing streak ─────────
+// ── the clearing story (module doc, PR #473 round 3 P3): OPERATOR-EXPLICIT only — an open
+// episode never auto-clears, not even on a closed round ───────────────────────────────────
 
 test("re-trip while already parked: dispatch stays gated but NO duplicate detected/escalated events — the episode is the dedup carrier", () => {
   const s = new State(":memory:");
@@ -212,32 +213,29 @@ test("re-trip while already parked: dispatch stays gated but NO duplicate detect
   s.close();
 });
 
-test("clearing: the parked run closes a (dispatch-empty) round — the NEXT start reads that closed round as recovery evidence and clears with a park-resumed receipt", () => {
+test("P3 (PR #473 round 3): a dispatch-empty round closing while parked does NOT clear — loop health is not wedge recovery, and the park stands across the restart", () => {
   const s = new State(":memory:");
   seedRun(s, "stalled");
   seedRun(s, "stalled");
   seedRun(s, "stalled");
   boot(s);
   detectConsecutiveStalls(s, mkCfg(), realNow, silentLog); // trips, parks
-  // A park gates dispatch, not the round loop: round 1 opens unconditionally (round.ts), its
-  // peripheral phases complete without touching the wedged dispatch path, and it CLOSES — the
-  // canary the clearing story rests on. The operator then stops and restarts the engine.
+  // The exact P3 oscillation seed: the park gates dispatch but not the round loop, so the
+  // parked run completes and closes a dispatch-empty round, then exits cleanly under the
+  // supervisor's SIGTERM. Under the rejected round-2 semantics the next start cleared here —
+  // opening the unbounded park -> empty-round clear -> re-wedge -> re-park cycle.
   s.appendEvent("round-phase", { round_id: 4, phase: "closed" });
   s.appendEvent("run-ended", { stoppedBy: "signal" });
   boot(s);
   const outcome = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
-  assert.deepEqual(outcome, { restartAfterStall: false, streak: 0, tripped: false });
-  assert.equal(s.parkRow(CONSECUTIVE_STALLS_PARK_SOURCE), null, "the closed round is the sanctioned-recovery signal");
-  assert.equal(s.isParked(), false);
-  const resumed = s.eventsAfterId(0, ["park-resumed"]);
-  assert.equal(resumed.length, 1);
-  const resumedPayload = resumed[0]!.payload as { source: string; via: string };
-  assert.equal(resumedPayload.source, CONSECUTIVE_STALLS_PARK_SOURCE);
-  assert.equal(resumedPayload.via, "stall-streak-clear");
+  assert.equal(outcome.tripped, true, "the open episode holds — no auto-clear on any engine-produced signal");
+  assert.equal(s.isParked(), true);
+  assert.equal(s.eventsAfterId(0, ["park-resumed"]).length, 0, "no clear receipt was ever written by the engine");
+  assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1, "and the standing escalation is not re-spammed");
   s.close();
 });
 
-test("clearing is NOT granted to any exit: the parked run stopped gracefully (run-ended, no round closed) OR killed hard leaves the streak — and the park — standing", () => {
+test("clearing is NOT granted to any exit: the parked run stopped gracefully (run-ended, no round closed) OR killed hard leaves the park standing", () => {
   const s = new State(":memory:");
   seedRun(s, "stalled");
   seedRun(s, "stalled");
@@ -245,39 +243,84 @@ test("clearing is NOT granted to any exit: the parked run stopped gracefully (ru
   boot(s);
   detectConsecutiveStalls(s, mkCfg(), realNow, silentLog); // trips, parks
   // The parked run is SIGTERMed before its round could close (or the wedge is in the round
-  // loop itself): a clean terminal, zero progress evidence. P1: exits never clear.
+  // loop itself): a clean terminal, zero progress evidence.
   s.appendEvent("run-ended", { stoppedBy: "signal" });
   boot(s);
   const afterClean = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
   assert.equal(afterClean.tripped, true);
-  assert.equal(s.isParked(), true, "a clean stop is not progress — the park stands");
+  assert.equal(s.isParked(), true, "a clean stop is not an operator clear — the park stands");
   // And a hard kill of the next parked run (no terminal at all) changes nothing either.
   boot(s);
   const afterCrash = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
   assert.equal(afterCrash.tripped, true);
-  assert.equal(s.isParked(), true, "no progress, no forgiveness — the park stands");
+  assert.equal(s.isParked(), true, "no operator act, no forgiveness — the park stands");
   assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1, "and the escalation never spams across those restarts");
   s.close();
 });
 
-test("a closed episode's stalls are consumed: after a clear, old stalls never re-trip a fresh start (park-resumed resets the fold)", () => {
+test("THE operator clear: park_state row deleted on a fully-materialized episode — the next start writes the operator-clear receipt, resumes, and removes the ESCALATION marker", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-stall-opclear-"));
+  try {
+    const s = new State(join(dir, "sapwood.sqlite"));
+    seedRun(s, "stalled");
+    seedRun(s, "stalled");
+    seedRun(s, "stalled");
+    boot(s);
+    detectConsecutiveStalls(s, mkCfg(), realNow, silentLog); // trips, parks, escalates
+    assert.equal(existsSync(join(dir, "ESCALATION")), true, "the standing alarm");
+    // The operator's documented clear action (troubleshooting.md): delete the park_state row —
+    // the same manual channel the sibling rapid-restart park documents ("both paths flow
+    // through the same clearPark").
+    s.clearPark(CONSECUTIVE_STALLS_PARK_SOURCE);
+    boot(s);
+    const outcome = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
+    assert.equal(outcome.tripped, false, "the operator's act is honored — dispatch resumes");
+    assert.equal(s.isParked(), false);
+    const resumed = s.eventsAfterId(0, ["park-resumed"]);
+    assert.equal(resumed.length, 1, "the clear is receipted in the log");
+    const resumedPayload = resumed[0]!.payload as { source: string; via: string };
+    assert.equal(resumedPayload.source, CONSECUTIVE_STALLS_PARK_SOURCE);
+    assert.equal(resumedPayload.via, "operator-clear");
+    assert.equal(existsSync(join(dir, "ESCALATION")), false, "the answered alarm is taken down");
+    // And the clear STICKS: a further restart neither re-parks nor re-escalates (the receipt
+    // closed the episode and reset the fold's streak).
+    boot(s);
+    const later = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
+    assert.deepEqual(later, { restartAfterStall: false, streak: 0, tripped: false });
+    assert.equal(s.eventsAfterId(0, ["consecutive-stalls-detected"]).length, 1);
+    assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1);
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a cleared episode's stalls are consumed: after the operator clear, one fresh stall counts 1, not 4 — and re-tripping needs a full new streak (a NEW episode)", () => {
   const s = new State(":memory:");
   seedRun(s, "stalled");
   seedRun(s, "stalled");
   seedRun(s, "stalled");
   boot(s);
   detectConsecutiveStalls(s, mkCfg(), realNow, silentLog); // episode 1: parks
-  s.appendEvent("round-phase", { round_id: 4, phase: "closed" }); // the parked run's own canary round
-  s.appendEvent("run-ended", { stoppedBy: "signal" });
+  s.clearPark(CONSECUTIVE_STALLS_PARK_SOURCE); // the operator clears without fixing
   boot(s);
-  detectConsecutiveStalls(s, mkCfg(), realNow, silentLog); // clears episode 1
-  // This cleared run itself wedges once (the operator resumed without fixing) — ONE stall, not
-  // four: the closed episode's three must not count again.
+  detectConsecutiveStalls(s, mkCfg(), realNow, silentLog); // receipts episode 1, resumes
+  // The unfixed wedge stalls this run — ONE stall, not four: episode 1's three are consumed.
   s.appendEvent("engine-stalled", { windowMs: 600_000 });
   boot(s);
   const outcome = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
   assert.deepEqual(outcome, { restartAfterStall: true, streak: 1, tripped: false });
   assert.equal(s.eventsAfterId(0, ["consecutive-stalls-detected"]).length, 1, "still only episode 1's detection");
+  // Two more stalls re-accumulate a full streak: a genuinely NEW episode parks and escalates.
+  s.appendEvent("engine-stalled", { windowMs: 600_000 });
+  boot(s);
+  detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
+  s.appendEvent("engine-stalled", { windowMs: 600_000 });
+  boot(s);
+  const retrip = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);
+  assert.equal(retrip.tripped, true);
+  assert.equal(s.eventsAfterId(0, ["consecutive-stalls-detected"]).length, 2, "episode 2 gets its own detection");
+  assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 2, "and its own single escalation");
   s.close();
 });
 
@@ -335,17 +378,19 @@ test("heal-on-boot: escalation latch/marker lost between writes — rebuilt idem
   }
 });
 
-test("clearing is RECEIPT-FIRST: killed between the park-resumed receipt and clearPark, the next start deletes the stray row silently (no duplicate receipt)", () => {
+test("a stray mirror row on a log-CLOSED episode is cleaned up silently — the log's receipt is authoritative and never duplicated", () => {
   const s = new State(":memory:");
-  // Post-crash state under the write order: episode opened + receipt appended, row still present.
+  // A defensive/legacy stray-mirror state: the episode is closed in the log (receipt down) but
+  // a park_state row exists anyway (a legacy round-2 DB, or state surgery gone sideways). The
+  // log wins: the row is a mirror of a closed episode and gets deleted, with no new receipt.
   s.appendEvent("consecutive-stalls-detected", { streak: 3, maxConsecutiveStalls: 3, enteredAt: "2026-07-30T00:00:00.000Z" });
   s.enterPark(CONSECUTIVE_STALLS_PARK_SOURCE, "old wedge", null, "2026-07-30T00:00:00.000Z");
   s.appendEvent("park-resumed", {
     source: CONSECUTIVE_STALLS_PARK_SOURCE,
     enteredAt: "2026-07-30T00:00:00.000Z",
-    via: "stall-streak-clear",
+    via: "operator-clear",
   });
-  assert.ok(s.parkRow(CONSECUTIVE_STALLS_PARK_SOURCE) !== null, "the kill window: receipt down, row not yet deleted");
+  assert.ok(s.parkRow(CONSECUTIVE_STALLS_PARK_SOURCE) !== null, "the stray state: receipt down, row still present");
 
   boot(s);
   const outcome = detectConsecutiveStalls(s, mkCfg(), realNow, silentLog);

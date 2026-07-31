@@ -44,26 +44,31 @@
 // (the #431 round-4 class). The transient-wedge guarantee falls out directly: a host-sleep
 // wedge closes rounds between its stalls, so its streak never exceeds 1.
 //
-// CLEARING STORY — the rapid-restart shape, with the drained-window condition replaced by a
-// broken streak, because the stall streak does not decay with time the way a birth window does:
-// the episode has NO probe; a later engine start observing streak < threshold appends the
-// `park-resumed` receipt (receipt FIRST, then clearPark — #431 round 4) and resumes. With every
-// exit neutral, the ONLY thing that breaks a standing streak is a closed round — and the parked
-// engine itself supplies exactly that canary: a park gates DISPATCH, not the round loop, and
-// round 1 of a run opens unconditionally (round.ts), so a parked run whose peripheral phases
-// complete closes one (dispatch-empty) round. The wedge decides what happens next, honestly:
-//   - wedge in the dispatch/worker path -> the parked round closes; the NEXT start reads that
-//     closed round as recovery evidence, appends the receipt, and resumes dispatch. Resumed
-//     WITHOUT the wedge fixed, dispatch re-wedges and the streak re-accumulates to a NEW
-//     episode — bounded, one escalation per episode, never silent.
-//   - wedge in the round loop itself -> the parked run stalls again before any round closes;
-//     the streak only grows, the park and its (deduped) escalation stand until the wedge is
-//     actually fixed. No restart pattern — graceful or hard — can launder it.
-// Deleting the park_state row by hand does NOT stick while the log still shows an unbroken
-// streak: the next start rebuilds every mirror from the log (LOG AUTHORITY — and the row-null
-// state is indistinguishable from the kill window between detection and enterPark, so treating
-// it as an operator act would fail open). The manual override is fixing the wedge, not state
-// surgery — docs/troubleshooting.md says so in operator terms.
+// CLEARING STORY — OPERATOR-EXPLICIT, and nothing else (PR #473 round 3, P3 ruling:
+// degrade-to-human, no new probe machinery). The episode has NO probe and NO auto-clear: once
+// open, it stands — across any number of restarts, with its single deduped escalation and its
+// evidence preserved — until the operator deletes the `consecutive-stalls` park_state row (the
+// SAME manual channel the sibling rapid-restart park documents); the next engine start observes
+// the deletion, appends the `park-resumed` receipt (`via: "operator-clear"`), and resumes.
+//
+// Why this deliberately DIFFERS from rapid-restart's auto-clear, per the same ruling: rapid-
+// restart can honestly re-evaluate its trip condition at every start (births inside a window
+// that decays with wall time), so "the condition no longer holds" is an observable fact. The
+// stall streak has no such decay, and the one in-engine progress signal that could stand in —
+// a round closing — is produced by a round loop the park deliberately leaves RUNNING while it
+// gates exactly the dispatch surface a dispatch-adjacent wedge lives on: a dispatch-empty round
+// closing while parked proves loop health, not wedge recovery, and accepting it as the clear
+// receipt yields an unbounded park -> empty-round clear -> re-wedge -> re-park oscillation
+// under a restarting supervisor (the round-3 P3). A bounded dispatch-adjacent recovery probe
+// was considered and REJECTED for v1 (marginal-complexity: no new recovery machinery on the
+// recovery path); a deterministic wedge is a human's call to close.
+//
+// Operator-clear detection is log-authoritative, not a guess: the engine's own clear is
+// receipt-first, so an OPEN episode whose escalation IS in the log but whose park row is GONE
+// with no receipt has exactly one possible writer — the operator. The one remaining row-null
+// state, detection logged but enterPark never reached (a kill in that two-statement window),
+// is distinguished by the ABSENT escalation (it only lands after the park) and heals by
+// rebuilding the row, so a crash can never be mistaken for a human act.
 import type { SapwoodConfig } from "../config/config.js";
 import type { State } from "../state/state.js";
 
@@ -129,11 +134,11 @@ export function detectConsecutiveStalls(
       );
   const escalationMessage = (reason: string): string =>
     `sapwood: consecutive-stall breaker tripped — ${reason}. Autonomous dispatch is parked. ` +
-    `The same wedge appears to recur on every restart; restarting again will not fix it. ` +
-    `Diagnose the stall (the engine-stalled events name the round/phase and last event) and fix the cause. ` +
-    `The park clears on the first start after a round has CLOSED again (the parked engine's own ` +
-    `dispatch-empty round counts once its phases complete) — no exit, clean or otherwise, clears it. ` +
-    `See docs/troubleshooting.md and docs/getting-started.md ("Running under a supervisor").`;
+    `The same wedge appears to recur on every restart; restarting again will not fix it, and the ` +
+    `park does NOT auto-clear. Diagnose the stall (the engine-stalled events name the round/phase ` +
+    `and last event), fix the cause, then clear the park by deleting its park_state row ` +
+    `(docs/troubleshooting.md has the exact command) — the next start records the operator clear ` +
+    `and resumes dispatch. See also docs/getting-started.md ("Running under a supervisor").`;
   /** The immediate local escalation — same channel, ordering, and mirror-heal contract as
    *  rapid-restart.ts's escalateLocally (see its own doc): the log-deduped park-escalated event
    *  FIRST, then the ESCALATION marker and the escalated_at latch as idempotent mirrors. */
@@ -204,23 +209,42 @@ export function detectConsecutiveStalls(
           `restarting into normal recovery (${streak} consecutive stalled run(s) so far, breaker threshold ${max})`,
       );
     }
-    // ── the breaker (item 3) — rapid-restart.ts's exact branch structure with the birth count
-    // replaced by the streak ──────────────────────────────────────────────────────────────
+    // ── the breaker (item 3) — rapid-restart.ts's branch structure, with one adjudicated
+    // difference (PR #473 round 3, P3): an OPEN episode never auto-clears. Rapid-restart's own
+    // clear re-evaluates its trip condition (births in a decaying window) and clears when it no
+    // longer holds; the stall streak has no such honest re-evaluation post-park — the only
+    // in-engine progress signal, a closed round, is produced by a loop the park deliberately
+    // leaves running while gating exactly the dispatch surface the wedge lives on. So an open
+    // episode holds until the OPERATOR acts (module doc's clearing story); the fold streak is
+    // consulted only to open a NEW episode. ────────────────────────────────────────────────
     const openEpisode = openEpisodeInLog();
     const row = state.parkRow(CONSECUTIVE_STALLS_PARK_SOURCE);
-    if (streak >= max) {
-      if (openEpisode === null) {
-        // Fresh trip. LOG FIRST: the detection event mints the episode identity every mirror
-        // uses; then the mirrors (park row, marker, latch), each reconstructible below.
-        const enteredAtIso = nowDate.toISOString();
-        const reason = reasonFor(streak, max);
-        state.appendEvent("consecutive-stalls-detected", { streak, maxConsecutiveStalls: max, enteredAt: enteredAtIso });
-        state.enterPark(CONSECUTIVE_STALLS_PARK_SOURCE, reason, null, enteredAtIso);
-        escalateLocally(reason, enteredAtIso);
+    if (openEpisode !== null) {
+      const enteredAtIso = openEpisode.enteredAt ?? row?.enteredAt ?? nowDate.toISOString();
+      if (row === null && escalatedInLog(enteredAtIso)) {
+        // THE operator clear (module doc): the episode had fully materialized — park row AND
+        // logged escalation — and the row is now gone with no engine receipt in the log. The
+        // engine's own clear is receipt-first, so a receiptless missing row on an escalated
+        // episode has exactly one remaining writer: the operator deleting the park_state row.
+        // Honor it — RECEIPT FIRST (closing the episode in the log, which also resets the
+        // fold's streak for every start after this), then clearPark as the mirror cleanup
+        // (removes the ESCALATION marker: the operator has acted, the alarm is answered).
+        state.appendEvent("park-resumed", {
+          source: CONSECUTIVE_STALLS_PARK_SOURCE,
+          enteredAt: enteredAtIso,
+          via: "operator-clear",
+        });
+        state.clearPark(CONSECUTIVE_STALLS_PARK_SOURCE);
+        log(
+          `[sapwood:startup] consecutive-stalls park cleared by the operator (park_state row removed) — ` +
+            `resuming dispatch; the streak restarts from zero`,
+        );
       } else {
-        // Episode already open in the log — the durable dedup carrier (one detection + one
-        // escalation per episode, never per restart). Reconstruct every missing mirror.
-        const enteredAtIso = openEpisode.enteredAt ?? row?.enteredAt ?? nowDate.toISOString();
+        // The episode stands — heal every missing mirror from the log (one detection + one
+        // escalation per episode, never per restart). row === null WITHOUT a logged escalation
+        // is the kill window between the detection event and enterPark (the escalation only
+        // lands after the park), not an operator act — rebuild the row under the episode's
+        // minted identity.
         const reason = row?.reason ?? reasonFor(openEpisode.streak, openEpisode.maxConsecutiveStalls);
         if (row === null) {
           state.enterPark(CONSECUTIVE_STALLS_PARK_SOURCE, reason, null, enteredAtIso);
@@ -230,25 +254,29 @@ export function detectConsecutiveStalls(
         }
         log(
           `[sapwood:startup] consecutive-stalls park still open (entered ${enteredAtIso}): ` +
-            `${streak} consecutive stalled run(s) — autonomous dispatch stays parked`,
+            `autonomous dispatch stays parked until the operator clears it (docs/troubleshooting.md)`,
         );
+        outcome.tripped = true;
       }
+      return outcome;
+    }
+    if (streak >= max) {
+      // Fresh trip. LOG FIRST: the detection event mints the episode identity every mirror
+      // uses; then the mirrors (park row, marker, latch), each reconstructible above.
+      const enteredAtIso = nowDate.toISOString();
+      const reason = reasonFor(streak, max);
+      state.appendEvent("consecutive-stalls-detected", { streak, maxConsecutiveStalls: max, enteredAt: enteredAtIso });
+      state.enterPark(CONSECUTIVE_STALLS_PARK_SOURCE, reason, null, enteredAtIso);
+      escalateLocally(reason, enteredAtIso);
       outcome.tripped = true;
       return outcome;
     }
-    if (openEpisode !== null || row !== null) {
-      // The streak is broken — this start is the sanctioned-recovery signal (module doc's
-      // clearing story). RECEIPT FIRST, then the row cleanup (#431 round 4's order, verbatim).
-      const enteredAtIso = openEpisode?.enteredAt ?? row?.enteredAt ?? null;
-      if (openEpisode !== null) {
-        state.appendEvent("park-resumed", {
-          source: CONSECUTIVE_STALLS_PARK_SOURCE,
-          enteredAt: enteredAtIso,
-          via: "stall-streak-clear",
-        });
-      }
+    if (row !== null) {
+      // A stray mirror row on a log-closed episode — the kill window between the operator-clear
+      // receipt above and its clearPark. Finish the cleanup silently: the log already carries
+      // the receipt, so no duplicate is appended (#431 round 4's receipt-first shape).
       state.clearPark(CONSECUTIVE_STALLS_PARK_SOURCE);
-      log(`[sapwood:startup] consecutive-stalls park cleared — the stall streak is broken (${streak} < ${max})`);
+      log(`[sapwood:startup] consecutive-stalls park row cleaned up — the episode is already closed in the log`);
     }
   } catch (error) {
     // Best-effort, same stance as detectRapidRestart: never abort engine startup.

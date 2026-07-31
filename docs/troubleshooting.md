@@ -238,21 +238,30 @@ The engine then emits `consecutive-stalls-detected`, **parks** autonomous dispat
 machinery as an environment failure — `PARKED (consecutive-stalls)` in `sapwood status`, plus
 `data/ESCALATION`), and stays up without dispatching.
 
-Recovery: diagnose the wedge — each `engine-stalled` event's payload names the open round/phase,
-the last event, and the tick age — and fix the cause. The stall count resets **only on real
-progress (a round closing) or the park's own clear receipt — never on how a run exited**: clean
-stops (including the SIGTERM a supervisor sends before every restart) and hard kills alike are
-neutral, so no restart pattern can launder the wedge. The park supplies its own canary: parking
-gates *dispatch*, not the round loop, so the parked engine still opens and completes one
-dispatch-empty round — once a round has **closed** again, the next start reads that as recovery
-evidence and clears the park automatically (`park-resumed`, `via: stall-streak-clear`). In
-practice: fix the wedge, restart (`systemctl restart` / SIGTERM + start); the graceful stop lets
-the parked round finish and close, and the following start resumes dispatch. If the wedge breaks
-the round loop itself, nothing closes and the park (with its single, deduped escalation) stands
-until the wedge is actually fixed. Deleting the `park_state` row by hand does **not** stick
-here: the log still shows the unbroken streak, and the next start rebuilds the park from it —
-fix the wedge instead of the state. A *transient* wedge (a host sleeping mid-round, a passing
-outage) closes rounds between its stalls and never trips the breaker at all.
+Recovery is **operator-explicit — this park never auto-clears.** The stall count that *arms*
+the breaker resets only on real progress (a round closing between stalls); how a run exited is
+always neutral — clean stops (including the SIGTERM a supervisor sends before every restart)
+and hard kills alike — so no restart pattern can launder the wedge. And once the park is
+established, no engine-produced signal clears it either: a dispatch-empty round closing while
+parked only proves the orchestration loop is healthy, not that the wedge on the (gated)
+dispatch surface is gone, so the engine deliberately does not read it as recovery. The steps:
+
+1. Diagnose the wedge — each `engine-stalled` event's payload names the open round/phase, the
+   last event, and the tick age — and fix the cause.
+2. Clear the park by deleting its `park_state` row (the same manual channel as every park):
+
+   ```sh
+   sqlite3 data/sapwood.sqlite "DELETE FROM park_state WHERE source = 'consecutive-stalls'"
+   ```
+
+3. Start (or restart) the engine. The next start observes the deletion, records the clear
+   (`park-resumed`, `via: operator-clear`), removes the `data/ESCALATION` marker, and resumes
+   dispatch. The streak restarts from zero — if the wedge was not actually fixed, a fresh
+   streak re-parks and re-escalates as a new episode.
+
+Until you act, the park and its single, deduped escalation stand across any number of restarts
+— nothing is re-spammed and nothing is lost. A *transient* wedge (a host sleeping mid-round, a
+passing outage) closes rounds between its stalls and never trips the breaker at all.
 
 ## How a dead engine says why it died (#407)
 

@@ -512,7 +512,7 @@ export function formatStatus(s: StatusSnapshot): string {
         p.source === "rapid-restart"
           ? "clears on a later start outside the restart window (docs/troubleshooting.md)"
           : p.source === "consecutive-stalls"
-            ? "clears on a later start after a closed round breaks the stall streak (docs/troubleshooting.md)"
+            ? "stands until the operator clears it — no auto-clear (docs/troubleshooting.md)"
             : "probing on backoff, auto-resumes on recovery";
       lines.push(
         `park: PARKED (${p.source}) since ${p.enteredAt} (${durationSec}s) — ` +
