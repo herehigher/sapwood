@@ -177,46 +177,102 @@ test("#449: no PROTECTED_SUFFIXES source file contains this issue's new symbols 
   }
 });
 
-// ── key grammar contract (#449 gate② P3c) ────────────────────────────────────────────────────
+// ── key grammar contract (#449 gate② P3c, re-pinned after the Codex cross-vendor P1 fix) ────────
 // R3 (design #402's convergence classifier, #450) must extract a key's `path` segment to test
 // membership in `fixDiffPaths` — the persisted `drive-fixup` payload's finding entries are
 // `{key, severity, kind}`, no separate `path` field (issue #449's own payload shape). These tests
-// pin the EXACT string shapes so an innocent format tweak here cannot silently break that future
-// parse. Every shape asserted here is also what makes the disclosed cross-round id-collision
-// residual (unlocated keys) structurally harmless for recurrence: the unlocated tail can never be
-// mistaken for — or collide with — a real path segment.
+// pin the EXACT JSON-tagged-tuple shapes (see finding-key.ts's "ENCODING" header doc) so an
+// innocent format tweak here cannot silently break that future parse, AND so ambiguity between a
+// located and an unlocated key is provably impossible — not merely unlikely.
 
-test("#449 gate② P3c: engineAgentFindingKey grammar is pinned — located key is exactly `engine-agent:<kind>:<path>`", () => {
-  assert.equal(engineAgentFindingKey({ id: "f1", kind: "security", path: "src/x.ts" }).key, "engine-agent:security:src/x.ts");
+test('#449 gate② P3c: engineAgentFindingKey grammar is pinned — located key is exactly `["engine-agent","loc",<kind>,<path>]`', () => {
+  assert.equal(
+    engineAgentFindingKey({ id: "f1", kind: "security", path: "src/x.ts" }).key,
+    JSON.stringify(["engine-agent", "loc", "security", "src/x.ts"]),
+  );
   assert.equal(
     engineAgentFindingKey({ id: "f1", path: "src/x.ts" }).key,
-    "engine-agent:unclassified:src/x.ts",
+    JSON.stringify(["engine-agent", "loc", "unclassified", "src/x.ts"]),
     "kind absent -> the literal 'unclassified' token",
   );
 });
 
-test("#449 gate② P3c: engineAgentFindingKey grammar is pinned — unlocated key is exactly `engine-agent:<kind>:«unlocated»:<id>`", () => {
-  assert.equal(engineAgentFindingKey({ id: "f1", kind: "security" }).key, "engine-agent:security:«unlocated»:f1");
-  assert.equal(engineAgentFindingKey({ id: "f1" }).key, "engine-agent:unclassified:«unlocated»:f1");
+test('#449 gate② P3c: engineAgentFindingKey grammar is pinned — unlocated key is exactly `["engine-agent","unloc",<kind>,<16-hex-char id digest>]`', () => {
+  const result = engineAgentFindingKey({ id: "f1", kind: "security" });
+  const decoded = JSON.parse(result.key) as string[];
+  assert.deepEqual(decoded.slice(0, 3), ["engine-agent", "unloc", "security"]);
+  assert.match(decoded[3]!, /^[0-9a-f]{16}$/, "the fourth element is a 16-hex-char digest, never the raw id");
+  assert.notEqual(decoded[3], "f1", "the raw id must never appear verbatim");
 });
 
-test("#449 gate② P3c: classicThreadFindingKey grammar is pinned — located key is exactly `classic:<path>:<findingDigest>`", () => {
-  assert.equal(classicThreadFindingKey({ id: "T1", path: "src/x.ts", findingDigest: "abc123" }).key, "classic:src/x.ts:abc123");
+test('#449 gate② P3c: classicThreadFindingKey grammar is pinned — located key is exactly `["classic","loc",<path>,<findingDigest>]`', () => {
+  assert.equal(
+    classicThreadFindingKey({ id: "T1", path: "src/x.ts", findingDigest: "abc123" }).key,
+    JSON.stringify(["classic", "loc", "src/x.ts", "abc123"]),
+  );
 });
 
-test("#449 gate② P3c: classicThreadFindingKey grammar is pinned — thread-id fallback is exactly `classic:thread:<id>`", () => {
-  assert.equal(classicThreadFindingKey({ id: "T1" }).key, "classic:thread:T1");
-  assert.equal(classicThreadFindingKey({ id: "T1", path: "src/x.ts", findingDigest: null }).key, "classic:thread:T1");
-  assert.equal(classicThreadFindingKey({ id: "T1", path: null, findingDigest: "abc" }).key, "classic:thread:T1");
+test('#449 gate② P3c: classicThreadFindingKey grammar is pinned — thread-id fallback is exactly `["classic","unloc",<id>]`', () => {
+  assert.equal(classicThreadFindingKey({ id: "T1" }).key, JSON.stringify(["classic", "unloc", "T1"]));
+  assert.equal(
+    classicThreadFindingKey({ id: "T1", path: "src/x.ts", findingDigest: null }).key,
+    JSON.stringify(["classic", "unloc", "T1"]),
+  );
+  assert.equal(classicThreadFindingKey({ id: "T1", path: null, findingDigest: "abc" }).key, JSON.stringify(["classic", "unloc", "T1"]));
 });
 
-test("#449 gate② P3c: the `«unlocated»` marker can never collide with a real path segment R3 would extract", () => {
-  // A real path from either grammar never contains the marker glyph, and the marker's own
-  // position (after the LAST colon-delimited path-shaped segment) makes it unambiguous even under
-  // a naive split(':') — R3 can therefore treat any key containing this literal substring as
-  // structurally unlocated without re-deriving `located` from the original finding.
-  const located = engineAgentFindingKey({ id: "f1", kind: "security", path: "src/x.ts" }).key;
-  const unlocated = engineAgentFindingKey({ id: "f1", kind: "security" }).key;
-  assert.doesNotMatch(located, /«unlocated»/);
-  assert.match(unlocated, /«unlocated»/);
+// ── adversarial: ambiguity impossible BY CONSTRUCTION (#449 gate② Codex cross-vendor P1 fix) ────
+// Round 1's colon-joined string (`"engine-agent:<kind>:«unlocated»:<id>"`) had a real injection
+// hole Codex found: nothing stops a repo from containing a path literally named `«unlocated»:f1`
+// — a session-supplied `path` is untrusted text (validated only for diff membership, never for
+// "does it look like our own marker"), so a crafted path could forge equality with an unlocated
+// key. The JSON-tagged-tuple encoding closes this structurally: a located key's tag is always
+// `"loc"` at array position 1, an unlocated key's is always `"unloc"` — no field's CONTENT can
+// ever land at that position, so no path/digest value, however adversarial, can flip one into the
+// other. These tests prove it with the sharpest adversarial input available: a path/id set to the
+// EXACT byte string an unlocated key for some other finding encodes to.
+
+test("#449 gate② Codex cross-vendor P1 fix: a genuine changed path set to the EXACT text of an unlocated key never compares equal to it", () => {
+  const unlocated = engineAgentFindingKey({ id: "f1", kind: "security" }); // no path
+  // The sharpest adversarial path: byte-identical to what THIS unlocated key itself encodes to.
+  const adversarial = engineAgentFindingKey({ id: "f2", kind: "correctness", path: unlocated.key });
+  assert.notEqual(adversarial.key, unlocated.key);
+  assert.equal(adversarial.located, true, "a finding WITH a path is always located, regardless of what that path's text looks like");
+});
+
+test("#449 gate② Codex cross-vendor P1 fix: a path containing the literal old-style marker/delimiter text is just ordinary path content now", () => {
+  const adversarialPath = "«unlocated»:f1"; // the exact text round 1's colon-joined scheme would have produced
+  const located = engineAgentFindingKey({ id: "f1", kind: "security", path: adversarialPath });
+  const unlocated = engineAgentFindingKey({ id: "f1", kind: "security" });
+  assert.notEqual(located.key, unlocated.key);
+  assert.equal(JSON.parse(located.key)[3], adversarialPath, "the adversarial text round-trips as ordinary path content, not a forged tag");
+});
+
+test("#449 gate② Codex cross-vendor P1 fix (classic path): a thread span path set to the EXACT text of a thread-id-fallback key never compares equal to it", () => {
+  const fallback = classicThreadFindingKey({ id: "THREAD_1" }); // no span data
+  const adversarial = classicThreadFindingKey({ id: "THREAD_2", path: fallback.key, findingDigest: "deadbeef" });
+  assert.notEqual(adversarial.key, fallback.key);
+  assert.equal(adversarial.located, true);
+});
+
+// ── prose-via-id closed structurally (#449 gate② Codex cross-vendor P2 fix) ─────────────────────
+// `Finding.id`'s runtime validation (`isFinding`, roles/reviewer.ts) only requires a non-empty
+// string — nothing stops a session from setting `id` to its entire finding body. Round 1 folded
+// `id` VERBATIM into the unlocated key; this closes it structurally, not by trusting sessions to
+// behave: only a short, non-reversible digest of `id` ever reaches the key.
+
+test("#449 gate② Codex cross-vendor P2 fix: a prose-length Finding.id is folded to a SHORT DIGEST — the raw text never appears in the key", () => {
+  const SENTINEL = "SENTINEL_PROSE_SMUGGLED_VIA_ID_7f3a";
+  const proseId = `${SENTINEL} — this finding's entire body, smuggled through the id field instead, repeated for length `.repeat(10);
+  const result = engineAgentFindingKey({ id: proseId, kind: "security" });
+  assert.doesNotMatch(result.key, new RegExp(SENTINEL));
+  assert.ok(result.key.length < 100, `key must stay short regardless of id length (got ${result.key.length} chars)`);
+  const decoded = JSON.parse(result.key) as string[];
+  assert.match(decoded[3]!, /^[0-9a-f]{16}$/);
+});
+
+test("#449 gate② Codex cross-vendor P2 fix: the id digest is still a real disambiguator — two DIFFERENT prose ids produce DIFFERENT digests", () => {
+  const a = engineAgentFindingKey({ id: "prose id number one, quite long and body-shaped", kind: "security" });
+  const b = engineAgentFindingKey({ id: "prose id number two, a totally different body", kind: "security" });
+  assert.notEqual(a.key, b.key);
 });

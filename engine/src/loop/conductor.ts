@@ -439,10 +439,27 @@ export function fixLegAdmissionBlockReason(input: {
  *
  *  Bounded blind spots (accepted, honesty over machinery): (1) the `drive-fixup` event lands
  *  AFTER startFixLeg confirms the spawn, so a crash in that window forgets one dispatch and the
- *  breaker trips one leg later — still capped by prFixCap; (2) a leg that committed locally but
- *  FAILED TO PUSH looks identical to a no-op leg, so the breaker escalates one leg early — no
- *  push-detection machinery for it (ruled #457 review round 1); the escalation comment instead
- *  tells the human to check the preserved worktree for unpushed commits. */
+ *  breaker trips one leg later — still capped by prFixCap. #449 gate② (design #402 R2) narrowed
+ *  this window (gathering the finding record BEFORE startFixLeg rather than after, so the
+ *  confirmed-spawn -> drive-fixup-append gap is back to a single synchronous appendEvent call with
+ *  no intervening await/forge-read) but did not, and could not, close it to true zero — a JS
+ *  `await` always yields at least one microtask tick, and `startFixLeg`'s own `fix-leg-started`
+ *  append (this file, inside `startFixLeg`) necessarily lands before its `return`, one tick before
+ *  the caller's `drive-fixup` append runs. #449 gate② Codex cross-vendor review asked, explicitly,
+ *  whether `fix-leg-started` itself could be the breaker's marker instead, to close this residual
+ *  — RETAINED, not adopted, on a documented scope/risk call: `fix-leg-started` proves DISPATCH,
+ *  not COMPLETION (it fires the instant the child spawns, before the leg has done ANY work), so
+ *  keying the breaker on it would be the WRONG SUPPRESSION DIRECTION — a leg that crashed
+ *  immediately after spawning, having pushed nothing and acted on nothing, would be wrongly
+ *  treated as "already tried this verdict, no retry," permanently denying a lane a genuinely fresh
+ *  attempt rather than merely costing one extra (prFixCap-bounded) leg, the failure direction this
+ *  breaker already accepts here. If live operation ever shows the duplicate-leg cost from this
+ *  residual window materializing in practice, that is a finding against #457 (this breaker's own
+ *  design), not against #449 — the window predates this PR and #449 only narrows it, never widens
+ *  it; (2) a leg that committed locally but FAILED TO PUSH looks identical to a no-op leg, so the
+ *  breaker escalates one leg early — no push-detection machinery for it (ruled #457 review round
+ *  1); the escalation comment instead tells the human to check the preserved worktree for
+ *  unpushed commits. */
 export function priorFixLegForVerdict(state: Pick<State, "eventsSince">, worker: string, verdictRunId: string): boolean {
   const events = state.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup", "env-failure-preserved", "lane-revived"]);
   let tripped = false;

@@ -2466,7 +2466,9 @@ test("tick DRIVE (#449, design #402 R2, engine-agent path): drive-fixup re-keys 
   assert.match(blocking!.key, /src\/x\.ts/);
   assert.equal(advisory!.severity, "advisory", "effectiveSeverity: style is D3-eligible, requested advisory honored");
   assert.equal(advisory!.kind, "style");
-  assert.match(advisory!.key, /«unlocated»/, "no path -> unlocated marker, still recorded (never omitted)");
+  // #449 gate② Codex cross-vendor P1 fix: no path -> the "unloc" tag (JSON-tagged-tuple encoding,
+  // finding-key.ts), still recorded (never omitted).
+  assert.equal((JSON.parse(advisory!.key) as string[])[1], "unloc");
   st.close();
 });
 
