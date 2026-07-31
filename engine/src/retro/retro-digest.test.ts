@@ -6,11 +6,20 @@
 // substitution, deps.forge plumbing, config's digestMaxChars) is covered in retro.test.ts
 // instead — same file-per-module split as harvest.ts/harvest.test.ts.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { CommitInfo, IForge, Issue, PRComment, PRReviewData, PRStatus } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+import { engineAgentFindingKey } from "../review/finding-key.js";
 import { State } from "../state/state.js";
-import { buildRetroDigest, capDigest, gatherDigestIssues, gatherTouchedPRs, PR_TOUCHED_EVENT_KINDS } from "./retro-digest.js";
+import {
+  buildRetroDigest,
+  capDigest,
+  gatherDigestIssues,
+  gatherFindingTendency,
+  gatherTouchedPRs,
+  PR_TOUCHED_EVENT_KINDS,
+} from "./retro-digest.js";
 
 // ── A programmable fake IForge — call-recording, per-item response tables ──────────────────
 
@@ -244,7 +253,7 @@ test("buildRetroDigest: empty round (no touched PRs, no escalated issues) — no
   const forge = new FakeForge();
   const state = new State(":memory:");
   const round = state.startRound(new Date().toISOString());
-  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS);
+  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS, 3);
   assert.equal(forge.diffCalls.length, 0);
   assert.equal(forge.reviewCalls.length, 0);
   assert.equal(forge.labelCalls.length, 0);
@@ -275,7 +284,7 @@ test("buildRetroDigest: a touched PR pulls its description + diff + review data 
   const state = new State(":memory:");
   const round = state.startRound(new Date().toISOString());
   state.appendEvent("merged", { worker: "a", issue: 1, pr: 11, headOid: "abc" });
-  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS);
+  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS, 3);
   assert.deepEqual(forge.bodyCalls, [11]);
   assert.deepEqual(forge.diffCalls, [11]);
   assert.deepEqual(forge.reviewCalls, [11]);
@@ -298,7 +307,7 @@ test("buildRetroDigest: an escalated issue pulls its labels + comments via forge
   const state = new State(":memory:");
   const round = state.startRound(new Date().toISOString());
   state.appendEvent("drive-needs-human", { worker: "a", issue: 4, pr: 99, reason: "flaky" });
-  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS);
+  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS, 3);
   assert.deepEqual(forge.labelCalls, [4]);
   assert.deepEqual(forge.commentCalls, [4]);
   assert.ok(digest.includes("Issue #4"));
@@ -315,7 +324,7 @@ test("buildRetroDigest: multiple touched PRs are sorted ascending and each gets 
   const round = state.startRound(new Date().toISOString());
   state.appendEvent("merged", { worker: "a", issue: 1, pr: 5, headOid: "x" });
   state.appendEvent("merged", { worker: "b", issue: 2, pr: 2, headOid: "y" });
-  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS);
+  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS, 3);
   const idx2 = digest.indexOf("PR #2");
   const idx5 = digest.indexOf("PR #5");
   assert.ok(idx2 !== -1 && idx5 !== -1 && idx2 < idx5, "PR #2's section must come before PR #5's");
@@ -330,7 +339,7 @@ test("buildRetroDigest: a per-PR fetch failure is contained to that PR's section
   const round = state.startRound(new Date().toISOString());
   state.appendEvent("merged", { worker: "a", issue: 1, pr: 7, headOid: "x" });
   state.appendEvent("merged", { worker: "b", issue: 2, pr: 8, headOid: "y" });
-  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS);
+  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS, 3);
   assert.ok(digest.includes("PR #7"));
   assert.ok(digest.includes("digest fetch failed"));
   assert.ok(digest.includes("healthy diff for 8"), "PR #8's section is unaffected by PR #7's failure");
@@ -342,7 +351,7 @@ test("buildRetroDigest: commit history is sourced from forge.getCommitsSince, fo
   forge.commits = [{ sha: "abc1234def5678", message: "fix: something\n\nlonger body text", author: "alice", date: "2026-07-11T00:00:00Z" }];
   const state = new State(":memory:");
   const round = state.startRound(new Date().toISOString());
-  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS);
+  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS, 3);
   assert.ok(digest.includes("abc1234")); // short sha
   assert.ok(digest.includes("alice"));
   assert.ok(digest.includes("fix: something")); // subject line only, not the longer body
@@ -357,7 +366,7 @@ test("buildRetroDigest: a commit-history fetch failure degrades to a note, never
   };
   const state = new State(":memory:");
   const round = state.startRound(new Date().toISOString());
-  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS);
+  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS, 3);
   assert.ok(digest.includes("commit history unavailable"));
   state.close();
 });
@@ -368,7 +377,7 @@ test("buildRetroDigest: the assembled digest respects maxChars end-to-end — a 
   const state = new State(":memory:");
   const round = state.startRound(new Date().toISOString());
   state.appendEvent("merged", { worker: "a", issue: 1, pr: 1, headOid: "x" });
-  const digest = await buildRetroDigest({ forge, state }, round, 300, ISSUE_KINDS);
+  const digest = await buildRetroDigest({ forge, state }, round, 300, ISSUE_KINDS, 3);
   assert.ok(digest.length <= 300);
   assert.ok(digest.includes("digest truncated"));
   state.close();
@@ -398,7 +407,7 @@ test("small cap (Codex round 1): a cap the old floors couldn't afford — every 
   state.appendEvent("merged", { worker: "b", issue: 2, pr: 2, headOid: "y" });
   state.appendEvent("drive-needs-human", { worker: "c", issue: 4, pr: 2, reason: "r" });
 
-  const digest = await buildRetroDigest({ forge, state }, round, 2500, ISSUE_KINDS);
+  const digest = await buildRetroDigest({ forge, state }, round, 2500, ISSUE_KINDS, 3);
 
   assert.ok(digest.length <= 2500, `total must respect the cap (got ${digest.length})`);
   // Every item/section present — nothing silently dropped:
@@ -425,14 +434,152 @@ test("small cap (Codex round 1): a pathologically tiny cap (200) with 2 PRs + 1 
   state.appendEvent("merged", { worker: "b", issue: 2, pr: 2, headOid: "y" });
   state.appendEvent("drive-needs-human", { worker: "c", issue: 4, pr: 2, reason: "r" });
 
-  const digest = await buildRetroDigest({ forge, state }, round, 200, ISSUE_KINDS);
+  const digest = await buildRetroDigest({ forge, state }, round, 200, ISSUE_KINDS, 3);
 
   // 200 chars cannot hold even the section skeleton, so the final backstop MUST fire — but it
   // fires MARKED (the truncation is named in the text), and the result never exceeds the cap.
   // Determinism: byte-identical on a second assembly over the same inputs.
   assert.ok(digest.length <= 200, `total must respect the cap (got ${digest.length})`);
   assert.ok(digest.includes("digest truncated"), "the backstop truncation is marked, never silent");
-  const again = await buildRetroDigest({ forge, state }, round, 200, ISSUE_KINDS);
+  const again = await buildRetroDigest({ forge, state }, round, 200, ISSUE_KINDS, 3);
   assert.equal(digest, again);
   state.close();
+});
+
+// ── #453 (design #402 R5, §5): the finding-class tendency table ─────────────────────────────
+//
+// A finding CLASS that recurs across PRs and rounds is evidence about the DESIGN, not about
+// those PRs — and until now nothing in the engine noticed a pattern it raised a dozen times.
+// The engine only TABULATES here (D5): every assertion below is about the table's content and
+// bounds, never about the engine acting on it.
+
+/** Seed one `drive-fixup` finding record — the R2 payload shape (`loop/conductor.ts`), keyed
+ *  through the real `engineAgentFindingKey` rather than a hand-written string, so these tests
+ *  break if the key encoding ever changes shape underneath the tendency reader. */
+function seedFixup(state: State, pr: number, findings: { id: string; kind?: string; path?: string }[]): void {
+  state.appendEvent("drive-fixup", {
+    worker: `w-${pr}`,
+    issue: pr,
+    pr,
+    fixRounds: 1,
+    reason: "review-rejected",
+    findings: findings.map((f) => ({
+      key: engineAgentFindingKey(f as { id: string; kind?: never; path?: string }).key,
+      severity: "blocking",
+      ...(f.kind !== undefined ? { kind: f.kind } : {}),
+    })),
+    fixDiffPaths: [],
+  });
+}
+
+test("#453 tendency: a (kind, path-prefix) class shared by two PRs counts 2 and names both PRs; a unique class counts 1", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound(new Date().toISOString());
+  seedFixup(state, 12, [{ id: "f1", kind: "correctness", path: "engine/src/loop/conductor.ts" }]);
+  seedFixup(state, 14, [{ id: "f2", kind: "correctness", path: "engine/src/loop/reconcile.ts" }]); // same prefix
+  seedFixup(state, 16, [{ id: "f3", kind: "security", path: "engine/src/forge/gh.ts" }]);
+
+  const t = gatherFindingTendency(state, round, 3);
+  const shared = t.rows.find((r) => r.kind === "correctness" && r.pathPrefix === "engine/src/loop/");
+  assert.ok(shared, `expected a correctness/engine/src/loop/ row, got ${JSON.stringify(t.rows)}`);
+  assert.equal(shared.count, 2);
+  assert.deepEqual(shared.prs, [12, 14]);
+  assert.equal(shared.rounds, 1);
+  const unique = t.rows.find((r) => r.kind === "security");
+  assert.ok(unique);
+  assert.equal(unique.count, 1);
+  assert.deepEqual(unique.prs, [16]);
+
+  const digest = await buildRetroDigest({ forge: new FakeForge(), state }, round, 60_000, ISSUE_KINDS, 3);
+  assert.ok(digest.includes("Finding-class tendency"), "the section heading is rendered");
+  assert.ok(digest.includes("engine/src/loop/"), "the shared class's path prefix is rendered");
+  assert.ok(digest.includes("#12, #14"), "both PRs are named in the shared class's row");
+  state.close();
+});
+
+test("#453 tendency: the window spans the last `tendencyRounds` rounds — 3 rounds with the same class shows rounds 3 at K=3, rounds 1 at K=1", () => {
+  const state = new State(":memory:");
+  const cls = { id: "f", kind: "correctness", path: "engine/src/loop/conductor.ts" };
+  state.startRound(new Date().toISOString());
+  seedFixup(state, 1, [cls]);
+  state.startRound(new Date().toISOString());
+  seedFixup(state, 2, [cls]);
+  const round3 = state.startRound(new Date().toISOString());
+  seedFixup(state, 3, [cls]);
+
+  const wide = gatherFindingTendency(state, round3, 3);
+  assert.equal(wide.rows.length, 1);
+  assert.equal(wide.rows[0]?.rounds, 3, "a class appearing once per round across three rounds spans 3 rounds");
+  assert.equal(wide.rows[0]?.count, 3);
+  assert.deepEqual(wide.rows[0]?.prs, [1, 2, 3]);
+  assert.equal(wide.roundsCovered, 3);
+
+  const narrow = gatherFindingTendency(state, round3, 1);
+  assert.equal(narrow.rows[0]?.rounds, 1, "K=1 sees only the current round");
+  assert.equal(narrow.rows[0]?.count, 1);
+  assert.deepEqual(narrow.rows[0]?.prs, [3]);
+  assert.equal(narrow.roundsCovered, 1);
+  state.close();
+});
+
+test("#453 tendency: fewer rounds in the ledger than `tendencyRounds` degrades to what exists, no error", () => {
+  const state = new State(":memory:");
+  const round = state.startRound(new Date().toISOString());
+  seedFixup(state, 7, [{ id: "f", kind: "design", path: "docs/design/x.md" }]);
+  const t = gatherFindingTendency(state, round, 3);
+  assert.equal(t.roundsCovered, 1, "only one round exists — the window degrades to it");
+  assert.equal(t.rows.length, 1);
+  assert.equal(t.rows[0]?.rounds, 1);
+  state.close();
+});
+
+test("#453 tendency: a round with zero finding records renders an EXPLICIT empty marker under the heading, never an absent section", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound(new Date().toISOString());
+  const digest = await buildRetroDigest({ forge: new FakeForge(), state }, round, 60_000, ISSUE_KINDS, 3);
+  assert.ok(digest.includes("Finding-class tendency"), "the heading is present even with no data");
+  assert.ok(digest.includes("no finding records"), "the empty state is stated explicitly, not implied by absence");
+  state.close();
+});
+
+test("#453 tendency: the section is bounded by digestMaxChars and any cut is MARKED, deterministically", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound(new Date().toISOString());
+  for (let i = 0; i < 40; i++) seedFixup(state, i + 1, [{ id: `f${i}`, kind: "correctness", path: `engine/src/pkg${i}/file.ts` }]);
+  const a = await buildRetroDigest({ forge: new FakeForge(), state }, round, 900, ISSUE_KINDS, 3);
+  const b = await buildRetroDigest({ forge: new FakeForge(), state }, round, 900, ISSUE_KINDS, 3);
+  assert.ok(a.length <= 900, `total must respect the cap (got ${a.length})`);
+  assert.equal(a, b, "same input + same cap => byte-identical output");
+  assert.ok(a.includes("digest truncated"), "the cut is marked in the digest text, never a silent drop");
+  state.close();
+});
+
+test("#453 tendency (#403 F25): the read is id-cursor-bounded — a round clock AHEAD of the machine clock still sees its own finding records", () => {
+  const state = new State(":memory:");
+  // Same seeded-vs-wall-clock mismatch as this file's first test: a `started_at`-based window
+  // would silently report a round in which no finding was ever raised.
+  const round = state.startRound(new Date(Date.now() + 3_600_000).toISOString());
+  seedFixup(state, 21, [{ id: "f", kind: "correctness", path: "engine/src/loop/conductor.ts" }]);
+  const t = gatherFindingTendency(state, round, 3);
+  assert.equal(t.rows.length, 1, "the round's own finding record is inside the window");
+  state.close();
+});
+
+test("#453 tendency: the tendency read uses the eventsAfterId id cursor — no timestamp-compared ledger read in this module", () => {
+  const source = readFileSync(new URL("./retro-digest.ts", import.meta.url), "utf8");
+  assert.match(source, /eventsAfterId\(/, "the ledger reads go through the id cursor");
+  assert.doesNotMatch(source, /eventsSince\(/, "no timestamp-bounded ledger read (#403 F25's silently-empty-round class)");
+});
+
+test("#453 (D5): no engine code path on the retro side creates an issue from a finding or a finding class", () => {
+  for (const file of ["./retro-digest.ts", "./retro.ts"]) {
+    const source = readFileSync(new URL(file, import.meta.url), "utf8");
+    for (const forbidden of ["createIssue", "addSubIssue"]) {
+      assert.doesNotMatch(
+        source,
+        new RegExp(`\\.${forbidden}\\(`),
+        `${file} must never turn a finding into an issue — the engine tabulates, retro judges (design #402 D5)`,
+      );
+    }
+  }
 });

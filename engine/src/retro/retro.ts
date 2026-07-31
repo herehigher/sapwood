@@ -286,11 +286,16 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
       // deterministic truncation — retro-digest.ts's capDigest), and substituted into the
       // prompt below as `{{round.digest}}` — the session's ONLY read surface into this round's
       // history now (RETRO_ALLOWED_TOOLS above carries no `gh` read grant anymore).
+      // #453 (design #402 R5): the digest also carries the cross-round finding-class TENDENCY
+      // table (roles.retro.tendencyRounds wide). The engine only tabulates it — whether a
+      // recurring class is evidence about the design is retro's own judgment, reaching the
+      // backlog only through the PR path below (ruling D5).
       const digest = await buildRetroDigest(
         { forge: deps.forge, state: deps.state },
         round,
         deps.cfg.roles.retro.digestMaxChars,
         RETRO_EVENT_KINDS,
+        deps.cfg.roles.retro.tendencyRounds,
       );
       const template = loadRolePromptTemplate(deps.cfg.roles.retro.promptFile, defaultRetroPromptPath());
       const rendered = renderFactsTemplate(template, { ...factVars(facts), "round.digest": digest });

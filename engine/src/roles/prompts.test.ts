@@ -37,7 +37,11 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   "plan-reviewer-confirm.md": "9f1a67fef890c0c29c6dc7182cb78fd7a16c2921d19384d97a141780597fbcf1",
   "plan-drafter.md": "b3ecacee2f8df90ebb0bcfca34ee796f067c990456f8ac600d5d5e33a47d0630",
   "harvest.md": "59fb5fb1a8a3bebb2429c878c309caffe3105a3f9a32262268b7a14525026d4b",
-  "retro.md": "d667893510d96a67e5e8041861daa2d6767e708acfeca2f98c498e09e6a21917",
+  // #453 (design #402 R5): intentional edit — the digest's new finding-class tendency table is
+  // pointed at, with the design-source rule and the stated blind spot. The FIRST deliberate
+  // change to this file since #235 pinned it as "already code-aware, do not touch"; that ruling
+  // was about tool scope, not about the role's analysis inputs, so it is not re-litigated here.
+  "retro.md": "266dfa04d6a36405e911eb6d0db60f929f5400d99aef8d72d1f388306b8d7f0e",
   "po-pool.md": "a5f51726e886ecaca53dfc9773e7403b602e3cb555cfb972bee2f15e54204d09",
   "po-decompose.md": "3289b0f37585b84fdce67319f9ae4b2e82c8873b13b2a292adef25b1bca79ae2",
 };
@@ -66,8 +70,14 @@ test("prompt snapshot: harvest.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultHarvestPromptPath())), SNAPSHOT_HASHES["harvest.md"]);
 });
 
-test("prompt snapshot (#235 AC item 3): retro.md is BYTE-IDENTICAL to its pre-#235 content — 'retro unchanged (already code-aware) — do not touch' is enforced here, not just asserted in prose", () => {
+test("prompt snapshot: retro.md hash matches the pinned revision (#235's tool-scope freeze still holds — the only edit since is #453's tendency-table section)", () => {
   assert.equal(sha256(readPrompt(defaultRetroPromptPath())), SNAPSHOT_HASHES["retro.md"]);
+  // #235 AC item 3 was about retro's TOOL SCOPE, and that half is still pinned byte-wise below:
+  // the prompt gained no tool grant, no `gh` instruction, and no direct-write path.
+  const body = readPrompt(defaultRetroPromptPath());
+  for (const forbidden of ["gh pr view", "gh pr list", "gh issue view", "gh issue list", "gh pr create"]) {
+    assert.ok(!body.includes(forbidden), `retro.md must not instruct ${forbidden}`);
+  }
 });
 
 test("prompt snapshot: po-pool.md hash matches the pinned revision", () => {

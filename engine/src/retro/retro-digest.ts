@@ -8,6 +8,11 @@
 // comments/labels for every issue the ledger flagged as escalated, plus the round's commit
 // history.
 //
+// #453 (design #402 R5) adds ONE section that is deliberately NOT round-scoped: the
+// finding-class tendency table, which spans the last `roles.retro.tendencyRounds` rounds. See
+// its own section header below for why, and for the D5 ruling that keeps the engine tabulating
+// and never acting.
+//
 // Commit history is sourced from `IForge.getCommitsSince` (a GitHub API read via `gh api`),
 // deliberately NOT a local `git log` subprocess: worker.test.ts's #69 grep-invariant pins the
 // ONLY engine modules ever allowed to shell a subprocess as worker.ts (spawn, the claude CLI)
@@ -28,6 +33,7 @@
 // fail-toward-more-work stance as the rest of this codebase (e.g. conductor.ts's
 // `addPRComment(...).catch(() => {})`). A failed item's section says so, in place of its data.
 import type { IForge, PRComment, PRReviewData } from "../forge/forge.js";
+import { findingKeyPath } from "../review/finding-key.js";
 import type { RoundRow, State } from "../state/state.js";
 
 /** Durable event kinds whose payload carries a `pr` field (conductor.ts's DRIVE-phase
@@ -69,6 +75,147 @@ export function gatherDigestIssues(state: State, round: RoundRow, kinds: string[
     if (typeof issue === "number") issues.add(issue);
   }
   return [...issues].sort((a, b) => a - b);
+}
+
+// ── #453 (design #402 R5, §5): the finding-class tendency table ─────────────────────────────
+//
+// A finding CLASS that recurs across many PRs is evidence about the DESIGN, not about those PRs
+// — this project has lived it (crash-consistency findings recurred across #191/#170/#172 and
+// again in the M9 wave until the design was reconsidered at source), and nothing in the engine
+// noticed a pattern it raised a dozen times. Retro is the right home and had been asked to do
+// this without ever being given the data.
+//
+// THE ENGINE ONLY TABULATES (design #402 ruling D5). Nothing below turns a class into an issue,
+// a threshold, or a verdict — the table is input to retro's own judgment, which reaches the
+// backlog only through retro's existing gate②-reviewed PR path. An engine threshold firing at
+// `count === 3` would be a backlog spam generator with no adjudication, and would be wrong
+// precisely in the interesting cases: recognizing "the same class" requires reading design
+// intent, which is exactly why docs/REVIEW-DOCTRINE.md is deliberately prose and not a lint/DSL.
+//
+// CROSS-ROUND, not just cross-PR. Everything else in this module is bounded by ONE round's
+// `start_event_id`; the #191/#170/#172 -> M9-wave shape recurs ACROSS rounds, so this read walks
+// back to the `start_event_id` of the earliest round in a `tendencyRounds`-wide window (the
+// current round INCLUSIVE — K=1 is "this round only"). Id cursors throughout (#403 F25): the
+// round boundary comes from the injected clock and `events.ts` from the machine clock, so any
+// timestamp comparison here would silently empty a round.
+
+/** The durable event kind carrying #449's (design #402 R2) per-round finding record — the only
+ *  source this table reads. `drive-fixup`'s payload gained `findings: [{key, severity, kind}]`
+ *  there; before it, a fix dispatch recorded a gate-reason STRING and no finding identity at
+ *  all, which is why this table could not exist until R2 landed. */
+export const FINDING_RECORD_EVENT_KINDS = ["drive-fixup"];
+
+/** One `(kind, path-prefix)` class as the digest renders it. `prs`/`rounds` are the recurrence
+ *  evidence: a count of 5 on one PR in one round is one noisy review; a count of 5 across four
+ *  PRs and three rounds is a statement about the design. */
+export interface TendencyRow {
+  kind: string;
+  pathPrefix: string;
+  count: number;
+  /** Distinct PR numbers the class was raised on, ascending. */
+  prs: number[];
+  /** How many DISTINCT rounds in the window raised it. */
+  rounds: number;
+}
+
+export interface FindingTendency {
+  /** Sorted deterministically: count desc, then kind, then prefix — same input always renders
+   *  the same table, the digest's standing determinism contract. */
+  rows: TendencyRow[];
+  /** The rounds actually tabulated — `< tendencyRounds` when the ledger holds fewer (a young
+   *  run degrades to what exists rather than erroring). */
+  roundsCovered: number;
+  firstRoundId: number;
+  lastRoundId: number;
+}
+
+/** `kind` fallback for a finding record that carried none — mirrors finding-axes.ts's own
+ *  "absent -> unclassified" default, so an unlabelled finding still lands in a real row instead
+ *  of vanishing from the table. */
+const UNCLASSIFIED_KIND = "unclassified";
+/** The path-prefix cell for a finding with no diff-anchored location (finding-key.ts's `unloc`
+ *  keys). Kept as a VISIBLE row rather than dropped: "many unlocated findings" is itself a
+ *  tendency worth seeing, and a silent drop would understate a class's count. */
+const UNLOCATED_PREFIX = "(unlocated)";
+
+/** Directory granularity — the unit a design decision actually lives at. A file-level key would
+ *  split one recurring class across every file it touched; a repo-level one would merge every
+ *  class into a single row. */
+function pathPrefixOf(path: string | null): string {
+  if (path === null) return UNLOCATED_PREFIX;
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "(repo root)" : path.slice(0, i + 1);
+}
+
+/** Tabulate `(kind, path-prefix)` recurrence across the last `tendencyRounds` rounds, current
+ *  round inclusive. Pure given `state`'s contents — exported so tests assert on it directly,
+ *  same convention as gatherTouchedPRs/gatherDigestIssues above. Never throws: a malformed or
+ *  foreign-shaped payload contributes nothing rather than failing the whole digest. */
+export function gatherFindingTendency(state: State, round: RoundRow, tendencyRounds: number): FindingTendency {
+  const k = Math.max(1, Math.floor(tendencyRounds));
+  // Round boundaries, earliest first. A missing row (a gap in `rounds`, or a window that reaches
+  // back before the run began) is simply absent — "fewer rounds than K exist" degrades to what
+  // the ledger holds, which is why this is a scan and not `getRound(n - K)` alone.
+  const boundaries: { roundId: number; startEventId: number }[] = [];
+  for (let id = Math.max(1, round.round_id - k + 1); id < round.round_id; id++) {
+    const r = state.getRound(id);
+    if (r) boundaries.push({ roundId: r.round_id, startEventId: r.start_event_id ?? 0 });
+  }
+  boundaries.push({ roundId: round.round_id, startEventId: round.start_event_id ?? 0 });
+
+  const events = state.eventsAfterId(boundaries[0]!.startEventId, FINDING_RECORD_EVENT_KINDS);
+  const classes = new Map<string, { kind: string; pathPrefix: string; count: number; prs: Set<number>; rounds: Set<number> }>();
+  for (const e of events) {
+    const p = e.payload as { pr?: unknown; findings?: unknown };
+    if (!Array.isArray(p.findings)) continue;
+    // The event's own ledger id places it in a round: the last boundary it sits after. Ids, not
+    // timestamps — the same cursor `startRound` stamps the boundary with.
+    let roundId = boundaries[0]!.roundId;
+    for (const b of boundaries) if (e.id > b.startEventId) roundId = b.roundId;
+    for (const f of p.findings as { key?: unknown; kind?: unknown }[]) {
+      if (typeof f?.key !== "string") continue;
+      const kind = typeof f.kind === "string" ? f.kind : UNCLASSIFIED_KIND;
+      const pathPrefix = pathPrefixOf(findingKeyPath(f.key));
+      const mapKey = JSON.stringify([kind, pathPrefix]); // same injective-encoding reason as finding-key.ts's own
+      const row = classes.get(mapKey) ?? { kind, pathPrefix, count: 0, prs: new Set<number>(), rounds: new Set<number>() };
+      row.count += 1;
+      if (typeof p.pr === "number") row.prs.add(p.pr);
+      row.rounds.add(roundId);
+      classes.set(mapKey, row);
+    }
+  }
+
+  const rows = [...classes.values()]
+    .map((r) => ({ kind: r.kind, pathPrefix: r.pathPrefix, count: r.count, prs: [...r.prs].sort((a, b) => a - b), rounds: r.rounds.size }))
+    .sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind) || a.pathPrefix.localeCompare(b.pathPrefix));
+
+  return { rows, roundsCovered: boundaries.length, firstRoundId: boundaries[0]!.roundId, lastRoundId: round.round_id };
+}
+
+/** Render the tendency section. The heading and the blind-spot note are ALWAYS present, empty
+ *  window included (issue #453 AC: a missing section reads as "no data was looked at", which is
+ *  a different and much worse claim than "nothing recurred"). */
+function formatTendencySection(t: FindingTendency, tendencyRounds: number): string {
+  const header = [
+    `## Finding-class tendency (last ${t.roundsCovered} round(s): #${t.firstRoundId}-#${t.lastRoundId}; roles.retro.tendencyRounds=${tendencyRounds})`,
+    "Engine-tabulated from this run's own durable finding records. It is a TABLE, not a verdict:",
+    "a class recurring across PRs and rounds is evidence about the DESIGN, not about those PRs —",
+    "judge it, and if it holds, propose at the design source rather than filing another point fix.",
+    "Blind spot, stated rather than papered over: a genuine recurring class goes unnoticed if retro",
+    "is disabled or judges wrong. The mitigation is that this table is durable and visible, not that",
+    "the engine acts on it — no engine path turns a finding or a finding class into an issue.",
+  ].join("\n");
+  if (t.rows.length === 0) {
+    return `${header}\n\n(no finding records in this window — ${t.roundsCovered} round(s) tabulated, zero recorded findings)`;
+  }
+  const rows = t.rows.map((r) => `| ${r.kind} | ${r.pathPrefix} | ${r.count} | ${r.prs.map((n) => `#${n}`).join(", ")} | ${r.rounds} |`);
+  return [
+    header,
+    "",
+    "| kind | path prefix | findings | distinct PRs | distinct rounds |",
+    "| --- | --- | --- | --- | --- |",
+    ...rows,
+  ].join("\n");
 }
 
 function formatPRSection(pr: number, body: string, diff: string, review: PRReviewData): string {
@@ -155,6 +302,10 @@ export interface RetroDigestDeps {
 // trim a few trailing bytes.
 const ISSUES_SHARE = 0.25; // reserved fraction of maxChars for the whole issues section
 const COMMITS_SHARE = 0.1; // reserved fraction of maxChars for commit history
+// #453: the tendency table is a compact fixed-width table plus a short header — it needs a
+// reserved share for the same starvation reason every other section has one (a couple of large
+// PR diffs must not push it out of the digest entirely), but a small one.
+const TENDENCY_SHARE = 0.1;
 const PR_ITEM_MAX = 20_000;
 const ISSUE_ITEM_MAX = 5_000;
 
@@ -171,13 +322,15 @@ export async function buildRetroDigest(
   round: RoundRow,
   maxChars: number,
   issueEventKinds: string[],
+  tendencyRounds: number,
 ): Promise<string> {
   const prs = gatherTouchedPRs(deps.state, round);
   const issues = gatherDigestIssues(deps.state, round, issueEventKinds);
 
   const issuesBudget = Math.floor(maxChars * ISSUES_SHARE);
   const commitsBudget = Math.floor(maxChars * COMMITS_SHARE);
-  const prsBudget = Math.max(maxChars - issuesBudget - commitsBudget, 0);
+  const tendencyBudget = Math.floor(maxChars * TENDENCY_SHARE);
+  const prsBudget = Math.max(maxChars - issuesBudget - commitsBudget - tendencyBudget, 0);
   const perPrCap = fairShare(prsBudget, prs.length, PR_ITEM_MAX);
   const perIssueCap = fairShare(issuesBudget, issues.length, ISSUE_ITEM_MAX);
 
@@ -223,6 +376,13 @@ export async function buildRetroDigest(
     commitsText = `(commit history unavailable: ${String(e)})`;
   }
 
+  // #453: cross-ROUND, so it sits outside the per-round sections above — capped like every other
+  // section (deterministic, marked), never silently dropped.
+  const tendencyText = capDigest(
+    formatTendencySection(gatherFindingTendency(deps.state, round, tendencyRounds), tendencyRounds),
+    tendencyBudget,
+  );
+
   const full = [
     `# Round #${round.round_id} digest (since ${round.started_at})`,
     `## PRs touched this round (${prs.length})`,
@@ -231,6 +391,7 @@ export async function buildRetroDigest(
     issues.length > 0 ? issueSections.join("\n\n") : "(none)",
     "## Commit history since round start",
     commitsText,
+    tendencyText,
   ].join("\n\n");
 
   return capDigest(full, maxChars);

@@ -1373,6 +1373,28 @@ test("doctrine.file: an absolute path is left untouched", () => {
   }
 });
 
+// ── #453: roles.retro.tendencyRounds (the finding-class tendency window) ────────────────────
+
+test("roles.retro.tendencyRounds: defaults to 3 rounds (current round inclusive)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.retro.tendencyRounds, 3);
+});
+
+test("roles.retro.tendencyRounds: operator-tunable to widen or narrow the window", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { tendencyRounds: 8 } }");
+  assert.equal(cfg.roles.retro.tendencyRounds, 8);
+});
+
+test("roles.retro.tendencyRounds: zero/negative/non-integer is rejected (positive int only)", () => {
+  for (const bad of ["0", "-1", "2.5"]) {
+    assert.throws(
+      () => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { tendencyRounds: ${bad} } }`),
+      /tendencyRounds/,
+      `tendencyRounds: ${bad} must be rejected`,
+    );
+  }
+});
+
 // ── #104: roles.retro.everyNRounds (retro cadence) ──────────────────────────────────────────
 
 test("roles.retro.everyNRounds: defaults to 1 (every round)", () => {

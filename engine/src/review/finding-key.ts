@@ -159,6 +159,29 @@ export function classicThreadFindingKey(t: { id: string; path?: string | null; f
 }
 
 /**
+ * The verified path a key carries, or `null` when it carries none — the inverse of the two
+ * encoders above, kept HERE so the tuple layout keeps exactly ONE owner (#453, design #402 R5:
+ * retro's tendency table groups persisted finding records by path prefix and must not re-derive
+ * this encoding for itself). `null` covers every case where no diff-anchored location exists:
+ * an `"unloc"` key (either path), and — defensively — any string that isn't one of this module's
+ * own tuples at all (a payload from a future/other encoding, or a corrupt row: an unreadable key
+ * degrades to "unlocated", never to a thrown parse error in a digest builder).
+ */
+export function findingKeyPath(key: string): string | null {
+  let tuple: unknown;
+  try {
+    tuple = JSON.parse(key);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(tuple) || tuple[1] !== "loc") return null;
+  // Position, not search: engine-agent's located tuple is [domain, "loc", kind, path], classic's
+  // is [domain, "loc", path, findingDigest] — see this module's ENCODING doc.
+  const path = tuple[0] === "engine-agent" ? tuple[3] : tuple[0] === "classic" ? tuple[2] : undefined;
+  return typeof path === "string" ? path : null;
+}
+
+/**
  * Bound a list to at most `max` entries, marking truncation rather than silently dropping the
  * tail (issue #449 AC: "both bounded — a fixed maximum entry count, with truncation marked in the
  * payload rather than silently dropped"). Shared by both the `findings` and `fixDiffPaths`
