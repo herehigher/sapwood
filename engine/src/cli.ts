@@ -24,6 +24,7 @@ import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop
 import { unadjudicatedConcerns } from "./loop/dissent.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
 import { InitError, init, requiredLabels } from "./loop/init.js";
+import { acquireInstanceLock } from "./loop/instance-lock.js";
 import { type EngineLogger, FileEngineLogger } from "./loop/logger.js";
 import {
   auditGatedEscalationFlags,
@@ -994,6 +995,11 @@ export interface EngineOverrides {
    *  actually stops. */
   onRoundPhase?: (roundId: number, phase: PeripheralPhase) => void;
   onRoundStop?: (roundId: number, hit: RoundStopHit) => void;
+  /** #382: pid-liveness seam for the single-instance lock — lets a test script "that pid is
+   *  dead" deterministically (repo rule: no assertion may depend on real subprocess lifetimes).
+   *  Production passes none, so the real `process.kill(pid, 0)` probe
+   *  (instance-lock.ts's pidIsAlive) applies. */
+  pidLiveness?: (pid: number) => boolean;
 }
 
 function createRunLogger(cfg: SapwoodConfig, override?: EngineLogger): { logger: EngineLogger; path: string } {
@@ -1427,16 +1433,53 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   // EngineOverrides.cfg is a tests-only injection seam and keeps its established precedence.
   // Production passes no override, so the CLI path is handed to loadConfig verbatim.
   const cfg = applyMilestoneOverride(argv, overrides.cfg ?? loadConfig(validatedRun.configPath));
-  if (cfg.engine.driver === "tick") return runTickEngine(argv, cfg, overrides);
-  // Gate② P2: fail fast on tick-only flags BEFORE any collaborator is constructed or any
-  // dispatch can happen — same abort-with-zero-dispatch stance as buildRenderPrompt /
-  // assertStopMilestoneExists startup validation.
-  const flagError = tickOnlyFlagError(argv);
-  if (flagError) {
-    process.stderr.write(`${flagError}\n`);
+  if (cfg.engine.driver !== "tick") {
+    // Gate② P2: fail fast on tick-only flags BEFORE any collaborator is constructed or any
+    // dispatch can happen — same abort-with-zero-dispatch stance as buildRenderPrompt /
+    // assertStopMilestoneExists startup validation.
+    const flagError = tickOnlyFlagError(argv);
+    if (flagError) {
+      process.stderr.write(`${flagError}\n`);
+      return 1;
+    }
+  }
+  // #382 (F9): single-instance lock on the data dir, acquired HERE — before either driver runs,
+  // so before appendRunStarted, before any startup reconcile, and before any board/forge write.
+  // State is resolved once at this boundary (the drivers' own `overrides.state ?? new State()`
+  // then just picks it up) because the lock's path IS the state DB's data dir
+  // (state.instanceLockPath — null for in-memory test states, a no-op acquire). This does move
+  // production State/data-dir creation ahead of the drivers' buildRenderPrompt fail-fast, but
+  // creating the local data dir is not dispatch — the zero-dispatch abort guarantee holds.
+  const state = overrides.state ?? new State();
+  const lock = acquireInstanceLock(state.instanceLockPath(), {
+    now: systemClock,
+    ...(overrides.pidLiveness !== undefined ? { isPidAlive: overrides.pidLiveness } : {}),
+  });
+  if (!lock.acquired) {
+    process.stderr.write(`sapwood run: ${lock.message}\n`);
+    if (overrides.state === undefined) state.close();
     return 1;
   }
-  return runRoundsEngine(argv, cfg, overrides);
+  try {
+    if (lock.tookOver !== null) {
+      // Takeover is the crash+restart drill working as designed — observable, never silent.
+      console.error(
+        `[sapwood:startup] took over stale instance lock at ${lock.lockPath} ` +
+          `(previous holder pid ${lock.tookOver.pid ?? "unparseable"} is gone)`,
+      );
+      state.appendEvent("instance-lock-taken-over", { lockPath: lock.lockPath, previousPid: lock.tookOver.pid });
+    }
+    const withState = { ...overrides, state };
+    if (cfg.engine.driver === "tick") return await runTickEngine(argv, cfg, withState);
+    return await runRoundsEngine(argv, cfg, withState);
+  } finally {
+    // The one shutdown seam every exit path already funnels through: runTickEngine/
+    // runRoundsEngine RETURN on kill-switch, stop conditions, --once, and graceful signals
+    // (round.ts's registerSignals requests a stop; the loop drains and returns), and a thrown
+    // startup/driver error propagates through here too. Only a hard death (SIGKILL, crash)
+    // skips this — exactly the stale-lock case the dead-pid takeover above recovers.
+    lock.release();
+  }
 }
 
 async function main(argv: string[]): Promise<number> {

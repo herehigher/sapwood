@@ -2227,6 +2227,15 @@ export class State {
     return p != null && existsSync(p);
   }
 
+  /** #382: the single-instance lockfile's path — beside the DB, same data-dir placement as the
+   *  sentinels above, but ENGINE-written (pid + token + acquiredAt), never a human control
+   *  input. Path helper only: acquisition/release logic lives in loop/instance-lock.ts (the
+   *  cli.ts run path is its one consumer). null dir (in-memory State, tests) -> no lock, same
+   *  convention as killSwitchPath/pausePath — no shared data dir means nothing to double-drive. */
+  instanceLockPath(): string | null {
+    return this.dataDir ? join(this.dataDir, "sapwood.lock") : null;
+  }
+
   // ── Environment-failure park (#168) ─────────────────────────────────────────────────────
   // Deliberately NOT a file sentinel (unlike killSwitchPath/pausePath above) — see the schema
   // v11->v12 migration comment: this is engine-derived runtime state, not a human out-of-band
