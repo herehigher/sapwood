@@ -1105,8 +1105,8 @@ export function buildTickFixLegResume(
 }
 
 /** #206 (frontend-design.md §11): the run boundary in the event stream. Replay derives run
- *  GROUPING from this event — never from the `engine_session` gap heuristic, which serves the
- *  wall-clock ceiling and deliberately resets on quiet gaps. Appended once per process start,
+ *  GROUPING from this event (#431 deleted the old `engine_session` gap heuristic entirely; the
+ *  wall clock now anchors to in-memory process start). Appended once per process start,
  *  before anything else this run writes (so it also anchors the #154 run-spend ledger position),
  *  carrying the ALLOWLISTED config subset (never the resolved object — see
  *  dashboardConfigSubset) plus a hash of the full config for change detection across runs. */

@@ -291,8 +291,10 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
 - **Cost ceiling + kill switch (#14, simplified in #69)** — engine-enforced,
   worker-unforgeable: a `spend_ledger` in SQLite (restart-safe; a mid-run engine
   restart recovers lane cost from the worker jsonl) feeds a **daily USD cap** checked
-  every tick, plus a **wall-clock cap** over an active engine session (session gap
-  derived from tick cadence — a legal slow cadence cannot silently disable the tier).
+  every tick, plus a **per-process wall-clock attention alarm** (#431: one clock per
+  process life, anchored at in-memory process start — restarts renew it at any gap
+  length; the crash-loop case is the rapid-restart detector's job, and the daily cap
+  remains the durable cross-restart bound).
   A **`KILL_SWITCH` file sentinel** in the engine's own data dir (human `touch`/`rm`;
   workers have no write path) is **one global gate at the very top of the conductor
   tick** (#69, replacing the #59/#61/#64 per-phase checks): active ⇒ the tick is

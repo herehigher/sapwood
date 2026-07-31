@@ -27,6 +27,7 @@ import type { RoundPhase, RoundRow, State } from "../state/state.js";
 import { createHeartbeatGate } from "../util/heartbeat.js";
 import {
   announceCeilingBreachOnce,
+  announceCeilingClearedOnce,
   type CeilingReason,
   escalatePark,
   evaluateCeiling,
@@ -976,18 +977,20 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         maxWallClockSec: cfg.cost.maxWallClockSec,
       });
       if (ceilingReasons.length > 0) {
-        deps.state.recordCeilingBreach(ceilingReasons, nowDate);
-        // #431 AC3: entering (or re-checking) the ceiling wait announces the breach — reasons,
-        // thresholds, observed values — exactly once per episode. Never silent again: F29's
-        // only trace was `park-wait-heartbeat {parked:false}` from the loop's own heartbeat.
+        // #431 AC3, round 2 (codex P2): announce EVENT-FIRST, then record — same order and same
+        // kill-window reasoning as tick()'s CEILING section (announceCeilingBreachOnce's own
+        // doc). Exactly once per episode; never silent again: F29's only trace was
+        // `park-wait-heartbeat {parked:false}` from this loop's own heartbeat.
         announceCeilingBreachOnce(deps.state, ceilingReasons, {
           wallClockElapsedSec,
           maxWallClockSec: cfg.cost.maxWallClockSec,
           dailySpendUsd: deps.state.dailySpendUsd(nowDate),
           dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
         });
+        deps.state.recordCeilingBreach(ceilingReasons, nowDate);
       } else {
         deps.state.clearCeilingBreach();
+        announceCeilingClearedOnce(deps.state);
       }
 
       let llmGreenLight = false;
@@ -1702,6 +1705,29 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
               /* telemetry only — see the standby-wait catch above */
             }
             standbyAttempts = 0;
+          }
+          // #431 round 2 (codex P1): the standby dwell itself consumes PROCESS LIFE, and this
+          // wake is a fresh round-open decision — re-enter the SAME admission gate the
+          // pre-standby path just above ran, BEFORE any peripheral can dispatch. Without this,
+          // a dwell that outlives cost.maxWallClockSec woke straight into paid peripherals
+          // (aligning/architecting/plan-review run before the executing tick's own ceiling
+          // check could ever fire), with no breach row and no event — invisible to status and
+          // the dashboard. waitForDispatchClear is the existing breach-wait path: it records
+          // the breach, emits the once-per-episode `ceiling-breach-entered`, keeps probing
+          // parks, and returns immediately for KILL_SWITCH/signals (the round then opens and
+          // blocks at its first peripheral, the standby loop's own documented kill-switch
+          // contract — unchanged).
+          await waitForDispatchClear();
+          if (signalled) {
+            return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "signal" };
+          }
+          // Same unconditional final-stop refresh as the pre-standby gate (see its comment):
+          // the recovery-clear iteration is exactly the one waitForDispatchClear's internal
+          // re-check deliberately skips.
+          checkFinalSpend();
+          await checkFinalMilestone();
+          if (finalStopHit) {
+            return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "stop-condition", stopCondition: finalStopHit };
           }
         }
 

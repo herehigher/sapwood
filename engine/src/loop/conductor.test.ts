@@ -4944,15 +4944,14 @@ test("tick ceiling (#431 AC3): entering the ceiling emits ONE reason-bearing cei
     clock = new Date(iso);
     return tick({ forge, state: st, supervisor: sup, cfg, now, processStartedAt });
   };
-  await tickAt("2026-07-06T00:05:00Z"); // under the cap — no breach, no event
-  assert.equal(st.eventsAfterId(0, ["ceiling-breach-entered"]).length, 0);
+  await tickAt("2026-07-06T00:05:00Z"); // under the cap — no breach, no event (and no spurious `cleared`)
+  assert.equal(st.eventsAfterId(0, ["ceiling-breach-entered", "ceiling-breach-cleared"]).length, 0);
   await tickAt("2026-07-06T00:20:00Z"); // breach detected — announced once
   await tickAt("2026-07-06T00:21:00Z"); // still breached — same episode, NO second event
   const events = st.eventsAfterId(0, ["ceiling-breach-entered"]);
   assert.equal(events.length, 1, "one announcement per breach episode, not per tick");
   const payload = events[0]!.payload as {
     reasons: string[];
-    episodeAt: string;
     wallClockElapsedSec: number;
     maxWallClockSec: number;
     dailyBudgetUsd: number;
@@ -4960,17 +4959,88 @@ test("tick ceiling (#431 AC3): entering the ceiling emits ONE reason-bearing cei
   assert.deepEqual(payload.reasons, ["wall-clock"], "the event names WHICH ceiling");
   assert.equal(payload.maxWallClockSec, 600, "the event carries the configured threshold");
   assert.equal(payload.wallClockElapsedSec, 1200, "the event carries the observed elapsed");
-  assert.equal(payload.episodeAt, st.ceilingBreach()?.at.toISOString(), "episode identity = the breach row's first-detected at");
   assert.equal(typeof payload.dailyBudgetUsd, "number");
-  // Episode ends (cap raised), then a NEW breach: the announcement re-arms.
-  st.clearCeilingBreach();
+  // Episode ends (cap raised): the ledger closes it with ONE `cleared` receipt (round 2: the
+  // pr-held/pr-released transition-pair shape), which is what re-arms the next announcement.
   const relaxed = mkCfg({ cost: { maxWallClockSec: 999999 } });
   clock = new Date("2026-07-06T00:22:00Z");
   await tick({ forge, state: st, supervisor: sup, cfg: relaxed, now, processStartedAt });
   assert.equal(st.ceilingBreach(), null, "the relaxed tick cleared the breach row (episode over)");
+  assert.equal(st.eventsAfterId(0, ["ceiling-breach-cleared"]).length, 1, "the episode's close has its receipt");
+  clock = new Date("2026-07-06T00:23:00Z");
+  await tick({ forge, state: st, supervisor: sup, cfg: relaxed, now, processStartedAt });
+  assert.equal(
+    st.eventsAfterId(0, ["ceiling-breach-cleared"]).length,
+    1,
+    "cleared is transition-only — steady-state healthy ticks append nothing",
+  );
   await tickAt("2026-07-06T00:25:00Z"); // back under the tight cap config -> a fresh episode
   assert.equal(st.eventsAfterId(0, ["ceiling-breach-entered"]).length, 2, "a fresh episode announces again");
   st.close();
+});
+
+test("tick ceiling (#431 round 2, codex P2): the kill-9 window between the two breach writes is safe BOTH directions — event-first means no episode is ever silently erased", async () => {
+  // Direction 1: killed AFTER the entered event, BEFORE the row commit (the only window the
+  // event-first order leaves). Simulate the post-crash DB state directly: announcement present,
+  // no ceiling_breach row.
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-breach-crash-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    let st = new State(dbPath);
+    st.appendEvent("ceiling-breach-entered", { reasons: ["wall-clock"], wallClockElapsedSec: 1200, maxWallClockSec: 600 });
+    st.close();
+
+    // 1a: the restart is STILL breached (a daily-budget-style continuation): the row is
+    // re-recorded with NO duplicate announcement.
+    st = new State(dbPath);
+    const forge = new FakeForge();
+    const stillStart = new Date("2026-07-06T00:00:00Z");
+    await tick({
+      forge,
+      state: st,
+      supervisor: new FakeSupervisor(),
+      cfg: mkCfg({ cost: { maxWallClockSec: 600 } }),
+      now: () => new Date("2026-07-06T00:20:00Z"),
+      processStartedAt: stillStart,
+    });
+    assert.ok(st.ceilingBreach() !== null, "the row is re-recorded on the next pass");
+    assert.equal(st.eventsAfterId(0, ["ceiling-breach-entered"]).length, 1, "no duplicate announcement — the event log already carries it");
+    st.close();
+
+    // 1b: the restart has RECOVERED (fresh wall-clock anchor): the open episode is CLOSED with
+    // a `cleared` receipt — announced entered + announced cleared, never a silent erasure.
+    // (Round 1 keyed dedup on the row's `at`; with the row missing, a recovered restart
+    // silently dropped the whole episode — codex's exact reproduction.)
+    st = new State(dbPath);
+    st.clearCeilingBreach(); // reset the row 1a re-created, isolating 1b to the crash state + recovery
+    // Re-simulate the crash state precisely: entered event standing (from the original append), no row.
+    const freshStart = new Date("2026-07-06T01:00:00Z");
+    await tick({
+      forge: new FakeForge(),
+      state: st,
+      supervisor: new FakeSupervisor(),
+      cfg: mkCfg({ cost: { maxWallClockSec: 600 } }),
+      now: () => new Date("2026-07-06T01:00:30Z"), // 30s alive — clear
+      processStartedAt: freshStart,
+    });
+    assert.equal(st.ceilingBreach(), null);
+    assert.equal(st.eventsAfterId(0, ["ceiling-breach-cleared"]).length, 1, "the prior life's episode is CLOSED in the ledger, not erased");
+    st.close();
+
+    // Direction 2 (round 1's hole): a row WITHOUT its event is now unrepresentable by
+    // construction — the append precedes recordCeilingBreach on every path — so the remaining
+    // assertion is the ledger invariant itself: entered/cleared strictly alternate.
+    st = new State(dbPath);
+    const kinds = st.eventsAfterId(0, ["ceiling-breach-entered", "ceiling-breach-cleared"]).map((e) => e.kind);
+    assert.deepEqual(
+      kinds,
+      ["ceiling-breach-entered", "ceiling-breach-cleared"],
+      "the pair alternates — every episode opens and closes exactly once",
+    );
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("tick ceiling: daily spend accumulates across ticks and SURVIVES a State reopen (restart-safe)", async () => {

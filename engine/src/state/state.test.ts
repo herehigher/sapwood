@@ -3179,18 +3179,29 @@ test("lastTickAt reads the heartbeat WITHOUT moving it (the #395 watchdog and th
   s.close();
 });
 
-test("countEventsSince (#431): counts one kind within the ts window — the rapid-restart detector's birth count", () => {
+test("countEventsBetween (#431): counts one kind within the CLOSED ts window — the rapid-restart detector's birth count", () => {
   const s = mem();
-  assert.equal(s.countEventsSince("1970-01-01T00:00:00.000Z", "run-started"), 0);
+  assert.equal(s.countEventsBetween("1970-01-01T00:00:00.000Z", "2999-01-01T00:00:00.000Z", "run-started"), 0);
   s.appendEvent("run-started", {});
   s.appendEvent("run-started", {});
   s.appendEvent("park-wait-heartbeat", { parked: false }); // a different kind can never inflate the birth count
   s.appendEvent("run-started", {});
   // appendEvent stamps the REAL machine clock (its own doc — deliberate), so the window edges
-  // are asserted with cutoffs unreachably far on either side: epoch (everything counts) and
-  // far-future (nothing does). No assertion depends on how fast the appends ran.
-  assert.equal(s.countEventsSince("1970-01-01T00:00:00.000Z", "run-started"), 3);
-  assert.equal(s.countEventsSince("2999-01-01T00:00:00.000Z", "run-started"), 0, "births before the cutoff never count");
+  // are asserted with cutoffs unreachably far on either side: epoch..far-future (everything
+  // counts), far-future-only (nothing does), and epoch-only upper bound (nothing does — the
+  // round-2 codex P3 direction: rows dated after the caller's clock never count). No assertion
+  // depends on how fast the appends ran.
+  assert.equal(s.countEventsBetween("1970-01-01T00:00:00.000Z", "2999-01-01T00:00:00.000Z", "run-started"), 3);
+  assert.equal(
+    s.countEventsBetween("2999-01-01T00:00:00.000Z", "2999-12-31T00:00:00.000Z", "run-started"),
+    0,
+    "births before the window never count",
+  );
+  assert.equal(
+    s.countEventsBetween("1970-01-01T00:00:00.000Z", "1970-01-02T00:00:00.000Z", "run-started"),
+    0,
+    "future-dated births (past the upper bound) never count",
+  );
   s.close();
 });
 

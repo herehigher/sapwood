@@ -2786,15 +2786,21 @@ export class State {
     return rows.map((r) => ({ kind: r.kind, payload: JSON.parse(r.payload) as unknown }));
   }
 
-  /** #431: how many events of `kind` carry a ts at/after `sinceIso` — the rapid-restart
-   *  detector's birth count (`run-started` is appended exactly once per process boot, so this
-   *  IS the number of process births in the window; wait-loop iterations append other kinds and
-   *  can never inflate it, by construction). Same ts-window semantics as eventsSince above —
-   *  and the same clock caveat: `ts` is the real machine clock at write time (appendEvent's own
-   *  doc), so the caller's cutoff must come from the same host clock family (cli.ts's
-   *  systemClock in production). A count, not the rows — the detector needs no payloads. */
-  countEventsSince(sinceIso: string, kind: string): number {
-    const row = this.db.prepare("SELECT COUNT(*) AS n FROM events WHERE ts >= ? AND kind = ?").get(sinceIso, kind) as { n: number };
+  /** #431: how many events of `kind` carry a ts inside the CLOSED window [sinceIso, untilIso] —
+   *  the rapid-restart detector's birth count (`run-started` is appended exactly once per
+   *  process boot, so this IS the number of process births in the window; wait-loop iterations
+   *  append other kinds and can never inflate it, by construction). The clock caveat matches
+   *  eventsSince above: `ts` is the real machine clock at write time (appendEvent's own doc), so
+   *  both cutoffs must come from the same host clock family (cli.ts's systemClock in
+   *  production). The UPPER bound exists for round 2's codex P3: a DB restored from a
+   *  fast-clock machine (or a backward host-clock correction) can hold `run-started` rows dated
+   *  in this machine's FUTURE — unbounded, those would count for the entire skew, false-tripping
+   *  the detector and re-parking even after a manual park clear. A count, not the rows — the
+   *  detector needs no payloads. */
+  countEventsBetween(sinceIso: string, untilIso: string, kind: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM events WHERE ts >= ? AND ts <= ? AND kind = ?")
+      .get(sinceIso, untilIso, kind) as { n: number };
     return row.n;
   }
 
@@ -2831,6 +2837,20 @@ export class State {
     const row = this.db.prepare("SELECT kind, payload FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1").get(kind) as
       | { kind: string; payload: string }
       | undefined;
+    return row ? { kind: row.kind, payload: JSON.parse(row.payload) as unknown } : undefined;
+  }
+
+  /** #431 round 2: the single newest event among `kinds` — the id-ordered "which side of a
+   *  paired transition are we on" read (the same event-log-as-memory shape
+   *  latestHoldVisibilityEvent uses for pr-held/pr-released, #169/#294), here consumed by the
+   *  ceiling announcement pair (conductor.ts's announceCeilingBreachOnce/
+   *  announceCeilingClearedOnce). */
+  latestEventOfKinds(kinds: string[]): { kind: string; payload: unknown } | undefined {
+    if (kinds.length === 0) throw new Error("latestEventOfKinds: kinds must be non-empty");
+    const placeholders = kinds.map(() => "?").join(",");
+    const row = this.db
+      .prepare(`SELECT kind, payload FROM events WHERE kind IN (${placeholders}) ORDER BY id DESC LIMIT 1`)
+      .get(...kinds) as { kind: string; payload: string } | undefined;
     return row ? { kind: row.kind, payload: JSON.parse(row.payload) as unknown } : undefined;
   }
 

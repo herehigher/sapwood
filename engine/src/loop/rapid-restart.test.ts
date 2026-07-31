@@ -128,7 +128,7 @@ test("a State failure inside detection is contained: logged, startup continues, 
   seedBirths(s, 5);
   const broken = new Proxy(s, {
     get(target, prop, receiver) {
-      if (prop === "countEventsSince") {
+      if (prop === "countEventsBetween") {
         return () => {
           throw new Error("disk exploded");
         };
@@ -140,5 +140,57 @@ test("a State failure inside detection is contained: logged, startup continues, 
   const outcome = detectRapidRestart(broken as State, mkCfg(), realNow, (line) => logged.push(line));
   assert.deepEqual(outcome, { tripped: false, births: 0 });
   assert.ok(logged.some((line) => /rapid-restart detection failed \(non-fatal/.test(line)));
+  s.close();
+});
+
+test("heal-on-boot (#431 round 2, codex P2): a birth that died between enterPark and the escalation latch is repaired by the NEXT boot — marker/latch/park-escalated land once, idempotently", () => {
+  const s = new State(":memory:");
+  seedBirths(s, 5);
+  // The post-crash state, constructed directly: detection + park landed, escalation did not
+  // (escalated_at null, no park-escalated event) — the exact window codex reproduced.
+  s.appendEvent("rapid-restart-detected", { births: 5, windowSec: 600, maxBirths: 5 });
+  s.enterPark(
+    RAPID_RESTART_PARK_SOURCE,
+    "5 engine starts within 600s (threshold 5) — crash loop suspected",
+    null,
+    "2026-07-31T00:00:00.000Z",
+  );
+  assert.equal(s.parkRow(RAPID_RESTART_PARK_SOURCE)?.escalatedAt, null);
+
+  s.appendEvent("run-started", {}); // the next boot's own birth
+  const outcome = detectRapidRestart(s, mkCfg(), realNow, silentLog);
+  assert.equal(outcome.tripped, true);
+  assert.ok(s.parkRow(RAPID_RESTART_PARK_SOURCE)?.escalatedAt !== null, "the latch is healed");
+  assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1, "exactly one escalation lands for the episode");
+  assert.equal(
+    s.eventsAfterId(0, ["rapid-restart-detected"]).length,
+    1,
+    "no duplicate detection event — the episode row remains the dedup carrier",
+  );
+
+  // A further birth in the same storm: fully idempotent — nothing new lands.
+  s.appendEvent("run-started", {});
+  detectRapidRestart(s, mkCfg(), realNow, silentLog);
+  assert.equal(s.eventsAfterId(0, ["park-escalated"]).length, 1);
+  s.close();
+});
+
+test("future-dated births never count (#431 round 2, codex P3): rows past the detector's own clock can neither false-trip nor defeat a manual park clear", () => {
+  const s = new State(":memory:");
+  seedBirths(s, 5); // stamped with the REAL clock — i.e. the FUTURE relative to the detector's shifted 'now'
+  // A restored-DB / backward-clock-step machine: the detector's clock sits an hour BEHIND the
+  // rows' stamps. Without the closed window's upper bound these five future rows would trip it.
+  const anHourBehind = () => new Date(Date.now() - 3600_000);
+  const outcome = detectRapidRestart(s, mkCfg(), anHourBehind, silentLog);
+  assert.deepEqual(outcome, { tripped: false, births: 0 });
+  assert.equal(s.parkRow(RAPID_RESTART_PARK_SOURCE), null, "no false trip");
+
+  // And the manual-clear path stays honored: a hand-deleted park is NOT immediately re-created
+  // by future-dated rows (the troubleshooting contract).
+  s.enterPark(RAPID_RESTART_PARK_SOURCE, "old storm", null, "2026-07-30T00:00:00.000Z");
+  s.clearPark(RAPID_RESTART_PARK_SOURCE); // the operator's manual clear
+  const again = detectRapidRestart(s, mkCfg(), anHourBehind, silentLog);
+  assert.equal(again.tripped, false);
+  assert.equal(s.parkRow(RAPID_RESTART_PARK_SOURCE), null, "the manual clear sticks");
   s.close();
 });

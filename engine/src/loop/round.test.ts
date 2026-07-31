@@ -3909,3 +3909,54 @@ test("runRounds (#431 AC3): the ceiling-wait loop announces the breach ONCE — 
   assert.ok(state.ceilingBreach() !== null, "the breach row stands for the whole wait");
   state.close();
 });
+
+test("runRounds (#431 round 2, codex P1): a standby dwell that outlives maxWallClockSec wakes into the BREACH-WAIT — announced once, and NO new round/peripherals ever open on this process life", async () => {
+  // Codex's reproduction, encoded: cap 100s; round 1 opens at t=0 and closes idle; standby
+  // dwells 60s + 120s of backoff (t=240s > cap); work then appears. Round 1's semantics are
+  // untouched (it always opens); the WAKE must re-enter the same admission gate the pre-standby
+  // path uses — never open a round (and run paid peripherals) on a process already past its cap.
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const base = Date.parse("2026-07-31T00:00:00.000Z");
+  let ms = base;
+  const now = () => new Date(ms);
+  // Work appears only once the process is past its cap: empty board before t=150s, one Ready
+  // issue after — pure clock steering, no call-count coupling.
+  forge.getReadyIssues = async () => (ms - base > 150_000 ? [{ number: 9, title: "late work", labels: [] }] : []);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (requestedMs: number): Promise<void> => {
+    sleepCalls.push(requestedMs);
+    ms += requestedMs; // the dwell consumes process life — the exact F29-adjacent shape
+    if (sleepCalls.length >= 8) stop(); // bounded safety net past the wake + several wait iterations
+  };
+  const deps = baseDeps({
+    forge,
+    state,
+    sleep,
+    now,
+    processStartedAt: new Date(base),
+    tickIntervalSec: 60,
+    cfg: mkCfg({ cost: { maxWallClockSec: 100 }, round: { standby: { enabled: true } } }),
+    peripherals: allPeripherals(log),
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "the wake never opened a round on a breached process");
+  assert.equal(state.getRound(2), undefined, "no second round exists");
+  assert.deepEqual(
+    log.map((l) => l.phase),
+    ["aligning", "architecting", "plan_review", "harvesting", "retro"],
+    "round 1's peripherals only — the wake ran NO paid peripheral on the breached process",
+  );
+  const announced = state.eventsAfterId(0, ["ceiling-breach-entered"]);
+  assert.equal(announced.length, 1, "the wake's admission gate announced the breach exactly once");
+  assert.deepEqual((announced[0]!.payload as { reasons: string[] }).reasons, ["wall-clock"]);
+  assert.ok(state.ceilingBreach() !== null, "the breach row stands — status/dashboard see the winding-down state");
+  state.close();
+});

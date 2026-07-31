@@ -147,25 +147,43 @@ export function drainEscalationDue(breachAtIso: string, nowMs: number, drainWind
 /** #431 AC3 (F29): the reason-bearing breach announcement — the F29 breach was INVISIBLE (the
  *  only signal was `park-wait-heartbeat {parked:false}`), so entering a ceiling wait now emits a
  *  `ceiling-breach-entered` event naming WHICH ceiling(s), the configured threshold, and the
- *  observed value, exactly ONCE per breach episode. Call strictly AFTER recordCeilingBreach for
- *  the same reasons/now — the episode identity is the breach row's own first-detected `at`
- *  (recordCeilingBreach's INSERT OR IGNORE preserves it across re-detections), and the dedup is
- *  EVENT-LOG-derived (#169: dedupe the event, not the signal): the latest
- *  `ceiling-breach-entered`'s `episodeAt` is compared against the row's `at`, so a crash between
- *  the row insert and the event append re-announces on the next pass (never a silent episode)
- *  and a normal re-detection appends nothing (never spam). Both ceiling-wait sites reference
- *  this: tick()'s CEILING section and round.ts's waitForDispatchClear. */
+ *  observed values, exactly ONCE per breach episode.
+ *
+ *  #431 round 2 (codex P2): EVENT-FIRST, EVENT-LOG-DEDUPED — call strictly BEFORE
+ *  recordCeilingBreach. Round 1 keyed the dedup on the breach ROW's first-detected `at` and
+ *  appended after the row commit; a kill between the two left a row with no event, and a
+ *  restarted process (fresh wall-clock anchor, no current breach) then CLEARED that row
+ *  silently — a permanently unannounced episode. Now the episode's identity IS the event pair:
+ *  `ceiling-breach-entered` opens it, `ceiling-breach-cleared` (announceCeilingClearedOnce
+ *  below) closes it, and the dedup asks only "which side is newest" — the exact
+ *  pr-held/pr-released transition-pair shape (#169/#294: dedupe the EVENT, not the signal).
+ *  Kill-window truth table, by construction: killed after the event, before the row -> a
+ *  still-breached restart re-records the row without a duplicate event, and a recovered
+ *  restart closes the episode with `cleared` (the entered announcement survives — never a
+ *  silent episode either way); the reverse window (row without event) is unrepresentable,
+ *  because the event always lands first. Both ceiling-wait sites reference this: tick()'s
+ *  CEILING section and round.ts's waitForDispatchClear (including its standby-wake re-entry). */
 export function announceCeilingBreachOnce(
-  state: Pick<State, "ceilingBreach" | "latestEvent" | "appendEvent">,
+  state: Pick<State, "latestEventOfKinds" | "appendEvent">,
   reasons: CeilingReason[],
   detail: { wallClockElapsedSec: number; maxWallClockSec: number; dailySpendUsd: number; dailyBudgetUsd: number },
 ): void {
-  const breach = state.ceilingBreach();
-  if (!breach) return; // defensive: nothing recorded means nothing to announce
-  const episodeAt = breach.at.toISOString();
-  const last = state.latestEvent("ceiling-breach-entered")?.payload as { episodeAt?: unknown } | undefined;
-  if (last?.episodeAt === episodeAt) return; // this episode is already announced
-  state.appendEvent("ceiling-breach-entered", { episodeAt, reasons, ...detail });
+  const last = state.latestEventOfKinds(["ceiling-breach-entered", "ceiling-breach-cleared"]);
+  if (last?.kind === "ceiling-breach-entered") return; // this episode is already announced
+  state.appendEvent("ceiling-breach-entered", { reasons, ...detail });
+}
+
+/** #431 round 2 (codex P2): the pair's closing half — appended when a ceiling episode actually
+ *  ENDS (the recovery transition, or a restart's fresh anchor clearing a prior life's stale
+ *  row), and only then: with no open `entered` this is a no-op, so healthy steady-state ticks
+ *  append nothing. This receipt is what makes "a fresh episode re-announces" true BY
+ *  CONSTRUCTION: without it, the event log could not distinguish "still the same episode" from
+ *  "recovered, then breached again". Call alongside every clearCeilingBreach on the two
+ *  ceiling-wait paths. */
+export function announceCeilingClearedOnce(state: Pick<State, "latestEventOfKinds" | "appendEvent">): void {
+  const last = state.latestEventOfKinds(["ceiling-breach-entered", "ceiling-breach-cleared"]);
+  if (last?.kind !== "ceiling-breach-entered") return; // no open episode to close
+  state.appendEvent("ceiling-breach-cleared", {});
 }
 
 /**
@@ -1518,14 +1536,25 @@ export async function escalatePark(
   log?: (message: string) => void,
 ): Promise<void> {
   const suspendedRequeues = state.pendingRollbacks().filter((r) => r.reason === ENV_FAILURE_REQUEUE_REASON).length;
+  // #431 round 2 (codex P2): the message is SOURCE-AWARE — a `rapid-restart` episode has no
+  // probe and no probe-driven auto-resume (state.ts's ParkSource doc), so the env-failure
+  // wording's promises would be false for it. In practice rapid-restart escalates at trip time
+  // (rapid-restart.ts's escalateLocally sets the latch), so this ladder only reaches it through
+  // an exotic latch loss — the honest message is still required for exactly that case.
   const message =
-    `sapwood: engine parked since ${park.enteredAt} due to a ${park.source} environment failure ` +
-    `(${park.reason}) — this has exceeded the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
-    `escalation threshold. The engine is still probing on a bounded exponential backoff and will ` +
-    `auto-resume dispatch on the first successful probe; this notification does not stop that. ` +
-    (suspendedRequeues > 0 ? `${suspendedRequeues} issue requeue(s) are held durably and will drain on resume. ` : "") +
-    `Informational only — no action is required unless the underlying outage is expected to ` +
-    `persist.`;
+    park.source === "rapid-restart"
+      ? `sapwood: engine parked since ${park.enteredAt} — rapid-restart detector (${park.reason}). ` +
+        `This episode has now stood for over the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
+        `escalation threshold. There is NO probe for this episode: dispatch stays parked until an ` +
+        `engine start observes the restart window drained (or the park is cleared by hand) — see ` +
+        `docs/troubleshooting.md and docs/security.md (supervisor circuit-breaker prerequisite).`
+      : `sapwood: engine parked since ${park.enteredAt} due to a ${park.source} environment failure ` +
+        `(${park.reason}) — this has exceeded the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
+        `escalation threshold. The engine is still probing on a bounded exponential backoff and will ` +
+        `auto-resume dispatch on the first successful probe; this notification does not stop that. ` +
+        (suspendedRequeues > 0 ? `${suspendedRequeues} issue requeue(s) are held durably and will drain on resume. ` : "") +
+        `Informational only — no action is required unless the underlying outage is expected to ` +
+        `persist.`;
   const intended = escalationChannel(park.source, forgeParked);
   // P2-3 (PR #180 review): the event below records the channel ACTUALLY used — when the forge
   // comment fails and this degrades to the local fallback, the audit trail must say "local",
@@ -3246,17 +3275,18 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   let drainRequested: string[] = [];
   let escalated: string[] = [];
   if (ceilingBreached) {
-    // #431 AC3: record + announce BEFORE the (long, async) drain below — the breach must be
-    // visible in the ledger the moment it is detected, once per episode (see
-    // announceCeilingBreachOnce's own doc; drainThenEscalate's internal recordCeilingBreach
-    // call is INSERT OR IGNORE, so recording here first changes nothing about the drain window).
-    state.recordCeilingBreach(ceilingReasons, nowDate);
+    // #431 AC3, round 2 (codex P2): announce EVENT-FIRST, then record — the announcement is the
+    // episode's durable identity (see announceCeilingBreachOnce's kill-window truth table), and
+    // both land BEFORE the (long, async) drain below so the breach is visible in the ledger the
+    // moment it is detected (drainThenEscalate's internal recordCeilingBreach call is INSERT OR
+    // IGNORE, so recording here first changes nothing about the drain window).
     announceCeilingBreachOnce(state, ceilingReasons, {
       wallClockElapsedSec: (nowDate.getTime() - processStartedAt.getTime()) / 1000,
       maxWallClockSec: cfg.cost.maxWallClockSec,
       dailySpendUsd: state.dailySpendUsd(nowDate),
       dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
     });
+    state.recordCeilingBreach(ceilingReasons, nowDate);
     ({ drainRequested, escalated } = await drainThenEscalate(
       forge,
       state,
@@ -3275,9 +3305,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       { mode: "observed", blockedLanes: driveFixBlockedLanes },
     ));
   } else {
-    // Resolved (daily cap rolled to a fresh day / wall-clock cfg raised / kill switch
-    // lifted before this tick) -> clear so a future re-breach starts a fresh drain window.
+    // Resolved (daily cap rolled to a fresh day / wall-clock cfg raised / a restart's fresh
+    // anchor / kill switch lifted before this tick) -> clear so a future re-breach starts a
+    // fresh drain window, and close the episode in the ledger (#431 round 2: the `cleared`
+    // receipt is transition-only — a healthy steady-state tick appends nothing — and it is
+    // what re-arms announceCeilingBreachOnce for the next genuine episode).
     state.clearCeilingBreach();
+    announceCeilingClearedOnce(state);
   }
 
   // ── PARK (#168): environment-failure self-healing, per source (PR #180 review P1-1). Read

@@ -624,6 +624,7 @@ checklist item**):
 | `ceiling-escalated` | Safety ceiling reached — winding down all work |
 | `ceiling-breach-entered` | Branches on `payload.reasons` (#431): wall-clock → "This run hit its {maxWallClockSec}s attention alarm — no new work until a restart"; daily-budget → "Today's ${dailyBudgetUsd} budget is spent — no new work until tomorrow"; both → join with " and ". One per breach episode, never per tick |
 | `rapid-restart-detected` | Engine started {births} times in {windowSec}s — crash loop suspected, dispatch parked for a human (#431) |
+| `ceiling-breach-cleared` | The safety ceiling cleared — work can resume (#431: the episode's closing receipt; one per episode, transition-only) |
 | `rollback-recovered` | Returned issue #{issue} to the backlog safely |
 | `rollback-retry-failed` | Still trying to return issue #{issue} to the backlog |
 | `rollback-escalated` | Couldn't return issue #{issue} automatically — flagged for a human |
@@ -1017,9 +1018,10 @@ mutable snapshot or outside the engine's own DB is live-only.
   directly ("round 12").
 - **No composite "run N, round M" identity.** Both coordinates would be
   synthetic; `round_id` alone already pinpoints a round. Run *grouping* is
-  derived from `run-started` events — never inferred from the
-  `engine_session` gap heuristic, which serves the wall-clock ceiling and
-  deliberately resets on quiet gaps.
+  derived from `run-started` events — the authoritative run boundary
+  (#431 deleted the old `engine_session` gap heuristic outright; the
+  wall-clock ceiling now anchors to in-memory process start and
+  `engine_session` survives only as the liveness heartbeat row).
 - **The unit of replay is the round.** Its event window is exact via the
   #123 id cursors (`start_event_id` / `start_spend_id`), immune to
   same-millisecond boundary collisions. A run replays as the ordered chapter

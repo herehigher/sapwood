@@ -26,10 +26,14 @@
 // the cause, and the next start outside the window resumes automatically. Deleting the
 // park_state row by hand works too; both paths flow through the same clearPark.
 //
-// Clock discipline (#403/F25): the cutoff derives from the caller's injected clock. Event `ts`
-// stamps are the machine clock at write time (appendEvent's own doc — deliberate), so the two
-// only meet when the caller's clock IS the machine clock — true in production (cli.ts's
-// systemClock); tests steer the window by injecting a shifted `now`, never by sleeping.
+// Clock discipline (#403/F25): both window bounds derive from the caller's injected clock —
+// the count is over the CLOSED window [now - windowSec, now]. Event `ts` stamps are the machine
+// clock at write time (appendEvent's own doc — deliberate), so the bounds only meet the stamps
+// when the caller's clock IS the machine clock — true in production (cli.ts's systemClock);
+// tests steer the window by injecting a shifted `now`, never by sleeping. The UPPER bound
+// (#431 round 2, codex P3): a DB restored from a fast-clock machine, or a backward host-clock
+// correction, can hold `run-started` rows dated in this machine's future — those must neither
+// false-trip the detector nor keep re-parking after a manual park clear for the whole skew.
 import type { SapwoodConfig } from "../config/config.js";
 import type { State } from "../state/state.js";
 
@@ -59,42 +63,55 @@ export function detectRapidRestart(
   const nowDate = now();
   const cutoffIso = new Date(nowDate.getTime() - windowSec * 1000).toISOString();
   let births = 0;
+  /** The immediate local escalation — NOW, not after envFailure.parkEscalateAfterSec: a crash
+   *  loop already IS the escalation-worthy fact, and each of its restarts resets this
+   *  process's life anyway. Local channel of the existing park ladder (escalatePark's own
+   *  triggerIssue-less branch): ESCALATION marker + park-escalated event + status surface.
+   *  The recordParkEscalation latch also keeps the per-tick duration ladder from re-firing.
+   *  Idempotent by construction of its callers: only ever invoked while the episode's
+   *  escalated_at is still null. */
+  const escalateLocally = (reason: string, enteredAtIso: string): void => {
+    const message =
+      `sapwood: rapid-restart detector tripped — ${reason}. Autonomous dispatch is parked. ` +
+      `A crash loop is not a sanctioned restart pattern: stop the supervisor/restart source, fix the cause, ` +
+      `and start the engine once the window has drained (a later clean start resumes automatically). ` +
+      `See docs/troubleshooting.md and docs/security.md (supervisor circuit-breaker prerequisite).`;
+    state.writeEscalationMarker({
+      source: RAPID_RESTART_PARK_SOURCE,
+      reason,
+      triggerIssue: null,
+      enteredAt: enteredAtIso,
+      message,
+      at: nowDate.toISOString(),
+    });
+    state.recordParkEscalation(RAPID_RESTART_PARK_SOURCE, nowDate.toISOString());
+    state.appendEvent("park-escalated", { source: RAPID_RESTART_PARK_SOURCE, channel: "local", triggerIssue: null });
+    log(`[sapwood:startup] ${message}`);
+  };
   try {
-    births = state.countEventsSince(cutoffIso, "run-started");
+    births = state.countEventsBetween(cutoffIso, nowDate.toISOString(), "run-started");
     const existing = state.parkRow(RAPID_RESTART_PARK_SOURCE);
     if (births >= maxBirths) {
       if (existing === null) {
         const reason = `${births} engine starts within ${windowSec}s (threshold ${maxBirths}) — crash loop suspected`;
-        // Event first (the detection fact), then the durable park (the consequence) — same
-        // event-before-upsert ordering the escalation paths use, so a crash between the two
-        // re-detects and re-parks on the next boot rather than losing the record.
+        // Event first (the detection fact), then the durable park (the consequence), then the
+        // escalation — same event-before-upsert ordering the escalation paths use. A crash
+        // ANYWHERE in this sequence heals on the next boot: before the park -> re-detects and
+        // re-parks; after the park but before the escalation latch -> the still-open branch
+        // below observes escalatedAt === null and completes the marker/latch/event (#431
+        // round 2, codex P2 — round 1 left that crash window permanently unescalated).
         state.appendEvent("rapid-restart-detected", { births, windowSec, maxBirths });
         state.enterPark(RAPID_RESTART_PARK_SOURCE, reason, null, nowDate.toISOString());
-        // Escalate NOW, not after envFailure.parkEscalateAfterSec — a crash loop already IS the
-        // escalation-worthy fact, and each of its restarts resets this process's life anyway.
-        // Local channel of the existing park ladder (escalatePark's own triggerIssue-less
-        // branch): ESCALATION marker + park-escalated event + status surface. Setting the
-        // escalated_at latch here also keeps the per-tick duration escalation from re-firing.
-        const message =
-          `sapwood: rapid-restart detector tripped — ${reason}. Autonomous dispatch is parked. ` +
-          `A crash loop is not a sanctioned restart pattern: stop the supervisor/restart source, fix the cause, ` +
-          `and start the engine once the window has drained (a later clean start resumes automatically). ` +
-          `See docs/troubleshooting.md and docs/security.md (supervisor circuit-breaker prerequisite).`;
-        state.writeEscalationMarker({
-          source: RAPID_RESTART_PARK_SOURCE,
-          reason,
-          triggerIssue: null,
-          enteredAt: nowDate.toISOString(),
-          message,
-          at: nowDate.toISOString(),
-        });
-        state.recordParkEscalation(RAPID_RESTART_PARK_SOURCE, nowDate.toISOString());
-        state.appendEvent("park-escalated", { source: RAPID_RESTART_PARK_SOURCE, channel: "local", triggerIssue: null });
-        log(`[sapwood:startup] ${message}`);
+        escalateLocally(reason, nowDate.toISOString());
       } else {
         // Already parked from a previous birth in this same storm — the durable episode is the
         // dedup carrier (one rapid-restart-detected + one escalation per episode, not per
         // birth: a crash loop must not turn the ledger into spam). Dispatch is already gated.
+        // #431 round 2 (codex P2): heal-on-boot — a prior birth that died between enterPark and
+        // the escalation latch left escalated_at null; complete the escalation now, once.
+        if (existing.escalatedAt === null) {
+          escalateLocally(existing.reason, existing.enteredAt);
+        }
         log(
           `[sapwood:startup] rapid-restart park still open (entered ${existing.enteredAt}): ` +
             `${births} births within ${windowSec}s — autonomous dispatch stays parked`,
