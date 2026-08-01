@@ -1353,10 +1353,17 @@ export type RollbackOutcome =
  *  issue's needs-human label is gone (gatedReentryDecision above). "reclaimed" means the lane is
  *  back in `driving` this same tick (the DRIVE loop below re-drives it, no new worker); "capped"
  *  means the cap was already spent and this removal was rejected — re-escalated + permanently
- *  latched (State.gatedFailedWorkers never returns it again). */
+ *  latched (State.gatedFailedWorkers never returns it again).
+ *
+ *  #484: two TERMINAL outcomes, decided BEFORE the cap so a finished lane can never be capped.
+ *  "merged" — the PR is already merged, so the lane goes straight back to `driving` for DRIVE to
+ *  settle with its ordinary `merged` terminal (no attempt burned). "issue-closed" — the issue is
+ *  closed, so the lane is over whatever its PR says: latched, surfaced once, never re-entered. */
 export type GatedReclaimOutcome =
   | { kind: "reclaimed"; worker: string; issue: number; pr: number; attempt: number }
-  | { kind: "capped"; worker: string; issue: number; pr: number; attempts: number };
+  | { kind: "capped"; worker: string; issue: number; pr: number; attempts: number }
+  | { kind: "merged"; worker: string; issue: number; pr: number; attempts: number }
+  | { kind: "issue-closed"; worker: string; issue: number; pr: number; attempts: number };
 
 /** #172: one handoff-lane decision that changed durable state this tick. */
 export type ResumeOutcome =
@@ -1544,9 +1551,9 @@ export function capHitEscalationNote(cfg: SapwoodConfig): string {
 /**
  * Dispatchable Ready issues, ordered (priority asc, number asc). Filters out reserve /
  * needs-human (held for human triage) and any issue carrying a blocked-by label.
- * ponytail: blocked-by issues are skipped while the label is present; re-checking the
- * blocker's OPEN/CLOSED state (to auto-unblock once it closes) is an M3 refinement — for
- * now triage removes the label. Avoids an extra gh round-trip per blocker per tick.
+ * The label itself is kept honest by `reconcileStaleBlockers` (#485), which runs immediately
+ * before this in the tick's dispatch phase and clears the ones whose blocker has since closed —
+ * this function stays a pure label filter and never reads the forge itself.
  */
 export function orderForDispatch(ready: Issue[], cfg: SapwoodConfig): Issue[] {
   // Held out of the main lane: reserve + every escalation label (needs-human, blocked, …).
@@ -1560,6 +1567,100 @@ export function orderForDispatch(ready: Issue[], cfg: SapwoodConfig): Issue[] {
     .map((i) => ({ i, rank: issuePriority(i.labels, cfg.labels.prefix) }))
     .sort((a, b) => a.rank - b.rank || a.i.number - b.i.number)
     .map((x) => x.i);
+}
+
+/** #485: blocker-state reads one tick may make. The candidate set is already bounded — only the
+ *  Ready issues the dispatch phase just fetched, deduped by blocker number — so this only bites
+ *  on a backlog carrying more than this many DISTINCT unresolved blockers; whatever it doesn't
+ *  reach keeps its label and is retried on the next tick, so the bound costs latency, never
+ *  correctness. ponytail: a flat constant, not config — make it configurable if a real repo
+ *  ever hits it. */
+export const BLOCKER_RECHECK_READS_PER_TICK = 20;
+
+/**
+ * #485: auto-clear stale `blocked-by:N` labels — the refinement orderForDispatch's comment used
+ * to defer to "M3 / triage removes the label by hand". For every Ready issue carrying blocker
+ * labels, read each DISTINCT blocker's state once (`getIssueMeta`, GitHub's own authoritative
+ * state field — never inferred from text) and remove exactly those label tokens whose blocker is
+ * no longer OPEN. Nothing else is touched: no other label, no comment, no body edit, and an issue
+ * with several blockers only loses the ones that actually closed.
+ *
+ * The token removed is the one the issue actually carries (so a `blocked-by:#5` form is removed
+ * verbatim, not as a reconstructed `blocked-by:5`), matched by the same `matchBlockedByLabel`
+ * parser `labelsBlockers` uses — a label this config's prefix doesn't parse as a blocker is
+ * invisible here exactly as it is to the dispatch filter, and costs no forge read.
+ *
+ * Never throws. A transient forge failure — the blocker read OR the label removal — leaves the
+ * label exactly where it is and the next tick retries. That is the COMMON path for a flaky
+ * GitHub read, not a rare edge, so it deliberately does not escalate to needs-human (Decision #9
+ * does not apply): the cost of a miss is one more tick of a stale label, while dispatch stays
+ * fail-closed meanwhile.
+ *
+ * Returns `ready` with the cleared labels dropped in memory, so THIS tick's orderForDispatch
+ * already sees the unblock instead of re-reading the board for a fact just written. Only labels
+ * whose removal the forge ACCEPTED are dropped from that view.
+ *
+ * Runs inside the dispatch phase, so it inherits every dispatch-suppressing safety layer for
+ * free: paused, park-without-canary, kill switch, zero dispatch cap — none of them reach a Ready
+ * read, so none of them reach this either. Nothing to clear when nothing can be dispatched.
+ *
+ * #212's authorized-engine-removal invariant (round.ts's `removeRoundPoolLabel` doc lists the
+ * complete set, and says a third `forge.removeLabel` call site is a defect until it arrives with
+ * a provenance check of its own): this is that third path, and its check is BLOCKER RESOLUTION —
+ * the token must parse as a `blocked-by:N` label under the configured prefix AND GitHub itself
+ * must report N as no longer OPEN. It removes an engine-legible ordering marker (decompose.ts
+ * writes these), never a human-adjudication signature: a token that matches ANY configured
+ * workflow or escalation label is refused outright below, so even a pathological config that
+ * aliased `needs-human` onto a `blocked-by:N` string cannot have it forged away here.
+ */
+export async function reconcileStaleBlockers(
+  forge: IForge,
+  ready: Issue[],
+  cfg: SapwoodConfig,
+  onCleared?: (issue: number, label: string, blocker: number) => void,
+): Promise<Issue[]> {
+  const neverRemovable = [
+    ...Object.entries(cfg.labels)
+      .filter(([key]) => key !== "prefix")
+      .map(([, value]) => value),
+    ...cfg.escalation.humanLabels,
+    ...cfg.escalation.holdLabels,
+  ];
+  const blockerState = new Map<number, "OPEN" | "CLOSED">();
+  let reads = 0;
+  const out: Issue[] = [];
+  for (const issue of ready) {
+    const kept: string[] = [];
+    for (const tok of issue.labels) {
+      const blocker = matchBlockedByLabel(tok, cfg.labels.prefix);
+      if (blocker == null || labelsInclude(neverRemovable, tok)) {
+        kept.push(tok);
+        continue;
+      }
+      if (!blockerState.has(blocker) && reads < BLOCKER_RECHECK_READS_PER_TICK) {
+        reads++;
+        try {
+          blockerState.set(blocker, (await forge.getIssueMeta(blocker)).state);
+        } catch {
+          // Transient read: leave the label, retry next tick. Not cached, so a later issue in
+          // this same pass may still get an answer (under the read budget).
+        }
+      }
+      if (blockerState.get(blocker) !== "CLOSED") {
+        kept.push(tok);
+        continue;
+      }
+      try {
+        await forge.removeLabel(issue.number, tok);
+      } catch {
+        kept.push(tok); // the write failed — the label is still there, so say so
+        continue;
+      }
+      onCleared?.(issue.number, tok, blocker);
+    }
+    out.push(kept.length === issue.labels.length ? issue : { ...issue, labels: kept });
+  }
+  return out;
 }
 
 const ENV_FAILURE_REQUEUE_REASON = "env-failure-requeue";
@@ -3255,6 +3356,56 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       const attempts = w.gated_reentry_attempts ?? 0;
       const decision = gatedReentryDecision(hasReserveLabel(labels, holdSet), attempts, cfg.lanes.gatedReentryCap);
       if (decision === "SKIP") continue; // a human hold still stands — no complete human act yet
+      // ── TERMINALITY BEFORE THE CAP (#484). Ordering, not an added guard: this discovery sits
+      //   between the hold check and the cap check, so a lane that is ALREADY DONE can never
+      //   reach the CAPPED branch's label write at all. Before it, the cap gate ran first, so a
+      //   capped lane could never learn its PR had been merged — it re-applied `needs-human`,
+      //   the next round's escalation sweep removed it again (the escalation had long since
+      //   resolved via `merged`), and the two ground a label-flap loop, one full cycle per round,
+      //   on issues that were CLOSED with MERGED PRs (live: #295/#377, round 262, 2026-07-31).
+      //   The control was lane-433, whose attempt happened to be UNDER the cap: it reclaimed,
+      //   DRIVE read the PR, and it recorded the honest `merged` terminal.
+      //
+      //   Cost: two read-only calls per lane whose hold a human ACTUALLY cleared — never for the
+      //   SKIP majority (a lane still held costs nothing, exactly as before), and never per-tick
+      //   for the same lane, because every arm below leaves gatedFailedWorkers() (driving, or
+      //   latched). Unguarded, like the label read above: a forge read failure propagates and the
+      //   next tick re-observes, rather than being swallowed into a wrong decision.
+      const prState = (await forge.getPRStatus(pr)).state;
+      if (prState === "MERGED") {
+        // The lane-433 path, now reachable at ANY attempt count. Hand the lane to DRIVE (which
+        // runs below, this same tick — `gate` is non-null here) and let it record the honest
+        // `merged` terminal with its board-Done write and rollback handling, rather than
+        // duplicating that settlement here. Deliberately NOT the RECLAIM transition below: no
+        // attempt is burned and no `gated-reentry` episode-reset event is emitted, because
+        // nothing is being re-entered — a finished lane is being collected.
+        state.upsertWorkerWithEvent({ ...w, state: "driving", ended_at: iso() }, "gated-reentry-merged", {
+          worker: w.name,
+          issue: w.issue,
+          pr,
+          attempts,
+        });
+        gatedReclaimed.push({ kind: "merged", worker: w.name, issue: w.issue, pr, attempts });
+        continue;
+      }
+      const issueState = (await forge.getIssueMeta(w.issue)).state;
+      if (issueState === "CLOSED") {
+        // #397's issue-CLOSED-gates-reentry ruling, enforced where reentry is actually decided.
+        // A closed issue is terminal whatever the PR says: re-driving it could merge a zombie PR
+        // (the PR#458 shape) and re-escalating it flaps a label on a work item nobody will
+        // reopen. Latch it — the SAME one-way column the CAPPED branch uses, so the row leaves
+        // gatedFailedWorkers() forever — and surface it ONCE, with no forge write at all: the
+        // event is the surfacing, and a comment on a closed issue would be the churn this fixes.
+        state.upsertWorkerWithEvent({ ...w, ended_at: iso(), gated_reentry_capped: 1 }, "gated-reentry-issue-closed", {
+          worker: w.name,
+          issue: w.issue,
+          pr,
+          prState,
+          attempts,
+        });
+        gatedReclaimed.push({ kind: "issue-closed", worker: w.name, issue: w.issue, pr, attempts });
+        continue;
+      }
       if (decision === "CAPPED") {
         // The cap was already spent on a prior reclaim that re-escalated, and a human removed
         // needs-human again anyway — refuse to retry forever: re-add the label, leave an
@@ -4586,7 +4737,14 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     let dispatchedThisTick = 0;
     let metaUsed = 0; // meta-rank (<=2) lanes taken this tick — anti-starvation accounting
 
-    const order = orderForDispatch(await forge.getReadyIssues(), cfg);
+    // #485: clear blocked-by labels whose blocker has since closed BEFORE the dispatch filter
+    // reads them, so a closed blocker unblocks its dependents without a human stripping the
+    // label. Bounded to the issues this Ready read already returned (no extra list call) and to
+    // BLOCKER_RECHECK_READS_PER_TICK distinct blocker reads; never throws.
+    const readyIssues = await reconcileStaleBlockers(forge, await forge.getReadyIssues(), cfg, (issue, label, blocker) =>
+      state.appendEvent("blocked-by-cleared", { issue, label, blocker }),
+    );
+    const order = orderForDispatch(readyIssues, cfg);
     for (const issue of order) {
       // The #14 engine ceiling outranks every other dispatch reason: a breach freezes ALL new
       // dispatch, not just the ones that happen to also be over the (separate) round budget.

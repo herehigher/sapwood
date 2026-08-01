@@ -180,6 +180,18 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async getIssueLabels(issue: number): Promise<string[]> {
     return this.issueLabels[issue] ?? [];
   }
+  /** #484: GATED RECLAIM reads the issue's live state before the reentry cap (a CLOSED issue is
+   *  terminal). Mutable per-issue; unlisted issues read OPEN, as every fixture here assumes. */
+  issueState: Record<number, "OPEN" | "CLOSED"> = {};
+  override async getIssueMeta(issue: number) {
+    return {
+      number: issue,
+      title: `issue ${issue}`,
+      state: this.issueState[issue] ?? ("OPEN" as const),
+      labels: this.issueLabels[issue] ?? [],
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+  }
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
   override async getIssueComments(issue: number) {
     return this.issueComments[issue] ?? [];

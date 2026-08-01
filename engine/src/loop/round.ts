@@ -805,6 +805,17 @@ export class PoolScopedForge implements IForge {
  *     rejects every label but `roundPool`, and widening it to a second label with different
  *     provenance rules would destroy that guarantee rather than extend it.
  *
+ *  3. **`conductor.ts`'s `reconcileStaleBlockers` — a `blocked-by:N` label ONLY, checked by
+ *     BLOCKER RESOLUTION** (#485). A `blocked-by:N` label is an engine-legible ordering marker
+ *     (decompose.ts writes them between a parent's children), not a human adjudication: it says
+ *     "wait for N", and GitHub's own state field answers whether N is still open. The check is
+ *     two-part — the token must parse as `blocked-by:N` under the configured prefix
+ *     (`matchBlockedByLabel`, the same parser dispatch filters on) AND `getIssueMeta(N).state`
+ *     must be CLOSED — plus a belt-and-braces refusal for any token that matches a configured
+ *     workflow/escalation label, so no config could alias a protected label into this path.
+ *     It does not route through this function for the same reason (2) doesn't: this one's value
+ *     is that it accepts nothing but `roundPool`.
+ *
  *  Everything else — `blocked`, `plan:approved`, `verify:n/a`, and `needs-human` outside the
  *  proven-and-authorized case above — remains removable by a human only. */
 export async function removeRoundPoolLabel(forge: IForge, cfg: SapwoodConfig, issue: number, label: string): Promise<void> {
