@@ -1026,7 +1026,13 @@ function createRunLogger(cfg: SapwoodConfig, override?: EngineLogger): { logger:
  *  records — not per-tick evaluations. Raw array lengths counted steady-state no-ops: a "kept"
  *  reclaim (running lane still alive), a "skipped" dispatch (cap/in-flight), and a "queued"
  *  drive (gate still waiting) re-count every tick, so a fully wedged run logged
- *  `reclaimed=3 dispatched=2 driven=3` forever while the event stream recorded nothing. */
+ *  `reclaimed=3 dispatched=2 driven=3` forever while the event stream recorded nothing.
+ *
+ *  Two deliberate blind spots (#505 review): a NEWLY ANNOUNCED queued transition still counts
+ *  as driven=0 here — its signal is the richer `[sapwood:drive]` line the conductor logs at the
+ *  announcement site, not this counter; and an ADOPT-path reclaim keeps its by-design "kept"
+ *  outcome (#169: adoption adds no scheduler machinery) — its signal is the one-shot
+ *  lane-adopted event. */
 export function formatTickSummary(result: TickResult): string {
   const reclaimed = result.reclaimed.filter((r) => r.kind !== "kept").length;
   const fixingReclaimed = result.fixingReclaimed.filter((r) => r.kind !== "kept").length;

@@ -2082,6 +2082,15 @@ test("tick DRIVE (#504): the queued reason reaches the LOG on the same episode-d
     ],
     "one log line per reason change, never per tick",
   );
+  // #505 review P3: an episode reset (a fix-leg excursion) re-announces the IDENTICAL reason —
+  // the log line must follow the event's episode dedupe, not compare reason strings alone.
+  st.appendEvent("drive-fixup", { worker: "lane-a", issue: 2, pr: 55, reason: "gate:FIXABLE:findings" });
+  await runTick();
+  assert.equal(
+    logged.filter((m) => m === "[sapwood:drive] lane lane-a pr #55 queued: gate-pending:WAIT_REVIEW").length,
+    2,
+    "same reason after a reset is a NEW episode and logs again",
+  );
   st.close();
 });
 
