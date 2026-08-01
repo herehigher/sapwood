@@ -2602,6 +2602,9 @@ export class WorkerSupervisor implements Supervisor {
     // use it" stance failureText already takes for FAILED lanes (conductor.ts's fix-leg harvest
     // is the first reader; an ordinary worker's DONE result text is otherwise unconsumed).
     const resultText = done ? this.terminalResultText(name) : undefined;
+    // #490: the lane worktree's local head — same "only for a DONE lane" gating as resultText
+    // (the fix-response receipt event is the one consumer). File reads only, no subprocess.
+    const worktreeHead = done ? this.laneWorktreeHead(name) : undefined;
     const running = this.readJson(this.path(name, "running.json"));
     if ((done || failed || handoff) && running?.resume_pending_db === true) {
       this.removeIfExists(this.path(name, "running.json"));
@@ -2620,6 +2623,7 @@ export class WorkerSupervisor implements Supervisor {
       ...(liveTelemetry ? { liveTelemetry } : {}),
       ...(failureText !== undefined ? { failureText } : {}),
       ...(resultText !== undefined ? { resultText } : {}),
+      ...(worktreeHead != null ? { worktreeHead } : {}),
       ...(actualModel != null ? { actualModel } : {}),
       ...(rateLimitResetAtMs != null ? { rateLimitResetAtMs } : {}),
       ...(envSignalStructured ? { envSignalStructured } : {}),
@@ -3044,6 +3048,11 @@ export class WorkerSupervisor implements Supervisor {
     }
   }
 
+  /** #490: see resolveWorktreeHead — the lane worktree's LOCAL commit sha, or null. */
+  private laneWorktreeHead(name: string): string | null {
+    return resolveWorktreeHead(join(this.worktreeRoot, name, ".git"));
+  }
+
   private laneIssue(name: string): number | null {
     for (const ext of ["running.json", "done.json", "failed.json", "handoff.json"]) {
       const r = this.readJson(this.path(name, ext));
@@ -3286,4 +3295,49 @@ export function buildRenderFixPrompt(cfg: SapwoodConfig): (issueNumber: number, 
   }
   return (issueNumber: number, pr: number) =>
     template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => vars[raw.trim()]!(issueNumber, pr));
+}
+
+/** #490: resolve a worktree's CURRENT commit sha from its `.git` entry — pure file reads (the
+ *  same gitdir-resolution pattern as WorkerSupervisor.laneHeadBranch, no subprocess): a detached
+ *  HEAD is the sha itself; a symbolic HEAD resolves through the loose ref file (worktree gitdir
+ *  first, then the commondir), then the commondir's packed-refs. This is the LOCAL head a fix
+ *  leg left behind — evidence of what it produced, not proof of a push. `null` on any
+ *  unreadable/unresolvable shape — honest "unobserved", never a guess. Exported for direct unit
+ *  coverage; production reaches it only through the supervisor's probe(). */
+export function resolveWorktreeHead(dotGit: string): string | null {
+  try {
+    let gitDir = dotGit;
+    if (!lstatSync(dotGit).isDirectory()) {
+      const link = readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+)$/m);
+      if (!link) return null;
+      gitDir = resolve(dirname(dotGit), link[1]!.trim());
+    }
+    const headRaw = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
+    if (/^[0-9a-f]{40}$/i.test(headRaw)) return headRaw.toLowerCase(); // detached
+    const ref = headRaw.match(/^ref:\s*(refs\/\S+)/m)?.[1];
+    if (!ref) return null;
+    // A linked worktree's refs live in the COMMON gitdir; a primary checkout has no commondir.
+    let common = gitDir;
+    try {
+      common = resolve(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim());
+    } catch {
+      // No commondir file — gitDir IS the common dir.
+    }
+    for (const dir of [gitDir, common]) {
+      try {
+        const loose = readFileSync(join(dir, ref), "utf8").trim();
+        if (/^[0-9a-f]{40}$/i.test(loose)) return loose.toLowerCase();
+      } catch {
+        // Not a loose ref here — try the next location / packed-refs.
+      }
+    }
+    const packed = readFileSync(join(common, "packed-refs"), "utf8");
+    for (const line of packed.split("\n")) {
+      const m = line.match(/^([0-9a-f]{40})\s+(\S+)$/i);
+      if (m && m[2] === ref) return m[1]!.toLowerCase();
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }

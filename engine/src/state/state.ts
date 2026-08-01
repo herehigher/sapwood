@@ -1326,6 +1326,16 @@ export interface FixResponseSettleBatch {
    *  an unrelated push elsewhere on the PR). `null` only for a pre-#451 fixture/caller that omits
    *  it — treated as "head unknown," which the escalation predicate below reads fail-closed. */
   headOid: string | null;
+  /** #490: under reviewer.mode engine-agent, thread writes are STRUCTURALLY absent (findings
+   *  arrive as one audit comment, never review threads) — so `count: 0` there must not read like
+   *  the F36-era pathological empty fix leg. True marks that shape; the receipt event then also
+   *  carries `newHead` so a productive leg is tellable from an empty one. Classic path: false,
+   *  and the receipt payload stays byte-identical to its pre-#490 shape. */
+  threadless: boolean;
+  /** #490: the lane worktree's LOCAL head after the leg (worker.ts's laneWorktreeHead — file
+   *  reads, engine-authored, never session prose). Evidence of what the leg produced, not proof
+   *  of a push. `null` when unobserved. */
+  newHead: string | null;
 }
 
 export interface FixResponseSettleInvalid {
@@ -2514,6 +2524,9 @@ export class State {
             fixRounds: batch.fixRounds,
             count: batch.writes.length,
             headOid: batch.headOid,
+            // #490: engine-agent legs only — the classic payload stays byte-identical (AC), so a
+            // consumer's `threadless: true` read doubles as "count:0 is structural, not empty".
+            ...(batch.threadless ? { threadless: true, newHead: batch.newHead } : {}),
             // #451 (gate② P2): `reply` is capDigest-bounded here (marked, never silent) — see
             // FIX_RESPONSE_LEDGER_REPLY_MAX_CHARS's own doc for why the ledger copy is bounded
             // while the pending_thread_writes row (the one actually posted to GitHub) is not.

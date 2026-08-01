@@ -234,6 +234,12 @@ export function computeFixResponseHarvest(
      *  anything (the caller, conductor.ts's reclaimTerminalLane, is the one place that still has
      *  it, read from the lane's own row before its terminal write clears it). */
     headOid: string | null;
+    /** #490: see FixResponseSettleBatch.threadless/.newHead — threaded straight through, like
+     *  headOid above. The caller supplies threadless from cfg.reviewer.mode and newHead from the
+     *  probe's worktreeHead. Optional with classic-shaped defaults (false/null) — pre-#490
+     *  fixtures and the classic path read identically either way. */
+    threadless?: boolean;
+    newHead?: string | null;
   },
 ): FixResponseSettleOutcome {
   if (input.prNumber == null) {
@@ -260,6 +266,8 @@ export function computeFixResponseHarvest(
       batchKey: fixResponseBatchKey(input.worker, input.prNumber, input.fixRounds),
       writes: validated.responses,
       headOid: input.headOid,
+      threadless: input.threadless ?? false,
+      newHead: input.newHead ?? null,
     },
   };
 }

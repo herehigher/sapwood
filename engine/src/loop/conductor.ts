@@ -1180,6 +1180,11 @@ export interface LaneProbe {
    *  "cheap, existing capture, just a new read" stance failureText already takes; an ordinary
    *  worker's DONE result text is simply never consumed by anything. */
   resultText?: string;
+  /** #490: the lane worktree's LOCAL commit sha for a DONE lane (worker.ts's laneWorktreeHead —
+   *  pure file reads). Evidence of what a fix leg produced, not proof of a push; undefined for a
+   *  non-DONE lane or an unresolvable worktree. reclaimTerminalLane threads it into the
+   *  fix-response receipt event's `newHead`. */
+  worktreeHead?: string;
   /** #287 (E4b, AC#1): the EARLIEST observable actual model for a still-`running` lane — the
    *  session-init line's own self-report (worker.ts's parseSessionInit), read from the SAME
    *  in-memory jsonl liveTelemetry already re-scans on every probe. `null`/undefined when no
@@ -2325,6 +2330,12 @@ async function reclaimTerminalLane(
               // anchors this round's disputed/addressed resolutions to the head they actually
               // answered. See FixResponseSettleBatch.headOid's own doc.
               headOid: w.review_triggered_head ?? null,
+              // #490: engine-agent legs have structurally-zero thread writes; mark the shape and
+              // carry the worktree's local head so a productive leg is tellable from an empty
+              // one in the receipt event alone. Classic path: threadless false, payload
+              // byte-identical to pre-#490.
+              threadless: cfg.reviewer.mode === "engine-agent",
+              newHead: p.worktreeHead ?? null,
             })
           : undefined;
       // PR produced: hold the lane in `driving` (it still occupies a lane until the #13 review
