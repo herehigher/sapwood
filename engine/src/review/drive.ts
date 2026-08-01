@@ -370,6 +370,32 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     return { kind: "conflict", status: status0, data: data0 };
   }
 
+  // ── ci-red route (#503), same position rationale as the conflict route above ────────────────
+  // #507 review P1: this must sit BEFORE the attempt-gate, not at the CI-evidence gate below —
+  // a decisive pin is PERMANENT per head, and its consume path (`refetchStillValid`) rejects
+  // `ciGreen: false`, so a required check that goes red AFTER a green preflight + paid decisive
+  // review (same head — e.g. a re-run, or a flaky check's second landing) would queue on every
+  // tick forever, recreating the exact wedge #503 removes. An unavailable pin's backoff window
+  // would likewise delay the route pointlessly. Position guarantees: `conflictCheck.ok` requires
+  // every higher-precedence preflight gate (state/draft/human-label/hold-label/mergeable/
+  // threads) to have passed, and the same-head guard is #460's split-generation discipline. The
+  // `status0.ciRed` rollup is only the CHEAP TRIGGER for the checks fetch — the routing decision
+  // itself is `requiredChecksRed`'s trusted-app FAILURE evidence; a rollup red with no trusted
+  // required-check failure (foreign app, non-required check) falls through to the ordinary
+  // machinery unchanged, at the cost of one extra checks fetch on that rare shape.
+  if (conflictCheck.ok && (status0.ciRed ?? false) && status0.headOid === data0.headOid) {
+    let checksPage0: { checks: import("../forge/forge.js").PRCheckItem[] };
+    try {
+      checksPage0 = await deps.forge.getPRChecks(pr, deps.ciChecksCap);
+    } catch (e) {
+      return { kind: "queued", reason: `engine-agent: CI-checks fetch failed: ${String(e)}` };
+    }
+    const failing = requiredChecksRed(checksPage0.checks, deps.cfg.ci.requiredChecks);
+    if (failing.length > 0) {
+      return { kind: "ci-red", status: status0, data: data0, failing };
+    }
+  }
+
   // ── attempt-gate: the per-head pin (design #279 §2 R3) ──────────────────────────────────────
   let pin = deps.getAttemptPin();
   if (pin && pin.head !== status0.headOid) {
@@ -449,18 +475,11 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   }
   const ciEvidence = requiredChecksSatisfied(checksPage.checks, deps.cfg.ci.requiredChecks);
   if (!ciEvidence.ok) {
-    // #503: red is not pending. A required check that CONCLUDED FAILING can never satisfy this
-    // gate on its own — only a producer push can — so an eternal backoff wait here was a wedge
-    // (live 2026-08-01: every lane looped on this reason for hours; the only bound was the #426
-    // aging escalation at escalateAfterSec). Route it to the same FIXABLE machinery the #460
-    // conflict route uses. Same split-generation guard as that route: only act when both reads
-    // describe the same head; a mismatched pair falls through to queued and the next tick
-    // re-fetches a coherent pair. Pending/absent/skipped/cancelled evidence keeps the exact
-    // pre-#503 queued wait (aged by the #426 pin).
-    const failing = requiredChecksRed(checksPage.checks, deps.cfg.ci.requiredChecks);
-    if (failing.length > 0 && status0.headOid === data0.headOid) {
-      return { kind: "ci-red", status: status0, data: data0, failing };
-    }
+    // #503: a trusted-red required check was already routed to {kind:"ci-red"} by the early
+    // route above (before the attempt-gate — see its own doc for why, #507 review P1). Reaching
+    // this line red therefore means a contradictory read (rollup not red, or heads split) —
+    // fail-safe to the same queued wait every other unsatisfied shape gets, aged by the #426
+    // pin, re-fetched coherently next tick.
     return { kind: "queued", reason: `engine-agent: preflight CI-evidence not satisfied: ${ciEvidence.unsatisfied.join(", ")}` };
   }
 
