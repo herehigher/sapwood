@@ -192,8 +192,8 @@ export function idleChurnMessage(reason: string): string {
     `normally — but those rounds are achieving nothing, which is the F32 pathology (#432): a standby probe signal ` +
     `counting work that nothing enabled can ever consume, so standby never engages. Start from the probe signal(s) ` +
     `named above and ask what would CONSUME that work; if the answer is "nothing", that signal needs its terminal ` +
-    `(round.ts's probeHasWork DESIGN RULE). This park does NOT auto-clear: fix the cause, then clear it by deleting ` +
-    `its park_state row (docs/troubleshooting.md has the exact command).`
+    `(round.ts's probeHasWork DESIGN RULE). This park does NOT auto-clear: fix the cause, then stop the engine and run ` +
+    `\`sapwood park clear --source ${IDLE_CHURN_PARK_SOURCE}\` (docs/troubleshooting.md).`
   );
 }
 

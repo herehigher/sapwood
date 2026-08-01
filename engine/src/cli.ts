@@ -26,6 +26,7 @@ import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, t
 import { InitError, init, requiredLabels } from "./loop/init.js";
 import { acquireInstanceLock } from "./loop/instance-lock.js";
 import { type EngineLogger, FileEngineLogger } from "./loop/logger.js";
+import { clearParksReceiptFirst } from "./loop/park-clear.js";
 import { detectRapidRestart } from "./loop/rapid-restart.js";
 import {
   auditGatedEscalationFlags,
@@ -44,7 +45,16 @@ import { MergeDriver } from "./roles/merge-driver.js";
 import { RoleRunner, type RoleRunnerDeps } from "./roles/peripheral.js";
 import { makeFallbackReviewers, makeReviewer } from "./roles/reviewer.js";
 import { buildRenderFixPrompt, buildRenderPrompt, discoverClaudeBin, probeLlmPing, WorkerSupervisor } from "./roles/worker.js";
-import { DEFAULT_DB_PATH, INSTANCE_LOCK_FILENAME, type ParkRow, SCHEMA_VERSION, State, type WorkerRow } from "./state/state.js";
+import {
+  DEFAULT_DB_PATH,
+  INSTANCE_LOCK_FILENAME,
+  PARK_SOURCES,
+  type ParkRow,
+  type ParkSource,
+  SCHEMA_VERSION,
+  State,
+  type WorkerRow,
+} from "./state/state.js";
 
 const require = createRequire(import.meta.url);
 // ponytail: runtime require avoids JSON-import assertion syntax differences across Node versions
@@ -67,6 +77,8 @@ Commands:
     --dry-run      Preview what would be dispatched + a cost estimate, then exit
                    (no worker spawned, no state written)
   status [db-path]  Read engine state straight from SQLite (no live session needed)
+  park clear     Clear a park episode receipt-first (refuses under a live engine)
+    --source SOURCE  Clear only this park source (default: every open episode)
   validate [path]  Load + validate a sapwood config file, report OK or the issues
 
 Flags:
@@ -605,6 +617,140 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
   }
 }
 
+// ── #475: `sapwood park clear` — the engine-owned, receipt-first operator clear ─────────────
+
+const PARK_USAGE = `\
+usage: sapwood park clear [db-path] [--source SOURCE]
+
+Clear a park episode the way the engine itself would: append the \`park-resumed\`
+receipt (\`via: operator-clear\`) FIRST, then delete the park_state row, then take down
+the data/ESCALATION marker — the same order the engine's startup path uses, so a kill
+mid-clear can never leave dispatch un-gated with no receipt in the ledger.
+
+Refuses when a live engine holds the data dir (the single-instance lock, #382): clearing
+under a running engine is exactly the race this verb exists to remove. Stop the engine,
+clear, start it again.
+
+Without --source, every open episode is cleared. Sources: ${PARK_SOURCES.join(", ")}.
+Defaults to ${DEFAULT_DB_PATH} (the same path \`sapwood run\` writes to).
+
+Flags:
+  --source SOURCE  Clear only this park source
+  --help, -h       Print this help and exit
+`;
+
+/** Parsed \`sapwood park clear\` args — same flat shape and fail-closed flag handling as
+ *  parseStatusArgs (help/error checked in order by the caller). Pure: no I/O. */
+export interface ParkArgs {
+  help: boolean;
+  error?: string | undefined;
+  dbPath: string;
+  source?: ParkSource | undefined;
+}
+
+export function parseParkArgs(argv: string[]): ParkArgs {
+  const args = argv.slice(3);
+  if (args.includes("--help") || args.includes("-h")) {
+    return { help: true, dbPath: DEFAULT_DB_PATH };
+  }
+  // `clear` is the only subcommand; anything else fails closed rather than being read as a
+  // db-path positional (a typo'd verb must never silently clear the default data dir).
+  if (args[0] !== "clear") {
+    const what = args[0] === undefined ? "missing subcommand" : `unknown subcommand: ${args[0]}`;
+    return { help: false, error: `${what} (the only park subcommand is \`clear\`)`, dbPath: DEFAULT_DB_PATH };
+  }
+  const positionals: string[] = [];
+  let source: ParkSource | undefined;
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--source") {
+      // Value-taking flag, same fail-closed operand check as status's --config: a missing or
+      // flag-shaped operand would otherwise silently widen the clear to EVERY episode.
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith("-")) {
+        return { help: false, error: "--source requires a park source", dbPath: DEFAULT_DB_PATH };
+      }
+      if (!(PARK_SOURCES as readonly string[]).includes(next)) {
+        return { help: false, error: `unknown --source: ${next} (one of: ${PARK_SOURCES.join(", ")})`, dbPath: DEFAULT_DB_PATH };
+      }
+      source = next as ParkSource;
+      i++;
+      continue;
+    }
+    if (a.startsWith("-")) {
+      return { help: false, error: `unknown flag: ${a}`, dbPath: DEFAULT_DB_PATH };
+    }
+    positionals.push(a);
+  }
+  return { help: false, dbPath: positionals[0] ?? DEFAULT_DB_PATH, source };
+}
+
+/** `sapwood park clear`: the operator clear, performed inside the engine's own protocol instead
+ *  of by raw SQL against a live DB (#475; the residual Codex flagged on PR #473).
+ *
+ *  Two properties the raw DELETE could not have:
+ *   - RECEIPT-FIRST (loop/park-clear.ts) — the ledger records the resume before the dispatch
+ *     gate can observe the absent row.
+ *   - NO LIVE ENGINE — coordinated through the single-instance lock (#382), the same lock
+ *     `sapwood run` takes on the data dir. A live holder is a refusal, never a racy clear; a
+ *     STALE lock (dead holder) is taken over exactly as a starting engine would, and the lock is
+ *     released before this returns, so the operator's next `sapwood run` is undisturbed.
+ *
+ *  Synchronous throughout (node:sqlite + the lock are both sync), like status/validate. */
+export function runPark(argv: string[]): { stdout: string; stderr: string; code: number } {
+  const parsed = parseParkArgs(argv);
+  if (parsed.help) return { stdout: PARK_USAGE, stderr: "", code: 0 };
+  if (parsed.error) {
+    return { stdout: "", stderr: `sapwood park: ${parsed.error}\n\n${PARK_USAGE}`, code: 1 };
+  }
+  const { dbPath, source } = parsed;
+  // Never CREATE a DB (or its data dir) as a side effect of a clear — a missing DB means the
+  // engine has never run here, which is an operator error worth reporting, not a silent success.
+  if (!existsSync(dbPath)) {
+    return { stdout: "", stderr: `sapwood park clear: no state DB at ${dbPath} — the engine has never run here\n`, code: 1 };
+  }
+  const lockPath = join(dirname(dbPath), INSTANCE_LOCK_FILENAME);
+  const lock = acquireInstanceLock(lockPath, { now: systemClock });
+  if (!lock.acquired) {
+    const holder =
+      lock.holder.pid !== null
+        ? `a live sapwood engine (pid ${lock.holder.pid}${lock.holder.acquiredAt ? `, lock acquired ${lock.holder.acquiredAt}` : ""})`
+        : `another process (or a crashed stale-lock takeover — see ${lockPath}.takeover)`;
+    return {
+      stdout: "",
+      stderr:
+        `sapwood park clear: ${holder} holds the data-dir lock at ${lockPath} — refusing to clear. ` +
+        `An engine-owned clear must not race a live engine's dispatch gate: stop the engine, clear, ` +
+        `then start it again.\n`,
+      code: 1,
+    };
+  }
+  try {
+    const state = new State(dbPath);
+    try {
+      const cleared = clearParksReceiptFirst(state, source ?? null);
+      if (cleared.length === 0) {
+        const scope = source ? ` for source ${source}` : "";
+        return { stdout: `sapwood park clear: no open park episode${scope} — nothing to clear\n`, stderr: "", code: 0 };
+      }
+      const lines = cleared.map((p) => `  cleared ${p.source} (parked since ${p.enteredAt}) — reason: ${p.reason}`);
+      return {
+        stdout: `sapwood park clear: ${cleared.length} park episode(s) cleared, receipt-first\n${lines.join("\n")}\n`,
+        stderr: "",
+        code: 0,
+      };
+    } finally {
+      state.close();
+    }
+  } catch (e) {
+    // A schema newer than this engine (State.migrate's own message) or any unexpected DB error:
+    // report it, never half-clear.
+    return { stdout: "", stderr: `sapwood park clear: ${e instanceof Error ? e.message : String(e)}\n`, code: 1 };
+  } finally {
+    lock.release();
+  }
+}
+
 /** Parsed run inputs produced by the synchronous validation boundary. Passing this token into
  *  runEngine/runDryRun prevents the async entry path from interpreting raw argv a second time. */
 export interface ValidatedRunArgs {
@@ -631,6 +777,9 @@ export function runCli(argv: string[]): CliResult {
   }
   if (arg === "status") {
     return runStatus(argv);
+  }
+  if (arg === "park") {
+    return runPark(argv);
   }
   if (arg !== "init" && arg !== "run") {
     return { stdout: "", stderr: USAGE, code: 2 };
