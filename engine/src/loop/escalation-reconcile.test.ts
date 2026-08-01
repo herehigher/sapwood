@@ -112,7 +112,7 @@ class FakeForge extends UnstubbedForge implements IForge {
     return { issues: [], skipped: 0 };
   }
   override async listIssuesAbsentFromBoard() {
-    return [];
+    return { unplaced: [], elsewhere: 0 };
   }
   override async readStartupReconcileData() {
     this.reads.push("readStartupReconcileData");

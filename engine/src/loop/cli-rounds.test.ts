@@ -62,6 +62,7 @@ class FakeForge extends UnstubbedForge implements IForge {
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
   unplaced = { issues: [] as number[], skipped: 0 };
   absentIssues: number[] = [];
+  absentElsewhere = 0;
   boardCalls: string[] = [];
   reconcileData: StartupReconcileData = { placements: [], openPrs: [] };
   reconcileReads = 0;
@@ -83,7 +84,7 @@ class FakeForge extends UnstubbedForge implements IForge {
   }
   override async listIssuesAbsentFromBoard() {
     this.boardCalls.push("list-absent");
-    return this.absentIssues;
+    return { unplaced: this.absentIssues, elsewhere: this.absentElsewhere };
   }
   override async readStartupReconcileData() {
     this.reconcileReads++;
@@ -375,7 +376,7 @@ test("sapwood run (default driver): runEngine reaches runRounds via createDefaul
     // through the narrower Pick<IForge, ...> fakes in cli.test.ts.
     assert.ok(forge.boardCalls.includes("list-absent"), "the real startup path calls listIssuesAbsentFromBoard");
     assert.deepEqual(state.eventsSince("2020-01-01T00:00:00Z", ["board-gap-detected"]), [
-      { kind: "board-gap-detected", payload: { total: 1, issues: [999] } },
+      { kind: "board-gap-detected", payload: { total: 1, issues: [999], elsewhere: 0 } },
     ]);
     const round = state.getRound(1)!;
     assert.equal(round.phase, "closed", "graceful stop still let the in-flight round finish (harvest included)");

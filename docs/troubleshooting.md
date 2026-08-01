@@ -427,6 +427,27 @@ round's selection. In-flight lanes still drain and a handed-off lane still resum
 dispatch is withheld. The next round re-selects and the engine stays alive throughout. Fix the
 token's permissions, or create the labels manually, and the following round proceeds normally.
 
+## Open issues nobody has placed on a board
+
+Every `sapwood run` startup reports (never places) open issues that no one has triaged onto a
+project board:
+
+```
+[sapwood:startup] 3 open issue(s) on no project board at all: #53, #512, #513 (a further 32 sit on another board — placed, not a gap)
+```
+
+Only issues on **no project at all** are listed — those are the actionable ones, typically
+freshly filed and awaiting triage. An issue that sits on a *different* board is placed on
+purpose (a repo may partition, say, an autonomous queue from a human-only one), so it is a
+single trailing count rather than a row; when nothing is unplaced, the check prints nothing at
+all regardless of how large that count is. Membership comes from GitHub's own project-item data
+on the issue, so there is no ignore list to maintain.
+
+The list is capped at 25 enumerated issues, but the stated total is always the true count. If
+either underlying read might be incomplete (the board paginated past its ceiling, or the
+open-issue read hit its `--limit`), the check logs `could not compute …` and skips — a wrong gap
+report is worse than none. Nothing here blocks startup.
+
 ## Startup residue after a crash or quota storm
 
 A run that dies mid-flight (an OOM kill, a provider quota storm, a hard restart) leaves lanes
