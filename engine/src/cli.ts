@@ -20,6 +20,7 @@ import {
   type LanePrOutcome,
   type LanePrRequest,
 } from "./forge/forge.js";
+import { type BaseRedPin, baseRedPin } from "./loop/base-ci.js";
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
 import { unadjudicatedConcerns } from "./loop/dissent.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
@@ -483,6 +484,11 @@ export interface StatusSnapshot {
    *  DB-only, same as every other field on this snapshot — no live GitHub call from `status`
    *  itself; the live check that produces `concern-adjudicated` runs in the engine each round. */
   unadjudicatedConcerns: number;
+  /** #502: the standing base-branch-CI-red episode, or null when the default branch is not known
+   *  to be red. The operator-facing half of base-CI awareness: a red base gates EVERY open lane's
+   *  merge-ref CI at once, and before this the only way to learn it was GitHub. DB-only like every
+   *  other field here — the live detection runs in the engine's tick, never in `status`. */
+  baseCiRed: BaseRedPin | null;
 }
 
 export function formatStatus(s: StatusSnapshot): string {
@@ -539,6 +545,12 @@ export function formatStatus(s: StatusSnapshot): string {
   } else {
     lines.push("park: inactive");
   }
+  lines.push(
+    s.baseCiRed
+      ? `base CI: RED at ${s.baseCiRed.sha} since ${s.baseCiRed.at} — failing: ${s.baseCiRed.failing.join(", ")}; ` +
+          "every open lane's CI evidence inherits this until the default branch is fixed"
+      : "base CI: not known red",
+  );
   lines.push(`PO-dissent concerns awaiting adjudication: ${s.unadjudicatedConcerns}`);
   if (s.orphanReport && (s.orphanReport.orphans.length > 0 || s.orphanReport.overflow > 0)) {
     lines.push("", `orphans: ${s.orphanReport.orphans.length + s.orphanReport.overflow}`);
@@ -610,6 +622,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
       parked: state.parkedSources(),
       orphanReport: reconcile ? { orphans: reconcile.orphans, overflow: reconcile.overflow } : null,
       unadjudicatedConcerns: unadjudicatedConcerns(concernEvents).size,
+      baseCiRed: baseRedPin(state),
     };
     return { stdout: formatStatus(snapshot), stderr: "", code: 0 };
   } finally {

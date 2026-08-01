@@ -581,6 +581,9 @@ export class RoundScopedForge implements IForge {
   getPRChecks(pr: number, cap: number) {
     return this.inner.getPRChecks(pr, cap);
   }
+  getDefaultBranchChecks(cap: number) {
+    return this.inner.getDefaultBranchChecks(cap);
+  }
   // #247: same plain-passthrough stance as the #234/#244 blocks above — the fix-loop's
   // thread-reply/resolve writes have no round/pool scoping concept either (the engine already
   // validated the threadId against the journal before calling either method).
@@ -755,6 +758,9 @@ export class PoolScopedForge implements IForge {
   }
   getPRChecks(pr: number, cap: number) {
     return this.inner.getPRChecks(pr, cap);
+  }
+  getDefaultBranchChecks(cap: number) {
+    return this.inner.getDefaultBranchChecks(cap);
   }
   // #247: same plain-passthrough stance as the other #234/#244 read tools above.
   replyToReviewThread(threadId: string, body: string) {

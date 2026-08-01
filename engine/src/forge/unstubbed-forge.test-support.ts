@@ -43,6 +43,7 @@ const IFORGE_MEMBERS = [
   "detectOwnerKind",
   "ensureRepoLabels",
   "getCommitsSince",
+  "getDefaultBranchChecks",
   "getIssueBody",
   "getIssueComments",
   "getIssueLabels",

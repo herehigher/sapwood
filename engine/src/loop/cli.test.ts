@@ -1326,6 +1326,7 @@ test("formatStatus: kill-switch active and a recorded ceiling breach both render
     lanesMax: 3,
     dailyBudgetUsd: 100,
     unadjudicatedConcerns: 0,
+    baseCiRed: null,
     parked: [],
   };
   const out = formatStatus(snapshot);
@@ -1348,6 +1349,7 @@ test("formatStatus: PAUSE active renders distinctly from kill switch, both can b
     lanesMax: 3,
     dailyBudgetUsd: 100,
     unadjudicatedConcerns: 0,
+    baseCiRed: null,
     parked: [],
   };
   const out = formatStatus(snapshot);
@@ -1370,6 +1372,7 @@ test("formatStatus: parked (llm) renders source/reason/duration/no-escalation", 
     lanesMax: 3,
     dailyBudgetUsd: 100,
     unadjudicatedConcerns: 0,
+    baseCiRed: null,
     parked: [
       {
         source: "llm",
@@ -1403,6 +1406,7 @@ test("formatStatus: parked + escalated renders the escalation timestamp", () => 
     lanesMax: 3,
     dailyBudgetUsd: 100,
     unadjudicatedConcerns: 0,
+    baseCiRed: null,
     parked: [
       {
         source: "forge",
@@ -1435,6 +1439,7 @@ test("formatStatus: not parked -> 'park: inactive', clears once resumed", () => 
     lanesMax: 3,
     dailyBudgetUsd: 100,
     unadjudicatedConcerns: 0,
+    baseCiRed: null,
     parked: [],
   };
   assert.match(formatStatus(snapshot), /park: inactive/);
@@ -1453,6 +1458,7 @@ test("formatStatus renders latest reconcile orphans and omits an absent/healthy 
     lanesMax: 3,
     dailyBudgetUsd: 100,
     unadjudicatedConcerns: 0,
+    baseCiRed: null,
     parked: [],
   };
   assert.doesNotMatch(formatStatus(base), /orphans:/);
@@ -1530,6 +1536,7 @@ test("formatStatus: a mixed storm renders BOTH episodes (one line per source), c
     lanesMax: 3,
     dailyBudgetUsd: 100,
     unadjudicatedConcerns: 0,
+    baseCiRed: null,
     parked: [
       {
         source: "llm",

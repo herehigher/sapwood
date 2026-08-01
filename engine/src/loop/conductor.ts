@@ -44,6 +44,7 @@ import type {
   State,
   WorkerRow,
 } from "../state/state.js";
+import { observeBaseCi } from "./base-ci.js";
 import {
   classifyEnvFailure,
   type EnvFailureSource,
@@ -3582,7 +3583,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // unresolved) and, once #246's FIXABLE gate is wired, could burn a fix round or hit its cap
     // for work the engine simply hasn't gotten to yet.
     const pendingThreadWriteWorkers = new Set(state.pendingThreadWrites().map((r) => r.worker));
-    for (const w of state.drivingWorkers()) {
+    const drivingThisTick = state.drivingWorkers();
+    // #502: the RUN-level base-branch CI observation — ONE capped `getDefaultBranchChecks` read
+    // per tick, taken here rather than per lane because a red default branch is one fact that
+    // gates every lane at once (three lanes each re-deriving it from their own merge-ref rollup
+    // is exactly the read that cannot tell "the base is broken" from "your branch is broken").
+    // Positioned INSIDE `if (gate)` and before the lane loop, and skipped when no lane is driving:
+    // nothing is waiting on CI evidence then, so there is nothing to label and no reason to poll.
+    // Never throws (loop/base-ci.ts fails closed to "not base-red") and never gates — it opens at
+    // most one latched escalation per red base commit, and the pin it leaves in the ledger is what
+    // the drive path reads to LABEL each lane's CI wait. Clearing it is the escalation-reconcile
+    // observer's job, once per round, not this tick's.
+    if (drivingThisTick.length > 0) await observeBaseCi({ forge, state, cfg, now, ...(deps.log ? { log: deps.log } : {}) });
+    for (const w of drivingThisTick) {
       if (w.pr == null) {
         // Fail-safe: a driving lane MUST carry a PR number (set at the reclaim transition
         // above) to be driven through gates. Its absence here (only checked once a mergeGate

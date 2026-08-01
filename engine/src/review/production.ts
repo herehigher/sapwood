@@ -6,6 +6,7 @@ import { basename, join, resolve } from "node:path";
 import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine, NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge } from "../forge/forge.js";
+import { baseRedPin } from "../loop/base-ci.js";
 import type { RoleRunner } from "../roles/peripheral.js";
 import type { State, WorkerRow } from "../state/state.js";
 import type { PerAcResult } from "./agent-output.js";
@@ -304,6 +305,10 @@ export function makeProductionEngineAgent(
       },
       reconcileAuditDelivery: () => deliver(),
       ciChecksCap: cfg.proxy.caps.maxChecksPerCall,
+      // #502: read fresh per call, straight off the durable ledger — the pin the conductor's
+      // per-tick base-CI observation left there. Never cached across ticks: a base that went green
+      // must stop lanes reporting a base-inherited wait on their very next poll.
+      getBaseRedPin: () => baseRedPin(state),
     };
   };
 
