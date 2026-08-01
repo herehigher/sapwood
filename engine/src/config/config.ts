@@ -196,14 +196,35 @@ const Cost = z
   })
   .strict();
 
+// #501: the default Claude model assigned to an INJECTED reviewer.agent block (Reviewer's own
+// `.transform()` below) — deliberately different from worker.model's own default ("opus") so the
+// ordinary zero-config parse never trips D5 (ConfigSchema's top-level superRefine). Exported for
+// tests, same convention as DEFAULT_GOAL_FILE/DEFAULT_CONFIG_PATHS below.
+export const DEFAULT_REVIEWER_AGENT_MODEL = "sonnet";
+
+// #501: identity marker for a reviewer.agent block this module itself injected (Reviewer's
+// `.transform()` below) rather than one a user supplied — read only by ConfigSchema's top-level
+// D5 check, so its rejection message can name the simpler one-line fix for the defaulted case
+// ("set reviewer.agent.model", not "choose a different value than what you wrote"). A WeakSet
+// keyed on the agent object itself (never the whole config, never a config field) is invisible to
+// every other reader: it changes no schema, no inferred type, no serialized/logged shape — purely
+// an internal signal between these two steps in the same parse.
+const injectedReviewerAgents = new WeakSet<object>();
+
 // #286 (E4a, design #279 §7): reviewer.agent — the engine-agent reviewer kind's OWN config
 // block, present only when reviewer.mode: engine-agent (dead-config rejected otherwise, see
-// Reviewer's superRefine below). `model` is REQUIRED (no default) and parse-rejected when it
-// equals worker.model (D5, model separation) — checked at the TOP-LEVEL ConfigSchema.superRefine
-// below, since worker.model lives in a sibling section this scoped block can't see. `.strict()`:
-// NO `fallbackModel` field (design #279 §7's "all v2 strictness retained ... no fallbackModel")
-// — an engine-agent session's own resilience is the retry-once-within-budget path
-// (engine-agent.ts), never a model swap the way worker/role sessions get one.
+// Reviewer's superRefine below). `model` is REQUIRED (no default) WHEN A USER SUPPLIES THIS
+// BLOCK THEMSELVES and parse-rejected when it equals worker.model (D5, model separation) —
+// checked at the TOP-LEVEL ConfigSchema.superRefine below, since worker.model lives in a sibling
+// section this scoped block can't see. `.strict()`: NO `fallbackModel` field (design #279 §7's
+// "all v2 strictness retained ... no fallbackModel") — an engine-agent session's own resilience
+// is the retry-once-within-budget path (engine-agent.ts), never a model swap the way worker/role
+// sessions get one.
+// #501: `model` has no schema-level `.default()` — a bare zod default here could not see
+// worker.model (a sibling section) and so could not avoid colliding with it. When a config omits
+// this whole block under `mode: engine-agent`, Reviewer's own `.transform()` below injects one
+// (DEFAULT_REVIEWER_AGENT_MODEL) instead — see that transform's doc comment for why the
+// injection lives there rather than as a bare schema default.
 const ReviewerAgent = z
   .object({
     model: z.string().min(1),
@@ -271,7 +292,12 @@ const Reviewer = z
     // Deliberately NOT added to `fallback`'s own enum below (engine-agent is PRIMARY-ONLY; a
     // same-model verdict gating its own producer via the failover path is exactly D5 exists to
     // prevent) — the enum difference IS the parse-time rejection design #279 §7 calls for.
-    mode: z.enum(["different-model-codex", "same-model-trusted", "human", "engine-agent"]).default("different-model-codex"),
+    // #501 (owner ruling 2026-08-01): default flipped different-model-codex -> engine-agent — a
+    // fresh sapwood user already has the Claude CLI sapwood itself needs, but not necessarily the
+    // hosted `@codex review` GitHub App the old default depended on. `engine-agent` runs locally
+    // on that same CLI. Hosted Codex stays fully selectable (`mode: different-model-codex`); see
+    // docs/PLAN.md's locked-decisions table (Decision #5) for the amendment record.
+    mode: z.enum(["different-model-codex", "same-model-trusted", "human", "engine-agent"]).default("engine-agent"),
     // #156: the PR-comment text that requests a review (buildReviewTriggerComment in reviewer.ts).
     // Default matches today's hardcoded `@codex review` byte-for-byte. Lets an operator point the
     // trigger at any bot/reviewer entry point — the verdict PARSER stays Codex-shaped regardless
@@ -301,8 +327,10 @@ const Reviewer = z
     // calls a human. Visibility only: the PR receives needs-human while gate② stays unchanged.
     escalateAfterSec: z.number().int().positive().default(86400),
     // #286 (E4a): the engine-agent kind's own sub-config — see ReviewerAgent's doc above.
-    // Optional at the schema level (whether it's REQUIRED depends on `mode`, which isn't
-    // expressible as a bare zod field) — enforced below.
+    // Optional at the schema level: `mode !== engine-agent` and `agent` set is dead-config
+    // rejected below, and `mode === engine-agent` with `agent` unset is DEFAULT-INJECTED by this
+    // schema's own `.transform()` below (#501) rather than rejected — a bare zod `.default()`
+    // can't express it (the injected value depends on `mode`, not a fixed literal).
     agent: ReviewerAgent.optional(),
   })
   .strict()
@@ -353,16 +381,13 @@ const Reviewer = z
       }
       seenFallbackKinds.add(kind);
     }
-    // #286: reviewer.agent dead-config / required-for-mode rules (design #279 §7's "all v2
-    // strictness retained ... dead-config rejection").
-    if (r.mode === "engine-agent" && r.agent === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["agent"],
-        message:
-          "reviewer.mode is engine-agent but reviewer.agent is not set — engine-agent requires reviewer.agent (at minimum agent.model)",
-      });
-    }
+    // #286: reviewer.agent dead-config rule (design #279 §7's "all v2 strictness retained ...
+    // dead-config rejection"). #501: the OTHER half of this pair — `mode: engine-agent` with
+    // `agent` unset — used to be rejected here too ("engine-agent requires reviewer.agent"); it
+    // is now DEFAULT-INJECTED instead by this schema's `.transform()` below, since engine-agent
+    // is the new zero-config default and a zero-config parse must succeed. This dead-config check
+    // is unaffected: it only ever fires for a USER-SUPPLIED `agent` block, and the transform below
+    // never adds one when `mode !== engine-agent`, so an injected block can never trip it.
     if (r.mode !== "engine-agent" && r.agent !== undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -373,6 +398,32 @@ const Reviewer = z
           "rejected, never silently ignored)",
       });
     }
+  })
+  .transform((r) => {
+    // #501: default-inject reviewer.agent when `mode` resolves to "engine-agent" — whether by
+    // the schema default just above or an explicit `mode: engine-agent` — and no `agent` block
+    // was supplied. Placed here (a transform chained AFTER this schema's own superRefine, i.e.
+    // the Reviewer-level resolution step) rather than as a bare schema default, so that:
+    //   (a) the dead-config check above still runs against the RAW, pre-injection value — it can
+    //       only ever see a USER-SUPPLIED agent block, never one this transform adds, so it can
+    //       never fire on an injected default; and
+    //   (b) ConfigSchema's own top-level superRefine (D5: reviewer.agent.model !== worker.model),
+    //       which runs strictly after this whole `reviewer` field has finished parsing, always
+    //       sees the FULLY RESOLVED agent block — a defaulted one is checked for the worker.model
+    //       collision exactly like a user-supplied one, never silently exempted.
+    // DEFAULT_REVIEWER_AGENT_MODEL ("sonnet") differs from worker.model's own default ("opus"),
+    // so the ordinary zero-config case never collides; an operator who sets ONLY worker.model to
+    // "sonnet" still hits the D5 rejection (see that check's own doc for the extended,
+    // defaulted-case error message). injectedReviewerAgents (below) marks the block so that
+    // message can name it as defaulted rather than user-set.
+    if (r.mode === "engine-agent" && r.agent === undefined) {
+      const agent = ReviewerAgent.parse({ model: DEFAULT_REVIEWER_AGENT_MODEL });
+      injectedReviewerAgents.add(agent);
+      r.agent = agent; // mutate-and-return, same pattern as resolveGoalFile/resolveLabelDefaults
+      // below — keeps the inferred type identical to the pre-transform shape (agent stays
+      // OPTIONAL in the TYPE; only the runtime value gains the default).
+    }
+    return r;
   });
 
 const Merge = z
@@ -1585,20 +1636,31 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
   // #286 (E4a, D5): the engine-agent reviewer's model must be DISTINGUISHABLE from the
   // producing worker's CONFIGURED model at parse time — reviewer.agent lives in a sibling
   // section from worker.model, so this cross-field check can only run here, after both are
-  // resolved (Reviewer's own superRefine, above, has no visibility into `worker`). This is the
+  // resolved (Reviewer's own superRefine/transform, above — including #501's default injection —
+  // has no visibility into `worker`, and runs strictly before this superRefine). This is the
   // PARSE-TIME half of D5 (worker.model is the closest static proxy for "the model a lane will
   // actually run" available before any session ever executes); the RUNTIME half — comparing
   // against the producing lane's ACTUAL recorded model, which can differ from worker.model on a
   // fallback-model switch — is engine-agent.ts's own job (evaluate()'s pre-/post-session
   // checks), not expressible at config-parse time.
+  // #501: this check runs identically whether cfg.reviewer.agent was user-supplied or
+  // default-injected — no silent model swap on collision either way (a silent opus fallback would
+  // silently change cost, CLAUDE.md's user-tunables rule). The message differs only in WORDING:
+  // an injected block (the zero-config case, or "only worker.model set") names the one-line fix
+  // an operator who never wrote a reviewer.agent block themselves actually needs.
   if (cfg.reviewer.mode === "engine-agent" && cfg.reviewer.agent && cfg.reviewer.agent.model === cfg.worker.model) {
+    const wasDefaulted = injectedReviewerAgents.has(cfg.reviewer.agent);
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["reviewer", "agent", "model"],
-      message:
-        `reviewer.agent.model ("${cfg.reviewer.agent.model}") must differ from worker.model ` +
-        `("${cfg.worker.model}") — a same-model review can never gate its own producer (D5, design #279); ` +
-        "choose a different Claude model for reviewer.agent.model.",
+      message: wasDefaulted
+        ? `reviewer.agent.model was DEFAULTED to "${cfg.reviewer.agent.model}" (#501's zero-config engine-agent ` +
+          `default — no reviewer.agent block was configured) and collides with worker.model ` +
+          `("${cfg.worker.model}") — a same-model review can never gate its own producer (D5, design #279); ` +
+          "the one-line fix: set reviewer.agent.model to a different Claude model than worker.model."
+        : `reviewer.agent.model ("${cfg.reviewer.agent.model}") must differ from worker.model ` +
+          `("${cfg.worker.model}") — a same-model review can never gate its own producer (D5, design #279); ` +
+          "choose a different Claude model for reviewer.agent.model.",
     });
   }
   // #286 (E4a, design #279 §4.3): mode: engine-agent with an empty/absent ci.requiredChecks is

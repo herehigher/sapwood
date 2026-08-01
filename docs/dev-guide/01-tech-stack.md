@@ -33,7 +33,7 @@ Everything else uses Node built-ins, including SQLite, HTTP, crypto, child proce
 | `gh` | GitHub forge reads and writes, including ProjectV2, issues, PRs, and reviews | `engine/src/forge/gh.ts`; `GithubForge` is in `engine/src/forge/forge.ts` |
 | `git` | Creates and manages one worktree per worker or role session | `engine/src/roles/worker.ts`, `engine/src/roles/peripheral.ts` |
 | Claude Code CLI (`claude`) | Runs headless producer and peripheral sessions | `WorkerSupervisor` in `engine/src/roles/worker.ts` and `RoleRunner` in `engine/src/roles/peripheral.ts` |
-| Reviewer service/CLI | Supplies the independent gate verdict | Hosted/trusted/human adapters live in `engine/src/roles/reviewer.ts`; the engine-agent adapter lives under `engine/src/review/` and composes a static `claude` review session. The default mode triggers Codex through a PR comment, so sapwood itself does not spawn a `codex` executable |
+| Reviewer service/CLI | Supplies the independent gate verdict | Hosted/trusted/human adapters live in `engine/src/roles/reviewer.ts`; the engine-agent adapter lives under `engine/src/review/` and composes a static `claude` review session. **#501 (2026-08-01): the default mode is `engine-agent`** — sapwood spawns this local `claude` review session itself, on the same CLI it already needs; `different-model-codex` (the pre-#501 default) instead triggers a hosted Codex review through a PR comment, so sapwood never spawns a `codex` executable for that mode either |
 
 ## What sapwood is NOT built with
 

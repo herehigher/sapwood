@@ -145,10 +145,15 @@ cost: # engine-enforced HARD ceiling (safety boundary, drains before killing)
 #                  # route is not registered (404) and no control buttons render.
 
 reviewer:
-  # different-model-codex: 0day-style gate② (fresh non-author Codex review) — default.
-  # same-model-trusted | human | engine-agent are the other reviewer kinds.
+  # engine-agent: a static, different-Claude-model review session the engine runs locally,
+  # on the same Claude CLI sapwood itself needs — default (#501, 2026-08-01). No extra
+  # install: a fresh sapwood user already has everything this kind requires.
+  # different-model-codex: 0day-style gate② instead — a fresh non-author review from the
+  # hosted `@codex review` GitHub App. Requires that App installed on this repo; was the
+  # default before #501. same-model-trusted | human are the other reviewer kinds.
   # produce-pr-and-stop is configured separately at merge.mode.
-  mode: different-model-codex
+  mode: engine-agent
+  # mode: different-model-codex  # the pre-#501 hosted-Codex default; see the comment above.
   # triggerCommand: "@codex review"
   #                   #156: the PR-comment text that requests a review. Default = Codex's
   #                   PR-comment trigger (shown, commented, per the promptFile pattern). Point
@@ -174,16 +179,23 @@ reviewer:
   # How long a current-head review may stay non-decisive before sapwood labels the PR
   # needs-human and emits an event. Visibility only: the lane stays driving and gate② stays firm.
   escalateAfterSec: 86400
-  # engine-agent only: this block is REQUIRED with mode: engine-agent and rejected with every
-  # other reviewer mode. The model must differ from worker.model; actual session/worker model
-  # usage is checked again at runtime. There is deliberately no fallbackModel.
+  # engine-agent only: this block is rejected with every other reviewer mode (dead config).
+  # With mode: engine-agent, it is OPTIONAL — omitted (as here) resolves a default for you at
+  # config-load time: model: sonnet (differs from worker.model's own "opus" default, D5's
+  # model-separation rule), effort/costCapUsd/retryAfterSec/treeRetentionCap at the values shown
+  # below. Set it explicitly to override any of those; a set model must still differ from
+  # worker.model — actual session/worker model usage is checked again at runtime. There is
+  # deliberately no fallbackModel.
   # agent:
-  #   model: sonnet     # required; must differ from worker.model
+  #   model: sonnet     # if set, must differ from worker.model (D5); unset -> defaulted to this
   #   effort: high      # low | medium | high
   #   promptFile: prompts/engine-reviewer.md
   #                     # optional; unset uses engine/prompts/engine-reviewer.md. Relative paths
   #                     # resolve against this config file's directory; invalid files fail fast.
-  #   costCapUsd: 3     # whole-logical-review cap; one retry receives only the remainder
+  #   costCapUsd: 3     # whole-logical-review cap; one retry receives only the remainder.
+  #                     # #501: this default makes gate② a PAID local Claude session — budget
+  #                     # roughly this much per review at effort: high (docs/configuration.md's
+  #                     # reviewer.agent.costCapUsd row has the full cost note).
   #   retryAfterSec: 900 # backoff between paid attempts on the same head after unavailable
   #   treeRetentionCap: 10 # retained review trees; in-flight/escalated heads are excluded
 
