@@ -38,10 +38,16 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // file-scoped and line 69 names `mcp__forge__search_issues` sixty lines later. Fixed so the
   // escape hatch below has no live user left in the repo, consistent with align mode's own
   // dedup-step instruction (still at what's now ~line 72), not merely permissive against it.
-  "po.md": "795ff298c8136f63891bcd4258a3f62a471a77a69b2a910033cf5b857f7d7bd9",
+  // #529 D2 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
+  // po-align/po-triage hold a default WebFetch grant, which reaches github.com. Rescoped to
+  // "no issue-API access at all".
+  "po.md": "959c3f3dd9ac441aa976d08a7faba544a621d15eb5c530ed751b9ea58c78b6f3",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
-  "architect.md": "2f2922e8c962050442cc8b9db9c8953fb6f42c4a05a962bdc4b6d3e8f5113404",
+  // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
+  // architect holds a default WebFetch grant, which reaches github.com. Rescoped to "no
+  // issue-API access at all".
+  "architect.md": "90e4964fed79e39a26832c9cd04ac4e8ee45d05e1545946688186417a85cd2cb",
   // #457 (F36): intentional edits — execution-class ACs are plan noise (CI already enforces
   // ci.requiredChecks unconditionally): plan-reviewer flags-and-strips them, the confirm pass
   // invalidates legacy plans carrying them, drafter/decompose never author them.
@@ -129,11 +135,39 @@ const ROLE_PROMPT_PATHS: Readonly<Record<string, readonly string[]>> = {
   worker: [defaultPromptPath(), defaultFixPromptPath()],
 };
 
+// gate② round 2 (F1-D1/D2/D3 on PR #532): architect and po-align/po-triage ALSO hold a default
+// WebSearch/WebFetch grant — peripheral.ts's ARCHITECT_ALLOWED_TOOLS, align.ts's PO session
+// wiring, config.ts's `webAccess.enabled` default true. `WebFetch` reaches github.com directly,
+// so these three roles can never truthfully say "you have no GitHub access at all" even in the
+// no-forge-tool branch of the #529 conditional. The other roles below genuinely have no web
+// grant (config.ts's review-family exclusion), so the identical-looking sentence is true for
+// them and must not be flagged.
+const ROLES_WITH_DEFAULT_WEB_ACCESS: ReadonlySet<string> = new Set(["architect", "po-align", "po-triage"]);
+
 test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access denial while its role holds a non-empty PROXY_ROLE_TOOL_MATRIX grant", () => {
-  // The claim family, not one exact string (a generic text-match would not have caught #512):
-  // a negation ("no"/"never"/"nothing") within the same clause as "reach(es)"/"touch(es)"
-  // GitHub — the #529 issue's own minimum bar.
-  const CATEGORICAL_DENIAL = /\b(?:no|never|nothing)\b[^.]{0,80}\b(?:reach(?:es)?|touch(?:es)?)\b[^.]{0,80}\bGitHub\b/i;
+  // Family 1 — the original #512-class bug: a negation ("no"/"never"/"nothing") within the
+  // same clause as "reach(es)"/"touch(es)" GitHub, with no forge-tool mention anywhere in the
+  // file to condition it (mitigated below by `namesTheGrantedTools` — this is what lets po.md's
+  // WRITE-scoped "no tool call of yours reaches GitHub" pass: the same file's later dedup-step
+  // paragraph names `mcp__forge__search_issues`, so a reader of the whole prompt learns the
+  // true picture even though this one clause, read alone, oversells it).
+  const REACHES_GITHUB_DENIAL = /\b(?:no|never|nothing)\b[^.]{0,80}\b(?:reach(?:es)?|touch(?:es)?)\b[^.]{0,80}\bGitHub\b/i;
+
+  // Family 2 (gate② round 2, D3) — "you have no GitHub access at all" is the phrasing #529's OWN
+  // conditional sentences actually use for their no-forge-tool branch, and it has no
+  // reach(es)/touch(es) verb at all, so REACHES_GITHUB_DENIAL never even sees it — this is
+  // exactly what let D1/D2 (architect.md, po.md claiming no GitHub access at all despite a
+  // separate WebFetch grant) through gate② round 1. Deliberately NOT given the
+  // `namesTheGrantedTools` escape hatch: by construction every one of these conditional
+  // sentences names `mcp__forge__` in its own "if" branch, so a file-wide mention would
+  // trivially exempt every prompt using this pattern — including a broken one (verified: this
+  // is why widening the regex alone, without also narrowing this family's mitigation, would NOT
+  // have caught D1/D2). The only thing that can legitimately excuse this phrase is the ROLE
+  // itself genuinely holding no other GitHub-reaching tool — see ROLES_WITH_DEFAULT_WEB_ACCESS.
+  // Requires "GitHub access" adjacent (not "GitHub ... access" with a gap) so this deliberately
+  // does NOT match every file's "## You have no GitHub write access at all" heading — that
+  // claim is correctly scoped to writes and true regardless of any web grant.
+  const NO_GITHUB_ACCESS_DENIAL = /\b(?:no|never|nothing)\b[^.]{0,60}\bGitHub access\b/i;
 
   for (const [role, tools] of Object.entries(PROXY_ROLE_TOOL_MATRIX)) {
     if (tools.length === 0) continue; // nothing granted, nothing to be dishonest about
@@ -147,19 +181,37 @@ test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access d
 
     for (const path of paths) {
       const body = readPrompt(path);
-      const deniesCategorically = CATEGORICAL_DENIAL.test(body);
+
       // A prompt may still legitimately talk about lacking WRITE access (e.g. "you never call
       // `gh`") — that's true regardless of the proxy. What it must not do is claim NO tool
       // reaches GitHub while never once naming the read-only tool family it actually may hold.
+      const deniesReach = REACHES_GITHUB_DENIAL.test(body);
       const namesTheGrantedTools = body.includes("mcp__forge__");
       assert.ok(
-        !deniesCategorically || namesTheGrantedTools,
+        !deniesReach || namesTheGrantedTools,
         `${path} (role "${role}") reads as a categorical no-GitHub-access denial (matches ` +
-          `${CATEGORICAL_DENIAL}) but never names an mcp__forge__ tool anywhere to condition ` +
+          `${REACHES_GITHUB_DENIAL}) but never names an mcp__forge__ tool anywhere to condition ` +
           `that claim, even though the matrix grants this role ${tools.length} read-only tool(s): ${tools.join(", ")}`,
+      );
+
+      const deniesAccess = NO_GITHUB_ACCESS_DENIAL.test(body);
+      assert.ok(
+        !deniesAccess || !ROLES_WITH_DEFAULT_WEB_ACCESS.has(role),
+        `${path} (role "${role}") asserts "no GitHub access at all" (matches ` +
+          `${NO_GITHUB_ACCESS_DENIAL}) but this role also holds a default WebSearch/WebFetch ` +
+          `grant, and WebFetch reaches github.com directly — the claim is false regardless of ` +
+          `whether an mcp__forge__ tool is also mentioned nearby`,
       );
     }
   }
+
+  // Known, accepted blind spot (gate② round 2, codex sol-high): the `namesTheGrantedTools`
+  // escape hatch above is file-scoped text matching, not semantic — a contrived prompt could
+  // name an `mcp__forge__` tool only to forbid its use ("never call mcp__forge__search_issues")
+  // and still pass. Left as-is deliberately: closing it means building a prompt linter, and the
+  // realistic failure mode this test exists to catch (a stale denial nobody meant to leave in)
+  // doesn't produce that shape. Not fixed here; noted so the next reader doesn't mistake this
+  // test for airtight.
 });
 
 test("shipped role prompts (#321): sentinel examples are plain text with no adjacent markdown fences", () => {
