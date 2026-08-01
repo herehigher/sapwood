@@ -6,6 +6,7 @@ import type { IForge, PRTopLevelComment } from "../forge/forge.js";
 import type { PerAcResult } from "./agent-output.js";
 import type { AuditDeliveryResult, EngineReviewWal } from "./drive.js";
 import { type ClassifiedFinding, effectiveSeverity } from "./finding-axes.js";
+import type { ReviewSessionIdentity, ReviewSessionSpend } from "./review-session.js";
 
 export const AUDIT_MARKER_PREFIX = "<!-- sapwood-audit ";
 const MARKER_RE = /^<!-- sapwood-audit kind=([a-z0-9-]+) head=([0-9a-f]+) diff=([0-9a-f]+) run=([A-Za-z0-9._:-]+) -->$/m;
@@ -19,7 +20,17 @@ export interface EngineReviewArtifact {
    *  #448) still round-trips and renders identically — `effectiveSeverity` defaults absent
    *  `severity` to `"blocking"`. */
   findings: ClassifiedFinding[];
-  sessionActualModels: string[];
+  /** #513 (PM adjudication 2026-08-01 + amendment): REPLACES the old `sessionActualModels:
+   *  string[]` outright — no legacy read path (see this repo's own amended ruling: the field is
+   *  per-run WAL row state, not an archive, and the only real deployment has zero undelivered
+   *  artifacts to strand). Scoped to the DECISIVE attempt ONLY — a failed attempt never passed the
+   *  post-session D5 check, so its telemetry is not provenance (engine-agent.ts's `attempt()`). */
+  sessionActualIdentities: ReviewSessionIdentity[];
+  /** #513: one entry per EXECUTED attempt (not an aggregate), in order, discriminant carried
+   *  verbatim — a summed value cannot express "attempt 1 known, attempt 2 unknown" without
+   *  discarding evidence, and the logical-review cost cap is a whole-logical-review cap, so a
+   *  failed attempt's spend belongs in the record too (engine-agent.ts's `evaluate()`). */
+  sessionSpends: ReviewSessionSpend[];
   promptHash: string;
 }
 
@@ -72,6 +83,48 @@ function renderFindingsList(findings: readonly ClassifiedFinding[]): string {
     : "- None recorded.";
 }
 
+/** `provider/model` — matches engine-agent.ts's own D5-message rendering, so the same identity
+ *  reads identically in both the D5 unavailable-reason string and this audit comment. */
+function formatIdentity(id: ReviewSessionIdentity): string {
+  return `${id.provider}/${id.model}`;
+}
+
+/** #513: the Provenance line's identity clause — "decisive reviewer identity" singular, plural
+ *  when more than one. An empty array is defensive only: the post-session D5 check in
+ *  engine-agent.ts already fails a verdict closed whenever the session's own identity list comes
+ *  back empty, so a REAL persisted artifact always carries at least one. */
+function renderIdentityClause(identities: readonly ReviewSessionIdentity[]): string {
+  const label = identities.length === 1 ? "decisive reviewer identity" : "decisive reviewer identities";
+  const value = identities.length > 0 ? identities.map(formatIdentity).join(", ") : "unknown";
+  return `${label} \`${value}\``;
+}
+
+/** #513: the Provenance line's spend clause — an estimate must never be able to read as a
+ *  measurement, so the wording (not just the number) changes by discriminant:
+ *   - every executed attempt `known`     -> a real, summed, provider-reported total.
+ *   - any attempt `estimated` (none `unknown`) -> the SAME summed total, but labelled an estimate
+ *     (token usage × pinned prices) — mixing in an estimated attempt makes the sum inexact too.
+ *   - any attempt `unknown`              -> no total is claimable; report the recorded numeric
+ *     subtotal (known + estimated attempts only) alongside how many attempts lacked telemetry,
+ *     never silently treating "unknown" as "$0".
+ *  `spends` is one entry per EXECUTED attempt, in order (`EngineReviewArtifact.sessionSpends`'s
+ *  own doc) — never an aggregate computed elsewhere. */
+function renderSpendClause(spends: readonly ReviewSessionSpend[]): string {
+  const n = spends.length;
+  const attempts = `${n} attempt${n === 1 ? "" : "s"}`;
+  const numeric = (s: ReviewSessionSpend): number => (s.kind === "unknown" ? 0 : s.usd);
+  const unknownCount = spends.filter((s) => s.kind === "unknown").length;
+  if (unknownCount > 0) {
+    const subtotal = spends.reduce((sum, s) => sum + numeric(s), 0);
+    return `logical-review spend \`unknown total\`; recorded numeric subtotal \`$${subtotal.toFixed(6)}\` (${attempts}; ${unknownCount} lacked telemetry)`;
+  }
+  const total = spends.reduce((sum, s) => sum + numeric(s), 0);
+  if (spends.some((s) => s.kind === "estimated")) {
+    return `logical-review spend estimate (token usage × pinned prices; ${attempts}) \`$${total.toFixed(6)}\``;
+  }
+  return `logical-review provider-reported spend (${attempts}) \`$${total.toFixed(6)}\``;
+}
+
 /** Render a stable human record. The wording deliberately contains neither reviewer.ts's
  *  Codex-clean sentence nor its `Reviewed commit/head OID:` assertion format. */
 export function buildAuditComment(wal: EngineReviewWal, artifact: EngineReviewArtifact): string {
@@ -85,7 +138,6 @@ export function buildAuditComment(wal: EngineReviewWal, artifact: EngineReviewAr
   // heading — the heading a reader must act on, never the one a session tried to file it under.
   const blocking = artifact.findings.filter((f) => effectiveSeverity(f) !== "advisory");
   const advisory = artifact.findings.filter((f) => effectiveSeverity(f) === "advisory");
-  const models = artifact.sessionActualModels.length > 0 ? artifact.sessionActualModels.join(", ") : "unknown";
   return `${buildAuditMarker(markerForWal(wal))}
 
 ## Sapwood engine review audit
@@ -105,19 +157,53 @@ ${renderFindingsList(blocking)}
 
 ${renderFindingsList(advisory)}
 
-Provenance: reviewer model(s) \`${models}\`; prompt template sha256 \`${artifact.promptHash}\`; projection manifest sha256 \`${wal.treeManifestHash ?? "unavailable"}\`; reviewed object \`${wal.head}\`; diff sha256 \`${wal.diffHash}\`; run \`${wal.runId}\`.
+Provenance: ${renderIdentityClause(artifact.sessionActualIdentities)}; ${renderSpendClause(artifact.sessionSpends)}; prompt template sha256 \`${artifact.promptHash}\`; projection manifest sha256 \`${wal.treeManifestHash ?? "unavailable"}\`; reviewed object \`${wal.head}\`; diff sha256 \`${wal.diffHash}\`; run \`${wal.runId}\`.
 `;
 }
 
+/** #513: strict per-identity validation — both fields of the `(provider, model)` pair are
+ *  required strings, exactly the same fail-closed posture `perAC`/`findings` already get below. */
+function isValidIdentity(v: unknown): v is ReviewSessionIdentity {
+  return (
+    !!v &&
+    typeof v === "object" &&
+    typeof (v as { provider?: unknown }).provider === "string" &&
+    typeof (v as { model?: unknown }).model === "string"
+  );
+}
+
+/** #513: strict per-spend validation of the `ReviewSessionSpend` discriminated union — `known`/
+ *  `estimated` require a numeric `usd`, `unknown` requires nothing else, any other `kind` (or a
+ *  missing one) fails closed to `null` via the `.every()` call site below, exactly as a malformed
+ *  `perAC`/`findings` entry already does. */
+function isValidSpend(v: unknown): v is ReviewSessionSpend {
+  if (!v || typeof v !== "object") return false;
+  const s = v as { kind?: unknown; usd?: unknown };
+  if (s.kind === "known" || s.kind === "estimated") return typeof s.usd === "number";
+  return s.kind === "unknown";
+}
+
+/** #513 (amended ruling): NO legacy read path. An old `sessionActualModels`-shaped artifact (no
+ *  `sessionSpends` at all) fails the `Array.isArray(v.sessionSpends)` check below and returns
+ *  `null` — `deliverEngineReviewAudit` already reports its existing named reason ("WAL has no
+ *  validated decisive review artifact") for a `null` parse, so this is a VALIDATION guarantee
+ *  (fail closed on a stale/malformed artifact), not a compatibility one. */
 export function parseEngineReviewArtifact(json: string): EngineReviewArtifact | null {
   try {
     const v = JSON.parse(json) as Partial<EngineReviewArtifact>;
-    if (!Array.isArray(v.perAC) || !Array.isArray(v.findings) || !Array.isArray(v.sessionActualModels) || typeof v.promptHash !== "string")
+    if (
+      !Array.isArray(v.perAC) ||
+      !Array.isArray(v.findings) ||
+      !Array.isArray(v.sessionActualIdentities) ||
+      !Array.isArray(v.sessionSpends) ||
+      typeof v.promptHash !== "string"
+    )
       return null;
     if (!v.perAC.every((a) => a && typeof a.id === "string" && ["confirmed", "cannot-confirm", "claim-accepted"].includes(a.status)))
       return null;
     if (!v.findings.every((f) => f && typeof f.id === "string" && typeof f.body === "string")) return null;
-    if (!v.sessionActualModels.every((m) => typeof m === "string")) return null;
+    if (!v.sessionActualIdentities.every(isValidIdentity)) return null;
+    if (!v.sessionSpends.every(isValidSpend)) return null;
     return v as EngineReviewArtifact;
   } catch {
     return null;

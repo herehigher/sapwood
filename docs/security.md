@@ -63,7 +63,9 @@ producer≠reviewer is enforced at the process/session boundary — a different-
 closed review session produces structured judgment, while deterministic engine code alone writes
 GitHub state and merges — not at the GitHub-account boundary. This is a bounded limitation, not an
 identity claim. The compensating control is the receipted, non-authoritative audit-comment trail:
-it records the reviewed head and diff, run id, actual reviewer model(s), prompt hash, and
+it records the reviewed head and diff, run id, the decisive attempt's actual reviewer identity
+(provider + model, never fabricated), each executed attempt's spend (provider-reported, a pinned-
+price estimate, or explicitly unknown — never silently read as $0), prompt hash, and
 materialized-tree manifest hash before any engine-agent-derived merge/FIXABLE outcome is consumed.
 It makes the separation and evidence inspectable, but does not turn the shared account into two
 independent principals.

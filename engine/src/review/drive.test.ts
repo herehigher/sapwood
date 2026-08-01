@@ -801,7 +801,8 @@ test("#288 restart reconciliation upgrades an unavailable pin from WAL receipt d
     reviewArtifactJson: JSON.stringify({
       perAC: [],
       findings: [{ id: "F1", body: "bug" }],
-      sessionActualModels: ["opus"],
+      sessionActualIdentities: [{ provider: "anthropic", model: "opus" }],
+      sessionSpends: [{ kind: "known", usd: 0.1 }],
       promptHash: "p",
     }),
     auditCommentId: null,

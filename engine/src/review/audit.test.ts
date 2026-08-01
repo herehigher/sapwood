@@ -3,13 +3,21 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { PRTopLevelComment } from "../forge/forge.js";
 import { CLEAN_VERDICT_RE, REVIEWED_HEAD_OID_RE } from "../roles/reviewer.js";
-import { buildAuditComment, buildAuditMarker, deliverEngineReviewAudit, type EngineReviewArtifact, parseAuditMarker } from "./audit.js";
+import {
+  buildAuditComment,
+  buildAuditMarker,
+  deliverEngineReviewAudit,
+  type EngineReviewArtifact,
+  parseAuditMarker,
+  parseEngineReviewArtifact,
+} from "./audit.js";
 import type { EngineReviewWal } from "./drive.js";
 
 const artifact: EngineReviewArtifact = {
   perAC: [{ id: "AC-1", status: "cannot-confirm" }],
   findings: [{ id: "F-1", body: "A concrete defect" }],
-  sessionActualModels: ["claude-opus-4-6"],
+  sessionActualIdentities: [{ provider: "anthropic", model: "claude-opus-4-6" }],
+  sessionSpends: [{ kind: "known", usd: 0.045 }],
   promptHash: "b".repeat(64),
 };
 const wal: EngineReviewWal = {
@@ -41,7 +49,8 @@ test("#288 audit body carries per-AC/findings/provenance but never matches appro
   const body = buildAuditComment(wal, artifact);
   assert.match(body, /AC-1.*cannot-confirm/);
   assert.match(body, /- \*\*F-1\*\*\n> A concrete defect/);
-  assert.match(body, /reviewer model.*opus/i);
+  assert.match(body, /decisive reviewer identity `anthropic\/claude-opus-4-6`/);
+  assert.match(body, /logical-review provider-reported spend \(1 attempt\) `\$0\.045000`/);
   for (const line of body.split("\n")) {
     assert.equal(CLEAN_VERDICT_RE.test(line), false);
     assert.equal(REVIEWED_HEAD_OID_RE.test(line), false);
@@ -179,4 +188,139 @@ test("#288 post or receipt-write failure never reports delivered", async () => {
   });
   assert.equal(postFailure.delivered, false);
   assert.match(postFailure.reason, /post failure/);
+});
+
+// ── #513: identity replacement + per-attempt spend ──────────────────────────────────────────
+
+test("#513 round-trip (known spend): build -> JSON persist -> parseEngineReviewArtifact -> render — provider and spend kind survive", () => {
+  const known: EngineReviewArtifact = {
+    perAC: [{ id: "AC-1", status: "confirmed" }],
+    findings: [],
+    sessionActualIdentities: [{ provider: "anthropic", model: "claude-sonnet-5" }],
+    sessionSpends: [{ kind: "known", usd: 0.156 }],
+    promptHash: "c".repeat(64),
+  };
+  const persisted = JSON.stringify(known);
+  const parsed = parseEngineReviewArtifact(persisted);
+  assert.ok(parsed);
+  assert.deepEqual(parsed!.sessionActualIdentities, known.sessionActualIdentities);
+  assert.deepEqual(parsed!.sessionSpends, known.sessionSpends);
+  const body = buildAuditComment({ ...wal, reviewArtifactJson: persisted }, parsed!);
+  assert.match(body, /decisive reviewer identity `anthropic\/claude-sonnet-5`/);
+  assert.match(body, /logical-review provider-reported spend \(1 attempt\) `\$0\.156000`/);
+});
+
+test("#513 round-trip (estimated spend): renders as an estimate, never as a measurement", () => {
+  const estimated: EngineReviewArtifact = {
+    perAC: [],
+    findings: [],
+    sessionActualIdentities: [{ provider: "openai", model: "gpt-5.6-luna" }],
+    sessionSpends: [{ kind: "estimated", usd: 0.270555 }],
+    promptHash: "d".repeat(64),
+  };
+  const parsed = parseEngineReviewArtifact(JSON.stringify(estimated));
+  assert.ok(parsed);
+  assert.equal(parsed!.sessionSpends[0]!.kind, "estimated");
+  const body = buildAuditComment({ ...wal, reviewArtifactJson: JSON.stringify(estimated) }, parsed!);
+  assert.match(body, /decisive reviewer identity `openai\/gpt-5\.6-luna`/);
+  assert.match(body, /logical-review spend estimate \(token usage × pinned prices; 1 attempt\) `\$0\.270555`/);
+  assert.doesNotMatch(body, /provider-reported spend/);
+});
+
+test("#513 rendering: two attempts, both provider-reported -> summed total, plural identity/attempt wording", () => {
+  const two: EngineReviewArtifact = {
+    ...artifact,
+    sessionActualIdentities: [
+      { provider: "anthropic", model: "claude-opus-4-6" },
+      { provider: "anthropic", model: "claude-sonnet-5" },
+    ],
+    sessionSpends: [
+      { kind: "known", usd: 0.078 },
+      { kind: "known", usd: 0.078 },
+    ],
+  };
+  const body = buildAuditComment(wal, two);
+  assert.match(body, /decisive reviewer identities `anthropic\/claude-opus-4-6, anthropic\/claude-sonnet-5`/);
+  assert.match(body, /logical-review provider-reported spend \(2 attempts\) `\$0\.156000`/);
+});
+
+test("#513 rendering: any attempt unknown -> total unclaimable, recorded subtotal + lacked-telemetry count", () => {
+  const withUnknown: EngineReviewArtifact = {
+    ...artifact,
+    sessionSpends: [{ kind: "known", usd: 0.078 }, { kind: "unknown" }],
+  };
+  const body = buildAuditComment(wal, withUnknown);
+  assert.match(body, /logical-review spend `unknown total`; recorded numeric subtotal `\$0\.078000` \(2 attempts; 1 lacked telemetry\)/);
+});
+
+test("#513 retry path (via a hand-built two-attempt artifact): two sessionSpends entries persist and render honestly", () => {
+  const retried: EngineReviewArtifact = {
+    ...artifact,
+    sessionSpends: [
+      { kind: "known", usd: 0.5 },
+      { kind: "known", usd: 0.3 },
+    ],
+  };
+  const persisted = JSON.stringify(retried);
+  const parsed = parseEngineReviewArtifact(persisted);
+  assert.ok(parsed);
+  assert.equal(parsed!.sessionSpends.length, 2);
+  const body = buildAuditComment(wal, parsed!);
+  assert.match(body, /\(2 attempts\) `\$0\.800000`/);
+});
+
+test("#513 strict validation: a malformed identity object fails closed to null", () => {
+  const malformed = { ...artifact, sessionActualIdentities: [{ provider: "anthropic" }] }; // missing model
+  assert.equal(parseEngineReviewArtifact(JSON.stringify(malformed)), null);
+  const wrongType = { ...artifact, sessionActualIdentities: ["anthropic/claude-opus-4-6"] };
+  assert.equal(parseEngineReviewArtifact(JSON.stringify(wrongType)), null);
+});
+
+test("#513 strict validation: each malformed sessionSpends variant fails closed to null", () => {
+  const noUsdOnKnown = { ...artifact, sessionSpends: [{ kind: "known" }] };
+  assert.equal(parseEngineReviewArtifact(JSON.stringify(noUsdOnKnown)), null);
+  const noUsdOnEstimated = { ...artifact, sessionSpends: [{ kind: "estimated" }] };
+  assert.equal(parseEngineReviewArtifact(JSON.stringify(noUsdOnEstimated)), null);
+  const stringUsd = { ...artifact, sessionSpends: [{ kind: "known", usd: "0.05" }] };
+  assert.equal(parseEngineReviewArtifact(JSON.stringify(stringUsd)), null);
+  const unknownKind = { ...artifact, sessionSpends: [{ kind: "bogus" }] };
+  assert.equal(parseEngineReviewArtifact(JSON.stringify(unknownKind)), null);
+  const missingKind = { ...artifact, sessionSpends: [{ usd: 1 }] };
+  assert.equal(parseEngineReviewArtifact(JSON.stringify(missingKind)), null);
+});
+
+test("#513 amended ruling: an OLD sessionActualModels-shaped artifact (no sessionSpends) parses to null — validation, not compatibility", () => {
+  const legacyShaped = JSON.stringify({
+    perAC: [{ id: "AC-1", status: "confirmed" }],
+    findings: [],
+    sessionActualModels: ["claude-opus-4-6"],
+    promptHash: "e".repeat(64),
+  });
+  assert.equal(parseEngineReviewArtifact(legacyShaped), null);
+});
+
+test("#513 amended ruling: deliverEngineReviewAudit degrades a stale/legacy-shaped WAL artifact to its existing named reason, never a crash or a half-rendered comment", async () => {
+  const legacyWal: EngineReviewWal = {
+    ...wal,
+    reviewArtifactJson: JSON.stringify({
+      perAC: [],
+      findings: [],
+      sessionActualModels: ["claude-opus-4-6"],
+      promptHash: "f".repeat(64),
+    }),
+  };
+  const result = await deliverEngineReviewAudit({
+    forge: {
+      getPRComments: async () => ({ comments: [], total: 0 }),
+      addPRComment: async () => {
+        throw new Error("must never post from an unvalidated artifact");
+      },
+    },
+    pr: 7,
+    wal: legacyWal,
+    commentsCap: 20,
+    now: () => new Date(),
+    recordReceipt: () => true,
+  });
+  assert.deepEqual(result, { delivered: false, reason: "WAL has no validated decisive review artifact" });
 });

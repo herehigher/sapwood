@@ -370,7 +370,10 @@ judgments and findings; the engine validates that output, derives approval or re
 non-authoritative audit comment, then re-fetches the live gate state before consuming the verdict.
 Engine-agent review spend is governed only by `agent.costCapUsd`. It is not written to
 `spend_ledger`, so it is outside `cost.roundBudgetUsd`, `cost.dailyBudgetUsd`, and
-`stop.afterSpendUsd`.
+`stop.afterSpendUsd` — instead, every executed attempt's spend (one entry each, discriminant
+carried verbatim: provider-reported, pinned-price estimate, or explicitly unknown) is recorded in
+the audit-comment trail (see [`security.md`](security.md#producer--reviewer--merger)'s
+"Single-identity limitation for engine-agent review").
 
 **Which CLI runs the review (`agent.runner`, #443)** is a separate question from `reviewer.mode`,
 and the two codex-shaped options are easy to confuse:

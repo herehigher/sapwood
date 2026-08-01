@@ -2725,7 +2725,8 @@ test("tick DRIVE (#449, design #402 R2, engine-agent path): drive-fixup re-keys 
       // Advisory-eligible kind, NO path — proves an unlocated finding still round-trips end-to-end.
       { id: "f2", body: "nit: naming", severity: "advisory", kind: "style" },
     ],
-    sessionActualModels: ["sonnet"],
+    sessionActualIdentities: [{ provider: "anthropic", model: "sonnet" }],
+    sessionSpends: [{ kind: "known", usd: 0.05 }],
     promptHash: "hash",
   };
   st.recordEngineReviewWalArtifact("lane-a", "run-9", "rejected", JSON.stringify(artifact));
@@ -2884,7 +2885,8 @@ test("tick DRIVE (#449, design #402 R2 verification item 4, prose-free): a findi
         path: "src/x.ts",
       },
     ],
-    sessionActualModels: ["sonnet"],
+    sessionActualIdentities: [{ provider: "anthropic", model: "sonnet" }],
+    sessionSpends: [{ kind: "known", usd: 0.05 }],
     promptHash: "hash",
   };
   st.recordEngineReviewWalArtifact("lane-a", "run-9", "rejected", JSON.stringify(artifact));
@@ -4954,7 +4956,8 @@ test("tick DRIVE (#450, advisories excluded, engine-agent path): a NEW advisory 
       { id: "f1", body: "still open", severity: "blocking", kind: "security", path: "src/a.ts" },
       { id: "f2", body: "nit: naming", severity: "advisory", kind: "style", path: "src/b.ts" },
     ],
-    sessionActualModels: ["sonnet"],
+    sessionActualIdentities: [{ provider: "anthropic", model: "sonnet" }],
+    sessionSpends: [{ kind: "known", usd: 0.05 }],
     promptHash: "hash",
   };
   st.recordEngineReviewWalArtifact("lane-a", "run-9", "rejected", JSON.stringify(artifact));

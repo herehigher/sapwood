@@ -381,6 +381,38 @@ test("cost-remainder: attempt 2's budget = costCapUsd - attempt 1's recorded cos
   assert.equal(runner.calls[1]!.maxBudgetUsd, 2); // 3 - 1
 });
 
+// ── #513: onReviewArtifact accumulates every executed attempt's spend, fires exactly once ──────
+
+test("#513 retry path: two EXECUTED attempts persist two sessionSpends entries (in order), decisive-only identities, onReviewArtifact fires exactly once", async () => {
+  const { build, artifactCalls } = mkDeps({
+    runnerQueue: [
+      mkSessionResult({ resultText: "garbage — attempt 1 produced nothing usable", costUsd: 1, costKnown: true }),
+      mkSessionResult({ resultText: ALL_CONFIRMED, costUsd: 0.4, costKnown: true }),
+    ],
+  });
+  const result = await build().evaluate(ctx());
+  assert.equal(result.kind, "approved");
+  assert.equal(artifactCalls.length, 1, "onReviewArtifact must fire exactly once, on the verdict-producing attempt");
+  const { sessionSpends, sessionActualIdentities } = artifactCalls[0]!.artifact;
+  assert.deepEqual(sessionSpends, [
+    { kind: "known", usd: 1 },
+    { kind: "known", usd: 0.4 },
+  ]);
+  // Identities are scoped to the DECISIVE attempt only — attempt 1's own (failed) session
+  // identity is never folded in, even though its spend is.
+  assert.deepEqual(sessionActualIdentities, [{ provider: "anthropic", model: AGENT_MODEL }]);
+});
+
+test("#513: an unknown-cost attempt's spend is recorded too, when it's the ONLY (decisive) attempt", async () => {
+  const { build, artifactCalls } = mkDeps({
+    runnerQueue: [mkSessionResult({ resultText: ALL_CONFIRMED, costUsd: 0, costKnown: false })],
+  });
+  const result = await build().evaluate(ctx());
+  assert.equal(result.kind, "approved");
+  assert.equal(artifactCalls.length, 1);
+  assert.deepEqual(artifactCalls[0]!.artifact.sessionSpends, [{ kind: "unknown" }]);
+});
+
 test("cost-remainder: remainder <= 0 (attempt 1 cost meets/exceeds the cap) -> NO retry, unavailable", async () => {
   const { build, runner } = mkDeps({ runnerQueue: [mkSessionResult({ resultText: "garbage", costUsd: 3 })] });
   const result = await build().evaluate(ctx());
