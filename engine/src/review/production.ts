@@ -12,7 +12,13 @@ import type { PerAcResult } from "./agent-output.js";
 import { deliverEngineReviewAudit, type EngineReviewArtifact } from "./audit.js";
 import type { EngineAgentDriveDeps } from "./drive.js";
 import { makeEngineAgentReviewer } from "./engine-agent.js";
-import { createPrivateClone, defaultPrivateCloneDir, defaultWorktreeRoot, type MaterializeResult, materialize } from "./materializer.js";
+import {
+  createPrivateClone,
+  defaultPrivateCloneDir,
+  defaultWorktreeRoot,
+  type MaterializeResult,
+  materializeWithExternalFetch,
+} from "./materializer.js";
 
 export interface ProductionEngineAgentOptions {
   sourceRepoDir?: string;
@@ -165,7 +171,16 @@ export function makeProductionEngineAgent(
       // #395 (gate② P3): thread the same forge-call timeout `gh` calls use — one user-tunable
       // knob for both external-process bounds, rather than a second one just for materializer.ts.
       const clone = await createPrivateClone({ sourceRepoDir, cloneDir, worktreeRoot, timeoutMs: cfg.liveness.forgeCallTimeoutMs });
-      const result = await materialize({ clone, oid: head, treeDir, timeoutMs: cfg.liveness.forgeCallTimeoutMs });
+      // #499: an externally-created PR head (update-branch, foreign push, fork PR) is absent
+      // from the local object store — fall back to one bounded fetch from the forge remote.
+      const result = await materializeWithExternalFetch({
+        clone,
+        oid: head,
+        treeDir,
+        timeoutMs: cfg.liveness.forgeCallTimeoutMs,
+        sourceRepoDir,
+        log,
+      });
       if (result.kind === "materialized" && activeWorker) {
         const wal = state.getEngineReviewWal(activeWorker);
         if (wal?.head === head) {
