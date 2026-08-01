@@ -60,8 +60,10 @@ part of an issue's definition-of-done. Distilled outcomes, never issue transcrip
 ## Locked decisions (see PLAN.md table)
 
 TypeScript engine · Claude Code plugin form factor · trusted repos first · default
-merge gate = 0day-style: Conductor merges on CI green + a fresh different-model Codex
-review (produce-PR-and-stop selectable) · dashboard deferred to
+merge gate: Conductor merges on CI green + a fresh local **engine-agent** review, a
+different Claude model (#501, 2026-08-01; hosted different-model Codex review stays
+selectable — the pre-#501 0day-style default; produce-PR-and-stop also selectable) ·
+dashboard deferred to
 v0.2 (built *by* sapwood as the flagship dogfood) · YAML config default (commented;
 JSON also accepted) · 0day's
 TDD/two-gate method as overridable defaults.

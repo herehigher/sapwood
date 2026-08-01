@@ -74,7 +74,7 @@ bootstrap_github,session_start}.sh`. Guard: `backend/src/zeroday/loop/guard.py`
 | 2 | Engine language | TypeScript (whole stack) |
 | 3 | Trust context | **Trusted repos first**, architected toward public-repo hardening |
 | 4 | Dashboard | **Deferred to v0.2.** v1 ships a CLI/terminal status view; validate demand, then build the dashboard from real usage |
-| 5 | Default merge gate | **0day-style: autonomous-merge gated on a different-model Codex PR review** — gate① CI green + gate② a fresh non-author review → the Conductor merges (producer≠merger). Reviewer is pluggable: hosted different-model Codex (default), same-model-trusted, human, or the engine-agent session in Decision #10; **produce-PR-and-stop** remains selectable when a human must merge. Different-model default matches 0day and the security review's recommendation. |
+| 5 | Default merge gate | **Autonomous-merge gated on a fresh, different-model PR review** — gate① CI green + gate② a fresh non-author review → the Conductor merges (producer≠merger). Reviewer is pluggable: the local **engine-agent** session (Decision #10 — **default**, #501), hosted different-model Codex, same-model-trusted, or human; **produce-PR-and-stop** remains selectable when a human must merge. **Amended 2026-08-01 (#501):** originally 0day-style hosted-Codex-by-default (matching 0day and the original security review's recommendation); flipped to the local engine-agent kind — production-validated (E4c, #434 retro trial) and runs on the Claude CLI every sapwood user already has, where hosted Codex required a separate `@codex review` GitHub App install most fresh users wouldn't have. Hosted Codex stays fully selectable (`reviewer.mode: different-model-codex`). |
 | 6 | Method | 0day's TDD + two-gate + taxonomy as overridable defaults |
 | 7 | Config format | **YAML default** — `sapwood.config.yaml`, hand-edited with inline comments (serves "易读易配置"). Zod-validated after parse. The YAML parser also reads JSON for free (YAML ⊃ JSON), so `.json` works with zero extra code; no separate `.ts` config. |
 | 8 | Dispatch readiness | **An issue is not `Ready` until it carries a verification plan** — acceptance criteria + how to prove them (tests to write/run, commands, observable outcomes). Authored by the issue author/triage *before* the producer starts (keeps producer≠author). Enforced at the `Ready` gate (`getReadyIssues` refuses issues without one) **and** re-checked by the reviewer at gate② (the PR must satisfy the stated plan). Inherently-unverifiable issues (docs/knowledge, chore) are labelled `verify:n/a` and use the round-close doc gate / a lighter definition-of-done instead, so the gate never blocks legitimate work. Cheap (plan written once, read by worker + reviewer who already read the diff); net-saves by killing wrong-direction PRs and rework. **Amended 2026-07-09 (gate⓪, lands in v0.2 — see the v0.2 chapter):** presence alone is no longer the bar — a **plan-reviewer peripheral (gate⓪)** reviews each plan's quality/feasibility post-`Ready`, pre-dispatch, and `getReadyIssues` requires the plan **and** its `plan:approved` label (fail-closed). `verify:n/a` is never self-declared: gate⓪ can only *propose* it, always paired with `needs-human`, and a human finalizes the adjudication by removing `needs-human` (→ doc-gate path). |
@@ -96,7 +96,7 @@ sapwood/
 │   ├── merge-driver.ts      # the only place a merge happens (autonomous-merge mode)
 │   ├── forge.ts             # IForge interface + GithubForge impl (gh CLI/GraphQL)
 │   ├── guard.ts             # fail-closed PreToolUse hook (port of guard.py), zero-dep
-│   ├── reviewer.ts          # pluggable review gate (hosted/trusted/human/engine-agent; Codex default)
+│   ├── reviewer.ts          # pluggable review gate (engine-agent/hosted/trusted/human; engine-agent default, #501)
 │   ├── config.ts            # load sapwood.config.yaml (yaml→zod), JSON also parses; defaults
 │   ├── state.ts             # SQLite (WAL) state + per-round metrics/events
 │   └── cli.ts               # `sapwood` binary: init / status / stop — runs WITHOUT a live session
@@ -846,7 +846,8 @@ public-repo hardening is additive, not a rewrite.** v1 requirements:
   executed by the Conductor, never the worker (matches 0day's `loop_merge_driver.sh`),
   backed by branch protection + a merge identity distinct from the worker, so the
   invariant holds even if the guard is bypassed. gate② is a fresh non-author review from
-  the configured reviewer kind (hosted Codex by default, or trusted/human/engine-agent);
+  the configured reviewer kind (the local engine-agent session by default, #501; or hosted
+  Codex/trusted/human);
   produce-PR-and-stop (human merges) is the conservative selectable mode.
 - **Protect the boundary from worker `Write`:** path-level deny on
   `.claude/settings.json` (hook wiring) and `.github/workflows/**`; **human-merge-only**

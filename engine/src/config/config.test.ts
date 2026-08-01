@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { configHash, DEFAULT_GOAL_FILE, dashboardConfigSubset, loadConfig, parseConfig } from "./config.js";
+import { configHash, DEFAULT_GOAL_FILE, DEFAULT_REVIEWER_AGENT_MODEL, dashboardConfigSubset, loadConfig, parseConfig } from "./config.js";
 
 test("applies defaults when only required board fields given", () => {
   const cfg = parseConfig("board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
@@ -14,7 +14,11 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.lanes.roundDispatchCap, 6); // #124: per-round quota, 2x lanes.max default
   assert.equal(cfg.worker.budgetUsdSoft, 10);
   assert.equal(cfg.worker.maxResumes, 2);
-  assert.equal(cfg.reviewer.mode, "different-model-codex");
+  // #501: default flipped different-model-codex -> engine-agent; a zero-config parse now
+  // succeeds with a DEFAULT-INJECTED reviewer.agent block too (see the dedicated #501 test
+  // block below for the full default-resolution matrix).
+  assert.equal(cfg.reviewer.mode, "engine-agent");
+  assert.equal(cfg.reviewer.agent?.model, DEFAULT_REVIEWER_AGENT_MODEL);
   assert.equal(cfg.labels.prefix, "sapwood:");
   assert.equal(cfg.labels.verifyNa, "sapwood:verify:n/a");
   assert.equal(cfg.labels.planApproved, "sapwood:plan:approved"); // #88 gate⓪
@@ -332,9 +336,9 @@ test("rejects a non-finite budget ceiling (overflow must not disable the cap)", 
   );
 });
 
-test("#13/#170: reviewer/merge defaults — codex reviewer, conductor-merge, silence escalation", () => {
+test("#13/#170/#501: reviewer/merge defaults — engine-agent reviewer, conductor-merge, silence escalation", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.reviewer.mode, "different-model-codex");
+  assert.equal(cfg.reviewer.mode, "engine-agent");
   assert.equal(cfg.reviewer.deltaChainMax, 3);
   assert.equal(cfg.reviewer.escalateAfterSec, 86400);
   assert.equal(cfg.merge.mode, "conductor-merge");
@@ -488,6 +492,46 @@ test("#13: reviewer.mode accepts same-model-trusted and human", () => {
   assert.equal(parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: human }").reviewer.mode, "human");
 });
 
+// ── #501: default reviewer kind flips to engine-agent — config default-resolution matrix ──────
+//
+// AC coverage: zero config; only worker.model set (collision, incl. its error message — see the
+// dedicated D5-extended test above); each explicit mode (regression-pinned); user agent block
+// with/without engine-agent (dead-config both directions — see the #286 batch below); injected
+// default does NOT trip dead-config.
+
+test("#501: zero config resolves reviewer.mode to engine-agent with a valid injected agent block (model != worker.model's own default)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.reviewer.mode, "engine-agent");
+  assert.equal(cfg.worker.model, "opus");
+  assert.equal(cfg.reviewer.agent?.model, DEFAULT_REVIEWER_AGENT_MODEL);
+  assert.notEqual(cfg.reviewer.agent?.model, cfg.worker.model);
+});
+
+test("#501: explicit mode: different-model-codex parses and behaves exactly as today — no agent block, regression-pinned", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: different-model-codex }");
+  assert.equal(cfg.reviewer.mode, "different-model-codex");
+  assert.equal(cfg.reviewer.agent, undefined);
+});
+
+test("#501: explicit mode: same-model-trusted and mode: human still parse with no injected agent block", () => {
+  const trusted = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: same-model-trusted, trustedReviewers: [bot] }",
+  );
+  assert.equal(trusted.reviewer.mode, "same-model-trusted");
+  assert.equal(trusted.reviewer.agent, undefined);
+  const human = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: human }");
+  assert.equal(human.reviewer.mode, "human");
+  assert.equal(human.reviewer.agent, undefined);
+});
+
+test("#501: explicit mode: engine-agent with a user-supplied agent block is used verbatim — no injection happens over it", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: opus }\nreviewer: { mode: engine-agent, agent: { model: haiku, effort: low } }",
+  );
+  assert.equal(cfg.reviewer.agent?.model, "haiku");
+  assert.equal(cfg.reviewer.agent?.effort, "low"); // the user's own value, not ReviewerAgent's "high" default
+});
+
 test("#13: rejects an unknown merge mode", () => {
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nmerge: { mode: yolo }"), /merge/);
 });
@@ -570,11 +614,16 @@ test("#314: reviewer.agent.treeRetentionCap is configurable and must be a positi
   );
 });
 
-test("#286: reviewer.mode: engine-agent REQUIRES reviewer.agent — missing ⇒ reject", () => {
-  assert.throws(
-    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: engine-agent }"),
-    /reviewer\.agent is not set|requires reviewer\.agent/,
-  );
+test("#501: reviewer.mode: engine-agent with reviewer.agent omitted ⇒ default-injected (sane defaults, model differs from worker.model's own default)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: engine-agent }");
+  assert.equal(cfg.reviewer.mode, "engine-agent");
+  assert.equal(cfg.worker.model, "opus"); // worker.model's own default, unchanged
+  assert.equal(cfg.reviewer.agent?.model, DEFAULT_REVIEWER_AGENT_MODEL);
+  assert.equal(cfg.reviewer.agent?.effort, "high");
+  assert.equal(cfg.reviewer.agent?.costCapUsd, 3);
+  assert.equal(cfg.reviewer.agent?.retryAfterSec, 900);
+  assert.equal(cfg.reviewer.agent?.treeRetentionCap, 10);
+  assert.equal(cfg.reviewer.agent?.promptFile, undefined);
 });
 
 test("#286: reviewer.agent REQUIRES agent.model — present block without model ⇒ reject", () => {
@@ -586,20 +635,50 @@ test("#286: reviewer.agent present while mode != engine-agent ⇒ reject (dead-c
     () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: human, agent: { model: opus } }"),
     /reviewer\.agent is set but reviewer\.mode is.*human/,
   );
-  // Also rejected against the DEFAULT mode (different-model-codex), not just an explicit one.
+  // #501: mode's own default flipped to engine-agent, so an agent block with mode OMITTED is no
+  // longer dead-config (it's now the ordinary "let the model default too" shape) — regression-pin
+  // the EXPLICIT-non-engine-agent-mode case instead: the AC's "explicit mode: different-model-codex
+  // ... configs ... behave exactly as today, including the dead-config rejection of a user-supplied
+  // reviewer.agent block alongside them" requirement.
   assert.throws(
-    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { agent: { model: opus } }"),
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: different-model-codex, agent: { model: opus } }"),
     /reviewer\.agent is set but reviewer\.mode is.*different-model-codex/,
   );
 });
 
-test("#286 (D5): reviewer.agent.model === worker.model ⇒ reject at parse", () => {
+test("#501: reviewer.agent present with mode OMITTED ⇒ mode defaults to engine-agent, so the block is NOT dead-config (the injected-default transform never even runs — a user block already satisfies it)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: opus }\nreviewer: { agent: { model: haiku } }");
+  assert.equal(cfg.reviewer.mode, "engine-agent");
+  assert.equal(cfg.reviewer.agent?.model, "haiku");
+});
+
+test("#286 (D5): reviewer.agent.model === worker.model ⇒ reject at parse (user-supplied agent block, exact message, no DEFAULTED wording)", () => {
   assert.throws(
     () =>
       parseConfig(
         "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: opus }\nreviewer: { mode: engine-agent, agent: { model: opus } }",
       ),
     /must differ from worker\.model/,
+  );
+  try {
+    parseConfig(
+      "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: opus }\nreviewer: { mode: engine-agent, agent: { model: opus } }",
+    );
+    assert.fail("expected parse to throw");
+  } catch (err) {
+    assert.doesNotMatch(String(err), /DEFAULTED/);
+  }
+});
+
+test("#501 (D5 extended): worker.model = the INJECTED reviewer.agent default ⇒ reject with the defaulted-case message naming the one-line fix", () => {
+  // Zero-config reviewer (mode omitted, agent omitted) resolves to engine-agent + an INJECTED
+  // agent.model of DEFAULT_REVIEWER_AGENT_MODEL ("sonnet") — an operator who sets ONLY
+  // worker.model to that same value collides with it, exactly as if they'd written it themselves
+  // (D5 cannot be silently defeated by defaults), but the message must say DEFAULTED and name the
+  // fix, per #501's issue text ("set reviewer.agent.model").
+  assert.throws(
+    () => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: ${DEFAULT_REVIEWER_AGENT_MODEL} }`),
+    /DEFAULTED.*collides with worker\.model.*set reviewer\.agent\.model to a different Claude model/s,
   );
 });
 
@@ -1701,7 +1780,7 @@ test("dashboardConfigSubset: carries the drawer's groups + the per-role model/ef
   assert.equal(subset.worker.budgetUsdSoft, 10);
   assert.equal(subset.guard.mode, "hard");
   assert.equal(subset.cost.dailyBudgetUsd, 100);
-  assert.equal(subset.reviewer.mode, "different-model-codex");
+  assert.equal(subset.reviewer.mode, "engine-agent"); // #501
   assert.equal(subset.merge.mode, "conductor-merge");
   assert.equal(subset.labels.needsHuman, "sapwood:needs-human");
   // §3 C/§6 captions read these — the allowlist "must include" them (frontend-design.md §3 E).

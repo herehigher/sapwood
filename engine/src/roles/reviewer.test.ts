@@ -843,9 +843,12 @@ test("CodexReviewer: a custom triggerCommand (#156 reviewer.triggerCommand) is u
 });
 
 test("makeReviewer: threads cfg.reviewer.triggerCommand into the built CodexReviewer's trigger comment", async () => {
+  // #501: reviewer.mode's own default flipped to engine-agent (makeReviewer cannot construct
+  // that kind — see the dedicated #501 test below); pin different-model-codex explicitly since
+  // this test is specifically about the CodexReviewer construction path.
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 1 },
-    reviewer: { triggerCommand: "/review-please" },
+    reviewer: { mode: "different-model-codex", triggerCommand: "/review-please" },
   });
   const calls: Array<[number, string]> = [];
   const forge = {
@@ -887,8 +890,11 @@ test("makeReviewer: threads cfg.doctrine into the built CodexReviewer's trigger 
   try {
     const path = join(dir, "REVIEW-DOCTRINE.md");
     writeFileSync(path, "disabled-consumer rule: gate probes on consumer enablement.");
+    // #501: pin different-model-codex explicitly — reviewer.mode's own default is now
+    // engine-agent, and this test is specifically about the CodexReviewer construction path.
     const cfg = ConfigSchema.parse({
       board: { owner: "o", repo: "r", projectNumber: 1 },
+      reviewer: { mode: "different-model-codex" },
       doctrine: { file: path },
     });
     const calls: Array<[number, string]> = [];
@@ -905,8 +911,10 @@ test("makeReviewer: threads cfg.doctrine into the built CodexReviewer's trigger 
 });
 
 test("makeReviewer: no doctrine file adopted -> the trigger comment is byte-for-byte identical to before #167, never the NO_DOCTRINE placeholder", async () => {
+  // #501: pin different-model-codex explicitly (reviewer.mode's own default is now engine-agent).
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 1 },
+    reviewer: { mode: "different-model-codex" },
     doctrine: { file: "/nonexistent/REVIEW-DOCTRINE.md" },
   });
   const calls: Array<[number, string]> = [];
@@ -964,8 +972,14 @@ test("SameModelTrustedReviewer: only a NAMED trusted login's approval counts —
   assert.equal(r.verdictFromData(mkData({ reviews: [mkReview("trusted-bot", "HEAD", "APPROVED")] })).action, "MERGE_OK");
 });
 
-test("makeReviewer: selects the configured reviewer kind, defaulting to Codex", () => {
-  const codex = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+test("makeReviewer: selects the configured reviewer kind for each Reviewer-implementing mode", () => {
+  // #501: reviewer.mode's own default flipped to engine-agent, which makeReviewer cannot
+  // construct (see the dedicated #501 test below) — pin different-model-codex explicitly here
+  // since this test is about the three Reviewer-implementing kinds makeReviewer DOES build.
+  const codex = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 1 },
+    reviewer: { mode: "different-model-codex" },
+  });
   assert.ok(makeReviewer(codex) instanceof CodexReviewer);
 
   const human = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 }, reviewer: { mode: "human" } });
@@ -976,6 +990,12 @@ test("makeReviewer: selects the configured reviewer kind, defaulting to Codex", 
     reviewer: { mode: "same-model-trusted", trustedReviewers: ["bot"] },
   });
   assert.ok(makeReviewer(trusted) instanceof SameModelTrustedReviewer);
+});
+
+test("#501: makeReviewer throws for the (now-default) engine-agent mode — production wiring (cli.ts) never calls it in that case, always using review/production.ts's dependency-rich construction path instead", () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  assert.equal(cfg.reviewer.mode, "engine-agent"); // #501's new zero-config default
+  assert.throws(() => makeReviewer(cfg), /engine-agent.*constructed via engine-agent\.ts's makeEngineAgentReviewer/);
 });
 
 // ── buildReviewerByKind / makeFallbackReviewers (#54) ────────────────────────────────────────

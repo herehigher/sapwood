@@ -193,7 +193,13 @@ test("makeEngineAgentReviewer: kind is 'engine-agent'", () => {
 });
 
 test("EngineAgentReviewer construction throws when cfg.reviewer.agent is not set (defense-in-depth against a hand-built config)", () => {
-  const cfgNoAgent = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  // #501: a real parse now ALWAYS default-injects reviewer.agent once mode resolves to
+  // engine-agent (zero-config included), so this defense-in-depth check — which exists for a
+  // HAND-BUILT config that bypasses the schema's own guarantee, never a config `parseConfig`
+  // itself could produce — has to strip the field back out after parsing to still exercise it.
+  const cfgWithAgent = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: engine-agent }");
+  assert.ok(cfgWithAgent.reviewer.agent); // sanity: #501's injection did fire
+  const cfgNoAgent = { ...cfgWithAgent, reviewer: { ...cfgWithAgent.reviewer, agent: undefined } };
   const { build } = mkDeps({ runnerQueue: [], cfg: cfgNoAgent as unknown as ReturnType<typeof mkCfg> });
   assert.throws(() => build(), /requires cfg\.reviewer\.agent/);
 });
