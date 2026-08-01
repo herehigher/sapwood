@@ -43,7 +43,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #529: same categorical→conditional GitHub-access fix as architect.md.
   "plan-reviewer.md": "43a042fa33300b8421d3a98e6c253c3ac20a1b678d5b312875dc8f26673d691b",
   "plan-reviewer-confirm.md": "895ae8b6dace1417d576e8398e9918921e78d28b96a4d9a7c07c245e7071ad2d",
-  "plan-drafter.md": "fb01e167a8a198d10eaff1c869df4f82cdc7c6ebdfe75f91775cd31a8faf27aa",
+  "plan-drafter.md": "0d808e7075e91c91fa070aa3c68aa711a9de950a2cbb93d64ce3e0c664bfb188",
   "harvest.md": "82312e3ac79e42e008a9d7477d4b9e601623a9ebb1e5a4fe306e8b3f266d109d",
   // #453 (design #402 R5): intentional edit — the digest's new finding-class tendency table is
   // pointed at, with the design-source rule and the stated blind spot. The FIRST deliberate
