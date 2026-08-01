@@ -371,7 +371,10 @@ fix leg with nothing it could act on. This is §1 and §4 failing *together*, an
 sharpest available evidence for both: layering would have made the note advisory and
 merged, and a dispute channel would have let the producer say so once.
 
-**What closes it.** ⚠️ **ACTION REQUIRED — a human must file a defect issue for this.**
+**What closes it.** ~~ACTION REQUIRED — a human must file a defect issue for this.~~
+**Done: filed as #461, shipped in PR #522 (2026-08-01) — no action remains** (see "Closed
+by #461" below; the struck-through marker is kept struck rather than deleted so the
+paragraph's history stays legible).
 It is *not* one of this design's implementation issues (§11) and is deliberately not
 listed there: the gap is a pre-existing hole in the **engine-agent review path** as
 already shipped (design #279's findings-transport decision), which this design's own PR
