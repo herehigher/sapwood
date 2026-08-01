@@ -628,7 +628,7 @@ plan. This set is **complete** — it covers every item #402 asked this design t
 **Not in this table, on purpose:** §4a's missing dispute channel on the engine-agent path.
 That is a **pre-existing defect** in the review path as already shipped, surfaced by this
 PR rather than specified by #402, so it is not an implementation issue of this design and
-filing it is not a precondition for #402's closure. It carries its own ⚠️ action-required
-note and its adjudicated fix in §4a, for a human to file against the review path. Recorded
-in the design rather than in an issue because the session that found it had no forge
-credentials — the alternative was losing it.
+filing it was not a precondition for #402's closure. It was recorded in the design rather
+than in an issue because the session that found it had no forge credentials — the
+alternative was losing it. Since filed as **#461** (along §4a's adjudicated fix) and
+shipped in **PR #522** (2026-08-01).
