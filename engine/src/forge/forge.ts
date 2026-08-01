@@ -2850,7 +2850,11 @@ export function parseIssueMeta(json: string): IssueMeta {
   return {
     number: d.number,
     title: d.title,
-    state: d.state === "CLOSED" ? "CLOSED" : "OPEN",
+    // #485: MERGED counts as CLOSED — a blocked-by:N whose N resolved as a merged PR-linked
+    // reference is no longer blocking anything. Deliberately an ENUMERATED match, not
+    // `!== "OPEN"`: an unrecognized/garbled state must keep reading OPEN, so the blocked-by
+    // reconcile's fail-direction stays "leave the label on" rather than "unblock on noise".
+    state: d.state === "CLOSED" || d.state === "MERGED" ? "CLOSED" : "OPEN",
     labels: (d.labels ?? []).map((l) => l.name),
     updatedAt: d.updatedAt,
     ...(d.milestone ? { milestone: d.milestone.title } : {}),
