@@ -123,33 +123,40 @@ Three tiers, from strongest to weakest containment (`docs/system-review-2026-07.
 Principle 4). Every role's writes sit at exactly one tier; prefer moving a future
 role's writes UP this ladder over adding a pattern-level deny.
 
-1. **Unreachable (for writes)** — no write tool channel exists at all. All six peripheral roles
-   in this doc hold `ROLE_ALLOWED_TOOLS = "Read,Grep,Glob"` (`engine/src/roles/peripheral.ts:89`)
-   — a real, non-empty READ channel (widened from an empty grant by #235 PR-B) — paired with the
-   hard veto `ROLE_DISALLOWED_TOOLS = "Write,Edit,MultiEdit,NotebookEdit,Bash"`
+1. **Unreachable (for writes)** — no write tool channel exists at all, for five of this doc's six
+   peripheral roles: po, architect, plan-reviewer, plan-drafter, harvest. These five hold
+   `ROLE_ALLOWED_TOOLS = "Read,Grep,Glob"` (`engine/src/roles/peripheral.ts:89`) as their FLOOR —
+   a real, non-empty READ channel (widened from an empty grant by #235 PR-B); po's align/triage
+   modes and architect widen this further still, to also include `WebSearch`/`WebFetch` under the
+   default config (see their own Write-scope rows below for the exact grant) — never `Write`,
+   `Edit`, or `MultiEdit` either way. This is paired with the hard veto
+   `ROLE_DISALLOWED_TOOLS = "Write,Edit,MultiEdit,NotebookEdit,Bash"`
    (`engine/src/roles/peripheral.ts:90`, which wins over any allow from any source, including a
-   target repo's own checked-out settings), or the worker-class-but-`gh`-free
-   `RETRO_ALLOWED_TOOLS` (`engine/src/retro/retro.ts:75`, no `gh` entry) — retro's own `Bash`
-   grant is pattern-scoped to eight specific `git` subcommands (`branch`/`checkout`/`add`/
-   `commit`/`push`/`diff`/`status`/`log`) and carries zero `gh` patterns of any kind, so `gh`
-   itself is unreachable through it even though `git` is not. Every OTHER peripheral role carries
-   no `Bash` grant at all, so for them a whole bypass class (short-flag aliases, quoting escapes)
-   is structurally moot rather than pattern-denied (#110; see
-   [`security.md`](security.md#issues-only-role-sessions-carry-no-shell-110)). This is
-   the strongest tier for writes because there is nothing to intercept — the write capability
-   doesn't exist to begin with; the read channel itself is contained separately, by the guard
-   hook's worktree confinement (`checkReadContainment` in `guard.ts`) — enforced under the
-   default `guard.mode: hard` (`config.ts:888`), degraded to observe-only (logged, never denied)
-   under an operator-configured `guard.mode: soft` (`applyGuardMode`, `guard-hook.ts:89`) — not by
-   this ladder. **The
-   plan-reviewer's freshness re-confirm session (#214, a variant pass within `plan_review`, not a
-   whole new role) carries `CONFIRM_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS`**
-   (`engine/src/roles/peripheral.ts:111`) — byte-identical to the base grant since #235, so it is
-   no longer a narrower exception; it stays tier 1 for WRITES on the same basis as every other
-   role: no `Bash` of any kind (no `git`, no `gh`, no shell to reach either through), no
-   `Write`/`Edit`/`MultiEdit` — the same "capability doesn't exist" argument holds for every write
-   path. See [`security.md`](security.md#issues-only-role-sessions-carry-no-shell-110)'s own note
-   on this session for the full rationale.
+   target repo's own checked-out settings): no `Bash` grant at all, so for them a whole bypass
+   class (short-flag aliases, quoting escapes) is structurally moot rather than pattern-denied
+   (#110; see [`security.md`](security.md#issues-only-role-sessions-carry-no-shell-110)). This is
+   the strongest tier for writes, for these five, because there is nothing to intercept — the
+   write capability doesn't exist to begin with; the read channel itself is contained separately,
+   by the guard hook's worktree confinement (`checkReadContainment` in `guard.ts`) — enforced
+   under the default `guard.mode: hard` (`config.ts:888`), degraded to observe-only (logged, never
+   denied) under an operator-configured `guard.mode: soft` (`applyGuardMode`, `guard-hook.ts:89`)
+   — not by this ladder. **`retro`, the sixth role, does NOT belong in this tier**:
+   `RETRO_ALLOWED_TOOLS` (`engine/src/retro/retro.ts:75`) grants a real `Write`/`Edit`/`MultiEdit`
+   channel plus `Bash` scoped to eight specific `git` subcommands including `commit` and `push`
+   (`branch`/`checkout`/`add`/`commit`/`push`/`diff`/`status`/`log`) —
+   `RETRO_DISALLOWED_TOOLS` (`retro.ts:101-105`) denies pushing to `main`/`master` by name and
+   every `gh` verb, but not `Write`/`Edit`/`MultiEdit` or those `git` subcommands — so the write
+   capability genuinely exists here, unlike the five roles above. Its containment is a shape this
+   ladder does not cleanly name; see its own per-role section below (`### retro (retro)`) for what
+   actually holds it. **The plan-reviewer's freshness re-confirm session (#214, a variant pass
+   within `plan_review`, not a whole new role) carries `CONFIRM_ALLOWED_TOOLS =
+   ROLE_ALLOWED_TOOLS`** (`engine/src/roles/peripheral.ts:111`) — byte-identical to the base grant
+   since #235, so it is no longer a narrower exception; it stays tier 1 for WRITES on the same
+   basis as the five roles above: no `Bash` of any kind (no `git`, no `gh`, no shell to reach
+   either through), no `Write`/`Edit`/`MultiEdit` — the same "capability doesn't exist" argument
+   holds for every write path. See
+   [`security.md`](security.md#issues-only-role-sessions-carry-no-shell-110)'s own note on this
+   session for the full rationale.
 2. **Intercepted** — a tool channel exists, but a fail-closed hook blocks the
    dangerous call before it executes. This is `guard.ts`'s PreToolUse hook, wired into
    every worker session (`worker.ts`) and, defense-in-depth, every role session too
