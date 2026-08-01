@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -471,8 +471,32 @@ const LEGACY_LABEL_CONFIG = {
   escalation: { humanLabels: ["needs-human", "blocked"] },
 };
 
+/** #480: an ABSOLUTE, guaranteed-absent doctrine path — pinned because `mkCfg` builds cfg via
+ *  `ConfigSchema.parse`, which skips `loadConfig`'s config-file-relative anchoring of
+ *  `doctrine.file` (config.ts:1848). Left at the schema default (`docs/REVIEW-DOCTRINE.md`,
+ *  RELATIVE), every doctrine-presence probe in this file — `capHitEscalationNote`'s `existsSync`,
+ *  `loadDoctrine` — would resolve against `process.cwd()`: absent when the suite runs from
+ *  `engine/` (npm's per-workspace cwd, which is why CI stayed green), PRESENT when it runs from
+ *  the repo root, where this repo's own `docs/REVIEW-DOCTRINE.md` really exists. Same
+ *  environment-dependence class as the doctrine's own timing-dependent-assertions ban: same code,
+ *  different runner setup, different verdict. The anchor is the value, not the filesystem. */
+const ABSENT_DOCTRINE_FILE = "/nonexistent/REVIEW-DOCTRINE.md";
+
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
-  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" }, ...LEGACY_LABEL_CONFIG, ...over });
+  ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" },
+    doctrine: { file: ABSENT_DOCTRINE_FILE },
+    ...LEGACY_LABEL_CONFIG,
+    ...over,
+  });
+
+test("#480: mkCfg's doctrine.file is absolute and absent — every doctrine-presence probe in this file has the same verdict from the repo root as from engine/", () => {
+  const cfg = mkCfg();
+  assert.ok(isAbsolute(cfg.doctrine.file), "a relative path would be probed against process.cwd()");
+  assert.equal(existsSync(cfg.doctrine.file), false);
+  // The concrete verdict the cwd-sensitivity flipped (#147 gated-reentry cap escalation).
+  assert.doesNotMatch(capHitEscalationNote(cfg), /review doctrine/i);
+});
 
 const seedRunning = (st: State, name: string, issue: number) =>
   st.upsertWorker({ name, issue, session_id: `s-${name}`, state: "running", started_at: "t", ended_at: null });
@@ -9258,10 +9282,11 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   // #167 review (Codex P2+P3 adjudication): cap-hit is this codebase's nearest mechanism to
   // the review doctrine's prFixCap→needs-human pattern — the escalation comment states the
   // principle (re-examine design/technical direction, not more patches) SELF-CONTAINED, true
-  // regardless of doctrine adoption. mkCfg() here builds cfg via ConfigSchema.parse with no
-  // doctrine file on disk at the default path — the legal, common "no doctrine adopted" case
-  // (doctrine.ts's NO_DOCTRINE) — so the comment must NOT cite a doctrine file that doesn't
-  // exist.
+  // regardless of doctrine adoption. mkCfg() pins `doctrine.file` to ABSENT_DOCTRINE_FILE — the
+  // legal, common "no doctrine adopted" case (doctrine.ts's NO_DOCTRINE) — so the comment must
+  // NOT cite a doctrine file that doesn't exist. #480: that pin is what makes this a fact about
+  // the cfg rather than about the invoking directory; before it, mkCfg left the RELATIVE schema
+  // default here and this very assertion passed from `engine/` and failed from the repo root.
   assert.match(gatedNotices()[0]![1], /re-examine the feature's design/i);
   assert.doesNotMatch(gatedNotices()[0]![1], /review doctrine/i);
   assert.doesNotMatch(gatedNotices()[0]![1], /point 4/i);
