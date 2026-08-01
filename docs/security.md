@@ -131,7 +131,8 @@ role's OWN call site (`architect.ts`, `align.ts`'s po-align/po-triage sessions),
 that could ever reach the grant. `po-pool` (align.ts's third `PO_ALLOWED_TOOLS` caller) stays on
 the ungranted base unconditionally: it renders a distinct prompt (`po-pool.md`), never `po.md`.
 
-**The review family stays offline by construction.** `plan-reviewer`, `plan-drafter`,
+**The review family stays offline by construction** — with one honestly-scoped exception named
+below. `plan-reviewer`, `plan-drafter`,
 `plan-reviewer-confirm`, and every gate② `engine-agent` review session never reference
 `cfg.webAccess` at all — refusal is the absence of a wire-up, not a check that could be
 misconfigured. Gate②'s review-session mode (`reviewCwd`, see below) goes further still: it
@@ -142,6 +143,65 @@ not an inspectable gate — this is recorded as a deliberate reproducibility pro
 `--strict-mcp-config`/`--setting-sources ""` seal (see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard-285)
 below) is unaffected by anything in this section — it was justified independently, for a
 materialized PR tree, and #410 leaves it exactly as it was.
+
+**The exception, stated exactly (#443, `reviewer.agent.runner: codex-exec`).** An operator can
+select a locally spawned `codex exec` process as the engine-agent review session's runner. It is
+**off by default** and this section is what an operator should read before turning it on. For a
+remote-provider CLI, "offline by construction" cannot mean a blanket network denial — the CLI needs
+its own provider — and the CLI's read-only sandbox turns out to restrict far less than its name
+suggests, so the adjudicated claim for that runner is narrower and is stated here rather than
+quietly inherited:
+
+- **No model-invoked egress beyond provider transport.** The session is pinned to
+  `--sandbox read-only` (whose recorded permission profile is network-*restricted* for
+  model-invoked commands), `-c tools.web_search=false`, and `-c mcp_servers={}` — a
+  highest-precedence override, so no MCP server loads from any config source, including a
+  producer-authored `.codex/config.toml` inside the reviewed tree. Plus `--ignore-user-config`
+  (the operator's own `$CODEX_HOME/config.toml`, and therefore its hooks, never load),
+  `--ignore-rules`, and the hardened env described below. The prompt reaches the CLI on
+  **stdin from a file**; the module spawns an argv vector and never a shell, so
+  producer-influenced text has no interpolation surface at all. The wall-clock session timeout
+  terminates the whole detached **process group**, so a descendant forked by reviewed code cannot
+  outlive it.
+- **Recorded blind spot 1 — execution.** `--sandbox read-only` blocks *writes*, not *execution*: a
+  shell-capable agent under it can still run producer-controlled code from the materialized tree.
+  This is NOT equivalent to the Claude runner's Read/Grep/Glob-only, no-`Bash` profile.
+- **Recorded blind spot 2 — host-wide reads, including your credentials.** The same sandbox does
+  **not confine the read scope**. Measured on codex-cli 0.145.0: its read-only Seatbelt policy
+  contains `(allow file-read*)`, and the session's own recorded permission profile reads
+  `{special: root, access: read}`. `-C <treeDir>` sets the working directory; it is not a
+  containment root. So a review session that is prompt-injected by the code it is reviewing — the
+  threat this whole section exists for — can read **any file the engine's own user can read**,
+  including `~/.codex/auth.json`, `~/.config/gh/hosts.yml`, and SSH private keys, and return their
+  contents through provider-visible output. Treat enabling this runner as granting the reviewed
+  code's author a read of your machine's user-readable files if they can steer the review session.
+- **Recorded blind spot 3 — the inherited environment.** The session's environment is the engine's
+  own, minus a denylist. `codexSessionEnv` strips the well-known credential families — forge tokens,
+  `SSH_AUTH_SOCK`/`SSH_AGENT_PID`, AWS/GCP/Azure, `KUBECONFIG`, npm/pip/twine/cargo registry tokens,
+  Docker — plus a generic sweep of any variable whose name ends in `_TOKEN`, `_SECRET`, `_API_KEY`,
+  `_PASSWORD`, or `_CREDENTIALS`. **That list cannot be exhaustive.** Everything else is inherited,
+  and dumping it costs a steered session one `env`. An operator who runs the engine from a shell
+  carrying secrets should assume a steered review session can read them. (An allowlist was
+  considered and rejected: one that silently omits something the CLI needs breaks every review, and
+  the only way to find the omission is a paid live run — a denylist plus sweep, with an explicit
+  keep-set for provider transport, has the bounded failure mode.)
+- **The mitigations are partial, and named as such.** Alongside the strip above, `codexSessionEnv`
+  redirects `GH_CONFIG_DIR` at an empty per-session directory and pins
+  `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` to `/dev/null` with `GIT_TERMINAL_PROMPT=0`. Those remove
+  the ambient *handles*; they do not stop a *read* of the underlying files, which remain on disk and
+  readable. **Filesystem confinement is what would actually close blind spot 2, and it is
+  deliberately not shipped**: the adjudication (2026-08-01, R2) rules out a new outer OS/container
+  fence (trusted-repos posture; the marginal-complexity principle). Blind spots 1 and 2 are emitted
+  at every codex-exec spawn as named entries in `engine-review-containment-gap`'s `gaps` payload
+  (`model-invoked-shell-execution`, `host-wide-filesystem-reads`), so they are on the durable
+  record rather than assumed away — and that pre-spawn record is **load-bearing**: if it cannot be
+  written, the session is not spawned and the review degrades to `unavailable`, rather than running
+  unrecorded.
+- **Unchanged either way.** The default runner is `claude`, and nothing above applies to it — the
+  Claude review session has no `Bash` at all and is guard-confined to the materialized tree. Gate②'s
+  own safety properties are runner-independent: blocking stays engine-derived over live PR data, the
+  session's output goes through the same element-wise validation for both runners, and an
+  unidentifiable session model maps to `unavailable` rather than to a verdict.
 
 **Detected, not pinned — the operator's own settings can still silently strip the grant.** An
 earlier version of this feature pinned `--strict-mcp-config`/`--setting-sources ""` for EVERY

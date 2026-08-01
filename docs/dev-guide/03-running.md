@@ -10,6 +10,7 @@ For installation into another repository, use [Getting started](../getting-start
 - GitHub CLI authenticated with repository and Project scopes; `sapwood init` performs the preflight (`engine/src/loop/init.ts`).
 - Claude Code CLI available as `claude`, or selected with `CLAUDE_BIN` (`engine/src/roles/worker.ts`).
 - The default reviewer (#501) is the engine-composed `engine-agent` Claude session (`engine/src/review/`) — it runs locally on the same `claude` CLI above, at a per-review dollar cost (`reviewer.agent.costCapUsd`, default $3; see `docs/configuration.md`). Other supported kinds, selectable via `reviewer.mode`, include a Codex-backed GitHub review trigger (`different-model-codex`, not a locally spawned `codex` command — `engine/src/roles/reviewer.ts`) and trusted/human GitHub reviews.
+- Independently of the kind, the `engine-agent` review session has a **runner** dimension (#443, `reviewer.agent.runner`): `claude` (default, the local `claude` CLI) or `codex-exec` — a locally spawned `codex exec` process, which makes gate② cross-vendor and requires the `codex` CLI on `PATH` (or `CODEX_BIN`) plus a codex login. Don't confuse it with the hosted `different-model-codex` mode above: that one spawns nothing and reviews through a PR comment. See `docs/configuration.md` for the runner's advisory-budget and recorded-blind-spot semantics.
 
 ## Install & build
 

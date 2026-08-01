@@ -228,6 +228,28 @@ const injectedReviewerAgents = new WeakSet<object>();
 const ReviewerAgent = z
   .object({
     model: z.string().min(1),
+    // #443 (design adjudication 2026-08-01): WHICH local CLI executes the review session — the
+    // reviewer-local executor seam (review/review-session.ts). `claude` (the default) is
+    // byte-for-byte today's behavior: RoleRunner.run()'s `reviewCwd` facility, unchanged.
+    // `codex-exec` runs the same session through a locally invoked `codex exec` process instead
+    // (review/codex-exec.ts), giving gate② a CROSS-VENDOR review with none of the hosted
+    // `@codex review` connector's failure modes. NOT to be confused with `reviewer.mode:
+    // different-model-codex`, which asks a HOSTED GitHub App to review and spawns nothing locally.
+    // Living inside this block means the existing dead-config rule already covers it: `runner` set
+    // while `mode` isn't engine-agent is rejected with the rest of `reviewer.agent`.
+    runner: z.enum(["claude", "codex-exec"]).default("claude"),
+    // #443 (R1): the pinned per-million-token prices the codex-exec runner's ESTIMATED spend is
+    // computed from — it has no hard budget mechanism, so `costCapUsd` degrades to advisory and
+    // spend is recorded as a flagged estimate (see review/codex-exec.ts). User-tunable rather than
+    // hardcoded because list prices differ per model and plan. Dead config for the `claude` runner
+    // (which reports real dollars) — rejected below rather than silently ignored.
+    codexPricing: z
+      .object({
+        inputUsdPerMTok: z.number().finite().nonnegative(),
+        outputUsdPerMTok: z.number().finite().nonnegative(),
+      })
+      .strict()
+      .optional(),
     effort: z.enum(["low", "medium", "high"]).default("high"),
     // Same #74 promptFile pattern as worker.promptFile: unset -> the engine's shipped
     // `engine/prompts/engine-reviewer.md`; a relative path resolves against the CONFIG FILE's
@@ -245,7 +267,22 @@ const ReviewerAgent = z
     // can exceed this bound until that lane records a decisive outcome.
     treeRetentionCap: z.number().int().positive().default(10),
   })
-  .strict();
+  .strict()
+  .superRefine((a, ctx) => {
+    // #443 (R1): the SAME dead-config stance the `reviewer.agent` block itself gets. A pricing
+    // table is meaningless for the `claude` runner (whose CLI reports real `total_cost_usd`), so
+    // shipping one there would read as "my estimates are configured" while nothing consults it.
+    if (a.runner !== "codex-exec" && a.codexPricing !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["codexPricing"],
+        message:
+          `reviewer.agent.codexPricing is set but reviewer.agent.runner is "${a.runner}", not codex-exec — ` +
+          "the pricing table only feeds the codex-exec runner's estimated-spend recording; remove it or set " +
+          "runner: codex-exec (dead config is rejected, never silently ignored)",
+      });
+    }
+  });
 
 // #286 (E4a, design #279 §4): CI execution-evidence config — which CheckRun name+App pairs
 // count as trusted execution evidence for a code-verifiable AC's `confirmed` status (a
@@ -1648,7 +1685,21 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
   // silently change cost, CLAUDE.md's user-tunables rule). The message differs only in WORDING:
   // an injected block (the zero-config case, or "only worker.model set") names the one-line fix
   // an operator who never wrote a reviewer.agent block themselves actually needs.
-  if (cfg.reviewer.mode === "engine-agent" && cfg.reviewer.agent && cfg.reviewer.agent.model === cfg.worker.model) {
+  // #443 (D5 generalization to a (provider, model) identity): this static check compares two BARE
+  // MODEL NAMES, which is only meaningful when both sides run against the SAME provider — true
+  // exactly when the review session runs on the Claude CLI (`runner: claude`, the default), since
+  // the worker leg always does. With `runner: codex-exec` the review session runs against a
+  // DIFFERENT provider by construction, so the identities cannot collide no matter what the two
+  // model strings happen to say, and this check would be a false rejection. Deliberately NOT solved
+  // with a `provider` config key (the adjudication rejected inventing one): the runtime half —
+  // engine-agent.ts's pre-/post-session checks over the session's OWN recorded (provider, model)
+  // telemetry — is where a codex-exec review's separation is actually established.
+  if (
+    cfg.reviewer.mode === "engine-agent" &&
+    cfg.reviewer.agent &&
+    cfg.reviewer.agent.runner === "claude" &&
+    cfg.reviewer.agent.model === cfg.worker.model
+  ) {
     const wasDefaulted = injectedReviewerAgents.has(cfg.reviewer.agent);
     ctx.addIssue({
       code: z.ZodIssueCode.custom,

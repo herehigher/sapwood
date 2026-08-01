@@ -600,6 +600,71 @@ test("#286: reviewer.mode: engine-agent + reviewer.agent parses with sane defaul
   assert.equal(cfg.reviewer.agent?.promptFile, undefined);
 });
 
+// ── #443: reviewer.agent.runner — the executor seam's config surface ──────────────────────────
+
+test("#443: reviewer.agent.runner defaults to claude (unset = today's behavior), accepts codex-exec, and rejects anything else", () => {
+  assert.equal(parseConfig(BASE_ENGINE_AGENT).reviewer.agent?.runner, "claude");
+  const codex = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\nreviewer: { mode: engine-agent, agent: { model: gpt-5.4-codex, runner: codex-exec } }\n",
+  );
+  assert.equal(codex.reviewer.agent?.runner, "codex-exec");
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\nreviewer: { mode: engine-agent, agent: { model: opus, runner: gemini } }\n",
+      ),
+    /runner/,
+  );
+});
+
+test("#443: the #501 default-injected agent block carries runner: claude — the zero-config default reviewer is still the local Claude session", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: engine-agent }");
+  assert.equal(cfg.reviewer.agent?.runner, "claude");
+});
+
+test("#443: `runner` inside the agent block inherits the EXISTING dead-config rule — set while mode isn't engine-agent ⇒ rejected with the whole block", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: different-model-codex, agent: { model: opus, runner: codex-exec } }\n",
+      ),
+    /reviewer\.agent is set but reviewer\.mode is.*different-model-codex/,
+  );
+});
+
+test("#443 (R1): reviewer.agent.codexPricing is dead config for the claude runner (rejected), and configurable for codex-exec", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\n" +
+          "reviewer: { mode: engine-agent, agent: { model: opus, codexPricing: { inputUsdPerMTok: 1, outputUsdPerMTok: 2 } } }\n",
+      ),
+    /codexPricing is set but reviewer\.agent\.runner is .*claude.*, not codex-exec/,
+  );
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\n" +
+      "reviewer: { mode: engine-agent, agent: { model: gpt-5.4-codex, runner: codex-exec, codexPricing: { inputUsdPerMTok: 1.25, outputUsdPerMTok: 10 } } }\n",
+  );
+  assert.deepEqual(cfg.reviewer.agent?.codexPricing, { inputUsdPerMTok: 1.25, outputUsdPerMTok: 10 });
+});
+
+test("#443 (D5 generalization): the parse-time model-collision check applies to the claude runner only — a codex-exec review is cross-PROVIDER by construction, so an identical model STRING is not a collision", () => {
+  // Same model name on both sides, claude runner ⇒ still rejected, exactly as before #443.
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: opus }\nreviewer: { mode: engine-agent, agent: { model: opus } }\n",
+      ),
+    /D5/,
+  );
+  // Same model name, codex-exec runner ⇒ parses: the runtime (provider, model) check is what
+  // establishes separation for that runner, and no `provider` config key was invented.
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: opus }\nreviewer: { mode: engine-agent, agent: { model: opus, runner: codex-exec } }\n",
+  );
+  assert.equal(cfg.reviewer.agent?.runner, "codex-exec");
+});
+
 test("#314: reviewer.agent.treeRetentionCap is configurable and must be a positive integer", () => {
   const cfg = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\nreviewer: { mode: engine-agent, agent: { model: opus, treeRetentionCap: 3 } }\n",

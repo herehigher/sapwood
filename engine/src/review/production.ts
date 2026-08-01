@@ -10,6 +10,7 @@ import type { RoleRunner } from "../roles/peripheral.js";
 import type { State, WorkerRow } from "../state/state.js";
 import type { PerAcResult } from "./agent-output.js";
 import { deliverEngineReviewAudit, type EngineReviewArtifact } from "./audit.js";
+import { CodexExecReviewSessionExecutor, DEFAULT_CODEX_PRICING } from "./codex-exec.js";
 import type { EngineAgentDriveDeps } from "./drive.js";
 import { makeEngineAgentReviewer } from "./engine-agent.js";
 import {
@@ -19,6 +20,7 @@ import {
   type MaterializeResult,
   materializeWithExternalFetch,
 } from "./materializer.js";
+import type { ReviewSessionExecutor } from "./review-session.js";
 
 export interface ProductionEngineAgentOptions {
   sourceRepoDir?: string;
@@ -130,9 +132,28 @@ export function makeProductionEngineAgent(
   const now = options.now;
   const log = options.log ?? console.error;
 
+  // #443: the executor-selection composition. `claude` (the default) supplies NOTHING here — the
+  // reviewer's own default seam over `runner` is byte-for-byte the pre-#443 path. `codex-exec`
+  // builds the local codex session runner, wired to this engine's real durable event channel so
+  // R1/R2's honest-recording events (advisory budget, unknown cost, containment blind spot) land in
+  // the same event stream every other engine fact does.
+  const executor: ReviewSessionExecutor | undefined =
+    cfg.reviewer.agent?.runner === "codex-exec"
+      ? new CodexExecReviewSessionExecutor({
+          stateDir: join(sourceRepoDir, "data", "sessions", "review-codex"),
+          // The SAME wall-clock ceiling every other session in this engine gets — a timeout is not
+          // a cost cap, and R1 changes nothing about it.
+          timeoutSec: cfg.worker.timeoutSec,
+          pricing: cfg.reviewer.agent.codexPricing ?? DEFAULT_CODEX_PRICING,
+          log,
+          appendEvent: (kind, payload) => state.appendEvent(kind, payload),
+        })
+      : undefined;
+
   const reviewer = makeEngineAgentReviewer({
     cfg,
     runner,
+    ...(executor ? { executor } : {}),
     getAcSnapshot: (issue) => state.getAcSnapshot(issue),
     getWorkerActualModels: (issue) => state.getWorkerActualModels(issue),
     ...(() => {
