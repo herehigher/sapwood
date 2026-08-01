@@ -222,8 +222,9 @@ Recovery: stop whatever is restarting the engine (usually a supervisor without i
 restart limit — configure one; see [security.md](security.md)'s supervisor
 prerequisite), fix the crash's cause, and start the engine once the window has drained
 — a start that counts fewer than `maxBirths` births clears the park automatically
-(`park-resumed`, `via: restart-window-clear`). No state surgery is needed; deleting the
-`park_state` row by hand also works but should never be necessary.
+(`park-resumed`, `via: restart-window-clear`). No state surgery is needed;
+`sapwood park clear --source rapid-restart` (with the engine stopped) also works but
+should never be necessary.
 
 ## Consecutive-stalls park (#407)
 
@@ -248,16 +249,32 @@ dispatch surface is gone, so the engine deliberately does not read it as recover
 
 1. Diagnose the wedge — each `engine-stalled` event's payload names the open round/phase, the
    last event, and the tick age — and fix the cause.
-2. Clear the park by deleting its `park_state` row (the same manual channel as every park):
+2. Stop the engine, then clear the park with the engine's own verb (#475):
 
    ```sh
-   sqlite3 data/sapwood.sqlite "DELETE FROM park_state WHERE source = 'consecutive-stalls'"
+   sapwood park clear --source consecutive-stalls
    ```
 
-3. Start (or restart) the engine. The next start observes the deletion, records the clear
-   (`park-resumed`, `via: operator-clear`), removes the `data/ESCALATION` marker, and resumes
-   dispatch. The streak restarts from zero — if the wedge was not actually fixed, a fresh
-   streak re-parks and re-escalates as a new episode.
+   It performs the clear inside the engine's protocol, **receipt-first**: the `park-resumed`
+   receipt (`via: operator-clear`) is appended *before* the `park_state` row is deleted, and the
+   `data/ESCALATION` marker comes down last — the same order the engine's startup path uses.
+   It **refuses** while a live engine holds the data dir (the single-instance lock, #382), which
+   is exactly the case where a raw row deletion could let a dispatch gate see the absent row
+   before any receipt is in the ledger.
+3. Start the engine again. The streak restarts from zero — if the wedge was not actually fixed,
+   a fresh streak re-parks and re-escalates as a new episode.
+
+**Break-glass fallback.** If the CLI is unavailable, deleting the row by hand still works — the
+engine's *next start* recognizes a receiptless missing row on an escalated episode as an operator
+act, writes the same `park-resumed` receipt, and removes the marker:
+
+```sh
+sqlite3 data/sapwood.sqlite "DELETE FROM park_state WHERE source = 'consecutive-stalls'"
+```
+
+Do this only with the engine **stopped**, and restart it afterwards: between the deletion and the
+next start there is no receipt in the ledger, and a running engine's dispatch gate would observe
+the absent row in that window.
 
 Until you act, the park and its single, deduped escalation stand across any number of restarts
 — nothing is re-spammed and nothing is lost. A *transient* wedge (a host sleeping mid-round, a
@@ -302,16 +319,19 @@ sqlite3 data/sapwood.sqlite \
 
 Recovery is **operator-explicit — this park never auto-clears**, and unlike an environment park
 there is nothing to probe: the loop itself is healthy, so no signal the engine could re-test would
-mean anything. Fix the cause, then:
+mean anything. Fix the cause, stop the engine, then:
 
 ```sh
-sqlite3 data/sapwood.sqlite "DELETE FROM park_state WHERE source = 'idle-churn'"
+sapwood park clear --source idle-churn
 ```
 
-The running loop notices the row is gone at its next round-open check and resumes; a restart works
-too. The streak restarts from zero — the detection event consumes the rounds that produced it —
-so if the cause was not actually fixed, a fresh set of K rounds re-parks as a new episode rather
-than re-spamming the old one.
+The verb is receipt-first and refuses under a live engine — see the
+[consecutive-stalls section](#consecutive-stalls-park-407) for why, and for the raw-SQL
+break-glass fallback (same shape, `source = 'idle-churn'`). Start the engine again afterwards;
+the running loop also notices the row is gone at its next round-open check. The streak restarts
+from zero — the detection event consumes the rounds that produced it — so if the cause was not
+actually fixed, a fresh set of K rounds re-parks as a new episode rather than re-spamming the old
+one.
 
 ## How a dead engine says why it died (#407)
 

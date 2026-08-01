@@ -47,9 +47,15 @@
 // CLEARING STORY — OPERATOR-EXPLICIT, and nothing else (PR #473 round 3, P3 ruling:
 // degrade-to-human, no new probe machinery). The episode has NO probe and NO auto-clear: once
 // open, it stands — across any number of restarts, with its single deduped escalation and its
-// evidence preserved — until the operator deletes the `consecutive-stalls` park_state row (the
-// SAME manual channel the sibling rapid-restart park documents); the next engine start observes
-// the deletion, appends the `park-resumed` receipt (`via: "operator-clear"`), and resumes.
+// evidence preserved — until the OPERATOR clears it. Two channels, one protocol:
+//   * SANCTIONED (#475): `sapwood park clear --source consecutive-stalls` (loop/park-clear.ts)
+//     does the clear inside the engine — receipt first, then the row, then the marker — and
+//     refuses while a live engine holds the data dir.
+//   * BREAK-GLASS: deleting the `consecutive-stalls` park_state row by hand still works. The
+//     next engine start observes the deletion and appends the receipt itself (the branch below).
+//     Its residual is exactly why #475 exists: between the DELETE and that start there is no
+//     receipt in the ledger, so a still-RUNNING engine's dispatch gate could observe the absent
+//     row un-receipted. The doc mandates a stopped engine + restart; the verb removes the need.
 //
 // Why this deliberately DIFFERS from rapid-restart's auto-clear, per the same ruling: rapid-
 // restart can honestly re-evaluate its trip condition at every start (births inside a window
@@ -154,9 +160,11 @@ export function detectConsecutiveStalls(
     `sapwood: consecutive-stall breaker tripped — ${reason}. Autonomous dispatch is parked. ` +
     `The same wedge appears to recur on every restart; restarting again will not fix it, and the ` +
     `park does NOT auto-clear. Diagnose the stall (the engine-stalled events name the round/phase ` +
-    `and last event), fix the cause, then clear the park by deleting its park_state row ` +
-    `(docs/troubleshooting.md has the exact command) — the next start records the operator clear ` +
-    `and resumes dispatch. See also docs/getting-started.md ("Running under a supervisor").`;
+    `and last event), fix the cause, then stop the engine and run ` +
+    `\`sapwood park clear --source ${CONSECUTIVE_STALLS_PARK_SOURCE}\` (#475 — receipt-first, and it ` +
+    `refuses while an engine holds the data dir; docs/troubleshooting.md keeps the raw-SQL ` +
+    `break-glass). Starting the engine again resumes dispatch. See also docs/getting-started.md ` +
+    `("Running under a supervisor").`;
   /** The immediate local escalation — same channel, ordering, and mirror-heal contract as
    *  rapid-restart.ts's escalateLocally (see its own doc): the log-deduped park-escalated event
    *  FIRST, then the ESCALATION marker and the escalated_at latch as idempotent mirrors. The
