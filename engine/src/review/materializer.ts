@@ -500,3 +500,84 @@ export async function materialize(opts: MaterializeOptions): Promise<Materialize
 
   return { kind: "materialized", treeDir: dir, oid, manifest };
 }
+
+// ── #499: external-head fallback ────────────────────────────────────────────────────────────
+
+/** #499: failure signatures that mean "the object database does not have this oid" — as opposed
+ *  to a timeout, a bad treeDir, or an OID-verification mismatch. Only this class is worth a
+ *  remedial remote fetch; everything else fails exactly as before. */
+export const MISSING_OBJECT_SIGNATURE = /unable to read tree|bad object|not a valid object|missing object/i;
+
+/** #499: pure builder, pinned like its siblings above. Fetches every branch head and every PR
+ *  head from `remoteUrl` into a private `refs/external/*` namespace — by REF, not by raw sha,
+ *  because sha-in-want depends on server config while advertised refs always resolve, and the
+ *  head we are missing is by construction a branch or PR head on the forge. The namespace keeps
+ *  the mirror refspec's `--prune` (buildFetchInvocation) from ever fighting these refs' objects
+ *  mid-materialization: the remedial fetch happens immediately before the retry checkout, and a
+ *  later prune only unpins objects for gc, which cannot un-materialize an already-built tree. */
+export function buildExternalHeadFetchInvocation(
+  cloneDir: string,
+  remoteUrl: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): GitInvocation {
+  return {
+    args: [
+      "-C",
+      cloneDir,
+      "-c",
+      "core.hooksPath=/dev/null",
+      "fetch",
+      "--no-tags",
+      remoteUrl,
+      "+refs/heads/*:refs/external/heads/*",
+      "+refs/pull/*/head:refs/external/pull/*",
+    ],
+    env: gitIsolationEnv(baseEnv),
+  };
+}
+
+/** #499: the source repo's `origin` URL (the forge remote the lanes push to), or null when there
+ *  is no usable origin — never throws. Read from the engine checkout's own config, which is the
+ *  same producer-writable surface `createPrivateClone` already reads (see
+ *  PrivateCloneOptions.sourceRepoDir's doc): safe for the same reason — fetched objects are
+ *  content-addressed and `materialize` verifies the checked-out OID, so a redirected origin can
+ *  refuse us objects but cannot substitute different content for the requested head. */
+export async function sourceOriginUrl(sourceRepoDir: string, timeoutMs: number = DEFAULT_GIT_TIMEOUT_MS): Promise<string | null> {
+  try {
+    const { stdout } = await pexecFile("git", ["-C", resolve(sourceRepoDir), "remote", "get-url", "origin"], {
+      env: gitIsolationEnv(),
+      timeout: timeoutMs,
+    });
+    const url = stdout.trim();
+    return url === "" ? null : url;
+  } catch {
+    return null;
+  }
+}
+
+/** #499: `materialize`, plus one bounded remedial step for the wedge class hit live 2026-08-01 —
+ *  a PR head created OUTSIDE this machine (GitHub update-branch, a human pushing from another
+ *  clone, a fork PR) is absent from the local object store, so the private clone (whose origin
+ *  is the LOCAL repo) can never check it out, and the review leg retries forever. On a
+ *  missing-object failure: fetch branch/PR heads from the source repo's origin into the private
+ *  clone, retry `materialize` ONCE, and otherwise return the original failure — which flows to
+ *  the existing REVIEW_UNAVAILABLE queue path and is bounded by the #426 aging escalation, so
+ *  this adds no new retry state anywhere. */
+export async function materializeWithExternalFetch(
+  opts: MaterializeOptions & { sourceRepoDir: string; log?: (message: string) => void },
+): Promise<MaterializeResult> {
+  const first = await materialize(opts);
+  if (first.kind !== "failure" || !MISSING_OBJECT_SIGNATURE.test(first.reason)) return first;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS;
+  const remoteUrl = await sourceOriginUrl(opts.sourceRepoDir, timeoutMs);
+  if (remoteUrl == null) return first;
+  opts.log?.(`[sapwood:review] head ${opts.oid} is absent from the local object store — fetching external heads from origin (#499)`);
+  const { args, env } = buildExternalHeadFetchInvocation(opts.clone.dir, remoteUrl);
+  try {
+    await pexecFile("git", args, { env, timeout: timeoutMs });
+  } catch (err) {
+    opts.log?.(`[sapwood:review] external-head fetch failed: ${(err as Error).message} (#499)`);
+    return first;
+  }
+  return materialize(opts);
+}

@@ -17,12 +17,15 @@ import {
   assertOutsideWorktreeMounts,
   buildCheckoutInvocation,
   buildCloneInvocation,
+  buildExternalHeadFetchInvocation,
   buildFetchInvocation,
   createPrivateClone,
   defaultPrivateCloneDir,
   defaultWorktreeRoot,
   MaterializerError,
+  MISSING_OBJECT_SIGNATURE,
   materialize,
+  materializeWithExternalFetch,
 } from "./materializer.js";
 
 // ── fixture plumbing ────────────────────────────────────────────────────────────────────────
@@ -1220,6 +1223,112 @@ test("materialize: never rejects even when the pre-checkout treeDir probe itself
     const result = await materialize({ clone, oid: headOid(shared), treeDir });
     assert.equal(result.kind, "failure");
     if (result.kind === "failure") assert.match(result.reason, /treeDir setup/);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(treeRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+// ── #499: external-head fallback ────────────────────────────────────────────────────────────
+
+test("buildExternalHeadFetchInvocation (#499): pinned argv (hooks disabled, --no-tags, refs/external namespace) and isolated env", () => {
+  const { args, env } = buildExternalHeadFetchInvocation("/priv/clone.git", "https://github.com/o/r.git", {
+    PATH: "/usr/bin",
+    GIT_CONFIG_GLOBAL: "/tmp/hostile",
+  });
+  assert.deepEqual(args, [
+    "-C",
+    "/priv/clone.git",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "fetch",
+    "--no-tags",
+    "https://github.com/o/r.git",
+    "+refs/heads/*:refs/external/heads/*",
+    "+refs/pull/*/head:refs/external/pull/*",
+  ]);
+  assert.equal(env.GIT_CONFIG_GLOBAL, "/dev/null");
+  assert.equal(env.GIT_CONFIG_SYSTEM, "/dev/null");
+});
+
+test("MISSING_OBJECT_SIGNATURE (#499): matches the object-absence class only", () => {
+  assert.ok(MISSING_OBJECT_SIGNATURE.test("checkout of abc failed: fatal: unable to read tree (abc)"));
+  assert.ok(MISSING_OBJECT_SIGNATURE.test("fatal: bad object abc"));
+  assert.ok(!MISSING_OBJECT_SIGNATURE.test('treeDir "/x" already exists and is not empty'));
+  assert.ok(!MISSING_OBJECT_SIGNATURE.test("checkout of abc failed: Command failed: timeout"));
+});
+
+test("materializeWithExternalFetch (#499): a head absent locally but reachable on the source repo's origin is fetched and materialized", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const treeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-tree-"));
+  // `remote` plays the forge: commit A on main, then commit B — B never reaches `shared`.
+  const remote = initSharedRepo();
+  let shared: string | null = null;
+  try {
+    writeFileSync(join(remote, "a.txt"), "a\n");
+    git(remote, ["add", "a.txt"]);
+    git(remote, ["commit", "-qm", "A"]);
+    shared = mkdtempSync(join(tmpdir(), "sapwood-materializer-shared-"));
+    rmSync(shared, { recursive: true, force: true });
+    git(tmpdir(), ["clone", "-q", remote, shared]); // origin -> remote, at commit A
+    writeFileSync(join(remote, "b.txt"), "b\n");
+    git(remote, ["add", "b.txt"]);
+    git(remote, ["commit", "-qm", "B"]); // exists ONLY on the "forge"
+    const oidB = git(remote, ["rev-parse", "HEAD"]).trim();
+
+    const cloneDir = join(cloneRoot, "clone.git");
+    const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    // Plain materialize cannot see B — the exact live wedge.
+    const direct = await materialize({ clone, oid: oidB, treeDir: join(treeRoot, "direct") });
+    assert.equal(direct.kind, "failure");
+    assert.ok(MISSING_OBJECT_SIGNATURE.test((direct as { reason: string }).reason), (direct as { reason: string }).reason);
+
+    const logged: string[] = [];
+    const result = await materializeWithExternalFetch({
+      clone,
+      oid: oidB,
+      treeDir: join(treeRoot, "fallback"),
+      sourceRepoDir: shared,
+      log: (m) => logged.push(m),
+    });
+    assert.equal(result.kind, "materialized", JSON.stringify(result));
+    if (result.kind === "materialized") {
+      assert.ok(
+        result.manifest.some((e) => e.path === "b.txt"),
+        "commit B's tree materialized",
+      );
+    }
+    assert.ok(logged.some((m) => m.includes("absent from the local object store")));
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(treeRoot, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+    if (shared) rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("materializeWithExternalFetch (#499): no usable origin -> the original failure is returned unchanged (no throw)", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const treeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-tree-"));
+  const shared = initSharedRepo(); // no origin remote at all
+  try {
+    writeFileSync(join(shared, "a.txt"), "a\n");
+    git(shared, ["add", "a.txt"]);
+    git(shared, ["commit", "-qm", "A"]);
+    const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir: join(cloneRoot, "clone.git"), worktreeRoot });
+    const missing = "0123456789012345678901234567890123456789";
+    const result = await materializeWithExternalFetch({
+      clone,
+      oid: missing,
+      treeDir: join(treeRoot, "t"),
+      sourceRepoDir: shared,
+    });
+    assert.equal(result.kind, "failure");
   } finally {
     rmSync(worktreeRoot, { recursive: true, force: true });
     rmSync(cloneRoot, { recursive: true, force: true });
