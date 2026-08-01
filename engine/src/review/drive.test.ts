@@ -1044,3 +1044,55 @@ test("driveEngineAgentReview (#503, #507 P1): unavailable pin INSIDE its backoff
   const outcome = await driveEngineAgentReview(deps, 1, 2);
   assert.equal(outcome.kind, "ci-red", "a red build must not wait out the unavailable-pin backoff");
 });
+
+test("driveEngineAgentReview (#503, #507 P1 round 2): an UNDELIVERED crash-persisted decisive artifact blocks the ci-red route — receipt before downstream action", async () => {
+  const { deps, recorded } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+    reconcileAuditDelivery: async () => ({ delivered: false, reason: "comment post still failing" }),
+  });
+  recorded.pin = { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "unavailable" };
+  recorded.wal = {
+    runId: "run-1",
+    head: "H1",
+    base: "B1",
+    diffHash: "d",
+    treeManifestHash: null,
+    attemptStart: "2026-01-01T00:00:00.000Z",
+    decisiveOutcome: "rejected",
+    reviewArtifactJson: "{}",
+    auditCommentId: null,
+    auditDeliveredAt: null,
+  };
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued", "a fix leg must not move the head while the decisive artifact is undelivered");
+  assert.equal(recorded.pin?.kind, "unavailable", "pin untouched — reconcile retries next tick");
+});
+
+test("driveEngineAgentReview (#503, #507 P1 round 2): once the WAL reconcile DELIVERS the artifact, the ci-red route proceeds in the same pass", async () => {
+  const { deps, recorded } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+    reconcileAuditDelivery: async () => ({ delivered: true }),
+  });
+  recorded.pin = { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "unavailable" };
+  recorded.wal = {
+    runId: "run-1",
+    head: "H1",
+    base: "B1",
+    diffHash: "d",
+    treeManifestHash: null,
+    attemptStart: "2026-01-01T00:00:00.000Z",
+    decisiveOutcome: "rejected",
+    reviewArtifactJson: "{}",
+    auditCommentId: null,
+    auditDeliveredAt: null,
+  };
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "ci-red", "audit delivered first, then the red routes to a fix leg");
+  assert.equal(recorded.pin?.kind, "decisive", "the reconcile upgraded the pin before the route fired");
+});
