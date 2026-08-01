@@ -131,7 +131,8 @@ role's OWN call site (`architect.ts`, `align.ts`'s po-align/po-triage sessions),
 that could ever reach the grant. `po-pool` (align.ts's third `PO_ALLOWED_TOOLS` caller) stays on
 the ungranted base unconditionally: it renders a distinct prompt (`po-pool.md`), never `po.md`.
 
-**The review family stays offline by construction.** `plan-reviewer`, `plan-drafter`,
+**The review family stays offline by construction** — with one honestly-scoped exception named
+below. `plan-reviewer`, `plan-drafter`,
 `plan-reviewer-confirm`, and every gate② `engine-agent` review session never reference
 `cfg.webAccess` at all — refusal is the absence of a wire-up, not a check that could be
 misconfigured. Gate②'s review-session mode (`reviewCwd`, see below) goes further still: it
@@ -142,6 +143,34 @@ not an inspectable gate — this is recorded as a deliberate reproducibility pro
 `--strict-mcp-config`/`--setting-sources ""` seal (see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard-285)
 below) is unaffected by anything in this section — it was justified independently, for a
 materialized PR tree, and #410 leaves it exactly as it was.
+
+**The exception, stated exactly (#443, `reviewer.agent.runner: codex-exec`).** An operator can
+select a locally spawned `codex exec` process as the engine-agent review session's runner. For a
+remote-provider CLI, "offline by construction" cannot mean a blanket network denial — the CLI needs
+its own provider — so the adjudicated claim for that runner is narrower and is stated here rather
+than quietly inherited:
+
+- **No model-invoked egress beyond provider transport.** The session is pinned to
+  `--sandbox read-only` (whose recorded permission profile is network-*restricted* for
+  model-invoked commands), `-c tools.web_search=false`, and `-c mcp_servers={}` — a
+  highest-precedence override, so no MCP server loads from any config source, including a
+  producer-authored `.codex/config.toml` inside the reviewed tree. Plus `--ignore-user-config`
+  (the operator's own `$CODEX_HOME/config.toml`, and therefore its hooks, never load),
+  `--ignore-rules`, and a credential-stripped env (no `GH_*`/`GITHUB_TOKEN`/git credential
+  vectors — the same denylist every Claude role session gets). The prompt reaches the CLI on
+  **stdin from a file**; the module spawns an argv vector and never a shell, so
+  producer-influenced text has no interpolation surface at all.
+- **The recorded blind spot.** `--sandbox read-only` blocks *writes*, not *execution*: a
+  shell-capable agent under it can still run producer-controlled code from the materialized tree.
+  This is NOT equivalent to the Claude runner's Read/Grep/Glob-only, no-`Bash` profile, and the
+  adjudication (2026-08-01, R2) deliberately did not add an outer OS/container fence for it
+  (trusted-repos posture; the marginal-complexity principle). Instead every codex-exec spawn emits
+  a named blind-spot warning event (`engine-review-containment-gap`), so the gap is on the durable
+  record rather than assumed away.
+- **Unchanged either way.** The default runner is `claude`, and nothing above applies to it. Gate②'s
+  own safety properties are runner-independent: blocking stays engine-derived over live PR data, the
+  session's output goes through the same element-wise validation for both runners, and an
+  unidentifiable session model maps to `unavailable` rather than to a verdict.
 
 **Detected, not pinned — the operator's own settings can still silently strip the grant.** An
 earlier version of this feature pinned `--strict-mcp-config`/`--setting-sources ""` for EVERY

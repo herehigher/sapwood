@@ -33,7 +33,14 @@ import { deriveApprovalResult, parseAgentReviewOutputText } from "./agent-output
 import type { EngineReviewArtifact } from "./audit.js";
 import { applySeverityOverride, changedPathsFromDiff } from "./finding-axes.js";
 import type { MaterializeResult } from "./materializer.js";
-import { runReviewSession } from "./review-session.js";
+import {
+  CLAUDE_PROVIDER,
+  ClaudeReviewSessionExecutor,
+  type ReviewSessionExecutor,
+  type ReviewSessionIdentity,
+  type ReviewSessionSpend,
+  runReviewSession,
+} from "./review-session.js";
 
 /** Everything `EngineAgentReviewer` needs, bundled as an explicit deps object (never a bare
  *  constructor arg list) — mirrors the pattern this codebase already uses for injected I/O
@@ -47,9 +54,17 @@ export interface EngineAgentReviewerDeps {
    *  contract), but `evaluate()` catches a throw anyway and maps it to a materialize failure
    *  (defense-in-depth against a caller-supplied wrapper that doesn't uphold that contract). */
   materialize: (headOid: string) => Promise<MaterializeResult>;
-  /** The RoleRunner-shaped session spawn facility — review-session.ts's `runReviewSession` takes
-   *  exactly this shape (`Pick<RoleRunner, "run">`). */
+  /** The RoleRunner-shaped session spawn facility the DEFAULT (`runner: claude`) executor wraps —
+   *  see `executor` below for the seam this feeds. */
   runner: Pick<RoleRunner, "run">;
+  /** #443: the review session's EXECUTOR (review-session.ts's `ReviewSessionExecutor`). Omitted ⇒
+   *  a `ClaudeReviewSessionExecutor` over `runner` above, i.e. byte-for-byte the pre-seam behavior
+   *  — which is why every existing caller and test needed no change. A composition root that
+   *  configures `reviewer.agent.runner: codex-exec` MUST supply the matching executor here
+   *  (production.ts does): a configured non-claude runner with no executor supplied is a
+   *  composition bug and THROWS at construction rather than silently reviewing on the default
+   *  runner, which would quietly turn a cross-vendor gate back into a same-vendor one. */
+  executor?: ReviewSessionExecutor;
   /** state.ts's AC-authority snapshot read (`State.getAcSnapshot`). */
   getAcSnapshot: (issue: number) => AcSnapshot | null;
   /** state.ts's D5 runtime-check accessor (`State.getWorkerActualModels`) — the PRODUCING lane's
@@ -148,13 +163,16 @@ function renderEngineReviewerPrompt(template: string, vars: Readonly<Record<stri
  *   - `verdict`   — the session ran, its output validated, an ApprovalResult was derived. Done.
  *   - `failed`    — the session RAN (attempt-shaped: it consumed budget) but produced no usable
  *                   verdict — a non-`done` outcome (crash/timeout) OR a `done` outcome whose
- *                   `resultText` failed schema validation. Carries the attempt's own recorded
- *                   cost so the caller can compute the retry's remaining budget, and `costKnown`
- *                   (#302 review, Codex P1): `false` means the transcript held NO cost record at
- *                   all (RoleSessionResult.costKnown's doc) — the 0 in `costUsd` is a
- *                   placeholder, so the caller must NOT compute a remainder from it (an unknown
+ *                   `resultText` failed schema validation. Carries the attempt's own SPEND
+ *                   EVIDENCE (#443's `ReviewSessionSpend`) so the caller can compute the retry's
+ *                   remaining budget. `{ kind: "unknown" }` (#302 review, Codex P1; #443 R1)
+ *                   means the session produced NO usable spend telemetry at all — there is no
+ *                   number to subtract, so the caller must NOT compute a remainder (an unknown
  *                   attempt-1 spend read as "$0 spent" would grant the retry a second FULL cap,
- *                   violating the whole-logical-review cap, issue #286 AC#4).
+ *                   violating the whole-logical-review cap, issue #286 AC#4). `estimated` spend
+ *                   (the codex-exec runner, which has no hard-cap mechanism) IS subtractable —
+ *                   the cap it feeds is advisory, and an advisory remainder is still strictly
+ *                   better than doubling down blind.
  *   - `setup-unavailable` — the session never got a fair chance to run at all: `runReviewSession`
  *                   itself returned `unavailable` (a materialize/spawn-setup failure), OR the
  *                   POST-session model-separation re-check (D5) found the session's own actual
@@ -162,7 +180,7 @@ function renderEngineReviewerPrompt(template: string, vars: Readonly<Record<stri
  *                   or a same-model verdict is not something a second attempt fixes. */
 type AttemptOutcome =
   | { kind: "verdict"; result: ApprovalResult }
-  | { kind: "failed"; costUsd: number; costKnown: boolean }
+  | { kind: "failed"; spend: ReviewSessionSpend }
   | { kind: "setup-unavailable"; reason: string };
 
 /**
@@ -180,6 +198,8 @@ export class EngineAgentReviewer implements ReviewerAdapter {
   private readonly promptTemplate: string;
   private readonly agentCfg: NonNullable<SapwoodConfig["reviewer"]["agent"]>;
   private readonly promptHash: string;
+  /** #443: resolved ONCE at construction — see `EngineAgentReviewerDeps.executor`. */
+  private readonly executor: ReviewSessionExecutor;
 
   constructor(private readonly deps: EngineAgentReviewerDeps) {
     const agent = deps.cfg.reviewer.agent;
@@ -193,6 +213,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     this.agentCfg = agent;
     this.promptTemplate = loadEngineReviewerPromptTemplate(agent.promptFile);
     this.promptHash = createHash("sha256").update(this.promptTemplate).digest("hex");
+    this.executor = resolveReviewSessionExecutor(agent.runner, deps);
   }
 
   /** #286: no bot to ping — unlike CodexReviewer's `@codex review` PR comment (which asks an
@@ -226,9 +247,12 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     // here and reused for the POST-session re-check in `attempt()` below — the producing lane's
     // recorded actual model cannot change mid-evaluate() (it's already terminal by the time a
     // review runs, or the pre-check itself already failed closed on "unknown").
-    const workerModels = this.deps.getWorkerActualModels(ctx.issue);
+    // #443: the worker leg always runs on the Claude CLI, so its recorded actual models carry the
+    // Claude provider by construction — that is what makes them comparable to a session identity
+    // as a (provider, model) PAIR rather than as a bare model string.
+    const workerModels = this.deps.getWorkerActualModels(ctx.issue).map((model) => ({ provider: CLAUDE_PROVIDER, model }));
     const preCheckFailure = this.modelSeparationUnavailableReason(
-      [this.agentCfg.model],
+      this.configuredReviewerIdentity(),
       workerModels,
       `reviewer.agent.model vs issue #${ctx.issue}'s producing lane`,
     );
@@ -289,7 +313,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     // transcript — e.g. a session killed before writing its result line) must NOT be treated as
     // "$0 spent, full cap remains": the remainder arithmetic below would grant attempt 2 a second
     // full cap, violating the whole-logical-review cap (issue #286 AC#4). Fail closed: no retry.
-    if (!first.costKnown) {
+    if (first.spend.kind === "unknown") {
       return {
         kind: "unavailable",
         headOid,
@@ -298,7 +322,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
           "its spend against the logical-review cap is unknown, so a retry cannot be budgeted (fail-closed, no retry)",
       };
     }
-    const remainder = capUsd - first.costUsd;
+    const remainder = capUsd - first.spend.usd;
     if (remainder <= 0) {
       return {
         kind: "unavailable",
@@ -331,27 +355,22 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     budgetUsd: number,
     snapshot: AcSnapshot,
     headOid: string,
-    workerModels: readonly string[],
+    workerModels: readonly ReviewSessionIdentity[],
     changedPaths: ReadonlySet<string>,
   ): Promise<AttemptOutcome> {
-    const outcome = await runReviewSession(this.deps.runner, {
+    const outcome = await runReviewSession(this.executor, {
       materialize: materialized,
       roleId: "engine-reviewer",
       prompt,
       model: this.agentCfg.model,
       effort: this.agentCfg.effort,
-      fallbackModel: "none",
       maxBudgetUsd: budgetUsd,
     });
     if (outcome.kind === "unavailable") {
       return { kind: "setup-unavailable", reason: outcome.reason };
     }
-    // #302 review (Codex P1, cost cap): ONLY an explicit `costKnown: false` reads as unknown —
-    // `undefined` (a legacy test fake that never sets the optional field) reads as known, per
-    // RoleSessionResult.costKnown's own convention; a REAL RoleRunner.run() always sets it.
-    const costKnown = outcome.costKnown !== false;
     if (outcome.outcome !== "done") {
-      return { kind: "failed", costUsd: outcome.costUsd, costKnown };
+      return { kind: "failed", spend: outcome.spend };
     }
     // Runtime model-separation check, POST-session (D5): re-verify using the SESSION'S OWN
     // recorded actual modelUsage against the producing WORKER's own recorded actual model(s) —
@@ -369,17 +388,22 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     // nothing list and pass as "distinguishable": an approval from an UNIDENTIFIABLE model. With
     // the sentinel filtered, an all-unknown session leaves an EMPTY reviewer list and the
     // existing empty ⇒ unavailable branch fires (fail-closed, same as an unknown worker actual).
+    // #443: the sentinel filtering now lives in the EXECUTOR (review-session.ts's Claude executor
+    // drops the "unknown" model rows before building its identity list), so what arrives here is
+    // already "every identity this session could actually establish" — an empty list still means
+    // UNIDENTIFIABLE, and the codex-exec runner reaches the same empty list when its own transcript
+    // carries no (provider, model) pair. One rule, both runners.
     const postCheckFailure = this.modelSeparationUnavailableReason(
-      outcome.modelUsage.map((m) => m.model).filter((m) => m !== "unknown"),
+      outcome.identity,
       workerModels,
       "this engine-agent session's own recorded actual model vs the producing lane's",
     );
     if (postCheckFailure) {
       return { kind: "setup-unavailable", reason: postCheckFailure };
     }
-    const parsed = parseAgentReviewOutputText(outcome.resultText ?? "", snapshot.manifest, changedPaths);
+    const parsed = parseAgentReviewOutputText(outcome.resultText, snapshot.manifest, changedPaths);
     if (!parsed) {
-      return { kind: "failed", costUsd: outcome.costUsd, costKnown };
+      return { kind: "failed", spend: outcome.spend };
     }
     const result = deriveApprovalResult(parsed, headOid);
     // #472 fix round (gate② P1): the persisted artifact carries EVERY classified finding — blocking
@@ -397,36 +421,57 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     this.deps.onReviewArtifact?.(headOid, {
       perAC: parsed.perAC,
       findings: gatedFindings,
-      sessionActualModels: [...new Set(outcome.modelUsage.map((m) => m.model).filter((m) => m !== "unknown"))],
+      // #443: the artifact keeps recording MODEL NAMES (the persisted audit shape is unchanged);
+      // the provider half of the identity is what the D5 check above consumes, not this record.
+      sessionActualModels: [...new Set(outcome.identity.map((i) => i.model))],
       promptHash: this.promptHash,
     });
     return { kind: "verdict", result };
   }
 
-  /** D5: `null` when `reviewerModels` is DISTINGUISHABLE from `workerModels` (safe to proceed);
-   *  an explanatory reason string otherwise. Indistinguishable = either side's array being EMPTY
-   *  ("unknown" — state.ts's `getWorkerActualModels` doc explains when the worker side
-   *  legitimately happens to be empty) OR any entry appearing on BOTH sides — either way, fail
-   *  closed (design #279's D5: "a verdict from the same model must never gate"). Shared by the
-   *  PRE-session check (`reviewerModels = [reviewer.agent.model]`, the closest static proxy
-   *  before any session has run) and the POST-session check (`reviewerModels` = the session's own
-   *  recorded actual modelUsage) — same comparison, different inputs. */
+  /** #443 (D5): the reviewer identity the PRE-session check compares — the closest static proxy
+   *  available before any session has run.
+   *   - `runner: claude` — `[{ anthropic, reviewer.agent.model }]`, exactly today's check: both
+   *     sides run on the Claude CLI, so two bare model names are directly comparable.
+   *   - `runner: codex-exec` — `null`, meaning "not statically comparable, skip the OVERLAP test".
+   *     The provider a `codex exec` session will actually report is not derivable from config (the
+   *     runner is not the vendor: `codex exec` can target non-OpenAI providers) and the
+   *     adjudication rejected inventing a `provider` key to declare it. What survives is the
+   *     stronger, non-static check: the POST-session comparison against the session's OWN recorded
+   *     (provider, model) telemetry, with an unidentifiable session mapping to `unavailable`. The
+   *     worker-unknown branch below still runs for BOTH runners — a review whose producer cannot
+   *     be identified at all fails closed regardless of who reviews. */
+  private configuredReviewerIdentity(): readonly ReviewSessionIdentity[] | null {
+    return this.agentCfg.runner === "claude" ? [{ provider: CLAUDE_PROVIDER, model: this.agentCfg.model }] : null;
+  }
+
+  /** D5: `null` when `reviewerIdentities` is DISTINGUISHABLE from `workerIdentities` (safe to
+   *  proceed); an explanatory reason string otherwise. Indistinguishable = either side's array
+   *  being EMPTY ("unknown" — state.ts's `getWorkerActualModels` doc explains when the worker side
+   *  legitimately happens to be empty) OR any (provider, model) PAIR appearing on BOTH sides —
+   *  either way, fail closed (design #279's D5: "a verdict from the same model must never gate").
+   *  Shared by the PRE-session check (a config-derived identity, or `null` — see
+   *  `configuredReviewerIdentity` — which skips only the overlap comparison) and the POST-session
+   *  check (the session's own recorded telemetry) — same comparison, different inputs.
+   *  #443: comparison is on the PAIR, not the bare model name, so a cross-PROVIDER reviewer is
+   *  distinguishable even from an identically-named model, and a same-provider one is not. */
   private modelSeparationUnavailableReason(
-    reviewerModels: readonly string[],
-    workerModels: readonly string[],
+    reviewerIdentities: readonly ReviewSessionIdentity[] | null,
+    workerIdentities: readonly ReviewSessionIdentity[],
     subjectLabel: string,
   ): string | null {
-    if (workerModels.length === 0) {
+    if (workerIdentities.length === 0) {
       return `${subjectLabel}: the producing worker's actual model is unknown (no recorded model usage yet) — assumed indistinguishable, fail-closed (D5)`;
     }
-    if (reviewerModels.length === 0) {
+    if (reviewerIdentities === null) return null;
+    if (reviewerIdentities.length === 0) {
       return `${subjectLabel}: the reviewer's own actual model is unknown (no recorded model usage) — assumed indistinguishable, fail-closed (D5)`;
     }
-    const overlap = reviewerModels.filter((m) => workerModels.includes(m));
+    const overlap = reviewerIdentities.filter((r) => workerIdentities.some((w) => w.provider === r.provider && w.model === r.model));
     if (overlap.length > 0) {
       return (
-        `${subjectLabel}: reviewer model(s) [${reviewerModels.join(", ")}] overlap the producing worker's actual model(s) ` +
-        `[${workerModels.join(", ")}] (shared: ${overlap.join(", ")}) — a same-model verdict must never gate (D5)`
+        `${subjectLabel}: reviewer model(s) [${reviewerIdentities.map(formatIdentity).join(", ")}] overlap the producing worker's actual model(s) ` +
+        `[${workerIdentities.map(formatIdentity).join(", ")}] (shared: ${overlap.map(formatIdentity).join(", ")}) — a same-model verdict must never gate (D5)`
       );
     }
     return null;
@@ -452,6 +497,39 @@ export class EngineAgentReviewer implements ReviewerAdapter {
       doctrine: doctrineText,
     });
   }
+}
+
+/** `provider/model`, the one rendering used in every D5 message — a bare model name would make two
+ *  cross-provider identities look identical in the very message that explains why they are not. */
+function formatIdentity(id: ReviewSessionIdentity): string {
+  return `${id.provider}/${id.model}`;
+}
+
+/** #443: the executor-selection dispatch. One place decides which runner executes gate②'s review
+ *  session, and it FAILS CLOSED: a configured runner the composition root did not supply an
+ *  executor for is a construction-time throw, never a silent fall back to the Claude default (which
+ *  would turn a deliberately cross-vendor gate back into a same-vendor one without a word). The
+ *  `claude` runner needs no supplied executor — it IS the default seam over `deps.runner`. */
+export function resolveReviewSessionExecutor(
+  runner: NonNullable<SapwoodConfig["reviewer"]["agent"]>["runner"],
+  deps: Pick<EngineAgentReviewerDeps, "runner" | "executor">,
+): ReviewSessionExecutor {
+  if (deps.executor) {
+    if (deps.executor.runner !== runner) {
+      throw new Error(
+        `EngineAgentReviewer: reviewer.agent.runner is "${runner}" but the supplied executor is "${deps.executor.runner}" — ` +
+          "the configured runner and the executing runner must be the same (refusing to construct)",
+      );
+    }
+    return deps.executor;
+  }
+  if (runner !== "claude") {
+    throw new Error(
+      `EngineAgentReviewer: reviewer.agent.runner is "${runner}" but no matching ReviewSessionExecutor was supplied — ` +
+        "refusing to construct rather than silently reviewing on the default Claude runner",
+    );
+  }
+  return new ClaudeReviewSessionExecutor(deps.runner);
 }
 
 /** Construct an `EngineAgentReviewer` from explicit dependencies. #288's production composition

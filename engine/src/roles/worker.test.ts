@@ -3133,11 +3133,16 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
   }
 });
 
-test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285): the ONLY child_process importers are worker.ts (spawn), gh.ts (execFile), and review/materializer.ts (execFile) — and the ONLY subprocess call site that may ever pass a cwd is spawnClaudeSession's own OPTIONAL, caller-supplied opt (#285 review session mode) — WorkerSupervisor's own dispatch()/resume() spawn() calls stay cwd-less, so the engine structurally CANNOT exec git in a worker worktree", () => {
+test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285, #443): the ONLY child_process importers are worker.ts (spawn), gh.ts (execFile), review/materializer.ts (execFile), and review/codex-exec.ts (spawn, gate②'s cross-vendor review runner) — and the ONLY subprocess call site that may ever pass a cwd is spawnClaudeSession's own OPTIONAL, caller-supplied opt (#285 review session mode) — WorkerSupervisor's own dispatch()/resume() spawn() calls stay cwd-less, so the engine structurally CANNOT exec git in a worker worktree", () => {
   const srcDir = new URL("../", import.meta.url);
   const files = readdirSync(srcDir, { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
-  // Sanity: the three known subprocess modules are present in the scan set.
-  assert.ok(files.includes("roles/worker.ts") && files.includes("forge/gh.ts") && files.includes("review/materializer.ts"));
+  // Sanity: the four known subprocess modules are present in the scan set.
+  assert.ok(
+    files.includes("roles/worker.ts") &&
+      files.includes("forge/gh.ts") &&
+      files.includes("review/materializer.ts") &&
+      files.includes("review/codex-exec.ts"),
+  );
   for (const f of files) {
     const src = readFileSync(new URL(f, srcDir), "utf8");
     const importsChildProcess = /from "node:child_process"/.test(src);
@@ -3188,6 +3193,22 @@ test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285): the ONLY 
       // parameter annotation (this module's own `defaultPrivateCloneDir(cwd = process.cwd())`
       // helpers) is a different, unrelated thing and must not false-positive here.
       assert.doesNotMatch(src, /[{,]\s*cwd\s*:/, "materializer.ts passes no cwd option to execFile (uses -C instead)");
+    } else if (f === "review/codex-exec.ts") {
+      // #443: a FOURTH legitimate importer — gate②'s cross-vendor review runner spawns the local
+      // `codex` CLI. Same discipline as the three above, plus the two properties that make its own
+      // containment claims checkable rather than asserted in prose:
+      //   - spawn ONLY (no exec/shell-string API can smuggle producer-influenced text into a shell);
+      //   - its ONE `cwd:` is the caller-supplied materialized review tree, never anything derived
+      //     locally — a codex session is structurally incapable of running in the engine's own
+      //     checkout or in a worker worktree.
+      assert.doesNotMatch(src, /\b(execFileSync|execFile|execSync|spawnSync|exec)\s*\(/, "codex-exec.ts uses spawn only");
+      assert.doesNotMatch(src, /shell\s*:/, "codex-exec.ts never spawns through a shell");
+      const cwdSites = src.match(/[{,]\s*cwd\s*:\s*[^,\n]+/g) ?? [];
+      assert.deepEqual(
+        cwdSites.map((s) => s.replace(/^[{,]\s*/, "").trim()),
+        ["cwd: req.treeDir"],
+        "codex-exec.ts's only subprocess cwd is the caller-supplied materialized tree",
+      );
     } else {
       // Every other engine module must not shell out at all.
       assert.equal(importsChildProcess, false, `${f} must not import node:child_process`);

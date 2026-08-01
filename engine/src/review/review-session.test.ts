@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import { RoleRunner, type RoleRunnerDeps, type RoleSessionOpts, type RoleSessionResult } from "../roles/peripheral.js";
 import { createPrivateClone, type MaterializeResult, materialize } from "./materializer.js";
-import { runReviewSession } from "./review-session.js";
+import { ClaudeReviewSessionExecutor, type ReviewSessionEvidence, runReviewSession } from "./review-session.js";
 
 /** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
  *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
@@ -89,13 +89,12 @@ test("runReviewSession: an upstream materialize() failure is NEVER handed to the
       return {} as unknown as RoleSessionResult;
     },
   };
-  const outcome = await runReviewSession(fakeRunner, {
+  const outcome = await runReviewSession(new ClaudeReviewSessionExecutor(fakeRunner), {
     materialize: { kind: "failure", reason: "checkout of deadbeef failed: some git error" },
     roleId: "engine-reviewer",
     prompt: "p",
     model: "opus",
     effort: "high",
-    fallbackModel: "none",
   });
   assert.equal(called, false, "runner.run must never be called when materialize() already failed");
   assert.deepEqual(outcome, { kind: "unavailable", reason: "checkout of deadbeef failed: some git error" });
@@ -109,13 +108,12 @@ test("runReviewSession: a materialized result is passed to runner.run as reviewC
       return { outcome: "done", costUsd: 0, modelUsage: [], exitCode: 0, name: "role-engine-reviewer-abc" };
     },
   };
-  const outcome = await runReviewSession(fakeRunner, {
+  const outcome = await runReviewSession(new ClaudeReviewSessionExecutor(fakeRunner), {
     materialize: { kind: "materialized", treeDir: "/tmp/some-materialized-tree", oid: "a".repeat(40), manifest: [] },
     roleId: "engine-reviewer",
     prompt: "review this diff",
     model: "opus",
     effort: "high",
-    fallbackModel: "none",
   });
   assert.equal(seenOpts?.reviewCwd, "/tmp/some-materialized-tree");
   // Codex sol-high PR #300 review, P2/P3: the tool profile / proxy suppression / forced-hard
@@ -126,7 +124,21 @@ test("runReviewSession: a materialized result is passed to runner.run as reviewC
   assert.equal(seenOpts?.allowedTools, undefined);
   assert.equal(seenOpts?.disallowedTools, undefined);
   assert.equal(seenOpts?.proxy, undefined, "a review session opts in to NO forge proxy at all");
-  assert.deepEqual(outcome, { kind: "ran", outcome: "done", costUsd: 0, modelUsage: [], exitCode: 0, name: "role-engine-reviewer-abc" });
+  // #443: `fallbackModel: "none"` is now pinned INSIDE ClaudeReviewSessionExecutor rather than
+  // supplied per call — same value reaching RoleRunner.run(), one fewer caller-overridable field
+  // (the D5 rationale for it lives in that executor's own doc).
+  assert.equal(seenOpts?.fallbackModel, "none");
+  // #443: the executor returns EVIDENCE, not a RoleSessionResult — the same facts, in the shape
+  // both runners share (spend evidence instead of a bare number, a (provider, model) identity list
+  // instead of raw modelUsage).
+  assert.deepEqual(outcome, {
+    kind: "ran",
+    outcome: "done",
+    resultText: "",
+    identity: [],
+    spend: { kind: "known", usd: 0 },
+    sessionId: "role-engine-reviewer-abc",
+  });
 });
 
 test("runReviewSession: a runner.run() setup-failure THROW (e.g. a materialized dir that vanished before spawn) is caught and mapped to unavailable — never propagates, never a silent degraded run", async () => {
@@ -135,13 +147,12 @@ test("runReviewSession: a runner.run() setup-failure THROW (e.g. a materialized 
       throw new Error(`review session materialized cwd "/tmp/gone" does not exist`);
     },
   };
-  const outcome = await runReviewSession(fakeRunner, {
+  const outcome = await runReviewSession(new ClaudeReviewSessionExecutor(fakeRunner), {
     materialize: { kind: "materialized", treeDir: "/tmp/gone", oid: "b".repeat(40), manifest: [] },
     roleId: "engine-reviewer",
     prompt: "p",
     model: "opus",
     effort: "high",
-    fallbackModel: "none",
   });
   assert.equal(outcome.kind, "unavailable");
   assert.match((outcome as { reason: string }).reason, /review session setup failed:.*does not exist/);
@@ -188,13 +199,12 @@ exit 0
 `,
     );
     const runner = mkRunner(dir, bin);
-    const outcome = await runReviewSession(runner, {
+    const outcome = await runReviewSession(new ClaudeReviewSessionExecutor(runner), {
       materialize: result,
       roleId: "engine-reviewer",
       prompt: "review this PR",
       model: "opus",
       effort: "high",
-      fallbackModel: "none",
     });
     assert.equal(outcome.kind, "ran");
     assert.equal((outcome as { outcome: string }).outcome, "done");
@@ -239,13 +249,12 @@ test("end-to-end: the review session's tool profile is Read/Grep/Glob only, no B
         },
       },
     });
-    const outcome = await runReviewSession(runner, {
+    const outcome = await runReviewSession(new ClaudeReviewSessionExecutor(runner), {
       materialize: result,
       roleId: "engine-reviewer",
       prompt: "p",
       model: "opus",
       effort: "high",
-      fallbackModel: "none",
     });
     assert.equal(outcome.kind, "ran");
     assert.equal(defaultProxyMinted, false, "the RoleRunner-wide default proxy is NEVER consulted for a review session");
@@ -283,16 +292,15 @@ exit 0
 `,
     );
     const runner = mkRunner(dir, bin);
-    const outcome = await runReviewSession(runner, {
+    const outcome = await runReviewSession(new ClaudeReviewSessionExecutor(runner), {
       materialize: result,
       roleId: "engine-reviewer",
       prompt: "review this PR",
       model: "opus",
       effort: "high",
-      fallbackModel: "none",
     });
     assert.equal(outcome.kind, "ran");
-    const manifest = (outcome as RoleSessionResult).contextManifest;
+    const manifest = (outcome as ReviewSessionEvidence).contextManifest;
     assert.ok(manifest, "a real run always carries a context manifest");
 
     const claudeMd = manifest!.sources.find((s) => s.label === "repo CLAUDE.md");
@@ -325,13 +333,12 @@ test("end-to-end: a materialized directory removed AFTER materialize() succeeded
     // materialize() reported as successfully materialized is gone by the time the review session
     // actually tries to use it (e.g. a concurrent cleanup, a crash-recovery race).
     rmSync(result.treeDir, { recursive: true, force: true });
-    const outcome = await runReviewSession(runner, {
+    const outcome = await runReviewSession(new ClaudeReviewSessionExecutor(runner), {
       materialize: result,
       roleId: "engine-reviewer",
       prompt: "p",
       model: "opus",
       effort: "high",
-      fallbackModel: "none",
     });
     assert.equal(outcome.kind, "unavailable");
     assert.match((outcome as { reason: string }).reason, /does not exist/);
@@ -343,13 +350,12 @@ test("end-to-end: a materialized directory removed AFTER materialize() succeeded
 
 test("runReviewSession: an OID-mismatch failure from materialize() (#284/E3a's own AC) surfaces as unavailable through the exact same path as any other materialize() failure", async () => {
   const fakeRunner = { run: async (): Promise<RoleSessionResult> => ({}) as unknown as RoleSessionResult };
-  const outcome = await runReviewSession(fakeRunner, {
+  const outcome = await runReviewSession(new ClaudeReviewSessionExecutor(fakeRunner), {
     materialize: { kind: "failure", reason: "checkout OID mismatch: requested aaaa..., private clone resolved bbbb..." },
     roleId: "engine-reviewer",
     prompt: "p",
     model: "opus",
     effort: "high",
-    fallbackModel: "none",
   });
   assert.deepEqual(outcome, { kind: "unavailable", reason: "checkout OID mismatch: requested aaaa..., private clone resolved bbbb..." });
 });
@@ -473,13 +479,12 @@ test("LIVE containment (Codex sol-high PR #300 review, P2): under a configured s
       preSpawnCapturePollMs: 10,
     });
     writeFileSync(join(dir, "guard-hook.js"), "process.exit(0)\n");
-    const outcome = await runReviewSession(runner, {
+    const outcome = await runReviewSession(new ClaudeReviewSessionExecutor(runner), {
       materialize: result,
       roleId: "engine-reviewer",
       prompt: "p",
       model: "opus",
       effort: "high",
-      fallbackModel: "none",
     });
     assert.equal(outcome.kind, "ran");
     const forcedGuardMode = readFileSync(join(dir, "guard_mode.seen"), "utf8");
