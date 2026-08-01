@@ -291,8 +291,10 @@ sqlite3 data/sapwood.sqlite \
 - A **named signal** (e.g. `ready-issues`, `handoff-resume-candidates`, `plan-triage-candidates`)
   is the thing to investigate: ask what would CONSUME that work. If the honest answer is
   "nothing, until a person acts", that signal is missing its terminal — the standing design rule
-  on the probe (`round.ts`'s `probeHasWork`) is that every signal must name the state in which a
-  deterministic failure stops it counting. Usually the fix is either that terminal, or the
+  is that every signal must name the state in which a deterministic failure stops it counting.
+  The signal names come from `probe-signals.ts`'s `PROBE_SIGNALS` registry, where each entry
+  states its consumer and its terminal in so many words (#469) — read the entry with the name
+  the event gave you. Usually the fix is either that terminal, or the
   human-side action the signal is waiting on (promote the issue, clear the hold, remove the label).
 - An **empty** list means the probe never ran at all — standby is disabled, or its
   "last round was idle" precondition was never met. Then the churn is not probe-driven; start

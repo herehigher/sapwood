@@ -501,8 +501,11 @@ const RECEIPT_KIND = "concern-posted";
  *  `escalateUnpostableConcern` gave up and handed it to a human after
  *  `cfg.roles.po.maxConcernPostAttempts` recorded failures. A concern that escalates therefore
  *  drops out of BOTH this probe signal and `reconcileDurableConcerns`' own retry loop below in
- *  the same fold, with no separate "already escalated" guard needed. */
-export function pendingDurableConcerns(state: State): Array<{ roundId: number; concern: Concern }> {
+ *  the same fold, with no separate "already escalated" guard needed.
+ *
+ *  #469: narrowed to the ONE read it performs (same `Pick` style as `concernPostFailureCount`
+ *  above) so probe-signals.ts's `ProbeCtx` can stay a narrow set of declared reads. */
+export function pendingDurableConcerns(state: Pick<State, "eventsAfterId">): Array<{ roundId: number; concern: Concern }> {
   const events = state.eventsAfterId(0, [...DECISION_KINDS, RECEIPT_KIND, POST_ESCALATED_KIND]);
   const receiptKeys = new Set<string>();
   const decisionEvents: typeof events = [];

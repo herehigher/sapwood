@@ -1316,7 +1316,15 @@ top-of-candidates set: the selection *bound* never depends on an optional role. 
 executing phase dispatches **pool members only** (a dispatch-scoped forge wrapper; the
 standby probe still sees all of Ready), and the same probe now ignores milestones whose
 open issues all carry a human-hold label — a backlog nothing enabled can consume no
-longer pins rounds open. Crash model: the chosen selection is persisted as a durable
+longer pins rounds open. **#469:** that probe's signals are a declarative registry
+(`probe-signals.ts`'s `PROBE_SIGNALS`, the `ESCALATION_SOURCES` pattern), each entry naming
+its consumer (and that consumer's gate) plus its **terminal** — the state in which a
+*deterministic* failure stops the signal counting. The terminal is required by the type and
+an inventory test cross-checks registry against probe in both directions, so a signal
+cannot be added without one; a signal with no terminal is the failure class that pins
+rounds open forever over a permanently-stuck case its author never enumerated. Documented
+blind spots (waiting-on-human work the probe deliberately does not hold rounds open for)
+are registered too, so the inventory is complete rather than aspirational. Crash model: the chosen selection is persisted as a durable
 `pool-selected` event *before* any label write, and a rerun replays it (last event
 wins) instead of recomputing — a duplicate selection session is confined to the rare
 crash window between the session returning and the event write (inherent: an external
