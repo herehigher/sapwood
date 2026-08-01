@@ -9,6 +9,7 @@ import { defaultPoolPromptPath, defaultPoPromptPath } from "../loop/align.js";
 import { defaultPoDecomposePromptPath } from "../loop/decompose.js";
 import { defaultHarvestPromptPath } from "../loop/harvest.js";
 import { defaultDoctrineTemplatePath } from "../loop/init.js";
+import { PROXY_ROLE_TOOL_MATRIX } from "../proxy/access.js";
 import { defaultRetroPromptPath } from "../retro/retro.js";
 import { defaultEngineReviewerPromptPath } from "../review/engine-agent.js";
 import { defaultArchitectPromptPath } from "./architect.js";
@@ -33,20 +34,24 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // before filing where the proxy is attached. Prior edit: #410 (WebSearch/WebFetch usage +
   // abstention wording, and the reworded "stay inside your scope" bullet).
   "po.md": "7624ca3c43291934f899d8d28f9e29aea850e29482b4860ed6b62d3dbd977def",
-  "architect.md": "7d7f623ad8779892f2e3fb67fe7e957d33de7ae7092f93b6e8dbc481c6913515",
+  // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
+  // conditional form — true whether or not the forge MCP proxy is attached to this session.
+  "architect.md": "2f2922e8c962050442cc8b9db9c8953fb6f42c4a05a962bdc4b6d3e8f5113404",
   // #457 (F36): intentional edits — execution-class ACs are plan noise (CI already enforces
   // ci.requiredChecks unconditionally): plan-reviewer flags-and-strips them, the confirm pass
   // invalidates legacy plans carrying them, drafter/decompose never author them.
-  "plan-reviewer.md": "c297aac101446bc3aeb2c9c0c7fb95256738717da70bd027233228ef071bdbf4",
-  "plan-reviewer-confirm.md": "9f1a67fef890c0c29c6dc7182cb78fd7a16c2921d19384d97a141780597fbcf1",
-  "plan-drafter.md": "b3ecacee2f8df90ebb0bcfca34ee796f067c990456f8ac600d5d5e33a47d0630",
-  "harvest.md": "59fb5fb1a8a3bebb2429c878c309caffe3105a3f9a32262268b7a14525026d4b",
+  // #529: same categorical→conditional GitHub-access fix as architect.md.
+  "plan-reviewer.md": "43a042fa33300b8421d3a98e6c253c3ac20a1b678d5b312875dc8f26673d691b",
+  "plan-reviewer-confirm.md": "895ae8b6dace1417d576e8398e9918921e78d28b96a4d9a7c07c245e7071ad2d",
+  "plan-drafter.md": "fb01e167a8a198d10eaff1c869df4f82cdc7c6ebdfe75f91775cd31a8faf27aa",
+  "harvest.md": "82312e3ac79e42e008a9d7477d4b9e601623a9ebb1e5a4fe306e8b3f266d109d",
   // #453 (design #402 R5): intentional edit — the digest's new finding-class tendency table is
   // pointed at, with the design-source rule and the stated blind spot. The FIRST deliberate
   // change to this file since #235 pinned it as "already code-aware, do not touch"; that ruling
   // was about tool scope, not about the role's analysis inputs, so it is not re-litigated here.
   "retro.md": "266dfa04d6a36405e911eb6d0db60f929f5400d99aef8d72d1f388306b8d7f0e",
-  "po-pool.md": "a5f51726e886ecaca53dfc9773e7403b602e3cb555cfb972bee2f15e54204d09",
+  // #529: same categorical→conditional GitHub-access fix as architect.md.
+  "po-pool.md": "13e4b27cad513e06bd0b99bed6dce612600d477e8b2a654fffa81649f2672c18",
   "po-decompose.md": "3289b0f37585b84fdce67319f9ae4b2e82c8873b13b2a292adef25b1bca79ae2",
 };
 
@@ -90,6 +95,66 @@ test("prompt snapshot: po-pool.md hash matches the pinned revision", () => {
 
 test("prompt snapshot: po-decompose.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultPoDecomposePromptPath())), SNAPSHOT_HASHES["po-decompose.md"]);
+});
+
+// ── #529 (AC-2): declared-session-contract drift — a role's prompt must never assert,
+// categorically, that no tool of the session reaches GitHub while access.ts's own
+// PROXY_ROLE_TOOL_MATRIX grants that role a non-empty set of forge MCP tools. Driven off the
+// matrix itself (not a hand-copied list of role names) so that adding a role to the matrix
+// without touching its prompt fails THIS test, not just a live dogfood count months later. ──
+
+// role id -> shipped prompt file(s) that role's session is rendered from. Every key in
+// PROXY_ROLE_TOOL_MATRIX must appear here (checked below) — an unmapped role is a test
+// FAILURE, not a silently-skipped role, exactly like the matrix's own deny-by-default stance
+// (access.ts's `?? []`) refuses an implicit pass.
+const ROLE_PROMPT_PATHS: Readonly<Record<string, readonly string[]>> = {
+  "po-pool": [defaultPoolPromptPath()],
+  // po-align and po-triage are two `{{po.mode}}` branches of the SAME shipped file (po.md) —
+  // see align.ts. Both map to it.
+  "po-align": [defaultPoPromptPath()],
+  "po-triage": [defaultPoPromptPath()],
+  harvest: [defaultHarvestPromptPath()],
+  architect: [defaultArchitectPromptPath()],
+  "plan-reviewer": [defaultPlanReviewerPromptPath()],
+  "plan-drafter": [defaultPlanDrafterPromptPath()],
+  "plan-reviewer-confirm": [defaultPlanConfirmPromptPath()],
+  retro: [defaultRetroPromptPath()],
+  // worker's PR_TOOLS grant is consumed by both the main dispatch leg (worker.md) and the
+  // fix-loop leg (fix.md) — both mint with role: "worker" (worker.ts).
+  worker: [defaultPromptPath(), defaultFixPromptPath()],
+};
+
+test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access denial while its role holds a non-empty PROXY_ROLE_TOOL_MATRIX grant", () => {
+  // The claim family, not one exact string (a generic text-match would not have caught #512):
+  // a negation ("no"/"never"/"nothing") within the same clause as "reach(es)"/"touch(es)"
+  // GitHub — the #529 issue's own minimum bar.
+  const CATEGORICAL_DENIAL = /\b(?:no|never|nothing)\b[^.]{0,80}\b(?:reach(?:es)?|touch(?:es)?)\b[^.]{0,80}\bGitHub\b/i;
+
+  for (const [role, tools] of Object.entries(PROXY_ROLE_TOOL_MATRIX)) {
+    if (tools.length === 0) continue; // nothing granted, nothing to be dishonest about
+
+    const paths = ROLE_PROMPT_PATHS[role];
+    assert.ok(
+      paths !== undefined && paths.length > 0,
+      `role "${role}" holds a non-empty forge proxy grant (${tools.join(", ")}) but has no ` +
+        `entry in this test's ROLE_PROMPT_PATHS — add one, do not let it pass by omission`,
+    );
+
+    for (const path of paths) {
+      const body = readPrompt(path);
+      const deniesCategorically = CATEGORICAL_DENIAL.test(body);
+      // A prompt may still legitimately talk about lacking WRITE access (e.g. "you never call
+      // `gh`") — that's true regardless of the proxy. What it must not do is claim NO tool
+      // reaches GitHub while never once naming the read-only tool family it actually may hold.
+      const namesTheGrantedTools = body.includes("mcp__forge__");
+      assert.ok(
+        !deniesCategorically || namesTheGrantedTools,
+        `${path} (role "${role}") reads as a categorical no-GitHub-access denial (matches ` +
+          `${CATEGORICAL_DENIAL}) but never names an mcp__forge__ tool anywhere to condition ` +
+          `that claim, even though the matrix grants this role ${tools.length} read-only tool(s): ${tools.join(", ")}`,
+      );
+    }
+  }
 });
 
 test("shipped role prompts (#321): sentinel examples are plain text with no adjacent markdown fences", () => {
