@@ -56,6 +56,14 @@ export interface ReviewSessionIdentity {
   model: string;
 }
 
+/** `provider/model` — the ONE rendering of a `ReviewSessionIdentity`, shared by every consumer
+ *  (engine-agent.ts's D5 unavailable-reason messages, audit.ts's Provenance line) so a cross-
+ *  provider identity never reads two different ways in two different places. Lives next to the
+ *  type it formats rather than being duplicated per call site (#513 gate② review). */
+export function formatIdentity(id: ReviewSessionIdentity): string {
+  return `${id.provider}/${id.model}`;
+}
+
 /** #443 (R1, honest recording): what an executor can honestly say about what the session cost.
  *   - `known`     — a real, provider-reported dollar figure (the Claude CLI's `total_cost_usd`).
  *   - `estimated` — no dollar telemetry exists, but token counts do: a pinned-price token estimate,

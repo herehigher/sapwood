@@ -36,6 +36,7 @@ import type { MaterializeResult } from "./materializer.js";
 import {
   CLAUDE_PROVIDER,
   ClaudeReviewSessionExecutor,
+  formatIdentity,
   type ReviewSessionExecutor,
   type ReviewSessionIdentity,
   type ReviewSessionSpend,
@@ -508,22 +509,20 @@ export class EngineAgentReviewer implements ReviewerAdapter {
   }
 }
 
-/** `provider/model`, the one rendering used in every D5 message — a bare model name would make two
- *  cross-provider identities look identical in the very message that explains why they are not. */
-function formatIdentity(id: ReviewSessionIdentity): string {
-  return `${id.provider}/${id.model}`;
-}
-
 /** #513: dedupe a session's own reported (provider, model) identities before persisting them into
  *  `EngineReviewArtifact.sessionActualIdentities` — a session's `modelUsage` transcript can carry
  *  the same identity more than once (multiple turns on the same model); the persisted record
  *  should list each DISTINCT identity once, same spirit as the pre-#513 `sessionActualModels`
- *  field's own `[...new Set(...)]` dedup, now keyed on the full pair rather than the bare model. */
+ *  field's own `[...new Set(...)]` dedup, now keyed on the full pair rather than the bare model.
+ *  The key is `JSON.stringify` of the pair, not a delimited string — a plain string join is
+ *  ambiguous in principle (provider `"a b"` + model `"c"` collides with provider `"a"` + model
+ *  `"b c"`); unreachable with any real provider/model string today, closed anyway while touching
+ *  this function (#513 gate② review P3). */
 function dedupeIdentities(identities: readonly ReviewSessionIdentity[]): ReviewSessionIdentity[] {
   const seen = new Set<string>();
   const out: ReviewSessionIdentity[] = [];
   for (const id of identities) {
-    const key = `${id.provider} ${id.model}`;
+    const key = JSON.stringify([id.provider, id.model]);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(id);

@@ -253,6 +253,20 @@ test("#513 rendering: any attempt unknown -> total unclaimable, recorded subtota
   assert.match(body, /logical-review spend `unknown total`; recorded numeric subtotal `\$0\.078000` \(2 attempts; 1 lacked telemetry\)/);
 });
 
+test("#513 gate② P2: an EMPTY sessionSpends never renders a positive measurement claim from zero data (mirrors renderIdentityClause's own empty-array stance)", () => {
+  const noSpends: EngineReviewArtifact = { ...artifact, sessionSpends: [] };
+  const body = buildAuditComment(wal, noSpends);
+  assert.match(body, /logical-review spend `no attempt spend recorded`/);
+  assert.doesNotMatch(body, /\$0\.000000/);
+  assert.doesNotMatch(body, /0 attempts/);
+  // A hand-built artifact carrying an EMPTY array still round-trips through parse/render intact —
+  // `Array.isArray([]) === true` and `.every()` on an empty array is vacuously true, so this shape
+  // is a defensive branch reachable via a corrupted/hand-written WAL row, not dead code.
+  const parsed = parseEngineReviewArtifact(JSON.stringify(noSpends));
+  assert.ok(parsed);
+  assert.deepEqual(parsed!.sessionSpends, []);
+});
+
 test("#513 retry path (via a hand-built two-attempt artifact): two sessionSpends entries persist and render honestly", () => {
   const retried: EngineReviewArtifact = {
     ...artifact,

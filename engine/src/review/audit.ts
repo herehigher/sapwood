@@ -6,7 +6,7 @@ import type { IForge, PRTopLevelComment } from "../forge/forge.js";
 import type { PerAcResult } from "./agent-output.js";
 import type { AuditDeliveryResult, EngineReviewWal } from "./drive.js";
 import { type ClassifiedFinding, effectiveSeverity } from "./finding-axes.js";
-import type { ReviewSessionIdentity, ReviewSessionSpend } from "./review-session.js";
+import { formatIdentity, type ReviewSessionIdentity, type ReviewSessionSpend } from "./review-session.js";
 
 export const AUDIT_MARKER_PREFIX = "<!-- sapwood-audit ";
 const MARKER_RE = /^<!-- sapwood-audit kind=([a-z0-9-]+) head=([0-9a-f]+) diff=([0-9a-f]+) run=([A-Za-z0-9._:-]+) -->$/m;
@@ -83,12 +83,6 @@ function renderFindingsList(findings: readonly ClassifiedFinding[]): string {
     : "- None recorded.";
 }
 
-/** `provider/model` — matches engine-agent.ts's own D5-message rendering, so the same identity
- *  reads identically in both the D5 unavailable-reason string and this audit comment. */
-function formatIdentity(id: ReviewSessionIdentity): string {
-  return `${id.provider}/${id.model}`;
-}
-
 /** #513: the Provenance line's identity clause — "decisive reviewer identity" singular, plural
  *  when more than one. An empty array is defensive only: the post-session D5 check in
  *  engine-agent.ts already fails a verdict closed whenever the session's own identity list comes
@@ -101,6 +95,15 @@ function renderIdentityClause(identities: readonly ReviewSessionIdentity[]): str
 
 /** #513: the Provenance line's spend clause — an estimate must never be able to read as a
  *  measurement, so the wording (not just the number) changes by discriminant:
+ *   - EMPTY (no executed attempts recorded at all) -> no total is claimable, exactly the same
+ *     "no data, no positive claim" stance `renderIdentityClause` above already takes on an empty
+ *     identity list. `evaluate()` never produces this (every verdict-producing artifact records
+ *     at least the decisive attempt's own spend) — reachable only via a hand-written or corrupted
+ *     WAL row that otherwise still passes `parseEngineReviewArtifact`'s array-shape check (an
+ *     empty array is a valid, if never-produced-in-production, `ReviewSessionSpend[]`). Without
+ *     this branch the fall-through below would render "provider-reported spend (0 attempts)
+ *     $0.000000" — a positive measurement claim asserted from zero records, the exact failure
+ *     class (#513) this whole rendering function exists to close.
  *   - every executed attempt `known`     -> a real, summed, provider-reported total.
  *   - any attempt `estimated` (none `unknown`) -> the SAME summed total, but labelled an estimate
  *     (token usage × pinned prices) — mixing in an estimated attempt makes the sum inexact too.
@@ -110,6 +113,7 @@ function renderIdentityClause(identities: readonly ReviewSessionIdentity[]): str
  *  `spends` is one entry per EXECUTED attempt, in order (`EngineReviewArtifact.sessionSpends`'s
  *  own doc) — never an aggregate computed elsewhere. */
 function renderSpendClause(spends: readonly ReviewSessionSpend[]): string {
+  if (spends.length === 0) return "logical-review spend `no attempt spend recorded`";
   const n = spends.length;
   const attempts = `${n} attempt${n === 1 ? "" : "s"}`;
   const numeric = (s: ReviewSessionSpend): number => (s.kind === "unknown" ? 0 : s.usd);
