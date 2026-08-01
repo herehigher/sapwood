@@ -164,21 +164,11 @@ class FakeForge extends UnstubbedForge implements IForge {
     this.issueLabelsByIssue[n] = (this.issueLabelsByIssue[n] ?? []).filter((x) => x !== l);
   }
   /** #485: per-issue OPEN/CLOSED state for the blocked-by reconcile's blocker reads. A number
-   *  in `metaThrows` simulates a transient forge read failure; anything unlisted reads OPEN. */
+   *  in `metaThrows` simulates a transient forge read failure; anything unlisted reads OPEN.
+   *  Shares the single `getIssueMeta` override below with #484's `issueStateByIssue`. */
   issueState: Record<number, "OPEN" | "CLOSED"> = {};
   metaThrows = new Set<number>();
   metaReads: number[] = [];
-  override async getIssueMeta(issue: number) {
-    this.metaReads.push(issue);
-    if (this.metaThrows.has(issue)) throw new Error("simulated forge failure");
-    return {
-      number: issue,
-      title: `issue ${issue}`,
-      state: this.issueState[issue] ?? ("OPEN" as const),
-      labels: this.issueLabelsByIssue[issue] ?? [],
-      updatedAt: "2026-01-01T00:00:00Z",
-    };
-  }
   /** #398: per-PR label set — the PR-side twin of `issueLabelsByIssue`, mutable so a test can
    *  simulate a human removing needs-human from the PR (the #147 reentry act, now on the carrier
    *  the escalation actually wrote). `addPRLabel` appends here, never removes. */
@@ -199,13 +189,18 @@ class FakeForge extends UnstubbedForge implements IForge {
   }
   /** #484: GATED RECLAIM's terminality discovery reads the ISSUE's live state before the cap.
    *  Mutable per-issue so a test can close an issue mid-run; unlisted issues read OPEN, which is
-   *  every pre-#484 fixture's implicit assumption. */
+   *  every pre-#484 fixture's implicit assumption.
+   *  Single merged override serving both #484 (`issueStateByIssue`) and #485 (`issueState` +
+   *  `metaThrows`/`metaReads`) — the two landed as separate green PRs whose combination
+   *  redeclared `getIssueMeta` (TS2393 on main). */
   issueStateByIssue: Record<number, "OPEN" | "CLOSED"> = {};
   override async getIssueMeta(n: number) {
+    this.metaReads.push(n);
+    if (this.metaThrows.has(n)) throw new Error("simulated forge failure");
     return {
       number: n,
       title: `issue ${n}`,
-      state: this.issueStateByIssue[n] ?? ("OPEN" as const),
+      state: this.issueStateByIssue[n] ?? this.issueState[n] ?? ("OPEN" as const),
       labels: this.issueLabelsByIssue[n] ?? [],
       updatedAt: "2026-01-01T00:00:00Z",
     };
