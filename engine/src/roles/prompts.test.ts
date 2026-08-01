@@ -26,9 +26,13 @@ function readPrompt(path: string): string {
 // ── Snapshot hashes — update deliberately, alongside a reviewed prompt edit, never casually ───
 
 const SNAPSHOT_HASHES: Record<string, string> = {
-  // #410: intentional edits — WebSearch/WebFetch usage + abstention wording (both), and the
-  // reworded "stay inside your scope" bullet (po.md, no longer read-able as a concern ban).
-  "po.md": "921a55442e8bd8186145e5c1a97b672df7ed68d28c4129e2d16de8c54be02db8",
+  // #444 (F35): intentional edit — the digest is no longer called "authoritative for current open
+  // issues" (it never was: it was milestone-scoped, so the issues a session duplicated were
+  // exactly the ones it could not see). The prompt now names the digest's real scope, explains
+  // the out-of-round annotations align.ts renders, and mandates `mcp__forge__search_issues`
+  // before filing where the proxy is attached. Prior edit: #410 (WebSearch/WebFetch usage +
+  // abstention wording, and the reworded "stay inside your scope" bullet).
+  "po.md": "7624ca3c43291934f899d8d28f9e29aea850e29482b4860ed6b62d3dbd977def",
   "architect.md": "7d7f623ad8779892f2e3fb67fe7e957d33de7ae7092f93b6e8dbc481c6913515",
   // #457 (F36): intentional edits — execution-class ACs are plan noise (CI already enforces
   // ci.requiredChecks unconditionally): plan-reviewer flags-and-strips them, the confirm pass

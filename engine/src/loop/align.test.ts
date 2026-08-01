@@ -1936,6 +1936,17 @@ test("defaultPoPromptPath: resolves to a real shipped file with both align and t
   assert.ok(template.includes("{{backlog.digest}}"));
 });
 
+test("po.md #444: the digest is no longer claimed authoritative for open issues, its real scope is named, and pre-filing search is mandated", () => {
+  const template = loadRolePromptTemplate(undefined, defaultPoPromptPath());
+  assert.ok(
+    !/authoritative for current open issues/.test(template),
+    "#444: the overclaim that made the milestone-scoped digest look like the complete dedup surface must be gone",
+  );
+  assert.ok(template.includes("outside this round"), "the prompt must name the digest's actual scope annotations");
+  assert.ok(template.includes("mcp__forge__search_issues"), "the prompt must mandate the pre-filing search where the proxy is attached");
+  assert.ok(/propose nothing/.test(template), "the existing 'if overlap is uncertain, propose nothing' rule stays");
+});
+
 test("buildBacklogDigest: number-sorted titles + configured hold annotations are deterministic; a record too large to fit whole is OMITTED, never sliced (#231)", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({ roles: { po: { backlogDigestMaxChars: 200 } } });
@@ -2009,15 +2020,59 @@ test("buildBacklogDigest: zero issues and a contained read failure are distinct,
   assert.match(failed.reason ?? "", /forge unavailable/);
 });
 
-test("buildBacklogDigest #215/#216: milestone filtering is local to the digest consumer", async () => {
+test("buildBacklogDigest #215/#216/#444: milestone scope is local to the digest consumer — it ORDERS and ANNOTATES, it no longer excludes", async () => {
   const forge = new FakeForge();
   forge.backlogIssues = [
     { number: 1, title: "M4 work", labels: [], milestone: "M4" },
     { number: 2, title: "M5 work", labels: [], milestone: "M5" },
     { number: 3, title: "unassigned proposal", labels: [] },
   ];
-  assert.equal((await buildBacklogDigest(forge, mkCfg({ round: { milestone: "M4" } }))).text, "- #1 — M4 work");
-  assert.match((await buildBacklogDigest(forge, mkCfg())).text, /#3 — unassigned proposal/);
+  assert.equal(
+    (await buildBacklogDigest(forge, mkCfg({ round: { milestone: "M4" } }))).text,
+    "- #1 — M4 work\n- #2 — M5 work [milestone: M5 — outside this round]\n- #3 — unassigned proposal [no milestone — outside this round]",
+  );
+  // Unscoped round: every open issue is in scope, so nothing carries a scope annotation.
+  assert.equal((await buildBacklogDigest(forge, mkCfg())).text, "- #1 — M4 work\n- #2 — M5 work\n- #3 — unassigned proposal");
+});
+
+test("buildBacklogDigest #444: an other-milestone / un-milestoned open issue is IN the dedup surface (the #435→#428 pairing shape)", async () => {
+  const forge = new FakeForge();
+  // The real 07-29/30 shape: a run scoped to v0.2.1 filed #435 duplicating #428 (next
+  // milestone) and #439 duplicating #427 (agent-filed, deliberately un-milestoned). Both had to
+  // be visible for overlap checking; under the pre-#444 milestone-scoped digest neither was.
+  forge.backlogIssues = [
+    { number: 428, title: "retro.ts KNOWN GAP comment", labels: [], milestone: "v0.2.2" },
+    { number: 430, title: "In-milestone work", labels: ["blocked"], milestone: "v0.2.1" },
+    { number: 427, title: "guard.fuzz.test.ts t.skip guards", labels: [] },
+  ];
+  const digest = await buildBacklogDigest(forge, mkCfg({ round: { milestone: "v0.2.1" } }));
+  assert.equal(digest.ok, true);
+  assert.equal(digest.total, 3);
+  assert.equal(digest.truncated, false);
+  // This round's own milestone renders FIRST (decomposition focus survives truncation), the
+  // out-of-scope dedup surface follows, each half number-ascending.
+  assert.deepEqual(digest.renderedIssueNumbers, [430, 427, 428]);
+  assert.ok(digest.text.includes("- #430 — In-milestone work [hold: blocked]"));
+  assert.ok(digest.text.includes("- #428 — retro.ts KNOWN GAP comment [milestone: v0.2.2 — outside this round]"));
+  assert.ok(digest.text.includes("- #427 — guard.fuzz.test.ts t.skip guards [no milestone — outside this round]"));
+});
+
+test("buildBacklogDigest #444: the widened dedup surface still obeys packDigestRecords — an out-of-scope record past the cap is COUNTED, never silently cut", async () => {
+  const forge = new FakeForge();
+  forge.backlogIssues = [
+    { number: 1, title: "in scope", labels: [], milestone: "M4" },
+    { number: 2, title: "z".repeat(220), labels: [], milestone: "M5" },
+  ];
+  const digest = await buildBacklogDigest(forge, mkCfg({ round: { milestone: "M4" }, roles: { po: { backlogDigestMaxChars: 200 } } }));
+  assert.equal(digest.ok, true);
+  assert.ok(digest.text.length <= 200);
+  assert.equal(digest.total, 2);
+  assert.equal(digest.rendered, 1);
+  assert.equal(digest.omitted, 1);
+  assert.equal(digest.truncated, true);
+  assert.deepEqual(digest.renderedIssueNumbers, [1]);
+  assert.ok(!digest.text.includes("- #2"), "a record too large to fit whole is never partially rendered");
+  assert.match(digest.text, /1 more issue\(s\) omitted/);
 });
 
 test("packDigestRecords: an absurdly tiny cap still never exceeds maxChars, even with zero rendered records", () => {
@@ -2029,7 +2084,7 @@ test("packDigestRecords: an absurdly tiny cap still never exceeds maxChars, even
   assert.equal(result.truncated, true);
 });
 
-test("createAligningStub #215: the align prompt receives only the milestone-scoped current backlog digest", async () => {
+test("createAligningStub #215/#444: the align prompt receives the whole open backlog — this round's milestone first, everything else annotated as dedup-only", async () => {
   const innerForge = new FakeForge();
   innerForge.backlogIssues = [
     { number: 42, title: "Existing bounded work", labels: ["blocked"], milestone: "M4" },
@@ -2044,7 +2099,7 @@ test("createAligningStub #215: the align prompt receives only the milestone-scop
     marker: null,
   });
   assert.ok(runner.calls[0]!.prompt.includes("- #42 — Existing bounded work [hold: blocked]"));
-  assert.ok(!runner.calls[0]!.prompt.includes("Other milestone work"));
+  assert.ok(runner.calls[0]!.prompt.includes("- #43 — Other milestone work [milestone: M5 — outside this round]"));
   assert.ok(!runner.calls[0]!.prompt.includes("{{backlog.digest}}"));
   state.close();
 });
