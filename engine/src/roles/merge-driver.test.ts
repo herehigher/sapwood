@@ -2643,3 +2643,72 @@ test("#288/#170 engine-agent silence past first-attempt escalation emits visibil
   assert.equal(outcome.reviewSilenceEscalation?.head, "HEAD");
   assert.equal(outcome.reviewSilenceEscalation?.silenceSec, 600);
 });
+
+// ── #503: engine-agent red required CI -> FIXABLE:CI_RED, not an eternal backoff wait ─────────
+// Live 2026-08-01: main went red (cross-PR composition), every lane's merge-ref CI inherited it,
+// and all three lanes looped on "preflight CI-evidence not satisfied" for 1.5h+ — the only bound
+// was the #426 aging escalation at escalateAfterSec (24h in the dogfood config). These pin the
+// #460-shaped route: red evidence dispatches the producer, pending evidence still waits.
+
+test("MergeDriver.driveOne (engine-agent, #503): required check CONCLUDED FAILURE -> FIXABLE:CI_RED with the ci-red prescription, no paid session", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, ciGreen: false, ciRed: true };
+  forge.checksPage = { checks: [{ name: "test", status: "COMPLETED", conclusion: "FAILURE", state: null, appSlug: "github-actions" }] };
+  let evaluated = false;
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "pending" as const, headOid: "HEAD" };
+    },
+  };
+  const cfg = mkEngineAgentCfg({ lanes: { prFixCap: 2 } });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.deepEqual(outcome, {
+    kind: "fixable",
+    pr: 7,
+    reason: "gate:FIXABLE:CI_RED:test@github-actions",
+    prescription: "ci-red",
+  });
+  assert.equal(evaluated, false, "a red build never spawns a paid engine-agent session");
+  assert.equal(recorded.wal, null);
+  assert.equal(recorded.pin, null);
+});
+
+test("MergeDriver.driveOne (engine-agent, #503): PENDING required CI still re-queues (no fix leg, aged by the #426 pin)", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, ciGreen: false, ciRed: false };
+  forge.checksPage = { checks: [{ name: "test", status: "IN_PROGRESS", conclusion: null, state: null, appSlug: "github-actions" }] };
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkEngineAgentCfg({ lanes: { prFixCap: 2 } }) });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /CI-evidence not satisfied/);
+});
+
+test("MergeDriver.driveOne (engine-agent, #503): prFixCap:0 preserves the pre-#503 queued wait (never a fix leg, never an auto-human — the #426 pin ages it)", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, ciGreen: false, ciRed: true };
+  forge.checksPage = { checks: [{ name: "test", status: "COMPLETED", conclusion: "FAILURE", state: null, appSlug: "github-actions" }] };
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkEngineAgentCfg({ lanes: { prFixCap: 0 } }) });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "gate-pending:ci-red-held" });
+});
+
+test("MergeDriver.driveOne (engine-agent, #503): produce-pr-and-stop reports FIXABLE:CI_RED without acting", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, ciGreen: false, ciRed: true };
+  forge.checksPage = { checks: [{ name: "test", status: "COMPLETED", conclusion: "FAILURE", state: null, appSlug: "github-actions" }] };
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkEngineAgentCfg({ merge: { mode: "produce-pr-and-stop" } }) });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.equal(outcome.kind, "stopped");
+  assert.match((outcome as { reason: string }).reason, /FIXABLE:CI_RED/);
+  assert.deepEqual(forge.merged, []);
+});

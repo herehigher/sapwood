@@ -928,3 +928,66 @@ test("driveEngineAgentReview: 'pending' is treated identically to 'unavailable' 
   assert.equal(outcome.kind, "queued");
   assert.equal(recorded.pin?.kind, "unavailable");
 });
+
+// ── #503: red required CI routes to {kind:"ci-red"}, not an eternal backoff wait ──────────────
+
+test("driveEngineAgentReview (#503): a required check CONCLUDED FAILURE -> {kind:'ci-red'} carrying status/data/failing, no WAL, no pin, no session", async () => {
+  let evaluated = false;
+  const { deps, recorded } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, {
+    kind: "ci-red",
+    status: status({ ciGreen: false, ciRed: true }),
+    data: data(),
+    failing: ["test@github-actions"],
+  });
+  assert.equal(evaluated, false, "no paid session for a red build");
+  assert.equal(recorded.wal, null);
+  assert.equal(recorded.pin, null);
+});
+
+test("driveEngineAgentReview (#503): PENDING required CI (null conclusion) keeps the exact pre-#503 queued wait — red is not pending, and neither is the reverse", async () => {
+  const { deps } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false }),
+      getPRChecks: async () => checksPage({ status: "IN_PROGRESS", conclusion: null }),
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /CI-evidence not satisfied/);
+});
+
+test("driveEngineAgentReview (#503): split-generation read (status@H1, data@H2) must NOT take the ci-red route — falls through to queued, next tick re-fetches a coherent pair", async () => {
+  const { deps } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true, headOid: "H1" }),
+      getPRReviewData: async () => data({ headOid: "H2" }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.notEqual(outcome.kind, "ci-red", "a mixed-head read must never dispatch a fix leg against a possibly-stale red");
+  assert.equal(outcome.kind, "queued");
+});
+
+test("driveEngineAgentReview (#503): a FAILURE from an untrusted app does NOT take the ci-red route — queued exactly as before", async () => {
+  const { deps } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE", appSlug: "evil-app" }),
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /CI-evidence not satisfied/);
+});

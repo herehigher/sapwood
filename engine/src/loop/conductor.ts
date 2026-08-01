@@ -1035,7 +1035,15 @@ export interface FixLegDeps {
   renderFixPrompt: (issueNumber: number, pr: number) => string;
 }
 
-export type FixPrescription = "conflict" | "findings";
+export type FixPrescription = "conflict" | "findings" | "ci-red";
+
+const CI_RED_FIX_PRESCRIPTION = `## CI-red prescription
+
+Required CI on this PR has CONCLUDED FAILING. Do only the CI-repair work in this leg: read
+the failing check run(s) via mcp__forge__pr_checks, reproduce the failure locally (typecheck,
+lint, tests — whatever the failing check runs), fix the branch, verify the same commands pass
+locally, then commit and push. Do not address standing review findings in this leg; they will
+be re-evaluated by a fresh review of the green head.`;
 
 const CONFLICT_FIX_PRESCRIPTION = `## Conflict-only prescription
 
@@ -1090,7 +1098,12 @@ export async function startFixLeg(
   }
   const pr = w.pr;
   const basePrompt = deps.renderFixPrompt(w.issue, pr);
-  const prompt = prescription === "conflict" ? `${basePrompt}\n\n${CONFLICT_FIX_PRESCRIPTION}` : basePrompt;
+  const prompt =
+    prescription === "conflict"
+      ? `${basePrompt}\n\n${CONFLICT_FIX_PRESCRIPTION}`
+      : prescription === "ci-red"
+        ? `${basePrompt}\n\n${CI_RED_FIX_PRESCRIPTION}`
+        : basePrompt;
   const issue: Issue = { number: w.issue, title: "", labels: [] };
   // #247 F1 (Codex sol-high PR #265 review round 2, P1): captured BEFORE resume() — the child
   // cannot make its first tool call before this line runs, so this row id can never postdate

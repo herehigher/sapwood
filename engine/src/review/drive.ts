@@ -32,7 +32,7 @@ import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
 import { labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js";
 import type { ApprovalResult, ReviewerAdapter } from "../roles/reviewer.js";
 import { changesRequestedOnHead, deriveBlockingSignal } from "../roles/reviewer.js";
-import { requiredChecksSatisfied } from "./ci-evidence.js";
+import { requiredChecksRed, requiredChecksSatisfied } from "./ci-evidence.js";
 import { escalateInstructionPathChanges } from "./instruction-path-escalation.js";
 
 /** The per-head engine-agent ATTEMPT PIN (design #279 §2 R3) — see state.ts's schema v24->v25
@@ -230,6 +230,12 @@ export type EngineAgentDriveOutcome =
   // deriveGate CONFLICTING branch driveOne's classic path already uses, instead of this module
   // re-deriving (or duplicating) that gate itself.
   | { kind: "conflict"; status: PRStatus; data: PRReviewData }
+  // #503: a required check CONCLUDED FAILING — red is not pending. Same shape and rationale as
+  // the #460 conflict route above: carries status/data so merge-driver.ts's driveEngineAgentOne
+  // routes it through the existing FIXABLE machinery (fix-leg dispatch, prFixCap accounting,
+  // drive-fixup event) instead of this lane waiting out a red that only a producer push can fix.
+  // `failing` is the `name@app` list from requiredChecksRed — evidence, engine-derived.
+  | { kind: "ci-red"; status: PRStatus; data: PRReviewData; failing: string[] }
   /** `verdict.verdictRunId` is the WAL/pin runId of the ONE decisive review run this verdict came
    *  from (#457, F36): a decisive pin is PERMANENT per head, so the SAME (runId, head) verdict is
    *  re-consumed on every tick until the head moves — the conductor's fix-leg circuit breaker
@@ -443,6 +449,18 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   }
   const ciEvidence = requiredChecksSatisfied(checksPage.checks, deps.cfg.ci.requiredChecks);
   if (!ciEvidence.ok) {
+    // #503: red is not pending. A required check that CONCLUDED FAILING can never satisfy this
+    // gate on its own — only a producer push can — so an eternal backoff wait here was a wedge
+    // (live 2026-08-01: every lane looped on this reason for hours; the only bound was the #426
+    // aging escalation at escalateAfterSec). Route it to the same FIXABLE machinery the #460
+    // conflict route uses. Same split-generation guard as that route: only act when both reads
+    // describe the same head; a mismatched pair falls through to queued and the next tick
+    // re-fetches a coherent pair. Pending/absent/skipped/cancelled evidence keeps the exact
+    // pre-#503 queued wait (aged by the #426 pin).
+    const failing = requiredChecksRed(checksPage.checks, deps.cfg.ci.requiredChecks);
+    if (failing.length > 0 && status0.headOid === data0.headOid) {
+      return { kind: "ci-red", status: status0, data: data0, failing };
+    }
     return { kind: "queued", reason: `engine-agent: preflight CI-evidence not satisfied: ${ciEvidence.unsatisfied.join(", ")}` };
   }
 

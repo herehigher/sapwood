@@ -203,7 +203,7 @@ export type DriveOutcome = (
   // they sit structurally outside the breaker (a zero-push classic fix leg can still be real
   // progress: thread replies/resolves are engine-executed writes that change unresolvedThreads
   // without a commit — fix-response.ts; and CI can go green without the head moving).
-  | { kind: "fixable"; pr: number; reason: string; prescription?: "conflict" | "findings"; verdictRunId?: string }
+  | { kind: "fixable"; pr: number; reason: string; prescription?: "conflict" | "findings" | "ci-red"; verdictRunId?: string }
 ) & {
   /** The reviewer-failover audit signal for this tick (#54), when one applies. STATELESS —
    *  reported on every tick the condition holds (see ReviewFailoverTransition); the caller
@@ -986,6 +986,23 @@ export class MergeDriver {
         return { kind: "stopped", pr, reason: "gates-passed:FIXABLE:merge-conflict" };
       }
       return { kind: "fixable", pr, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" };
+    }
+    if (outcome.kind === "ci-red") {
+      // #503: mirror of the #460 conflict route above, for a required check that CONCLUDED
+      // FAILING at preflight. No deriveGate call here: checkPreflight already passed (state/
+      // draft/human-label/hold-label all cleared before the CI-evidence gate in drive.ts), and
+      // deriveGate's own CI_RED arm is #246's "alongside a decisive verdict" shape — which can
+      // never exist under engine-agent, whose preflight requires green evidence BEFORE any paid
+      // session (design #279 §4.3): red at preflight would otherwise wait forever. prFixCap
+      // still governs: cap 0 preserves the pre-#503 queued wait (aged by the #426 pin), exactly
+      // as #246 preserved pre-#246 folds.
+      if (this.deps.cfg.lanes.prFixCap === 0) {
+        return { kind: "queued", pr, reason: "gate-pending:ci-red-held" };
+      }
+      if (this.deps.cfg.merge.mode === "produce-pr-and-stop") {
+        return { kind: "stopped", pr, reason: "gates-passed:FIXABLE:CI_RED" };
+      }
+      return { kind: "fixable", pr, reason: `gate:FIXABLE:CI_RED:${outcome.failing.join(",")}`, prescription: "ci-red" };
     }
     return this.finalizeVerdict(pr, outcome.status, outcome.data, outcome.verdict);
   }

@@ -2318,6 +2318,31 @@ test("tick DRIVE (#270): conflict FIXABLE uses the existing lane/counter with a 
   st.close();
 });
 
+test("tick DRIVE (#503): ci-red FIXABLE uses the existing lane/counter with the CI-red prescription", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:CI_RED:test@github-actions", prescription: "ci-red" };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "base fix prompt", mintProxy: async () => ({}) as never },
+  });
+  const prompt = sup.resumeCalls[0]!.opts?.prompt ?? "";
+  assert.match(prompt, /CI-red prescription/);
+  assert.match(prompt, /mcp__forge__pr_checks/);
+  assert.match(prompt, /Do not address standing review findings/);
+  assert.equal(st.getWorker("lane-a")?.fix_rounds, 1, "shared #246 counter, no ci-red-specific counter");
+  assert.equal(r.driven[0]?.kind, "fixup");
+  st.close();
+});
+
 test("tick DRIVE (#270): conflict at the shared fix-round cap preserves label + comment before terminal upsert", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
