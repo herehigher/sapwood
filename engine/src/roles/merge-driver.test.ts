@@ -1982,6 +1982,13 @@ class EngineAgentFakeForge extends FakeForge {
   override async getPRChecks() {
     return { ...this.checksPage, total: this.checksPage.checks.length };
   }
+  /** #390: how many PR-review-data reads a pass spent — the observation must not add one when no
+   *  hold label is configured. */
+  reviewDataReads = 0;
+  override async getPRReviewData() {
+    this.reviewDataReads++;
+    return super.getPRReviewData();
+  }
 }
 
 interface EARecorded {
@@ -2711,4 +2718,127 @@ test("MergeDriver.driveOne (engine-agent, #503): produce-pr-and-stop reports FIX
   assert.equal(outcome.kind, "stopped");
   assert.match((outcome as { reason: string }).reason, /FIXABLE:CI_RED/);
   assert.deepEqual(forge.merged, []);
+});
+
+// ── #390: engine-agent stateless signal parity — the #294 hold observation ────────────────────
+// #287's engine-agent path returned BEFORE driveOne's classic `withSignals` wrap, so a lane on
+// an engine-agent-configured project reported no hold observation at all: the gate itself was
+// correct (checkPreflight evaluates holdLabels and queues a held PR — see the #460 test above),
+// but the conductor never saw a `holdObservation`, so `pr-held`/`pr-released` never fired and a
+// held PR was indistinguishable from "waiting on review" in persisted data. These pin the parity
+// on the OUTCOME side; conductor.test.ts's own #390 test pins the event side.
+//
+// THE FOUR PARITY TESTS BELOW ARE SKIPPED ON PURPOSE, and this is the whole reason:
+// `merge-driver.ts` is on docs/security.md's "Human-merge-only paths" list, so the producer that
+// wrote these tests cannot land the wiring they assert — it ships as a paste-ready diff in the PR
+// body for a human to apply. Applying that diff un-skips all four (its own hunks do it), updates
+// the seven existing exact-shape assertions above that now carry a `holdObservation`, and deletes
+// the gap-pin test at the end of this file. Until then the gap-pin test is what CI actually runs:
+// it asserts the CURRENT (broken) behavior, so this file states the defect in runnable form rather
+// than only describing it.
+
+test("MergeDriver.driveOne (engine-agent, #390): a HELD pass reports the hold observation in the label's ON-PR casing, and still never spawns a paid session", {
+  skip: "#390: un-skipped by the merge-driver.ts diff in this PR body — a producer cannot land that human-merge-only file",
+}, async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.reviewData = { ...forge.reviewData, labels: ["type:Bug", "Sapwood:Hold"] };
+  let evaluated = false;
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "pending" as const, headOid: "HEAD" };
+    },
+  };
+  const cfg = mkEngineAgentCfg({ escalation: { humanLabels: ["needs-human", "blocked"], holdLabels: ["sapwood:hold"] } });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /hold-label-present/);
+  // Exact case-insensitive identity (#248 G3), reported in the casing the human actually applied
+  // — the conductor's `pr-held` payload names this string.
+  assert.deepEqual(outcome.holdObservation, { held: true, label: "Sapwood:Hold" });
+  assert.equal(evaluated, false, "a held PR never spawns a paid engine-agent session");
+});
+
+test("MergeDriver.driveOne (engine-agent, #390): an UNHELD pass carries held:false — the release half of the pair, reported even on the terminal merged outcome", {
+  skip: "#390: un-skipped by the merge-driver.ts diff in this PR body — a producer cannot land that human-merge-only file",
+}, async () => {
+  const forge = new EngineAgentFakeForge();
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => ({ kind: "approved" as const, headOid: "HEAD", evidence: { freshApprovingReviews: 0, freshTrustedSignals: 0 } }),
+  };
+  const cfg = mkEngineAgentCfg({ escalation: { humanLabels: ["needs-human", "blocked"], holdLabels: ["sapwood:hold"] } });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(
+    7,
+    46,
+    ALREADY_TRIGGERED,
+    noopRecord,
+    undefined,
+    undefined,
+    undefined,
+    mkEngineAgentDeps(recorded, { auditDelivery: async () => ({ delivered: true }) }),
+  );
+  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD", holdObservation: { held: false } });
+});
+
+test("MergeDriver.driveOne (engine-agent, #390): hold then release across two passes — the observation flips held:true -> held:false, which is what the conductor turns into pr-held/pr-released", {
+  skip: "#390: un-skipped by the merge-driver.ts diff in this PR body — a producer cannot land that human-merge-only file",
+}, async () => {
+  const forge = new EngineAgentFakeForge();
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
+  const cfg = mkEngineAgentCfg({ escalation: { humanLabels: ["needs-human", "blocked"], holdLabels: ["sapwood:hold"] } });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const deps = mkEngineAgentDeps(recorded);
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+
+  forge.reviewData = { ...forge.reviewData, labels: ["Sapwood:Hold"] }; // a human applies the hold
+  const held = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, deps);
+  assert.deepEqual(held.holdObservation, { held: true, label: "Sapwood:Hold" });
+
+  forge.reviewData = { ...forge.reviewData, labels: [] }; // ...and removes it again
+  const released = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, deps);
+  assert.deepEqual(released.holdObservation, { held: false });
+});
+
+test("MergeDriver.driveOne (engine-agent, #390): with NO hold label configured the observation is held:false by construction — no extra PR read is spent to learn it", {
+  skip: "#390: un-skipped by the merge-driver.ts diff in this PR body — a producer cannot land that human-merge-only file",
+}, async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.reviewData = { ...forge.reviewData, isDraft: true }; // any early preflight queue will do
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
+  const cfg = mkEngineAgentCfg({ escalation: { humanLabels: ["needs-human", "blocked"], holdLabels: [] } });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.deepEqual(outcome.holdObservation, { held: false });
+  assert.equal(
+    forge.reviewDataReads,
+    1,
+    "only the drive pipeline's own PR-data read — the observation costs nothing when no hold label is configured",
+  );
+});
+
+// ── #390 gap pin: what CI runs TODAY, until the human applies this PR's merge-driver.ts diff ──
+// The four tests above are the target behavior and are skipped; this one is the red half, kept
+// runnable so the defect is a CI-observable fact rather than a claim in an issue body. The diff
+// DELETES this test in the same hunk that un-skips the others — the two states are mutually
+// exclusive by construction, so neither can be left half-applied silently.
+test("MergeDriver.driveOne (engine-agent, #390 gap): an engine-agent pass carries NO hold observation, so the conductor can never emit pr-held for a held engine-agent lane", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.reviewData = { ...forge.reviewData, labels: ["Sapwood:Hold"] };
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
+  const cfg = mkEngineAgentCfg({ escalation: { humanLabels: ["needs-human", "blocked"], holdLabels: ["sapwood:hold"] } });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  // The GATE is correct — the hold is honored (queued/WAIT, no paid session). Only the visibility
+  // signal is missing, which is exactly the scope of #390.
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /hold-label-present/);
+  assert.equal(outcome.holdObservation, undefined);
 });

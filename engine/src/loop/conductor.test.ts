@@ -2032,6 +2032,46 @@ test("tick DRIVE (#294) crash-rerun: a kill -9 between the hold observation and 
   }
 });
 
+test("tick DRIVE (#390): an ENGINE-AGENT lane's two-pass hold observation drives the same pr-held -> pr-released pair, with the on-PR label casing in the payload", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  const runTick = () => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+
+  // The two outcomes are shaped EXACTLY as the engine-agent path produces them once #390's
+  // merge-driver.ts diff is applied (see merge-driver.test.ts's own skipped #390 tests): a held
+  // pass queues on checkPreflight's `hold-label-present` and carries the label in its ON-PR
+  // casing; the release pass carries `held:false`. This half of the pair is reviewer-kind
+  // agnostic ALREADY — the conductor only ever sees `holdObservation` — which is precisely why
+  // #390 is a merge-driver-side wiring gap and needs no conductor change to close.
+  gate.outcomes[55] = {
+    kind: "queued",
+    pr: 55,
+    reason: "engine-agent: preflight failed: hold-label-present",
+    holdObservation: { held: true, label: "Sapwood:Hold" },
+  };
+  await runTick();
+  gate.outcomes[55] = {
+    kind: "queued",
+    pr: 55,
+    reason: "engine-agent: preflight failed: unresolved-threads",
+    holdObservation: { held: false },
+  };
+  await runTick();
+
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]);
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["pr-held", "pr-released"],
+  );
+  assert.deepEqual(events[0]!.payload, { worker: "lane-a", issue: 2, pr: 55, label: "Sapwood:Hold" });
+  assert.deepEqual(events[1]!.payload, { worker: "lane-a", issue: 2, pr: 55 });
+  assert.equal(st.getWorker("lane-a")?.state, "driving", "visibility only — the gate outcome is untouched");
+  st.close();
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // #383 (F4): drive-queued steady-state dedupe. driveOne reports "queued" STATELESSLY on every
 // DRIVE pass a lane sits on a gate-pending outcome (it has no memory) — these tests are about
