@@ -803,7 +803,14 @@ const ABSENT_ISSUES_LOG_CAP = 25;
  *  added to the board is outside its input set by construction. Detect-and-report only: this
  *  function adds no auto-placement write, matching listIssuesAbsentFromBoard's own read-only
  *  contract. Both passes are independently best-effort — a failure in one never blocks the
- *  other, or engine startup. */
+ *  other, or engine startup.
+ *
+ *  #491: the gap report enumerates ONLY issues on no project board anywhere. An issue placed on
+ *  a different board is deliberate on a multi-board repo (this one partitions a dogfood queue
+ *  from a human-only board), so it gets one trailing count and never a row: ~30 by-design rows
+ *  per startup buried the handful of genuinely untriaged issues, which trains an operator to
+ *  skip the report entirely — the way a real gap gets missed. No unplaced issues -> no line at
+ *  all, however large that count is. */
 export async function normalizeUnplacedBoardItems(
   forge: Pick<IForge, "listUnplacedIssues" | "setBoardStatus" | "listIssuesAbsentFromBoard">,
   state: Pick<State, "appendEvent">,
@@ -829,15 +836,16 @@ export async function normalizeUnplacedBoardItems(
   }
 
   try {
-    const absent = await forge.listIssuesAbsentFromBoard();
-    if (absent.length > 0) {
-      const shown = absent.slice(0, ABSENT_ISSUES_LOG_CAP);
-      const truncated = absent.length > shown.length;
+    const { unplaced, elsewhere } = await forge.listIssuesAbsentFromBoard();
+    if (unplaced.length > 0) {
+      const shown = unplaced.slice(0, ABSENT_ISSUES_LOG_CAP);
+      const truncated = unplaced.length > shown.length;
       log(
-        `[sapwood:startup] ${absent.length} open issue(s) absent from the configured board altogether: ` +
-          `#${shown.join(", #")}${truncated ? ", ..." : ""}`,
+        `[sapwood:startup] ${unplaced.length} open issue(s) on no project board at all: ` +
+          `#${shown.join(", #")}${truncated ? ", ..." : ""}` +
+          (elsewhere > 0 ? ` (a further ${elsewhere} sit on another board — placed, not a gap)` : ""),
       );
-      state.appendEvent("board-gap-detected", { total: absent.length, issues: shown });
+      state.appendEvent("board-gap-detected", { total: unplaced.length, issues: shown, elsewhere });
     }
   } catch (error) {
     log(`[sapwood:startup] could not compute open issues absent from the board; check skipped: ${String(error)}`);

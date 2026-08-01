@@ -208,8 +208,14 @@ export interface IForge {
    *  cannot see an issue that was never added to the board). Read-only, startup-only,
    *  detect-and-report: the engine never places an issue on a board itself — see cli.ts's
    *  normalizeUnplacedBoardItems, the sole caller. Same jurisdiction as listUnplacedIssues:
-   *  draft board items and items belonging to another repo don't count as "on board". */
-  listIssuesAbsentFromBoard(): Promise<number[]>;
+   *  draft board items and items belonging to another repo don't count as "on board".
+   *
+   *  #491: split into two classes, because "not on the configured board" over-reports badly on
+   *  any repo running a deliberate multi-board partition (this one runs two: a dogfood queue and
+   *  a human-only board — ~30 of the reported rows were placed-by-design every startup). An issue
+   *  that is a member of ANY project is PLACED, and only counted; the actionable list is the
+   *  issues nobody has placed anywhere. */
+  listIssuesAbsentFromBoard(): Promise<BoardGapReport>;
   /** One startup-only, read-only view used to surface management-side orphans after local
    *  state loss. It is observability input only: callers must never rebuild workers from it.
    *  PR orphan detection shares listOpenPrBodies' 200-open-PR bound (#50 residual), so PRs
@@ -716,8 +722,8 @@ export class GithubForge implements IForge {
    *  ceiling (a real open issue beyond it could be silently missing from the "absent" set, or
    *  the reported total could undercount). Neither existing method's OWN behavior changes for
    *  its other callers — this is a read-time check layered on top, not a new fetch mode. */
-  async listIssuesAbsentFromBoard(): Promise<number[]> {
-    const [project, openIssues] = await Promise.all([this.fetchProject(), this.listOpenIssueNumbers()]);
+  async listIssuesAbsentFromBoard(): Promise<BoardGapReport> {
+    const [project, openIssues] = await Promise.all([this.fetchProject(), this.listOpenIssuePlacements()]);
     if (project.truncated) {
       throw new Error("listIssuesAbsentFromBoard: board read hit fetchProject's page ceiling — refusing a possibly-wrong absent report");
     }
@@ -1167,6 +1173,33 @@ export class GithubForge implements IForge {
     return issues.map((i) => i.number);
   }
 
+  /** #491: listOpenIssueNumbers plus GitHub's own `projectItems` membership — the ONE read
+   *  behind the board-gap report. Deliberately not a per-issue lookup (30 extra API calls every
+   *  startup) and not an ignore-list config key: `projectItems` rides along on the list call the
+   *  check already made, so multi-board awareness costs one extra JSON field. Needs the same
+   *  project read scope `fetchProject` already requires, so it grants nothing new; if that field
+   *  is unavailable the call throws and normalizeUnplacedBoardItems' best-effort catch degrades
+   *  to a logged skip — the same fail-closed posture as the two truncation guards.
+   *
+   *  Kept separate from listOpenIssueNumbers rather than widening it: that method is also the
+   *  cheap forge reachability probe, and it should stay the cheapest read this forge makes. */
+  async listOpenIssuePlacements(): Promise<OpenIssuePlacement[]> {
+    const out = await this.gh([
+      "issue",
+      "list",
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--state",
+      "open",
+      "--json",
+      "number,projectItems",
+      "--limit",
+      String(OPEN_ISSUES_LIMIT),
+    ]);
+    const issues = JSON.parse(out) as { number: number; projectItems?: unknown[] }[];
+    return issues.map((i) => ({ number: i.number, onAnyProject: (i.projectItems ?? []).length > 0 }));
+  }
+
   async listOpenIssues(): Promise<Issue[]> {
     // Keep this separate from listOpenIssueNumbers: that smaller read is also the cheap forge
     // reachability probe, while the PO digest needs richer fields and milestone scoping.
@@ -1562,6 +1595,23 @@ export interface UnplacedIssues {
   skipped: number;
 }
 
+/** #491: one open issue plus whether GitHub lists it as an item of ANY project. `onAnyProject`
+ *  comes straight from `gh issue list --json projectItems` — a structured membership signal on
+ *  the read the gap check already makes, not an inference from labels or title text. */
+export interface OpenIssuePlacement {
+  number: number;
+  onAnyProject: boolean;
+}
+
+/** #491: the startup board-gap verdict. `unplaced` is the actionable list (open, on no project
+ *  at all — nobody has triaged it anywhere); `elsewhere` counts issues that are off the
+ *  configured board but placed on another one, which a multi-board repo does on purpose and
+ *  which must therefore never occupy a row in the report. */
+export interface BoardGapReport {
+  unplaced: number[];
+  elsewhere: number;
+}
+
 /** Select only this repo's No-Status issue items for startup normalization. Any named Status
  *  is untouched; draft/non-issue and foreign-repo items are outside this forge's write
  *  jurisdiction and counted for one caller-level log line. */
@@ -1576,16 +1626,25 @@ export function selectUnplacedIssues(items: readonly BoardPlacement[], repoFullN
 /** #412: the No-Status normalizer above answers "is this board item misplaced" — this answers
  *  the strictly earlier question, "is this OPEN issue on the board at all". `placements` is
  *  ANY-status board membership (unlike selectUnplacedIssues' filtered input): an item counts as
- *  "on board" regardless of which lane it's in, No-Status included — only a genuinely absent
- *  issue number is reported. Same jurisdiction as selectUnplacedIssues: a draft item (number
- *  null) or a foreign-repo item can never mask (or falsely stand in for) a real absence. */
+ *  "on board" regardless of which lane it's in, No-Status included. Same jurisdiction as
+ *  selectUnplacedIssues: a draft item (number null) or a foreign-repo item can never mask (or
+ *  falsely stand in for) a real absence.
+ *
+ *  #491: off the configured board is no longer the same verdict as unplaced. Three classes,
+ *  in order — on the configured board (authoritative: `placements`, which is repo-scoped and
+ *  lane-complete) is not reported at all; on some OTHER project (`onAnyProject`, GitHub's own
+ *  membership field) is counted only; on no project anywhere is the actionable list. */
 export function selectIssuesAbsentFromBoard(
-  openIssues: readonly number[],
+  openIssues: readonly OpenIssuePlacement[],
   placements: readonly BoardPlacement[],
   repoFullName: string,
-): number[] {
+): BoardGapReport {
   const onBoard = new Set(placements.flatMap((item) => (item.number !== null && item.repo === repoFullName ? [item.number] : [])));
-  return openIssues.filter((issue) => !onBoard.has(issue));
+  const offBoard = openIssues.filter((issue) => !onBoard.has(issue.number));
+  return {
+    unplaced: offBoard.filter((issue) => !issue.onAnyProject).map((issue) => issue.number),
+    elsewhere: offBoard.filter((issue) => issue.onAnyProject).length,
+  };
 }
 
 /** The project query. `root` is "user" or "organization" (owner-kind agnostic downstream). */
