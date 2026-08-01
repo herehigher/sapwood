@@ -946,8 +946,14 @@ function loadReviewDoctrine(cfg: SapwoodConfig): string | undefined {
   return text === NO_DOCTRINE ? undefined : text;
 }
 
-/** Construct the configured PRIMARY reviewer (reviewer.mode). Default = CodexReviewer, matching
- *  the locked decision (0day-style fresh different-model review). */
+/** Construct the configured PRIMARY reviewer (reviewer.mode) — for every kind EXCEPT the default
+ *  one. Since #501 flipped `reviewer.mode`'s own default to `engine-agent` (a local Claude review
+ *  session, PLAN.md Decision #5), the zero-config path does NOT come through here at all:
+ *  `engine-agent` has no legal construction in this limited factory (see buildReviewerByKind's
+ *  `engine-agent` case — it throws), and cli.ts selects the dependency-rich review/production.ts
+ *  path first, reaching this function only when the configured mode is one of the three
+ *  GitHub-review-shaped kinds (`different-model-codex` — the pre-#501 default, still selectable —
+ *  `same-model-trusted`, `human`). */
 export function makeReviewer(cfg: SapwoodConfig): Reviewer {
   return buildReviewerByKind(cfg.reviewer.mode, cfg.reviewer.trustedReviewers, cfg.reviewer.triggerCommand, loadReviewDoctrine(cfg));
 }
