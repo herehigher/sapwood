@@ -13,6 +13,14 @@ import { PROXY_ROLE_TOOL_MATRIX } from "../proxy/access.js";
 import { defaultRetroPromptPath } from "../retro/retro.js";
 import { defaultEngineReviewerPromptPath } from "../review/engine-agent.js";
 import { defaultArchitectPromptPath } from "./architect.js";
+import {
+  ARCHITECT_ALLOWED_TOOLS,
+  CONFIRM_ALLOWED_TOOLS,
+  PO_ALIGN_ALLOWED_TOOLS,
+  PO_ALLOWED_TOOLS,
+  PO_TRIAGE_ALLOWED_TOOLS,
+  ROLE_ALLOWED_TOOLS,
+} from "./peripheral.js";
 import { defaultPlanConfirmPromptPath, defaultPlanDrafterPromptPath, defaultPlanReviewerPromptPath } from "./plan-review.js";
 import { defaultFixPromptPath, defaultPromptPath } from "./worker.js";
 
@@ -39,15 +47,17 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // escape hatch below has no live user left in the repo, consistent with align mode's own
   // dedup-step instruction (still at what's now ~line 72), not merely permissive against it.
   // #529 D2 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
-  // po-align/po-triage hold a default WebFetch grant, which reaches github.com. Rescoped to
-  // "no issue-API access at all".
-  "po.md": "959c3f3dd9ac441aa976d08a7faba544a621d15eb5c530ed751b9ea58c78b6f3",
+  // po-align/po-triage hold a default WebFetch grant, which reaches github.com.
+  // #529 (gate② round 3, optional cleanup): even "no issue-API access at all" was still an
+  // access CLAIM (WebFetch can reach api.github.com for a public repo too) — reworded to point
+  // at the substituted context instead of asserting any "no X access" claim at all.
+  "po.md": "8d0e94e625da9984e5f5acddf4a98362d3e986307b872c0a2ede277768ea3332",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
-  // architect holds a default WebFetch grant, which reaches github.com. Rescoped to "no
-  // issue-API access at all".
-  "architect.md": "90e4964fed79e39a26832c9cd04ac4e8ee45d05e1545946688186417a85cd2cb",
+  // architect holds a default WebFetch grant, which reaches github.com.
+  // #529 (gate② round 3, optional cleanup): same further rewording as po.md above.
+  "architect.md": "cadfbdddfd470f41f5c6daf728bde931f554e3c590f5ad34240380f8d3cb1ec0",
   // #457 (F36): intentional edits — execution-class ACs are plan noise (CI already enforces
   // ci.requiredChecks unconditionally): plan-reviewer flags-and-strips them, the confirm pass
   // invalidates legacy plans carrying them, drafter/decompose never author them.
@@ -143,6 +153,38 @@ const ROLE_PROMPT_PATHS: Readonly<Record<string, readonly string[]>> = {
 // grant (config.ts's review-family exclusion), so the identical-looking sentence is true for
 // them and must not be flagged.
 const ROLES_WITH_DEFAULT_WEB_ACCESS: ReadonlySet<string> = new Set(["architect", "po-align", "po-triage"]);
+
+test("gate② round 3 pin: ROLES_WITH_DEFAULT_WEB_ACCESS matches peripheral.ts's actual web-grant constants — a hand-maintained set inside the test whose whole job is catching hand-maintained mirrors of code facts, so it is itself pinned against the source of truth rather than left free-floating", () => {
+  // peripheral.ts's own doc comment (#410) names exactly these three as the only sessions the
+  // WebSearch/WebFetch ternary can ever choose for: ARCHITECT_ALLOWED_TOOLS, PO_ALIGN_ALLOWED_
+  // TOOLS, PO_TRIAGE_ALLOWED_TOOLS. If a fourth constant ever gains the grant, or one of these
+  // three loses it, this assertion — not a silently-stale Set literal above — is what breaks.
+  for (const [name, tools] of [
+    ["ARCHITECT_ALLOWED_TOOLS", ARCHITECT_ALLOWED_TOOLS],
+    ["PO_ALIGN_ALLOWED_TOOLS", PO_ALIGN_ALLOWED_TOOLS],
+    ["PO_TRIAGE_ALLOWED_TOOLS", PO_TRIAGE_ALLOWED_TOOLS],
+  ] as const) {
+    assert.ok(
+      tools.includes("WebSearch"),
+      `peripheral.ts's ${name} no longer includes WebSearch — if this is intentional, ` +
+        `ROLES_WITH_DEFAULT_WEB_ACCESS above must be updated to match (remove the role this ` +
+        `constant backs); if it's a regression, fix peripheral.ts instead`,
+    );
+  }
+  for (const [name, tools] of [
+    ["ROLE_ALLOWED_TOOLS", ROLE_ALLOWED_TOOLS],
+    ["PO_ALLOWED_TOOLS", PO_ALLOWED_TOOLS],
+    ["CONFIRM_ALLOWED_TOOLS", CONFIRM_ALLOWED_TOOLS],
+  ] as const) {
+    assert.ok(
+      !tools.includes("WebSearch"),
+      `peripheral.ts's ${name} now includes WebSearch — a role backed by this ungranted ` +
+        `baseline just gained web access. ROLES_WITH_DEFAULT_WEB_ACCESS above must be updated ` +
+        `to add whichever role now resolves to ${name} with the grant, or the AC-2 test below ` +
+        `will silently stop covering it — the #529 defect class, one level up`,
+    );
+  }
+});
 
 test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access denial while its role holds a non-empty PROXY_ROLE_TOOL_MATRIX grant", () => {
   // Family 1 — the original #512-class bug: a negation ("no"/"never"/"nothing") within the
