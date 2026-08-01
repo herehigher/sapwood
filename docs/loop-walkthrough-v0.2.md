@@ -76,6 +76,13 @@ Note the asymmetry: **milestone scoping** (`round.milestone`, or the
    `needs-human` label a human has since removed re-enter DRIVE, up to
    `lanes.gatedReentryCap` per issue (`gated-reentry` /
    `gated-reentry-capped` events; capped lanes are latched and re-labeled).
+   Terminality is decided **before** the cap (#484): a merged PR goes back to
+   DRIVE for its ordinary `merged` terminal at any attempt count
+   (`gated-reentry-merged`, no attempt burned), and a CLOSED issue is terminal
+   whatever its PR says — latched and surfaced once
+   (`gated-reentry-issue-closed`), never re-driven and never re-labeled. Only a
+   live issue with a live PR ever reaches the cap, so the capped re-label on a
+   finished lane is unreachable by construction rather than by a guard.
 5. **RECLAIM** — every running lane classified by four signals (terminal
    sentinel `.handoff`/`.done`/`.failed`; heartbeat age vs
    `worker.heartbeatStaleSecs`; wrapper liveness): KEEP / terminal-record /

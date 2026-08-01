@@ -2178,6 +2178,12 @@ test("parseIssueMeta: no milestone -> the key is omitted, not null", () => {
   assert.ok(!("milestone" in meta));
 });
 
+test("#485 parseIssueMeta: MERGED reads as CLOSED; an unrecognized state still reads OPEN", () => {
+  const mk = (state: string) => JSON.stringify({ number: 1, title: "t", state, labels: [], updatedAt: "x", milestone: null });
+  assert.equal(parseIssueMeta(mk("MERGED")).state, "CLOSED", "a merged blocker no longer blocks");
+  assert.equal(parseIssueMeta(mk("SOMETHING_NEW")).state, "OPEN", "fail-direction: noise must not read as resolved");
+});
+
 test("getIssueMeta: scoped to owner/repo, requests the right --json fields", async () => {
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);

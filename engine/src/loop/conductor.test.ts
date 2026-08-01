@@ -31,6 +31,7 @@ import { WorkerSupervisor } from "../roles/worker.js";
 import { State, type WorkerRow } from "../state/state.js";
 import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import {
+  BLOCKER_RECHECK_READS_PER_TICK,
   budgetExceeded,
   capHitEscalationNote,
   classifyLane,
@@ -54,6 +55,7 @@ import {
   orderForDispatch,
   priorFixLegForVerdict,
   type ReclaimResult,
+  reconcileStaleBlockers,
   releaseVanishedWorktrees,
   resumeDecision,
   type Supervisor,
@@ -153,10 +155,20 @@ class FakeForge extends UnstubbedForge implements IForge {
     if (!cur.includes(l)) this.issueLabelsByIssue[n] = [...cur, l];
   }
   labelsRemoved: Array<[number, string]> = [];
+  /** #485: when set, removeLabel throws — proves a failed clear leaves the stale label in place
+   *  (retried next tick) instead of the engine pretending it removed one. */
+  throwOnRemoveLabel = false;
   override async removeLabel(n: number, l: string): Promise<void> {
+    if (this.throwOnRemoveLabel) throw new Error("simulated forge failure");
     this.labelsRemoved.push([n, l]);
     this.issueLabelsByIssue[n] = (this.issueLabelsByIssue[n] ?? []).filter((x) => x !== l);
   }
+  /** #485: per-issue OPEN/CLOSED state for the blocked-by reconcile's blocker reads. A number
+   *  in `metaThrows` simulates a transient forge read failure; anything unlisted reads OPEN.
+   *  Shares the single `getIssueMeta` override below with #484's `issueStateByIssue`. */
+  issueState: Record<number, "OPEN" | "CLOSED"> = {};
+  metaThrows = new Set<number>();
+  metaReads: number[] = [];
   /** #398: per-PR label set — the PR-side twin of `issueLabelsByIssue`, mutable so a test can
    *  simulate a human removing needs-human from the PR (the #147 reentry act, now on the carrier
    *  the escalation actually wrote). `addPRLabel` appends here, never removes. */
@@ -174,6 +186,24 @@ class FakeForge extends UnstubbedForge implements IForge {
   throwOnAddPRLabel = false;
   override async getPRLabels(n: number): Promise<string[]> {
     return this.prLabelsByPr[n] ?? [];
+  }
+  /** #484: GATED RECLAIM's terminality discovery reads the ISSUE's live state before the cap.
+   *  Mutable per-issue so a test can close an issue mid-run; unlisted issues read OPEN, which is
+   *  every pre-#484 fixture's implicit assumption.
+   *  Single merged override serving both #484 (`issueStateByIssue`) and #485 (`issueState` +
+   *  `metaThrows`/`metaReads`) — the two landed as separate green PRs whose combination
+   *  redeclared `getIssueMeta` (TS2393 on main). */
+  issueStateByIssue: Record<number, "OPEN" | "CLOSED"> = {};
+  override async getIssueMeta(n: number) {
+    this.metaReads.push(n);
+    if (this.metaThrows.has(n)) throw new Error("simulated forge failure");
+    return {
+      number: n,
+      title: `issue ${n}`,
+      state: this.issueStateByIssue[n] ?? this.issueState[n] ?? ("OPEN" as const),
+      labels: this.issueLabelsByIssue[n] ?? [],
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
   }
   override async openPR(): Promise<number> {
     return 1;
@@ -485,6 +515,144 @@ test("#310 orderForDispatch: decomposed tracking parents are never dispatched ev
     ).map((issue) => issue.number),
     [1],
   );
+});
+
+// ── #485: auto-clear stale blocked-by labels once the blocker issue closes ─────────────────
+
+/** Runs the reconcile over one issue's labels against a blocker-state map, returning what was
+ *  removed on the forge and what the caller's own (in-memory) view of the labels became. */
+const runBlockerReconcile = async (
+  labels: string[],
+  states: Record<number, "OPEN" | "CLOSED">,
+  opts: { throws?: number[]; prefix?: string } = {},
+) => {
+  const forge = new FakeForge();
+  forge.issueState = states;
+  for (const n of opts.throws ?? []) forge.metaThrows.add(n);
+  const cfg = opts.prefix == null ? mkCfg() : mkCfg({ labels: { ...LEGACY_LABEL_CONFIG.labels, prefix: opts.prefix } });
+  const out = await reconcileStaleBlockers(forge, [{ number: 9, title: "", labels }], cfg);
+  return { removed: forge.labelsRemoved, labels: out[0]?.labels ?? [], reads: forge.metaReads, forge };
+};
+
+test("#485 reconcileStaleBlockers: a CLOSED blocker's label is removed, an OPEN blocker's is left alone", async () => {
+  const closed = await runBlockerReconcile(["prio:3-feature", "blocked-by:5"], { 5: "CLOSED" });
+  assert.deepEqual(closed.removed, [[9, "blocked-by:5"]]);
+  assert.deepEqual(closed.labels, ["prio:3-feature"], "the returned issue is unblocked in the same pass");
+
+  const open = await runBlockerReconcile(["prio:3-feature", "blocked-by:5"], { 5: "OPEN" });
+  assert.deepEqual(open.removed, [], "an open blocker is unchanged behavior");
+  assert.deepEqual(open.labels, ["prio:3-feature", "blocked-by:5"]);
+});
+
+test("#485 reconcileStaleBlockers: a transient blocker-read failure keeps the label and never escalates", async () => {
+  const r = await runBlockerReconcile(["blocked-by:5"], {}, { throws: [5] });
+  assert.deepEqual(r.removed, [], "nothing removed on an unreadable blocker — retried next tick");
+  assert.deepEqual(r.labels, ["blocked-by:5"]);
+  assert.deepEqual(r.forge.labelsAdded, [], "no needs-human escalation: a flaky read is the common path, not Decision #9");
+});
+
+test("#485 reconcileStaleBlockers: a failed removeLabel leaves the stale label in place", async () => {
+  const forge = new FakeForge();
+  forge.issueState = { 5: "CLOSED" };
+  forge.throwOnRemoveLabel = true;
+  const out = await reconcileStaleBlockers(forge, [{ number: 9, title: "", labels: ["blocked-by:5"] }], mkCfg());
+  assert.deepEqual(out[0]?.labels, ["blocked-by:5"], "the write failed, so the local view must not claim it succeeded");
+  assert.deepEqual(forge.labelsAdded, []);
+});
+
+test("#485 reconcileStaleBlockers: multiple blockers clear partially — only the closed ones", async () => {
+  const r = await runBlockerReconcile(["blocked-by:5", "blocked-by:6", "blocked-by:7"], { 5: "CLOSED", 6: "OPEN", 7: "CLOSED" });
+  assert.deepEqual(
+    r.removed.map(([, l]) => l),
+    ["blocked-by:5", "blocked-by:7"],
+  );
+  assert.deepEqual(r.labels, ["blocked-by:6"], "still blocked by the one blocker that is still open");
+});
+
+test("#485 reconcileStaleBlockers: the exact label token is removed, including the blocked-by:#N form", async () => {
+  const r = await runBlockerReconcile(["blocked-by:#5"], { 5: "CLOSED" });
+  assert.deepEqual(r.removed, [[9, "blocked-by:#5"]], "removal uses the token the issue actually carries, not a reconstructed one");
+});
+
+test("#485 reconcileStaleBlockers: a non-configured-prefix blocked-by label is invisible, exactly as labelsBlockers sees it", async () => {
+  const r = await runBlockerReconcile(["blocked-by:5"], { 5: "CLOSED" }, { prefix: "sapwood:" });
+  assert.deepEqual(r.removed, []);
+  assert.deepEqual(r.reads, [], "no forge read at all for a label this config does not parse as a blocker");
+});
+
+test("#485 reconcileStaleBlockers: blocker reads are deduped across issues and bounded per tick", async () => {
+  const forge = new FakeForge();
+  forge.issueState = { 5: "CLOSED" };
+  await reconcileStaleBlockers(
+    forge,
+    [
+      { number: 9, title: "", labels: ["blocked-by:5"] },
+      { number: 10, title: "", labels: ["blocked-by:5"] },
+    ],
+    mkCfg(),
+  );
+  assert.deepEqual(forge.metaReads, [5], "one read for the shared blocker, not one per blocked issue");
+  assert.deepEqual(
+    forge.labelsRemoved.map(([n]) => n),
+    [9, 10],
+    "both issues still get their own label removed",
+  );
+
+  const many = new FakeForge();
+  const blocked = Array.from({ length: BLOCKER_RECHECK_READS_PER_TICK + 5 }, (_, k) => ({
+    number: 100 + k,
+    title: "",
+    labels: [`blocked-by:${200 + k}`],
+  }));
+  for (const b of blocked) many.issueState[Number(b.labels[0]?.split(":")[1])] = "CLOSED";
+  await reconcileStaleBlockers(many, blocked, mkCfg());
+  assert.equal(many.metaReads.length, BLOCKER_RECHECK_READS_PER_TICK, "the per-tick read budget bounds the pass");
+  assert.equal(many.labelsRemoved.length, BLOCKER_RECHECK_READS_PER_TICK, "the rest keep their labels and are retried next tick");
+});
+
+test("#485 reconcileStaleBlockers (#212 invariant): a token that also matches a configured workflow label is never removed", async () => {
+  // A pathological config that aliases the human-release signature onto a blocked-by-shaped
+  // string must not let the engine forge that signature, even with the blocker genuinely closed.
+  const forge = new FakeForge();
+  forge.issueState = { 7: "CLOSED" };
+  const cfg = mkCfg({
+    labels: { ...LEGACY_LABEL_CONFIG.labels, needsHuman: "blocked-by:7" },
+    escalation: { humanLabels: ["blocked-by:7", "blocked"] },
+  });
+  const out = await reconcileStaleBlockers(forge, [{ number: 9, title: "", labels: ["blocked-by:7"] }], cfg);
+  assert.deepEqual(forge.labelsRemoved, []);
+  assert.deepEqual(out[0]?.labels, ["blocked-by:7"]);
+});
+
+test("#485 tick: an issue blocked by a CLOSED issue is unblocked and dispatched with no human action", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 9, title: "", labels: ["prio:3-feature", "blocked-by:5"] }];
+  forge.issueState = { 5: "CLOSED" };
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(forge.labelsRemoved, [[9, "blocked-by:5"]]);
+  assert.deepEqual(
+    sup.dispatched.map((i) => i.number),
+    [9],
+  );
+  assert.deepEqual(
+    r.dispatched.filter((d) => d.kind === "dispatched").map((d) => d.issue),
+    [9],
+  );
+  st.close();
+});
+
+test("#485 tick: an issue blocked by a still-OPEN issue stays filtered out, exactly as before", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 9, title: "", labels: ["prio:3-feature", "blocked-by:5"] }];
+  forge.issueState = { 5: "OPEN" };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(forge.labelsRemoved, []);
+  assert.deepEqual(sup.dispatched, [] as Issue[]);
+  st.close();
 });
 
 test("tick dispatch: claim happens before launch; a claim failure spawns no worker", async () => {
@@ -9021,6 +9189,146 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   const r4 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r4.gatedReclaimed, []);
   assert.equal(st.getWorker("lane-b")?.state, "failed");
+  st.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #484: terminality is discovered BEFORE the cap. Live evidence (round 262, 2026-07-31): the cap
+// gate ran first, so a capped lane could never learn its PR was already MERGED — it re-applied
+// `needs-human` to CLOSED issues (#295/#377), the next round's escalation sweep removed it again,
+// and the two flapped a label forever. The control was lane-433, under the cap, which reclaimed,
+// read the PR and recorded the honest `merged` terminal.
+
+test("#484 AC1: a CAPPED gated lane whose PR is already MERGED still reaches the merged terminal — no `gated-reentry-capped` event, no label write, no attempt burned", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ lanes: { gatedReentryCap: 1 } });
+  const gate = new FakeMergeGate();
+
+  // The exact live shape: attempts == cap (the CAPPED branch's own precondition) on a lane whose
+  // PR a human merged by hand while the escalation stood.
+  st.upsertWorker({
+    name: "lane-m",
+    issue: 295,
+    session_id: "s-lane-m",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 458,
+    gated_reentry_attempts: 1,
+    gated_escalation_labeled: 1,
+  });
+  forge.issueLabelsByIssue[295] = []; // the sweep already removed the resolved escalation's label
+  forge.prStatus = { ...forge.prStatus, state: "MERGED" };
+  gate.outcomes[458] = { kind: "merged", pr: 458, headOid: "H1" };
+
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r.gatedReclaimed, [{ kind: "merged", worker: "lane-m", issue: 295, pr: 458, attempts: 1 }]);
+  // The lane-433 path: DRIVE settles it this SAME tick with the ordinary merged terminal.
+  assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-m", issue: 295, pr: 458 }]);
+  assert.equal(st.getWorker("lane-m")?.state, "done");
+  assert.deepEqual(forge.boardSet, [[295, "done"]]);
+  assert.equal(st.eventsAfterId(0, ["gated-reentry-capped"]).length, 0, "the cap was never reached — terminality is decided first");
+  assert.deepEqual(forge.labelsAdded, [], "no needs-human re-applied to a finished lane");
+  assert.deepEqual(forge.prLabelsAdded, []);
+  assert.equal(st.getWorker("lane-m")?.gated_reentry_attempts, 1, "nothing was re-entered, so no attempt is burned");
+  assert.equal(st.eventsAfterId(0, ["gated-reentry"]).length, 0);
+
+  // Terminal: nothing further, forever.
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r2.gatedReclaimed, []);
+  assert.equal(forge.labelsAdded.length, 0);
+  st.close();
+});
+
+test("#484 AC2: a gated lane whose ISSUE is CLOSED never re-escalates — an OPEN zombie PR on a closed issue is surfaced ONCE and latched, not looped (the #397 issue-CLOSED-gates-reentry ruling)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ lanes: { gatedReentryCap: 2 } });
+  const gate = new FakeMergeGate();
+
+  // attempts (0) is UNDER the cap, so this is decided by terminality alone — not by the cap.
+  st.upsertWorker({
+    name: "lane-z",
+    issue: 377,
+    session_id: "s-lane-z",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 460,
+    gated_escalation_labeled: 1,
+  });
+  forge.issueLabelsByIssue[377] = [];
+  forge.issueStateByIssue[377] = "CLOSED";
+  forge.prStatus = { ...forge.prStatus, state: "OPEN" }; // the zombie PR
+
+  for (let round = 0; round < 5; round++) {
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    assert.deepEqual(
+      r.gatedReclaimed,
+      round === 0 ? [{ kind: "issue-closed", worker: "lane-z", issue: 377, pr: 460, attempts: 0 }] : [],
+      `round ${round}: surfaced exactly once`,
+    );
+  }
+  assert.equal(st.eventsAfterId(0, ["gated-reentry-issue-closed"]).length, 1);
+  assert.equal(st.eventsAfterId(0, ["gated-reentry"]).length, 0, "never re-entered — the zombie PR is never re-driven");
+  assert.equal(st.eventsAfterId(0, ["gated-reentry-capped"]).length, 0);
+  assert.deepEqual(forge.labelsAdded, [], "no re-escalation onto a closed issue");
+  assert.deepEqual(forge.prLabelsAdded, []);
+  assert.deepEqual(forge.issueComments, []);
+  assert.equal(st.getWorker("lane-z")?.state, "failed"); // closure is not success
+  assert.equal(st.getWorker("lane-z")?.gated_reentry_capped, 1); // latched: permanently out of reentry
+  assert.equal(st.gatedFailedWorkers().length, 0);
+  st.close();
+});
+
+test("#484 AC3: the live sweep↔reentry cycle (round 262: resolve -> sweep -> re-escalate -> goto) converges to silence — two rounds of reconcile+sweep+tick on a CLOSED issue with a MERGED PR", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ lanes: { gatedReentryCap: 1 } });
+  const gate = new FakeMergeGate();
+
+  // The 11:59 state: an escalated lane at its cap, its PR hand-merged and its issue closed by
+  // that merge, with the engine's own needs-human label still standing on the issue.
+  seedRunning(st, "lane-f", 295);
+  const lane = st.getWorker("lane-f")!;
+  st.upsertWorker({ ...lane, state: "failed", pr: 458, ended_at: "t1", gated_reentry_attempts: 1, gated_escalation_labeled: 1 });
+  st.appendEvent("drive-needs-human", { worker: "lane-f", issue: 295, pr: 458, labeled: 1 });
+  forge.issueLabelsByIssue[295] = [cfg.labels.needsHuman];
+  forge.issueStateByIssue[295] = "CLOSED";
+  forge.prStatus = { ...forge.prStatus, state: "MERGED" };
+  gate.outcomes[458] = { kind: "merged", pr: 458, headOid: "H1" };
+
+  const round = async () => {
+    await reconcileEscalations(forge, st, cfg);
+    await sweepResolvedHolds(forge, st, cfg);
+    return tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  };
+
+  // Round 1: the escalation resolves (via merged), the sweep lifts the stale hold, and the lane
+  // is COLLECTED instead of re-escalated.
+  const r1 = await round();
+  assert.deepEqual(r1.gatedReclaimed, [{ kind: "merged", worker: "lane-f", issue: 295, pr: 458, attempts: 1 }]);
+  assert.equal(st.getWorker("lane-f")?.state, "done");
+  assert.deepEqual(forge.issueLabelsByIssue[295], [], "the hold was swept, and nothing put it back");
+
+  // Round 2 (and 3): silence — no re-escalation, so no new resolution, so nothing left to sweep.
+  const eventsAfterRound1 = st.eventsAfterId(0, ["gated-reentry-capped", "needs-human-swept", "escalation-resolved"]).length;
+  for (let i = 0; i < 2; i++) {
+    const r = await round();
+    assert.deepEqual(r.gatedReclaimed, []);
+  }
+  assert.equal(
+    st.eventsAfterId(0, ["gated-reentry-capped", "needs-human-swept", "escalation-resolved"]).length,
+    eventsAfterRound1,
+    "the cycle emits nothing further — no per-round churn",
+  );
+  assert.equal(st.eventsAfterId(0, ["gated-reentry-capped"]).length, 0);
+  assert.deepEqual(forge.labelsAdded, [], "no GitHub label write on a CLOSED issue, ever");
+  assert.deepEqual(forge.prLabelsAdded, []);
   st.close();
 });
 
