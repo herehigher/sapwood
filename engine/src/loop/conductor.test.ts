@@ -30,6 +30,7 @@ import { CODEX_REVIEWER_LOGINS, CodexReviewer, type ReviewFallbackLock, type Rev
 import { WorkerSupervisor } from "../roles/worker.js";
 import { State, type WorkerRow } from "../state/state.js";
 import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
+import { BASE_CI_RED_ESCALATED, BASE_CI_RED_OBSERVED, baseRedPin } from "./base-ci.js";
 import {
   BLOCKER_RECHECK_READS_PER_TICK,
   budgetExceeded,
@@ -221,6 +222,14 @@ class FakeForge extends UnstubbedForge implements IForge {
   prChecks: PRCheckItem[] = [];
   override async getPRChecks(_pr: number, cap: number) {
     return { checks: this.prChecks.slice(0, cap), total: this.prChecks.length };
+  }
+  /** #502: the default branch's own rollup — read once per tick by DRIVE's base-CI observation.
+   *  Defaults to a GREEN main, so every pre-#502 scenario in this file keeps its exact behaviour;
+   *  a test that wants the base-red path sets `baseChecks`. */
+  baseChecks: PRCheckItem[] = [];
+  baseBranchHeadOid = "base-head";
+  override async getDefaultBranchChecks(cap: number) {
+    return { branch: "main", headOid: this.baseBranchHeadOid, checks: this.baseChecks.slice(0, cap), total: this.baseChecks.length };
   }
   override async mergePR(pr: number, headOid: string): Promise<void> {
     this.merged.push([pr, headOid]);
@@ -788,6 +797,71 @@ test("tick DRIVE: a driving lane with NO recorded AC snapshot (predates #283, ac
 //    loop comment), this test proves the DEFENSE holds regardless: IF such a row ever existed
 //    (crash, corruption, a future refactor of that invariant), it fails closed instead of driving
 //    unprotected. ──
+
+// ── #502: base-branch CI awareness, end to end through tick() ────────────────────────────────
+
+test("tick DRIVE (#502): a CI-RED default branch raises exactly ONE run-level escalation for THREE driving lanes — not one per lane, and not one per tick", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  forge.baseBranchHeadOid = "a1c0ffee";
+  forge.baseChecks = [{ name: "test", status: "COMPLETED", conclusion: "FAILURE", state: null, appSlug: "github-actions" }];
+  for (const [name, issue, pr] of [
+    ["lane-a", 101, 501],
+    ["lane-b", 102, 502],
+    ["lane-c", 103, 503],
+  ] as const) {
+    st.upsertWorker({ name, issue, session_id: `sess-${issue}`, state: "driving", started_at: "t0", ended_at: null, pr });
+  }
+  const gate = new FakeMergeGate();
+  const deps = { now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, log: () => {} };
+  await tick(deps);
+  await tick(deps); // still red, same commit — the latch must hold across ticks too
+
+  const escalations = st.eventsAfterId(0, [BASE_CI_RED_ESCALATED]);
+  assert.equal(escalations.length, 1, "one fact, one bit — three lanes and two ticks produce ONE escalation");
+  const payload = escalations[0]?.payload as { sha: string; failing: string[] };
+  assert.equal(payload.sha, "a1c0ffee", "it names the base commit the operator has to go look at");
+  assert.deepEqual(payload.failing, ["test"], "…and the failing run");
+  // The pin the drive path and the human-owned FIXABLE:CI_RED suppression both read.
+  const pin = baseRedPin(st);
+  assert.equal(pin?.sha, "a1c0ffee");
+  assert.deepEqual(pin?.failing, ["test"]);
+  st.close();
+});
+
+test("tick DRIVE (#502): a GREEN default branch pins nothing and escalates nothing — the pre-#502 path, byte for byte", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  forge.baseChecks = [{ name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null, appSlug: "github-actions" }];
+  st.upsertWorker({ name: "lane-a", issue: 104, session_id: "s", state: "driving", started_at: "t0", ended_at: null, pr: 504 });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: new FakeMergeGate(), log: () => {} });
+  assert.equal(st.eventsAfterId(0, [BASE_CI_RED_ESCALATED, BASE_CI_RED_OBSERVED]).length, 0);
+  assert.equal(baseRedPin(st), null);
+  st.close();
+});
+
+test("tick DRIVE (#502): with NO driving lane there is nothing waiting on CI evidence — the base-branch read is never made", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  let reads = 0;
+  forge.getDefaultBranchChecks = async () => {
+    reads++;
+    return { branch: "main", headOid: "a1", checks: [], total: 0 };
+  };
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: new FakeSupervisor(),
+    cfg: mkCfg(),
+    mergeGate: new FakeMergeGate(),
+    log: () => {},
+  });
+  assert.equal(reads, 0, "no lanes driving -> no poll");
+  st.close();
+});
 
 test("tick DRIVE (#301 P1#1): a lane whose ac_body_hash is set but whose ac_snapshots row is MISSING (the crash-window shape) escalates as an anomaly — never silently drives as if it were a pre-#283 legacy lane", async () => {
   const st = new State(":memory:");

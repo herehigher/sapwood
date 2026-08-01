@@ -218,6 +218,12 @@ export interface EngineAgentDriveDeps {
    *  spawning another paid review session. */
   reconcileAuditDelivery: () => Promise<AuditDeliveryResult>;
   ciChecksCap: number;
+  /** #502: the RUN-level base-branch-CI-red pin, if one stands (loop/base-ci.ts's `baseRedPin`,
+   *  threaded in by the conductor's composition root — this module never touches storage). Read
+   *  ONLY to LABEL the CI wait below: nothing here gates, routes or escalates on it, so a stale or
+   *  wrongly-set pin can at worst mis-word a queued reason. Absent (or returning null) reproduces
+   *  the pre-#502 reason strings exactly. */
+  getBaseRedPin?: () => { sha: string; at: string; failing: string[] } | null;
 }
 
 export type EngineAgentDriveOutcome =
@@ -497,7 +503,23 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     // this line red therefore means a contradictory read (rollup not red, or heads split) —
     // fail-safe to the same queued wait every other unsatisfied shape gets, aged by the #426
     // pin, re-fetched coherently next tick.
-    return { kind: "queued", reason: `engine-agent: preflight CI-evidence not satisfied: ${ciEvidence.unsatisfied.join(", ")}` };
+    //
+    // #502: while the default branch is itself CI-red, EVERY open PR's merge-ref CI inherits that
+    // red and every lane lands here at once — the shape that left three lanes waiting 1.5h+ on
+    // unreachable evidence with nothing saying why. The wait itself is unchanged (this is a
+    // labelling change, not a routing one); what changes is that the reason names the base commit
+    // and its failing run, so "the base is broken" reads differently from "your branch is broken"
+    // in the queued reason, the drive event and the operator's log. Plausibly-base-inherited, not
+    // provably: the pin proves the BASE is red, not that THIS lane's wait is caused by it, and the
+    // wording says "base-inherited" about a lane that could also have its own unrelated problem.
+    // That over-attribution is the deliberate trade — it costs wording on a lane that is waiting
+    // either way, where staying silent cost the 1.5h.
+    const basePin = deps.getBaseRedPin?.() ?? null;
+    const baseNote = basePin ? ` (base-inherited: the default branch is CI-red at ${basePin.sha} — ${basePin.failing.join(", ")})` : "";
+    return {
+      kind: "queued",
+      reason: `engine-agent: preflight CI-evidence not satisfied${baseNote}: ${ciEvidence.unsatisfied.join(", ")}`,
+    };
   }
 
   // ── identity resolution (design #279 §2 R2-6) ───────────────────────────────────────────────

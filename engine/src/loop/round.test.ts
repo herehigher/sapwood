@@ -129,6 +129,11 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
+  /** #502: DRIVE's once-per-tick base-branch CI read. A GREEN default branch, so nothing in this
+   *  file's scenarios changes behaviour. */
+  override async getDefaultBranchChecks() {
+    return { branch: "main", headOid: "base-head", checks: [], total: 0 };
+  }
   override async mergePR(): Promise<void> {}
   override async addPRComment(): Promise<void> {}
   override async addIssueComment(): Promise<void> {}

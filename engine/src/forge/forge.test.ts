@@ -23,6 +23,7 @@ import {
   hasVerificationPlan,
   OPEN_ISSUES_LIMIT,
   parseCompareChangedFiles,
+  parseDefaultBranchChecksPage,
   parseIssueLabels,
   parseIssueMeta,
   parseIssueRelations,
@@ -2815,6 +2816,73 @@ test("getPRChecks: scoped to owner/repo, GraphQL contexts(first: cap) with owner
   assert.ok(args.includes("repo=r"));
   assert.ok(args.includes("number=3"));
   assert.ok(args.includes("cap=40"));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #502: the base-branch check-status read — getPRChecks' capped-contexts shape, keyed on the
+// DEFAULT BRANCH's HEAD commit instead of a PR number.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("parseDefaultBranchChecksPage: parses the default branch name, its HEAD oid and the capped rollup contexts", () => {
+  const json = JSON.stringify({
+    data: {
+      repository: {
+        defaultBranchRef: {
+          name: "main",
+          target: {
+            oid: "a1c0ffee",
+            statusCheckRollup: {
+              contexts: {
+                totalCount: 2,
+                nodes: [
+                  { name: "test", status: "COMPLETED", conclusion: "FAILURE", checkSuite: { app: { slug: "github-actions" } } },
+                  { context: "legacy-ci", state: "SUCCESS" },
+                ],
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  assert.deepEqual(parseDefaultBranchChecksPage(json), {
+    branch: "main",
+    headOid: "a1c0ffee",
+    checks: [
+      { name: "test", status: "COMPLETED", conclusion: "FAILURE", state: null, appSlug: "github-actions" },
+      { name: "legacy-ci", status: "", conclusion: null, state: "SUCCESS", appSlug: null },
+    ],
+    total: 2,
+  });
+});
+
+test("parseDefaultBranchChecksPage: a missing ref / non-Commit target / absent rollup degrades to an EMPTY page — never a throw, never a fabricated red", () => {
+  assert.deepEqual(parseDefaultBranchChecksPage(JSON.stringify({ data: { repository: {} } })), {
+    branch: "",
+    headOid: "",
+    checks: [],
+    total: 0,
+  });
+  const noRollup = JSON.stringify({ data: { repository: { defaultBranchRef: { name: "main", target: { oid: "a1" } } } } });
+  assert.deepEqual(parseDefaultBranchChecksPage(noRollup), { branch: "main", headOid: "a1", checks: [], total: 0 });
+});
+
+test("getDefaultBranchChecks: scoped to owner/repo, GraphQL contexts(first: cap) — capped exactly like getPRChecks, and carries NO pr number", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify({});
+  };
+  await forge.getDefaultBranchChecks(40);
+  const args = seen[0]!;
+  assert.deepEqual(args.slice(0, 2), ["api", "graphql"]);
+  assert.ok(args.includes("owner=o"));
+  assert.ok(args.includes("repo=r"));
+  assert.ok(args.includes("cap=40"));
+  assert.ok(!args.some((a) => a.startsWith("number=")), "ref-scoped, not PR-scoped");
+  assert.match(args.join(" "), /contexts\(first: \$cap\)/, "bounded contexts — no unbounded read");
 });
 
 test("parsePRReviewThreadsPage: parses threads + their own comments + per-thread commentsComplete, tolerates malformed/missing pageInfo", () => {

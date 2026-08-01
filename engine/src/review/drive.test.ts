@@ -225,6 +225,7 @@ function makeDeps(overrides: {
   cfg?: SapwoodConfig;
   now?: () => Date;
   runIds?: string[];
+  getBaseRedPin?: EngineAgentDriveDeps["getBaseRedPin"];
 }): { deps: EngineAgentDriveDeps; recorded: Recorded } {
   const recorded: Recorded = { pin: null, wal: null };
   let runIdCursor = 0;
@@ -266,6 +267,7 @@ function makeDeps(overrides: {
     auditDelivery: overrides.auditDelivery ?? (async () => ({ delivered: false, reason: "no #288 impl in this test" })),
     reconcileAuditDelivery: overrides.reconcileAuditDelivery ?? (async () => ({ delivered: false, reason: "nothing to reconcile" })),
     ciChecksCap: 20,
+    ...(overrides.getBaseRedPin ? { getBaseRedPin: overrides.getBaseRedPin } : {}),
   };
   return { deps, recorded };
 }
@@ -965,6 +967,35 @@ test("driveEngineAgentReview (#503): PENDING required CI (null conclusion) keeps
   const outcome = await driveEngineAgentReview(deps, 1, 2);
   assert.equal(outcome.kind, "queued");
   assert.match(outcome.kind === "queued" ? outcome.reason : "", /CI-evidence not satisfied/);
+});
+
+// ── #502: a base-inherited CI wait reads differently from an ordinary branch-CI wait ──────────
+
+test("driveEngineAgentReview (#502): while the base-red pin stands, the CI-wait reason NAMES the base commit and its failing run — distinct from the ordinary branch-CI wait", async () => {
+  const forge = { getPRStatus: async () => status({ ciGreen: false }), getPRChecks: async () => checksPage({ conclusion: null }) };
+  const ordinary = await driveEngineAgentReview(makeDeps({ forge }).deps, 1, 2);
+  const inherited = await driveEngineAgentReview(
+    makeDeps({ forge, getBaseRedPin: () => ({ sha: "a1c0ffee", at: "2026-01-01T00:00:00.000Z", failing: ["test@github-actions"] }) }).deps,
+    1,
+    2,
+  );
+  const reason = (o: typeof ordinary): string => (o.kind === "queued" ? o.reason : "");
+  assert.match(reason(ordinary), /CI-evidence not satisfied/);
+  assert.doesNotMatch(reason(ordinary), /base-inherited/);
+  assert.match(reason(inherited), /base-inherited/, "the operator can tell 'the base is broken' from 'your branch is broken'");
+  assert.match(reason(inherited), /a1c0ffee/, "…and which base commit");
+  assert.match(reason(inherited), /test@github-actions/, "…and which run");
+  assert.notEqual(reason(ordinary), reason(inherited));
+});
+
+test("driveEngineAgentReview (#502): a cleared base-red pin puts the lane straight back on the ordinary per-PR CI-evidence reason — no residue", async () => {
+  const { deps } = makeDeps({
+    forge: { getPRStatus: async () => status({ ciGreen: false }), getPRChecks: async () => checksPage({ conclusion: null }) },
+    getBaseRedPin: () => null,
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.doesNotMatch(outcome.kind === "queued" ? outcome.reason : "", /base-inherited/);
 });
 
 test("driveEngineAgentReview (#503): split-generation read (status@H1, data@H2) must NOT take the ci-red route — falls through to queued, next tick re-fetches a coherent pair", async () => {

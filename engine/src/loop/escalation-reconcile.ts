@@ -103,6 +103,7 @@ import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 import type { State } from "../state/state.js";
+import { BASE_CI_RED_CLEARED, BASE_CI_RED_ESCALATED, baseCiFailing, baseRedPin, readBaseCi } from "./base-ci.js";
 import { MERGED_BOARD_DONE_REASON } from "./conductor.js";
 
 /** How each escalation kind proves it actually applied the needs-human label — see the module
@@ -263,6 +264,18 @@ export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   // own (operator-explicit park_state row deletion; the round loop's `waitForDispatchClear`
   // observes the row's absence and resumes), never this table's label/close/merge reconciliation.
   //
+  // DELIBERATELY ABSENT (#502): `base-ci-red-escalated` — the fourth run-level detector, and the
+  // same F34 question answered NO for the same STRUCTURAL reason the three above give. This table
+  // is the needs-human-LABEL reconciler, keyed by the ISSUE in each event's payload; a red default
+  // branch is a RUN-level fact with no issue, no PR and no label, so `openEscalations` would skip
+  // it on the `issue === undefined` guard even if it were listed and a listed row would be dead
+  // weight that reads as coverage (#470's own words). What is DIFFERENT about it, and why it is
+  // named here rather than merely omitted: unlike the three park-carried kinds, its resolution IS
+  // this module's job — `reconcileBaseCiEscalation` below observes base-green on the same
+  // once-per-round pass and appends the same `escalation-resolved` receipt every row above emits,
+  // keyed on `source` alone. So the kind reuses this module's resolution vocabulary and observer
+  // without pretending to be an issue-keyed strip row.
+  //
   // KNOWN, BOUNDED GAP (#295 review round 10, deferred to #404): frontend-design.md §3 also
   // flags two PREDICATE kinds — `reclaim-failed` when `payload.next` is not an automatic
   // continuation, and `reclaim-done` on its no-PR branch. They are attention items only for
@@ -324,8 +337,14 @@ export const RESOLVED_KIND = "escalation-resolved";
  *  `escalation-sweep.ts`, which may only act on a witness that genuinely represents completion or
  *  release; see its own `SWEEPABLE_VIA`. Recording the two separately is a payload REFINEMENT,
  *  not a new contract: this module still writes one transition event per resolution and still
- *  gates nothing. */
-export type ResolutionVia = "merged" | "pr-closed" | "issue-closed" | "label-removed" | "board-fixed";
+ *  gates nothing.
+ *
+ *  #502: `base-green` is the RUN-level witness — the default branch's CI is no longer red. It is
+ *  the only value produced by an escalation with no issue and no PR, so it never reaches
+ *  `escalation-sweep.ts` (that module skips any resolution whose payload carries no numeric
+ *  `issue`, and `SWEEPABLE_VIA` does not list it either — a run-level fact applied no label for a
+ *  sweep to remove). */
+export type ResolutionVia = "merged" | "pr-closed" | "issue-closed" | "label-removed" | "board-fixed" | "base-green";
 
 export interface OpenEscalation {
   /** The escalation event kind this came from — the `source` the dashboard folds on. */
@@ -542,5 +561,58 @@ export async function reconcileEscalations(
       // Best-effort: the append IS the latch, so a lost one simply leaves the escalation open —
       // the next round's sweep re-derives the same resolution and retries (module doc, AC2).
     }
+  }
+  await reconcileBaseCiEscalation(forge, state, cfg, warn);
+}
+
+/**
+ * #502: the RUN-level arm of this same observer — resolve the base-branch-CI-red escalation once
+ * the default branch is no longer red. Lives here, and runs on THIS pass, precisely so base-red
+ * gets no reconciliation path of its own: same once-per-round home, same read-only-observation +
+ * append-a-transition-event discipline, same `escalation-resolved` vocabulary every issue-keyed
+ * row above emits (keyed on `source` alone, since the fact carries no issue — see
+ * `ESCALATION_SOURCES`' own `base-ci-red-escalated` ruling).
+ *
+ * COST, matching this module's own bound: ZERO forge calls while no base-red episode stands (the
+ * pin fold drops out before any read), and at most ONE capped `getDefaultBranchChecks` per round
+ * while one does.
+ *
+ * ORDER — RECEIPT FIRST (#431's log-first write rule, the same ordering
+ * `reconcileCeilingAnnouncements`' clear side and PR #463's event-before-upsert use): the
+ * `escalation-resolved` receipt is appended STRICTLY BEFORE `base-ci-red-cleared`. A kill between
+ * the two leaves the episode still pinned with a receipt already written; the next pass re-derives
+ * base-green and appends both again, which is a duplicate receipt (noise, paired and honest). The
+ * reverse order would clear the pin with no record that the escalation was ever resolved — the
+ * direction that silently loses the fact.
+ *
+ * NOT A GATE. Clearing the pin only stops lanes from LABELLING their CI wait base-inherited; their
+ * per-PR CI-evidence path was never diverted, so they are back on it the moment the pin is gone,
+ * with no manual step. An unreadable base read leaves the episode open this pass — never a false
+ * clear.
+ */
+export async function reconcileBaseCiEscalation(
+  forge: Pick<IForge, "getDefaultBranchChecks">,
+  state: Pick<State, "eventsAfterId" | "appendEvent">,
+  cfg: SapwoodConfig,
+  warn: (message: string) => void,
+): Promise<void> {
+  let pin: ReturnType<typeof baseRedPin>;
+  try {
+    pin = baseRedPin(state);
+  } catch (e) {
+    warn(`[sapwood:base-ci] failed to read the base-red pin — left open this pass: ${String(e)}`);
+    return;
+  }
+  if (pin == null) return;
+  const page = await readBaseCi(forge, cfg.proxy.caps.maxChecksPerCall, warn);
+  if (page == null) return; // no usable evidence — the episode stays open, same as every other arm
+  if (page.headOid === pin.sha && baseCiFailing(page, cfg.ci.requiredChecks).length > 0) return; // still red
+  try {
+    state.appendEvent(RESOLVED_KIND, { source: BASE_CI_RED_ESCALATED, sha: pin.sha, via: "base-green" satisfies ResolutionVia });
+    state.appendEvent(BASE_CI_RED_CLEARED, { sha: pin.sha, head: page.headOid });
+  } catch (e) {
+    // Best-effort, exactly like the issue-keyed arm above: a lost append leaves the episode open
+    // and the next round re-derives the same resolution.
+    warn(`[sapwood:base-ci] base-green receipt/clear append failed — episode left open: ${String(e)}`);
   }
 }

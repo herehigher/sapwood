@@ -450,6 +450,14 @@ export interface IForge {
    *  read — a monorepo PR can carry far more than a handful of check runs). `total` is the
    *  sub-connection's own `totalCount` — the proxy's `pr_checks` tool. */
   getPRChecks(pr: number, cap: number): Promise<PRChecksPage>;
+  /** #502: the DEFAULT BRANCH's current check status, read off its HEAD commit's
+   *  `statusCheckRollup` through the SAME capped `contexts(first: cap)` connection `getPRChecks`
+   *  uses — the one new polling surface base-branch CI awareness needs. Ref-scoped, never
+   *  PR-scoped: a red base is a RUN-level fact that gates every open lane at once, and deriving
+   *  it from any one PR's merge-ref rollup cannot tell "the base is broken" from "this branch
+   *  is broken". Deliberately additive — `getPRChecks`' signature, query and behavior are
+   *  untouched. */
+  getDefaultBranchChecks(cap: number): Promise<BranchChecksPage>;
   /** #247: post a reply comment on ONE review thread (GraphQL `addPullRequestReviewThreadReply`,
    *  `threadId` a `PullRequestReviewThread` node id — the SAME opaque id `getPRReviewThreads`'
    *  `ReviewThreadItem.id` already carries). The fix-loop's ONLY write path for a fix leg's
@@ -616,6 +624,18 @@ export interface PRCheckItem {
 /** #244 (Codex sol-high PR #260 review, P1): IForge.getPRChecks' bounded result — `total` is
  *  the GraphQL `contexts` sub-connection's own `totalCount`. */
 export interface PRChecksPage {
+  checks: PRCheckItem[];
+  total: number;
+}
+
+/** #502: IForge.getDefaultBranchChecks' bounded result — `getPRChecks`' shape plus the two facts
+ *  that make it ref-scoped rather than PR-scoped: WHICH branch GitHub reports as the default, and
+ *  WHICH commit is currently its HEAD (the oid the checks below belong to, and the identity the
+ *  base-red pin is keyed on). An empty `headOid` means the read produced no usable commit — see
+ *  parseDefaultBranchChecksPage. */
+export interface BranchChecksPage {
+  branch: string;
+  headOid: string;
   checks: PRCheckItem[];
   total: number;
 }
@@ -1442,6 +1462,25 @@ export class GithubForge implements IForge {
       `cap=${cap}`,
     ]);
     return parsePRChecksPage(out);
+  }
+
+  /** #502: the base-branch twin of getPRChecks — see IForge.getDefaultBranchChecks' own doc.
+   *  Same CAPPED `contexts(first: cap)` connection, no `number` variable (nothing here is
+   *  addressable by PR), and the default branch is whatever GitHub says it is. */
+  async getDefaultBranchChecks(cap: number): Promise<BranchChecksPage> {
+    const out = await this.gh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${DEFAULT_BRANCH_CHECKS_QUERY}`,
+      "-f",
+      `owner=${this.cfg.board.owner}`,
+      "-f",
+      `repo=${this.repo()}`,
+      "-F",
+      `cap=${cap}`,
+    ]);
+    return parseDefaultBranchChecksPage(out);
   }
 
   /** #247: reply to a review thread — see IForge.replyToReviewThread's doc. `threadId` is an
@@ -3215,6 +3254,79 @@ export function parsePRChecksPage(json: string): PRChecksPage {
     appSlug: c.checkSuite?.app?.slug ?? null,
   }));
   return { checks, total: conn?.totalCount ?? checks.length };
+}
+
+/** #502: the BASE-BRANCH twin of PR_CHECKS_QUERY — the same capped `contexts(first: $cap)` read
+ *  off a commit's `statusCheckRollup`, keyed on the repository's DEFAULT BRANCH ref instead of a
+ *  PR number. The branch is resolved by GitHub (`defaultBranchRef`), never configured here: a
+ *  base-branch name in sapwood config would be a second source of truth for a fact the forge
+ *  already owns. */
+export const DEFAULT_BRANCH_CHECKS_QUERY = `
+query($owner: String!, $repo: String!, $cap: Int!) {
+  repository(owner: $owner, name: $repo) {
+    defaultBranchRef {
+      name
+      target {
+        ... on Commit {
+          oid
+          statusCheckRollup {
+            contexts(first: $cap) {
+              totalCount
+              nodes {
+                __typename
+                ... on CheckRun { name status conclusion checkSuite { app { slug } } }
+                ... on StatusContext { context state }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/** Pure parse of DEFAULT_BRANCH_CHECKS_QUERY — the same node mapping parsePRChecksPage uses (a
+ *  legacy StatusContext falls back to `context` for the name and carries no app slug). EVERY
+ *  absent level degrades to an EMPTY page rather than throwing: a repo with no default branch, a
+ *  non-Commit ref target, or a commit with no rollup at all are all "no evidence", and #502's
+ *  consumer reads no-evidence as NOT-base-red. Fabricating a red from a missing field is the one
+ *  failure direction this parse must never take. */
+export function parseDefaultBranchChecksPage(json: string): BranchChecksPage {
+  const d = JSON.parse(json) as {
+    data?: {
+      repository?: {
+        defaultBranchRef?: {
+          name?: string;
+          target?: {
+            oid?: string;
+            statusCheckRollup?: {
+              contexts?: {
+                totalCount?: number;
+                nodes?: {
+                  name?: string;
+                  context?: string;
+                  status?: string;
+                  conclusion?: string | null;
+                  state?: string | null;
+                  checkSuite?: { app?: { slug?: string | null } | null } | null;
+                }[];
+              };
+            } | null;
+          } | null;
+        } | null;
+      };
+    };
+  };
+  const ref = d.data?.repository?.defaultBranchRef;
+  const conn = ref?.target?.statusCheckRollup?.contexts;
+  const checks: PRCheckItem[] = (conn?.nodes ?? []).map((c) => ({
+    name: c.name ?? c.context ?? "",
+    status: c.status ?? "",
+    conclusion: c.conclusion ?? null,
+    state: c.state ?? null,
+    appSlug: c.checkSuite?.app?.slug ?? null,
+  }));
+  return { branch: ref?.name ?? "", headOid: ref?.target?.oid ?? "", checks, total: conn?.totalCount ?? checks.length };
 }
 
 /** #244: the review-threads-WITH-COMMENTS query — extends REVIEW_THREADS_QUERY (which only
