@@ -246,6 +246,13 @@ the locked trusted-repos-first posture. Blocking M10 on it would couple this des
 to a whole-system trust-model change. DISPOSITION: standalone hardening issue
 (backlog, references this section); explicitly out of #279 scope. Owner may override.
 
+**CLOSED by #488.** The argv half had in fact already landed independently
+(#305/#352/#353 taught `guard.ts`'s Category C to block `gh label`, `gh project`, and
+governance-flagged `gh issue edit`); #488 closed the remaining permission-layer half by
+adding those verbs to `WORKER_DISALLOWED_TOOLS`. See docs/security.md's
+"Producer capability asymmetry" bullet on the guard for the current, authoritative
+statement of the boundary.
+
 ## 6. Session contract (updated)
 
 As v2 §3 plus: spawn via claude CLI only (D5); the session runs in the §3

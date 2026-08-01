@@ -234,6 +234,18 @@ The asymmetry is compensated, but not erased, by several independent controls:
   verbs — including `gh pr review --comment` — while the guard's argv block only stops
   `--approve`/`--request-changes`. The producer's actual comment channels remain `gh pr
   comment` and `gh issue comment`, both left open by both layers.
+  Since #488, that deny-list also carries the **governance-signal** verbs `gh issue edit*`,
+  `gh label*`, and `gh project*`, so the boundary the guard has enforced at the argv layer
+  since #305/#352/#353 now also holds at the permission layer. It matters because every
+  dispatch/merge gate treats issue labels and the board `Status` field as engine-or-human-only
+  signals (`plan:approved`, `labels.roundPool`, `escalation.humanLabels`, the `Ready` lane): a
+  producer that can set them forges the signals those gates trust. Same intentional coarseness
+  as the `gh pr review*` entry — `gh issue edit*` denies the whole verb, including the plain
+  `--body` edit the guard still permits. `gh api` is deliberately NOT on the deny-list:
+  read-only `gh api` is ordinary worker usage and a prefix rule cannot separate it from a
+  mutation, which is exactly the argv-shape judgement the guard's `checkGhApi` makes (REST
+  label/milestone/state endpoints and GraphQL mutations, including ProjectV2 field writes).
+  This closes design #279 §5a's deferred "standalone hardening issue".
 - `engine/src/roles/worker.ts` does not add the engine `data/` directory as a Claude tool
   root (there is no `--add-dir data`), so the tool layer does not offer a path into it.
   This is not Bash containment: worker Bash can reach `../../data`, exactly the residual

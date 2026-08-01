@@ -859,8 +859,22 @@ export const WORKER_ALLOWED_TOOLS = "Read,Edit,Write,Bash(git *),Bash(gh *),Bash
 /** #350: defense-in-depth on top of the guard's argv-layer block (guard.ts) — neither `gh pr
  *  review` nor `gh release` is needed by any stock worker workflow, so denying them here too
  *  costs nothing while narrowing the CLI-permission surface. The guard stays the primary,
- *  wrapper-bypass-resistant boundary; this is the permission layer, out of scope for guard.ts. */
-export const WORKER_DISALLOWED_TOOLS = "Bash(gh pr merge*),Bash(gh pr ready*),Bash(gh pr review*),Bash(gh release*)";
+ *  wrapper-bypass-resistant boundary; this is the permission layer, out of scope for guard.ts.
+ *
+ *  #488 (design #279 §5a's deferred hardening) adds the GOVERNANCE-SIGNAL verbs: issue labels
+ *  and the board `Status` field are what every dispatch/merge gate in this engine treats as an
+ *  engine-or-human-only signal (`plan:approved`, `labels.roundPool`, `escalation.humanLabels`,
+ *  the `Ready` lane). A producer able to set them forges exactly the signals those gates were
+ *  built to trust, so the permission layer denies them alongside the guard, which has blocked
+ *  the same commands at the argv layer since #305/#352/#353 (`gh label`, `gh project`, and
+ *  governance-flagged `gh issue edit` — see guard.ts's checkCategoryC). Same intentional
+ *  coarseness as the `gh pr review*` entry above: `Bash(gh issue edit*)` denies the whole verb,
+ *  including the plain `--body` edit the guard's argv check still permits. `gh api` is
+ *  deliberately absent — read-only `gh api` is ordinary worker usage and a prefix rule can't
+ *  separate it from a mutation, which is precisely the argv-shape judgement checkGhApi makes.
+ *  Comment channels (`gh pr comment`, `gh issue comment`) stay open in both layers. */
+export const WORKER_DISALLOWED_TOOLS =
+  "Bash(gh pr merge*),Bash(gh pr ready*),Bash(gh pr review*),Bash(gh release*),Bash(gh issue edit*),Bash(gh label*),Bash(gh project*)";
 /** #244 (Codex sol-high PR #260 review, P1): the credential-free worker leg's own `--allowedTools`
  *  base — WORKER_ALLOWED_TOOLS with `Bash(gh *)` dropped. Once `workerCredentialFreeEnv` severs
  *  `gh`'s on-disk/env credential reach, the grant itself should stop offering `gh` at all — a
