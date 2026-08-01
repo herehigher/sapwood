@@ -28,8 +28,10 @@ import {
   ENGINE_REVIEW_BUDGET_ADVISORY,
   ENGINE_REVIEW_CONTAINMENT_GAP,
   ENGINE_REVIEW_COST_UNKNOWN,
+  ENGINE_REVIEW_ORPHANED_GROUP,
   estimateCodexCostUsd,
   findCodexRollout,
+  isStrippedEnvKey,
   parseCodexExecStream,
   parseCodexRolloutIdentity,
 } from "./codex-exec.js";
@@ -82,6 +84,8 @@ interface Harness {
   pendingTimerMs: () => number[];
   /** Scripted GROUP-liveness readings for the injected `isTreeAlive`; the last value repeats. */
   aliveReadings: boolean[];
+  /** Set to make the injected `killFn` throw — e.g. an `ESRCH` for a group that already exited. */
+  killThrows: Error | null;
   executor: CodexExecReviewSessionExecutor;
   req: ReviewSessionRequest;
   cleanup: () => void;
@@ -104,6 +108,8 @@ function harness(
   // Default: the tree stays ALIVE until the test says otherwise, so no path short-circuits on a
   // liveness reading the test didn't script.
   const aliveReadings = opts.aliveReadings ?? [true];
+  // Mutable box so a test can arm `killThrows` on the returned harness AFTER construction.
+  const state: { killThrows: Error | null } = { killThrows: null };
 
   if (opts.rollout !== undefined) {
     const day = join(codexHome, "sessions", "2026", "08", "01");
@@ -124,6 +130,7 @@ function harness(
     newSessionId: () => "fixed",
     killFn: (pid, signal) => {
       signals.push({ pid, signal: String(signal) });
+      if (state.killThrows) throw state.killThrows;
     },
     isTreeAlive: () => (aliveReadings.length > 1 ? (aliveReadings.shift() as boolean) : (aliveReadings[0] as boolean)),
     startTimer: (ms, fire) => {
@@ -166,6 +173,12 @@ function harness(
     child,
     signals,
     aliveReadings,
+    get killThrows() {
+      return state.killThrows;
+    },
+    set killThrows(e: Error | null) {
+      state.killThrows = e;
+    },
     pendingTimerMs: () => timers.map((t) => t.ms),
     fireTimerAt: (ms: number) => {
       const entry = timers.find((t) => t.ms === ms);
@@ -276,6 +289,54 @@ test("codexSessionEnv: forge/git/SSH credential HANDLES are stripped or redirect
   assert.equal(env.CODEX_HOME, "/home/u/.codex");
   assert.equal(env.OPENAI_API_KEY, "sk-test");
   assert.equal(env.PATH, "/usr/bin");
+});
+
+test("isStrippedEnvKey: the well-known credential FAMILIES an operator's shell carries are dropped — a prompt-injected session dumping `env` is the cheapest exfiltration path there is", () => {
+  for (const key of [
+    // forge / git / ssh (round 1)
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GIT_ASKPASS",
+    "GIT_CONFIG_GLOBAL",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    // cloud (round 2, P1-b)
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GCLOUD_PROJECT",
+    "CLOUDSDK_CONFIG",
+    "AZURE_CLIENT_SECRET",
+    "KUBECONFIG",
+    // registries + docker
+    "NPM_TOKEN",
+    "NODE_AUTH_TOKEN",
+    "CARGO_REGISTRY_TOKEN",
+    "PIP_INDEX_URL",
+    "TWINE_PASSWORD",
+    "DOCKER_AUTH_CONFIG",
+    // the generic name-shape sweep
+    "SOME_VENDOR_TOKEN",
+    "MY_SECRET",
+    "STRIPE_API_KEY",
+    "SERVICE_APIKEY",
+    "DB_PASSWORD",
+    "PG_PASSWD",
+    "APP_CREDENTIALS",
+  ]) {
+    assert.equal(isStrippedEnvKey(key), true, `${key} must not reach a review session`);
+  }
+});
+
+test("isStrippedEnvKey: the keep-set WINS over the sweep — `OPENAI_API_KEY` matches `*_API_KEY` and must survive anyway, or every review breaks with no way to catch it short of a paid run", () => {
+  for (const key of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME", "CODEX_BIN", "PATH", "HOME", "TMPDIR", "LANG", "TERM", "TZ"]) {
+    assert.equal(isStrippedEnvKey(key), false, `${key} is required for the session to run at all`);
+  }
+  // The sweep is a whole-key SUFFIX match, so an innocuous name that merely CONTAINS a keyword stays.
+  for (const key of ["TOKENIZER_MODE", "SECRETS_MANAGER_REGION_NAME", "MY_PASSWORD_POLICY"]) {
+    assert.equal(isStrippedEnvKey(key), false, `${key} is not a credential and must not be swept`);
+  }
 });
 
 test("findCodexRollout: locates a transcript by thread id anywhere under <codexHome>/sessions; a missing home or unknown id is null, never a throw", () => {
@@ -538,6 +599,75 @@ test("execute: a LOST child-exit notification settles synthetically instead of h
   }
 });
 
+test("execute (P1-a): a group that SURVIVES SIGKILL and never emits close/exit still settles — the review returns `timeout` and the surviving group is REPORTED, not awaited (the wedged-lane failure the whole fix exists to remove)", async () => {
+  // Every liveness reading says ALIVE forever, so the two-dead-readings detector can NEVER trip;
+  // and the child emits no `close`/`exit` at all. Before this fix the await never settled.
+  const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK, aliveReadings: [true] });
+  try {
+    const p = h.executor.execute(h.req);
+    await Promise.resolve();
+    await Promise.resolve();
+    h.fireTimerAt(SESSION_TIMEOUT_MS);
+    await Promise.resolve();
+    h.fireTimerAt(KILL_GRACE_MS); // grace elapses, tree still alive ⇒ SIGKILL
+    const evidence = await p; // settles WITHOUT any close/exit and WITHOUT the detector tripping
+    assert.equal(evidence.outcome, "timeout");
+    assert.deepEqual(h.signals, [
+      { pid: -FAKE_PID, signal: "SIGTERM" },
+      { pid: -FAKE_PID, signal: "SIGKILL" },
+    ]);
+    // The surviving group is a separate, durable fact for a human — not a reason to block.
+    const orphan = h.events.filter((e) => e.kind === ENGINE_REVIEW_ORPHANED_GROUP);
+    assert.equal(orphan.length, 1);
+    assert.deepEqual(orphan[0]!.payload, { runner: "codex-exec", session: "engine-reviewer-fixed", pid: FAKE_PID });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("execute (P1-a): a timed-out session whose group DID die reports no orphan — the report is a real observation, not a fixed side effect of every timeout", async () => {
+  const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK, aliveReadings: [true, true, false] });
+  try {
+    const p = h.executor.execute(h.req);
+    await Promise.resolve();
+    await Promise.resolve();
+    h.fireTimerAt(SESSION_TIMEOUT_MS);
+    await Promise.resolve();
+    h.fireTimerAt(KILL_GRACE_MS);
+    const evidence = await p;
+    assert.equal(evidence.outcome, "timeout");
+    assert.equal(
+      h.events.some((e) => e.kind === ENGINE_REVIEW_ORPHANED_GROUP),
+      false,
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("execute (P2-b): ESRCH from the group signal is 'already gone' — no positive-pid retry, which after a group exit could deliver SIGKILL to a RECYCLED, unrelated process", async () => {
+  const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK, aliveReadings: [true] });
+  try {
+    // The scripted kill throws ESRCH for every signal, as the kernel does for a vanished group.
+    h.killThrows = Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
+    const p = h.executor.execute(h.req);
+    await Promise.resolve();
+    await Promise.resolve();
+    h.fireTimerAt(SESSION_TIMEOUT_MS);
+    await Promise.resolve();
+    h.fireTimerAt(KILL_GRACE_MS);
+    const evidence = await p;
+    assert.equal(evidence.outcome, "timeout", "and the await still settles — ESRCH is not a reason to hang either");
+    assert.deepEqual(
+      h.signals.map((s) => s.pid),
+      [-FAKE_PID, -FAKE_PID],
+      "only ever the NEGATIVE (group) pid: the leader-pid fallback is gone",
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("execute: a lost exit AFTER a timeout still reads as `timeout` — the timeout latch wins, exactly as peripheral.ts orders it", async () => {
   const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK, aliveReadings: [true, true, false, false] });
   try {
@@ -567,10 +697,10 @@ test("execute: a materialized tree that vanished before spawn is a SETUP failure
   }
 });
 
-test("execute: a broken event channel cannot become a gate — the session still runs and returns evidence", async () => {
+test("execute (P2-a): the PRE-SPAWN containment record is LOAD-BEARING — an event channel that throws means NO session is spawned, and the throw becomes `unavailable` upstream (the record IS the mitigation for an unfenced gap; it must not be the thing that silently drops)", async () => {
   const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK });
+  let spawned = 0;
   try {
-    // Replace the executor's sink with one that throws on every append.
     const throwing = new CodexExecReviewSessionExecutor({
       stateDir: join(h.dir, "state2"),
       timeoutSec: 600,
@@ -583,19 +713,79 @@ test("execute: a broken event channel cannot become a gate — the session still
       },
       newSessionId: () => "fixed2",
       startTimer: () => () => {},
-      spawnFn: ((_bin: string, args: string[]) => {
-        writeFileSync(args[args.indexOf("-o") + 1]!, "text", "utf8");
-        queueMicrotask(() => h.child.emitStdout(STREAM_OK));
+      spawnFn: (() => {
+        spawned++;
         return h.child;
-        // biome-ignore lint/suspicious/noExplicitAny: see above
+        // biome-ignore lint/suspicious/noExplicitAny: fake ChildProcess stand-in
       }) as any,
     });
-    const p = throwing.execute(h.req);
+    await assert.rejects(() => throwing.execute(h.req), /refusing to spawn an unrecorded codex review session/);
+    assert.equal(spawned, 0, "nothing is spawned when the blind-spot record cannot be written");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("execute (P2-a): a composition with NO durable event channel at all is refused the same way — a runner that cannot honor the disclosure the docs make on its behalf does not run", async () => {
+  const h = harness();
+  let spawned = 0;
+  try {
+    const unwired = new CodexExecReviewSessionExecutor({
+      stateDir: join(h.dir, "state3"),
+      timeoutSec: 600,
+      pricing: PRICING,
+      codexBin: "/fake/codex",
+      env: { PATH: "/usr/bin" },
+      log: () => {},
+      newSessionId: () => "fixed3",
+      startTimer: () => () => {},
+      spawnFn: (() => {
+        spawned++;
+        return h.child;
+        // biome-ignore lint/suspicious/noExplicitAny: fake ChildProcess stand-in
+      }) as any,
+    });
+    await assert.rejects(() => unwired.execute(h.req), /no durable event channel wired/);
+    assert.equal(spawned, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("execute (P2-a): post-run events stay BEST-EFFORT — a channel that starts throwing only after the pre-spawn record still lets the review return its evidence (observability never decides a verdict)", async () => {
+  const h = harness({ stream: `{"type":"thread.started","thread_id":"thread-xyz"}\n`, lastMessage: "x", rollout: ROLLOUT_OK });
+  try {
+    // The cost-unknown alert (post-run) throws; the containment record (pre-spawn) succeeded.
+    let calls = 0;
+    const p = new CodexExecReviewSessionExecutor({
+      stateDir: join(h.dir, "state4"),
+      timeoutSec: SESSION_TIMEOUT_MS / 1000,
+      livenessPollMs: POLL_MS,
+      pricing: PRICING,
+      codexBin: "/fake/codex",
+      env: { PATH: "/usr/bin", CODEX_HOME: join(h.dir, "codex-home") },
+      log: () => {},
+      appendEvent: () => {
+        calls++;
+        if (calls > 1) throw new Error("event channel down after the first write");
+      },
+      newSessionId: () => "fixed4",
+      startTimer: () => () => {},
+      killFn: () => {},
+      isTreeAlive: () => true,
+      spawnFn: ((_bin: string, args: string[]) => {
+        writeFileSync(args[args.indexOf("-o") + 1]!, "text", "utf8");
+        queueMicrotask(() => h.child.emitStdout(`{"type":"thread.started","thread_id":"thread-xyz"}\n`));
+        return h.child;
+        // biome-ignore lint/suspicious/noExplicitAny: fake ChildProcess stand-in
+      }) as any,
+    }).execute(h.req);
     await Promise.resolve();
     await Promise.resolve();
     h.child.finish(0);
     const evidence = await p;
     assert.equal(evidence.outcome, "done");
+    assert.deepEqual(evidence.spend, { kind: "unknown" }, "the alert it could not write is still the honest reading");
   } finally {
     h.cleanup();
   }

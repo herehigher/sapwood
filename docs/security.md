@@ -175,18 +175,28 @@ quietly inherited:
   including `~/.codex/auth.json`, `~/.config/gh/hosts.yml`, and SSH private keys, and return their
   contents through provider-visible output. Treat enabling this runner as granting the reviewed
   code's author a read of your machine's user-readable files if they can steer the review session.
-- **The mitigations are partial, and named as such.** `codexSessionEnv` strips the inherited forge
-  tokens and the `SSH_AUTH_SOCK`/`SSH_AGENT_PID` agent handles (a live agent socket is a usable
-  credential with no key file to read), redirects `GH_CONFIG_DIR` at an empty per-session
-  directory, and pins `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` to `/dev/null` with
-  `GIT_TERMINAL_PROMPT=0`. Those remove the ambient *handles*; they do not stop a *read* of the
-  underlying files, which remain on disk and readable. **Filesystem confinement is what would
-  actually close blind spot 2, and it is deliberately not shipped**: the adjudication (2026-08-01,
-  R2) rules out a new outer OS/container fence (trusted-repos posture; the marginal-complexity
-  principle). Both blind spots are emitted at every codex-exec spawn as named entries in
-  `engine-review-containment-gap`'s `gaps` payload
+- **Recorded blind spot 3 — the inherited environment.** The session's environment is the engine's
+  own, minus a denylist. `codexSessionEnv` strips the well-known credential families — forge tokens,
+  `SSH_AUTH_SOCK`/`SSH_AGENT_PID`, AWS/GCP/Azure, `KUBECONFIG`, npm/pip/twine/cargo registry tokens,
+  Docker — plus a generic sweep of any variable whose name ends in `_TOKEN`, `_SECRET`, `_API_KEY`,
+  `_PASSWORD`, or `_CREDENTIALS`. **That list cannot be exhaustive.** Everything else is inherited,
+  and dumping it costs a steered session one `env`. An operator who runs the engine from a shell
+  carrying secrets should assume a steered review session can read them. (An allowlist was
+  considered and rejected: one that silently omits something the CLI needs breaks every review, and
+  the only way to find the omission is a paid live run — a denylist plus sweep, with an explicit
+  keep-set for provider transport, has the bounded failure mode.)
+- **The mitigations are partial, and named as such.** Alongside the strip above, `codexSessionEnv`
+  redirects `GH_CONFIG_DIR` at an empty per-session directory and pins
+  `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` to `/dev/null` with `GIT_TERMINAL_PROMPT=0`. Those remove
+  the ambient *handles*; they do not stop a *read* of the underlying files, which remain on disk and
+  readable. **Filesystem confinement is what would actually close blind spot 2, and it is
+  deliberately not shipped**: the adjudication (2026-08-01, R2) rules out a new outer OS/container
+  fence (trusted-repos posture; the marginal-complexity principle). Blind spots 1 and 2 are emitted
+  at every codex-exec spawn as named entries in `engine-review-containment-gap`'s `gaps` payload
   (`model-invoked-shell-execution`, `host-wide-filesystem-reads`), so they are on the durable
-  record rather than assumed away.
+  record rather than assumed away — and that pre-spawn record is **load-bearing**: if it cannot be
+  written, the session is not spawned and the review degrades to `unavailable`, rather than running
+  unrecorded.
 - **Unchanged either way.** The default runner is `claude`, and nothing above applies to it — the
   Claude review session has no `Bash` at all and is guard-confined to the materialized tree. Gate②'s
   own safety properties are runner-independent: blocking stays engine-derived over live PR data, the

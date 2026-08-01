@@ -85,6 +85,12 @@ export const ENGINE_REVIEW_COST_UNKNOWN = "engine-review-cost-unknown";
 /** #443 (R2): the named containment blind spots, recorded at every codex-exec spawn. */
 export const ENGINE_REVIEW_CONTAINMENT_GAP = "engine-review-containment-gap";
 
+/** #443 (PR #510 round-2 review, P1-a): the timed-out session's process group was STILL observable
+ *  after the SIGKILL escalation. The review settles as `timeout` regardless — a surviving group is
+ *  a host-level fact for a human to chase (something may still be running and spending), never a
+ *  reason to leave a gate② lane awaiting an exit that may never come. */
+export const ENGINE_REVIEW_ORPHANED_GROUP = "engine-review-orphaned-group";
+
 /** Facet 1: a read-only sandbox blocks writes, not execution — model-invoked shell commands can
  *  still RUN producer-controlled code from the reviewed tree. */
 export const CONTAINMENT_GAP_MODEL_INVOKED_EXECUTION = "model-invoked-shell-execution";
@@ -148,13 +154,93 @@ export function codexHomeDir(env: Record<string, string | undefined>): string {
   return h ? h : join(homedir(), ".codex");
 }
 
-/** A codex session environment without forge credentials, agent sockets, or git credential-injection
- *  vectors — the DENYLIST peripheral.ts's `peripheralSessionEnv` applies to every Claude role
- *  session, restated here (the design adjudication keeps peripheral.ts untouched by this feature)
- *  and WIDENED by the gate② review of PR #510:
- *   - `SSH_AUTH_SOCK`/`SSH_AGENT_PID` are stripped: a live agent socket is a USABLE credential
- *     without any key file to read, so leaving it inherited would hand a prompt-injected session
- *     working SSH auth for free;
+/** #443 (PR #510 round-2 review, P1-b): the env keys that SURVIVE the credential sweep below no
+ *  matter what pattern they happen to match. Every entry is here because the codex CLI cannot run
+ *  without it — this list is the reason the sweep can be aggressive without being untestable:
+ *   - `OPENAI_API_KEY`/`OPENAI_*` — the provider transport itself. Note it MATCHES the generic
+ *     `*_API_KEY` sweep, which is exactly why an explicit keep-set exists rather than a cleverer
+ *     regex: the one credential this session legitimately needs looks identical to the ones it must
+ *     never see.
+ *   - `CODEX_HOME`/`CODEX_BIN` — where the CLI's own auth and binary live (`--ignore-user-config`'s
+ *     help text: auth still resolves through `CODEX_HOME`).
+ *   - `PATH`, `HOME`, `SHELL`, `USER`, `LOGNAME`, `PWD`, `TMPDIR`, `LANG`, `LC_ALL`, `TERM`,
+ *     `TZ`, `NODE_OPTIONS` — the ordinary runtime environment any process needs to start.
+ *  Kept as an exact-match set plus one prefix (`OPENAI_`), never a substring test. */
+const CODEX_ENV_KEEP: ReadonlySet<string> = new Set([
+  "CODEX_HOME",
+  "CODEX_BIN",
+  "PATH",
+  "HOME",
+  "SHELL",
+  "USER",
+  "LOGNAME",
+  "PWD",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "TZ",
+  "NODE_OPTIONS",
+]);
+
+/** Well-known credential FAMILIES, by exact name or prefix. Not exhaustive and not claimed to be —
+ *  see `codexSessionEnv`'s honest-limit note and docs/security.md. */
+const CODEX_ENV_STRIP_EXACT: ReadonlySet<string> = new Set([
+  // forge
+  "GITHUB_TOKEN",
+  "GITHUB_ENTERPRISE_TOKEN",
+  // git credential/prompt vectors
+  "GIT_ASKPASS",
+  // ssh: a live agent socket is a usable credential with no key file to read
+  "SSH_AUTH_SOCK",
+  "SSH_AGENT_PID",
+  // cloud + orchestration
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "KUBECONFIG",
+  // package registries
+  "NPM_TOKEN",
+  "NODE_AUTH_TOKEN",
+  "CARGO_REGISTRY_TOKEN",
+]);
+
+const CODEX_ENV_STRIP_PREFIX: readonly string[] = [
+  "GH_",
+  "GIT_CONFIG_",
+  "AWS_", // incl. AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN / AWS_PROFILE
+  "GCLOUD_",
+  "CLOUDSDK_",
+  "AZURE_",
+  "DOCKER_",
+  "PIP_",
+  "TWINE_",
+];
+
+/** The generic sweep: any variable whose NAME advertises a secret. Deliberately a suffix match on
+ *  the whole key, so `MY_SERVICE_TOKEN` goes and `TOKENIZER_MODE` stays. `CODEX_ENV_KEEP` wins over
+ *  this. */
+const CODEX_ENV_STRIP_SUFFIX: readonly string[] = ["_TOKEN", "_SECRET", "_API_KEY", "_APIKEY", "_PASSWORD", "_PASSWD", "_CREDENTIALS"];
+
+/** Exported for its own test: does this env var name get dropped from a codex review session? */
+export function isStrippedEnvKey(key: string): boolean {
+  const k = key.toUpperCase();
+  // The keep-set wins over EVERY rule below — including the suffix sweep, which would otherwise
+  // take the provider's own API key with it and break every review.
+  if (CODEX_ENV_KEEP.has(k) || k.startsWith("OPENAI_")) return false;
+  if (CODEX_ENV_STRIP_EXACT.has(k)) return true;
+  if (CODEX_ENV_STRIP_PREFIX.some((p) => k.startsWith(p))) return true;
+  return CODEX_ENV_STRIP_SUFFIX.some((s) => k.endsWith(s));
+}
+
+/** A codex session environment without inherited credentials — the DENYLIST peripheral.ts's
+ *  `peripheralSessionEnv` applies to every Claude role session, restated here (the design
+ *  adjudication keeps peripheral.ts untouched by this feature) and WIDENED TWICE by the gate②
+ *  review of PR #510:
+ *   - forge tokens, `SSH_AUTH_SOCK`/`SSH_AGENT_PID` (a live agent socket is a USABLE credential
+ *     with no key file to read), and — round 2, P1-b — the well-known credential FAMILIES an
+ *     operator's shell routinely carries: AWS/GCP/Azure, `KUBECONFIG`, npm/pip/twine/cargo registry
+ *     tokens, Docker, plus a generic `*_TOKEN`/`*_SECRET`/`*_API_KEY`/`*_PASSWORD`/`*_CREDENTIALS`
+ *     sweep (`isStrippedEnvKey`). Without that widening, a prompt-injected session could dump the
+ *     lot with a single `env` — by far the cheapest exfiltration path available to it;
  *   - `GH_CONFIG_DIR` is REDIRECTED (by the caller, via `ghConfigDir`) at an empty ephemeral
  *     directory under the session's own state dir, rather than left pointing at the operator's real
  *     `~/.config/gh` — so an inherited `gh` config with `hosts.yml` tokens is not the default
@@ -162,29 +248,26 @@ export function codexHomeDir(env: Record<string, string | undefined>): string {
  *   - `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` are pinned to `/dev/null` and `GIT_TERMINAL_PROMPT=0`,
  *     neutralizing credential helpers/askpass prompts declared in the operator's git config.
  *
- *  HONEST LIMIT — these strip and redirect the ambient HANDLES; they do not stop a READ of the
- *  underlying files. `--sandbox read-only` does not confine the read scope (see this module's own
- *  gap list), so `~/.config/gh/hosts.yml`, `~/.codex/auth.json` and `~/.ssh/*` remain readable on
- *  disk by a session that goes looking. This is necessary-but-insufficient hardening, recorded as
- *  such here, in `CONTAINMENT_GAP_HOST_WIDE_FILE_READS`, and in docs/security.md.
+ *  Why a denylist-plus-sweep and NOT an allowlist: an allowlist that silently omits something the
+ *  CLI needs breaks every review, and the only way to discover the omission is a paid live run. The
+ *  denylist's failure mode — an unknown-shaped secret survives — is bounded and disclosed; the
+ *  allowlist's is a runner that never works. `CODEX_ENV_KEEP` is the explicit counterweight.
+ *
+ *  HONEST LIMITS, both disclosed in docs/security.md:
+ *   1. The strip covers known families and common name shapes; it CANNOT be exhaustive. The
+ *      remaining environment is INHERITED, so an operator running the engine from a shell that
+ *      carries secrets should assume a steered review session can read them.
+ *   2. These strip and redirect the ambient HANDLES; they do not stop a READ of the underlying
+ *      files. `--sandbox read-only` does not confine the read scope (see this module's own gap
+ *      list), so `~/.config/gh/hosts.yml`, `~/.codex/auth.json` and `~/.ssh/*` remain readable on
+ *      disk by a session that goes looking — `CONTAINMENT_GAP_HOST_WIDE_FILE_READS`.
  *
  *  Provider transport credentials (`CODEX_HOME`, `OPENAI_API_KEY`, ...) are deliberately NOT
  *  stripped: a review that cannot reach its own provider is not contained, it is broken. */
 export function codexSessionEnv(env: NodeJS.ProcessEnv, ghConfigDir: string): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(env)) {
-    const normalized = key.toUpperCase();
-    if (
-      normalized === "GITHUB_TOKEN" ||
-      normalized === "GITHUB_ENTERPRISE_TOKEN" ||
-      normalized.startsWith("GH_") ||
-      normalized === "GIT_ASKPASS" ||
-      normalized.startsWith("GIT_CONFIG_") ||
-      normalized === "SSH_AUTH_SOCK" ||
-      normalized === "SSH_AGENT_PID"
-    ) {
-      continue;
-    }
+    if (isStrippedEnvKey(key)) continue;
     out[key] = value;
   }
   // Set AFTER the strip loop, so these are the redirected values and never an inherited one that
@@ -421,11 +504,20 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
       lastMessagePath,
     });
 
-    // R2: the blind spots are announced at spawn, every time — the adjudicated alternative to
-    // pretending a read-only sandbox equals the Claude runner's Read/Grep/Glob-only profile. BOTH
+    // R2: the blind spots are announced BEFORE the spawn, every time — the adjudicated alternative
+    // to pretending a read-only sandbox equals the Claude runner's Read/Grep/Glob-only profile. BOTH
     // facets ride in one payload (see CODEX_CONTAINMENT_GAPS) so the credential-read exposure is
     // greppable in its own right.
-    this.event(ENGINE_REVIEW_CONTAINMENT_GAP, {
+    //
+    // LOAD-BEARING, unlike every other event this module writes (PR #510 round-2 review, P2-a). The
+    // record IS the mitigation for a gap the owner ruling deliberately leaves unfenced, and
+    // docs/security.md states the facets are emitted at EVERY spawn — a best-effort append would let
+    // that claim silently become false and run an unrecorded session against operator-readable
+    // credentials. So a failure here THROWS before anything is spawned: review-session.ts maps the
+    // throw to `unavailable` and the lane degrades honestly (no session, no spend, a visible
+    // reason). This gates the SPAWN, never the review's outcome — observability still cannot decide
+    // a verdict, and the post-run events below stay best-effort exactly as they were. */
+    this.requireEvent(ENGINE_REVIEW_CONTAINMENT_GAP, {
       runner: this.runner,
       session: sessionId,
       gaps: [...CODEX_CONTAINMENT_GAPS],
@@ -482,18 +574,23 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
     const killFn = this.deps.killFn ?? ((pid: number, signal: NodeJS.Signals | 0) => void process.kill(pid, signal));
     const isTreeAlive = this.deps.isTreeAlive ?? ((pid: number) => !sessionTreeIsGone(pid));
     const pid = child.pid;
-    /** Signal the whole detached GROUP (negative pid), falling back to the leader alone if group
-     *  signalling fails — the same tolerance worker.ts's `killGroup` applies. */
+    /** Signal the whole detached GROUP (negative pid) — and ONLY the group.
+     *
+     *  There is deliberately NO positive-pid fallback (PR #510 round-2 review, P2-b). `detached:
+     *  true` makes the group canonical: if the group signal fails, either it is already gone
+     *  (`ESRCH` — nothing to do) or it is not ours (`EPERM` — a leader-pid retry would not be ours
+     *  either). A blind `killFn(pid, sig)` after an ESRCH is worse than useless: once the group has
+     *  exited, the kernel is free to reassign that pid, so the retry can deliver SIGKILL to an
+     *  UNRELATED live process. `ESRCH` is therefore swallowed as "already gone"; anything else is
+     *  logged (an unexpected signalling failure is a fact worth recording, never a crash — the
+     *  timeout path settles regardless, see below). */
     const killGroup = (sig: NodeJS.Signals): void => {
       if (pid === undefined) return;
       try {
         killFn(-pid, sig);
-      } catch {
-        try {
-          killFn(pid, sig);
-        } catch {
-          /* already gone */
-        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ESRCH") return; // group already gone
+        log(`[sapwood:codex-review] session ${sessionId}: ${sig} to process group ${pid} failed: ${String(err)}`);
       }
     };
     const treeIsGone = (): boolean => (pid === undefined ? true : !isTreeAlive(pid));
@@ -537,6 +634,15 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
     // the await eventually settles), then terminate the GROUP with peripheral.ts's own kill
     // sequence — subscribe to the grace BEFORE signalling, and use GROUP liveness (never the
     // leader's `exit` event) as the verdict on whether the SIGKILL escalation is still warranted.
+    //
+    // AND THEN SETTLE, UNCONDITIONALLY (PR #510 round-2 review, P1-a). The previous version returned
+    // here and left `await exited` waiting for a `close` that may never come: if the child emits no
+    // exit notification AND the group stays observable after SIGKILL (uninterruptible sleep, a
+    // signal that didn't take, a descendant still holding the group id), every liveness reading says
+    // ALIVE, the two-dead-readings detector never trips, and the lane wedges forever — the exact
+    // failure this fix exists to remove, one branch over. A timed-out session's outcome is ALREADY
+    // `timeout` regardless of any exit code, so waiting buys nothing. A group that survives SIGKILL
+    // is a SEPARATE fact: it is reported (below) rather than blocked on.
     const cancelTimeout = startTimer(this.deps.timeoutSec * 1000, () => {
       timedOut = true;
       void (async () => {
@@ -558,8 +664,20 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
             }),
         );
         killGroup("SIGTERM");
-        if ((await grace) === "gone") return;
-        killGroup("SIGKILL");
+        if ((await grace) !== "gone") {
+          killGroup("SIGKILL");
+          // One last kernel answer AFTER the escalation. A still-observable group here is an
+          // orphaned-tree report for a human — a durable event plus a log line — not a reason to
+          // keep this lane waiting.
+          if (!treeIsGone()) {
+            log(
+              `[sapwood:codex-review] session ${sessionId}: process group ${pid} still observable after SIGKILL — ` +
+                "settling the review as timeout and leaving the surviving group reported, not awaited",
+            );
+            this.event(ENGINE_REVIEW_ORPHANED_GROUP, { runner: this.runner, session: sessionId, pid: pid ?? null });
+          }
+        }
+        settle?.(null);
       })();
     });
 
@@ -611,8 +729,31 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
     return text.length === 0 ? null : parseCodexRolloutIdentity(text);
   }
 
+  /** The ONE event this module refuses to lose (P2-a) — see its call site for why the containment
+   *  record is treated differently from every other write here. Throws BEFORE the spawn, so
+   *  `runReviewSession` maps it to `unavailable`: no session runs unrecorded. An absent
+   *  `appendEvent` dep is also a refusal, not a pass: a composition that wired this runner without
+   *  a durable event channel cannot honor the disclosure the docs make on its behalf. */
+  private requireEvent(kind: string, payload: unknown): void {
+    if (!this.deps.appendEvent) {
+      throw new Error(
+        `codex review session: no durable event channel wired, so the ${kind} record cannot be written — ` +
+          "refusing to spawn an unrecorded codex review session",
+      );
+    }
+    try {
+      this.deps.appendEvent(kind, payload);
+    } catch (err) {
+      throw new Error(
+        `codex review session: failed to record ${kind} (${String(err)}) — refusing to spawn an unrecorded codex review session`,
+      );
+    }
+  }
+
   /** Best-effort event append: a broken/absent event channel can never turn observability into a
-   *  gate on the review (the same stance production.ts takes for the verdict event). */
+   *  gate on the review (the same stance production.ts takes for the verdict event). Used for every
+   *  POST-run record — by then the session has already run, and losing an after-the-fact note must
+   *  not change what the gate concludes. */
   private event(kind: string, payload: unknown): void {
     try {
       this.deps.appendEvent?.(kind, payload);

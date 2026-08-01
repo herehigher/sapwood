@@ -22,7 +22,12 @@ import type { RoleSessionResult } from "../roles/peripheral.js";
 import type { ApprovalResult, ReviewContext } from "../roles/reviewer.js";
 import type { AcSnapshot } from "./ac-snapshot.js";
 import type { EngineReviewArtifact } from "./audit.js";
-import { ENGINE_REVIEW_BUDGET_ADVISORY, ENGINE_REVIEW_CONTAINMENT_GAP, ENGINE_REVIEW_COST_UNKNOWN } from "./codex-exec.js";
+import {
+  ENGINE_REVIEW_BUDGET_ADVISORY,
+  ENGINE_REVIEW_CONTAINMENT_GAP,
+  ENGINE_REVIEW_COST_UNKNOWN,
+  ENGINE_REVIEW_ORPHANED_GROUP,
+} from "./codex-exec.js";
 import { makeEngineAgentReviewer, resolveReviewSessionExecutor } from "./engine-agent.js";
 import type { MaterializeResult } from "./materializer.js";
 import type { ReviewSessionEvidence, ReviewSessionExecutor, ReviewSessionRequest } from "./review-session.js";
@@ -329,7 +334,12 @@ test("regression pin: with `runner` unset, evaluate() goes through RoleRunner.ru
 
 test("event-kind registration: every honest-recording kind this feature adds is listed in the §7 copy map — the repo's own rule that a new event kind lands in that map in the SAME PR", () => {
   const doc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "docs", "frontend-design.md"), "utf8");
-  for (const kind of [ENGINE_REVIEW_BUDGET_ADVISORY, ENGINE_REVIEW_COST_UNKNOWN, ENGINE_REVIEW_CONTAINMENT_GAP]) {
+  for (const kind of [
+    ENGINE_REVIEW_BUDGET_ADVISORY,
+    ENGINE_REVIEW_COST_UNKNOWN,
+    ENGINE_REVIEW_CONTAINMENT_GAP,
+    ENGINE_REVIEW_ORPHANED_GROUP,
+  ]) {
     assert.ok(doc.includes(`| \`${kind}\` |`), `event kind ${kind} must have a plain-language row in docs/frontend-design.md §7`);
   }
 });
