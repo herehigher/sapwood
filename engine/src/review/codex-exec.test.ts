@@ -279,15 +279,21 @@ test("parseCodexExecStream (#512): a missing/malformed item.completed item is to
   assert.equal(t.toolItemCount, 1);
 });
 
-test("parseCodexExecStream (#512): a mixed stream counts every recognized tool-ish item type", () => {
+test("parseCodexExecStream (#512): a mixed stream counts every recognized TREE-INSPECTION item type", () => {
   const t = parseCodexExecStream(
     `{"type":"item.completed","item":{"type":"command_execution"}}\n` +
       `{"type":"item.completed","item":{"type":"file_change"}}\n` +
       `{"type":"item.completed","item":{"type":"mcp_tool_call"}}\n` +
-      `{"type":"item.completed","item":{"type":"web_search"}}\n` +
       `{"type":"item.completed","item":{"type":"agent_message"}}\n`,
   );
-  assert.equal(t.toolItemCount, 4);
+  assert.equal(t.toolItemCount, 3);
+});
+
+test("parseCodexExecStream (#512, PM gate② review P2): web_search is NOT counted — a web search is not tree inspection, and this runner's argv disables it anyway (-c tools.web_search=false); counting it would inflate the exact signal this event exists to report honestly", () => {
+  const t = parseCodexExecStream(
+    `{"type":"item.completed","item":{"type":"command_execution"}}\n` + `{"type":"item.completed","item":{"type":"web_search"}}\n`,
+  );
+  assert.equal(t.toolItemCount, 1);
 });
 
 test("parseCodexRolloutIdentity: provider + model from the session's own transcript; a HALF-known identity is no identity (D5 fail-closed)", () => {

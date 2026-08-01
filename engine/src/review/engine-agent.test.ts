@@ -571,6 +571,57 @@ test("shipped engine-reviewer prompt (#512): 'never execute / never reach the ne
   );
 });
 
+// #512 (PM gate② round 2, P1-1, proven live): the first submitted round missed a FOURTH site — the
+// opening identity paragraph — and it was the BINDING one. "never run a shell command" directly
+// contradicted the "actually inspect the tree" instruction added at the materialized-tree bullet,
+// and it sits in the most authoritative position in the whole prompt. A live three-arm rerun (same
+// fixture, model, effort) showed the first round changed NOTHING observable (0 command_execution
+// items, same as main); fixing this site (plus the model-identity and capability-limit sites below)
+// produced 12 command_execution items and materially different findings. These three tests pin the
+// live-proven fix so a future edit cannot silently reintroduce the contradiction.
+test("shipped engine-reviewer prompt (#512, PM gate② round 2, P1-1): the opening identity paragraph no longer forbids a shell command, and states tree inspection is REQUIRED", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.doesNotMatch(
+    prompt,
+    /never execute the producer's code, never run a shell command, and/,
+    "the opening paragraph must not tell the session it may never run a shell command — that is the codex-exec runner's only tree-inspection tool",
+  );
+  assert.match(
+    prompt,
+    /You are a STATIC reviewer: you never execute the producer's code, and you have no write access/,
+    "the identity sentence keeps 'never execute the producer's code' and 'no write access' — both genuinely true for every runner",
+  );
+  assert.match(
+    prompt,
+    /You DO inspect the materialized tree read-only, with whatever means your session has\s*—?\s*\n?\s*that is REQUIRED, not optional/,
+    "the opening paragraph must affirmatively require tree inspection, in the prompt's most authoritative position",
+  );
+});
+
+test("shipped engine-reviewer prompt (#512, PM gate② round 2, P1-1): the model-identity claim is runner-neutral — not one more site claiming 'Claude'", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.doesNotMatch(
+    prompt,
+    /You are a different Claude model from/,
+    "must not claim the reviewing session is a Claude model — false for codex-exec, and this is exactly the property #443's cross-vendor D5 model separation exists to provide",
+  );
+  assert.match(prompt, /You run on a different model from the one that produced this PR/);
+});
+
+test("shipped engine-reviewer prompt (#512, PM gate② round 2, P1-1): the capability-limit paragraph states 'must not execute/reach the network' as a PROHIBITION, and 'cannot read live GitHub state' as the one genuine inability", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.doesNotMatch(
+    prompt,
+    /you cannot execute code, reach the network, or read\s*\n\s*live GitHub state/,
+    "must not phrase 'must not execute/reach the network' as an inability — for codex-exec it is a prohibition on a tool the session actually has",
+  );
+  assert.match(
+    prompt,
+    /you must not execute code or reach the network, and\s*\n\s*cannot read live GitHub state — is never itself a finding\./,
+    "keeps the paragraph's actual point (a capability limit is never itself a finding) while separating the prohibition from the one genuine inability",
+  );
+});
+
 test("shipped engine-reviewer prompt (#454, design #402 R6 §6a): the judged half is stated as unverifiable by the engine, row by row", () => {
   const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
   assert.match(

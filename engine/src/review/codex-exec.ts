@@ -179,17 +179,21 @@ export interface CodexExecStreamTelemetry {
   toolItemCount: number;
 }
 
-/** #512: `item.completed`'s `item.type` values this parser counts as a tool/command call — the
- *  observed-inspection signal `ENGINE_REVIEW_SESSION_INSPECTION` records. `command_execution` is a
- *  shell call — the ONE tree-inspection capability this runner's containment profile actually
- *  grants (`--sandbox read-only` permits reads; see this module's own top-of-file doc).
- *  `file_change`/`mcp_tool_call`/`web_search` are included for forward compatibility with future
- *  CLI item shapes; this runner's own argv (`-c mcp_servers={}`, `-c tools.web_search=false`) means
- *  the latter two should never actually appear. `agent_message` (prose) and `reasoning` (the
- *  model's own chain-of-thought item, also prose) are deliberately NOT counted — an `agent_message`
- *  is exactly the "answered from the diff alone" pattern #512 exists to detect, not evidence of
- *  inspection. */
-const CODEX_TOOL_ITEM_TYPES: ReadonlySet<string> = new Set(["command_execution", "file_change", "mcp_tool_call", "web_search"]);
+/** #512 (PM gate② review, P2): `item.completed`'s `item.type` values this parser counts as
+ *  TREE-INSPECTION activity — the signal `ENGINE_REVIEW_SESSION_INSPECTION` records, and the name
+ *  this set and the event both commit to. `command_execution` is a shell call — the ONE
+ *  tree-inspection capability this runner's containment profile actually grants (`--sandbox
+ *  read-only` permits reads; see this module's own top-of-file doc). `file_change`/`mcp_tool_call`
+ *  are included for forward compatibility with future CLI item shapes that would still count as
+ *  "did something to/via the tree"; this runner's own argv (`-c mcp_servers={}`) means the latter
+ *  should never actually appear. `web_search` is DELIBERATELY EXCLUDED even though this runner's
+ *  argv also disables it (`-c tools.web_search=false`, so it should never fire either): a web
+ *  search is not tree inspection, and counting it would inflate the exact signal this event exists
+ *  to report honestly if that argv flag were ever dropped. `agent_message` (prose) and `reasoning`
+ *  (the model's own chain-of-thought item, also prose) are deliberately NOT counted — an
+ *  `agent_message` is exactly the "answered from the diff alone" pattern #512 exists to detect,
+ *  not evidence of inspection. */
+const CODEX_TOOL_ITEM_TYPES: ReadonlySet<string> = new Set(["command_execution", "file_change", "mcp_tool_call"]);
 
 /** CODEX_BIN env override, else `codex` on PATH — deliberately the same shape as worker.ts's
  *  `discoverClaudeBin(CLAUDE_BIN)`, so both runners are discovered the same way. */
