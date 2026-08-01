@@ -510,6 +510,32 @@ carrying a stale `labels.inProgress` from a lane that died before this feature l
 it and move them back to `Ready`), and see
 [Where to look after an unattended run](#where-to-look-after-an-unattended-run).
 
+## Every lane is waiting on CI at once (`base CI: RED`)
+
+If `sapwood status` reports
+
+```
+base CI: RED at <sha> since <when> — failing: <check>; every open lane's CI evidence inherits
+this until the default branch is fixed
+```
+
+the problem is **not** any one PR. The default branch's own HEAD commit is CI-red, so every open
+PR's merge-ref CI inherits that red and every lane sits in the same CI-evidence wait — each lane's
+queued reason says `base-inherited` and names the same commit. This is the shape two individually
+green PRs can produce by *composition*: each passed alone, their merge did not.
+
+**What to do:** fix the default branch (revert, or land a fix). Nothing on the sapwood side needs
+touching — the lanes are waiting, not wedged, and they resume the ordinary per-PR CI-evidence path
+by themselves on their next poll once the branch is green. The engine raises exactly **one**
+escalation for the episode, no matter how many lanes are waiting or how long it stands, and
+resolves it itself (`escalation-resolved`, `via: base-green`) on the round after the branch
+recovers. A new red commit landing on the default branch is a new fact and escalates once more.
+
+**If status says `base CI: not known red` but lanes still all wait:** the engine could not read
+the default branch's checks (it fails closed to "not red" rather than guessing) — look for
+`[sapwood:base-ci] default-branch check read failed` in the log, and check `gh` auth as under
+[`gh` auth / scope problems](#gh-auth--scope-problems-init).
+
 ## See also
 
 - [`security.md`](security.md) — the guard, human controls, and escalation model

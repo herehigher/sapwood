@@ -428,6 +428,17 @@ bounded drain, so a cost-ceiling breach or the kill switch can finish draining i
 against a lane that can never progress. A pin that is merely fresh is never terminal: that is an
 ordinary healthy wait while CI runs.
 
+**A red default branch (no configuration):** base-branch CI awareness needs no config key. While
+at least one lane is driving, sapwood reads the default branch's own check rollup once per tick.
+If that branch's HEAD commit is CI-red, every open PR's merge-ref CI inherits the red, so sapwood
+raises **one** run-level escalation naming the base commit and the failing run (never one per lane
+or per poll), each waiting lane's queued reason says the wait is base-inherited and names that
+commit, and `sapwood status` reports `base CI: RED at <sha>`. It clears itself once the branch is
+green again — no manual step. If `requiredChecks` is configured, only those trusted name+app pairs
+can mark the base red; if it is not, any check on that commit whose own conclusion says it ran and
+failed counts. Nothing gates on this signal: it is announcement and labelling only, so an
+ambiguous or unreadable read simply reports nothing rather than holding a lane.
+
 ### gate① CI evidence (all reviewer modes)
 
 Independently of `requiredChecks`, every reviewer mode has a gate① CI signal derived from the

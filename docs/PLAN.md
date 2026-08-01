@@ -1066,6 +1066,27 @@ marker idempotency, output schema, escalation path) see
   cancel it — gate① stays not-green under #401's SUCCESS-only rule, so such a lane is exactly as
   wedged as one waiting forever, and the evidence comment names those checks alongside the pending
   ones so the human knows which to re-run.
+  **Base-branch CI awareness (#502) — the run-level fact both clocks above are blind to:** a red
+  DEFAULT BRANCH gates every open lane at once. From the moment `main` goes red, every open PR's
+  merge-ref CI inherits that red, so all lanes land in the same `CI-evidence not satisfied` wait
+  and neither the review-silence nor the CI-pending clock can tell "the base is broken" from "your
+  branch is broken" (on 2026-08-01 that left three lanes backing off for 1.5h+ with no signal at
+  all). The engine now polls the default branch's own check rollup once per tick, through one new
+  bounded forge read (`getDefaultBranchChecks`, the same capped `contexts(first: cap)` shape
+  `getPRChecks` uses, keyed on the branch's HEAD commit instead of a PR number) and only while at
+  least one lane is actually driving. A red base opens a durable, SHA-keyed pin kept in the event
+  log itself (`base-ci-red-observed` / `base-ci-red-cleared`, the #426 pin shape one level up — no
+  new column, no migration) and raises ONE run-level escalation (`base-ci-red-escalated`) naming
+  the base commit and the failing run: one fact, one bit, never one per lane and never one per
+  poll. While it stands, each lane's CI-wait reason says so and names that commit, and `sapwood
+  status` reports the standing episode. When the base goes green the existing escalation-reconcile
+  observer resolves it on its own once-per-round pass — receipt strictly before the clear — and
+  lanes are back on the ordinary per-PR CI-evidence path with no manual step. Every ambiguity
+  (unreadable read, no default-branch commit, an empty rollup) fails closed to NOT-base-red:
+  detection only LABELS and announces, it gates nothing, so a wrong pin can neither stop a lane
+  nor merge one. The pin is deliberately queryable so the `FIXABLE:CI_RED` suppression for
+  base-inherited lane failures — which lives on the human-merge-only `merge-driver.ts` path — can
+  read it once a human lands that half.
   **Adjudicated findings stop re-consuming fix rounds (#378, F14):** gate② used to see
   review threads only as an aggregate unresolved COUNT, so a finding that had already
   been human-adjudicated and thread-resolved re-entered the FIXABLE gate every time a
