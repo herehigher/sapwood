@@ -1245,7 +1245,8 @@ function seedAuditServedLeg(st: State, opts: { runId?: string; findings?: number
     JSON.stringify({
       perAC: [],
       findings: Array.from({ length: opts.findings ?? 2 }, (_, i) => ({ id: `F-${i}`, body: `finding body ${i}` })),
-      sessionActualModels: ["m"],
+      sessionActualIdentities: [{ provider: "anthropic", model: "m" }],
+      sessionSpends: [{ kind: "known", usd: 0 }],
       promptHash: "p",
     }),
   );
@@ -1359,7 +1360,13 @@ test("#461: findingResponses are rejected when the leg never called getPRAuditCo
     "lane-fix",
     "run-1",
     "rejected",
-    JSON.stringify({ perAC: [], findings: [{ id: "F-0", body: "b" }], sessionActualModels: ["m"], promptHash: "p" }),
+    JSON.stringify({
+      perAC: [],
+      findings: [{ id: "F-0", body: "b" }],
+      sessionActualIdentities: [{ provider: "anthropic", model: "m" }],
+      sessionSpends: [{ kind: "known", usd: 0 }],
+      promptHash: "p",
+    }),
   );
   const outcome = harvest(
     st,
@@ -1425,7 +1432,8 @@ function seedRejectedWal(st: State, runId = "run-1", findings = 2): void {
     JSON.stringify({
       perAC: [],
       findings: Array.from({ length: findings }, (_, i) => ({ id: `F-${i}`, body: `FINDING BODY ${i}` })),
-      sessionActualModels: ["m"],
+      sessionActualIdentities: [{ provider: "anthropic", model: "m" }],
+      sessionSpends: [{ kind: "known", usd: 0 }],
       promptHash: "p",
     }),
   );

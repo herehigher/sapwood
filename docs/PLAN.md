@@ -426,7 +426,9 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   never hardcoded — now separates the instructions the engine actually checks (per-AC id-set
   exactness, the finding key allowlist and closed enums, the advisory-kind allowlist,
   `rejected` implying a non-empty findings array, two-sided model separation, head/base/diff
-  identity and snapshot drift, the static-only tool profile) from the ones only the agent can
+  identity and snapshot drift, no write access for every runner — containment beyond that is
+  runner-specific, not one shared "static" tool profile, since #512 narrowed the claim once
+  the codex-exec runner shipped) from the ones only the agent can
   honor (test substantiveness, the evidence tier, a finding's severity/kind, whether a
   finding is worth writing at all). The boundary is durable knowledge, not decoration: a
   tuner tightening an enforced rule in prose changes nothing, while loosening a judged one is

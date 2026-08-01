@@ -53,7 +53,7 @@ class FakeForge extends UnstubbedForge implements IForge {
     return { issues: [], skipped: 0 };
   }
   override async listIssuesAbsentFromBoard() {
-    return [];
+    return { unplaced: [], elsewhere: 0 };
   }
   override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
@@ -496,7 +496,12 @@ test("createDefaultPeripherals (#109 gate② P2): with round.milestone set, the 
   const triageCalls = runner.calls.filter((c) => c.roleId === "po-triage");
   assert.equal(triageCalls.length, 1, "exactly one triage session — the in-milestone candidate only");
   assert.match(triageCalls[0]!.prompt, /in-scope triage candidate/);
-  assert.doesNotMatch(triageCalls[0]!.prompt, /out-of-scope/);
+  // #444: the scoping property under test is which issue is TRIAGED, not what the session can
+  // see. The prompt's backlog digest deliberately renders out-of-milestone open issues now (as
+  // dedup-only context, annotated), so assert on the triage TARGET fields, not on a blanket
+  // prompt-wide text scan.
+  assert.match(triageCalls[0]!.prompt, /- Number: #7\n/);
+  assert.doesNotMatch(triageCalls[0]!.prompt, /- Number: #8\n/);
   state.close();
 });
 

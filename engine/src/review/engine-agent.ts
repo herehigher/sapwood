@@ -36,6 +36,7 @@ import type { MaterializeResult } from "./materializer.js";
 import {
   CLAUDE_PROVIDER,
   ClaudeReviewSessionExecutor,
+  formatIdentity,
   type ReviewSessionExecutor,
   type ReviewSessionIdentity,
   type ReviewSessionSpend,
@@ -305,7 +306,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     // doc — so re-materializing for the retry would be redundant work, not a correctness
     // requirement) but a FRESH session (a new `run()` call, its own session name/id).
     const capUsd = this.agentCfg.costCapUsd;
-    const first = await this.attempt(materialized, prompt, capUsd, snapshot, headOid, workerModels, changedPaths);
+    const first = await this.attempt(materialized, prompt, capUsd, snapshot, headOid, workerModels, changedPaths, []);
     if (first.kind === "verdict") return first.result;
     if (first.kind === "setup-unavailable") return { kind: "unavailable", headOid, reason: first.reason };
 
@@ -330,7 +331,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
         reason: `engine-agent review attempt 1 produced no valid output and exhausted its cost cap ($${capUsd.toFixed(2)}) — no budget remains for a retry`,
       };
     }
-    const second = await this.attempt(materialized, prompt, remainder, snapshot, headOid, workerModels, changedPaths);
+    const second = await this.attempt(materialized, prompt, remainder, snapshot, headOid, workerModels, changedPaths, [first.spend]);
     if (second.kind === "verdict") return second.result;
     if (second.kind === "setup-unavailable") return { kind: "unavailable", headOid, reason: second.reason };
     return {
@@ -357,6 +358,11 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     headOid: string,
     workerModels: readonly ReviewSessionIdentity[],
     changedPaths: ReadonlySet<string>,
+    /** #513: the spends of every attempt already EXECUTED before this one (empty for attempt 1) —
+     *  accumulated into `sessionSpends` alongside this attempt's own spend on the verdict branch
+     *  below, so a retry's persisted artifact records BOTH attempts' cost, not just the
+     *  verdict-producing one (a summed value would discard "attempt 1 known, attempt 2 unknown"). */
+    priorSpends: readonly ReviewSessionSpend[],
   ): Promise<AttemptOutcome> {
     const outcome = await runReviewSession(this.executor, {
       materialize: materialized,
@@ -421,9 +427,13 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     this.deps.onReviewArtifact?.(headOid, {
       perAC: parsed.perAC,
       findings: gatedFindings,
-      // #443: the artifact keeps recording MODEL NAMES (the persisted audit shape is unchanged);
-      // the provider half of the identity is what the D5 check above consumes, not this record.
-      sessionActualModels: [...new Set(outcome.identity.map((i) => i.model))],
+      // #513: the DECISIVE attempt's own (provider, model) identities only — a failed prior
+      // attempt never passed this same D5 check, so its telemetry is not provenance and is
+      // deliberately NOT folded in here (unlike `sessionSpends` below, which does accumulate).
+      sessionActualIdentities: dedupeIdentities(outcome.identity),
+      // #513: every EXECUTED attempt's spend, in order — `onReviewArtifact` still fires exactly
+      // once, here, on the attempt that produced the verdict, carrying the full accumulated list.
+      sessionSpends: [...priorSpends, outcome.spend],
       promptHash: this.promptHash,
     });
     return { kind: "verdict", result };
@@ -499,10 +509,25 @@ export class EngineAgentReviewer implements ReviewerAdapter {
   }
 }
 
-/** `provider/model`, the one rendering used in every D5 message — a bare model name would make two
- *  cross-provider identities look identical in the very message that explains why they are not. */
-function formatIdentity(id: ReviewSessionIdentity): string {
-  return `${id.provider}/${id.model}`;
+/** #513: dedupe a session's own reported (provider, model) identities before persisting them into
+ *  `EngineReviewArtifact.sessionActualIdentities` — a session's `modelUsage` transcript can carry
+ *  the same identity more than once (multiple turns on the same model); the persisted record
+ *  should list each DISTINCT identity once, same spirit as the pre-#513 `sessionActualModels`
+ *  field's own `[...new Set(...)]` dedup, now keyed on the full pair rather than the bare model.
+ *  The key is `JSON.stringify` of the pair, not a delimited string — a plain string join is
+ *  ambiguous in principle (provider `"a b"` + model `"c"` collides with provider `"a"` + model
+ *  `"b c"`); unreachable with any real provider/model string today, closed anyway while touching
+ *  this function (#513 gate② review P3). */
+function dedupeIdentities(identities: readonly ReviewSessionIdentity[]): ReviewSessionIdentity[] {
+  const seen = new Set<string>();
+  const out: ReviewSessionIdentity[] = [];
+  for (const id of identities) {
+    const key = JSON.stringify([id.provider, id.model]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(id);
+  }
+  return out;
 }
 
 /** #443: the executor-selection dispatch. One place decides which runner executes gate②'s review

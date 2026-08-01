@@ -1380,6 +1380,17 @@ export type EnvFailureSource = "llm" | "forge";
  *  upstream of anything the engine could re-test. It clears when a human clears it. */
 export type ParkSource = EnvFailureSource | "rapid-restart" | "consecutive-stalls" | "idle-churn";
 
+/** #475: every ParkSource as a VALUE, for the `sapwood park clear --source` operand check. The
+ *  `satisfies Record<ParkSource, 0>` is the point: adding a sixth source above without listing it
+ *  here is a compile error, so the CLI's accepted set can never drift behind the type. */
+export const PARK_SOURCES: readonly ParkSource[] = Object.keys({
+  llm: 0,
+  forge: 0,
+  "rapid-restart": 0,
+  "consecutive-stalls": 0,
+  "idle-churn": 0,
+} satisfies Record<ParkSource, 0>) as ParkSource[];
+
 /** #168: one environment-failure park episode — ONE ROW PER SOURCE (see the schema v11->v12
  *  migration comment for why per-source rows and why this lives in the state DB, not a file
  *  sentinel). `triggerIssue` is the issue whose lane failure caused this episode, or null.

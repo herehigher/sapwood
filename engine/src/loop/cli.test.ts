@@ -400,7 +400,7 @@ test("normalizeUnplacedBoardItems: moves every issue to backlog and records one 
       setBoardStatus: async (issue, status) => {
         moves.push([issue, status]);
       },
-      listIssuesAbsentFromBoard: async () => [],
+      listIssuesAbsentFromBoard: async () => ({ unplaced: [], elsewhere: 0 }),
     },
     { appendEvent: (kind, payload) => events.push([kind, payload]) },
     () => {},
@@ -426,7 +426,7 @@ test("normalizeUnplacedBoardItems: a failed move is logged and does not block la
         moves.push(issue);
         if (issue === 21) throw new Error("boom");
       },
-      listIssuesAbsentFromBoard: async () => [],
+      listIssuesAbsentFromBoard: async () => ({ unplaced: [], elsewhere: 0 }),
     },
     { appendEvent: (_kind, payload) => events.push(payload) },
     (line) => logs.push(line),
@@ -447,12 +447,12 @@ test("normalizeUnplacedBoardItems: reports open issues absent from the board —
     {
       listUnplacedIssues: async () => ({ issues: [], skipped: 0 }),
       setBoardStatus: async () => assert.fail("must not write to the board while reporting"),
-      listIssuesAbsentFromBoard: async () => [101, 102],
+      listIssuesAbsentFromBoard: async () => ({ unplaced: [101, 102], elsewhere: 0 }),
     },
     { appendEvent: (kind, payload) => events.push([kind, payload]) },
     (line) => logs.push(line),
   );
-  assert.deepEqual(events, [["board-gap-detected", { total: 2, issues: [101, 102] }]]);
+  assert.deepEqual(events, [["board-gap-detected", { total: 2, issues: [101, 102], elsewhere: 0 }]]);
   assert.ok(logs.some((line) => /\b2\b/.test(line) && /#101/.test(line) && /#102/.test(line)));
 });
 
@@ -463,7 +463,7 @@ test("normalizeUnplacedBoardItems: no absent issues -> no report event, no noise
     {
       listUnplacedIssues: async () => ({ issues: [], skipped: 0 }),
       setBoardStatus: async () => assert.fail("must not write to the board while reporting"),
-      listIssuesAbsentFromBoard: async () => [],
+      listIssuesAbsentFromBoard: async () => ({ unplaced: [], elsewhere: 0 }),
     },
     { appendEvent: (_kind, payload) => events.push(payload) },
     (line) => logs.push(line),
@@ -480,7 +480,7 @@ test("normalizeUnplacedBoardItems: the enumeration is capped, but the reported t
     {
       listUnplacedIssues: async () => ({ issues: [], skipped: 0 }),
       setBoardStatus: async () => assert.fail("must not write to the board while reporting"),
-      listIssuesAbsentFromBoard: async () => absentIssues,
+      listIssuesAbsentFromBoard: async () => ({ unplaced: absentIssues, elsewhere: 0 }),
     },
     { appendEvent: (kind, payload) => events.push([kind, payload]) },
     (line) => logs.push(line),
@@ -496,6 +496,41 @@ test("normalizeUnplacedBoardItems: the enumeration is capped, but the reported t
     logs.some((line) => /\b40\b/.test(line)),
     "the log line states the true total, not the capped length",
   );
+});
+
+// #491: issues that ARE placed, just on another board, are a one-line count — never rows in
+// the actionable list, which is what trained the operator to skip the whole report.
+test("normalizeUnplacedBoardItems: issues placed on another board are one summary count, never listed rows (#491)", async () => {
+  const events: Array<[string, unknown]> = [];
+  const logs: string[] = [];
+  await normalizeUnplacedBoardItems(
+    {
+      listUnplacedIssues: async () => ({ issues: [], skipped: 0 }),
+      setBoardStatus: async () => assert.fail("must not write to the board while reporting"),
+      listIssuesAbsentFromBoard: async () => ({ unplaced: [101], elsewhere: 29 }),
+    },
+    { appendEvent: (kind, payload) => events.push([kind, payload]) },
+    (line) => logs.push(line),
+  );
+  assert.deepEqual(events, [["board-gap-detected", { total: 1, issues: [101], elsewhere: 29 }]]);
+  assert.equal(logs.length, 1, "one line total, not one per placed-elsewhere issue");
+  assert.ok(/#101/.test(logs[0]!) && /\b29\b/.test(logs[0]!), "the actionable issue is named; the rest are a bare count");
+});
+
+test("normalizeUnplacedBoardItems: every open issue placed somewhere -> silence, even with a large elsewhere count (#491)", async () => {
+  const events: unknown[] = [];
+  const logs: string[] = [];
+  await normalizeUnplacedBoardItems(
+    {
+      listUnplacedIssues: async () => ({ issues: [], skipped: 0 }),
+      setBoardStatus: async () => assert.fail("must not write to the board while reporting"),
+      listIssuesAbsentFromBoard: async () => ({ unplaced: [], elsewhere: 30 }),
+    },
+    { appendEvent: (_kind, payload) => events.push(payload) },
+    (line) => logs.push(line),
+  );
+  assert.deepEqual(events, [], "nothing is actionable — nothing is reported");
+  assert.deepEqual(logs, []);
 });
 
 test("normalizeUnplacedBoardItems: a computation failure logs and lets startup complete — never blocks", async () => {
@@ -572,7 +607,7 @@ test("normalizeUnplacedBoardItems: the No-Status normalization loop and the abse
       setBoardStatus: async (issue, status) => {
         writes.push([issue, status]);
       },
-      listIssuesAbsentFromBoard: async () => [201, 202],
+      listIssuesAbsentFromBoard: async () => ({ unplaced: [201, 202], elsewhere: 0 }),
     },
     { appendEvent: (kind, payload) => events.push([kind, payload]) },
     () => {},
@@ -580,7 +615,7 @@ test("normalizeUnplacedBoardItems: the No-Status normalization loop and the abse
   assert.deepEqual(writes, [[7, "backlog"]], "only the pre-existing No-Status move writes — nothing else");
   assert.deepEqual(events, [
     ["board-normalized", { issue: 7, status: "backlog" }],
-    ["board-gap-detected", { total: 2, issues: [201, 202] }],
+    ["board-gap-detected", { total: 2, issues: [201, 202], elsewhere: 0 }],
   ]);
 });
 

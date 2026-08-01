@@ -62,6 +62,7 @@ class FakeForge extends UnstubbedForge implements IForge {
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
   unplaced = { issues: [] as number[], skipped: 0 };
   absentIssues: number[] = [];
+  absentElsewhere = 0;
   boardCalls: string[] = [];
   reconcileData: StartupReconcileData = { placements: [], openPrs: [] };
   reconcileReads = 0;
@@ -83,7 +84,7 @@ class FakeForge extends UnstubbedForge implements IForge {
   }
   override async listIssuesAbsentFromBoard() {
     this.boardCalls.push("list-absent");
-    return this.absentIssues;
+    return { unplaced: this.absentIssues, elsewhere: this.absentElsewhere };
   }
   override async readStartupReconcileData() {
     this.reconcileReads++;
@@ -375,7 +376,7 @@ test("sapwood run (default driver): runEngine reaches runRounds via createDefaul
     // through the narrower Pick<IForge, ...> fakes in cli.test.ts.
     assert.ok(forge.boardCalls.includes("list-absent"), "the real startup path calls listIssuesAbsentFromBoard");
     assert.deepEqual(state.eventsSince("2020-01-01T00:00:00Z", ["board-gap-detected"]), [
-      { kind: "board-gap-detected", payload: { total: 1, issues: [999] } },
+      { kind: "board-gap-detected", payload: { total: 1, issues: [999], elsewhere: 0 } },
     ]);
     const round = state.getRound(1)!;
     assert.equal(round.phase, "closed", "graceful stop still let the in-flight round finish (harvest included)");
@@ -516,7 +517,17 @@ test("sapwood run (default driver, #253 review round 2, H1): cfg.proxy.enabled: 
 
     const argvText = readFileSync(argvLog, "utf8");
     assert.ok(!argvText.includes("--mcp-config"), "shadow mode: no session anywhere gets a proxy attached");
-    assert.ok(!argvText.includes("mcp__forge__"), "shadow mode: allowedTools is never widened");
+    // #444: bind to the AUTHORITATIVE signal — the value of the tool-list flags themselves —
+    // rather than scanning the whole argv blob. The blob also carries the rendered PROMPT, and
+    // po.md now names `mcp__forge__search_issues` in prose (telling the align session to search
+    // before filing, when the tool is attached); prose naming a tool is not a grant of it, so a
+    // substring scan over the prompt would fail this test for a non-violation.
+    const args = argvText.split("\0");
+    const toolListValues = args.filter((_arg, i) => args[i - 1] === "--allowedTools" || args[i - 1] === "--disallowedTools");
+    assert.ok(toolListValues.length > 0, "expected the spawned session(s) to carry a tool-list flag at all");
+    for (const value of toolListValues) {
+      assert.ok(!value.includes("mcp__forge__"), "shadow mode: allowedTools is never widened");
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

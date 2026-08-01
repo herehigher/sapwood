@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -92,7 +92,7 @@ class FakeForge extends UnstubbedForge implements IForge {
     return { issues: [], skipped: 0 };
   }
   override async listIssuesAbsentFromBoard() {
-    return [];
+    return { unplaced: [], elsewhere: 0 };
   }
   override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
@@ -471,8 +471,32 @@ const LEGACY_LABEL_CONFIG = {
   escalation: { humanLabels: ["needs-human", "blocked"] },
 };
 
+/** #480: an ABSOLUTE, guaranteed-absent doctrine path — pinned because `mkCfg` builds cfg via
+ *  `ConfigSchema.parse`, which skips `loadConfig`'s config-file-relative anchoring of
+ *  `doctrine.file` (config.ts:1848). Left at the schema default (`docs/REVIEW-DOCTRINE.md`,
+ *  RELATIVE), every doctrine-presence probe in this file — `capHitEscalationNote`'s `existsSync`,
+ *  `loadDoctrine` — would resolve against `process.cwd()`: absent when the suite runs from
+ *  `engine/` (npm's per-workspace cwd, which is why CI stayed green), PRESENT when it runs from
+ *  the repo root, where this repo's own `docs/REVIEW-DOCTRINE.md` really exists. Same
+ *  environment-dependence class as the doctrine's own timing-dependent-assertions ban: same code,
+ *  different runner setup, different verdict. The anchor is the value, not the filesystem. */
+const ABSENT_DOCTRINE_FILE = "/nonexistent/REVIEW-DOCTRINE.md";
+
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
-  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" }, ...LEGACY_LABEL_CONFIG, ...over });
+  ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" },
+    doctrine: { file: ABSENT_DOCTRINE_FILE },
+    ...LEGACY_LABEL_CONFIG,
+    ...over,
+  });
+
+test("#480: mkCfg's doctrine.file is absolute and absent — every doctrine-presence probe in this file has the same verdict from the repo root as from engine/", () => {
+  const cfg = mkCfg();
+  assert.ok(isAbsolute(cfg.doctrine.file), "a relative path would be probed against process.cwd()");
+  assert.equal(existsSync(cfg.doctrine.file), false);
+  // The concrete verdict the cwd-sensitivity flipped (#147 gated-reentry cap escalation).
+  assert.doesNotMatch(capHitEscalationNote(cfg), /review doctrine/i);
+});
 
 const seedRunning = (st: State, name: string, issue: number) =>
   st.upsertWorker({ name, issue, session_id: `s-${name}`, state: "running", started_at: "t", ended_at: null });
@@ -2032,6 +2056,46 @@ test("tick DRIVE (#294) crash-rerun: a kill -9 between the hold observation and 
   }
 });
 
+test("tick DRIVE (#390): an ENGINE-AGENT lane's two-pass hold observation drives the same pr-held -> pr-released pair, with the on-PR label casing in the payload", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  const runTick = () => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+
+  // The two outcomes are shaped EXACTLY as the engine-agent path produces them once #390's
+  // merge-driver.ts diff is applied (see merge-driver.test.ts's own skipped #390 tests): a held
+  // pass queues on checkPreflight's `hold-label-present` and carries the label in its ON-PR
+  // casing; the release pass carries `held:false`. This half of the pair is reviewer-kind
+  // agnostic ALREADY — the conductor only ever sees `holdObservation` — which is precisely why
+  // #390 is a merge-driver-side wiring gap and needs no conductor change to close.
+  gate.outcomes[55] = {
+    kind: "queued",
+    pr: 55,
+    reason: "engine-agent: preflight failed: hold-label-present",
+    holdObservation: { held: true, label: "Sapwood:Hold" },
+  };
+  await runTick();
+  gate.outcomes[55] = {
+    kind: "queued",
+    pr: 55,
+    reason: "engine-agent: preflight failed: unresolved-threads",
+    holdObservation: { held: false },
+  };
+  await runTick();
+
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]);
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["pr-held", "pr-released"],
+  );
+  assert.deepEqual(events[0]!.payload, { worker: "lane-a", issue: 2, pr: 55, label: "Sapwood:Hold" });
+  assert.deepEqual(events[1]!.payload, { worker: "lane-a", issue: 2, pr: 55 });
+  assert.equal(st.getWorker("lane-a")?.state, "driving", "visibility only — the gate outcome is untouched");
+  st.close();
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // #383 (F4): drive-queued steady-state dedupe. driveOne reports "queued" STATELESSLY on every
 // DRIVE pass a lane sits on a gate-pending outcome (it has no memory) — these tests are about
@@ -2725,7 +2789,8 @@ test("tick DRIVE (#449, design #402 R2, engine-agent path): drive-fixup re-keys 
       // Advisory-eligible kind, NO path — proves an unlocated finding still round-trips end-to-end.
       { id: "f2", body: "nit: naming", severity: "advisory", kind: "style" },
     ],
-    sessionActualModels: ["sonnet"],
+    sessionActualIdentities: [{ provider: "anthropic", model: "sonnet" }],
+    sessionSpends: [{ kind: "known", usd: 0.05 }],
     promptHash: "hash",
   };
   st.recordEngineReviewWalArtifact("lane-a", "run-9", "rejected", JSON.stringify(artifact));
@@ -2884,7 +2949,8 @@ test("tick DRIVE (#449, design #402 R2 verification item 4, prose-free): a findi
         path: "src/x.ts",
       },
     ],
-    sessionActualModels: ["sonnet"],
+    sessionActualIdentities: [{ provider: "anthropic", model: "sonnet" }],
+    sessionSpends: [{ kind: "known", usd: 0.05 }],
     promptHash: "hash",
   };
   st.recordEngineReviewWalArtifact("lane-a", "run-9", "rejected", JSON.stringify(artifact));
@@ -3739,7 +3805,8 @@ function seedDisputedFinding(
         { id: "F-0", body: "THE REVIEWER FINDING BODY" },
         { id: "F-1", body: "a second finding" },
       ],
-      sessionActualModels: ["m"],
+      sessionActualIdentities: [{ provider: "anthropic", model: "m" }],
+      sessionSpends: [{ kind: "known", usd: 0 }],
       promptHash: "p",
     }),
   );
@@ -5098,7 +5165,8 @@ test("tick DRIVE (#450, advisories excluded, engine-agent path): a NEW advisory 
       { id: "f1", body: "still open", severity: "blocking", kind: "security", path: "src/a.ts" },
       { id: "f2", body: "nit: naming", severity: "advisory", kind: "style", path: "src/b.ts" },
     ],
-    sessionActualModels: ["sonnet"],
+    sessionActualIdentities: [{ provider: "anthropic", model: "sonnet" }],
+    sessionSpends: [{ kind: "known", usd: 0.05 }],
     promptHash: "hash",
   };
   st.recordEngineReviewWalArtifact("lane-a", "run-9", "rejected", JSON.stringify(artifact));
@@ -9362,10 +9430,11 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   // #167 review (Codex P2+P3 adjudication): cap-hit is this codebase's nearest mechanism to
   // the review doctrine's prFixCap→needs-human pattern — the escalation comment states the
   // principle (re-examine design/technical direction, not more patches) SELF-CONTAINED, true
-  // regardless of doctrine adoption. mkCfg() here builds cfg via ConfigSchema.parse with no
-  // doctrine file on disk at the default path — the legal, common "no doctrine adopted" case
-  // (doctrine.ts's NO_DOCTRINE) — so the comment must NOT cite a doctrine file that doesn't
-  // exist.
+  // regardless of doctrine adoption. mkCfg() pins `doctrine.file` to ABSENT_DOCTRINE_FILE — the
+  // legal, common "no doctrine adopted" case (doctrine.ts's NO_DOCTRINE) — so the comment must
+  // NOT cite a doctrine file that doesn't exist. #480: that pin is what makes this a fact about
+  // the cfg rather than about the invoking directory; before it, mkCfg left the RELATIVE schema
+  // default here and this very assertion passed from `engine/` and failed from the repo root.
   assert.match(gatedNotices()[0]![1], /re-examine the feature's design/i);
   assert.doesNotMatch(gatedNotices()[0]![1], /review doctrine/i);
   assert.doesNotMatch(gatedNotices()[0]![1], /point 4/i);

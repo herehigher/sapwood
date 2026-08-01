@@ -2155,8 +2155,8 @@ export async function escalatePark(
           `sapwood: engine parked since ${park.enteredAt} — consecutive-stall breaker (${park.reason}). ` +
           `This episode has now stood for over the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
           `escalation threshold. There is NO probe and NO auto-clear for this episode: fix the recurring ` +
-          `wedge, then clear the park by deleting its park_state row (docs/troubleshooting.md has the ` +
-          `exact command) — the next start records the operator clear and resumes dispatch.`
+          `wedge, then stop the engine and run \`sapwood park clear --source consecutive-stalls\` ` +
+          `(docs/troubleshooting.md) — starting the engine again resumes dispatch.`
         : park.source === "idle-churn"
           ? // #470: the third probe-less shape (loop/idle-churn.ts). Same honesty requirement as
             // the two arms above — and the same practical residual: the breaker escalates at trip
@@ -2166,8 +2166,8 @@ export async function escalatePark(
             `This episode has now stood for over the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
             `escalation threshold. There is NO probe and NO auto-clear for this episode: the loop itself is ` +
             `healthy, so there is nothing down here to re-test — the fault is a probe signal counting work ` +
-            `nothing enabled can consume. Fix that, then clear the park by deleting its park_state row ` +
-            `(docs/troubleshooting.md has the exact command).`
+            `nothing enabled can consume. Fix that, then stop the engine and run ` +
+            `\`sapwood park clear --source idle-churn\` (docs/troubleshooting.md).`
           : `sapwood: engine parked since ${park.enteredAt} due to a ${park.source} environment failure ` +
             `(${park.reason}) — this has exceeded the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
             `escalation threshold. The engine is still probing on a bounded exponential backoff and will ` +
