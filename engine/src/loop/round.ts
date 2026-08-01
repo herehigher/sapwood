@@ -43,6 +43,14 @@ import { pendingDurableConcerns } from "./dissent.js";
 import { issuesMergedThisTick, prsOpenedThisTick, type StopConditionHit, type StopConfig } from "./driver.js";
 import { emptySpinBreached, parkDurationExceededSec, probeBackoffSec, probeDueWithHint } from "./env-failure.js";
 import { escalateToNeedsHuman } from "./escalation-writer.js";
+import {
+  FINGERPRINT_WINDOW_LIMIT,
+  IDLE_CHURN_DETECTED_KIND,
+  idleChurnBreached,
+  idleChurnStreak,
+  roundFingerprint,
+  tripIdleChurnBreaker,
+} from "./idle-churn.js";
 import { buildRoundArtifact, persistRoundArtifact, type RoundArtifact } from "./round-artifact.js";
 import { startProgressWatchdog, systemWatchdogTimer } from "./watchdog.js";
 
@@ -78,8 +86,16 @@ const DEGRADED_PHASE_TO_ROUND_PHASE: Readonly<Record<string, PeripheralPhase>> =
  *  phase (see the call site), so no crash window can drop a phase the round actually ran.
  *  Appended caller-side, like every other event in this loop: state methods never self-append
  *  (state.ts). */
-function appendRoundPhase(state: Pick<State, "appendEvent">, roundId: number, phase: RoundPhase): void {
-  state.appendEvent("round-phase", { round_id: roundId, phase });
+function appendRoundPhase(
+  state: Pick<State, "appendEvent">,
+  roundId: number,
+  phase: RoundPhase,
+  /** #470: the terminal `closed` stamp ONLY — `{ idle, fp }`, the idle-churn breaker's durable,
+   *  restart-safe per-round sample (idle-churn.ts's module doc). Additive: every other phase
+   *  entry emits exactly the payload it always has. */
+  extra?: Record<string, unknown>,
+): void {
+  state.appendEvent("round-phase", { round_id: roundId, phase, ...extra });
 }
 
 /** #374 review (Codex sol-high finding 5, P2 — align to the AC): issue #374's own acceptance
@@ -1263,7 +1279,13 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   };
 
   /** #125 standby: cheap pre-round probe (one local SQLite read + pure GitHub API, no LLM) —
-   *  true the moment there is ANY signal that a new round would have real work to do. 'Ready empty' alone is NOT "nothing to do": a
+   *  returns the NAME of the first signal saying a new round would have real work to do, or `null`
+   *  for "nothing to do". (#470: it used to return a bare boolean. The name costs nothing — the
+   *  probe already short-circuits on the first hit — and it is what puts the F32 diagnosis in the
+   *  ledger: the idle-churn breaker's event names the signal that held the loop open, so the next
+   *  incident is read off the round ledger instead of re-derived by reading this function's
+   *  source. `probeHasWork` below is the unchanged boolean view standby itself uses.)
+   *  'Ready empty' alone is NOT "nothing to do": a
    *  plan-review candidate needs gate⓪; a plan-TRIAGE candidate (any open plan-less issue,
    *  regardless of board status — Codex P1 on PR #150: exactly what the aligning phase's PO
    *  triage pass consumes, so skipping it would back off forever over a backlog the PO exists
@@ -1331,14 +1353,14 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  wait). A throwing probe is a recorded tick-error and counts as "has work": the round opens
    *  and pre-#125 behavior resumes — the peripherals can cope with an occasionally-unnecessary
    *  round, same fail-toward-more-work stance as every other contained read in this module. */
-  const probeHasWork = async (): Promise<boolean> => {
+  const probeWorkSignal = async (): Promise<string | null> => {
     try {
       // Codex P2 (PR #150 round 4): pending rollback rows are retried ONLY inside a tick
       // (conductor.ts), and the failure that created one can be exactly what removed the
       // board's Ready signal (a claimed-but-dead issue is invisible to every API probe below) —
       // so an outstanding row counts as work, or standby would starve the retry indefinitely.
       // Local SQLite read: the cheapest signal, checked first.
-      if (deps.state.pendingRollbacks().length > 0) return true;
+      if (deps.state.pendingRollbacks().length > 0) return "pending-rollbacks";
       // #432 round 4 (Codex P1 finding 2, gate② review 3): a durable dissent CONCERN whose
       // comment-post transiently failed (dissent.ts's postConcernIfNew) is engine-owned pending
       // work — reconcileDurableConcerns' own retry sweep runs every round regardless of
@@ -1347,7 +1369,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // catch-all below could ever represent it; pendingDurableConcerns (dissent.ts) is the
       // SAME pure-local SQLite read reconcileDurableConcerns folds over — cheap, checked here
       // beside pendingRollbacks, before any network call.
-      if (pendingDurableConcerns(deps.state).length > 0) return true;
+      if (pendingDurableConcerns(deps.state).length > 0) return "pending-durable-concerns";
       // #433 (F33): a CARRIED lane is work. Rounds are dispatch windows and lanes cross them by
       // design, but every phase that finishes a lane — reclaim, resume, drive, gated reentry —
       // only ever runs inside a round's own executing tick. So withholding the next round over an
@@ -1363,18 +1385,18 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       //  - gatedFailedWorkers(): #147 gated-reentry candidates, already excluding capped/unlabelled
       //    rows — but consumed ONLY by tick()'s GATED RECLAIM phase, which is skipped entirely
       //    without a mergeGate, so this one is gated on the gate being configured.
-      if (deps.state.activeWorkers().length > 0) return true;
-      if (deps.state.handoffWorkers().length > 0) return true;
-      if (deps.mergeGate !== undefined && deps.state.gatedFailedWorkers().length > 0) return true;
-      if ((await forge.getReadyIssues()).length > 0) return true;
+      if (deps.state.activeWorkers().length > 0) return "active-lanes";
+      if (deps.state.handoffWorkers().length > 0) return "handoff-resume-candidates";
+      if (deps.mergeGate !== undefined && deps.state.gatedFailedWorkers().length > 0) return "gated-reentry-candidates";
+      if ((await forge.getReadyIssues()).length > 0) return "ready-issues";
       // #127 gate② F2: each candidate signal below only counts as work when the role that
       // CONSUMES it is enabled. A plan-review candidate is only ever consumed by the
       // plan-reviewer (gate⓪), a triage candidate only by the PO's aligning pass — with that
       // role disabled (roles.<role>.enabled: false) the candidate can never be consumed, so
       // counting it would pin this probe true forever: standby never engages and every round
       // burns the remaining peripheral sessions doing nothing, indefinitely.
-      if (cfg.roles.planReviewer.enabled && (await forge.getIssuesNeedingPlanReview()).length > 0) return true;
-      if (cfg.roles.po.enabled && (await forge.getIssuesNeedingPlanTriage()).length > 0) return true;
+      if (cfg.roles.planReviewer.enabled && (await forge.getIssuesNeedingPlanReview()).length > 0) return "plan-review-candidates";
+      if (cfg.roles.po.enabled && (await forge.getIssuesNeedingPlanTriage()).length > 0) return "plan-triage-candidates";
       // #432 round 5 (Codex P1 finding 1, gate② confirm round 2 — round 4's own version of this
       // line was itself an F32 generator): the round-pool's ELIGIBLE set (forge.ts's
       // selectPoolEligibleIssues/isPoolEligible, #214) is Ready-lane-scoped, hold-excluding, and
@@ -1416,7 +1438,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         cfg.roles.planReviewer.enabled &&
         (await forge.getPoolEligibleIssues()).some((i) => labelsInclude(i.labels, cfg.labels.roundPool))
       )
-        return true;
+        return "pooled-plan-review-repair";
       // #127 gate② R1 (same disabled-consumer rule): the milestone catch-all exists because an
       // open not-yet-Ready issue in the round's milestone is exactly what the PO/aligning pass
       // decomposes (or gate⓪ approves) — with BOTH gate⓪ roles off, nothing enabled can consume
@@ -1427,7 +1449,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         // Cheapest read first: zero open issues in the milestone settles the question with no
         // further fetch.
         const count = await forge.countOpenIssuesInMilestone(cfg.round.milestone);
-        if (count === 0) return false;
+        if (count === 0) return null;
         // #212 (documented residual, round.ts:426-427 pre-fix): a milestone holding open issues
         // ALL carrying a human-hold label (cfg.escalation.humanLabels) is not consumable by
         // anything enabled either — a human is already in the loop for every one of them, same
@@ -1523,7 +1545,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         // (extractVerificationPlan, cfg.labels.verifyNa/split/decomposed/roundPool) already shared
         // with the consumers cited.
         const openIssues = await forge.listOpenIssues();
-        return openIssues.some((i) => {
+        const milestoneWork = openIssues.some((i) => {
           if (i.milestone !== cfg.round.milestone) return false;
           if (labelsInclude(i.labels, cfg.labels.inProgress)) return false;
           if (cfg.escalation.humanLabels.some((label) => labelsInclude(i.labels, label))) return false;
@@ -1536,8 +1558,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           if (planCompleteOrExempt && !carriesConsumableSignal) return false;
           return true;
         });
+        return milestoneWork ? "milestone-backlog" : null;
       }
-      return false;
+      return null;
     } catch (e) {
       tickErrors++;
       try {
@@ -1545,8 +1568,24 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       } catch {
         /* state write failed too — tickErrors still counts it */
       }
-      return true;
+      return "probe-error";
     }
+  };
+
+  /** #470: the signal name the LAST `probeWorkSignal()` call returned, or `null` when it returned
+   *  "nothing to do". Stays `null` for a run where the probe never ran at all (standby disabled,
+   *  or its `lastRoundIdle` precondition never met) — which the idle-churn breaker reports as
+   *  its own kind of diagnosis (idle-churn.ts's IdleChurnTrip.probeSignals doc). Deliberately a
+   *  plain in-memory latch, never durable: it is DIAGNOSTIC enrichment for an event that is
+   *  itself the durable record, and a restart with no probe call yet honestly has nothing to
+   *  report. */
+  let lastProbeSignal: string | null = null;
+
+  /** #125 standby's own boolean view of the probe above — unchanged behavior, one call site each
+   *  for the boolean and for the recorded signal name. */
+  const probeHasWork = async (): Promise<boolean> => {
+    lastProbeSignal = await probeWorkSignal();
+    return lastProbeSignal !== null;
   };
 
   const toTickDeps = (over: {
@@ -2155,11 +2194,42 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           /* state write failed too — tickErrors still counts it */
         }
       }
+      // #470 (F32 backstop): the idle-churn breaker's per-round sample, computed HERE so the
+      // terminal `closed` stamp below carries it — that stamp is what makes the streak
+      // ledger-derived and restart-safe (idle-churn.ts's module doc), with no new column and no
+      // in-memory counter to lose.
+      //  - IDLE is stricter than the standby precondition just below (`lastRoundIdle`): it also
+      //    requires an EMPTY lane set. The drain loop above already guarantees that at close
+      //    today — see idle-churn.ts's (a) for why it is kept anyway, and for what actually
+      //    keeps a legitimate CI wait out of the streak (such a wait never closes a round at all).
+      //  - The FINGERPRINT is computed only for an idle round: a busy round resets the streak
+      //    anyway, so the window read is skipped entirely on the path that would pay for it.
+      //    Bounded by FINGERPRINT_WINDOW_LIMIT (an overflowing window is unfingerprintable, which
+      //    resets — never a truncated match).
+      // Contained like every other observability write at this call site: a failure here degrades
+      // to a tick-error and the round still closes.
+      const idleRound = ranExecuting && workersThisRound === 0 && deps.state.activeWorkers().length === 0;
+      let fingerprint: string | null = null;
+      try {
+        if (idleRound) {
+          fingerprint = roundFingerprint(deps.state.eventsPage(round.start_event_id ?? 0, FINGERPRINT_WINDOW_LIMIT + 1));
+        }
+      } catch (e) {
+        tickErrors++;
+        try {
+          deps.state.appendEvent("tick-error", { error: `idle-churn fingerprint failed: ${String(e)}` });
+        } catch {
+          /* state write failed too — tickErrors still counts it */
+        }
+      }
       // The terminal `closed` — the one phase the loop above never "enters" (the while guard
       // excludes it). BEFORE closeRound, unlike the entry emissions: once the row is `done`, no
       // resume ever revisits this round, so a crash between the two must lose the close (which
       // the resume path redoes) rather than the event (which nothing would).
-      appendRoundPhase(deps.state, round.round_id, "closed");
+      appendRoundPhase(deps.state, round.round_id, "closed", {
+        idle: idleRound,
+        ...(fingerprint !== null ? { fp: fingerprint } : {}),
+      });
       deps.state.closeRound(round.round_id, closedAt);
       roundsClosed++;
       // #125 idle-round precondition: record whether THIS round dispatched nothing — the gate
@@ -2196,6 +2266,40 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           /* best-effort — the park row itself is still the durable record */
         }
         consecutiveDegradedRounds = 0; // episode entered (or already open) — the gate above takes over
+      }
+      // #470 (F32 backstop): the idle-churn breaker — the sibling of the empty-spin breaker
+      // above, for the OTHER way a round can achieve nothing. Empty-spin catches rounds that
+      // FAILED (every peripheral session degraded); this catches rounds that SUCCEEDED at doing
+      // nothing, K times over, with the ledger unable to tell them apart — the F32 shape, where
+      // an unconsumable probe signal defeats standby and the loop churns healthily forever.
+      // Consulted only on an idle round (a busy one cannot extend a streak, so the ledger fold is
+      // skipped) and folded fresh from the ledger every time, so a kill -9 mid-count resumes at
+      // the same number. Contained: a breaker that throws must not take down a healthy loop.
+      if (idleRound && fingerprint !== null) {
+        try {
+          const streak = idleChurnStreak(deps.state.eventsAfterId(0, ["round-phase", IDLE_CHURN_DETECTED_KIND]), fingerprint);
+          if (idleChurnBreached(streak, cfg.round.idleChurn.consecutiveIdenticalRoundsThreshold)) {
+            tripIdleChurnBreaker(
+              deps.state,
+              {
+                streak,
+                threshold: cfg.round.idleChurn.consecutiveIdenticalRoundsThreshold,
+                roundId: round.round_id,
+                fingerprint,
+                probeSignals: lastProbeSignal !== null ? [lastProbeSignal] : [],
+                at: closedAt,
+              },
+              deps.log,
+            );
+          }
+        } catch (e) {
+          tickErrors++;
+          try {
+            deps.state.appendEvent("tick-error", { error: `idle-churn breaker failed: ${String(e)}` });
+          } catch {
+            /* state write failed too — tickErrors still counts it */
+          }
+        }
       }
       // #109 gate② P1 (idle throttle): an IDLE round — zero workers in flight — closing and the
       // next opening back-to-back would run the real peripheral role sessions (PO/architect/

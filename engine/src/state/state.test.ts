@@ -3187,8 +3187,8 @@ test("migration v25->v26 clears a decisive engine-review pin whose WAL has no ve
     raw.close();
 
     const s = new State(dbPath);
-    assert.equal(SCHEMA_VERSION, 30); // #398: workers.gated_escalation_carrier (29 -> 30)
-    assert.equal(s.userVersion(), 30);
+    assert.equal(SCHEMA_VERSION, 31); // #470: park_state.source CHECK gains 'idle-churn' (30 -> 31)
+    assert.equal(s.userVersion(), 31);
     assert.equal(s.getEngineReviewAttemptPin("lane-v25"), null, "the lane is re-reviewable on its unchanged head");
     const row = s.getWorker("lane-v25");
     assert.equal(row?.engine_review_pin_head, null);
@@ -3219,8 +3219,8 @@ test("migration v26->v27: a populated v26 DB (predating park_state.reset_hint_at
     raw.close();
 
     const s = new State(dbPath);
-    assert.equal(SCHEMA_VERSION, 30); // #398: workers.gated_escalation_carrier (29 -> 30)
-    assert.equal(s.userVersion(), 30);
+    assert.equal(SCHEMA_VERSION, 31); // #470: park_state.source CHECK gains 'idle-churn' (30 -> 31)
+    assert.equal(s.userVersion(), 31);
     const row = s.parkRow("llm");
     assert.equal(row?.reason, "pre-existing v26 episode");
     assert.equal(row?.triggerIssue, 42);

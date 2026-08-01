@@ -2037,13 +2037,24 @@ export async function escalatePark(
           `escalation threshold. There is NO probe and NO auto-clear for this episode: fix the recurring ` +
           `wedge, then clear the park by deleting its park_state row (docs/troubleshooting.md has the ` +
           `exact command) — the next start records the operator clear and resumes dispatch.`
-        : `sapwood: engine parked since ${park.enteredAt} due to a ${park.source} environment failure ` +
-          `(${park.reason}) — this has exceeded the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
-          `escalation threshold. The engine is still probing on a bounded exponential backoff and will ` +
-          `auto-resume dispatch on the first successful probe; this notification does not stop that. ` +
-          (suspendedRequeues > 0 ? `${suspendedRequeues} issue requeue(s) are held durably and will drain on resume. ` : "") +
-          `Informational only — no action is required unless the underlying outage is expected to ` +
-          `persist.`;
+        : park.source === "idle-churn"
+          ? // #470: the third probe-less shape (loop/idle-churn.ts). Same honesty requirement as
+            // the two arms above — and the same practical residual: the breaker escalates at trip
+            // time (tripIdleChurnBreaker sets the latch), so this ladder only reaches it through
+            // an exotic latch loss.
+            `sapwood: engine parked since ${park.enteredAt} — idle-churn breaker (${park.reason}). ` +
+            `This episode has now stood for over the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
+            `escalation threshold. There is NO probe and NO auto-clear for this episode: the loop itself is ` +
+            `healthy, so there is nothing down here to re-test — the fault is a probe signal counting work ` +
+            `nothing enabled can consume. Fix that, then clear the park by deleting its park_state row ` +
+            `(docs/troubleshooting.md has the exact command).`
+          : `sapwood: engine parked since ${park.enteredAt} due to a ${park.source} environment failure ` +
+            `(${park.reason}) — this has exceeded the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
+            `escalation threshold. The engine is still probing on a bounded exponential backoff and will ` +
+            `auto-resume dispatch on the first successful probe; this notification does not stop that. ` +
+            (suspendedRequeues > 0 ? `${suspendedRequeues} issue requeue(s) are held durably and will drain on resume. ` : "") +
+            `Informational only — no action is required unless the underlying outage is expected to ` +
+            `persist.`;
   const intended = escalationChannel(park.source, forgeParked);
   // P2-3 (PR #180 review): the event below records the channel ACTUALLY used — when the forge
   // comment fails and this degrades to the local fallback, the audit trail must say "local",

@@ -1035,6 +1035,23 @@ const EmptySpin = z
   })
   .strict();
 
+// #470 (dogfood F32): the idle-churn breaker — the empty-spin breaker's sibling, for the OTHER
+// way a round can achieve nothing. Empty-spin catches rounds that FAILED (every peripheral
+// session degraded); this catches rounds that succeeded at doing nothing: K consecutive closed
+// rounds that were idle (no dispatch, no occupied lane) AND state-identical (each appended
+// exactly the same durable facts as the one before — loop/idle-churn.ts). That is the F32 shape,
+// where a standby probe signal counting unconsumable work defeats standby and the loop churns
+// healthily forever. GENEROUS default (5, vs. empty-spin's 3): this backstop is aimed at a
+// pathology that runs indefinitely, so it costs nothing to be sure — and unlike the degraded
+// rounds empty-spin counts, an idle state-identical round is CHEAP to have gotten wrong. Reaching
+// it parks dispatch for a human (no probe, no auto-clear — the loop is healthy; what is broken is
+// upstream of it). User-tunable per the config rule.
+const IdleChurn = z
+  .object({
+    consecutiveIdenticalRoundsThreshold: z.number().int().positive().default(5),
+  })
+  .strict();
+
 // #86: round-loop scoping. `milestone` reuses the exact GitHub-milestone mechanism
 // stop.onMilestoneComplete already validates against (forge.listMilestoneTitles/
 // countOpenIssuesInMilestone) rather than inventing a parallel label-based "theme" — one key
@@ -1049,6 +1066,8 @@ const Round = z
     standby: Standby.default({}),
     // #374: the empty-spin breaker's own threshold — see EmptySpin's doc above.
     emptySpin: EmptySpin.default({}),
+    // #470: the idle-churn breaker's own threshold — see IdleChurn's doc above.
+    idleChurn: IdleChurn.default({}),
     // #126: round directive file — human steering (why/what) injected into the aligning +
     // architecting prompts at round open (directive.ts's resolveRoundDirective). Resolved like
     // other DATA paths in this repo — relative to the process cwd, the same convention
@@ -1803,6 +1822,7 @@ export function dashboardConfigSubset(cfg: SapwoodConfig) {
       poolFactor: cfg.round.poolFactor,
       standby: { enabled: cfg.round.standby.enabled, backoffCapSec: cfg.round.standby.backoffCapSec },
       emptySpin: { consecutiveDegradedRoundsThreshold: cfg.round.emptySpin.consecutiveDegradedRoundsThreshold },
+      idleChurn: { consecutiveIdenticalRoundsThreshold: cfg.round.idleChurn.consecutiveIdenticalRoundsThreshold },
     },
     reviewer: { mode: cfg.reviewer.mode, deltaChainMax: cfg.reviewer.deltaChainMax },
     merge: { mode: cfg.merge.mode },
