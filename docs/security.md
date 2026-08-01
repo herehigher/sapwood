@@ -145,10 +145,12 @@ below) is unaffected by anything in this section — it was justified independen
 materialized PR tree, and #410 leaves it exactly as it was.
 
 **The exception, stated exactly (#443, `reviewer.agent.runner: codex-exec`).** An operator can
-select a locally spawned `codex exec` process as the engine-agent review session's runner. For a
+select a locally spawned `codex exec` process as the engine-agent review session's runner. It is
+**off by default** and this section is what an operator should read before turning it on. For a
 remote-provider CLI, "offline by construction" cannot mean a blanket network denial — the CLI needs
-its own provider — so the adjudicated claim for that runner is narrower and is stated here rather
-than quietly inherited:
+its own provider — and the CLI's read-only sandbox turns out to restrict far less than its name
+suggests, so the adjudicated claim for that runner is narrower and is stated here rather than
+quietly inherited:
 
 - **No model-invoked egress beyond provider transport.** The session is pinned to
   `--sandbox read-only` (whose recorded permission profile is network-*restricted* for
@@ -156,18 +158,37 @@ than quietly inherited:
   highest-precedence override, so no MCP server loads from any config source, including a
   producer-authored `.codex/config.toml` inside the reviewed tree. Plus `--ignore-user-config`
   (the operator's own `$CODEX_HOME/config.toml`, and therefore its hooks, never load),
-  `--ignore-rules`, and a credential-stripped env (no `GH_*`/`GITHUB_TOKEN`/git credential
-  vectors — the same denylist every Claude role session gets). The prompt reaches the CLI on
+  `--ignore-rules`, and the hardened env described below. The prompt reaches the CLI on
   **stdin from a file**; the module spawns an argv vector and never a shell, so
-  producer-influenced text has no interpolation surface at all.
-- **The recorded blind spot.** `--sandbox read-only` blocks *writes*, not *execution*: a
+  producer-influenced text has no interpolation surface at all. The wall-clock session timeout
+  terminates the whole detached **process group**, so a descendant forked by reviewed code cannot
+  outlive it.
+- **Recorded blind spot 1 — execution.** `--sandbox read-only` blocks *writes*, not *execution*: a
   shell-capable agent under it can still run producer-controlled code from the materialized tree.
-  This is NOT equivalent to the Claude runner's Read/Grep/Glob-only, no-`Bash` profile, and the
-  adjudication (2026-08-01, R2) deliberately did not add an outer OS/container fence for it
-  (trusted-repos posture; the marginal-complexity principle). Instead every codex-exec spawn emits
-  a named blind-spot warning event (`engine-review-containment-gap`), so the gap is on the durable
+  This is NOT equivalent to the Claude runner's Read/Grep/Glob-only, no-`Bash` profile.
+- **Recorded blind spot 2 — host-wide reads, including your credentials.** The same sandbox does
+  **not confine the read scope**. Measured on codex-cli 0.145.0: its read-only Seatbelt policy
+  contains `(allow file-read*)`, and the session's own recorded permission profile reads
+  `{special: root, access: read}`. `-C <treeDir>` sets the working directory; it is not a
+  containment root. So a review session that is prompt-injected by the code it is reviewing — the
+  threat this whole section exists for — can read **any file the engine's own user can read**,
+  including `~/.codex/auth.json`, `~/.config/gh/hosts.yml`, and SSH private keys, and return their
+  contents through provider-visible output. Treat enabling this runner as granting the reviewed
+  code's author a read of your machine's user-readable files if they can steer the review session.
+- **The mitigations are partial, and named as such.** `codexSessionEnv` strips the inherited forge
+  tokens and the `SSH_AUTH_SOCK`/`SSH_AGENT_PID` agent handles (a live agent socket is a usable
+  credential with no key file to read), redirects `GH_CONFIG_DIR` at an empty per-session
+  directory, and pins `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` to `/dev/null` with
+  `GIT_TERMINAL_PROMPT=0`. Those remove the ambient *handles*; they do not stop a *read* of the
+  underlying files, which remain on disk and readable. **Filesystem confinement is what would
+  actually close blind spot 2, and it is deliberately not shipped**: the adjudication (2026-08-01,
+  R2) rules out a new outer OS/container fence (trusted-repos posture; the marginal-complexity
+  principle). Both blind spots are emitted at every codex-exec spawn as named entries in
+  `engine-review-containment-gap`'s `gaps` payload
+  (`model-invoked-shell-execution`, `host-wide-filesystem-reads`), so they are on the durable
   record rather than assumed away.
-- **Unchanged either way.** The default runner is `claude`, and nothing above applies to it. Gate②'s
+- **Unchanged either way.** The default runner is `claude`, and nothing above applies to it — the
+  Claude review session has no `Bash` at all and is guard-confined to the materialized tree. Gate②'s
   own safety properties are runner-independent: blocking stays engine-derived over live PR data, the
   session's output goes through the same element-wise validation for both runners, and an
   unidentifiable session model maps to `unavailable` rather than to a verdict.

@@ -13,13 +13,14 @@
 //   - D5: identity comes from the session's OWN transcript, and is EMPTY when unidentifiable.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
   buildCodexExecArgs,
-  CONTAINMENT_GAP_EXECUTION_UNDER_READ_ONLY,
+  CONTAINMENT_GAP_HOST_WIDE_FILE_READS,
+  CONTAINMENT_GAP_MODEL_INVOKED_EXECUTION,
   CodexExecReviewSessionExecutor,
   codexHomeDir,
   codexSessionEnv,
@@ -36,20 +37,32 @@ import type { ReviewSessionRequest } from "./review-session.js";
 
 const PRICING = { inputUsdPerMTok: 2, outputUsdPerMTok: 10 };
 
-/** A minimal ChildProcess stand-in: stdout/stderr emitters, a recorded `kill`, and a `finish()` the
- *  test calls when IT decides the session ended — never a real process, never a real clock. */
+const SESSION_TIMEOUT_MS = 600_000;
+const KILL_GRACE_MS = 200;
+const POLL_MS = 1000;
+/** The fake child's pid — a small positive number that NEVER reaches the real OS: `killFn` and
+ *  `isTreeAlive` are both injected in this suite, so nothing here can signal a live process. */
+const FAKE_PID = 4242;
+
+/** A minimal ChildProcess stand-in: stdout/stderr emitters, a pid, and a `finish()` the test calls
+ *  when IT decides the session ended — never a real process, never a real clock. `kill()` is
+ *  present but deliberately NOT what the executor should use: signalling must go through the
+ *  injected `killFn` with a NEGATIVE pid (the whole process group), and a call landing here instead
+ *  is the regression this suite exists to catch. */
 class FakeChild extends EventEmitter {
   stdout = new EventEmitter();
   stderr = new EventEmitter();
-  killed: string[] = [];
+  pid: number | undefined = FAKE_PID;
+  leaderOnlyKills: string[] = [];
   kill(signal: string): boolean {
-    this.killed.push(signal);
+    this.leaderOnlyKills.push(signal);
     return true;
   }
   emitStdout(text: string): void {
     this.stdout.emit("data", text);
   }
   finish(code: number | null): void {
+    this.emit("exit", code);
     this.emit("close", code);
   }
 }
@@ -59,9 +72,16 @@ interface Harness {
   events: Array<{ kind: string; payload: Record<string, unknown> }>;
   spawnCalls: Array<{ bin: string; args: string[]; opts: Record<string, unknown> }>;
   child: FakeChild;
-  /** Fire the wall-clock timeout the executor scheduled (index 0 = the session bound). */
-  fireTimer(index: number): void;
-  timerMs: number[];
+  /** Every `killFn(pid, signal)` the executor issued, verbatim — a NEGATIVE pid means the whole
+   *  detached process group was signalled, which is the property under test. */
+  signals: Array<{ pid: number; signal: string }>;
+  /** Fire the pending timer scheduled for exactly `ms` (the executor's timers all have distinct
+   *  durations, so this reads as "fire the session bound" / "fire a liveness poll" rather than an
+   *  opaque index). Returns false when no such timer is pending. */
+  fireTimerAt(ms: number): boolean;
+  pendingTimerMs: () => number[];
+  /** Scripted GROUP-liveness readings for the injected `isTreeAlive`; the last value repeats. */
+  aliveReadings: boolean[];
   executor: CodexExecReviewSessionExecutor;
   req: ReviewSessionRequest;
   cleanup: () => void;
@@ -69,15 +89,21 @@ interface Harness {
 
 /** `stream` is what the fake CLI prints on stdout; `lastMessage`, when set, is written to whatever
  *  path the executor passed to `-o` (i.e. the file channel the final response really travels on). */
-function harness(opts: { stream?: string; lastMessage?: string; env?: NodeJS.ProcessEnv; rollout?: string } = {}): Harness {
+function harness(
+  opts: { stream?: string; lastMessage?: string; env?: NodeJS.ProcessEnv; rollout?: string; aliveReadings?: boolean[] } = {},
+): Harness {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-codex-exec-"));
   const treeDir = join(dir, "tree");
   mkdirSync(treeDir, { recursive: true });
   const codexHome = join(dir, "codex-home");
   const events: Harness["events"] = [];
   const spawnCalls: Harness["spawnCalls"] = [];
+  const signals: Harness["signals"] = [];
   const timers: Array<{ ms: number; fire: () => void }> = [];
   const child = new FakeChild();
+  // Default: the tree stays ALIVE until the test says otherwise, so no path short-circuits on a
+  // liveness reading the test didn't script.
+  const aliveReadings = opts.aliveReadings ?? [true];
 
   if (opts.rollout !== undefined) {
     const day = join(codexHome, "sessions", "2026", "08", "01");
@@ -87,13 +113,19 @@ function harness(opts: { stream?: string; lastMessage?: string; env?: NodeJS.Pro
 
   const executor = new CodexExecReviewSessionExecutor({
     stateDir: join(dir, "state"),
-    timeoutSec: 600,
+    timeoutSec: SESSION_TIMEOUT_MS / 1000,
+    killGraceMs: KILL_GRACE_MS,
+    livenessPollMs: POLL_MS,
     pricing: PRICING,
     codexBin: "/fake/codex",
     env: { PATH: "/usr/bin", CODEX_HOME: codexHome, GH_TOKEN: "secret", GITHUB_TOKEN: "secret", ...opts.env },
     log: () => {},
     appendEvent: (kind, payload) => events.push({ kind, payload: payload as Record<string, unknown> }),
     newSessionId: () => "fixed",
+    killFn: (pid, signal) => {
+      signals.push({ pid, signal: String(signal) });
+    },
+    isTreeAlive: () => (aliveReadings.length > 1 ? (aliveReadings.shift() as boolean) : (aliveReadings[0] as boolean)),
     startTimer: (ms, fire) => {
       const drop = (): void => {
         const i = timers.indexOf(entry);
@@ -132,8 +164,15 @@ function harness(opts: { stream?: string; lastMessage?: string; env?: NodeJS.Pro
     events,
     spawnCalls,
     child,
-    timerMs: [],
-    fireTimer: (index: number) => timers[index]?.fire(),
+    signals,
+    aliveReadings,
+    pendingTimerMs: () => timers.map((t) => t.ms),
+    fireTimerAt: (ms: number) => {
+      const entry = timers.find((t) => t.ms === ms);
+      if (!entry) return false;
+      entry.fire();
+      return true;
+    },
     executor,
     req: { treeDir, roleId: "engine-reviewer", prompt: "review this diff", model: "gpt-5.4-codex", effort: "high", budgetUsd: 3 },
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
@@ -206,19 +245,37 @@ test("discoverCodexBin / codexHomeDir: env overrides win, else the documented de
   assert.match(codexHomeDir({}), /\.codex$/);
 });
 
-test("codexSessionEnv: forge/git credentials are stripped, provider transport is NOT (a review that cannot reach its provider is broken, not contained)", () => {
-  const env = codexSessionEnv({
-    PATH: "/usr/bin",
-    GH_TOKEN: "x",
-    GH_CONFIG_DIR: "/home/u/.config/gh",
-    GITHUB_TOKEN: "x",
-    GITHUB_ENTERPRISE_TOKEN: "x",
-    GIT_ASKPASS: "/bin/echo",
-    GIT_CONFIG_GLOBAL: "/tmp/gitconfig",
-    CODEX_HOME: "/home/u/.codex",
-    OPENAI_API_KEY: "sk-test",
-  });
-  assert.deepEqual(Object.keys(env).sort(), ["CODEX_HOME", "OPENAI_API_KEY", "PATH"]);
+test("codexSessionEnv: forge/git/SSH credential HANDLES are stripped or redirected, provider transport is NOT (a review that cannot reach its provider is broken, not contained)", () => {
+  const env = codexSessionEnv(
+    {
+      PATH: "/usr/bin",
+      GH_TOKEN: "x",
+      GH_CONFIG_DIR: "/home/u/.config/gh",
+      GITHUB_TOKEN: "x",
+      GITHUB_ENTERPRISE_TOKEN: "x",
+      GIT_ASKPASS: "/bin/echo",
+      GIT_CONFIG_GLOBAL: "/home/u/.gitconfig",
+      SSH_AUTH_SOCK: "/tmp/ssh-agent.sock",
+      SSH_AGENT_PID: "999",
+      CODEX_HOME: "/home/u/.codex",
+      OPENAI_API_KEY: "sk-test",
+    },
+    "/state/session.gh-config",
+  );
+  // Stripped outright: every inherited forge/SSH credential handle. A live agent socket is a
+  // USABLE credential with no key file to read, which is why SSH_AUTH_SOCK is on this list.
+  for (const stripped of ["GH_TOKEN", "GITHUB_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GIT_ASKPASS", "SSH_AUTH_SOCK", "SSH_AGENT_PID"]) {
+    assert.equal(env[stripped], undefined, `${stripped} must not reach a review session`);
+  }
+  // Redirected/neutralized (set AFTER the strip loop, so an inherited value can never survive).
+  assert.equal(env.GH_CONFIG_DIR, "/state/session.gh-config", "gh looks at an empty ephemeral config home, not the operator's");
+  assert.equal(env.GIT_CONFIG_GLOBAL, "/dev/null");
+  assert.equal(env.GIT_CONFIG_SYSTEM, "/dev/null");
+  assert.equal(env.GIT_TERMINAL_PROMPT, "0");
+  // Preserved: provider transport, and the ordinary runtime environment.
+  assert.equal(env.CODEX_HOME, "/home/u/.codex");
+  assert.equal(env.OPENAI_API_KEY, "sk-test");
+  assert.equal(env.PATH, "/usr/bin");
 });
 
 test("findCodexRollout: locates a transcript by thread id anywhere under <codexHome>/sessions; a missing home or unknown id is null, never a throw", () => {
@@ -289,16 +346,25 @@ test("execute: spawns the codex CLI with the pinned profile, cwd = the materiali
     assert.equal((call.opts.env as NodeJS.ProcessEnv).GH_TOKEN, undefined, "forge credentials never reach a review session");
     assert.equal((call.opts.env as NodeJS.ProcessEnv).GITHUB_TOKEN, undefined);
     assert.equal(call.opts.shell, undefined, "no shell — an argv vector has no interpolation surface");
+    assert.equal(call.opts.detached, true, "the child leads its own process group, so the timeout can kill the whole tree");
     // stdin is a numeric file descriptor, and the file it points at holds the prompt verbatim.
     const stdio = call.opts.stdio as [number, string, string];
     assert.equal(typeof stdio[0], "number");
     assert.equal(readFileSync(join(h.dir, "state", "engine-reviewer-fixed.prompt.txt"), "utf8"), "review this diff");
+    // The hardened env actually reaches the spawn: an empty per-session gh config home, neutralized
+    // git config, and no inherited SSH agent socket.
+    const env = call.opts.env as NodeJS.ProcessEnv;
+    assert.equal(env.GH_CONFIG_DIR, join(h.dir, "state", "engine-reviewer-fixed.gh-config"));
+    assert.deepEqual(readdirSync(env.GH_CONFIG_DIR as string), [], "the redirected gh config home is empty, and exists");
+    assert.equal(env.GIT_CONFIG_GLOBAL, "/dev/null");
+    assert.equal(env.GIT_TERMINAL_PROMPT, "0");
+    assert.equal(env.SSH_AUTH_SOCK, undefined);
   } finally {
     h.cleanup();
   }
 });
 
-test("execute (R2): the containment blind-spot warning fires at EVERY spawn — the adjudicated alternative to claiming a read-only sandbox equals the Claude runner's no-Bash profile", async () => {
+test("execute (R2): the containment blind-spot warning fires at EVERY spawn and names BOTH facets — execution of reviewed code AND host-wide filesystem reads, the latter greppable on its own", async () => {
   const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK });
   try {
     await run(h);
@@ -307,8 +373,14 @@ test("execute (R2): the containment blind-spot warning fires at EVERY spawn — 
     assert.deepEqual(gap[0]!.payload, {
       runner: "codex-exec",
       session: "engine-reviewer-fixed",
-      gap: CONTAINMENT_GAP_EXECUTION_UNDER_READ_ONLY,
+      gaps: [CONTAINMENT_GAP_MODEL_INVOKED_EXECUTION, CONTAINMENT_GAP_HOST_WIDE_FILE_READS],
     });
+    // The credential-read exposure is a NAMED entry, not prose folded into an "execution" label —
+    // an operator filtering the event stream for it must be able to match on this string alone.
+    assert.ok(
+      (gap[0]!.payload.gaps as string[]).includes(CONTAINMENT_GAP_HOST_WIDE_FILE_READS),
+      "the read-scope gap must be independently greppable",
+    );
   } finally {
     h.cleanup();
   }
@@ -394,19 +466,91 @@ test("execute: the final response is read from the -o FILE, and outcome follows 
   }
 });
 
-test("execute: the wall-clock ceiling stays HARD — firing the session bound kills the tree and the outcome is `timeout` regardless of the exit code that follows (R1 changes budgets, never timeouts)", async () => {
-  const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK });
+test("execute: the wall-clock ceiling kills the whole PROCESS GROUP — SIGTERM then SIGKILL at the NEGATIVE pid, so a descendant forked by reviewed code cannot outlive the timeout (killing only the leader is the regression this pins)", async () => {
+  // The tree stays alive through the grace window, so the SIGKILL escalation is warranted — the
+  // reading is scripted, never a real `process.kill(pid, 0)` against a real child.
+  const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK, aliveReadings: [true] });
   try {
     const p = h.executor.execute(h.req);
     await Promise.resolve();
     await Promise.resolve();
-    h.fireTimer(0); // the session bound — fired on the test's terms, never a real clock
-    assert.deepEqual(h.child.killed, ["SIGTERM"]);
-    h.fireTimer(0); // the SIGTERM->SIGKILL grace timer is now first in the queue
-    assert.deepEqual(h.child.killed, ["SIGTERM", "SIGKILL"]);
+    assert.ok(h.fireTimerAt(SESSION_TIMEOUT_MS), "the session bound — fired on the test's terms, never a real clock");
+    await Promise.resolve();
+    assert.deepEqual(h.signals, [{ pid: -FAKE_PID, signal: "SIGTERM" }], "the GROUP is signalled, not the leader");
+    assert.ok(h.fireTimerAt(KILL_GRACE_MS), "the SIGTERM->SIGKILL grace window elapses with the tree still alive");
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(h.signals, [
+      { pid: -FAKE_PID, signal: "SIGTERM" },
+      { pid: -FAKE_PID, signal: "SIGKILL" },
+    ]);
+    assert.deepEqual(h.child.leaderOnlyKills, [], "child.kill() — which reaches ONLY the leader — is never used");
     h.child.finish(0);
     const evidence = await p;
     assert.equal(evidence.outcome, "timeout", "a timeout stays a timeout even if the child then exits 0");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("execute: the SIGKILL escalation is skipped when the whole tree is already gone inside the grace window — peripheral.ts's own awaitKillGrace semantics, reused rather than reimplemented", async () => {
+  // Alive at the timeout (so the kill path starts), gone by the time the grace settles.
+  const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK, aliveReadings: [true, true, false] });
+  try {
+    const p = h.executor.execute(h.req);
+    await Promise.resolve();
+    await Promise.resolve();
+    h.fireTimerAt(SESSION_TIMEOUT_MS);
+    await Promise.resolve();
+    h.fireTimerAt(KILL_GRACE_MS);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(
+      h.signals,
+      [{ pid: -FAKE_PID, signal: "SIGTERM" }],
+      "nothing left in the group ⇒ no SIGKILL at a pid the OS may have recycled",
+    );
+    h.child.finish(0);
+    await p;
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("execute: a LOST child-exit notification settles synthetically instead of hanging — two consecutive dead group readings (createExitLossDetector) end the await, and the outcome is `failed`, never `done` on an unobserved exit", async () => {
+  // The child never emits `close`/`exit` at all — the wedged-lane scenario. Readings: alive once
+  // (the counter must reset on a live reading), then dead twice.
+  const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK, aliveReadings: [true, false, false] });
+  try {
+    const p = h.executor.execute(h.req);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.ok(h.fireTimerAt(POLL_MS), "poll 1 — alive, nothing settles");
+    await Promise.resolve();
+    assert.ok(h.fireTimerAt(POLL_MS), "poll 2 — first dead reading, still not enough on its own");
+    await Promise.resolve();
+    assert.ok(h.fireTimerAt(POLL_MS), "poll 3 — second consecutive dead reading ⇒ the exit is lost");
+    const evidence = await p; // resolves WITHOUT any close/exit event ever arriving
+    assert.equal(evidence.outcome, "failed");
+    assert.equal(h.pendingTimerMs().includes(POLL_MS), false, "the poll stops once loss is declared");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("execute: a lost exit AFTER a timeout still reads as `timeout` — the timeout latch wins, exactly as peripheral.ts orders it", async () => {
+  const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK, aliveReadings: [true, true, false, false] });
+  try {
+    const p = h.executor.execute(h.req);
+    await Promise.resolve();
+    await Promise.resolve();
+    h.fireTimerAt(SESSION_TIMEOUT_MS);
+    await Promise.resolve();
+    h.fireTimerAt(POLL_MS);
+    await Promise.resolve();
+    h.fireTimerAt(POLL_MS);
+    const evidence = await p;
+    assert.equal(evidence.outcome, "timeout");
   } finally {
     h.cleanup();
   }

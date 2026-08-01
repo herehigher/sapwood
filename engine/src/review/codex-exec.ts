@@ -29,16 +29,30 @@
 //                           terminal stream (this repo's Codex ops notes: truncated/interleaved
 //                           stdout has cost real review rounds before)
 //   --json                  machine-readable session telemetry on stdout (thread id, token usage)
-// plus a credential-stripped env (no GH_*/GITHUB_TOKEN/git credential vectors) and a prompt
+// plus a credential-stripped, credential-redirected env (`codexSessionEnv`) and a prompt
 // delivered on STDIN FROM A FILE — never through argv or any shell (this module spawns with an
 // argv vector, never a shell string, so producer-influenced text has no interpolation surface at
 // all), with stdin at EOF the instant the prompt ends so the CLI can never block waiting for more.
 //
-// THE GAP THIS CANNOT CLOSE (recorded, not silently accepted — design R2): `--sandbox read-only`
-// blocks WRITES, not EXECUTION. A shell-capable agent under a read-only sandbox can still run
-// producer-controlled code from the materialized tree. Per the adjudication this is recorded as a
-// named blind-spot warning event at spawn (`ENGINE_REVIEW_CONTAINMENT_GAP`) rather than fenced with
-// a new outer OS/container layer (trusted-repos posture + the marginal-complexity principle).
+// THE GAPS THIS CANNOT CLOSE (recorded, not silently accepted — design R2). Measured against
+// codex-cli 0.145.0, whose read-only Seatbelt policy contains `(allow file-read*)` and whose own
+// recorded permission profile reads `{special: root, access: read}`:
+//   1. `--sandbox read-only` blocks WRITES, not EXECUTION — a shell-capable agent under it can
+//      still RUN producer-controlled code from the materialized tree;
+//   2. and it does not confine the READ SCOPE at all. `-C <treeDir>` sets the working directory;
+//      it is not a containment root. A prompt-injected review session can therefore read
+//      HOST-WIDE files — including the operator's own credentials (`~/.codex/auth.json`,
+//      `~/.config/gh/hosts.yml`, SSH private keys) — and return them through provider-visible
+//      output. This is materially worse than facet 1 and is the reason the gap event names it
+//      SEPARATELY (`CONTAINMENT_GAP_HOST_WIDE_FILE_READS`), so an operator can grep the
+//      credential-read exposure specifically.
+// `codexSessionEnv` below strips and redirects the ambient credential HANDLES an injected session
+// would otherwise inherit, which raises the cost of facet 2 but does NOT close it: those files stay
+// readable on disk. What would close it is filesystem confinement, and the owner ruling (R2)
+// deliberately does not ship one — no new outer OS/container fence (trusted-repos posture + the
+// marginal-complexity principle). Both facets are recorded at every spawn via
+// `ENGINE_REVIEW_CONTAINMENT_GAP`; docs/security.md states the exposure in full for an operator
+// deciding whether to enable this runner.
 //
 // BUDGET (R1): `codex exec` has no `--max-budget-usd` equivalent, so `reviewer.agent.costCapUsd`
 // degrades to ADVISORY for this runner — announced with a pre-run warning event, never silently.
@@ -50,6 +64,13 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+// Process supervision is REUSED, not reimplemented: `awaitKillGrace`/`sessionTreeIsGone`
+// (peripheral.ts) and `createExitLossDetector` (util/heartbeat.ts) are the engine's existing,
+// vendor-neutral primitives for "kill the whole tree, then stop waiting honestly". peripheral.ts
+// itself is not modified by this feature — these are plain exported functions with no Claude-shaped
+// state behind them.
+import { awaitKillGrace, sessionTreeIsGone } from "../roles/peripheral.js";
+import { createExitLossDetector } from "../util/heartbeat.js";
 import type { ReviewSessionEvidence, ReviewSessionExecutor, ReviewSessionIdentity, ReviewSessionRequest } from "./review-session.js";
 
 /** #443 (R1): announced BEFORE the session starts — `reviewer.agent.costCapUsd` is advisory for
@@ -61,12 +82,24 @@ export const ENGINE_REVIEW_BUDGET_ADVISORY = "engine-review-budget-advisory";
  *  is never read as `$0` anywhere (the caller refuses to budget a retry from it). */
 export const ENGINE_REVIEW_COST_UNKNOWN = "engine-review-cost-unknown";
 
-/** #443 (R2): the named containment blind spot, recorded at every codex-exec spawn. */
+/** #443 (R2): the named containment blind spots, recorded at every codex-exec spawn. */
 export const ENGINE_REVIEW_CONTAINMENT_GAP = "engine-review-containment-gap";
 
-/** The stable name of the one gap this runner's profile cannot enforce — a fixed identifier so an
- *  operator can grep/aggregate it, rather than free prose that drifts per call site. */
-export const CONTAINMENT_GAP_EXECUTION_UNDER_READ_ONLY = "execution-under-read-only-sandbox";
+/** Facet 1: a read-only sandbox blocks writes, not execution — model-invoked shell commands can
+ *  still RUN producer-controlled code from the reviewed tree. */
+export const CONTAINMENT_GAP_MODEL_INVOKED_EXECUTION = "model-invoked-shell-execution";
+
+/** Facet 2 (the credential-read exposure, gate② review of PR #510): the same sandbox does not
+ *  confine the READ SCOPE — `-C` is a working directory, not a containment root — so a
+ *  prompt-injected session can read host-wide files, operator credentials included, and return them
+ *  through provider-visible output. Named separately from facet 1 precisely so this exposure is
+ *  greppable on its own rather than buried inside a single "execution" label. */
+export const CONTAINMENT_GAP_HOST_WIDE_FILE_READS = "host-wide-filesystem-reads";
+
+/** Every gap this runner's profile cannot enforce, recorded together in one event payload — stable
+ *  identifiers so an operator can grep/aggregate them, rather than free prose that drifts per call
+ *  site. Adding a facet here is what makes it show up in the durable record. */
+export const CODEX_CONTAINMENT_GAPS: readonly string[] = [CONTAINMENT_GAP_MODEL_INVOKED_EXECUTION, CONTAINMENT_GAP_HOST_WIDE_FILE_READS];
 
 /** #443 (R1): the pinned per-million-token prices the `estimated` spend figure is computed from.
  *  User-tunable through `reviewer.agent.codexPricing` (docs/configuration.md) — never hardcoded at
@@ -115,13 +148,29 @@ export function codexHomeDir(env: Record<string, string | undefined>): string {
   return h ? h : join(homedir(), ".codex");
 }
 
-/** A codex session environment without forge credentials or git credential-injection vectors —
- *  the same DENYLIST peripheral.ts's `peripheralSessionEnv` applies to every Claude role session,
- *  restated here rather than imported because the design adjudication keeps peripheral.ts untouched
- *  by this feature (its guard/settings machinery is Claude-shaped and single-vendor). Provider
- *  transport credentials (`CODEX_HOME`, `OPENAI_API_KEY`, ...) are deliberately NOT stripped: a
- *  review that cannot reach its own provider is not contained, it is broken. */
-export function codexSessionEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+/** A codex session environment without forge credentials, agent sockets, or git credential-injection
+ *  vectors — the DENYLIST peripheral.ts's `peripheralSessionEnv` applies to every Claude role
+ *  session, restated here (the design adjudication keeps peripheral.ts untouched by this feature)
+ *  and WIDENED by the gate② review of PR #510:
+ *   - `SSH_AUTH_SOCK`/`SSH_AGENT_PID` are stripped: a live agent socket is a USABLE credential
+ *     without any key file to read, so leaving it inherited would hand a prompt-injected session
+ *     working SSH auth for free;
+ *   - `GH_CONFIG_DIR` is REDIRECTED (by the caller, via `ghConfigDir`) at an empty ephemeral
+ *     directory under the session's own state dir, rather than left pointing at the operator's real
+ *     `~/.config/gh` — so an inherited `gh` config with `hosts.yml` tokens is not the default
+ *     lookup path;
+ *   - `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` are pinned to `/dev/null` and `GIT_TERMINAL_PROMPT=0`,
+ *     neutralizing credential helpers/askpass prompts declared in the operator's git config.
+ *
+ *  HONEST LIMIT — these strip and redirect the ambient HANDLES; they do not stop a READ of the
+ *  underlying files. `--sandbox read-only` does not confine the read scope (see this module's own
+ *  gap list), so `~/.config/gh/hosts.yml`, `~/.codex/auth.json` and `~/.ssh/*` remain readable on
+ *  disk by a session that goes looking. This is necessary-but-insufficient hardening, recorded as
+ *  such here, in `CONTAINMENT_GAP_HOST_WIDE_FILE_READS`, and in docs/security.md.
+ *
+ *  Provider transport credentials (`CODEX_HOME`, `OPENAI_API_KEY`, ...) are deliberately NOT
+ *  stripped: a review that cannot reach its own provider is not contained, it is broken. */
+export function codexSessionEnv(env: NodeJS.ProcessEnv, ghConfigDir: string): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(env)) {
     const normalized = key.toUpperCase();
@@ -130,12 +179,20 @@ export function codexSessionEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
       normalized === "GITHUB_ENTERPRISE_TOKEN" ||
       normalized.startsWith("GH_") ||
       normalized === "GIT_ASKPASS" ||
-      normalized.startsWith("GIT_CONFIG_")
+      normalized.startsWith("GIT_CONFIG_") ||
+      normalized === "SSH_AUTH_SOCK" ||
+      normalized === "SSH_AGENT_PID"
     ) {
       continue;
     }
     out[key] = value;
   }
+  // Set AFTER the strip loop, so these are the redirected values and never an inherited one that
+  // happened to survive (`GH_CONFIG_DIR` matches the `GH_` prefix above and is removed first).
+  out.GH_CONFIG_DIR = ghConfigDir;
+  out.GIT_CONFIG_GLOBAL = "/dev/null";
+  out.GIT_CONFIG_SYSTEM = "/dev/null";
+  out.GIT_TERMINAL_PROMPT = "0";
   return out;
 }
 
@@ -304,9 +361,28 @@ export interface CodexExecExecutorDeps {
   startTimer?: (ms: number, fire: () => void) => () => void;
   /** SIGTERM -> SIGKILL grace, ms (peripheral.ts's own default is 200). */
   killGraceMs?: number;
+  /** How often the GROUP-liveness probe runs while waiting for the child's exit notification —
+   *  the input to `createExitLossDetector` (util/heartbeat.ts), reused rather than reimplemented.
+   *  Default 30s, the same cadence peripheral.ts's own heartbeat uses for the identical purpose. */
+  livenessPollMs?: number;
+  /** Injected raw signal primitive (default `process.kill`). Injected — rather than injecting a
+   *  ready-made "kill the group" function — so a test can assert the NEGATIVE pid at the syscall
+   *  boundary (proving group signalling) without a fake pid ever reaching the real OS. */
+  killFn?: (pid: number, signal: NodeJS.Signals | 0) => void;
+  /** Injected GROUP-liveness probe (default: peripheral.ts's exported `sessionTreeIsGone`, negated
+   *  — the same primitive `RoleRunner.killTree` uses). Injectable for the same reason
+   *  `RoleRunnerDeps.isPidAlive` is: a test scripts the reading instead of depending on the OS's
+   *  child-reaping timing, which makes a genuine lost notification unreproducible on demand. */
+  isTreeAlive?: (pid: number) => boolean;
 }
 
 const DEFAULT_KILL_GRACE_MS = 200;
+
+/** GROUP-liveness probe cadence while awaiting the child's exit — 30s, the same value peripheral.ts
+ *  uses for the identical lost-notification detection. Two consecutive dead readings are required
+ *  (createExitLossDetector), so worst-case detection latency is ~30-60s: negligible against the
+ *  session's own wall-clock ceiling, and far better than an unbounded await. */
+const DEFAULT_LIVENESS_POLL_MS = 30_000;
 
 /** Bound on captured stdout/stderr, bytes. A runaway CLI must not be able to grow the engine's heap
  *  without limit; the tail is what carries `turn.completed`, so the HEAD is what gets dropped. */
@@ -345,12 +421,14 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
       lastMessagePath,
     });
 
-    // R2: the blind spot is announced at spawn, every time — the adjudicated alternative to
-    // pretending a read-only sandbox equals the Claude runner's no-Bash profile.
+    // R2: the blind spots are announced at spawn, every time — the adjudicated alternative to
+    // pretending a read-only sandbox equals the Claude runner's Read/Grep/Glob-only profile. BOTH
+    // facets ride in one payload (see CODEX_CONTAINMENT_GAPS) so the credential-read exposure is
+    // greppable in its own right.
     this.event(ENGINE_REVIEW_CONTAINMENT_GAP, {
       runner: this.runner,
       session: sessionId,
-      gap: CONTAINMENT_GAP_EXECUTION_UNDER_READ_ONLY,
+      gaps: [...CODEX_CONTAINMENT_GAPS],
     });
     // R1: the cap is announced as ADVISORY before any spend happens, so the warning exists even if
     // the session then crashes with no telemetry at all.
@@ -361,12 +439,22 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
     const spawnFn = this.deps.spawnFn ?? spawn;
     const startTimer = this.deps.startTimer ?? defaultStartTimer;
     const stdinFd = openSync(promptPath, "r");
+    // An EMPTY, per-session `gh` config home — see codexSessionEnv's doc for what this redirects
+    // and, just as importantly, what it does not close.
+    const ghConfigDir = join(this.deps.stateDir, `${sessionId}.gh-config`);
+    mkdirSync(ghConfigDir, { recursive: true });
     let child: ChildProcess;
     try {
       child = spawnFn(this.deps.codexBin ?? discoverCodexBin(env), args, {
         cwd: req.treeDir,
-        env: codexSessionEnv(env),
+        env: codexSessionEnv(env, ghConfigDir),
         stdio: [stdinFd, "pipe", "pipe"],
+        // DETACHED: the child leads its OWN process group, so the timeout path can signal the whole
+        // TREE (`process.kill(-pid, ...)`) instead of only the leader. Without this, a descendant
+        // forked by reviewed code — which a read-only sandbox permits (see the gap list above) —
+        // survives the "hard" wall-clock kill and keeps running and spending. Exactly the property
+        // worker.ts's `spawnClaudeSession` already pins for every Claude session.
+        detached: true,
       });
     } finally {
       // The child holds its own duplicate of the descriptor (uv dups it during spawn); this one is
@@ -391,35 +479,93 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
       stderr = appendCapped(stderr, d.toString());
     });
 
-    let timedOut = false;
-    // A holder object, not a bare `let`: the assignment happens inside the timer callback, which
-    // control-flow analysis cannot see (it would narrow the variable to `null` forever).
-    const killTimer: { cancel: (() => void) | null } = { cancel: null };
-    const cancelTimeout = startTimer(this.deps.timeoutSec * 1000, () => {
-      timedOut = true;
+    const killFn = this.deps.killFn ?? ((pid: number, signal: NodeJS.Signals | 0) => void process.kill(pid, signal));
+    const isTreeAlive = this.deps.isTreeAlive ?? ((pid: number) => !sessionTreeIsGone(pid));
+    const pid = child.pid;
+    /** Signal the whole detached GROUP (negative pid), falling back to the leader alone if group
+     *  signalling fails — the same tolerance worker.ts's `killGroup` applies. */
+    const killGroup = (sig: NodeJS.Signals): void => {
+      if (pid === undefined) return;
       try {
-        child.kill("SIGTERM");
+        killFn(-pid, sig);
       } catch {
-        /* already gone */
-      }
-      killTimer.cancel = startTimer(this.deps.killGraceMs ?? DEFAULT_KILL_GRACE_MS, () => {
         try {
-          child.kill("SIGKILL");
+          killFn(pid, sig);
         } catch {
-          /* already reaped */
+          /* already gone */
         }
-      });
-    });
+      }
+    };
+    const treeIsGone = (): boolean => (pid === undefined ? true : !isTreeAlive(pid));
 
-    const exitCode = await new Promise<number | null>((resolve) => {
+    let timedOut = false;
+    let lostExit = false;
+    // Settlement is captured so BOTH the real exit notification and the lost-notification detector
+    // below can end the await. Without the second path, a lost `close` wedges this gate② lane
+    // forever (the review never returns, the WAL row never settles) — the failure worker.ts and
+    // peripheral.ts already model with the exact primitives reused here.
+    let settle: ((code: number | null) => void) | null = null;
+    const exited = new Promise<number | null>((resolve) => {
+      settle = resolve;
       child.on("error", (err) => {
         log(`[sapwood:codex-review] session ${sessionId} spawn/runtime error: ${String(err)}`);
         resolve(null);
       });
       child.on("close", (code) => resolve(code));
     });
+
+    // #395's lost-exit detector (util/heartbeat.ts), driven off the GROUP-liveness probe: two
+    // consecutive dead readings with no live reading between them ⇒ the notification is lost, and
+    // the await settles synthetically instead of hanging. Reused, not reimplemented — including its
+    // reasoning about why one dead reading is not enough.
+    const exitLoss = createExitLossDetector(() => !treeIsGone());
+    const pollTimer: { cancel: (() => void) | null } = { cancel: null };
+    const schedulePoll = (): void => {
+      pollTimer.cancel = startTimer(this.deps.livenessPollMs ?? DEFAULT_LIVENESS_POLL_MS, () => {
+        if (!exitLoss.tick()) {
+          schedulePoll();
+          return;
+        }
+        lostExit = true;
+        log(`[sapwood:codex-review] session ${sessionId}: child-exit notification lost (group gone) — settling synthetically`);
+        settle?.(null);
+      });
+    };
+    schedulePoll();
+
+    // The wall-clock ceiling: latch `timedOut` FIRST (so the outcome stays "timeout" no matter how
+    // the await eventually settles), then terminate the GROUP with peripheral.ts's own kill
+    // sequence — subscribe to the grace BEFORE signalling, and use GROUP liveness (never the
+    // leader's `exit` event) as the verdict on whether the SIGKILL escalation is still warranted.
+    const cancelTimeout = startTimer(this.deps.timeoutSec * 1000, () => {
+      timedOut = true;
+      void (async () => {
+        const grace = awaitKillGrace(
+          { onExit: (cb) => child.once("exit", cb) },
+          this.deps.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
+          treeIsGone,
+          (ms, signal) =>
+            new Promise<void>((resolve) => {
+              const cancel = startTimer(ms, resolve);
+              signal.addEventListener(
+                "abort",
+                () => {
+                  cancel();
+                  resolve();
+                },
+                { once: true },
+              );
+            }),
+        );
+        killGroup("SIGTERM");
+        if ((await grace) === "gone") return;
+        killGroup("SIGKILL");
+      })();
+    });
+
+    const exitCode = await exited;
     cancelTimeout();
-    killTimer.cancel?.();
+    pollTimer.cancel?.();
 
     try {
       writeFileSync(transcriptPath, stderr.length > 0 ? `${stdout}\n${stderr}` : stdout, "utf8");
@@ -442,7 +588,11 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
     }
 
     return {
-      outcome: timedOut ? "timeout" : exitCode === 0 ? "done" : "failed",
+      // `timedOut` is checked FIRST (peripheral.ts's own ordering): a timeout stays a timeout
+      // however the await eventually settled. `lostExit` next: a session whose exit notification
+      // never arrived produced no trustworthy exit code, so it reads as `failed` — the fail-closed
+      // direction (an invalid attempt, never a verdict), never `done` on an unobserved exit.
+      outcome: timedOut ? "timeout" : lostExit ? "failed" : exitCode === 0 ? "done" : "failed",
       resultText: readIfPresent(lastMessagePath),
       identity: identity === null ? [] : [identity],
       spend,
