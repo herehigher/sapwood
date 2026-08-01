@@ -376,6 +376,28 @@ test("/api/events pages ascending by id and reports lastId", async () => {
   }
 });
 
+test("#489 /api/events surfaces an engine-review-verdict verbatim — a new kind costs no schema change", async () => {
+  const payload = {
+    worker: "lane-12",
+    issue: 12,
+    pr: 7,
+    head: "a".repeat(40),
+    runId: "run-1",
+    outcome: "rejected",
+    findingCount: 2,
+    perAC: { confirmed: 1, "cannot-confirm": 1, "claim-accepted": 0 },
+  };
+  const fx = await fixture((s) => s.appendEvent("engine-review-verdict", payload));
+  try {
+    const body = await getJson(fx, "/api/events");
+    assert.equal(body.events.length, 1);
+    assert.equal(body.events[0].kind, "engine-review-verdict");
+    assert.deepEqual(body.events[0].payload, payload);
+  } finally {
+    fx.close();
+  }
+});
+
 test("/api/events: an empty tail keeps the caller's cursor rather than rewinding it to 0", async () => {
   const fx = await fixture(seedEvents);
   try {
