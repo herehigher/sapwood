@@ -227,6 +227,35 @@ test("#513 round-trip (estimated spend): renders as an estimate, never as a meas
   assert.doesNotMatch(body, /provider-reported spend/);
 });
 
+test("#513 gate② round 3 (P3-1): a MIX of known + estimated (no unknown) is still labelled an estimate, but the parenthetical says 'mixed' rather than claiming the whole figure is token-derived", () => {
+  const mixedKnownFirst: EngineReviewArtifact = {
+    ...artifact,
+    sessionSpends: [
+      { kind: "known", usd: 0.1 },
+      { kind: "estimated", usd: 0.05 },
+    ],
+  };
+  const bodyKnownFirst = buildAuditComment(wal, mixedKnownFirst);
+  assert.match(
+    bodyKnownFirst,
+    /logical-review spend estimate \(mixed provider-reported and pinned-price-estimated; 2 attempts\) `\$0\.150000`/,
+  );
+  assert.doesNotMatch(bodyKnownFirst, /token usage × pinned prices/);
+  // Order-independent: estimated-first renders identically (same set, same total, same wording).
+  const mixedEstimatedFirst: EngineReviewArtifact = {
+    ...artifact,
+    sessionSpends: [
+      { kind: "estimated", usd: 0.05 },
+      { kind: "known", usd: 0.1 },
+    ],
+  };
+  const bodyEstimatedFirst = buildAuditComment(wal, mixedEstimatedFirst);
+  assert.match(
+    bodyEstimatedFirst,
+    /logical-review spend estimate \(mixed provider-reported and pinned-price-estimated; 2 attempts\) `\$0\.150000`/,
+  );
+});
+
 test("#513 rendering: two attempts, both provider-reported -> summed total, plural identity/attempt wording", () => {
   const two: EngineReviewArtifact = {
     ...artifact,

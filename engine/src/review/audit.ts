@@ -84,9 +84,12 @@ function renderFindingsList(findings: readonly ClassifiedFinding[]): string {
 }
 
 /** #513: the Provenance line's identity clause — "decisive reviewer identity" singular, plural
- *  when more than one. An empty array is defensive only: the post-session D5 check in
- *  engine-agent.ts already fails a verdict closed whenever the session's own identity list comes
- *  back empty, so a REAL persisted artifact always carries at least one. */
+ *  when more than one. An empty array is defensive only: `evaluate()`'s post-session D5 check
+ *  (engine-agent.ts) already fails a verdict closed whenever a session's own identity list comes
+ *  back empty, AND `parseEngineReviewArtifact` (this file, #513 gate② round 2 P2-B) rejects an
+ *  empty `sessionActualIdentities` outright — so this branch is reachable only from an
+ *  `EngineReviewArtifact` built directly in-process (e.g. a test), never from anything that has
+ *  round-tripped through the parser. */
 function renderIdentityClause(identities: readonly ReviewSessionIdentity[]): string {
   const label = identities.length === 1 ? "decisive reviewer identity" : "decisive reviewer identities";
   const value = identities.length > 0 ? identities.map(formatIdentity).join(", ") : "unknown";
@@ -98,15 +101,21 @@ function renderIdentityClause(identities: readonly ReviewSessionIdentity[]): str
  *   - EMPTY (no executed attempts recorded at all) -> no total is claimable, exactly the same
  *     "no data, no positive claim" stance `renderIdentityClause` above already takes on an empty
  *     identity list. `evaluate()` never produces this (every verdict-producing artifact records
- *     at least the decisive attempt's own spend) — reachable only via a hand-written or corrupted
- *     WAL row that otherwise still passes `parseEngineReviewArtifact`'s array-shape check (an
- *     empty array is a valid, if never-produced-in-production, `ReviewSessionSpend[]`). Without
- *     this branch the fall-through below would render "provider-reported spend (0 attempts)
- *     $0.000000" — a positive measurement claim asserted from zero records, the exact failure
- *     class (#513) this whole rendering function exists to close.
+ *     at least the decisive attempt's own spend), and `parseEngineReviewArtifact` (#513 gate②
+ *     round 2 P2-B) rejects an empty `sessionSpends` outright — so, same as the identity clause,
+ *     this branch is reachable only from an artifact built directly in-process, never from
+ *     anything that has round-tripped through the parser. Without this branch the fall-through
+ *     below would render "provider-reported spend (0 attempts) $0.000000" — a positive
+ *     measurement claim asserted from zero records, the exact failure class (#513) this whole
+ *     rendering function exists to close.
  *   - every executed attempt `known`     -> a real, summed, provider-reported total.
- *   - any attempt `estimated` (none `unknown`) -> the SAME summed total, but labelled an estimate
- *     (token usage × pinned prices) — mixing in an estimated attempt makes the sum inexact too.
+ *   - every executed attempt `estimated`, none `known`/`unknown` -> the SAME summed total,
+ *     labelled an estimate derived from token usage × pinned prices.
+ *   - a MIX of `known` and `estimated` (none `unknown`) -> the SAME summed total, still labelled
+ *     an estimate (mixing in even one estimated attempt makes the sum inexact), but with a
+ *     DIFFERENT parenthetical ("mixed provider-reported and pinned-price-estimated", #513 gate②
+ *     round 3 P3-1) — the pure-estimated wording would otherwise claim the WHOLE figure was
+ *     token-derived when part of it was genuinely provider-reported.
  *   - any attempt `unknown`, at least one OTHER attempt numeric -> no total is claimable; report
  *     the recorded numeric subtotal (known + estimated attempts only) alongside how many attempts
  *     lacked telemetry, never silently treating "unknown" as "$0". If that subtotal itself
@@ -137,7 +146,12 @@ function renderSpendClause(spends: readonly ReviewSessionSpend[]): string {
     return `logical-review spend \`unknown total\`; ${subtotalLabel} \`$${subtotal.toFixed(6)}\` (${attempts}; ${unknownCount} lacked telemetry)`;
   }
   const total = spends.reduce((sum, s) => sum + (s.kind === "unknown" ? 0 : s.usd), 0);
-  if (spends.some((s) => s.kind === "estimated")) {
+  const hasKnown = spends.some((s) => s.kind === "known");
+  const hasEstimated = spends.some((s) => s.kind === "estimated");
+  if (hasEstimated && hasKnown) {
+    return `logical-review spend estimate (mixed provider-reported and pinned-price-estimated; ${attempts}) \`$${total.toFixed(6)}\``;
+  }
+  if (hasEstimated) {
     return `logical-review spend estimate (token usage × pinned prices; ${attempts}) \`$${total.toFixed(6)}\``;
   }
   return `logical-review provider-reported spend (${attempts}) \`$${total.toFixed(6)}\``;
