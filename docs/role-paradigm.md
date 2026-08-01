@@ -129,13 +129,19 @@ role's writes UP this ladder over adding a pattern-level deny.
    hard veto `ROLE_DISALLOWED_TOOLS = "Write,Edit,MultiEdit,NotebookEdit,Bash"`
    (`engine/src/roles/peripheral.ts:90`, which wins over any allow from any source, including a
    target repo's own checked-out settings), or the worker-class-but-`gh`-free
-   `RETRO_ALLOWED_TOOLS` (`engine/src/retro/retro.ts:68`, no `gh` entry) — there is no `Bash`
-   grant for the session to reach `gh` (or any other shell command) through, so a whole bypass
-   class (short-flag aliases, quoting escapes) is structurally moot rather than pattern-denied
-   (#110; see [`security.md`](security.md#issues-only-role-sessions-carry-no-shell-110)). This is
+   `RETRO_ALLOWED_TOOLS` (`engine/src/retro/retro.ts:75`, no `gh` entry) — retro's own `Bash`
+   grant is pattern-scoped to eight specific `git` subcommands (`branch`/`checkout`/`add`/
+   `commit`/`push`/`diff`/`status`/`log`) and carries zero `gh` patterns of any kind, so `gh`
+   itself is unreachable through it even though `git` is not. Every OTHER peripheral role carries
+   no `Bash` grant at all, so for them a whole bypass class (short-flag aliases, quoting escapes)
+   is structurally moot rather than pattern-denied (#110; see
+   [`security.md`](security.md#issues-only-role-sessions-carry-no-shell-110)). This is
    the strongest tier for writes because there is nothing to intercept — the write capability
    doesn't exist to begin with; the read channel itself is contained separately, by the guard
-   hook's worktree confinement (`checkReadContainment` in `guard.ts`), not by this ladder. **The
+   hook's worktree confinement (`checkReadContainment` in `guard.ts`) — enforced under the
+   default `guard.mode: hard` (`config.ts:888`), degraded to observe-only (logged, never denied)
+   under an operator-configured `guard.mode: soft` (`applyGuardMode`, `guard-hook.ts:89`) — not by
+   this ladder. **The
    plan-reviewer's freshness re-confirm session (#214, a variant pass within `plan_review`, not a
    whole new role) carries `CONFIRM_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS`**
    (`engine/src/roles/peripheral.ts:111`) — byte-identical to the base grant since #235, so it is

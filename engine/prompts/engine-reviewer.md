@@ -155,8 +155,9 @@ says. Tightening any of them in prose here is a no-op; the check is the source o
 - **head/base/diff identity, and snapshotted-body drift** — the diff you are given is the exact
   object the engine pinned; on a head/base mismatch mid-resolution the engine re-pins to the new
   value and reviews that, once — a second mismatch queues this tick instead, and the engine never
-  reviews a target that fails to match its own pin. An issue body edited since dispatch stops the
-  review outright, routed to a human instead.
+  reviews a target that fails to match its own pin. For a lane with an AC snapshot recorded at
+  dispatch (the normal case since #283), an issue body edited since then stops the review, routed
+  to a human instead; a lane with no snapshot recorded drives without this particular check.
 - **no writes, for every runner** — a review session can never modify the tree or reach the forge.
   Beyond that, containment is runner-specific, not one shared "static" profile: the Claude runner's
   tool grant (`Read`/`Grep`/`Glob`, no `Bash`, no forge access) is hardcoded in `RoleRunner.run()`'s
