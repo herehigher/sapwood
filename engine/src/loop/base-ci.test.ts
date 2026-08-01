@@ -238,6 +238,40 @@ test("reconcileEscalations (#502): a base that is STILL red leaves the pin stand
   state.close();
 });
 
+test("reconcileEscalations (#502, PR #523 gate② finding 1): main advancing to a DIFFERENT commit that is ALSO red is still red — never a false `base-green` receipt", async () => {
+  // The second-broken-push shape: a fix attempt lands on main while the first red still stands,
+  // so the default branch's HEAD moves a1 -> b2 and b2 fails too. The base never went green, so
+  // nothing here may record that it did — a false `escalation-resolved` witness is durable, and
+  // it is exactly the "your evidence says one thing, GitHub says another" ambiguity #502 exists to
+  // remove. The pin stays standing on a1 until the next tick's `observeBaseCi` re-pins to b2 (a
+  // NEW red commit is a new fact and escalates once more, by design).
+  const state = new State(":memory:");
+  state.appendEvent(BASE_CI_RED_OBSERVED, { sha: "a1", at: "2026-08-01T10:00:00.000Z", failing: ["test"] });
+  state.appendEvent(BASE_CI_RED_ESCALATED, { sha: "a1", failing: ["test"] });
+  const forge = new FakeForge();
+  forge.result = page("b2", [run("test", "FAILURE")]);
+  await reconcileEscalations(forge, state, mkCfg(), () => {});
+  assert.equal(state.eventsAfterId(0, [RESOLVED_KIND]).length, 0, "the base is still red — no resolution witness may be recorded");
+  assert.equal(state.eventsAfterId(0, [BASE_CI_RED_CLEARED]).length, 0, "…and the pin may not be cleared");
+  assert.equal(baseRedPin(state)?.sha, "a1", "the episode stands until the tick re-pins it to the new red commit");
+  state.close();
+});
+
+test("reconcileEscalations (#502, PR #523 gate② finding 1): main advancing to a DIFFERENT commit that is GREEN resolves normally — the fix must not over-correct into never clearing", async () => {
+  const state = new State(":memory:");
+  state.appendEvent(BASE_CI_RED_OBSERVED, { sha: "a1", at: "2026-08-01T10:00:00.000Z", failing: ["test"] });
+  state.appendEvent(BASE_CI_RED_ESCALATED, { sha: "a1", failing: ["test"] });
+  const forge = new FakeForge();
+  forge.result = page("b2", [run("test", "SUCCESS")]);
+  await reconcileEscalations(forge, state, mkCfg(), () => {});
+  const resolved = state.eventsAfterId(0, [RESOLVED_KIND]).map((e) => e.payload as { source: string; sha: string; via: string });
+  assert.deepEqual(resolved, [{ source: BASE_CI_RED_ESCALATED, sha: "a1", via: "base-green" }], "the a1 episode is genuinely over");
+  const cleared = state.eventsAfterId(0, [BASE_CI_RED_CLEARED]).map((e) => e.payload as { sha: string; head: string });
+  assert.deepEqual(cleared, [{ sha: "a1", head: "b2" }], "the clear records WHICH head was observed green, not just which sha was pinned");
+  assert.equal(baseRedPin(state), null);
+  state.close();
+});
+
 test("reconcileEscalations (#502): with NO base-red pin standing, the base-branch read is never made — a resolved episode costs zero forge calls forever after", async () => {
   const state = new State(":memory:");
   const forge = new FakeForge();

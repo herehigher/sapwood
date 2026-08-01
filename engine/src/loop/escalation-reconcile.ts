@@ -606,7 +606,19 @@ export async function reconcileBaseCiEscalation(
   if (pin == null) return;
   const page = await readBaseCi(forge, cfg.proxy.caps.maxChecksPerCall, warn);
   if (page == null) return; // no usable evidence — the episode stays open, same as every other arm
-  if (page.headOid === pin.sha && baseCiFailing(page, cfg.ci.requiredChecks).length > 0) return; // still red
+  // "Is the base red RIGHT NOW", asked of whatever commit is the default branch's head THIS pass —
+  // deliberately NOT "is the pinned commit still red".
+  //
+  // PR #523 gate② finding 1: an earlier version required `page.headOid === pin.sha` here, which
+  // made the second-broken-push shape (main advances a1 -> b2, and b2 fails too) fall straight
+  // through to the resolve/clear below — recording a DURABLE, factually false `via: "base-green"`
+  // witness and dropping the pin while the base had never once been green. The window is real, not
+  // theoretical: this observer runs in the round's aligning phase, strictly before the executing
+  // phase where `observeBaseCi` would re-pin, so `sapwood status` would report `base CI: not known
+  // red` about a branch that is red — the exact ambiguity #502 exists to remove. SHA equality was
+  // never the question; it only ever identified WHICH episode is being closed, which is what
+  // `pin.sha` in the payloads below already records.
+  if (baseCiFailing(page, cfg.ci.requiredChecks).length > 0) return; // still red — on whichever commit main is at now
   try {
     state.appendEvent(RESOLVED_KIND, { source: BASE_CI_RED_ESCALATED, sha: pin.sha, via: "base-green" satisfies ResolutionVia });
     state.appendEvent(BASE_CI_RED_CLEARED, { sha: pin.sha, head: page.headOid });
