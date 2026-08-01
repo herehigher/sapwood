@@ -18,12 +18,12 @@ semantics), [`../configuration.md`](../configuration.md) (`lanes.prFixCap`,
 the shipped prompt `engine/prompts/engine-reviewer.md` itself. This document remains the
 record of *why* — the alternatives rejected and the blind spots accepted on the way.
 
-**One item stays open, and deliberately not as a follow-up of this design:** §4a's
-missing dispute channel on the `engine-agent` reviewer path. It is a pre-existing defect
-in the review path as already shipped (design #279's findings-transport decision), which
-this design's own PR surfaced rather than specified; §4a carries its ⚠️ action-required
-note and an already-adjudicated preferred fix for a human to file. #402's own follow-up
-set was complete at R1–R6, and closing it never depended on that issue existing.
+**The one item that outlived this design is now closed too:** §4a's missing dispute
+channel on the `engine-agent` reviewer path — a pre-existing defect in the review path as
+already shipped (design #279's findings-transport decision), which this design's own PR
+surfaced rather than specified — was filed as **#461** along §4a's adjudicated preferred
+fix and shipped in **PR #522** (2026-08-01). #402's own follow-up set was complete at
+R1–R6 and never depended on it.
 
 The review spiral's *mechanics* are sound and out of scope: a fix leg's new commits
 already force a genuinely fresh, head-OID-bound review (`conductor.ts`'s trigger-pin
@@ -371,7 +371,10 @@ fix leg with nothing it could act on. This is §1 and §4 failing *together*, an
 sharpest available evidence for both: layering would have made the note advisory and
 merged, and a dispute channel would have let the producer say so once.
 
-**What closes it.** ⚠️ **ACTION REQUIRED — a human must file a defect issue for this.**
+**What closes it.** ~~ACTION REQUIRED — a human must file a defect issue for this.~~
+**Done: filed as #461, shipped in PR #522 (2026-08-01) — no action remains** (see "Closed
+by #461" below; the struck-through marker is kept struck rather than deleted so the
+paragraph's history stays legible).
 It is *not* one of this design's implementation issues (§11) and is deliberately not
 listed there: the gap is a pre-existing hole in the **engine-agent review path** as
 already shipped (design #279's findings-transport decision), which this design's own PR
@@ -625,7 +628,7 @@ plan. This set is **complete** — it covers every item #402 asked this design t
 **Not in this table, on purpose:** §4a's missing dispute channel on the engine-agent path.
 That is a **pre-existing defect** in the review path as already shipped, surfaced by this
 PR rather than specified by #402, so it is not an implementation issue of this design and
-filing it is not a precondition for #402's closure. It carries its own ⚠️ action-required
-note and its adjudicated fix in §4a, for a human to file against the review path. Recorded
-in the design rather than in an issue because the session that found it had no forge
-credentials — the alternative was losing it.
+filing it was not a precondition for #402's closure. It was recorded in the design rather
+than in an issue because the session that found it had no forge credentials — the
+alternative was losing it. Since filed as **#461** (along §4a's adjudicated fix) and
+shipped in **PR #522** (2026-08-01).

@@ -415,12 +415,12 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   §3/§8 for the full design and the rejected alternatives. **Design #402 is fully shipped
   as of 2026-07-31** — R1 layering (#448), R2 per-round finding record (#449), R3
   convergence + the `prFixCap` default (#450), R4 dispute pricing (#451), R5 retro tendency
-  accounting (#453), R6 the reviewer prompt as a designed artifact (#454). Its one open
-  item is deliberately NOT one of them: §4a's missing dispute channel on the `engine-agent`
-  reviewer path is a pre-existing defect in the review path as already shipped (design
-  #279's findings-transport decision), carrying its own adjudicated fix in the design doc
-  for a human to file — on this path an engine-agent finding is answerable only by changing
-  code, never by disagreeing with it, and convergence is what bounds that today.
+  accounting (#453), R6 the reviewer prompt as a designed artifact (#454). The one item
+  deliberately NOT among them — §4a's missing dispute channel on the `engine-agent`
+  reviewer path, a pre-existing defect in the review path as already shipped (design
+  #279's findings-transport decision) — was filed as #461 along §4a's adjudicated fix and
+  shipped in PR #522 (2026-08-01): a fix leg can now answer an engine-agent finding with a
+  structured `findingResponses` dispute instead of only changing code.
   **The reviewer prompt states its own enforced/judged boundary (#454, R6 §6a).**
   `engine/prompts/engine-reviewer.md` — operator-tunable via `reviewer.agent.promptFile`,
   never hardcoded — now separates the instructions the engine actually checks (per-AC id-set
