@@ -3323,14 +3323,19 @@ export function resolveWorktreeHead(dotGit: string): string | null {
     } catch {
       // No commondir file — gitDir IS the common dir.
     }
-    for (const dir of [gitDir, common]) {
-      try {
-        const loose = readFileSync(join(dir, ref), "utf8").trim();
-        if (/^[0-9a-f]{40}$/i.test(loose)) return loose.toLowerCase();
-      } catch {
-        // Not a loose ref here — try the next location / packed-refs.
-      }
+    // #509 review P2 (same rule context-manifest.ts already pins): only refs/bisect/,
+    // refs/rewritten/, and refs/worktree/ are WORKTREE-LOCAL; every other ref — including
+    // refs/heads/* — is shared and must resolve from the COMMON store only. Probing the
+    // worktree gitdir first would let a stale (or worker-created) worktrees/<lane>/refs/heads
+    // shadow win over the real branch head.
+    const worktreeLocal = /^refs\/(bisect|rewritten|worktree)\//.test(ref);
+    try {
+      const loose = readFileSync(join(worktreeLocal ? gitDir : common, ref), "utf8").trim();
+      if (/^[0-9a-f]{40}$/i.test(loose)) return loose.toLowerCase();
+    } catch {
+      // Not a loose ref — fall through to packed-refs.
     }
+    if (worktreeLocal) return null; // worktree-local namespaces are never packed in the common store
     const packed = readFileSync(join(common, "packed-refs"), "utf8");
     for (const line of packed.split("\n")) {
       const m = line.match(/^([0-9a-f]{40})\s+(\S+)$/i);
