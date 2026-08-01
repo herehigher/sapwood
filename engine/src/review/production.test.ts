@@ -21,6 +21,217 @@ function oid(n: number): string {
   return n.toString(16).padStart(40, "0");
 }
 
+// ── #489: the decisive engine-agent verdict is announced in the durable event stream ─────────
+// One harness, both outcomes: the ONLY difference between an approved and a rejected run here is
+// what the session's structured result says, so the two tests below share this seam rather than
+// duplicating the ~80-line config -> construction -> drive -> audit wiring a third and fourth time.
+
+const ENGINE_REVIEW_VERDICT = "engine-review-verdict";
+
+async function driveVerdictSeam(opts: {
+  tag: string;
+  runId: string;
+  acStatuses: ("confirmed" | "cannot-confirm" | "claim-accepted")[];
+  findings: Record<string, unknown>[];
+}): Promise<{ state: State; cleanup: () => void }> {
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 1 },
+    worker: { model: "sonnet" },
+    reviewer: { mode: "engine-agent", agent: { model: "opus" } },
+    ci: { requiredChecks: [{ name: "test", app: "github-actions" }] },
+  });
+  const H = "a".repeat(40);
+  const B = "b".repeat(40);
+  const body = "## Acceptance criteria\n\n- [ ] Works correctly\n- [ ] Handles errors\n";
+  const snapshot = buildAcSnapshot(12, body, "2026-01-01T00:00:00Z");
+  assert.ok(snapshot);
+  assert.equal(snapshot!.manifest.length, opts.acStatuses.length);
+  const state = new State(":memory:");
+  const gcParent = mkdtempSync(join(tmpdir(), `sapwood-review-${opts.tag}-`));
+  state.recordAcSnapshot(snapshot!);
+  state.upsertWorker({
+    name: "lane-12",
+    issue: 12,
+    session_id: "worker-session",
+    state: "driving",
+    started_at: "t",
+    ended_at: null,
+    pr: 7,
+  });
+  state.recordWorkerActualModel("lane-12", "sonnet");
+  const comments: PRTopLevelComment[] = [];
+  const reviewData = {
+    headOid: H,
+    author: "producer",
+    state: "OPEN" as const,
+    isDraft: false,
+    labels: [],
+    unresolvedThreads: 0,
+    reviews: [],
+    comments: [],
+    reactions: [],
+  };
+  const forge = {
+    getPRStatus: async () => ({ state: "OPEN", headOid: H, baseOid: B, ciGreen: true, mergeable: "MERGEABLE" }),
+    getPRReviewData: async () => reviewData,
+    getPRDiff: async () =>
+      "diff --git a/src/foo.ts b/src/foo.ts\nindex 1111111..2222222 100644\n--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+    getPRChangedFiles: async () => ({ files: [], complete: true }),
+    getPRChecks: async () => ({
+      checks: [{ name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null, appSlug: "github-actions" }],
+      total: 1,
+    }),
+    getPRComments: async () => ({ comments, total: comments.length }),
+    addPRComment: async (_pr: number, commentBody: string) => {
+      comments.push({ id: `IC${comments.length + 1}`, login: "sapwood", createdAt: "2026-01-01T00:00:01Z", body: commentBody });
+    },
+    mergePR: async () => {},
+  } as unknown as IForge;
+  const resultText = `<<<SAPWOOD_RESULT>>>\n${JSON.stringify({
+    perAC: snapshot!.manifest.map((a, i) => ({ id: a.id, status: opts.acStatuses[i] })),
+    findings: opts.findings,
+  })}\n<<<END_SAPWOOD_RESULT>>>`;
+  const runner = {
+    run: async () => ({
+      outcome: "done" as const,
+      costUsd: 0.1,
+      costKnown: true,
+      exitCode: 0,
+      name: "role-engine-reviewer-test",
+      resultText,
+      modelUsage: [{ model: "opus", inputTokens: 1, outputTokens: 1, cacheCreationTokens: 0, cacheReadTokens: 0 }],
+    }),
+  };
+  const production = makeProductionEngineAgent(cfg, forge, state, runner, {
+    now: () => new Date("2026-01-01T00:00:00Z"),
+    newRunId: () => opts.runId,
+    reviewTreeRoot: join(gcParent, "trees"),
+    materializeOverride: async (head) => ({
+      kind: "materialized",
+      treeDir: "/private/tree",
+      oid: head,
+      manifest: [{ path: "x", contentHash: "c" }],
+    }),
+  });
+  const driver = new MergeDriver({ forge, reviewer: production.reviewer, cfg, fallbackReviewers: [] });
+  await driver.driveOne(
+    7,
+    12,
+    { head: null, at: null },
+    () => {},
+    undefined,
+    false,
+    undefined,
+    production.driveDepsForLane(state.getWorker("lane-12")!, 7),
+  );
+  return {
+    state,
+    cleanup: () => {
+      state.close();
+      rmSync(gcParent, { recursive: true, force: true });
+    },
+  };
+}
+
+test("#489 a decisive REJECTED engine-agent verdict appends exactly one event carrying lane/PR/head/run/outcome and its finding + AC counts", async () => {
+  const seam = await driveVerdictSeam({
+    tag: "verdict-rejected",
+    runId: "run-489-rejected",
+    acStatuses: ["confirmed", "cannot-confirm"],
+    findings: [
+      { id: "f1", body: "a real defect", path: "src/foo.ts" },
+      { id: "f2", body: "a style nit", severity: "advisory", kind: "style" },
+    ],
+  });
+  try {
+    const events = seam.state.eventsSince("1970-01-01T00:00:00.000Z", [ENGINE_REVIEW_VERDICT]);
+    assert.equal(events.length, 1, "exactly one verdict event per decisive review run");
+    assert.deepEqual(events[0]!.payload, {
+      worker: "lane-12",
+      issue: 12,
+      pr: 7,
+      head: "a".repeat(40),
+      runId: "run-489-rejected",
+      outcome: "rejected",
+      findingCount: 2,
+      perAC: { confirmed: 1, "cannot-confirm": 1, "claim-accepted": 0 },
+    });
+  } finally {
+    seam.cleanup();
+  }
+});
+
+test("#489 a decisive APPROVED engine-agent verdict emits the same event — the approved side of gate② is no less visible", async () => {
+  const seam = await driveVerdictSeam({
+    tag: "verdict-approved",
+    runId: "run-489-approved",
+    acStatuses: ["confirmed", "confirmed"],
+    findings: [],
+  });
+  try {
+    const events = seam.state.eventsSince("1970-01-01T00:00:00.000Z", [ENGINE_REVIEW_VERDICT]);
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0]!.payload, {
+      worker: "lane-12",
+      issue: 12,
+      pr: 7,
+      head: "a".repeat(40),
+      runId: "run-489-approved",
+      outcome: "approved",
+      findingCount: 0,
+      perAC: { confirmed: 2, "cannot-confirm": 0, "claim-accepted": 0 },
+    });
+  } finally {
+    seam.cleanup();
+  }
+});
+
+test("#489 crash shape: the LOG-FIRST append is deduped from the log itself — a replayed run emits once, a NEW run still emits its own", () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-review-verdict-dedup-"));
+  const state = new State(":memory:");
+  const head = "a".repeat(40);
+  try {
+    state.upsertWorker({ name: "lane-a", issue: 1, session_id: "s-a", state: "driving", started_at: "t", ended_at: null, pr: 2 });
+    state.recordEngineReviewWal("lane-a", { runId: "run-a", head, base: "b".repeat(40), diffHash: "d-a", attemptStart: "t" });
+    const cfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 1 },
+      worker: { model: "sonnet" },
+      reviewer: { mode: "engine-agent", agent: { model: "opus" } },
+    });
+    const production = makeProductionEngineAgent(
+      cfg,
+      {} as IForge,
+      state,
+      { run: async () => assert.fail("not called") },
+      { now: realClock, reviewTreeRoot: root },
+    );
+    const deps = production.driveDepsForLane(state.getWorker("lane-a")!, 2);
+    // The engine died between the event append and the WAL write; the replay repeats the call.
+    deps.recordWalDecisiveOutcome("run-a", "rejected");
+    deps.recordWalDecisiveOutcome("run-a", "rejected");
+    const events = state.eventsSince("1970-01-01T00:00:00.000Z", [ENGINE_REVIEW_VERDICT]);
+    assert.equal(events.length, 1, "replaying the same run must not double-emit");
+    assert.equal((events[0]!.payload as { runId: string }).runId, "run-a");
+
+    // A later attempt on a new head is a genuinely new verdict, not a duplicate of the old one.
+    state.recordEngineReviewWal("lane-a", {
+      runId: "run-b",
+      head: "c".repeat(40),
+      base: "b".repeat(40),
+      diffHash: "d-b",
+      attemptStart: "t",
+    });
+    deps.recordWalDecisiveOutcome("run-b", "approved");
+    assert.deepEqual(
+      state.eventsSince("1970-01-01T00:00:00.000Z", [ENGINE_REVIEW_VERDICT]).map((e) => (e.payload as { runId: string }).runId),
+      ["run-a", "run-b"],
+    );
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("#314 review-tree sweep bounds repeated attempts to the configured cap", () => {
   const root = mkdtempSync(join(tmpdir(), "sapwood-review-trees-"));
   try {

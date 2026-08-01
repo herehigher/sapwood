@@ -628,6 +628,7 @@ checklist item**):
 | `rollback-recovered` | Returned issue #{issue} to the backlog safely |
 | `rollback-retry-failed` | Still trying to return issue #{issue} to the backlog |
 | `rollback-escalated` | Couldn't return issue #{issue} automatically — flagged for a human |
+| `engine-review-verdict` | Branches on `payload.outcome` (#489): approved → "Review approved PR #{pr} — {findingCount} finding(s) noted"; rejected → "Review sent PR #{pr} back — {findingCount} finding(s) to fix". The engine's own reviewer reaching a decision, emitted once per review run (`runId`); the sentence stops there — what happens next is narrated by `merged` / `drive-fixup` themselves. A SUMMARY: counts only, since the findings themselves live in the PR's audit comment. `findingCount`/`perAC` are `null` when the run's artifact wasn't observed — say "counts unavailable", never "0" |
 | `reviewer-fallback-switch` | The usual reviewer isn't answering — switched to the backup |
 | `reviewer-fallback-revert` | The usual reviewer is back — switched back |
 | `pr-held` | A person put PR #{pr} on hold — nothing moves until they lift it |

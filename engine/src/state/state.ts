@@ -2095,6 +2095,28 @@ export class State {
     return row != null;
   }
 
+  /** #489: has an event of `kind` already been appended for this exact (worker, engine-review
+   *  runId)? The dedup memory for the LOG-FIRST engine-review verdict event — same
+   *  event-log-as-memory pattern as `laneEventRecorded` above (#169/#294), and ONE-WAY for the
+   *  same reason: a run reaches a decisive outcome exactly once, and nothing later un-decides it.
+   *
+   *  Keyed by runId rather than by pr: a lane legitimately reaches SEVERAL decisive verdicts on
+   *  the same PR (one per head / fix round), so a (worker, pr) key would suppress every verdict
+   *  after the first. The runId is engine-authored (`newRunId`), never derived from session prose,
+   *  and is the same identity the WAL row and the audit-comment marker carry. */
+  runEventRecorded(kind: string, worker: string, runId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM events
+         WHERE kind = ?
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.runId') = ?
+         LIMIT 1`,
+      )
+      .get(kind, worker, runId);
+    return row != null;
+  }
+
   /** #447: one worker-row write and the event announcing it, in ONE sqlite transaction — the
    *  same shape (and the same reason) as `settleTerminalWorker` above. A recovery pass that
    *  moves a lane must not be able to leave the move without its record: the row would be

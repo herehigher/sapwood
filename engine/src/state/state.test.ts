@@ -632,6 +632,24 @@ test("laneEventRecorded (#447): matches only the SAME kind for the SAME (worker,
   s.close();
 });
 
+test("runEventRecorded (#489): scoped to (kind, worker, runId) — a later run of the same lane gets its own answer", () => {
+  const s = mem();
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-a", "run-1"), false);
+
+  s.appendEvent("drive-queued", { worker: "lane-a", issue: 2, pr: 55, runId: "run-1" }); // unrelated kinds never match
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-a", "run-1"), false);
+
+  s.appendEvent("engine-review-verdict", { worker: "lane-a", issue: 2, pr: 55, runId: "run-1", outcome: "rejected" });
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-a", "run-1"), true);
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-b", "run-1"), false, "another lane's run is not this lane's");
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-a", "run-2"), false, "the lane's NEXT attempt is a new run");
+
+  // One-way, like laneEventRecorded: nothing later can un-record this run's verdict.
+  s.appendEvent("merged", { worker: "lane-a", issue: 2, pr: 55 });
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-a", "run-1"), true);
+  s.close();
+});
+
 test("upsertWorkerWithEvent (#447): row write and its event land together — a failing event write rolls the row back", () => {
   const s = mem();
   s.upsertWorker({ name: "lane-a", issue: 2, session_id: "s", state: "failed", started_at: "t", ended_at: "t", pr: 55 });
