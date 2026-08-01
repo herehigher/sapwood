@@ -18,12 +18,12 @@ semantics), [`../configuration.md`](../configuration.md) (`lanes.prFixCap`,
 the shipped prompt `engine/prompts/engine-reviewer.md` itself. This document remains the
 record of *why* — the alternatives rejected and the blind spots accepted on the way.
 
-**One item stays open, and deliberately not as a follow-up of this design:** §4a's
-missing dispute channel on the `engine-agent` reviewer path. It is a pre-existing defect
-in the review path as already shipped (design #279's findings-transport decision), which
-this design's own PR surfaced rather than specified; §4a carries its ⚠️ action-required
-note and an already-adjudicated preferred fix for a human to file. #402's own follow-up
-set was complete at R1–R6, and closing it never depended on that issue existing.
+**The one item that outlived this design is now closed too:** §4a's missing dispute
+channel on the `engine-agent` reviewer path — a pre-existing defect in the review path as
+already shipped (design #279's findings-transport decision), which this design's own PR
+surfaced rather than specified — was filed as **#461** along §4a's adjudicated preferred
+fix and shipped in **PR #522** (2026-08-01). #402's own follow-up set was complete at
+R1–R6 and never depended on it.
 
 The review spiral's *mechanics* are sound and out of scope: a fix leg's new commits
 already force a genuinely fresh, head-OID-bound review (`conductor.ts`'s trigger-pin
