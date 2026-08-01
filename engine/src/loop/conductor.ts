@@ -3914,6 +3914,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           const queuedResetId = state.maxEventIdForKinds(DRIVE_QUEUED_RESET_KINDS, w.name, pr);
           const sameEpisode = lastQueued != null && lastQueued.id > queuedResetId && lastQueued.reason === outcome.reason;
           if (!sameEpisode) {
+            // #504: the reason was previously visible ONLY inside this event's payload — a lane
+            // wedge-looping on e.g. a review-checkout failure read as healthy ticks in
+            // sapwood.log. Same episode-dedupe as the event: one log line per reason change.
+            // Log BEFORE the durable append (#505 review P2): a crash between the two must cost
+            // a harmless duplicate log line on the rerun, never a silently missing one — the
+            // event is the dedupe memory, so append-first would suppress the re-log forever.
+            deps.log?.(`[sapwood:drive] lane ${w.name} pr #${pr} queued: ${outcome.reason}`);
             state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: outcome.reason });
           }
           driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: outcome.reason });

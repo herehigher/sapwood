@@ -1024,10 +1024,25 @@ function createRunLogger(cfg: SapwoodConfig, override?: EngineLogger): { logger:
   };
 }
 
-function formatTickSummary(result: TickResult): string {
+/** #504: the tick line counts ACTIONS, matching what the (transition-deduped, #383) event log
+ *  records — not per-tick evaluations. Raw array lengths counted steady-state no-ops: a "kept"
+ *  reclaim (running lane still alive), a "skipped" dispatch (cap/in-flight), and a "queued"
+ *  drive (gate still waiting) re-count every tick, so a fully wedged run logged
+ *  `reclaimed=3 dispatched=2 driven=3` forever while the event stream recorded nothing.
+ *
+ *  Two deliberate blind spots (#505 review): a NEWLY ANNOUNCED queued transition still counts
+ *  as driven=0 here — its signal is the richer `[sapwood:drive]` line the conductor logs at the
+ *  announcement site, not this counter; and an ADOPT-path reclaim keeps its by-design "kept"
+ *  outcome (#169: adoption adds no scheduler machinery) — its signal is the one-shot
+ *  lane-adopted event. */
+export function formatTickSummary(result: TickResult): string {
+  const reclaimed = result.reclaimed.filter((r) => r.kind !== "kept").length;
+  const fixingReclaimed = result.fixingReclaimed.filter((r) => r.kind !== "kept").length;
+  const dispatched = result.dispatched.filter((d) => d.kind === "dispatched").length;
+  const driven = result.driven.filter((d) => d.kind !== "queued").length;
   return (
-    `[sapwood:tick] reclaimed=${result.reclaimed.length} fixingReclaimed=${result.fixingReclaimed.length} ` +
-    `dispatched=${result.dispatched.length} driven=${result.driven.length} resumed=${result.resumed.length} ` +
+    `[sapwood:tick] reclaimed=${reclaimed} fixingReclaimed=${fixingReclaimed} ` +
+    `dispatched=${dispatched} driven=${driven} resumed=${result.resumed.length} ` +
     `rollbacks=${result.rollbacks.length} fixResponses=${result.fixResponses.length} gatedReclaimed=${result.gatedReclaimed.length} ` +
     `drainRequested=${result.drainRequested.length} escalated=${result.escalated.length} ceilingBreached=${result.ceilingBreached}`
   );

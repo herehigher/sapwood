@@ -13,6 +13,7 @@ import {
   formatDryRunPreview,
   formatStatus,
   formatStopConditionLine,
+  formatTickSummary,
   normalizeUnplacedBoardItems,
   parseMilestoneFlag,
   parseRunConfigFlag,
@@ -1779,4 +1780,75 @@ test("buildTickFixLegResume (#253): cfg.proxy.enabled: true, shadow: false (the 
   } finally {
     state.close();
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #504: the tick summary line counts ACTIONS on the events' transition-dedupe basis, not raw
+// per-tick evaluations. The dogfood run that motivated this logged `reclaimed=3 dispatched=2
+// driven=3` every tick for 1.5h while the event stream recorded zero actions — "kept" reclaims,
+// "skipped" dispatches, and steady-state "queued" drives are no-ops and must read as zeros.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("formatTickSummary (#504): kept/skipped/queued steady-state no-ops count as zero", () => {
+  const line = formatTickSummary({
+    reclaimed: [
+      { kind: "kept", worker: "lane-a", issue: 1 },
+      { kind: "kept", worker: "lane-b", issue: 2 },
+      { kind: "kept", worker: "lane-c", issue: 3 },
+    ],
+    fixingReclaimed: [{ kind: "kept", worker: "lane-d", issue: 4 }],
+    dispatched: [
+      { kind: "skipped", issue: 5, reason: "cap" },
+      { kind: "skipped", issue: 6, reason: "in-flight" },
+    ],
+    driven: [
+      { kind: "queued", worker: "lane-a", issue: 1, pr: 11, reason: "gate-pending:WAIT_REVIEW" },
+      { kind: "queued", worker: "lane-b", issue: 2, pr: 12, reason: "gate-pending:WAIT_REVIEW" },
+      { kind: "queued", worker: "lane-c", issue: 3, pr: 13, reason: "gate-pending:WAIT_REVIEW" },
+    ],
+    resumed: [],
+    rollbacks: [],
+    fixResponses: [],
+    gatedReclaimed: [],
+    drainRequested: [],
+    escalated: [],
+    overBudget: false,
+    ceilingBreached: false,
+    ceilingReasons: [],
+  });
+  assert.equal(
+    line,
+    "[sapwood:tick] reclaimed=0 fixingReclaimed=0 dispatched=0 driven=0 resumed=0 " +
+      "rollbacks=0 fixResponses=0 gatedReclaimed=0 drainRequested=0 escalated=0 ceilingBreached=false",
+  );
+});
+
+test("formatTickSummary (#504): real actions still count", () => {
+  const line = formatTickSummary({
+    reclaimed: [
+      { kind: "kept", worker: "lane-a", issue: 1 },
+      { kind: "done", worker: "lane-b", issue: 2, next: "DRIVING", costUsd: 0, modelUsage: [] },
+    ],
+    fixingReclaimed: [],
+    dispatched: [
+      { kind: "dispatched", issue: 5, worker: "lane-e" },
+      { kind: "skipped", issue: 6, reason: "cap" },
+    ],
+    driven: [
+      { kind: "queued", worker: "lane-a", issue: 1, pr: 11, reason: "gate-pending:WAIT_REVIEW" },
+      { kind: "merged", worker: "lane-b", issue: 2, pr: 12 },
+    ],
+    resumed: [],
+    rollbacks: [],
+    fixResponses: [],
+    gatedReclaimed: [],
+    drainRequested: [],
+    escalated: [],
+    overBudget: false,
+    ceilingBreached: false,
+    ceilingReasons: [],
+  });
+  assert.match(line, /reclaimed=1 /);
+  assert.match(line, /dispatched=1 /);
+  assert.match(line, /driven=1 /);
 });
