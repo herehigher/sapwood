@@ -175,17 +175,40 @@ export interface BacklogDigestResult extends BoundedDigest {
   renderedIssueNumbers: number[];
 }
 
-/** Engine-side PO context (#215): deterministic, milestone-scoped here at the digest consumer.
+/** #444: milestone scope ORDERS and ANNOTATES this digest — it no longer EXCLUDES. An issue
+ *  outside `cfg.round.milestone` (a later milestone, or no milestone at all — the shape every
+ *  agent-filed proposal deliberately carries so it stays out of the pool) is still open work the
+ *  align session must not duplicate, so it stays in the rendered dedup surface with an annotation
+ *  saying it is out of this round's DECOMPOSITION scope. Empty string for an in-scope issue, and
+ *  for every issue when the round is unscoped (`milestone === undefined`) — unchanged rendering
+ *  on that path. */
+function scopeAnnotation(issue: Issue, milestone: string | undefined): string {
+  if (milestone === undefined || issue.milestone === milestone) return "";
+  return issue.milestone === undefined ? " [no milestone — outside this round]" : ` [milestone: ${issue.milestone} — outside this round]`;
+}
+
+/** Engine-side PO context (#215): deterministic; milestone scope is applied here at the digest
+ *  consumer.
  *  #231: a read failure is no longer swallowed into an indistinguishable placeholder string —
  *  `ok: false` (+ `reason`) is the explicit, checkable signal createAligningStub's creation loop
  *  and the durable `backlog-read-failed` honesty event key off of. Truncation never slices a
  *  mid-record line (packDigestRecords above), so a caller can always tell which issues were
- *  actually shown to the session vs. merely counted as omitted. */
+ *  actually shown to the session vs. merely counted as omitted.
+ *
+ *  #444: the digest covers ALL open issues, not just this round's milestone. The pre-#444
+ *  milestone filter made duplicate filings mechanical rather than unlucky — an issue in the NEXT
+ *  milestone (#428) or carrying no milestone at all (#427, the agent-filed shape) simply could
+ *  not be seen by the session asked not to duplicate it, so it got duplicated (#435, #439). The
+ *  DECOMPOSITION focus is still this round's milestone, expressed by ordering (in-scope first, so
+ *  the focus is what survives truncation) plus a per-record `scopeAnnotation` the prompt explains
+ *  — never by hiding the rest. One packDigestRecords call over the whole list keeps the existing
+ *  bounded-digest contract (single cap, exact counts, truncation marker) intact: no second
+ *  budget, no second section, no new config key. */
 export async function buildBacklogDigest(forge: IForge, cfg: SapwoodConfig): Promise<BacklogDigestResult> {
   let issues: Issue[];
   try {
     const allIssues = await forge.listOpenIssues();
-    issues = filterIssuesByMilestone(allIssues, cfg.round.milestone).filter((issue) => !labelsInclude(issue.labels, cfg.labels.decomposed));
+    issues = allIssues.filter((issue) => !labelsInclude(issue.labels, cfg.labels.decomposed));
   } catch (e) {
     return {
       text: BACKLOG_READ_FAILED,
@@ -201,21 +224,22 @@ export async function buildBacklogDigest(forge: IForge, cfg: SapwoodConfig): Pro
   if (issues.length === 0) {
     return { text: NO_OPEN_ISSUES, ok: true, total: 0, rendered: 0, omitted: 0, truncated: false, renderedIssueNumbers: [] };
   }
-  const ordered = [...issues].sort((a, b) => a.number - b.number);
+  // #444: this round's milestone first (so the decomposition focus is what survives a truncated
+  // cap), then the rest of the open backlog as dedup-only context; each half number-ascending, so
+  // the whole list stays deterministic regardless of forge ordering.
+  const byNumber = (a: Issue, b: Issue): number => a.number - b.number;
+  const inScope = (issue: Issue): boolean => cfg.round.milestone === undefined || issue.milestone === cfg.round.milestone;
+  const ordered = [...issues.filter(inScope).sort(byNumber), ...issues.filter((issue) => !inScope(issue)).sort(byNumber)];
   const lines = ordered.map((issue) => {
     const holds = cfg.escalation.humanLabels.filter((label) => labelsInclude(issue.labels, label));
     const annotation = holds.length > 0 ? ` [hold: ${holds.join(", ")}]` : "";
-    return `- #${issue.number} — ${issue.title}${annotation}`;
+    return `- #${issue.number} — ${issue.title}${scopeAnnotation(issue, cfg.round.milestone)}${annotation}`;
   });
   const packed = packDigestRecords(lines, cfg.roles.po.backlogDigestMaxChars, NO_OPEN_ISSUES);
   // #237: packDigestRecords only ever drops a TRAILING run of whole records (its own doc
   // comment) — so the first `rendered` entries of `ordered` (same order `lines` was built in)
   // are exactly what made it into `packed.text`.
   return { ...packed, ok: true, renderedIssueNumbers: ordered.slice(0, packed.rendered).map((issue) => issue.number) };
-}
-
-function filterIssuesByMilestone(issues: Issue[], milestone: string | undefined): Issue[] {
-  return milestone === undefined ? issues : issues.filter((issue) => issue.milestone === milestone);
 }
 
 // Placeholder Issue for template rendering in "align" mode: there is no single issue in scope

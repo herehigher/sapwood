@@ -516,7 +516,17 @@ test("sapwood run (default driver, #253 review round 2, H1): cfg.proxy.enabled: 
 
     const argvText = readFileSync(argvLog, "utf8");
     assert.ok(!argvText.includes("--mcp-config"), "shadow mode: no session anywhere gets a proxy attached");
-    assert.ok(!argvText.includes("mcp__forge__"), "shadow mode: allowedTools is never widened");
+    // #444: bind to the AUTHORITATIVE signal — the value of the tool-list flags themselves —
+    // rather than scanning the whole argv blob. The blob also carries the rendered PROMPT, and
+    // po.md now names `mcp__forge__search_issues` in prose (telling the align session to search
+    // before filing, when the tool is attached); prose naming a tool is not a grant of it, so a
+    // substring scan over the prompt would fail this test for a non-violation.
+    const args = argvText.split("\0");
+    const toolListValues = args.filter((_arg, i) => args[i - 1] === "--allowedTools" || args[i - 1] === "--disallowedTools");
+    assert.ok(toolListValues.length > 0, "expected the spawned session(s) to carry a tool-list flag at all");
+    for (const value of toolListValues) {
+      assert.ok(!value.includes("mcp__forge__"), "shadow mode: allowedTools is never widened");
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

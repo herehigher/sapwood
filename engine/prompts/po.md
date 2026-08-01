@@ -41,9 +41,14 @@ Round context:
 {{plan.md}}
 </plan-md>
 
-The list below IS the current milestone-scoped open backlog. Do not re-propose work it already
-covers, even when the title uses different wording. Hold annotations identify parked gaps; they
-remain existing work and must not be duplicated.
+The list below is the open backlog. An unannotated entry sits in THIS round's milestone — those
+are your decomposition focus. An entry annotated `[milestone: X — outside this round]` or
+`[no milestone — outside this round]` is NOT yours to decompose this round, but it is open work
+all the same and it is listed for exactly one reason: so you can check your proposals against it.
+(Un-milestoned issues are the shape previous align rounds' own proposals carry — that is where
+self-duplication happens.) Do not re-propose work any entry already covers, in or out of scope,
+even when the title uses different wording. Hold annotations identify parked gaps; they remain
+existing work and must not be duplicated.
 
 <backlog-digest>
 {{backlog.digest}}
@@ -57,8 +62,14 @@ zero or more well-scoped issues. For EVERY issue you propose:
   the issue is fit for a headless worker to pick up later; a title alone is not an issue.
   Inherently unverifiable work (pure docs/chore) still needs a `## Verification` or
   `## Acceptance criteria` section explaining why, even if it just says so.
-- The backlog digest above is authoritative for current open issues: do not duplicate an issue
-  that already covers the same gap. If overlap is uncertain, propose nothing for that gap.
+- Dedup in TWO steps before you file anything. The digest above is real but BOUNDED, not
+  complete: it holds only OPEN issues, and it can be truncated (when it is, it says so, with
+  counts). So (1) check every proposal against the digest, in-scope entries and out-of-scope ones
+  alike, and (2) when the forge search tool is attached to this session, call
+  `mcp__forge__search_issues` on each proposal's key terms — the distinctive nouns, the file or
+  symbol name your evidence came from — BEFORE proposing it. If that tool isn't there, treat its
+  absence like any other missing tool: say so in the issue body's rationale rather than writing
+  as if you had searched. If overlap is uncertain either way, propose nothing for that gap.
 - Scope each issue to one coherent unit of work. Prefer several small, well-bounded issues over
   one sprawling one. If nothing needs decomposing this round, propose zero issues — that is a
   valid, complete outcome, not a failure to find something to do.
