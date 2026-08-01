@@ -715,3 +715,25 @@ test("init scaffolds the doctrine file at a custom doctrine.file location, creat
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("init (#492): the guard-hook action line reports the hook as built and wired per-session, not deferred/unbuilt", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    const guardLine = actions.find((a) => a.startsWith("guard hook:"));
+    assert.ok(guardLine, "init reports the guard hook");
+    // The onboarding message must not claim the repo's core safety mechanism is missing (it
+    // has been built and live per worker session since M1/M2).
+    assert.doesNotMatch(guardLine!, /not built yet|deferred to M1/);
+    assert.match(guardLine!, /built/);
+    assert.match(guardLine!, /worker\.ts/); // names who wires it, since init itself does not
+    assert.match(guardLine!, /human-merge-only/); // still true, still stated
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
