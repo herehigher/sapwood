@@ -86,6 +86,8 @@ interface Harness {
   aliveReadings: boolean[];
   /** Set to make the injected `killFn` throw — e.g. an `ESRCH` for a group that already exited. */
   killThrows: Error | null;
+  /** Set to make the injected GROUP-liveness probe throw, so the whole timeout coroutine blows up. */
+  throwOnLivenessProbe: Error | null;
   executor: CodexExecReviewSessionExecutor;
   req: ReviewSessionRequest;
   cleanup: () => void;
@@ -108,8 +110,8 @@ function harness(
   // Default: the tree stays ALIVE until the test says otherwise, so no path short-circuits on a
   // liveness reading the test didn't script.
   const aliveReadings = opts.aliveReadings ?? [true];
-  // Mutable box so a test can arm `killThrows` on the returned harness AFTER construction.
-  const state: { killThrows: Error | null } = { killThrows: null };
+  // Mutable box so a test can arm the failure injections on the returned harness AFTER construction.
+  const state: { killThrows: Error | null; throwOnLivenessProbe: Error | null } = { killThrows: null, throwOnLivenessProbe: null };
 
   if (opts.rollout !== undefined) {
     const day = join(codexHome, "sessions", "2026", "08", "01");
@@ -132,7 +134,10 @@ function harness(
       signals.push({ pid, signal: String(signal) });
       if (state.killThrows) throw state.killThrows;
     },
-    isTreeAlive: () => (aliveReadings.length > 1 ? (aliveReadings.shift() as boolean) : (aliveReadings[0] as boolean)),
+    isTreeAlive: () => {
+      if (state.throwOnLivenessProbe) throw state.throwOnLivenessProbe;
+      return aliveReadings.length > 1 ? (aliveReadings.shift() as boolean) : (aliveReadings[0] as boolean);
+    },
     startTimer: (ms, fire) => {
       const drop = (): void => {
         const i = timers.indexOf(entry);
@@ -178,6 +183,12 @@ function harness(
     },
     set killThrows(e: Error | null) {
       state.killThrows = e;
+    },
+    get throwOnLivenessProbe() {
+      return state.throwOnLivenessProbe;
+    },
+    set throwOnLivenessProbe(e: Error | null) {
+      state.throwOnLivenessProbe = e;
     },
     pendingTimerMs: () => timers.map((t) => t.ms),
     fireTimerAt: (ms: number) => {
@@ -329,8 +340,26 @@ test("isStrippedEnvKey: the well-known credential FAMILIES an operator's shell c
   }
 });
 
-test("isStrippedEnvKey: the keep-set WINS over the sweep — `OPENAI_API_KEY` matches `*_API_KEY` and must survive anyway, or every review breaks with no way to catch it short of a paid run", () => {
-  for (const key of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME", "CODEX_BIN", "PATH", "HOME", "TMPDIR", "LANG", "TERM", "TZ"]) {
+test("isStrippedEnvKey: the keep-set WINS over the sweep — every supported auth mode survives, or every review breaks with no way to catch it short of a paid run", () => {
+  for (const key of [
+    // Provider transport. Each of these three MATCHES the generic sweep (`_API_KEY`, `_TOKEN`),
+    // which is exactly why they are pinned here: `codex doctor --json` reports
+    // "auth is provided by environment" for each on a machine with no auth file, so a future
+    // widening of the sweep that swallowed one would silently break authentication for those
+    // operators. This assertion is the tripwire.
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "CODEX_ACCESS_TOKEN",
+    "OPENAI_BASE_URL",
+    "CODEX_HOME",
+    "CODEX_BIN",
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "TERM",
+    "TZ",
+  ]) {
     assert.equal(isStrippedEnvKey(key), false, `${key} is required for the session to run at all`);
   }
   // The sweep is a whole-key SUFFIX match, so an innocuous name that merely CONTAINS a keyword stays.
@@ -641,6 +670,33 @@ test("execute (P1-a): a timed-out session whose group DID die reports no orphan 
       false,
     );
   } finally {
+    h.cleanup();
+  }
+});
+
+test("execute (P1-a, last edge): a THROW anywhere in the timeout termination path still settles — the settle lives in an unconditional finally, and the rejection never escapes the void'd coroutine", async () => {
+  // The liveness probe itself throws (a non-ESRCH failure: EPERM, a broken injected probe, ...),
+  // so `awaitKillGrace`/`treeIsGone` blow up INSIDE the coroutine — and the child emits no
+  // `close`/`exit` ever. Before this fix, execution never reached the settle and the lane hung.
+  const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK });
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    h.throwOnLivenessProbe = new Error("EPERM: liveness probe blew up");
+    const p = h.executor.execute(h.req);
+    await Promise.resolve();
+    await Promise.resolve();
+    h.fireTimerAt(SESSION_TIMEOUT_MS);
+    const evidence = await p; // settles despite the throw, with no close/exit ever emitted
+    assert.equal(evidence.outcome, "timeout", "the timeout latch decides the outcome however we got here");
+    // Give any escaped rejection a turn of the loop to surface before asserting it did not.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, [], "a failure in the termination path must never escape as an unhandled rejection");
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
     h.cleanup();
   }
 });

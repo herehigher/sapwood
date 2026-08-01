@@ -161,6 +161,8 @@ export function codexHomeDir(env: Record<string, string | undefined>): string {
  *     `*_API_KEY` sweep, which is exactly why an explicit keep-set exists rather than a cleverer
  *     regex: the one credential this session legitimately needs looks identical to the ones it must
  *     never see.
+ *   - `CODEX_API_KEY`/`CODEX_ACCESS_TOKEN` — the CLI's other two env-auth modes (`codex doctor`
+ *     reports auth-from-environment for each), same sweep-collision story.
  *   - `CODEX_HOME`/`CODEX_BIN` — where the CLI's own auth and binary live (`--ignore-user-config`'s
  *     help text: auth still resolves through `CODEX_HOME`).
  *   - `PATH`, `HOME`, `SHELL`, `USER`, `LOGNAME`, `PWD`, `TMPDIR`, `LANG`, `LC_ALL`, `TERM`,
@@ -169,6 +171,16 @@ export function codexHomeDir(env: Record<string, string | undefined>): string {
 const CODEX_ENV_KEEP: ReadonlySet<string> = new Set([
   "CODEX_HOME",
   "CODEX_BIN",
+  // Round-3 review, P1-b: the CLI's OWN env-auth modes. Verified empirically against the installed
+  // codex-cli 0.145.0 — `codex doctor --json` reports "auth is provided by environment" for EACH of
+  // these with no auth file present, so on a machine that authenticates this way, sweeping them
+  // makes every review fail to authenticate: the broken-runner failure mode this keep-set exists to
+  // prevent. Both MATCH the generic sweep below (`_API_KEY`, `_TOKEN`), which is precisely why they
+  // need explicit entries — the same rationale as `OPENAI_API_KEY`. Exact names, deliberately NOT a
+  // `CODEX_` prefix: a future `CODEX_SOMETHING_TOKEN` that is not provider transport should still
+  // be swept.
+  "CODEX_API_KEY",
+  "CODEX_ACCESS_TOKEN",
   "PATH",
   "HOME",
   "SHELL",
@@ -646,38 +658,58 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
     const cancelTimeout = startTimer(this.deps.timeoutSec * 1000, () => {
       timedOut = true;
       void (async () => {
-        const grace = awaitKillGrace(
-          { onExit: (cb) => child.once("exit", cb) },
-          this.deps.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
-          treeIsGone,
-          (ms, signal) =>
-            new Promise<void>((resolve) => {
-              const cancel = startTimer(ms, resolve);
-              signal.addEventListener(
-                "abort",
-                () => {
-                  cancel();
-                  resolve();
-                },
-                { once: true },
+        // Round-3 review, P1-a (last edge): the ENTIRE body is wrapped, and settlement lives in an
+        // unconditional `finally`. Anything in here can throw — `awaitKillGrace`, the injected
+        // liveness probe, `killGroup`'s own logging — and a throw would otherwise skip the settle
+        // below, wedging the lane exactly as before AND escaping as an unhandled rejection that can
+        // take the engine down (this coroutine is `void`ed: nobody is awaiting it to catch for us).
+        // The `timedOut` latch is already set, so the outcome reads `timeout` however we get here.
+        try {
+          const grace = awaitKillGrace(
+            { onExit: (cb) => child.once("exit", cb) },
+            this.deps.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
+            treeIsGone,
+            (ms, signal) =>
+              new Promise<void>((resolve) => {
+                const cancel = startTimer(ms, resolve);
+                signal.addEventListener(
+                  "abort",
+                  () => {
+                    cancel();
+                    resolve();
+                  },
+                  { once: true },
+                );
+              }),
+          );
+          killGroup("SIGTERM");
+          if ((await grace) !== "gone") {
+            killGroup("SIGKILL");
+            // One last kernel answer AFTER the escalation. A still-observable group here is an
+            // orphaned-tree report for a human — a durable event plus a log line — not a reason to
+            // keep this lane waiting.
+            if (!treeIsGone()) {
+              log(
+                `[sapwood:codex-review] session ${sessionId}: process group ${pid} still observable after SIGKILL — ` +
+                  "settling the review as timeout and leaving the surviving group reported, not awaited",
               );
-            }),
-        );
-        killGroup("SIGTERM");
-        if ((await grace) !== "gone") {
-          killGroup("SIGKILL");
-          // One last kernel answer AFTER the escalation. A still-observable group here is an
-          // orphaned-tree report for a human — a durable event plus a log line — not a reason to
-          // keep this lane waiting.
-          if (!treeIsGone()) {
-            log(
-              `[sapwood:codex-review] session ${sessionId}: process group ${pid} still observable after SIGKILL — ` +
-                "settling the review as timeout and leaving the surviving group reported, not awaited",
-            );
-            this.event(ENGINE_REVIEW_ORPHANED_GROUP, { runner: this.runner, session: sessionId, pid: pid ?? null });
+              this.event(ENGINE_REVIEW_ORPHANED_GROUP, { runner: this.runner, session: sessionId, pid: pid ?? null });
+            }
           }
+        } catch (err) {
+          // Swallowed deliberately: the termination path is best-effort, and its failure must
+          // neither escape as an unhandled rejection nor block the settle in the `finally`.
+          try {
+            log(`[sapwood:codex-review] session ${sessionId}: timeout termination path failed (non-fatal): ${String(err)}`);
+          } catch {
+            /* a broken logger cannot become a gate either */
+          }
+        } finally {
+          // The one line that must run on EVERY path through this coroutine. `settle` is a
+          // promise `resolve` (it cannot throw), and the optional call covers the impossible
+          // "timer fired before the executor ran" ordering rather than assuming it.
+          settle?.(null);
         }
-        settle?.(null);
       })();
     });
 
