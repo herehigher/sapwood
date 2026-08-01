@@ -579,5 +579,11 @@ export async function materializeWithExternalFetch(
     opts.log?.(`[sapwood:review] external-head fetch failed: ${(err as Error).message} (#499)`);
     return first;
   }
-  return materialize(opts);
+  const retry = await materialize(opts);
+  if (retry.kind === "materialized") return retry;
+  // #506 review P2: a failed retry returns the ORIGINAL failure — the contract callers and
+  // tests pin ("otherwise return the original failure"). The retry's own reason is still
+  // surfaced through the log so a divergent second failure is not silently flattened.
+  opts.log?.(`[sapwood:review] retry after external-head fetch still failed: ${retry.reason} (#499)`);
+  return first;
 }

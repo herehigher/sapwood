@@ -1322,6 +1322,11 @@ test("materializeWithExternalFetch (#499): no usable origin -> the original fail
     git(shared, ["commit", "-qm", "A"]);
     const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir: join(cloneRoot, "clone.git"), worktreeRoot });
     const missing = "0123456789012345678901234567890123456789";
+    // #506 review P3: pin the ORIGINAL failure reason byte-for-byte, not just the kind. Same
+    // treeDir for both calls — the checkout-failure reason embeds the --work-tree path, and a
+    // failed checkout leaves the treeDir empty, so reuse is legal.
+    const direct = await materialize({ clone, oid: missing, treeDir: join(treeRoot, "t") });
+    assert.equal(direct.kind, "failure");
     const result = await materializeWithExternalFetch({
       clone,
       oid: missing,
@@ -1329,10 +1334,56 @@ test("materializeWithExternalFetch (#499): no usable origin -> the original fail
       sourceRepoDir: shared,
     });
     assert.equal(result.kind, "failure");
+    if (result.kind === "failure" && direct.kind === "failure") {
+      assert.equal(result.reason, direct.reason, "no-origin path returns the ORIGINAL failure reason unchanged");
+    }
   } finally {
     rmSync(worktreeRoot, { recursive: true, force: true });
     rmSync(cloneRoot, { recursive: true, force: true });
     rmSync(treeRoot, { recursive: true, force: true });
     rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("materializeWithExternalFetch (#499, #506 P2): fetch succeeds but the head is STILL missing -> the original failure reason is returned, the retry's own reason only reaches the log", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const treeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-tree-"));
+  const remote = initSharedRepo();
+  let shared: string | null = null;
+  try {
+    writeFileSync(join(remote, "a.txt"), "a\n");
+    git(remote, ["add", "a.txt"]);
+    git(remote, ["commit", "-qm", "A"]);
+    shared = mkdtempSync(join(tmpdir(), "sapwood-materializer-shared-"));
+    rmSync(shared, { recursive: true, force: true });
+    git(tmpdir(), ["clone", "-q", remote, shared]); // origin -> remote, but the oid below exists NOWHERE
+    const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir: join(cloneRoot, "clone.git"), worktreeRoot });
+    const missing = "0123456789012345678901234567890123456789";
+    // Same treeDir as the fallback call below — the reason string embeds the --work-tree path.
+    const direct = await materialize({ clone, oid: missing, treeDir: join(treeRoot, "t") });
+    assert.equal(direct.kind, "failure");
+    const logged: string[] = [];
+    const result = await materializeWithExternalFetch({
+      clone,
+      oid: missing,
+      treeDir: join(treeRoot, "t"),
+      sourceRepoDir: shared,
+      log: (m) => logged.push(m),
+    });
+    assert.equal(result.kind, "failure");
+    if (result.kind === "failure" && direct.kind === "failure") {
+      assert.equal(result.reason, direct.reason, "retry failure preserves the ORIGINAL reason");
+    }
+    assert.ok(
+      logged.some((m) => m.includes("retry after external-head fetch still failed")),
+      "the retry's own reason reaches the log",
+    );
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(treeRoot, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+    if (shared) rmSync(shared, { recursive: true, force: true });
   }
 });
