@@ -29,6 +29,7 @@ import {
   ENGINE_REVIEW_CONTAINMENT_GAP,
   ENGINE_REVIEW_COST_UNKNOWN,
   ENGINE_REVIEW_ORPHANED_GROUP,
+  ENGINE_REVIEW_SESSION_INSPECTION,
   estimateCodexCostUsd,
   findCodexRollout,
   isStrippedEnvKey,
@@ -233,13 +234,60 @@ test("parseCodexExecStream: picks the thread id and sums turn.completed usage; a
       `{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}\n` +
       `{ truncated tail`,
   );
-  assert.deepEqual(t, { threadId: "t1", usage: { inputTokens: 15, outputTokens: 3 } });
+  assert.deepEqual(t, { threadId: "t1", usage: { inputTokens: 15, outputTokens: 3 }, toolItemCount: 0 });
 });
 
 test("parseCodexExecStream: a stream with no usage at all reports usage null — NOT zero (R1: missing telemetry is never read as free)", () => {
   const t = parseCodexExecStream(`{"type":"thread.started","thread_id":"t1"}\n{"type":"turn.failed","error":{"message":"boom"}}\n`);
   assert.equal(t.threadId, "t1");
   assert.equal(t.usage, null);
+  assert.equal(t.toolItemCount, 0);
+});
+
+// ── #512: the session-inspection census ─────────────────────────────────────────────────────
+
+test("parseCodexExecStream (#512): counts command_execution items — the shell call this runner's control demonstration showed is the actual tree-inspection capability", () => {
+  const t = parseCodexExecStream(
+    `{"type":"thread.started","thread_id":"t1"}\n` +
+      `{"type":"item.completed","item":{"type":"command_execution","command":"rg --files -g 'engine/src/review/*.ts' ."}}\n` +
+      `{"type":"item.completed","item":{"type":"command_execution","command":"rg --files -g 'engine/src/review/*.ts' . | wc -l"}}\n` +
+      `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n`,
+  );
+  assert.equal(t.toolItemCount, 2);
+});
+
+test("parseCodexExecStream (#512): agent_message is NOT a tool call — a diff-only, zero-inspection session counts zero, honestly", () => {
+  const t = parseCodexExecStream(
+    `{"type":"thread.started","thread_id":"t1"}\n` +
+      `{"type":"item.completed","item":{"type":"agent_message"}}\n` +
+      `{"type":"item.completed","item":{"type":"reasoning"}}\n` +
+      `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n`,
+  );
+  assert.equal(t.toolItemCount, 0);
+});
+
+test("parseCodexExecStream (#512): a missing/malformed item.completed item is tolerated, never fatal — mirrors the parser's existing malformed-line tolerance", () => {
+  const t = parseCodexExecStream(
+    `{"type":"thread.started","thread_id":"t1"}\n` +
+      `{"type":"item.completed"}\n` + // no `item` field at all
+      `{"type":"item.completed","item":"not an object"}\n` +
+      `{"type":"item.completed","item":{"noType":true}}\n` +
+      `{"type":"item.completed","item":{"type":"command_execution"}}\n` + // the one real item among the noise
+      `not json at all\n` +
+      `{ truncated tail`,
+  );
+  assert.equal(t.toolItemCount, 1);
+});
+
+test("parseCodexExecStream (#512): a mixed stream counts every recognized tool-ish item type", () => {
+  const t = parseCodexExecStream(
+    `{"type":"item.completed","item":{"type":"command_execution"}}\n` +
+      `{"type":"item.completed","item":{"type":"file_change"}}\n` +
+      `{"type":"item.completed","item":{"type":"mcp_tool_call"}}\n` +
+      `{"type":"item.completed","item":{"type":"web_search"}}\n` +
+      `{"type":"item.completed","item":{"type":"agent_message"}}\n`,
+  );
+  assert.equal(t.toolItemCount, 4);
 });
 
 test("parseCodexRolloutIdentity: provider + model from the session's own transcript; a HALF-known identity is no identity (D5 fail-closed)", () => {
@@ -471,6 +519,59 @@ test("execute (R2): the containment blind-spot warning fires at EVERY spawn and 
       (gap[0]!.payload.gaps as string[]).includes(CONTAINMENT_GAP_HOST_WIDE_FILE_READS),
       "the read-scope gap must be independently greppable",
     );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("execute (#512): the session-inspection census is emitted once per session, carrying the runner, session id, and observed tool-item count — EVIDENCE ONLY, never read back by anything in this test's own assertions on outcome/spend/identity", async () => {
+  const streamWithTools =
+    `Reading prompt from stdin...\n` +
+    `{"type":"thread.started","thread_id":"thread-xyz"}\n` +
+    `{"type":"item.completed","item":{"type":"agent_message"}}\n` +
+    `{"type":"item.completed","item":{"type":"command_execution","command":"rg --files ."}}\n` +
+    `{"type":"item.completed","item":{"type":"command_execution","command":"cat engine/src/foo.test.ts"}}\n` +
+    `{"type":"turn.completed","usage":{"input_tokens":1000,"output_tokens":100}}\n`;
+  const h = harness({ stream: streamWithTools, lastMessage: "x", rollout: ROLLOUT_OK });
+  try {
+    const evidence = await run(h);
+    const inspections = h.events.filter((e) => e.kind === ENGINE_REVIEW_SESSION_INSPECTION);
+    assert.equal(inspections.length, 1, "exactly one census per session");
+    assert.deepEqual(inspections[0]!.payload, { runner: "codex-exec", session: "engine-reviewer-fixed", toolItemCount: 2 });
+    // The evidence still describes a NORMAL, successful session — the census rides alongside the
+    // ordinary outcome/spend/identity evidence, it does not replace or gate any of it.
+    assert.equal(evidence.outcome, "done");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("execute (#512): a zero-tool-call session (the #443 shadow-run failure mode) still gets its census recorded, honestly, as zero — not omitted", async () => {
+  const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK });
+  try {
+    await run(h);
+    const inspections = h.events.filter((e) => e.kind === ENGINE_REVIEW_SESSION_INSPECTION);
+    assert.equal(inspections.length, 1);
+    assert.deepEqual(inspections[0]!.payload, { runner: "codex-exec", session: "engine-reviewer-fixed", toolItemCount: 0 });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("execute (#512): the census is emitted with the module's BEST-EFFORT event() helper, not requireEvent — a failing/absent appendEvent must not stop the session from producing a verdict-worthy outcome (unlike the load-bearing containment-gap record)", async () => {
+  const h = harness({ stream: STREAM_OK, lastMessage: "x", rollout: ROLLOUT_OK });
+  try {
+    // Swap in an appendEvent that throws for every call AFTER the (load-bearing) containment-gap
+    // spawn-time write already succeeded, by making it throw only on this event's kind — proves the
+    // failure is swallowed rather than propagated, exactly like ENGINE_REVIEW_COST_UNKNOWN's own
+    // best-effort append.
+    // biome-ignore lint/suspicious/noExplicitAny: reaching into a private field to arm a targeted failure for this one test
+    (h.executor as any).deps.appendEvent = (kind: string, payload: unknown) => {
+      if (kind === ENGINE_REVIEW_SESSION_INSPECTION) throw new Error("boom");
+      h.events.push({ kind, payload: payload as Record<string, unknown> });
+    };
+    const evidence = await run(h);
+    assert.equal(evidence.outcome, "done", "a broken best-effort event append must never turn a clean session into a failure");
   } finally {
     h.cleanup();
   }
