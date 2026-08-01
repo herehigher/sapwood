@@ -2056,6 +2056,35 @@ test("tick DRIVE (#383): a WAIT-gated lane ticked repeatedly with an UNCHANGED r
   st.close();
 });
 
+test("tick DRIVE (#504): the queued reason reaches the LOG on the same episode-dedupe basis as the event — once per reason change, silent on steady state", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "engine-agent: checkout of deadbeef failed" };
+  const logged: string[] = [];
+  const runTick = () =>
+    tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, log: (m) => logged.push(m) });
+  await runTick();
+  await runTick();
+  await runTick();
+  const wedgeLines = logged.filter((m) => m.includes("[sapwood:drive]"));
+  assert.deepEqual(wedgeLines, ["[sapwood:drive] lane lane-a pr #55 queued: engine-agent: checkout of deadbeef failed"]);
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW" };
+  await runTick();
+  await runTick();
+  assert.deepEqual(
+    logged.filter((m) => m.includes("[sapwood:drive]")),
+    [
+      "[sapwood:drive] lane lane-a pr #55 queued: engine-agent: checkout of deadbeef failed",
+      "[sapwood:drive] lane lane-a pr #55 queued: gate-pending:WAIT_REVIEW",
+    ],
+    "one log line per reason change, never per tick",
+  );
+  st.close();
+});
+
 test("tick DRIVE (#383): a reason CHANGE (e.g. a fresh review trigger swapping in) re-emits drive-queued", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

@@ -3904,6 +3904,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           const sameEpisode = lastQueued != null && lastQueued.id > queuedResetId && lastQueued.reason === outcome.reason;
           if (!sameEpisode) {
             state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+            // #504: the reason was previously visible ONLY inside this event's payload — a lane
+            // wedge-looping on e.g. a review-checkout failure read as healthy ticks in
+            // sapwood.log. Same episode-dedupe as the event: one log line per reason change.
+            deps.log?.(`[sapwood:drive] lane ${w.name} pr #${pr} queued: ${outcome.reason}`);
           }
           driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
           break;
