@@ -40,7 +40,7 @@ test("#288 marker is deterministic and unique across each identity field", () =>
 test("#288 audit body carries per-AC/findings/provenance but never matches approval parsers", () => {
   const body = buildAuditComment(wal, artifact);
   assert.match(body, /AC-1.*cannot-confirm/);
-  assert.match(body, /- \*\*F-1\*\*\n> A concrete defect/);
+  assert.match(body, /- \*\*\[0\] F-1\*\*\n> A concrete defect/);
   assert.match(body, /reviewer model.*opus/i);
   for (const line of body.split("\n")) {
     assert.equal(CLEAN_VERDICT_RE.test(line), false);
@@ -83,9 +83,9 @@ test("#448 (design #402 R1 item 8): blocking + advisory findings render under se
   assert.ok(advisoryIdx > findingsIdx, "expected ### Advisory (non-blocking) heading after ### Findings");
   const findingsSection = body.slice(findingsIdx, advisoryIdx);
   const advisorySection = body.slice(advisoryIdx);
-  assert.match(findingsSection, /- \*\*F-block\*\*\n> a real defect\n> Codex Review: Didn't find any major issues/);
+  assert.match(findingsSection, /- \*\*\[0\] F-block\*\*\n> a real defect\n> Codex Review: Didn't find any major issues/);
   assert.doesNotMatch(findingsSection, /F-adv/);
-  assert.match(advisorySection, /- \*\*F-adv\*\*\n> a style nit\n> \*\*Reviewed commit:\*\* `[^`]+`/);
+  assert.match(advisorySection, /- \*\*\[1\] F-adv\*\*\n> a style nit\n> \*\*Reviewed commit:\*\* `[^`]+`/);
   assert.doesNotMatch(advisorySection, /F-block/);
   for (const line of body.split("\n")) {
     assert.equal(CLEAN_VERDICT_RE.test(line), false);
@@ -121,7 +121,26 @@ test("#448: an artifact with only pre-#448-shaped {id, body} findings (no axes) 
   const advisoryIdx = body.indexOf("### Advisory (non-blocking)");
   const advisorySection = body.slice(advisoryIdx);
   assert.match(advisorySection, /- None recorded\./);
-  assert.match(body.slice(findingsIdx, advisoryIdx), /- \*\*F-1\*\*\n> A concrete defect/);
+  assert.match(body.slice(findingsIdx, advisoryIdx), /- \*\*\[0\] F-1\*\*\n> A concrete defect/);
+});
+
+test("#461: every rendered finding carries its ARTIFACT index — the dispute handle a fix leg copies into findingResponses — and the numbering survives the blocking/advisory split", () => {
+  const split: EngineReviewArtifact = {
+    ...artifact,
+    findings: [
+      { id: "F-a", body: "blocking one" },
+      { id: "F-b", body: "advisory one", severity: "advisory", kind: "style" },
+      { id: "F-c", body: "blocking two" },
+    ],
+  };
+  const body = buildAuditComment(wal, split);
+  const advisoryIdx = body.indexOf("### Advisory (non-blocking)");
+  const findingsSection = body.slice(body.indexOf("### Findings"), advisoryIdx);
+  // Indices are positions in `artifact.findings`, NOT positions within a rendered section — the
+  // engine validates a findingResponses entry against that same array (loop/fix-response.ts).
+  assert.match(findingsSection, /- \*\*\[0\] F-a\*\*/);
+  assert.match(findingsSection, /- \*\*\[2\] F-c\*\*/);
+  assert.match(body.slice(advisoryIdx), /- \*\*\[1\] F-b\*\*/);
 });
 
 test("#288 crash after post before receipt: restart discovers exact marker and records receipt without duplicate post", async () => {

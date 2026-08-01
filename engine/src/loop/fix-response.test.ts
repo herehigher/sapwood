@@ -21,9 +21,11 @@ import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output
 import {
   attemptThreadWrite,
   computeDisputeEscalation,
+  computeFindingDisputeEscalation,
   computeFixResponseHarvest,
   fixLegJournalCursor,
   fixResponseBatchKey,
+  journaledAuditRunIds,
   journaledReviewThreadIds,
   latestThreadResolutions,
   validateFixResponseOutput,
@@ -999,7 +1001,9 @@ test("computeDisputeEscalation: every unresolved current-head thread durably dis
     writes: [{ threadId: "T1", resolution: "disputed", reply: "disagree" }],
   });
   const result = await computeDisputeEscalation(forge, st, disputeCfg(), "lane-a", 55);
-  assert.deepEqual(result, { headOid: "head-1", threads: [{ threadId: "T1", findingBody: "the finding", reply: "disagree" }] });
+  // #461: `items`/`ref`/`source` — the shape generalized to carry the audit-comment channel's
+  // finding disputes alongside the thread ones; the thread path's own data is unchanged.
+  assert.deepEqual(result, { headOid: "head-1", source: "thread", items: [{ ref: "T1", findingBody: "the finding", reply: "disagree" }] });
   st.close();
 });
 
@@ -1174,4 +1178,316 @@ test("computeDisputeEscalation: an unreadable live read (getPRStatus or getPRRev
   forgeB.throwOnThreads = true;
   assert.equal(await computeDisputeEscalation(forgeB, st, disputeCfg(), "lane-a", 55), null);
   st.close();
+});
+
+// ── #461: findingResponses — the audit-comment-shaped dissent channel ────────────────────────
+//
+// Engine-agent findings arrive as ONE audit comment, never review threads, so a fix leg had no
+// machine-readable way to dispute one (every threadResponses entry validates against a journaled
+// `pr_review_threads` id an audit finding structurally does not have). These tests cover the new
+// block's validation matrix, its two-source known-set (journaled audit RUN ids x the WAL
+// artifact's own finding COUNT), and the dispute -> needs-human routing predicate.
+
+const auditJournalRow = (overrides: Record<string, unknown> = {}, pr = 30, runIds: string[] = ["run-1"]) => ({
+  ...journalRow(overrides, pr),
+  tool: "getPRAuditComments",
+  responseCanonical: JSON.stringify({
+    pr,
+    comments: runIds.map((runId) => ({ id: `IC_${runId}`, kind: "engine-agent", head: "head-x", diff: "d", runId, body: "…" })),
+    returned: runIds.length,
+    complete: true,
+  }),
+  ...overrides,
+});
+
+/** A `fixing` lane's world at settle time: the leg's journal cursor, ONE journaled
+ *  getPRAuditComments row it was served, and the WAL row carrying the reviewed artifact whose
+ *  finding COUNT bounds every findingIndex. */
+function seedAuditServedLeg(st: State, opts: { runId?: string; findings?: number; pr?: number; walRunId?: string } = {}): void {
+  const runId = opts.runId ?? "run-1";
+  const pr = opts.pr ?? 30;
+  const cursor = st.maxForgeProxyJournalId("lane-fix");
+  st.appendEvent("fix-leg-started", { worker: "lane-fix", issue: 9, pr, fixRounds: 1, journalCursor: cursor });
+  const id = st.appendForgeProxyJournalIntent({
+    identity: { roundId: 1, phase: "fixing", role: "worker", session: "lane-fix", attempt: 1 },
+    seq: 1,
+    tool: "getPRAuditComments",
+    proxyVersion: "1",
+    argsCanonical: JSON.stringify({ pr }),
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: "2026-08-01T00:00:01Z",
+  });
+  st.recordForgeProxyJournalResponse(id, {
+    responseCanonical: JSON.stringify({
+      pr,
+      comments: [{ id: "IC_1", kind: "engine-agent", head: "head-x", diff: "d", runId, body: "…" }],
+      returned: 1,
+      complete: true,
+    }),
+    contentHash: "h",
+    truncated: false,
+    fetchedAt: "2026-08-01T00:00:01Z",
+  });
+  st.recordEngineReviewWal("lane-fix", {
+    runId: opts.walRunId ?? runId,
+    head: "head-x",
+    base: "base-x",
+    diffHash: "d",
+    attemptStart: "2026-08-01T00:00:00Z",
+  });
+  st.recordEngineReviewWalArtifact(
+    "lane-fix",
+    opts.walRunId ?? runId,
+    "rejected",
+    JSON.stringify({
+      perAC: [],
+      findings: Array.from({ length: opts.findings ?? 2 }, (_, i) => ({ id: `F-${i}`, body: `finding body ${i}` })),
+      sessionActualModels: ["m"],
+      promptHash: "p",
+    }),
+  );
+}
+
+const harvest = (st: State, resultText: string, pr = 30) =>
+  computeFixResponseHarvest(st, { worker: "lane-fix", issue: 9, fixRounds: 1, prNumber: pr, resultText, headOid: "head-x" });
+
+test("#461 AC1: a findingResponses entry naming a served runId + an in-range index validates and rides the batch", () => {
+  const st = new State(":memory:");
+  seedAuditServedLeg(st);
+  const outcome = harvest(
+    st,
+    sapwoodResult({
+      threadResponses: [],
+      findingResponses: [{ runId: "run-1", findingIndex: 1, reply: "the diff never touches that path", resolution: "disputed" }],
+    }),
+  );
+  assert.equal(outcome.kind, "batch");
+  if (outcome.kind !== "batch") return;
+  assert.deepEqual(outcome.batch.findingWrites, [
+    { runId: "run-1", findingIndex: 1, reply: "the diff never touches that path", resolution: "disputed" },
+  ]);
+  assert.deepEqual(outcome.batch.writes, [], "no thread writes — findings carry no thread to reply to");
+  st.close();
+});
+
+test("#461 AC1: an UNKNOWN runId (never served to this leg) rejects the WHOLE output, fail-closed — parity with threadResponses", () => {
+  const st = new State(":memory:");
+  seedAuditServedLeg(st);
+  const outcome = harvest(
+    st,
+    sapwoodResult({
+      threadResponses: [],
+      findingResponses: [{ runId: "run-GHOST", findingIndex: 0, reply: "no", resolution: "disputed" }],
+    }),
+  );
+  assert.equal(outcome.kind, "invalid");
+  if (outcome.kind === "invalid") assert.match(outcome.invalid.reason, /run-GHOST/);
+  st.close();
+});
+
+test("#461 AC1: a findingIndex past the reviewed artifact's own finding count rejects the whole output", () => {
+  const st = new State(":memory:");
+  seedAuditServedLeg(st, { findings: 2 });
+  const outcome = harvest(
+    st,
+    sapwoodResult({ threadResponses: [], findingResponses: [{ runId: "run-1", findingIndex: 2, reply: "no", resolution: "disputed" }] }),
+  );
+  assert.equal(outcome.kind, "invalid");
+  if (outcome.kind === "invalid") assert.match(outcome.invalid.reason, /findingIndex 2/);
+  st.close();
+});
+
+test("#461 AC1: a duplicate (runId, findingIndex) rejects the whole output — one response per finding, never two", () => {
+  const st = new State(":memory:");
+  seedAuditServedLeg(st);
+  const outcome = harvest(
+    st,
+    sapwoodResult({
+      threadResponses: [],
+      findingResponses: [
+        { runId: "run-1", findingIndex: 0, reply: "fixed", resolution: "addressed" },
+        { runId: "run-1", findingIndex: 0, reply: "actually disputed", resolution: "disputed" },
+      ],
+    }),
+  );
+  assert.equal(outcome.kind, "invalid");
+  if (outcome.kind === "invalid") assert.match(outcome.invalid.reason, /duplicate/i);
+  st.close();
+});
+
+test("#461 AC1: malformed entries (empty/whitespace reply, non-integer or negative index, unknown resolution, extra field) all reject", () => {
+  const known = new Map([["run-1", 2]]);
+  const bad: Record<string, unknown>[] = [
+    { runId: "run-1", findingIndex: 0, reply: "   \n ", resolution: "disputed" },
+    { runId: "run-1", findingIndex: 0.5, reply: "x", resolution: "disputed" },
+    { runId: "run-1", findingIndex: -1, reply: "x", resolution: "disputed" },
+    { runId: "run-1", findingIndex: 0, reply: "x", resolution: "ignored" },
+    { runId: "run-1", findingIndex: 0, reply: "x", resolution: "disputed", sneaky: true },
+    { runId: "", findingIndex: 0, reply: "x", resolution: "disputed" },
+  ];
+  for (const entry of bad) {
+    const v = validateFixResponseOutput(sapwoodResult({ threadResponses: [], findingResponses: [entry] }), new Set(), known);
+    assert.equal(v.ok, false, `expected rejection for ${JSON.stringify(entry)}`);
+  }
+});
+
+test("#461 AC3: an output with NO findingResponses block validates exactly as before and carries no findingWrites (byte-identical undisputed flow)", () => {
+  const st = new State(":memory:");
+  seedAuditServedLeg(st);
+  const outcome = harvest(st, sapwoodResult({ threadResponses: [] }));
+  assert.equal(outcome.kind, "batch");
+  if (outcome.kind !== "batch") return;
+  assert.deepEqual(outcome.batch.findingWrites, []);
+  st.settleTerminalWorker(
+    { name: "lane-fix", issue: 9, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 30 },
+    { worker: "lane-fix", issue: 9, usd: 0, at: "2026-08-01T00:00:02Z" },
+    outcome,
+  );
+  const [receipt] = st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-response-queued"]);
+  assert.equal("findingWrites" in (receipt!.payload as object), false, "no new payload field without the new block");
+  st.close();
+});
+
+test("#461: findingResponses are rejected when the leg never called getPRAuditComments at all (no journaled audit row -> nothing known)", () => {
+  const st = new State(":memory:");
+  st.appendEvent("fix-leg-started", { worker: "lane-fix", issue: 9, pr: 30, fixRounds: 1, journalCursor: 0 });
+  st.recordEngineReviewWal("lane-fix", { runId: "run-1", head: "head-x", base: "b", diffHash: "d", attemptStart: "t" });
+  st.recordEngineReviewWalArtifact(
+    "lane-fix",
+    "run-1",
+    "rejected",
+    JSON.stringify({ perAC: [], findings: [{ id: "F-0", body: "b" }], sessionActualModels: ["m"], promptHash: "p" }),
+  );
+  const outcome = harvest(
+    st,
+    sapwoodResult({ threadResponses: [], findingResponses: [{ runId: "run-1", findingIndex: 0, reply: "x", resolution: "disputed" }] }),
+  );
+  assert.equal(outcome.kind, "invalid", "the WAL alone can never authorize a response — the leg must have been SERVED the run");
+  st.close();
+});
+
+test("#461: a WAL that has moved on to a DIFFERENT run than the one journaled to the leg authorizes nothing (fail-closed)", () => {
+  const st = new State(":memory:");
+  seedAuditServedLeg(st, { runId: "run-1", walRunId: "run-2" });
+  const outcome = harvest(
+    st,
+    sapwoodResult({ threadResponses: [], findingResponses: [{ runId: "run-1", findingIndex: 0, reply: "x", resolution: "disputed" }] }),
+  );
+  assert.equal(outcome.kind, "invalid");
+  st.close();
+});
+
+test("#461: journaledAuditRunIds — collects run ids from a served getPRAuditComments row, PR-bound on BOTH request args and response", () => {
+  assert.deepEqual([...journaledAuditRunIds([auditJournalRow({}, 30, ["run-a", "run-b"])] as never, 30)].sort(), ["run-a", "run-b"]);
+  // cross-PR confused-deputy closure, same shape journaledReviewThreadIds already takes
+  assert.deepEqual([...journaledAuditRunIds([auditJournalRow({}, 999, ["run-a"])] as never, 30)], []);
+  assert.deepEqual(
+    [...journaledAuditRunIds([auditJournalRow({ argsCanonical: JSON.stringify({ pr: 30 }) }, 999, ["run-a"])] as never, 30)],
+    [],
+  );
+  // a different tool's row, an unresponded row, and a malformed row all contribute nothing
+  assert.deepEqual([...journaledAuditRunIds([auditJournalRow({ tool: "pr_review_threads" }, 30, ["run-a"])] as never, 30)], []);
+  assert.deepEqual([...journaledAuditRunIds([auditJournalRow({ status: "intent", responseCanonical: null })] as never, 30)], []);
+  assert.deepEqual([...journaledAuditRunIds([auditJournalRow({ responseCanonical: "not json" })] as never, 30)], []);
+});
+
+// ── #461 AC2: dispute routing — an auditable record + an evidenced needs-human escalation ────
+
+/** The durable receipt a settled fix leg leaves behind for its finding responses. */
+const seedFindingResponseQueued = (
+  st: State,
+  writes: { runId: string; findingIndex: number; resolution: "addressed" | "disputed"; reply: string }[],
+  fixRounds = 1,
+) =>
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    batchKey: `lane-a#55#${fixRounds}`,
+    fixRounds,
+    count: 0,
+    headOid: "head-1",
+    threadless: true,
+    newHead: null,
+    writes: [],
+    findingWrites: writes,
+  });
+
+function seedRejectedWal(st: State, runId = "run-1", findings = 2): void {
+  st.recordEngineReviewWal("lane-a", { runId, head: "head-1", base: "b", diffHash: "d", attemptStart: "t" });
+  st.recordEngineReviewWalArtifact(
+    "lane-a",
+    runId,
+    "rejected",
+    JSON.stringify({
+      perAC: [],
+      findings: Array.from({ length: findings }, (_, i) => ({ id: `F-${i}`, body: `FINDING BODY ${i}` })),
+      sessionActualModels: ["m"],
+      promptHash: "p",
+    }),
+  );
+}
+
+test("#461 AC2: a recorded disputed finding for the standing verdict yields dispute evidence — finding ref, reviewer body, producer reply, head", () => {
+  const st = new State(":memory:");
+  seedRejectedWal(st);
+  seedFindingResponseQueued(st, [{ runId: "run-1", findingIndex: 1, resolution: "disputed", reply: "THE PRODUCER REPLY" }]);
+  const escalation = computeFindingDisputeEscalation(st, "lane-a", 55, "run-1");
+  assert.deepEqual(escalation, {
+    headOid: "head-1",
+    source: "finding",
+    items: [{ ref: "run-1#1", findingBody: "FINDING BODY 1", reply: "THE PRODUCER REPLY" }],
+  });
+  st.close();
+});
+
+test("#461 AC2: an ADDRESSED-only finding response never escalates (only a dispute routes)", () => {
+  const st = new State(":memory:");
+  seedRejectedWal(st);
+  seedFindingResponseQueued(st, [{ runId: "run-1", findingIndex: 0, resolution: "addressed", reply: "fixed it" }]);
+  assert.equal(computeFindingDisputeEscalation(st, "lane-a", 55, "run-1"), null);
+  st.close();
+});
+
+test("#461: a dispute recorded against an OLDER run never escalates the CURRENT verdict (fail-closed on a superseded review)", () => {
+  const st = new State(":memory:");
+  seedRejectedWal(st, "run-2");
+  seedFindingResponseQueued(st, [{ runId: "run-1", findingIndex: 0, resolution: "disputed", reply: "stale dispute" }]);
+  assert.equal(computeFindingDisputeEscalation(st, "lane-a", 55, "run-2"), null);
+  st.close();
+});
+
+test("#461: a LATER round's addressed response supersedes an earlier dispute of the same finding (last receipt wins)", () => {
+  const st = new State(":memory:");
+  seedRejectedWal(st);
+  seedFindingResponseQueued(st, [{ runId: "run-1", findingIndex: 0, resolution: "disputed", reply: "disagree" }], 1);
+  seedFindingResponseQueued(st, [{ runId: "run-1", findingIndex: 0, resolution: "addressed", reply: "ok, fixed" }], 2);
+  assert.equal(computeFindingDisputeEscalation(st, "lane-a", 55, "run-1"), null);
+  st.close();
+});
+
+test("#461: no WAL artifact for the standing verdict -> null (never escalates on evidence it cannot show)", () => {
+  const st = new State(":memory:");
+  st.recordEngineReviewWal("lane-a", { runId: "run-1", head: "head-1", base: "b", diffHash: "d", attemptStart: "t" });
+  seedFindingResponseQueued(st, [{ runId: "run-1", findingIndex: 0, resolution: "disputed", reply: "disagree" }]);
+  assert.equal(computeFindingDisputeEscalation(st, "lane-a", 55, "run-1"), null);
+  st.close();
+});
+
+test("#461: a disputed index outside the artifact's finding range is dropped, never rendered as evidence", () => {
+  const st = new State(":memory:");
+  seedRejectedWal(st, "run-1", 1);
+  seedFindingResponseQueued(st, [{ runId: "run-1", findingIndex: 5, resolution: "disputed", reply: "disagree" }]);
+  assert.equal(computeFindingDisputeEscalation(st, "lane-a", 55, "run-1"), null);
+  st.close();
+});
+
+test("#461 D1(b): the shipped fix.md documents findingResponses with runId + findingIndex copied from the audit comment", () => {
+  const content = readFileSync(defaultFixPromptPath(), "utf8");
+  assert.match(content, /findingResponses/);
+  assert.match(content, /findingIndex/);
+  assert.match(content, /runId/);
 });

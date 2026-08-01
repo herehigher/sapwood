@@ -45,7 +45,8 @@
 import { z } from "zod";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, ReviewThreadsPage } from "../forge/forge.js";
-import { TOOL_PR_REVIEW_THREADS } from "../proxy/tools.js";
+import { TOOL_PR_AUDIT_COMMENTS, TOOL_PR_REVIEW_THREADS } from "../proxy/tools.js";
+import { parseEngineReviewArtifact } from "../review/audit.js";
 import type { FixResponseSettleOutcome, ForgeProxyJournalRow, PendingThreadWrite, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 
@@ -62,9 +63,26 @@ const FixThreadResponseEntrySchema = z
   })
   .strict();
 
+/** #461: the audit-comment-shaped mirror of `FixThreadResponseEntrySchema`. An engine-agent
+ *  finding is delivered in ONE audit comment (`review/audit.ts`), never as a review thread, so it
+ *  has no `threadId` to key on — its identity is `(runId, findingIndex)`, both rendered in that
+ *  same comment. Same field discipline as its thread twin: trimmed-non-empty reply, closed
+ *  resolution enum, strict object. */
+const FixFindingResponseEntrySchema = z
+  .object({
+    runId: z.string().min(1),
+    findingIndex: z.number().int().nonnegative(),
+    reply: z.string().refine((s) => s.trim().length > 0, { message: "reply must not be empty or whitespace-only" }),
+    resolution: z.enum(["addressed", "disputed"]),
+  })
+  .strict();
+
 const FixResponseMetadataSchema = z
   .object({
     threadResponses: z.array(FixThreadResponseEntrySchema),
+    /** #461: OPTIONAL — a leg that emits no `findingResponses` at all validates, settles, and
+     *  receipts byte-identically to its pre-#461 self (issue AC3). */
+    findingResponses: z.array(FixFindingResponseEntrySchema).optional(),
   })
   .strict();
 
@@ -74,7 +92,16 @@ export interface FixThreadResponse {
   resolution: "addressed" | "disputed";
 }
 
-export type FixResponseValidation = { ok: true; responses: FixThreadResponse[] } | { ok: false; reason: string };
+export interface FixFindingResponse {
+  runId: string;
+  findingIndex: number;
+  reply: string;
+  resolution: "addressed" | "disputed";
+}
+
+export type FixResponseValidation =
+  | { ok: true; responses: FixThreadResponse[]; findingResponses: FixFindingResponse[] }
+  | { ok: false; reason: string };
 
 function describeZodError(error: z.ZodError): string {
   return error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
@@ -89,7 +116,16 @@ function describeZodError(error: z.ZodError): string {
  *  is valid (nothing to report -> nothing executed). Duplicate threadId entries are rejected
  *  outright (Codex #110-review duplicate-entry fail-open class): the contract is ONE response
  *  per thread. */
-export function validateFixResponseOutput(text: string, knownThreadIds: ReadonlySet<string>): FixResponseValidation {
+export function validateFixResponseOutput(
+  text: string,
+  knownThreadIds: ReadonlySet<string>,
+  /** #461: runId -> how many findings that run's REVIEWED ARTIFACT actually contains — the bound
+   *  every `findingIndex` is checked against. Built by `knownAuditFindingCounts` below from two
+   *  independent facts (the leg was SERVED that run's audit comment; the engine's own WAL holds
+   *  that run's finding array). Defaults to EMPTY, so a caller that supplies nothing rejects every
+   *  `findingResponses` entry — fail-closed, never fail-open, for pre-#461 call sites. */
+  knownFindingCounts: ReadonlyMap<string, number> = new Map(),
+): FixResponseValidation {
   const block = parseStructuredBlock(text);
   if (!block) return { ok: false, reason: "no structured output block found (missing or truncated sentinel)" };
   let metadata: unknown;
@@ -115,7 +151,26 @@ export function validateFixResponseOutput(text: string, knownThreadIds: Readonly
       };
     }
   }
-  return { ok: true, responses: parsed.data.threadResponses };
+  const findingResponses = parsed.data.findingResponses ?? [];
+  const seenFindings = new Set<string>();
+  for (const r of findingResponses) {
+    const key = `${r.runId}#${r.findingIndex}`;
+    if (seenFindings.has(key)) {
+      return { ok: false, reason: `duplicate finding ${key} in findingResponses — one response per finding, never two` };
+    }
+    seenFindings.add(key);
+    const count = knownFindingCounts.get(r.runId);
+    if (count === undefined) {
+      return {
+        ok: false,
+        reason: `runId ${r.runId} was not present in the journaled getPRAuditComments response(s) served to this leg for this PR/round`,
+      };
+    }
+    if (r.findingIndex >= count) {
+      return { ok: false, reason: `findingIndex ${r.findingIndex} is out of range for run ${r.runId} (${count} finding(s) reviewed)` };
+    }
+  }
+  return { ok: true, responses: parsed.data.threadResponses, findingResponses };
 }
 
 /** Every review-thread id that appeared in a 'fetched'/'delivered' `pr_review_threads` journal
@@ -157,6 +212,62 @@ export function journaledReviewThreadIds(rows: readonly ForgeProxyJournalRow[], 
     }
   }
   return ids;
+}
+
+/** #461: every engine-review RUN id this leg was actually SERVED an audit comment for, scoped to
+ *  `expectedPr` — the audit-comment twin of `journaledReviewThreadIds` above, and the first of the
+ *  two facts a `findingResponses` entry must clear. Same PR-binding discipline (BOTH the journaled
+ *  REQUEST args and the RESPONSE must name `expectedPr`, closing the same cross-PR confused-deputy
+ *  shape), same round-scoping by the caller's cursor, same skip-never-throw stance on a malformed
+ *  row. `runId` is read as a STRUCTURED field of the tool's own response envelope
+ *  (`proxy/tools.ts`'s `fetchPRAuditCommentsResponse`, which spreads the parsed marker), never
+ *  scraped out of the rendered Markdown body — the doctrine's authoritative-signals rule. */
+export function journaledAuditRunIds(rows: readonly ForgeProxyJournalRow[], expectedPr: number): Set<string> {
+  const runIds = new Set<string>();
+  for (const row of rows) {
+    if (row.tool !== TOOL_PR_AUDIT_COMMENTS) continue;
+    if (row.status !== "fetched" && row.status !== "delivered") continue;
+    if (!row.responseCanonical) continue;
+    let argsPr: unknown;
+    try {
+      argsPr = (JSON.parse(row.argsCanonical) as { pr?: unknown }).pr;
+    } catch {
+      continue;
+    }
+    if (argsPr !== expectedPr) continue;
+    let parsed: { pr?: unknown; comments?: { runId?: unknown }[] };
+    try {
+      parsed = JSON.parse(row.responseCanonical) as { pr?: unknown; comments?: { runId?: unknown }[] };
+    } catch {
+      continue;
+    }
+    if (parsed.pr !== expectedPr) continue;
+    for (const c of parsed.comments ?? []) {
+      if (typeof c.runId === "string") runIds.add(c.runId);
+    }
+  }
+  return runIds;
+}
+
+/** #461: the `findingIndex` bound, per run — the SECOND fact a `findingResponses` entry must
+ *  clear, and the one the leg cannot influence at all. The count comes from the engine's OWN
+ *  persisted review artifact (the `engine_review_wal` row's `EngineReviewArtifact.findings`, the
+ *  same array `review/audit.ts` numbers `[N]` when it renders the comment), and is honored ONLY
+ *  when that run is also in `servedRunIds` — a leg may only answer a review it was actually shown,
+ *  and may only name an index that review actually produced. A WAL that has already moved on to a
+ *  newer run authorizes NOTHING (returns empty): the engine cannot prove what the leg was shown,
+ *  so it trusts none of it. */
+export function knownAuditFindingCounts(
+  state: Pick<State, "getEngineReviewWal">,
+  worker: string,
+  servedRunIds: ReadonlySet<string>,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  const wal = state.getEngineReviewWal(worker);
+  if (!wal || !servedRunIds.has(wal.runId) || !wal.reviewArtifactJson) return counts;
+  const artifact = parseEngineReviewArtifact(wal.reviewArtifactJson);
+  if (artifact) counts.set(wal.runId, artifact.findings.length);
+  return counts;
 }
 
 /** #247 D2/F1 (Codex sol-high PR #265 review rounds 1+2): the per-fix-round journal cursor —
@@ -222,7 +333,7 @@ export function fixResponseBatchKey(worker: string, pr: number, fixRounds: numbe
  *  everything lands, or nothing does (the row stays `fixing`, retried next tick, and re-derives
  *  the identical batch from the SAME resultText/journal). */
 export function computeFixResponseHarvest(
-  state: Pick<State, "listForgeProxyJournalForSession" | "eventsSince">,
+  state: Pick<State, "listForgeProxyJournalForSession" | "eventsSince" | "getEngineReviewWal">,
   input: {
     worker: string;
     issue: number;
@@ -252,7 +363,11 @@ export function computeFixResponseHarvest(
   const cursor = fixLegJournalCursor(state, input.worker, input.fixRounds);
   const rows = cursor != null ? state.listForgeProxyJournalForSession(input.worker, cursor) : [];
   const known = journaledReviewThreadIds(rows, input.prNumber);
-  const validated = validateFixResponseOutput(input.resultText, known);
+  // #461: the audit-comment channel's own known-set — served runs (journal) x that run's reviewed
+  // finding count (WAL). Empty on the classic path (no audit comment is ever served there), which
+  // is exactly the fail-closed default validateFixResponseOutput applies to `findingResponses`.
+  const knownFindings = knownAuditFindingCounts(state, input.worker, journaledAuditRunIds(rows, input.prNumber));
+  const validated = validateFixResponseOutput(input.resultText, known, knownFindings);
   if (!validated.ok) {
     return { kind: "invalid", invalid: { worker: input.worker, issue: input.issue, pr: input.prNumber, reason: validated.reason } };
   }
@@ -265,6 +380,7 @@ export function computeFixResponseHarvest(
       fixRounds: input.fixRounds,
       batchKey: fixResponseBatchKey(input.worker, input.prNumber, input.fixRounds),
       writes: validated.responses,
+      findingWrites: validated.findingResponses,
       headOid: input.headOid,
       threadless: input.threadless ?? false,
       newHead: input.newHead ?? null,
@@ -326,18 +442,27 @@ export function latestThreadResolutions(
   return latest;
 }
 
-/** One thread's evidence for a `review-disputed` escalation comment (design §4's five items,
- *  minus the two the caller already has — worker/issue/pr are the lane's own, fix rounds spent is
- *  `w.fix_rounds`). */
-export interface DisputedThreadEvidence {
-  threadId: string;
+/** One disputed item's evidence for a `review-disputed` escalation comment (design §4's five
+ *  items, minus the two the caller already has — worker/issue/pr are the lane's own, fix rounds
+ *  spent is `w.fix_rounds`). `ref` is whatever identifies the disputed thing on its own path: a
+ *  GitHub review-thread id (classic) or `<runId>#<findingIndex>` (#461, engine-agent). */
+export interface DisputedEvidence {
+  ref: string;
   findingBody: string;
   reply: string;
 }
 
 export interface DisputeEscalation {
   headOid: string;
-  threads: DisputedThreadEvidence[];
+  /** #461: which channel carried the dispute. Both end at the SAME needs-human escalation
+   *  (conductor.ts's `escalateReviewDisputed`, the same `review-disputed` event kind and the same
+   *  #147 gated-reentry way out) — the tag only picks the noun the comment/payload use, so a human
+   *  reading the audit trail can tell a thread dispute from an audit-comment finding dispute. The
+   *  two are mutually exclusive on any one tick by construction: the classic predicate needs live
+   *  unresolved threads (which the engine-agent path never has), the finding predicate needs a
+   *  `verdictRunId` (which the classic path never carries). */
+  source: "thread" | "finding";
+  items: DisputedEvidence[];
 }
 
 /** #451 (design #402 §4/D4): true iff EVERY unresolved review thread on the PR's CURRENT head has
@@ -403,11 +528,11 @@ export async function computeDisputeEscalation(
   const unresolved = threadsPage.threads.filter((t) => !t.isResolved);
   if (unresolved.length === 0) return null; // nothing to adjudicate (also the whole §4a engine-agent case)
   const records = latestThreadResolutions(state.eventsSince("1970-01-01T00:00:00.000Z", ["fix-response-queued"]), worker, pr);
-  const threads: DisputedThreadEvidence[] = [];
+  const items: DisputedEvidence[] = [];
   for (const t of unresolved) {
     const record = records.get(t.id);
     if (record === undefined || record.resolution !== "disputed" || record.headOid !== headOid) return null;
-    threads.push({ threadId: t.id, findingBody: t.comments[0]?.body ?? "(no comment body available)", reply: record.reply });
+    items.push({ ref: t.id, findingBody: t.comments[0]?.body ?? "(no comment body available)", reply: record.reply });
   }
   // #451 gate② round 3 (Codex P1): TOCTOU close — re-validate immediately before the caller acts
   // on this result. See this function's own doc for the race the two reads above are exposed to.
@@ -418,7 +543,82 @@ export async function computeDisputeEscalation(
     return null; // fail-closed: cannot reconfirm — never escalate on an unproven current state
   }
   if (recheck.state !== "OPEN" || recheck.headOid !== headOid) return null;
-  return { headOid, threads };
+  return { headOid, source: "thread", items };
+}
+
+/** #461: every finding response this lane has durably recorded for (worker, pr), newest receipt
+ *  wins per `(runId, findingIndex)` — the audit-comment twin of `latestThreadResolutions` above,
+ *  folded from the SAME `fix-response-queued` receipts (state.ts's settleTerminalWorker) for the
+ *  same reason: nothing on GitHub records that a producer disputed an audit-comment finding (the
+ *  comment is engine-written and never edited, and there is no thread to leave unresolved), so
+ *  this ledger is the only durable carrier. Malformed entries contribute nothing, never throw. */
+export function latestFindingResolutions(
+  events: readonly { kind: string; payload: unknown }[],
+  worker: string,
+  pr: number,
+): Map<string, FixFindingResponse> {
+  const latest = new Map<string, FixFindingResponse>();
+  for (const e of events) {
+    if (e.kind !== "fix-response-queued") continue;
+    const payload = e.payload as {
+      worker?: unknown;
+      pr?: unknown;
+      findingWrites?: readonly { runId?: unknown; findingIndex?: unknown; resolution?: unknown; reply?: unknown }[];
+    } | null;
+    if (payload?.worker !== worker || payload?.pr !== pr) continue;
+    for (const w of payload.findingWrites ?? []) {
+      if (typeof w.runId !== "string" || typeof w.findingIndex !== "number" || !Number.isInteger(w.findingIndex)) continue;
+      if (w.resolution !== "addressed" && w.resolution !== "disputed") continue;
+      latest.set(`${w.runId}#${w.findingIndex}`, {
+        runId: w.runId,
+        findingIndex: w.findingIndex,
+        resolution: w.resolution,
+        reply: typeof w.reply === "string" ? w.reply : "",
+      });
+    }
+  }
+  return latest;
+}
+
+/** #461 (the audit-comment counterpart of `computeDisputeEscalation` above): the evidence for a
+ *  needs-human escalation when a fix leg answered the STANDING engine-agent verdict by disputing
+ *  one or more of its findings. Returns `null` — caller falls through to today's decision,
+ *  unchanged — whenever there is nothing to adjudicate or the dispute cannot be PROVEN current.
+ *
+ *  Currency is proven by the run id alone, and that is stronger than it looks: an engine-agent
+ *  verdict is head-and-diff-pinned (`review/drive.ts`'s WAL), so `verdictRunId` — the run whose
+ *  rejection caused THIS tick's fixable (`merge-driver.ts`'s finalizeVerdict) — changes the moment
+ *  the PR does. A dispute recorded against an older run therefore never speaks for the current
+ *  verdict, and a leg that actually pushed gets re-reviewed under a new run id whose findings
+ *  nobody has disputed yet. No live forge read is needed (or made) to establish any of this.
+ *
+ *  FAIL-CLOSED, same posture as its thread twin: no WAL row, a WAL that has moved past
+ *  `verdictRunId`, an unparseable/absent artifact, or an out-of-range index all yield "no proven
+ *  dispute" rather than an escalation the engine cannot show its evidence for. Nothing here
+ *  approves anything or touches the verdict — producer ≠ reviewer: the dispute is routed to a
+ *  human, never honored by the engine. */
+export function computeFindingDisputeEscalation(
+  state: Pick<State, "eventsSince" | "getEngineReviewWal">,
+  worker: string,
+  pr: number,
+  verdictRunId: string,
+): DisputeEscalation | null {
+  const wal = state.getEngineReviewWal(worker);
+  if (!wal || wal.runId !== verdictRunId || !wal.reviewArtifactJson) return null;
+  const artifact = parseEngineReviewArtifact(wal.reviewArtifactJson);
+  if (!artifact) return null;
+  const records = [
+    ...latestFindingResolutions(state.eventsSince("1970-01-01T00:00:00.000Z", ["fix-response-queued"]), worker, pr).values(),
+  ];
+  const items = records
+    .filter((r) => r.resolution === "disputed" && r.runId === verdictRunId && r.findingIndex < artifact.findings.length)
+    .sort((a, b) => a.findingIndex - b.findingIndex)
+    .map((r) => ({
+      ref: `${r.runId}#${r.findingIndex}`,
+      findingBody: artifact.findings[r.findingIndex]?.body ?? "(finding body unavailable)",
+      reply: r.reply,
+    }));
+  return items.length > 0 ? { headOid: wal.head, source: "finding", items } : null;
 }
 
 // ── Durable-queue execution (mirrors conductor.ts's attemptRollback shape, #31) ─────────────

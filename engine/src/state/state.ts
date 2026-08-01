@@ -1308,6 +1308,18 @@ export interface FixResponseSettleWrite {
   resolution: "addressed" | "disputed";
 }
 
+/** #461: one finding response from the audit-comment dissent channel. Unlike a thread write it
+ *  enqueues NOTHING — an engine-agent finding has no thread to reply to or resolve, and the engine
+ *  never edits its own audit comment — so this rides the receipt event only: an `addressed` entry
+ *  for audit completeness, a `disputed` one as the durable record `computeFindingDisputeEscalation`
+ *  (loop/fix-response.ts) reads back to route the dispute to a human. */
+export interface FixResponseSettleFindingWrite {
+  runId: string;
+  findingIndex: number;
+  reply: string;
+  resolution: "addressed" | "disputed";
+}
+
 export interface FixResponseSettleBatch {
   worker: string;
   issue: number;
@@ -1315,6 +1327,9 @@ export interface FixResponseSettleBatch {
   fixRounds: number;
   batchKey: string;
   writes: FixResponseSettleWrite[];
+  /** #461: see `FixResponseSettleFindingWrite`. Optional with an empty default — a pre-#461
+   *  fixture, and every leg that emits no `findingResponses` block, receipts byte-identically. */
+  findingWrites?: FixResponseSettleFindingWrite[];
   /** #451 (design #402 §4/D4): the head this fix round's session actually answered — sourced by
    *  the caller from the lane's OWN `review_triggered_head` (state.ts's WorkerRow), read BEFORE
    *  `settleTerminalWorker`'s own write clears it for a `fixing` lane (reclaimTerminalLane's
@@ -2535,6 +2550,21 @@ export class State {
               resolution: w.resolution,
               reply: capDigest(w.reply, FIX_RESPONSE_LEDGER_REPLY_MAX_CHARS),
             })),
+            // #461: the audit-comment channel's own responses — spread ONLY when the leg emitted
+            // any, so a payload without the new block stays byte-identical to its pre-#461 shape.
+            // Replies are capDigest-bounded for the same reason the thread ones are; unlike them
+            // this IS the only copy (nothing is enqueued for a finding), which is exactly why the
+            // bound is marked rather than silent.
+            ...((batch.findingWrites ?? []).length > 0
+              ? {
+                  findingWrites: batch.findingWrites!.map((w) => ({
+                    runId: w.runId,
+                    findingIndex: w.findingIndex,
+                    resolution: w.resolution,
+                    reply: capDigest(w.reply, FIX_RESPONSE_LEDGER_REPLY_MAX_CHARS),
+                  })),
+                }
+              : {}),
           });
         }
       }
