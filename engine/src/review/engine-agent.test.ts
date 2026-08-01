@@ -384,10 +384,22 @@ test("cost-remainder: attempt 2's budget = costCapUsd - attempt 1's recorded cos
 // ── #513: onReviewArtifact accumulates every executed attempt's spend, fires exactly once ──────
 
 test("#513 retry path: two EXECUTED attempts persist two sessionSpends entries (in order), decisive-only identities, onReviewArtifact fires exactly once", async () => {
+  // #513 gate② round 2 (P3-A): attempt 1 and attempt 2 report DISTINCT identities (both still
+  // distinguishable from the worker's WORKER_MODEL, so D5 passes on both) — with the old test,
+  // both attempts happened to report the SAME default AGENT_MODEL identity, so an implementation
+  // that wrongly accumulated identities across attempts (instead of scoping to the decisive one)
+  // would have deduped down to the identical asserted single-entry array and passed anyway. Only
+  // a genuinely DIFFERENT attempt-1 identity makes the "decisive-only" assertion below load-bearing.
+  const ATTEMPT_1_MODEL = "opus-legacy-attempt-1-only";
   const { build, artifactCalls } = mkDeps({
     runnerQueue: [
-      mkSessionResult({ resultText: "garbage — attempt 1 produced nothing usable", costUsd: 1, costKnown: true }),
-      mkSessionResult({ resultText: ALL_CONFIRMED, costUsd: 0.4, costKnown: true }),
+      mkSessionResult({
+        resultText: "garbage — attempt 1 produced nothing usable",
+        costUsd: 1,
+        costKnown: true,
+        modelUsage: [{ model: ATTEMPT_1_MODEL, inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 }],
+      }),
+      mkSessionResult({ resultText: ALL_CONFIRMED, costUsd: 0.4, costKnown: true }), // default identity: AGENT_MODEL
     ],
   });
   const result = await build().evaluate(ctx());
@@ -398,8 +410,9 @@ test("#513 retry path: two EXECUTED attempts persist two sessionSpends entries (
     { kind: "known", usd: 1 },
     { kind: "known", usd: 0.4 },
   ]);
-  // Identities are scoped to the DECISIVE attempt only — attempt 1's own (failed) session
-  // identity is never folded in, even though its spend is.
+  // Identities are scoped to the DECISIVE attempt (attempt 2, AGENT_MODEL) only — attempt 1's own
+  // DIFFERENT (failed) session identity (ATTEMPT_1_MODEL) is never folded in, even though its
+  // spend is.
   assert.deepEqual(sessionActualIdentities, [{ provider: "anthropic", model: AGENT_MODEL }]);
 });
 

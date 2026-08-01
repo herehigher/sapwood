@@ -254,17 +254,55 @@ test("#513 rendering: any attempt unknown -> total unclaimable, recorded subtota
 });
 
 test("#513 gate② P2: an EMPTY sessionSpends never renders a positive measurement claim from zero data (mirrors renderIdentityClause's own empty-array stance)", () => {
+  // buildAuditComment is exercised DIRECTLY (never via parseEngineReviewArtifact) — gate② round 2
+  // (P2-B) now makes an empty sessionSpends unreachable through the parser (see the dedicated
+  // rejection test below), so this defensive branch is belt-and-braces for an artifact built
+  // in-process, not something a validated WAL row can ever carry.
   const noSpends: EngineReviewArtifact = { ...artifact, sessionSpends: [] };
   const body = buildAuditComment(wal, noSpends);
   assert.match(body, /logical-review spend `no attempt spend recorded`/);
   assert.doesNotMatch(body, /\$0\.000000/);
   assert.doesNotMatch(body, /0 attempts/);
-  // A hand-built artifact carrying an EMPTY array still round-trips through parse/render intact —
-  // `Array.isArray([]) === true` and `.every()` on an empty array is vacuously true, so this shape
-  // is a defensive branch reachable via a corrupted/hand-written WAL row, not dead code.
-  const parsed = parseEngineReviewArtifact(JSON.stringify(noSpends));
-  assert.ok(parsed);
-  assert.deepEqual(parsed!.sessionSpends, []);
+});
+
+test("#513 gate② round 2 (P2-B): parseEngineReviewArtifact rejects EMPTY sessionActualIdentities/sessionSpends — evaluate() always produces at least one of each, so this states the real contract", () => {
+  const emptyIdentities = { ...artifact, sessionActualIdentities: [] };
+  assert.equal(parseEngineReviewArtifact(JSON.stringify(emptyIdentities)), null);
+  const emptySpends = { ...artifact, sessionSpends: [] };
+  assert.equal(parseEngineReviewArtifact(JSON.stringify(emptySpends)), null);
+});
+
+test("#513 gate② round 2 (P2-B): parseEngineReviewArtifact rejects an empty-string provider/model and a negative/non-finite usd", () => {
+  const emptyProvider = { ...artifact, sessionActualIdentities: [{ provider: "", model: "claude-opus-4-6" }] };
+  assert.equal(parseEngineReviewArtifact(JSON.stringify(emptyProvider)), null);
+  const emptyModel = { ...artifact, sessionActualIdentities: [{ provider: "anthropic", model: "" }] };
+  assert.equal(parseEngineReviewArtifact(JSON.stringify(emptyModel)), null);
+  const negativeUsd = { ...artifact, sessionSpends: [{ kind: "known", usd: -0.01 }] };
+  assert.equal(parseEngineReviewArtifact(JSON.stringify(negativeUsd)), null);
+  // JSON.parse('{"usd":1e999}') yields Infinity — Number.isFinite must reject it, or the render
+  // path would produce the nonsense "$Infinity".
+  const infiniteUsd = JSON.stringify({ ...artifact, sessionSpends: [{ kind: "estimated", usd: 1 }] }).replace('"usd":1}', '"usd":1e999}');
+  assert.equal(parseEngineReviewArtifact(infiniteUsd), null);
+});
+
+test("#513 gate② round 2 (P2-A): every attempt unknown (zero numeric entries) -> no subtotal claimed at all, never `$0.000000`", () => {
+  const allUnknown: EngineReviewArtifact = { ...artifact, sessionSpends: [{ kind: "unknown" }, { kind: "unknown" }] };
+  const body = buildAuditComment(wal, allUnknown);
+  assert.match(body, /logical-review spend `unknown total`; no numeric spend recorded \(2 attempts; 2 lacked telemetry\)/);
+  assert.doesNotMatch(body, /\$0\.000000/);
+  assert.doesNotMatch(body, /subtotal/);
+});
+
+test("#513 gate② round 2 (P2-A): an estimated attempt's dollars contributing to an unknown-attempt subtotal stay LABELLED as an estimate, never laundered into a bare number", () => {
+  const estimatedPlusUnknown: EngineReviewArtifact = {
+    ...artifact,
+    sessionSpends: [{ kind: "estimated", usd: 0.05 }, { kind: "unknown" }],
+  };
+  const body = buildAuditComment(wal, estimatedPlusUnknown);
+  assert.match(
+    body,
+    /logical-review spend `unknown total`; recorded numeric subtotal estimate `\$0\.050000` \(2 attempts; 1 lacked telemetry\)/,
+  );
 });
 
 test("#513 retry path (via a hand-built two-attempt artifact): two sessionSpends entries persist and render honestly", () => {

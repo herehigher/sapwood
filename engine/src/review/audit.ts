@@ -107,22 +107,36 @@ function renderIdentityClause(identities: readonly ReviewSessionIdentity[]): str
  *   - every executed attempt `known`     -> a real, summed, provider-reported total.
  *   - any attempt `estimated` (none `unknown`) -> the SAME summed total, but labelled an estimate
  *     (token usage × pinned prices) — mixing in an estimated attempt makes the sum inexact too.
- *   - any attempt `unknown`              -> no total is claimable; report the recorded numeric
- *     subtotal (known + estimated attempts only) alongside how many attempts lacked telemetry,
- *     never silently treating "unknown" as "$0".
+ *   - any attempt `unknown`, at least one OTHER attempt numeric -> no total is claimable; report
+ *     the recorded numeric subtotal (known + estimated attempts only) alongside how many attempts
+ *     lacked telemetry, never silently treating "unknown" as "$0". If that subtotal itself
+ *     includes an `estimated` entry, the subtotal is labelled an estimate too (#513 gate② round 2
+ *     P2-A) — otherwise an estimated dollar figure would launder into an unqualified "recorded
+ *     numeric subtotal" the moment an unknown attempt joins it.
+ *   - EVERY attempt `unknown` (zero numeric entries at all) -> no subtotal clause at all (#513
+ *     gate② round 2 P2-A) — a "recorded numeric subtotal `$0.000000`" would itself be exactly the
+ *     "unknown read as $0" failure this whole function exists to forbid, just wearing a subtotal
+ *     label instead of a total one.
  *  `spends` is one entry per EXECUTED attempt, in order (`EngineReviewArtifact.sessionSpends`'s
  *  own doc) — never an aggregate computed elsewhere. */
 function renderSpendClause(spends: readonly ReviewSessionSpend[]): string {
   if (spends.length === 0) return "logical-review spend `no attempt spend recorded`";
   const n = spends.length;
   const attempts = `${n} attempt${n === 1 ? "" : "s"}`;
-  const numeric = (s: ReviewSessionSpend): number => (s.kind === "unknown" ? 0 : s.usd);
-  const unknownCount = spends.filter((s) => s.kind === "unknown").length;
+  const isNumeric = (s: ReviewSessionSpend): s is Extract<ReviewSessionSpend, { usd: number }> => s.kind !== "unknown";
+  const unknownCount = spends.length - spends.filter(isNumeric).length;
   if (unknownCount > 0) {
-    const subtotal = spends.reduce((sum, s) => sum + numeric(s), 0);
-    return `logical-review spend \`unknown total\`; recorded numeric subtotal \`$${subtotal.toFixed(6)}\` (${attempts}; ${unknownCount} lacked telemetry)`;
+    const numericSpends = spends.filter(isNumeric);
+    if (numericSpends.length === 0) {
+      return `logical-review spend \`unknown total\`; no numeric spend recorded (${attempts}; ${unknownCount} lacked telemetry)`;
+    }
+    const subtotal = numericSpends.reduce((sum, s) => sum + s.usd, 0);
+    const subtotalLabel = numericSpends.some((s) => s.kind === "estimated")
+      ? "recorded numeric subtotal estimate"
+      : "recorded numeric subtotal";
+    return `logical-review spend \`unknown total\`; ${subtotalLabel} \`$${subtotal.toFixed(6)}\` (${attempts}; ${unknownCount} lacked telemetry)`;
   }
-  const total = spends.reduce((sum, s) => sum + numeric(s), 0);
+  const total = spends.reduce((sum, s) => sum + (s.kind === "unknown" ? 0 : s.usd), 0);
   if (spends.some((s) => s.kind === "estimated")) {
     return `logical-review spend estimate (token usage × pinned prices; ${attempts}) \`$${total.toFixed(6)}\``;
   }
@@ -166,24 +180,27 @@ Provenance: ${renderIdentityClause(artifact.sessionActualIdentities)}; ${renderS
 }
 
 /** #513: strict per-identity validation — both fields of the `(provider, model)` pair are
- *  required strings, exactly the same fail-closed posture `perAC`/`findings` already get below. */
+ *  required NON-EMPTY strings, exactly the same fail-closed posture `perAC`/`findings` already
+ *  get below. Empty-string acceptance was gate② round 2's P2-B finding: an empty `provider`/
+ *  `model` is not a fact any real session telemetry produces (D5 empty-array handling maps "no
+ *  identity" to a MISSING array entry, never a present-but-blank one), so accepting it here would
+ *  let a corrupted row assert a hollow identity as if it were real. */
 function isValidIdentity(v: unknown): v is ReviewSessionIdentity {
-  return (
-    !!v &&
-    typeof v === "object" &&
-    typeof (v as { provider?: unknown }).provider === "string" &&
-    typeof (v as { model?: unknown }).model === "string"
-  );
+  if (!v || typeof v !== "object") return false;
+  const id = v as { provider?: unknown; model?: unknown };
+  return typeof id.provider === "string" && id.provider.length > 0 && typeof id.model === "string" && id.model.length > 0;
 }
 
 /** #513: strict per-spend validation of the `ReviewSessionSpend` discriminated union — `known`/
- *  `estimated` require a numeric `usd`, `unknown` requires nothing else, any other `kind` (or a
- *  missing one) fails closed to `null` via the `.every()` call site below, exactly as a malformed
- *  `perAC`/`findings` entry already does. */
+ *  `estimated` require a FINITE, NON-NEGATIVE numeric `usd` (gate② round 2 P2-B: bare
+ *  `typeof usd === "number"` let `JSON.parse('{"usd":1e999}')`'s `Infinity` and negative figures
+ *  through, both of which render as nonsense dollar amounts — `$Infinity`, or a spend below zero),
+ *  `unknown` requires nothing else, any other `kind` (or a missing one) fails closed to `null` via
+ *  the `.every()` call site below, exactly as a malformed `perAC`/`findings` entry already does. */
 function isValidSpend(v: unknown): v is ReviewSessionSpend {
   if (!v || typeof v !== "object") return false;
   const s = v as { kind?: unknown; usd?: unknown };
-  if (s.kind === "known" || s.kind === "estimated") return typeof s.usd === "number";
+  if (s.kind === "known" || s.kind === "estimated") return typeof s.usd === "number" && Number.isFinite(s.usd) && s.usd >= 0;
   return s.kind === "unknown";
 }
 
@@ -191,7 +208,20 @@ function isValidSpend(v: unknown): v is ReviewSessionSpend {
  *  `sessionSpends` at all) fails the `Array.isArray(v.sessionSpends)` check below and returns
  *  `null` — `deliverEngineReviewAudit` already reports its existing named reason ("WAL has no
  *  validated decisive review artifact") for a `null` parse, so this is a VALIDATION guarantee
- *  (fail closed on a stale/malformed artifact), not a compatibility one. */
+ *  (fail closed on a stale/malformed artifact), not a compatibility one.
+ *
+ *  #513 gate② round 2 (P2-B): `sessionActualIdentities`/`sessionSpends` must be NON-EMPTY, not
+ *  merely present arrays — `evaluate()` always produces at least one identity and one spend for a
+ *  verdict-producing artifact (D5's post-session check already fails a verdict closed on an empty
+ *  identity list; `attempt()` always folds the decisive attempt's own spend into `sessionSpends`),
+ *  so a non-empty requirement states the real contract rather than tightening an arbitrary one.
+ *  This is also the root cause the round 2 P2 traced its own defensive empty-array rendering
+ *  branches to: with this check in place, `renderIdentityClause`/`renderSpendClause`'s own
+ *  empty-array handling can only ever be reached by an artifact built directly in-process (never
+ *  by anything that has round-tripped through this parser), belt-and-braces rather than the only
+ *  thing standing between a corrupted WAL row and a false claim. `perAC`/`findings` stay
+ *  LEGITIMATELY empty-able (a snapshot with no AC entries, an approved verdict with zero
+ *  findings) — this tightening applies only to the two new #513 fields. */
 export function parseEngineReviewArtifact(json: string): EngineReviewArtifact | null {
   try {
     const v = JSON.parse(json) as Partial<EngineReviewArtifact>;
@@ -199,7 +229,9 @@ export function parseEngineReviewArtifact(json: string): EngineReviewArtifact | 
       !Array.isArray(v.perAC) ||
       !Array.isArray(v.findings) ||
       !Array.isArray(v.sessionActualIdentities) ||
+      v.sessionActualIdentities.length === 0 ||
       !Array.isArray(v.sessionSpends) ||
+      v.sessionSpends.length === 0 ||
       typeof v.promptHash !== "string"
     )
       return null;
