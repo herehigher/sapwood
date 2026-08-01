@@ -2248,6 +2248,8 @@ test("settleTerminalWorker (D4): a validated batch's worker row + spend + EVERY 
         fixRounds: 1,
         batchKey: "lane-fix#1",
         headOid: "head-x",
+        threadless: false,
+        newHead: null,
         writes: [
           { threadId: "T1", reply: "fixed", resolution: "addressed" },
           { threadId: "T2", reply: "disagree", resolution: "disputed" },
@@ -2336,6 +2338,8 @@ test("settleTerminalWorker (D4 crash-ordering): a thrown mid-batch enqueue rolls
           fixRounds: 1,
           batchKey: "lane-fix#1",
           headOid: "head-x",
+          threadless: false,
+          newHead: null,
           writes: [
             { threadId: "T1", reply: "fixed", resolution: "addressed" },
             { threadId: "T2", reply: "disagree", resolution: "disputed" }, // this insert throws
@@ -3537,5 +3541,45 @@ test("listRounds is the rounds spine: every row, artifact left-joined, cursors a
   assert.equal(rounds[2]!.status, "in_progress");
   assert.equal(rounds[2]!.endedAt, null);
   assert.equal(rounds[2]!.eventCount, 0, "an open round with no events of its own counts none");
+  s.close();
+});
+
+// ── #490: engine-agent receipt honesty — threadless shape + local head ────────────────────────
+
+test("settleTerminalWorker (#490): an engine-agent (threadless) batch's receipt carries threadless:true + newHead — count:0 no longer reads as an empty leg", () => {
+  const s = new State(":memory:");
+  s.upsertWorker({ name: "lane-ea", issue: 9, session_id: "s", state: "fixing", started_at: "t", ended_at: null, pr: 30 });
+  s.settleTerminalWorker(
+    { name: "lane-ea", issue: 9, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 30 },
+    { worker: "lane-ea", issue: 9, usd: 0.05, at: "2026-08-01T00:00:00Z" },
+    {
+      kind: "batch",
+      batch: {
+        worker: "lane-ea",
+        issue: 9,
+        pr: 30,
+        fixRounds: 1,
+        batchKey: "lane-ea#30#1",
+        headOid: null,
+        threadless: true,
+        newHead: "ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34",
+        writes: [],
+      },
+    },
+  );
+  const events = s.eventsSince("1970-01-01T00:00:00.000Z", ["fix-response-queued"]);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0]!.payload, {
+    worker: "lane-ea",
+    issue: 9,
+    pr: 30,
+    batchKey: "lane-ea#30#1",
+    fixRounds: 1,
+    count: 0,
+    headOid: null,
+    threadless: true,
+    newHead: "ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34",
+    writes: [],
+  });
   s.close();
 });

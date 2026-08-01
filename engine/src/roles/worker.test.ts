@@ -50,6 +50,7 @@ import {
   parseToolUsage,
   probeLlmPing,
   renderPromptTemplate,
+  resolveWorktreeHead,
   scanEgressSuspects,
   shellSingleQuote,
   spawnClaudeSession,
@@ -5110,6 +5111,104 @@ test("resume: fix-leg entry does NOT remove the stale terminal sentinel when the
     );
     s.dispose();
     s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #490: resolveWorktreeHead — pure-file worktree head resolution ────────────────────────────
+
+test("resolveWorktreeHead (#490): detached HEAD (raw sha) resolves directly", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-wth-"));
+  try {
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    writeFileSync(join(dir, ".git", "HEAD"), "AB12cd34ab12cd34ab12cd34ab12cd34ab12cd34\n");
+    assert.equal(resolveWorktreeHead(join(dir, ".git")), "ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveWorktreeHead (#490): linked-worktree gitdir file -> symbolic HEAD -> loose ref in the commondir", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-wth-"));
+  try {
+    const common = join(dir, "main-repo-.git");
+    const wtGit = join(common, "worktrees", "lane-a");
+    mkdirSync(join(common, "refs", "heads"), { recursive: true });
+    mkdirSync(wtGit, { recursive: true });
+    mkdirSync(join(dir, "wt"), { recursive: true });
+    writeFileSync(join(dir, "wt", ".git"), `gitdir: ${wtGit}\n`);
+    writeFileSync(join(wtGit, "HEAD"), "ref: refs/heads/feature\n");
+    writeFileSync(join(wtGit, "commondir"), "../..\n");
+    writeFileSync(join(common, "refs", "heads", "feature"), "1234567890abcdef1234567890abcdef12345678\n");
+    assert.equal(resolveWorktreeHead(join(dir, "wt", ".git")), "1234567890abcdef1234567890abcdef12345678");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveWorktreeHead (#490): packed ref (no loose file) resolves through packed-refs", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-wth-"));
+  try {
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
+    writeFileSync(
+      join(dir, ".git", "packed-refs"),
+      "# pack-refs with: peeled fully-peeled sorted\nfeedfacefeedfacefeedfacefeedfacefeedface refs/heads/main\n",
+    );
+    assert.equal(resolveWorktreeHead(join(dir, ".git")), "feedfacefeedfacefeedfacefeedfacefeedface");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveWorktreeHead (#490): missing/unresolvable shapes return null, never a guess", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-wth-"));
+  try {
+    assert.equal(resolveWorktreeHead(join(dir, "nope", ".git")), null);
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/gone\n");
+    assert.equal(resolveWorktreeHead(join(dir, ".git")), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveWorktreeHead (#490, #509 P2): a stale refs/heads shadow in the WORKTREE gitdir must not win over the common store", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-wth-"));
+  try {
+    const common = join(dir, "main-repo-.git");
+    const wtGit = join(common, "worktrees", "lane-a");
+    mkdirSync(join(common, "refs", "heads"), { recursive: true });
+    mkdirSync(join(wtGit, "refs", "heads"), { recursive: true });
+    mkdirSync(join(dir, "wt"), { recursive: true });
+    writeFileSync(join(dir, "wt", ".git"), `gitdir: ${wtGit}\n`);
+    writeFileSync(join(wtGit, "HEAD"), "ref: refs/heads/feature\n");
+    writeFileSync(join(wtGit, "commondir"), "../..\n");
+    // The shadow (stale/worker-created) and the real shared ref disagree — the COMMON one wins.
+    writeFileSync(join(wtGit, "refs", "heads", "feature"), "baadf00dbaadf00dbaadf00dbaadf00dbaadf00d\n");
+    writeFileSync(join(common, "refs", "heads", "feature"), "1234567890abcdef1234567890abcdef12345678\n");
+    assert.equal(resolveWorktreeHead(join(dir, "wt", ".git")), "1234567890abcdef1234567890abcdef12345678");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveWorktreeHead (#490, #509 P2): a worktree-local namespace (refs/bisect) resolves from the worktree gitdir and never falls through to the common packed-refs", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-wth-"));
+  try {
+    const common = join(dir, "main-repo-.git");
+    const wtGit = join(common, "worktrees", "lane-a");
+    mkdirSync(join(wtGit, "refs", "bisect"), { recursive: true });
+    mkdirSync(common, { recursive: true });
+    mkdirSync(join(dir, "wt"), { recursive: true });
+    writeFileSync(join(dir, "wt", ".git"), `gitdir: ${wtGit}\n`);
+    writeFileSync(join(wtGit, "HEAD"), "ref: refs/bisect/bad\n");
+    writeFileSync(join(wtGit, "commondir"), "../..\n");
+    writeFileSync(join(wtGit, "refs", "bisect", "bad"), "feedfacefeedfacefeedfacefeedfacefeedface\n");
+    // A same-named entry in the common packed-refs must be ignored for a worktree-local ref.
+    writeFileSync(join(common, "packed-refs"), "ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34 refs/bisect/bad\n");
+    assert.equal(resolveWorktreeHead(join(dir, "wt", ".git")), "feedfacefeedfacefeedfacefeedfacefeedface");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
