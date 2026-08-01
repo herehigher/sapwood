@@ -628,6 +628,7 @@ checklist item**):
 | `rollback-recovered` | Returned issue #{issue} to the backlog safely |
 | `rollback-retry-failed` | Still trying to return issue #{issue} to the backlog |
 | `rollback-escalated` | Couldn't return issue #{issue} automatically — flagged for a human |
+| `engine-review-verdict` | Branches on `payload.outcome` (#489): approved → "Review approved PR #{pr} — {findingCount} finding(s) noted"; rejected → "Review sent PR #{pr} back — {findingCount} finding(s) to fix". The engine's own reviewer reaching a decision, emitted once per review run (`runId`); the sentence stops there — what happens next is narrated by `merged` / `drive-fixup` themselves. A SUMMARY: counts only, since the findings themselves live in the PR's audit comment. `findingCount`/`perAC` are `null` when the run's artifact wasn't observed — say "counts unavailable", never "0" |
 | `reviewer-fallback-switch` | The usual reviewer isn't answering — switched to the backup |
 | `reviewer-fallback-revert` | The usual reviewer is back — switched back |
 | `pr-held` | A person put PR #{pr} on hold — nothing moves until they lift it |
@@ -662,7 +663,8 @@ checklist item**):
 | `retro-pr-degraded` | A self-improvement proposal didn't come together this round |
 | `run-started` | Engine started a new run |
 | `instance-lock-taken-over` | Took over the engine lock left by a crashed run (pid {previousPid}) |
-| `round-phase` | Round {round_id} moved into {phase} |
+| `round-phase` | Round {round_id} moved into {phase}. The terminal `closed` entry additionally carries the idle-churn breaker's own per-round sample (#470): `idle` (this round dispatched nothing and left no lane in flight) and, for an idle round only, `fp` — a digest of every durable fact the round appended. Both are diagnostics for that breaker's ledger-derived streak, not feed copy; the sentence is unchanged |
+| `idle-churn-detected` | The loop ran {rounds} rounds in a row that changed nothing at all — parked for a human (#470). Names the standby probe signal(s) that kept opening those rounds. Not an attention *strip* item: like `rapid-restart-detected` and `consecutive-stalls-detected`, its waiting-on-a-human state is carried by its park episode (`PARKED (idle-churn)`), and it carries no issue |
 
 The same module captions lane states (`running` → "writing", `driving` → "PR
 under review", `handoff` → "handed off") and config keys (§3 E). Adding an

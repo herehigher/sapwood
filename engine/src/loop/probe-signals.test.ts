@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { Issue } from "../forge/forge.js";
 import type { PendingRollback, WorkerRow } from "../state/state.js";
-import { PROBE_SIGNALS, type ProbeCtx, probeSignalsHaveWork } from "./probe-signals.js";
+import { firstWorkSignal, PROBE_SIGNALS, type ProbeCtx } from "./probe-signals.js";
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -72,9 +72,9 @@ const FIXTURES: Record<string, () => ProbeCtx> = {
       eventsAfterId: () => [{ id: 1, kind: "triage-decision-accepted", payload: { round_id: 1, concerns: [{ issue: 7, reason: "r" }] } }],
     },
   }),
-  "active-workers": () => ({ ...baseCtx(), state: { ...baseCtx().state, activeWorkers: oneWorker } }),
-  "handoff-workers": () => ({ ...baseCtx(), state: { ...baseCtx().state, handoffWorkers: oneWorker } }),
-  "gated-failed-workers": () => ({ ...baseCtx(), state: { ...baseCtx().state, gatedFailedWorkers: oneWorker } }),
+  "active-lanes": () => ({ ...baseCtx(), state: { ...baseCtx().state, activeWorkers: oneWorker } }),
+  "handoff-resume-candidates": () => ({ ...baseCtx(), state: { ...baseCtx().state, handoffWorkers: oneWorker } }),
+  "gated-reentry-candidates": () => ({ ...baseCtx(), state: { ...baseCtx().state, gatedFailedWorkers: oneWorker } }),
   "ready-issues": () => ({ ...baseCtx(), forge: { ...baseCtx().forge, getReadyIssues: async () => [mkIssue()] } }),
   "plan-review-candidates": () => ({
     ...baseCtx(),
@@ -84,7 +84,7 @@ const FIXTURES: Record<string, () => ProbeCtx> = {
     ...baseCtx(),
     forge: { ...baseCtx().forge, getIssuesNeedingPlanTriage: async () => [mkIssue()] },
   }),
-  "pooled-eligible-issues": () => {
+  "pooled-plan-review-repair": () => {
     const cfg = allOnCfg();
     return {
       ...baseCtx(),
@@ -94,7 +94,7 @@ const FIXTURES: Record<string, () => ProbeCtx> = {
       forge: { ...baseCtx().forge, getPoolEligibleIssues: async () => [mkIssue({ labels: [cfg.labels.roundPool] })] },
     };
   },
-  "milestone-open-issues": () => {
+  "milestone-backlog": () => {
     const cfg = allOnCfg();
     return {
       ...baseCtx(),
@@ -145,9 +145,11 @@ test("#469 AC2: registry -> behavior — every probing signal has a fixture, eve
     [],
     "fixture(s) for a signal that no longer exists (or is now a blind spot) — delete them",
   );
-  assert.equal(await probeSignalsHaveWork(baseCtx()), false, "the all-empty baseline must NOT open a round");
+  assert.equal(await firstWorkSignal(baseCtx()), null, "the all-empty baseline must NOT open a round");
   for (const name of probing) {
-    assert.equal(await probeSignalsHaveWork(FIXTURES[name]!()), true, `${name}: registered but unreachable — its fixture opens no round`);
+    // #470: the probe returns the NAME, so this also pins each entry's ledger contract — a
+    // fixture that fires some OTHER signal (a shadowing bug) fails here rather than passing.
+    assert.equal(await firstWorkSignal(FIXTURES[name]!()), name, `${name}: registered but unreachable — its fixture opens no round`);
   }
 });
 
@@ -167,36 +169,42 @@ test("#469: local (SQLite) signals are all checked before any forge read — the
   );
 });
 
-/** round.ts's probe body, sliced from source — the delegation check below reads it. */
+/** round.ts's probe, sliced from source — BOTH the signal-returning `probeWorkSignal` and the
+ *  boolean `probeHasWork` view that wraps it (#470), so a signal cannot be smuggled into either.
+ *  The delegation check below reads it. */
 function probeSource(): string {
   const src = readFileSync(join(SRC, "loop/round.ts"), "utf8");
-  const start = src.indexOf("const probeHasWork = async ()");
-  assert.ok(start > 0, "probeHasWork no longer exists in round.ts under that name — re-point this scan");
-  const end = src.indexOf("\n  };\n", start);
-  assert.ok(end > start, "could not find the end of probeHasWork");
+  const start = src.indexOf("const probeWorkSignal = async ()");
+  assert.ok(start > 0, "probeWorkSignal no longer exists in round.ts under that name — re-point this scan");
+  const end = src.indexOf("const toTickDeps = ", start);
+  assert.ok(end > start, "could not find the end of the probe");
   return src.slice(start, end);
 }
 
 test("#469 AC2: behavior -> registry — round.ts's probe holds NO signal of its own; an unregistered addition there fails this test", () => {
   const body = probeSource();
-  assert.ok(body.includes("probeSignalsHaveWork("), "the probe must delegate to the registry");
-  // The one `return true` is the contained-failure arm (a throwing probe counts as work).
-  assert.equal(
-    body.split("return true").length - 1,
-    1,
-    "probeHasWork gained a truth branch of its own — register it in PROBE_SIGNALS (with its terminal) instead",
+  assert.ok(body.includes("firstWorkSignal("), "the probe must delegate to the registry");
+  // #470 made the probe return the firing signal's NAME, so a smuggled signal is a string return.
+  // The one that belongs here is the contained-failure arm: a throwing probe reports
+  // `probe-error` and fails OPEN to opening the round.
+  const stringReturns = body.match(/return "[^"]*"/g) ?? [];
+  assert.deepEqual(
+    stringReturns,
+    ['return "probe-error"'],
+    "the probe named a signal of its own — register it in PROBE_SIGNALS (with its terminal) instead",
   );
-  assert.ok(/catch \(e\) \{[\s\S]*return true;/.test(body), "the surviving `return true` must be the catch's fail-open arm");
-  assert.doesNotMatch(body, /\bforge\.\w+\(/, "probeHasWork must issue no forge read of its own — reads belong to a registry entry");
+  assert.doesNotMatch(body, /\breturn true\b/, "no bare truth branch either — a signal is a registry entry, not a local `return true`");
+  assert.ok(/catch \(e\) \{[\s\S]*return "probe-error";/.test(body), "the surviving string return must be the catch's fail-open arm");
+  assert.doesNotMatch(body, /\bforge\.\w+\(/, "the probe must issue no forge read of its own — reads belong to a registry entry");
   assert.doesNotMatch(
     body.replace(/deps\.state\.appendEvent/g, ""),
     /\bdeps\.state\.\w+\(/,
-    "probeHasWork must issue no state read of its own (appendEvent for the tick-error aside)",
+    "the probe must issue no state read of its own (appendEvent for the tick-error aside)",
   );
 });
 
 test("#469: an eligible-but-UNPOOLED issue still counts as nothing — the round-5 F32 fix survives the refactor", async () => {
   const ctx = baseCtx();
   ctx.forge.getPoolEligibleIssues = async () => [mkIssue({ labels: ["something-else"] })];
-  assert.equal(await probeSignalsHaveWork(ctx), false, "a valid PO `selected: []` judgment must not pin the probe true");
+  assert.equal(await firstWorkSignal(ctx), null, "a valid PO `selected: []` judgment must not pin the probe true");
 });

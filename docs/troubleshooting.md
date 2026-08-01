@@ -263,6 +263,56 @@ Until you act, the park and its single, deduped escalation stand across any numb
 — nothing is re-spammed and nothing is lost. A *transient* wedge (a host sleeping mid-round, a
 passing outage) closes rounds between its stalls and never trips the breaker at all.
 
+## Idle-churn park (#470)
+
+Standby ([configuration.md](configuration.md)'s `round.standby.enabled`) is what stops the loop
+opening rounds it has nothing to do in. It asks one question before each round: *is there
+provably any work?* The failure this park exists for is that question answered **wrongly yes** —
+a probe signal counting work nothing enabled can ever consume (a role that is switched off, a
+selector reading a superset of what the consumer actually takes, a label nobody will ever remove).
+Standby then never engages, and the loop opens round after round, each one perfectly healthy and
+each one achieving exactly nothing. The live case was six such rounds in twelve minutes (dogfood
+F32, rounds 244–249) — found only because a human happened to be reading the round ledger.
+
+The breaker bounds it: once `round.idleChurn.consecutiveIdenticalRoundsThreshold` rounds (default
+5) in a row have closed both **idle** (no dispatch, no lane left in flight) and **state-identical**
+(each appended exactly the same durable facts as the one before — same kinds, same payloads), the
+engine appends `idle-churn-detected`, **parks** dispatch (`PARKED (idle-churn)` in `sapwood
+status`, plus `data/ESCALATION`), and stays up without opening another round.
+
+**Read the event first — it names the diagnosis.** Its `probeSignals` field names the standby
+probe signal(s) that held those rounds open:
+
+```sh
+sqlite3 data/sapwood.sqlite \
+  "SELECT payload FROM events WHERE kind = 'idle-churn-detected' ORDER BY id DESC LIMIT 1"
+```
+
+- A **named signal** (e.g. `ready-issues`, `handoff-resume-candidates`, `plan-triage-candidates`)
+  is the thing to investigate: ask what would CONSUME that work. If the honest answer is
+  "nothing, until a person acts", that signal is missing its terminal — the standing design rule
+  is that every signal must name the state in which a deterministic failure stops it counting.
+  The signal names come from `probe-signals.ts`'s `PROBE_SIGNALS` registry, where each entry
+  states its consumer and its terminal in so many words (#469) — read the entry with the name
+  the event gave you. Usually the fix is either that terminal, or the
+  human-side action the signal is waiting on (promote the issue, clear the hold, remove the label).
+- An **empty** list means the probe never ran at all — standby is disabled, or its
+  "last round was idle" precondition was never met. Then the churn is not probe-driven; start
+  from the round ledger (`round-phase` events) and what the rounds were doing instead.
+
+Recovery is **operator-explicit — this park never auto-clears**, and unlike an environment park
+there is nothing to probe: the loop itself is healthy, so no signal the engine could re-test would
+mean anything. Fix the cause, then:
+
+```sh
+sqlite3 data/sapwood.sqlite "DELETE FROM park_state WHERE source = 'idle-churn'"
+```
+
+The running loop notices the row is gone at its next round-open check and resumes; a restart works
+too. The streak restarts from zero — the detection event consumes the rounds that produced it —
+so if the cause was not actually fixed, a fresh set of K rounds re-parks as a new episode rather
+than re-spamming the old one.
+
 ## How a dead engine says why it died (#407)
 
 Every run's fate is the **last run-lifecycle event** in the ledger after its `run-started`:

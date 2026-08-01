@@ -8,6 +8,7 @@ import { loadDoctrine, NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge } from "../forge/forge.js";
 import type { RoleRunner } from "../roles/peripheral.js";
 import type { State, WorkerRow } from "../state/state.js";
+import type { PerAcResult } from "./agent-output.js";
 import { deliverEngineReviewAudit, type EngineReviewArtifact } from "./audit.js";
 import type { EngineAgentDriveDeps } from "./drive.js";
 import { makeEngineAgentReviewer } from "./engine-agent.js";
@@ -25,6 +26,18 @@ export interface ProductionEngineAgentOptions {
 }
 
 const REVIEW_TREE_NAME = /^([0-9a-f]{40})-.+/i;
+
+/** #489: the event kind announcing a decisive engine-agent gate② verdict. Copy entry lives in
+ *  docs/frontend-design.md §7 (every engine PR that adds a kind extends that map). */
+export const ENGINE_REVIEW_VERDICT = "engine-review-verdict";
+
+/** Verbatim status keys (`agent-output.ts`'s own vocabulary), all three always present so a
+ *  consumer never has to distinguish "zero" from "absent". */
+function countPerAcStatuses(perAC: readonly PerAcResult[]): Record<PerAcResult["status"], number> {
+  const counts = { confirmed: 0, "cannot-confirm": 0, "claim-accepted": 0 };
+  for (const ac of perAC) counts[ac.status]++;
+  return counts;
+}
 
 function gcWarning(log: (message: string) => void, action: string, err: unknown): void {
   try {
@@ -164,6 +177,52 @@ export function makeProductionEngineAgent(
     },
   });
 
+  /** #489: the decisive gate② verdict, announced in the durable event stream. Under
+   *  `reviewer.mode: engine-agent` the verdict used to live ONLY in the WAL + the PR audit comment,
+   *  so a supervisor watching the event log saw a PR open and then merge with nothing in between —
+   *  reconstructing gate② meant joining three sources by hand. Emitted from the ONE site where a
+   *  WAL row gets its `decisive_outcome`, so there is no second place a verdict can be born.
+   *
+   *  SUMMARY only (counts, never the findings themselves): the full artifact keeps its one home in
+   *  the WAL row / audit comment.
+   *
+   *  LOG-FIRST, before the WAL write (the same ordering the audit path uses), with the log itself
+   *  as the dedup memory (#169/#294) keyed by runId: a crash anywhere around the pair replays into
+   *  exactly ONE event for that run, while the lane's NEXT attempt — a different runId — still gets
+   *  its own. Best-effort like every other observability write here: a failed append is logged, and
+   *  never turns the event log into a gate on the review. */
+  const appendVerdictEvent = (worker: WorkerRow, pr: number, runId: string, outcome: "approved" | "rejected"): void => {
+    try {
+      if (state.runEventRecorded(ENGINE_REVIEW_VERDICT, worker.name, runId)) return;
+      const wal = state.getEngineReviewWal(worker.name);
+      if (!wal || wal.runId !== runId) {
+        // The WAL update below is runId-guarded too and would be a no-op for this run — say so
+        // rather than emitting a verdict event carrying a head this attempt cannot vouch for.
+        log(`[sapwood:engine-review-verdict] lane ${worker.name} has no WAL row for run ${runId} — verdict event not emitted`);
+        return;
+      }
+      const artifact = artifacts.get(wal.head);
+      state.appendEvent(ENGINE_REVIEW_VERDICT, {
+        worker: worker.name,
+        issue: worker.issue,
+        pr,
+        head: wal.head,
+        runId,
+        outcome,
+        // null, not 0: "this composition never saw the artifact" is not "the review found nothing"
+        // (the same never-fabricate stance `treeManifestHash` takes when unobserved).
+        findingCount: artifact ? artifact.findings.length : null,
+        perAC: artifact ? countPerAcStatuses(artifact.perAC) : null,
+      });
+    } catch (err) {
+      try {
+        log(`[sapwood:engine-review-verdict] event append failed (non-fatal): ${String(err)}`);
+      } catch {
+        // A broken logger cannot turn observability into a gate either.
+      }
+    }
+  };
+
   const driveDepsForLane = (worker: WorkerRow, pr: number): Omit<EngineAgentDriveDeps, "forge" | "cfg" | "reviewerAdapter"> => {
     activeWorker = worker.name;
     const deliver = async () => {
@@ -187,6 +246,7 @@ export function makeProductionEngineAgent(
       getWal: () => state.getEngineReviewWal(worker.name),
       recordWal: (wal) => state.recordEngineReviewWal(worker.name, wal),
       recordWalDecisiveOutcome: (runId, outcome) => {
+        appendVerdictEvent(worker, pr, runId, outcome);
         state.recordEngineReviewWalDecisiveOutcome(worker.name, runId, outcome);
         try {
           const wal = state.getEngineReviewWal(worker.name);

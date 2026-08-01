@@ -632,6 +632,24 @@ test("laneEventRecorded (#447): matches only the SAME kind for the SAME (worker,
   s.close();
 });
 
+test("runEventRecorded (#489): scoped to (kind, worker, runId) — a later run of the same lane gets its own answer", () => {
+  const s = mem();
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-a", "run-1"), false);
+
+  s.appendEvent("drive-queued", { worker: "lane-a", issue: 2, pr: 55, runId: "run-1" }); // unrelated kinds never match
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-a", "run-1"), false);
+
+  s.appendEvent("engine-review-verdict", { worker: "lane-a", issue: 2, pr: 55, runId: "run-1", outcome: "rejected" });
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-a", "run-1"), true);
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-b", "run-1"), false, "another lane's run is not this lane's");
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-a", "run-2"), false, "the lane's NEXT attempt is a new run");
+
+  // One-way, like laneEventRecorded: nothing later can un-record this run's verdict.
+  s.appendEvent("merged", { worker: "lane-a", issue: 2, pr: 55 });
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-a", "run-1"), true);
+  s.close();
+});
+
 test("upsertWorkerWithEvent (#447): row write and its event land together — a failing event write rolls the row back", () => {
   const s = mem();
   s.upsertWorker({ name: "lane-a", issue: 2, session_id: "s", state: "failed", started_at: "t", ended_at: "t", pr: 55 });
@@ -3187,8 +3205,8 @@ test("migration v25->v26 clears a decisive engine-review pin whose WAL has no ve
     raw.close();
 
     const s = new State(dbPath);
-    assert.equal(SCHEMA_VERSION, 30); // #398: workers.gated_escalation_carrier (29 -> 30)
-    assert.equal(s.userVersion(), 30);
+    assert.equal(SCHEMA_VERSION, 31); // #470: park_state.source CHECK gains 'idle-churn' (30 -> 31)
+    assert.equal(s.userVersion(), 31);
     assert.equal(s.getEngineReviewAttemptPin("lane-v25"), null, "the lane is re-reviewable on its unchanged head");
     const row = s.getWorker("lane-v25");
     assert.equal(row?.engine_review_pin_head, null);
@@ -3219,8 +3237,8 @@ test("migration v26->v27: a populated v26 DB (predating park_state.reset_hint_at
     raw.close();
 
     const s = new State(dbPath);
-    assert.equal(SCHEMA_VERSION, 30); // #398: workers.gated_escalation_carrier (29 -> 30)
-    assert.equal(s.userVersion(), 30);
+    assert.equal(SCHEMA_VERSION, 31); // #470: park_state.source CHECK gains 'idle-churn' (30 -> 31)
+    assert.equal(s.userVersion(), 31);
     const row = s.parkRow("llm");
     assert.equal(row?.reason, "pre-existing v26 episode");
     assert.equal(row?.triggerIssue, 42);

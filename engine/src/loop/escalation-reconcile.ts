@@ -252,6 +252,17 @@ export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   // and receipted by the next start — stall-breaker.ts's module doc), never this table's
   // label/close/merge reconciliation.
   //
+  // DELIBERATELY ABSENT (#470): `idle-churn-detected` — the idle-churn breaker
+  // (loop/idle-churn.ts) is the third detector built on the park/needs-human paradigm, so the
+  // #431/#407 ruling above applies to it verbatim, and it is recorded here rather than silently
+  // omitted because #470's own AC asks for this table's ruling on the kind. Its waiting-on-a-human
+  // state is carried by its durable `idle-churn` park episode (row + park-escalated lifecycle +
+  // ESCALATION marker + `sapwood status`); the event carries NO issue and applies NO label, so
+  // `openEscalations` would skip it on the `issue === undefined` guard even if it were listed —
+  // a listed row would be dead weight that reads as coverage. Its clearing story is the park's
+  // own (operator-explicit park_state row deletion; the round loop's `waitForDispatchClear`
+  // observes the row's absence and resumes), never this table's label/close/merge reconciliation.
+  //
   // KNOWN, BOUNDED GAP (#295 review round 10, deferred to #404): frontend-design.md §3 also
   // flags two PREDICATE kinds — `reclaim-failed` when `payload.next` is not an automatic
   // continuation, and `reclaim-done` on its no-PR branch. They are attention items only for

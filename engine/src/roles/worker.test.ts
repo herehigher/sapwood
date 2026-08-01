@@ -4427,8 +4427,53 @@ test("WORKER_ALLOWED_TOOLS_NO_GH: byte-identical to WORKER_ALLOWED_TOOLS minus B
 // guard.ts's argv-layer block: it denies the whole `gh pr review`/`gh release` verbs, while
 // the guard only blocks the `--approve`/`--request-changes` argv shapes — out of scope for
 // this constant.
-test("WORKER_DISALLOWED_TOOLS: exact deny-list value — merge/ready (pre-existing) plus review/release (#350)", () => {
-  assert.equal(WORKER_DISALLOWED_TOOLS, "Bash(gh pr merge*),Bash(gh pr ready*),Bash(gh pr review*),Bash(gh release*)");
+test("WORKER_DISALLOWED_TOOLS: exact deny-list value — merge/ready (pre-existing), review/release (#350), governance (#488)", () => {
+  assert.equal(
+    WORKER_DISALLOWED_TOOLS,
+    "Bash(gh pr merge*),Bash(gh pr ready*),Bash(gh pr review*),Bash(gh release*),Bash(gh issue edit*),Bash(gh label*),Bash(gh project*)",
+  );
+});
+
+/** Minimal `Bash(<prefix>*)` matcher — the only rule shape this deny-list uses. Lets the #488
+ *  cases below read as "which commands does a worker session lose", not as a string diff. */
+const deniedBy = (command: string): string | undefined =>
+  WORKER_DISALLOWED_TOOLS.split(",").find((rule) => command.startsWith(rule.replace(/^Bash\(/, "").replace(/\*?\)$/, "")));
+
+// #488: the dispatch/merge gates treat issue labels and board Status as engine-or-human-only
+// signals (plan:approved, round:pool, the Ready lane). A producer that can set them forges the
+// very signals those gates trust — so the permission layer denies them too, mirroring the
+// guard's own already-enforced Category C blocks on `gh label`/`gh project`/governance-flag
+// `gh issue edit` (guard.test.ts's BLOCK matrix). `gh api` is deliberately NOT denied here:
+// read-only `gh api` is ordinary worker usage and a coarse prefix rule cannot separate it from
+// a mutation, which is exactly the argv-shape judgement the guard already makes.
+test("WORKER_DISALLOWED_TOOLS: label / board-status mutation is denied for the producer (#488)", () => {
+  for (const cmd of [
+    "gh issue edit 488 --add-label sapwood:plan:approved",
+    "gh issue edit 488 --remove-label sapwood:blocked",
+    "gh label create forged",
+    "gh label edit hold --color ff0000",
+    "gh label delete hold",
+    "gh project item-edit --id ITEM --field-id STATUS --single-select-option-id READY",
+    "gh project item-add 4 --url https://github.com/o/r/issues/488",
+  ]) {
+    assert.ok(deniedBy(cmd), `expected a deny rule to cover: ${cmd}`);
+  }
+});
+
+// The change is a boundary narrowing, not a `gh` removal — the stock worker workflow (push,
+// open the PR, talk on the issue/PR, read state) must survive it untouched.
+test("WORKER_DISALLOWED_TOOLS: ordinary worker gh usage stays allowed (#488)", () => {
+  for (const cmd of [
+    "gh pr create --title t --body b",
+    "gh pr comment 488 --body b",
+    "gh pr view 488",
+    "gh issue view 488",
+    "gh issue comment 488 --body b",
+    "gh issue list --label sapwood:round:pool",
+    "gh api repos/o/r/issues/488",
+  ]) {
+    assert.equal(deniedBy(cmd), undefined, `expected no deny rule to cover: ${cmd}`);
+  }
 });
 
 // #244 (Codex sol-high PR #260 review, P2): fail-closed policy — credentialFree + a failed mint

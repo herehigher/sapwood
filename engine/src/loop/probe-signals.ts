@@ -84,7 +84,9 @@ export type ProbeCtx = {
  *  deliberately does not hold rounds open for. Registered anyway so the inventory is complete —
  *  a reader can see that the case was considered, not forgotten. */
 export type ProbeSignal = {
-  /** Stable identity, used by the inventory test and in review discussion. Unique. */
+  /** Stable identity: the inventory test's key, AND (#470) the name this signal reports into
+   *  the `idle-churn-detected` event when it is the one holding rounds open — so it is a ledger
+   *  contract, not just a label. Unique. */
   name: string;
   /** `local`: SQLite only (cheap, checked first). `forge`: a GitHub read. `none`: neither —
    *  the fact isn't observable through any API this probe could call. */
@@ -139,7 +141,7 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
   // pending-rollbacks above as the cheap signals checked before any network call. Each set is
   // exactly what its consumer can still act on (disabled-consumer rule).
   {
-    name: "active-workers",
+    name: "active-lanes",
     read: "local",
     consumer: "conductor.ts tick() RECLAIM/DRIVE/FIXING phases — always live, no gate",
     terminal:
@@ -147,7 +149,7 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
     probe: (ctx) => ctx.state.activeWorkers().length > 0,
   },
   {
-    name: "handoff-workers",
+    name: "handoff-resume-candidates",
     read: "local",
     consumer: "conductor.ts resume scheduler — always live, no gate",
     terminal:
@@ -155,7 +157,7 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
     probe: (ctx) => ctx.state.handoffWorkers().length > 0,
   },
   {
-    name: "gated-failed-workers",
+    name: "gated-reentry-candidates",
     read: "local",
     consumer: "conductor.ts tick() GATED RECLAIM (#147) — skipped entirely without a merge gate, so gated on deps.mergeGate",
     terminal:
@@ -196,7 +198,7 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
     probe: async (ctx) => (await ctx.forge.getIssuesNeedingPlanTriage()).length > 0,
   },
   {
-    name: "pooled-eligible-issues",
+    name: "pooled-plan-review-repair",
     read: "forge",
     // #432 round 5 (Codex P1 finding 1, gate② confirm round 2 — round 4's own version of this
     // line was itself an F32 generator): the round-pool's ELIGIBLE set (forge.ts's
@@ -227,7 +229,7 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
     probe: async (ctx) => (await ctx.forge.getPoolEligibleIssues()).some((i) => labelsInclude(i.labels, ctx.cfg.labels.roundPool)),
   },
   {
-    name: "milestone-open-issues",
+    name: "milestone-backlog",
     read: "forge",
     // #127 gate② R1 (same disabled-consumer rule): the milestone catch-all exists because an
     // open not-yet-Ready issue in the round's milestone is exactly what the PO/aligning pass
@@ -371,15 +373,19 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
   // kind, so it correctly never counts and needs no terminal of its own.
 ];
 
-/** Iterate the registry in order; the FIRST consumable signal that fires wins. Same ordering,
- *  same guards, same short-circuiting as the `if (...) return true;` chain this replaced — a
- *  gated-off signal never issues its read (round.test.ts asserts exactly that for the two
- *  role-gated forge signals). Throws propagate to round.ts's probe, which contains them. */
-export async function probeSignalsHaveWork(ctx: ProbeCtx): Promise<boolean> {
+/** Iterate the registry in order; the FIRST consumable signal that fires wins, and its `name`
+ *  is the return value (#470: the probe reports WHICH signal held the round open, so the
+ *  idle-churn breaker's event carries the F32 diagnosis instead of the next incident having to
+ *  re-derive it from source). `null` = nothing to do. Same ordering, same guards, same
+ *  short-circuiting as the `if (...) return true;` chain this replaced — a gated-off signal
+ *  never issues its read (round.test.ts asserts exactly that for the two role-gated forge
+ *  signals). Throws propagate to round.ts's probe, which contains them (and reports
+ *  `probe-error` as the signal name, fail-open to opening the round). */
+export async function firstWorkSignal(ctx: ProbeCtx): Promise<string | null> {
   for (const signal of PROBE_SIGNALS) {
     if (signal.probe === null) continue;
     if (signal.enabled && !signal.enabled(ctx)) continue;
-    if (await signal.probe(ctx)) return true;
+    if (await signal.probe(ctx)) return signal.name;
   }
-  return false;
+  return null;
 }

@@ -398,16 +398,33 @@ test("runRounds #206: a full round leaves a round-phase event trail — every ph
   stopSafety();
   assert.equal(result.rounds, 1);
   // The replay spine (frontend-design.md §11): rounds.phase is an in-place UPDATE, so this
-  // trail is the ONLY history of the round state machine the dashboard can fold.
-  assert.deepEqual(deps.state.eventsSince("1970-01-01T00:00:00.000Z", ["round-phase"]), [
-    { kind: "round-phase", payload: { round_id: 1, phase: "aligning" } },
-    { kind: "round-phase", payload: { round_id: 1, phase: "architecting" } },
-    { kind: "round-phase", payload: { round_id: 1, phase: "plan_review" } },
-    { kind: "round-phase", payload: { round_id: 1, phase: "executing" } },
-    { kind: "round-phase", payload: { round_id: 1, phase: "harvesting" } },
-    { kind: "round-phase", payload: { round_id: 1, phase: "retro" } },
-    { kind: "round-phase", payload: { round_id: 1, phase: "closed" } },
-  ]);
+  // trail is the ONLY history of the round state machine the dashboard can fold. #470: the
+  // terminal `closed` entry additionally carries the idle-churn breaker's per-round sample
+  // (`idle`, plus `fp` for an idle round) — asserted separately below so the SPINE assertion
+  // stays about the spine.
+  const trail = deps.state.eventsSince("1970-01-01T00:00:00.000Z", ["round-phase"]);
+  assert.deepEqual(
+    trail.map((e) => ({
+      kind: e.kind,
+      round_id: (e.payload as { round_id: number }).round_id,
+      phase: (e.payload as { phase: string }).phase,
+    })),
+    [
+      { kind: "round-phase", round_id: 1, phase: "aligning" },
+      { kind: "round-phase", round_id: 1, phase: "architecting" },
+      { kind: "round-phase", round_id: 1, phase: "plan_review" },
+      { kind: "round-phase", round_id: 1, phase: "executing" },
+      { kind: "round-phase", round_id: 1, phase: "harvesting" },
+      { kind: "round-phase", round_id: 1, phase: "retro" },
+      { kind: "round-phase", round_id: 1, phase: "closed" },
+    ],
+  );
+  const closedPayload = trail.at(-1)!.payload as { idle: boolean; fp?: string };
+  assert.equal(closedPayload.idle, true, "#470: this round dispatched nothing and left no lane in flight");
+  assert.equal(typeof closedPayload.fp, "string", "#470: an idle round carries its own state fingerprint");
+  for (const e of trail.slice(0, -1)) {
+    assert.deepEqual(Object.keys(e.payload as object).sort(), ["phase", "round_id"], "#470: only the CLOSED entry is stamped");
+  }
   deps.state.close();
 });
 
@@ -4801,5 +4818,201 @@ test("runRounds (#431 rounds 5-6, codex P1): the round-wait green-light clear re
   assert.equal(state.getRound(2), undefined, "no paid round 2 while the rapid-restart park stands");
   assert.ok(pings >= 2, "the probe ran in round 1's tick AND in the wait");
   assert.ok(state.parkRow("rapid-restart") !== null, "the non-llm park stands throughout");
+  state.close();
+});
+
+// ── #470 (F32 backstop): the idle-churn breaker — K idle, state-identical rounds park with
+// ── evidence. Standby stays the first line; this only ever sees churn standby failed to stop. ──
+
+/** The F32 shape, reproduced with the mechanism F32 itself had (PR #466's "superset pool read"):
+ *  a probe signal that counts work the DISPATCH path can never consume. `probeHasWork` reads the
+ *  unscoped forge and sees a Ready issue, so standby never engages and a round opens every time;
+ *  the executing phase reads through PoolScopedForge and sees nothing, so nothing is ever
+ *  dispatched. Every round therefore closes idle, having appended exactly the same nothing. */
+function mkF32Deps(state: State, sleep: (ms: number) => Promise<void>, threshold: number): RoundDeps {
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "unconsumable", body: "", labels: [], milestone: null } as unknown as Issue];
+  return baseDeps({
+    forge,
+    state,
+    sleep,
+    // The pool label the executing phase scopes dispatch to — which issue #1 does NOT carry.
+    poolLabel: "pool",
+    cfg: mkCfg({
+      round: { standby: { enabled: true }, idleChurn: { consecutiveIdenticalRoundsThreshold: threshold } },
+    }),
+  });
+}
+
+test("runRounds #470: K idle, state-identical rounds trip the idle-churn breaker exactly once — it parks, names the probe signal that held the loop open, and no further round opens", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-idle-churn-"));
+  try {
+    const state = new State(join(dir, "sapwood.sqlite"));
+    // Same "operator intervenes the moment the park lands" idiom the #374 empty-spin test uses:
+    // polls durable park state, never a magic sleep-call count.
+    const sleep = async (): Promise<void> => {
+      if (state.isParked()) writeFileSync(join(dir, "KILL_SWITCH"), "");
+    };
+    const deps = mkF32Deps(state, sleep, 3);
+    const result = await runRounds(deps);
+    assert.equal(result.stoppedBy, "kill-switch");
+    const detected = state.eventsAfterId(0, ["idle-churn-detected"]);
+    assert.equal(detected.length, 1, "the breaker fires EXACTLY once — never again every round after");
+    const payload = detected[0]!.payload as { rounds: number; threshold: number; probeSignals: string[]; fingerprint: string };
+    assert.equal(payload.rounds, 3);
+    assert.equal(payload.threshold, 3);
+    assert.deepEqual(
+      payload.probeSignals,
+      ["ready-issues"],
+      "the ledger names the signal that held the round open — no source-reading required",
+    );
+    assert.equal(state.parkRow("idle-churn")?.triggerIssue, null, "parked under its own source, no trigger issue");
+    assert.ok(
+      state.parkRow("idle-churn")?.escalatedAt != null,
+      "escalated at trip time (the local channel — this episode has no issue to comment on)",
+    );
+    assert.equal(result.rounds, 3, "rounds 1-3 closed idle; round 4 was withheld by the park, never opened");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds #470: the streak is LEDGER-derived — a kill -9 mid-count resumes at the same number in a fresh process (no new column, no in-memory counter)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-idle-churn-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    // Run 1: two idle rounds, then "kill -9" (stop the loop, close the DB) mid-count.
+    const state1 = new State(dbPath);
+    const { sleep: sleep1 } = mkSleepSpy();
+    const deps1 = mkF32Deps(state1, sleep1, 3);
+    const stopSafety = boundedStopOnPhase(deps1, 10); // 2 rounds x 5 peripheral phases
+    const first = await runRounds(deps1);
+    stopSafety();
+    assert.equal(first.rounds, 2);
+    assert.equal(state1.eventsAfterId(0, ["idle-churn-detected"]).length, 0, "two rounds is below the threshold");
+    state1.close();
+    // Run 2: a fresh process over the same ledger — the third idle round trips it.
+    const state2 = new State(dbPath);
+    const sleep2 = async (): Promise<void> => {
+      if (state2.isParked()) writeFileSync(join(dir, "KILL_SWITCH"), "");
+    };
+    const deps2 = mkF32Deps(state2, sleep2, 3);
+    const second = await runRounds(deps2);
+    assert.equal(second.stoppedBy, "kill-switch");
+    const detected = state2.eventsAfterId(0, ["idle-churn-detected"]);
+    assert.equal(detected.length, 1);
+    assert.equal((detected[0]!.payload as { rounds: number }).rounds, 3, "the count continued across the process boundary — 2 + 1");
+    assert.equal(second.rounds, 1, "the new process closed ONE round before the ledger-derived streak tripped");
+    state2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds #470: a round that DISPATCHES never trips the breaker, however many rounds run", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [1, 2, 3, 4, 5].map(
+    (number) => ({ number, title: `t${number}`, body: "", labels: [], milestone: null }) as unknown as Issue,
+  );
+  const state = new State(":memory:");
+  const deps = baseDeps({
+    forge,
+    state,
+    sleep,
+    supervisor: new AutoCompleteSupervisor(),
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 }, round: { idleChurn: { consecutiveIdenticalRoundsThreshold: 2 } } }),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 20); // 4 rounds
+  await runRounds(deps);
+  stopSafety();
+  assert.ok(state.eventsAfterId(0, ["dispatched"]).length >= 3, "the fixture really did dispatch every round");
+  assert.equal(state.eventsAfterId(0, ["idle-churn-detected"]).length, 0, "a round that put a lane in flight is never idle");
+  assert.equal(state.isParked(), false);
+  state.close();
+});
+
+test("runRounds #470: a legitimate WAIT — a driving lane on pending CI — never trips the breaker, even though its drive-queued events repeat identically every pass", async () => {
+  const forge = new FakeForge(); // empty backlog: with standby ON, a genuinely idle loop STOPS closing rounds
+  const state = new State(":memory:");
+  let stop = () => {};
+  // The lane's own terminal state ends the run — never a sleep-call count (timing-free).
+  const sleep = async (): Promise<void> => {
+    if (state.getWorker("lane-9")?.state === "done") stop();
+  };
+  state.upsertWorker({ name: "lane-9", issue: 9, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 91 });
+  // Eight identical "still waiting on CI" passes before the verdict lands — the exact shape whose
+  // repeated, byte-identical drive-queued payloads would look state-identical to a fingerprint
+  // taken WITHOUT the lane-occupancy fact beside it.
+  const gate = new ScriptedMergeGate([
+    ...Array.from({ length: 8 }, () => ({ kind: "queued", pr: 91, reason: "awaiting-ci" }) as DriveOutcome),
+    { kind: "merged", pr: 91, headOid: "H" },
+  ]);
+  const deps = baseDeps({
+    forge,
+    state,
+    sleep,
+    mergeGate: gate,
+    cfg: mkCfg({
+      lanes: { max: 1, roundDispatchCap: 1 },
+      round: { standby: { enabled: true }, idleChurn: { consecutiveIdenticalRoundsThreshold: 2 } },
+    }),
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.ok(gate.calls >= 8, `the lane really did sit through repeated WAIT passes (drive passes: ${gate.calls})`);
+  assert.equal(state.eventsAfterId(0, ["idle-churn-detected"]).length, 0, "a waited-on lane is not idle churn");
+  assert.equal(state.isParked(), false);
+  // The structural reason, pinned: the executing phase drains until no lane is in flight, so a
+  // lane awaiting CI holds its round OPEN for as long as it waits. It cannot close eight
+  // identical rounds; it closes ONE round that also carries the merge. Both facts (a round that
+  // never closes, and a closed round whose fingerprint carries `merged`) keep it out of the
+  // streak — no wait, however long, can accrue one.
+  assert.equal(result.rounds, 1, "the whole eight-pass wait happened INSIDE one round — a WAIT closes no rounds at all");
+  assert.equal(
+    state.eventsAfterId(0, ["merged"]).length,
+    1,
+    "…and the one round it did close is the round that merged: a state CHANGE, never an identical repeat",
+  );
+  state.close();
+});
+
+test("runRounds #470: standby stays the FIRST line — a genuinely empty backlog (every open issue on a human hold) stops closing rounds at all, so the breaker never even gets a second sample", async () => {
+  const forge = new FakeForge(); // ready/planReview/triage all empty: the held issues are off every consumable lane
+  const state = new State(":memory:");
+  let stop = () => {};
+  let standbyWaits = 0;
+  const sleep = async (): Promise<void> => {
+    if (state.eventsAfterId(0, ["standby-wait"]).length > standbyWaits) {
+      standbyWaits = state.eventsAfterId(0, ["standby-wait"]).length;
+      if (standbyWaits >= 3) stop(); // standby is provably holding the loop; wind the run down
+    }
+  };
+  const deps = baseDeps({
+    forge,
+    state,
+    sleep,
+    cfg: mkCfg({
+      // Threshold 2: if standby did NOT hold, round 2 would close idle and identical and trip it.
+      round: { standby: { enabled: true }, idleChurn: { consecutiveIdenticalRoundsThreshold: 2 } },
+    }),
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.rounds, 1, "round 1 (always unconditional) closed idle; standby then withheld every round after it");
+  assert.ok(standbyWaits >= 3, "standby genuinely engaged and kept backing off");
+  assert.equal(
+    state.eventsAfterId(0, ["idle-churn-detected"]).length,
+    0,
+    "no second closed round exists to compare — the breaker is downstream of standby by construction",
+  );
+  assert.equal(state.isParked(), false);
   state.close();
 });
