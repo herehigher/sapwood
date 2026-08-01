@@ -175,6 +175,19 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async getPRLabels(n: number): Promise<string[]> {
     return this.prLabelsByPr[n] ?? [];
   }
+  /** #484: GATED RECLAIM's terminality discovery reads the ISSUE's live state before the cap.
+   *  Mutable per-issue so a test can close an issue mid-run; unlisted issues read OPEN, which is
+   *  every pre-#484 fixture's implicit assumption. */
+  issueStateByIssue: Record<number, "OPEN" | "CLOSED"> = {};
+  override async getIssueMeta(n: number) {
+    return {
+      number: n,
+      title: `issue ${n}`,
+      state: this.issueStateByIssue[n] ?? ("OPEN" as const),
+      labels: this.issueLabelsByIssue[n] ?? [],
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+  }
   override async openPR(): Promise<number> {
     return 1;
   }
@@ -9021,6 +9034,146 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   const r4 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.deepEqual(r4.gatedReclaimed, []);
   assert.equal(st.getWorker("lane-b")?.state, "failed");
+  st.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #484: terminality is discovered BEFORE the cap. Live evidence (round 262, 2026-07-31): the cap
+// gate ran first, so a capped lane could never learn its PR was already MERGED — it re-applied
+// `needs-human` to CLOSED issues (#295/#377), the next round's escalation sweep removed it again,
+// and the two flapped a label forever. The control was lane-433, under the cap, which reclaimed,
+// read the PR and recorded the honest `merged` terminal.
+
+test("#484 AC1: a CAPPED gated lane whose PR is already MERGED still reaches the merged terminal — no `gated-reentry-capped` event, no label write, no attempt burned", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ lanes: { gatedReentryCap: 1 } });
+  const gate = new FakeMergeGate();
+
+  // The exact live shape: attempts == cap (the CAPPED branch's own precondition) on a lane whose
+  // PR a human merged by hand while the escalation stood.
+  st.upsertWorker({
+    name: "lane-m",
+    issue: 295,
+    session_id: "s-lane-m",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 458,
+    gated_reentry_attempts: 1,
+    gated_escalation_labeled: 1,
+  });
+  forge.issueLabelsByIssue[295] = []; // the sweep already removed the resolved escalation's label
+  forge.prStatus = { ...forge.prStatus, state: "MERGED" };
+  gate.outcomes[458] = { kind: "merged", pr: 458, headOid: "H1" };
+
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r.gatedReclaimed, [{ kind: "merged", worker: "lane-m", issue: 295, pr: 458, attempts: 1 }]);
+  // The lane-433 path: DRIVE settles it this SAME tick with the ordinary merged terminal.
+  assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-m", issue: 295, pr: 458 }]);
+  assert.equal(st.getWorker("lane-m")?.state, "done");
+  assert.deepEqual(forge.boardSet, [[295, "done"]]);
+  assert.equal(st.eventsAfterId(0, ["gated-reentry-capped"]).length, 0, "the cap was never reached — terminality is decided first");
+  assert.deepEqual(forge.labelsAdded, [], "no needs-human re-applied to a finished lane");
+  assert.deepEqual(forge.prLabelsAdded, []);
+  assert.equal(st.getWorker("lane-m")?.gated_reentry_attempts, 1, "nothing was re-entered, so no attempt is burned");
+  assert.equal(st.eventsAfterId(0, ["gated-reentry"]).length, 0);
+
+  // Terminal: nothing further, forever.
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r2.gatedReclaimed, []);
+  assert.equal(forge.labelsAdded.length, 0);
+  st.close();
+});
+
+test("#484 AC2: a gated lane whose ISSUE is CLOSED never re-escalates — an OPEN zombie PR on a closed issue is surfaced ONCE and latched, not looped (the #397 issue-CLOSED-gates-reentry ruling)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ lanes: { gatedReentryCap: 2 } });
+  const gate = new FakeMergeGate();
+
+  // attempts (0) is UNDER the cap, so this is decided by terminality alone — not by the cap.
+  st.upsertWorker({
+    name: "lane-z",
+    issue: 377,
+    session_id: "s-lane-z",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 460,
+    gated_escalation_labeled: 1,
+  });
+  forge.issueLabelsByIssue[377] = [];
+  forge.issueStateByIssue[377] = "CLOSED";
+  forge.prStatus = { ...forge.prStatus, state: "OPEN" }; // the zombie PR
+
+  for (let round = 0; round < 5; round++) {
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    assert.deepEqual(
+      r.gatedReclaimed,
+      round === 0 ? [{ kind: "issue-closed", worker: "lane-z", issue: 377, pr: 460, attempts: 0 }] : [],
+      `round ${round}: surfaced exactly once`,
+    );
+  }
+  assert.equal(st.eventsAfterId(0, ["gated-reentry-issue-closed"]).length, 1);
+  assert.equal(st.eventsAfterId(0, ["gated-reentry"]).length, 0, "never re-entered — the zombie PR is never re-driven");
+  assert.equal(st.eventsAfterId(0, ["gated-reentry-capped"]).length, 0);
+  assert.deepEqual(forge.labelsAdded, [], "no re-escalation onto a closed issue");
+  assert.deepEqual(forge.prLabelsAdded, []);
+  assert.deepEqual(forge.issueComments, []);
+  assert.equal(st.getWorker("lane-z")?.state, "failed"); // closure is not success
+  assert.equal(st.getWorker("lane-z")?.gated_reentry_capped, 1); // latched: permanently out of reentry
+  assert.equal(st.gatedFailedWorkers().length, 0);
+  st.close();
+});
+
+test("#484 AC3: the live sweep↔reentry cycle (round 262: resolve -> sweep -> re-escalate -> goto) converges to silence — two rounds of reconcile+sweep+tick on a CLOSED issue with a MERGED PR", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ lanes: { gatedReentryCap: 1 } });
+  const gate = new FakeMergeGate();
+
+  // The 11:59 state: an escalated lane at its cap, its PR hand-merged and its issue closed by
+  // that merge, with the engine's own needs-human label still standing on the issue.
+  seedRunning(st, "lane-f", 295);
+  const lane = st.getWorker("lane-f")!;
+  st.upsertWorker({ ...lane, state: "failed", pr: 458, ended_at: "t1", gated_reentry_attempts: 1, gated_escalation_labeled: 1 });
+  st.appendEvent("drive-needs-human", { worker: "lane-f", issue: 295, pr: 458, labeled: 1 });
+  forge.issueLabelsByIssue[295] = [cfg.labels.needsHuman];
+  forge.issueStateByIssue[295] = "CLOSED";
+  forge.prStatus = { ...forge.prStatus, state: "MERGED" };
+  gate.outcomes[458] = { kind: "merged", pr: 458, headOid: "H1" };
+
+  const round = async () => {
+    await reconcileEscalations(forge, st, cfg);
+    await sweepResolvedHolds(forge, st, cfg);
+    return tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  };
+
+  // Round 1: the escalation resolves (via merged), the sweep lifts the stale hold, and the lane
+  // is COLLECTED instead of re-escalated.
+  const r1 = await round();
+  assert.deepEqual(r1.gatedReclaimed, [{ kind: "merged", worker: "lane-f", issue: 295, pr: 458, attempts: 1 }]);
+  assert.equal(st.getWorker("lane-f")?.state, "done");
+  assert.deepEqual(forge.issueLabelsByIssue[295], [], "the hold was swept, and nothing put it back");
+
+  // Round 2 (and 3): silence — no re-escalation, so no new resolution, so nothing left to sweep.
+  const eventsAfterRound1 = st.eventsAfterId(0, ["gated-reentry-capped", "needs-human-swept", "escalation-resolved"]).length;
+  for (let i = 0; i < 2; i++) {
+    const r = await round();
+    assert.deepEqual(r.gatedReclaimed, []);
+  }
+  assert.equal(
+    st.eventsAfterId(0, ["gated-reentry-capped", "needs-human-swept", "escalation-resolved"]).length,
+    eventsAfterRound1,
+    "the cycle emits nothing further — no per-round churn",
+  );
+  assert.equal(st.eventsAfterId(0, ["gated-reentry-capped"]).length, 0);
+  assert.deepEqual(forge.labelsAdded, [], "no GitHub label write on a CLOSED issue, ever");
+  assert.deepEqual(forge.prLabelsAdded, []);
   st.close();
 });
 

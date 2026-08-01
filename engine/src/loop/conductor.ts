@@ -1353,10 +1353,17 @@ export type RollbackOutcome =
  *  issue's needs-human label is gone (gatedReentryDecision above). "reclaimed" means the lane is
  *  back in `driving` this same tick (the DRIVE loop below re-drives it, no new worker); "capped"
  *  means the cap was already spent and this removal was rejected — re-escalated + permanently
- *  latched (State.gatedFailedWorkers never returns it again). */
+ *  latched (State.gatedFailedWorkers never returns it again).
+ *
+ *  #484: two TERMINAL outcomes, decided BEFORE the cap so a finished lane can never be capped.
+ *  "merged" — the PR is already merged, so the lane goes straight back to `driving` for DRIVE to
+ *  settle with its ordinary `merged` terminal (no attempt burned). "issue-closed" — the issue is
+ *  closed, so the lane is over whatever its PR says: latched, surfaced once, never re-entered. */
 export type GatedReclaimOutcome =
   | { kind: "reclaimed"; worker: string; issue: number; pr: number; attempt: number }
-  | { kind: "capped"; worker: string; issue: number; pr: number; attempts: number };
+  | { kind: "capped"; worker: string; issue: number; pr: number; attempts: number }
+  | { kind: "merged"; worker: string; issue: number; pr: number; attempts: number }
+  | { kind: "issue-closed"; worker: string; issue: number; pr: number; attempts: number };
 
 /** #172: one handoff-lane decision that changed durable state this tick. */
 export type ResumeOutcome =
@@ -3244,6 +3251,56 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       const attempts = w.gated_reentry_attempts ?? 0;
       const decision = gatedReentryDecision(hasReserveLabel(labels, holdSet), attempts, cfg.lanes.gatedReentryCap);
       if (decision === "SKIP") continue; // a human hold still stands — no complete human act yet
+      // ── TERMINALITY BEFORE THE CAP (#484). Ordering, not an added guard: this discovery sits
+      //   between the hold check and the cap check, so a lane that is ALREADY DONE can never
+      //   reach the CAPPED branch's label write at all. Before it, the cap gate ran first, so a
+      //   capped lane could never learn its PR had been merged — it re-applied `needs-human`,
+      //   the next round's escalation sweep removed it again (the escalation had long since
+      //   resolved via `merged`), and the two ground a label-flap loop, one full cycle per round,
+      //   on issues that were CLOSED with MERGED PRs (live: #295/#377, round 262, 2026-07-31).
+      //   The control was lane-433, whose attempt happened to be UNDER the cap: it reclaimed,
+      //   DRIVE read the PR, and it recorded the honest `merged` terminal.
+      //
+      //   Cost: two read-only calls per lane whose hold a human ACTUALLY cleared — never for the
+      //   SKIP majority (a lane still held costs nothing, exactly as before), and never per-tick
+      //   for the same lane, because every arm below leaves gatedFailedWorkers() (driving, or
+      //   latched). Unguarded, like the label read above: a forge read failure propagates and the
+      //   next tick re-observes, rather than being swallowed into a wrong decision.
+      const prState = (await forge.getPRStatus(pr)).state;
+      if (prState === "MERGED") {
+        // The lane-433 path, now reachable at ANY attempt count. Hand the lane to DRIVE (which
+        // runs below, this same tick — `gate` is non-null here) and let it record the honest
+        // `merged` terminal with its board-Done write and rollback handling, rather than
+        // duplicating that settlement here. Deliberately NOT the RECLAIM transition below: no
+        // attempt is burned and no `gated-reentry` episode-reset event is emitted, because
+        // nothing is being re-entered — a finished lane is being collected.
+        state.upsertWorkerWithEvent({ ...w, state: "driving", ended_at: iso() }, "gated-reentry-merged", {
+          worker: w.name,
+          issue: w.issue,
+          pr,
+          attempts,
+        });
+        gatedReclaimed.push({ kind: "merged", worker: w.name, issue: w.issue, pr, attempts });
+        continue;
+      }
+      const issueState = (await forge.getIssueMeta(w.issue)).state;
+      if (issueState === "CLOSED") {
+        // #397's issue-CLOSED-gates-reentry ruling, enforced where reentry is actually decided.
+        // A closed issue is terminal whatever the PR says: re-driving it could merge a zombie PR
+        // (the PR#458 shape) and re-escalating it flaps a label on a work item nobody will
+        // reopen. Latch it — the SAME one-way column the CAPPED branch uses, so the row leaves
+        // gatedFailedWorkers() forever — and surface it ONCE, with no forge write at all: the
+        // event is the surfacing, and a comment on a closed issue would be the churn this fixes.
+        state.upsertWorkerWithEvent({ ...w, ended_at: iso(), gated_reentry_capped: 1 }, "gated-reentry-issue-closed", {
+          worker: w.name,
+          issue: w.issue,
+          pr,
+          prState,
+          attempts,
+        });
+        gatedReclaimed.push({ kind: "issue-closed", worker: w.name, issue: w.issue, pr, attempts });
+        continue;
+      }
       if (decision === "CAPPED") {
         // The cap was already spent on a prior reclaim that re-escalated, and a human removed
         // needs-human again anyway — refuse to retry forever: re-add the label, leave an
