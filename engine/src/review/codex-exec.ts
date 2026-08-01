@@ -175,7 +175,19 @@ export interface CodexExecStreamTelemetry {
    *  — i.e. the session actually DID something, as opposed to only producing prose. Always a
    *  number, never `null`: zero is a perfectly honest count (a session that never called a tool),
    *  distinct from `usage`/`threadId`'s `null` (telemetry never seen at all). See
-   *  `ENGINE_REVIEW_SESSION_INSPECTION`'s doc for why this is recorded and never gated on. */
+   *  `ENGINE_REVIEW_SESSION_INSPECTION`'s doc for why this is recorded and never gated on.
+   *
+   *  HONEST BOUND (#512, PM gate② review, P2-1, valid finding — fix adopted as a documented bound,
+   *  NOT a streaming parser; see the adjudication at `MAX_CAPTURE_BYTES`'s own doc for why a
+   *  streaming NDJSON parser was rejected for an evidence-only counter). This count is computed
+   *  over the RETAINED capture window only (`appendCapped`/`MAX_CAPTURE_BYTES`, 8 MiB, tail-kept,
+   *  head-dropped). A session whose total stdout exceeds that bound may UNDERCOUNT — an
+   *  `item.completed` early in a pathologically verbose session can be dropped along with the rest
+   *  of the head before this parser ever sees it. The error is STRICTLY ONE-DIRECTIONAL: truncation
+   *  can only ever drop items, never fabricate one, so this count can read low or zero when the
+   *  session actually inspected the tree, but can never read positive when it did not. A low or
+   *  zero `toolItemCount` is therefore a prompt to read the session's own transcript
+   *  (`transcriptPath`) before concluding "no inspection happened" — never proof of it on its own. */
   toolItemCount: number;
 }
 
@@ -365,7 +377,9 @@ const CODEX_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/;
  *  prompt from stdin..." banner before the stream starts), an unknown event type, or a truncated
  *  tail is skipped, never fatal. `threadId`/`usage` come back `null` when never seen — what makes
  *  the honest-recording paths fire, rather than a fabricated value; `toolItemCount` is always a
- *  number (zero is itself an honest, recordable count — see `ENGINE_REVIEW_SESSION_INSPECTION`). */
+ *  number (zero is itself an honest, recordable count — see `ENGINE_REVIEW_SESSION_INSPECTION`).
+ *  This function only ever sees what `stdout` retains — see `CodexExecStreamTelemetry.toolItemCount`'s
+ *  doc for the resulting one-directional undercount bound on very large streams (#512, P2-1). */
 export function parseCodexExecStream(stdout: string): CodexExecStreamTelemetry {
   let threadId: string | null = null;
   let inputTokens = 0;
@@ -547,7 +561,13 @@ const DEFAULT_KILL_GRACE_MS = 200;
 const DEFAULT_LIVENESS_POLL_MS = 30_000;
 
 /** Bound on captured stdout/stderr, bytes. A runaway CLI must not be able to grow the engine's heap
- *  without limit; the tail is what carries `turn.completed`, so the HEAD is what gets dropped. */
+ *  without limit; the tail is what carries `turn.completed`, so the HEAD is what gets dropped. #512
+ *  (PM gate② review, P2-1): this is also the retention window `parseCodexExecStream`'s
+ *  `toolItemCount` is computed over — an `item.completed` for an early `command_execution` in a
+ *  session whose total stdout exceeds this bound is dropped along with the rest of the head, before
+ *  the parser ever sees it. Observed real streams are on the order of ~1.6 KB, three to four orders
+ *  of magnitude below this bound, so this is a documented edge case, not a fix: see
+ *  `CodexExecStreamTelemetry.toolItemCount`'s doc for why it stays that way. */
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 
 function appendCapped(buf: string, chunk: string): string {
