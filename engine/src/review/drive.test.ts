@@ -928,3 +928,171 @@ test("driveEngineAgentReview: 'pending' is treated identically to 'unavailable' 
   assert.equal(outcome.kind, "queued");
   assert.equal(recorded.pin?.kind, "unavailable");
 });
+
+// ── #503: red required CI routes to {kind:"ci-red"}, not an eternal backoff wait ──────────────
+
+test("driveEngineAgentReview (#503): a required check CONCLUDED FAILURE -> {kind:'ci-red'} carrying status/data/failing, no WAL, no pin, no session", async () => {
+  let evaluated = false;
+  const { deps, recorded } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, {
+    kind: "ci-red",
+    status: status({ ciGreen: false, ciRed: true }),
+    data: data(),
+    failing: ["test@github-actions"],
+  });
+  assert.equal(evaluated, false, "no paid session for a red build");
+  assert.equal(recorded.wal, null);
+  assert.equal(recorded.pin, null);
+});
+
+test("driveEngineAgentReview (#503): PENDING required CI (null conclusion) keeps the exact pre-#503 queued wait — red is not pending, and neither is the reverse", async () => {
+  const { deps } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false }),
+      getPRChecks: async () => checksPage({ status: "IN_PROGRESS", conclusion: null }),
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /CI-evidence not satisfied/);
+});
+
+test("driveEngineAgentReview (#503): split-generation read (status@H1, data@H2) must NOT take the ci-red route — falls through to queued, next tick re-fetches a coherent pair", async () => {
+  const { deps } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true, headOid: "H1" }),
+      getPRReviewData: async () => data({ headOid: "H2" }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.notEqual(outcome.kind, "ci-red", "a mixed-head read must never dispatch a fix leg against a possibly-stale red");
+  assert.equal(outcome.kind, "queued");
+});
+
+test("driveEngineAgentReview (#503): a FAILURE from an untrusted app does NOT take the ci-red route — queued exactly as before", async () => {
+  const { deps } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE", appSlug: "evil-app" }),
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /CI-evidence not satisfied/);
+});
+
+// ── #507 review P1: the ci-red route precedes the pin machinery, exactly like the conflict route ─
+
+test("driveEngineAgentReview (#503, #507 P1): decisive APPROVED pin + a required check that went red on the SAME head -> {kind:'ci-red'}, pin untouched, no session — the consume path's refetchStillValid must NOT swallow this forever", async () => {
+  let evaluated = false;
+  const { deps, recorded } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+  const pin = { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "decisive" as const };
+  recorded.pin = pin;
+  recorded.wal = {
+    runId: "run-1",
+    head: "H1",
+    base: "B1",
+    diffHash: "d",
+    treeManifestHash: null,
+    attemptStart: "2026-01-01T00:00:00.000Z",
+    decisiveOutcome: "approved",
+    reviewArtifactJson: "{}",
+    auditCommentId: "C1",
+    auditDeliveredAt: "2026-01-01T00:00:01.000Z",
+  };
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, {
+    kind: "ci-red",
+    status: status({ ciGreen: false, ciRed: true }),
+    data: data(),
+    failing: ["test@github-actions"],
+  });
+  assert.equal(evaluated, false, "no session — the pin is decisive, never re-run");
+  assert.deepEqual(recorded.pin, pin, "the ci-red route never reads or writes the pin");
+});
+
+test("driveEngineAgentReview (#503, #507 P1): unavailable pin INSIDE its backoff window + trusted red -> {kind:'ci-red'} immediately, not the backoff queued", async () => {
+  const now = new Date("2026-01-01T00:00:10.000Z"); // 10s into a 900s backoff
+  const { deps, recorded } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+    now: () => now,
+  });
+  recorded.pin = { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "unavailable" };
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "ci-red", "a red build must not wait out the unavailable-pin backoff");
+});
+
+test("driveEngineAgentReview (#503, #507 P1 round 2): an UNDELIVERED crash-persisted decisive artifact blocks the ci-red route — receipt before downstream action", async () => {
+  const { deps, recorded } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+    reconcileAuditDelivery: async () => ({ delivered: false, reason: "comment post still failing" }),
+  });
+  recorded.pin = { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "unavailable" };
+  recorded.wal = {
+    runId: "run-1",
+    head: "H1",
+    base: "B1",
+    diffHash: "d",
+    treeManifestHash: null,
+    attemptStart: "2026-01-01T00:00:00.000Z",
+    decisiveOutcome: "rejected",
+    reviewArtifactJson: "{}",
+    auditCommentId: null,
+    auditDeliveredAt: null,
+  };
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued", "a fix leg must not move the head while the decisive artifact is undelivered");
+  assert.equal(recorded.pin?.kind, "unavailable", "pin untouched — reconcile retries next tick");
+});
+
+test("driveEngineAgentReview (#503, #507 P1 round 2): once the WAL reconcile DELIVERS the artifact, the ci-red route proceeds in the same pass", async () => {
+  const { deps, recorded } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+    reconcileAuditDelivery: async () => ({ delivered: true }),
+  });
+  recorded.pin = { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "unavailable" };
+  recorded.wal = {
+    runId: "run-1",
+    head: "H1",
+    base: "B1",
+    diffHash: "d",
+    treeManifestHash: null,
+    attemptStart: "2026-01-01T00:00:00.000Z",
+    decisiveOutcome: "rejected",
+    reviewArtifactJson: "{}",
+    auditCommentId: null,
+    auditDeliveredAt: null,
+  };
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "ci-red", "audit delivered first, then the red routes to a fix leg");
+  assert.equal(recorded.pin?.kind, "decisive", "the reconcile upgraded the pin before the route fired");
+});

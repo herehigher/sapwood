@@ -56,3 +56,20 @@ export function requiredChecksSatisfied(checks: readonly PRCheckItem[], required
   }
   return { ok: unsatisfied.length === 0, unsatisfied };
 }
+
+/** #503: the RED subset of the evidence question — configured required checks whose matching,
+ *  trusted (same name + same owning App) CheckRun has CONCLUDED `FAILURE` on the reviewed head.
+ *  Deliberately narrower than "not satisfied": pending/absent/SKIPPED/NEUTRAL/CANCELLED all
+ *  stay in the WAIT class (they age via the #426 CI-pending pin — a fix leg cannot re-run a
+ *  cancelled job), and an untrusted same-named check can no more prove red than it can prove
+ *  green. Empty `required` returns empty (the fail-closed synthetic entry above is a config
+ *  problem, not something a paid fix leg can repair). */
+export function requiredChecksRed(checks: readonly PRCheckItem[], required: readonly RequiredCheck[]): string[] {
+  const red: string[] = [];
+  for (const req of required) {
+    if (checks.some((c) => c.name === req.name && (c.appSlug ?? null) === req.app && c.conclusion === "FAILURE")) {
+      red.push(`${req.name}@${req.app}`);
+    }
+  }
+  return red;
+}

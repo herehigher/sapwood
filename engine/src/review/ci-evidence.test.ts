@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PRCheckItem } from "../forge/forge.js";
-import { requiredChecksSatisfied } from "./ci-evidence.js";
+import { requiredChecksRed, requiredChecksSatisfied } from "./ci-evidence.js";
 
 const REQUIRED = [{ name: "test", app: "github-actions" }];
 
@@ -68,4 +68,56 @@ test("requiredChecksSatisfied: an unrelated extra check in the page never counts
   const result = requiredChecksSatisfied([check({ name: "some-other-check" })], REQUIRED);
   assert.equal(result.ok, false);
   assert.deepEqual(result.unsatisfied, ["test@github-actions"]);
+});
+
+// ── #503: requiredChecksRed — the RED subset ─────────────────────────────────────────────────
+
+test("requiredChecksRed (#503): a required check with a trusted FAILURE conclusion is red", () => {
+  assert.deepEqual(
+    requiredChecksRed(
+      [{ name: "test", status: "COMPLETED", conclusion: "FAILURE", state: null, appSlug: "github-actions" }],
+      [{ name: "test", app: "github-actions" }],
+    ),
+    ["test@github-actions"],
+  );
+});
+
+test("requiredChecksRed (#503): pending (null conclusion) is NOT red — it stays in the WAIT class", () => {
+  assert.deepEqual(
+    requiredChecksRed(
+      [{ name: "test", status: "IN_PROGRESS", conclusion: null, state: null, appSlug: "github-actions" }],
+      [{ name: "test", app: "github-actions" }],
+    ),
+    [],
+  );
+});
+
+test("requiredChecksRed (#503): SKIPPED / CANCELLED conclusions are NOT red — a fix leg cannot re-run them", () => {
+  for (const conclusion of ["SKIPPED", "CANCELLED", "NEUTRAL"]) {
+    assert.deepEqual(
+      requiredChecksRed(
+        [{ name: "test", status: "COMPLETED", conclusion, state: null, appSlug: "github-actions" }],
+        [{ name: "test", app: "github-actions" }],
+      ),
+      [],
+      conclusion,
+    );
+  }
+});
+
+test("requiredChecksRed (#503): a FAILURE from a FOREIGN app is NOT red — untrusted evidence proves nothing in either direction", () => {
+  assert.deepEqual(
+    requiredChecksRed(
+      [{ name: "test", status: "COMPLETED", conclusion: "FAILURE", state: null, appSlug: "evil-app" }],
+      [{ name: "test", app: "github-actions" }],
+    ),
+    [],
+  );
+});
+
+test("requiredChecksRed (#503): empty required list returns empty — the fail-closed config shape is not a fix-leg problem", () => {
+  assert.deepEqual(
+    requiredChecksRed([{ name: "test", status: "COMPLETED", conclusion: "FAILURE", state: null, appSlug: "github-actions" }], []),
+    [],
+  );
 });

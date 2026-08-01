@@ -32,7 +32,7 @@ import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
 import { labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js";
 import type { ApprovalResult, ReviewerAdapter } from "../roles/reviewer.js";
 import { changesRequestedOnHead, deriveBlockingSignal } from "../roles/reviewer.js";
-import { requiredChecksSatisfied } from "./ci-evidence.js";
+import { requiredChecksRed, requiredChecksSatisfied } from "./ci-evidence.js";
 import { escalateInstructionPathChanges } from "./instruction-path-escalation.js";
 
 /** The per-head engine-agent ATTEMPT PIN (design #279 §2 R3) — see state.ts's schema v24->v25
@@ -230,6 +230,12 @@ export type EngineAgentDriveOutcome =
   // deriveGate CONFLICTING branch driveOne's classic path already uses, instead of this module
   // re-deriving (or duplicating) that gate itself.
   | { kind: "conflict"; status: PRStatus; data: PRReviewData }
+  // #503: a required check CONCLUDED FAILING — red is not pending. Same shape and rationale as
+  // the #460 conflict route above: carries status/data so merge-driver.ts's driveEngineAgentOne
+  // routes it through the existing FIXABLE machinery (fix-leg dispatch, prFixCap accounting,
+  // drive-fixup event) instead of this lane waiting out a red that only a producer push can fix.
+  // `failing` is the `name@app` list from requiredChecksRed — evidence, engine-derived.
+  | { kind: "ci-red"; status: PRStatus; data: PRReviewData; failing: string[] }
   /** `verdict.verdictRunId` is the WAL/pin runId of the ONE decisive review run this verdict came
    *  from (#457, F36): a decisive pin is PERMANENT per head, so the SAME (runId, head) verdict is
    *  re-consumed on every tick until the head moves — the conductor's fix-leg circuit breaker
@@ -385,6 +391,49 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
       }
     }
   }
+
+  // ── ci-red route (#503), same position rationale as the conflict route above ────────────────
+  // #507 review P1 (round 1): this must sit BEFORE the decisive-consume/backoff paths, not at
+  // the CI-evidence gate below — a decisive pin is PERMANENT per head, and its consume path
+  // (`refetchStillValid`) rejects `ciGreen: false`, so a required check that goes red AFTER a
+  // green preflight + paid decisive review (same head — e.g. a re-run, or a flaky check's
+  // second landing) would queue on every tick forever, recreating the exact wedge #503 removes.
+  // An unavailable pin's backoff window would likewise delay the route pointlessly.
+  //
+  // #507 review P1 (round 2): but it must sit AFTER the #288 WAL reconciliation above, and must
+  // YIELD while a matching decisive artifact is still UNDELIVERED (reconcile just failed) — a
+  // fix leg pushed off this route would move the head, the head-change clear above would drop
+  // the pin, and the crash-persisted artifact could never be audited (receipt-before-
+  // downstream-action). Undelivered is `decisiveOutcome !== null && auditCommentId == null`,
+  // the same predicate the decisive-consume anomaly check below reads.
+  //
+  // Position guarantees: `conflictCheck.ok` requires every higher-precedence preflight gate
+  // (state/draft/human-label/hold-label/mergeable/threads) to have passed, and the same-head
+  // guard is #460's split-generation discipline. The `status0.ciRed` rollup is only the CHEAP
+  // TRIGGER for the checks fetch — the routing decision itself is `requiredChecksRed`'s
+  // trusted-app FAILURE evidence; a rollup red with no trusted required-check failure (foreign
+  // app, non-required check) falls through to the ordinary machinery unchanged, at the cost of
+  // one extra checks fetch on that rare shape.
+  const undeliveredDecisiveWal = (() => {
+    if (pin?.kind !== "unavailable") return false;
+    const wal = deps.getWal();
+    return (
+      wal != null && wal.runId === pin.runId && wal.head === status0.headOid && wal.decisiveOutcome !== null && wal.auditCommentId == null
+    );
+  })();
+  if (conflictCheck.ok && (status0.ciRed ?? false) && status0.headOid === data0.headOid && !undeliveredDecisiveWal) {
+    let checksPage0: { checks: import("../forge/forge.js").PRCheckItem[] };
+    try {
+      checksPage0 = await deps.forge.getPRChecks(pr, deps.ciChecksCap);
+    } catch (e) {
+      return { kind: "queued", reason: `engine-agent: CI-checks fetch failed: ${String(e)}` };
+    }
+    const failing = requiredChecksRed(checksPage0.checks, deps.cfg.ci.requiredChecks);
+    if (failing.length > 0) {
+      return { kind: "ci-red", status: status0, data: data0, failing };
+    }
+  }
+
   if (pin?.kind === "decisive") {
     // PERMANENT for this head: never re-run a session. Still attempt to CONSUME the already-
     // decisive, already-delivered verdict on every tick (cheap — no paid session) — a transient
@@ -443,6 +492,11 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   }
   const ciEvidence = requiredChecksSatisfied(checksPage.checks, deps.cfg.ci.requiredChecks);
   if (!ciEvidence.ok) {
+    // #503: a trusted-red required check was already routed to {kind:"ci-red"} by the early
+    // route above (before the attempt-gate — see its own doc for why, #507 review P1). Reaching
+    // this line red therefore means a contradictory read (rollup not red, or heads split) —
+    // fail-safe to the same queued wait every other unsatisfied shape gets, aged by the #426
+    // pin, re-fetched coherently next tick.
     return { kind: "queued", reason: `engine-agent: preflight CI-evidence not satisfied: ${ciEvidence.unsatisfied.join(", ")}` };
   }
 
