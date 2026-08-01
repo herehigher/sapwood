@@ -33,7 +33,12 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // the out-of-round annotations align.ts renders, and mandates `mcp__forge__search_issues`
   // before filing where the proxy is attached. Prior edit: #410 (WebSearch/WebFetch usage +
   // abstention wording, and the reworded "stay inside your scope" bullet).
-  "po.md": "7624ca3c43291934f899d8d28f9e29aea850e29482b4860ed6b62d3dbd977def",
+  // #529 F1 (gate② round 1): line 9 carried the exact same categorical denial as the six roles
+  // below — the ONLY reason it didn't trip the AC-2 test was that `namesTheGrantedTools` is
+  // file-scoped and line 69 names `mcp__forge__search_issues` sixty lines later. Fixed so the
+  // escape hatch below has no live user left in the repo, consistent with align mode's own
+  // dedup-step instruction (still at what's now ~line 72), not merely permissive against it.
+  "po.md": "795ff298c8136f63891bcd4258a3f62a471a77a69b2a910033cf5b857f7d7bd9",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   "architect.md": "2f2922e8c962050442cc8b9db9c8953fb6f42c4a05a962bdc4b6d3e8f5113404",
