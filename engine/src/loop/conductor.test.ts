@@ -3778,6 +3778,151 @@ test("tick DRIVE (#451, gate② round 3 P1): the terminal worker update + review
   st.close();
 });
 
+// ── #461: the audit-comment-shaped sibling — a disputed engine-agent FINDING routes to the same
+// escalation carrier a disputed THREAD does, instead of degrading to a silent zero-push leg that
+// only #457's breaker eventually catches. ───────────────────────────────────────────────────────
+
+/** The engine-agent world a settled, disputing fix leg leaves behind: the standing rejected
+ *  verdict's WAL artifact (the finding bodies the escalation quotes) plus the `fix-response-queued`
+ *  receipt carrying its `findingWrites`. */
+function seedDisputedFinding(
+  st: State,
+  worker: string,
+  issue: number,
+  pr: number,
+  runId: string,
+  writes: { runId: string; findingIndex: number; resolution: "addressed" | "disputed"; reply: string }[],
+  fixRounds = 1,
+): void {
+  st.recordEngineReviewWal(worker, { runId, head: "head-2", base: "base-1", diffHash: "d", attemptStart: "t" });
+  st.recordEngineReviewWalArtifact(
+    worker,
+    runId,
+    "rejected",
+    JSON.stringify({
+      perAC: [],
+      findings: [
+        { id: "F-0", body: "THE REVIEWER FINDING BODY" },
+        { id: "F-1", body: "a second finding" },
+      ],
+      sessionActualIdentities: [{ provider: "anthropic", model: "m" }],
+      sessionSpends: [{ kind: "known", usd: 0 }],
+      promptHash: "p",
+    }),
+  );
+  st.appendEvent("fix-response-queued", {
+    worker,
+    issue,
+    pr,
+    batchKey: `${worker}#${pr}#${fixRounds}`,
+    fixRounds,
+    count: 0,
+    headOid: "head-2",
+    threadless: true,
+    newHead: null,
+    writes: [],
+    findingWrites: writes,
+  });
+}
+
+const engineAgentFixable = (pr: number, runId: string): DriveOutcome =>
+  ({
+    kind: "fixable",
+    pr,
+    reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false",
+    prescription: "findings",
+    verdictRunId: runId,
+  }) as const;
+
+test("tick DRIVE (#461, AC2): a fix leg that DISPUTED an engine-agent finding escalates needs-human carrying the dispute — no fix leg dispatched, zero fix rounds, verdict untouched", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-b", 3, 66, { fix_rounds: 1 });
+  st.appendEvent("drive-fixup", { worker: "lane-b", issue: 3, pr: 66, fixRounds: 1, reason: "r", verdictRunId: "run-1" });
+  seedDisputedFinding(st, "lane-b", 3, 66, "run-1", [
+    { runId: "run-1", findingIndex: 0, resolution: "disputed", reply: "THE PRODUCER REPLY VERBATIM" },
+  ]);
+  const gate = new FakeMergeGate();
+  gate.outcomes[66] = engineAgentFixable(66, "run-1");
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+
+  assert.deepEqual(sup.resumeCalls, [], "no fix leg dispatched");
+  const row = st.getWorker("lane-b")!;
+  assert.equal(row.state, "failed");
+  assert.equal(row.fix_rounds, 1, "zero FURTHER fix rounds spent");
+  assert.deepEqual(forge.prLabelsAdded, [[66, "needs-human"]]); // PR-born, same carrier as #451
+  assert.equal(r.driven[0]!.kind, "needs-human");
+  assert.match((r.driven[0] as { reason: string }).reason, /^review-finding-disputed:/);
+  const comment = forge.prComments[0]![1];
+  assert.match(comment, /run-1#0/, "the disputed finding's (runId, index) handle");
+  assert.match(comment, /THE REVIEWER FINDING BODY/, "the reviewer's own finding text");
+  assert.match(comment, /THE PRODUCER REPLY VERBATIM/, "the producer's dispute, verbatim");
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed"]);
+  assert.equal(events.length, 1, "recorded on the SAME durable escalation kind a thread dispute uses");
+  assert.deepEqual((events[0]!.payload as { findings: string[] }).findings, ["run-1#0"]);
+  // AC2: no auto-approval, no verdict mutation — the WAL's decisive outcome is untouched.
+  assert.equal(st.getEngineReviewWal("lane-b")!.decisiveOutcome, "rejected");
+  assert.deepEqual(forge.merged, []);
+  st.close();
+});
+
+test("tick DRIVE (#461, AC3): the SAME tick without any recorded finding dispute is unchanged — #457's verdict-rerun breaker still owns it", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-b", 3, 66, { fix_rounds: 1 });
+  st.appendEvent("drive-fixup", { worker: "lane-b", issue: 3, pr: 66, fixRounds: 1, reason: "r", verdictRunId: "run-1" });
+  seedDisputedFinding(st, "lane-b", 3, 66, "run-1", [{ runId: "run-1", findingIndex: 0, resolution: "addressed", reply: "fixed, pushed" }]);
+  const gate = new FakeMergeGate();
+  gate.outcomes[66] = engineAgentFixable(66, "run-1");
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal((r.driven[0] as { reason: string }).reason, "fix-leg-no-op:verdict-rerun");
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed"]), []);
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-verdict-rerun"]).length, 1);
+  st.close();
+});
+
+test("tick DRIVE (#461): a dispute recorded against a SUPERSEDED verdict never escalates the current one — the fix leg is dispatched as usual", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-b", 3, 66);
+  seedDisputedFinding(st, "lane-b", 3, 66, "run-2", [
+    { runId: "run-1", findingIndex: 0, resolution: "disputed", reply: "an OLD round's dispute" },
+  ]);
+  const gate = new FakeMergeGate();
+  gate.outcomes[66] = engineAgentFixable(66, "run-2");
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(r.driven[0]!.kind, "fixup");
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed"]), []);
+  st.close();
+});
+
 test("tick DRIVE (#451, AC7): a review-disputed escalation is reclaimable through the existing #147 GATED RECLAIM path once a human clears the label — no new re-entry channel", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

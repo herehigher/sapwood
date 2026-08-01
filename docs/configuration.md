@@ -146,10 +146,25 @@ means "skip the test-driven gate and make the doc change instead."
 **`worker.fixPromptFile` template variables (round-2 fix A7 — deliberately NARROWER than
 `worker.promptFile`'s):** `{{issue.number}}`, `{{pr.number}}`, `{{labels.verifyNa}}` only —
 never `{{issue.title}}`/`{{issue.body}}`/`{{issue.labels}}`. A fix leg's evidence channel is
-the PR-facing proxy tools (`pr_review_threads`/`pr_reviews`/`pr_checks`/`pr_details`), not
-issue prose, so the render function never needs a full issue object — just the issue and PR
-numbers (`{{pr.number}}` is required because a PR-facing tool call takes a PR number, not an
-issue number, and `{{issue.number}}` alone doesn't name it).
+the PR-facing proxy tools (`pr_review_threads`/`pr_reviews`/`pr_checks`/`pr_details`, plus
+`getPRAuditComments` for engine-agent findings), not issue prose, so the render function never
+needs a full issue object — just the issue and PR numbers (`{{pr.number}}` is required because
+a PR-facing tool call takes a PR number, not an issue number, and `{{issue.number}}` alone
+doesn't name it).
+
+**A fix leg can disagree, in both review modes (#247, #461).** It holds no forge credentials;
+its one structured report is what the engine executes. `threadResponses` answers classic
+review threads (`addressed` → the engine replies and resolves; `disputed` → it replies and
+leaves the thread open). `findingResponses` answers **engine-agent** findings, which arrive as
+one audit comment rather than threads, keyed on that comment's `runId` plus the finding's
+rendered `[N]` index; entries naming a run the leg was never served, or an index the reviewed
+run never produced, reject the whole report, the same fail-closed rule thread ids follow. A
+`disputed` finding approves nothing and changes no verdict — the lane escalates to
+`needs-human` (`review-finding-disputed:<n>`) with the reviewer's finding and the producer's
+reasoning quoted side by side, and no further paid fix round, so a wrong finding costs one
+round and an adjudication instead of `prFixCap` rounds of silence. If you replace the shipped
+prompt, keep both blocks documented in yours: an unreported dispute is indistinguishable from
+a leg that simply did nothing.
 
 **Fail-fast rules:** the template is loaded once, eagerly, at engine startup (before any
 dispatch) — never lazily on first use. A `promptFile` (or `fixPromptFile`) that's set but

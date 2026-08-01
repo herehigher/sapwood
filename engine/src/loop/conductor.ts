@@ -57,6 +57,7 @@ import { isHumanMergeOnlyVerdict } from "./escalation-buckets.js";
 import {
   attemptThreadWrite,
   computeDisputeEscalation,
+  computeFindingDisputeEscalation,
   computeFixResponseHarvest,
   type DisputeEscalation,
   type FixResponseWriteOutcome,
@@ -4002,6 +4003,30 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "review-disputed-escalation-write-failed" });
             break;
           }
+          // #461: the audit-comment-shaped sibling of the branch just above — the engine-agent
+          // path's findings arrive in ONE audit comment, never as review threads, so a leg that
+          // dissents from one has no thread for `computeDisputeEscalation` to read it off. Its
+          // dissent is carried by the `findingResponses` block instead (fix-response.ts), recorded
+          // on the `fix-response-queued` receipt, and read back here. Checked BEFORE #457's
+          // verdict-rerun breaker below on purpose: both end in needs-human, but the breaker only
+          // knows "a leg ran and pushed nothing" — it cannot say WHY, so an evidenced dispute
+          // would otherwise land as an anonymous no-op (exactly the gap this issue names). Pure
+          // state reads, zero forge calls, and structurally disjoint from the thread path above
+          // (that one requires `verdictRunId === undefined`, this one requires it defined).
+          const findingDispute =
+            outcome.prescription === "findings" && outcome.verdictRunId !== undefined
+              ? computeFindingDisputeEscalation(state, w.name, pr, outcome.verdictRunId)
+              : null;
+          if (findingDispute) {
+            const escalated = await escalateReviewDisputed(forge, state, cfg, w, pr, fixRounds, findingDispute, iso);
+            if (escalated) {
+              driveFixBlockedLanes.add(w.name);
+              driven.push(escalated);
+              break;
+            }
+            driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "review-disputed-escalation-write-failed" });
+            break;
+          }
           // #457 (F36): verdict-rerun breaker — see priorFixLegForVerdict's own doc. A prior
           // `drive-fixup` for this exact engine-agent verdict means its one leg already ran and
           // pushed nothing; a rerun gets byte-identical inputs, so no further fix round is spent
@@ -4962,8 +4987,13 @@ const REVIEW_DISPUTED_ESCALATION_FAILURE_RESET_KINDS = ["review-disputed", "gate
  *  than invented fresh. Keyed on `headOid` specifically (not just worker+pr) so a re-escalation
  *  against a NEW head after a prior one succeeded is never mistaken for the same, already-posted
  *  episode. */
-function reviewDisputedCommentMarker(worker: string, pr: number, headOid: string): string {
-  return `<!-- sapwood:review-disputed:${worker}:${pr}:${headOid} -->`;
+function reviewDisputedCommentMarker(escalation: DisputeEscalation, worker: string, pr: number): string {
+  // #461: the finding-shaped escalation gets its OWN marker namespace. The two sources cannot
+  // fire on the same tick, but they CAN fire on the same (worker, pr, head) across a lane's life
+  // (a classic-reviewer episode and an engine-agent one), and a shared marker would let the second
+  // one's evidence be suppressed as "already posted" by the first one's.
+  const scope = escalation.source === "thread" ? "" : `${escalation.source}:`;
+  return `<!-- sapwood:review-disputed:${scope}${worker}:${pr}:${escalation.headOid} -->`;
 }
 
 /** #451 (design #402 §4/D4): the `review-disputed` escalation — a FIXABLE tick whose every
@@ -5037,22 +5067,35 @@ async function escalateReviewDisputed(
   // #451 gate② P1: each excerpt is capped BEFORE assembly, then the whole comment is capped again
   // as a backstop — the same two-layer discipline capDigest's own doc describes. Full texts stay
   // authoritative on the thread itself (linked by id, right below).
-  const evidence = escalation.threads
+  const noun = escalation.source === "thread" ? "thread" : "finding";
+  const evidence = escalation.items
     .map(
       (t) =>
-        `- thread \`${t.threadId}\`\n  reviewer finding: ${capDigest(t.findingBody, REVIEW_DISPUTED_EXCERPT_MAX_CHARS)}\n  producer reply (disputed, unresolved): ${capDigest(t.reply, REVIEW_DISPUTED_EXCERPT_MAX_CHARS)}`,
+        `- ${noun} \`${t.ref}\`\n  reviewer finding: ${capDigest(t.findingBody, REVIEW_DISPUTED_EXCERPT_MAX_CHARS)}\n  producer reply (disputed, unresolved): ${capDigest(t.reply, REVIEW_DISPUTED_EXCERPT_MAX_CHARS)}`,
     )
     .join("\n\n");
-  const marker = reviewDisputedCommentMarker(w.name, pr, escalation.headOid);
-  const comment =
-    capDigest(
-      `sapwood: PR #${pr} — every unresolved review thread on the current head (\`${escalation.headOid}\`) carries a ` +
+  const marker = reviewDisputedCommentMarker(escalation, w.name, pr);
+  // #461: the two sources differ only in their opening sentence (what was disputed and where the
+  // full text lives) — the adjudication instruction, the carrier, the label and the reclaim path
+  // below are shared verbatim. The thread wording is byte-identical to its pre-#461 self.
+  const preamble =
+    escalation.source === "thread"
+      ? `sapwood: PR #${pr} — every unresolved review thread on the current head (\`${escalation.headOid}\`) carries a ` +
         `recorded **disputed** resolution (${fixRoundsSpent} fix round(s) already spent). A dispute is a producer/reviewer ` +
         `disagreement, not something more fix rounds can resolve (design #402 §4/D4) — escalating directly to ` +
         `\`${cfg.labels.needsHuman}\` for adjudication instead of dispatching another fix leg. Evidence per thread ` +
-        `(excerpted — the full text is on each thread by id):\n\n${evidence}\n\n` +
-        `Adjudicate each: side with the reviewer (resolve the thread yourself, or ask for another fix round) or side with the ` +
-        `producer (resolve it as not-a-defect). Remove \`${cfg.labels.needsHuman}\` ${carrierNoun(carrier)} once done to reclaim ` +
+        `(excerpted — the full text is on each thread by id):`
+      : `sapwood: PR #${pr} — the fix leg DISPUTED ${escalation.items.length} engine-agent review finding(s) raised against the ` +
+        `current head (\`${escalation.headOid}\`) instead of changing code for them (${fixRoundsSpent} fix round(s) already ` +
+        `spent). A dispute is a producer/reviewer disagreement, not something more fix rounds can resolve (#461) — escalating ` +
+        `directly to \`${cfg.labels.needsHuman}\` for adjudication instead of dispatching another fix leg. The review verdict ` +
+        `is UNCHANGED: a dispute is heard, never honored, by the engine. Evidence per finding, keyed \`<runId>#<index>\` ` +
+        `(excerpted — the full text is in this PR's sapwood engine review audit comment for that run):`;
+  const comment =
+    capDigest(
+      `${preamble}\n\n${evidence}\n\n` +
+        `Adjudicate each: side with the reviewer (${escalation.source === "thread" ? "resolve the thread yourself, or " : ""}ask for another fix round) or side with the ` +
+        `producer (${escalation.source === "thread" ? "resolve it as not-a-defect" : "accept the dispute and merge, or narrow the finding"}). Remove \`${cfg.labels.needsHuman}\` ${carrierNoun(carrier)} once done to reclaim ` +
         `(#147 gated reentry).`,
       REVIEW_DISPUTED_COMMENT_MAX_CHARS,
     ) + `\n\n${marker}`;
@@ -5084,10 +5127,15 @@ async function escalateReviewDisputed(
       carrier,
       headOid: escalation.headOid,
       fixRounds: fixRoundsSpent,
-      threads: escalation.threads.map((t) => t.threadId),
+      // #461: the refs land under the key that names what they ARE — `threads` (GitHub thread
+      // ids, the pre-#461 payload, byte-identical) or `findings` (`<runId>#<index>` handles).
+      ...(escalation.source === "thread"
+        ? { threads: escalation.items.map((t) => t.ref) }
+        : { source: escalation.source, findings: escalation.items.map((t) => t.ref) }),
     },
   );
-  return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `review-disputed:${escalation.threads.length}` };
+  const reason = escalation.source === "thread" ? "review-disputed" : "review-finding-disputed";
+  return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `${reason}:${escalation.items.length}` };
 }
 
 // ── #450 (design #402 R3, §3c) — convergence stop ───────────────────────────────────────────────

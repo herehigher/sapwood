@@ -293,8 +293,10 @@ a lane-history fact, which belongs where fix rounds are already counted).
 and costs zero further paid fix legs.**
 
 **Scope, corrected after live operation: this section covers the CLASSIC reviewer path
-(threads) only.** The `engine-agent` path has no review threads and therefore no dispute
-channel at all — see §4a, which was written from evidence this design's own PR produced.
+(threads) only.** The `engine-agent` path has no review threads and therefore had no dispute
+channel at all — see §4a, which was written from evidence this design's own PR produced, and
+which #461 has since closed with an audit-comment-keyed channel that routes into this same
+escalation.
 
 Precisely: on a DRIVE tick where the gate is `FIXABLE` and every unresolved thread on
 the current head has a recorded `disputed` resolution for that head, the lane escalates
@@ -349,8 +351,10 @@ exist there today. The chain, each link verified in source rather than inferred:
    and, at the GraphQL layer, only `addPullRequestReviewThreadReply` — there is no
    `addPullRequestReviewThread` / `addPullRequestReview` / `createReview` anywhere.
 4. Therefore `pr_review_threads` is legitimately EMPTY on an engine-agent-reviewed PR.
-5. The fix leg's only report contract is `threadResponses`, and every entry is keyed on
-   a thread id the engine can verify the producer actually saw.
+5. The fix leg's only report contract *was* `threadResponses`, and every entry is keyed on
+   a thread id the engine can verify the producer actually saw. (#461 added the second
+   contract this section calls for — see "What closes it" below; points 1-4 are unchanged
+   and are exactly why that contract could not simply reuse thread ids.)
 
 ⇒ **On the engine-agent path a fix leg can express neither `addressed` nor `disputed`
 for any finding.** Not "it is awkward" — there is no id to key an entry on, and
@@ -389,12 +393,28 @@ from a decision rather than a blank page:
   it converts every finding into a durable GitHub thread — including the advisories §2
   exists to keep cheap.
 
-Until it lands, state the residual honestly rather than implying §4 covers both modes:
-**an engine-agent finding is answerable only by changing code, never by disagreeing with
-it**, and a non-defect finding therefore costs the full `prFixCap` before a human is
-asked. §3's convergence stop is what bounds that today — on this path the per-round
-finding record (R2) is the *only* signal a lane emits about progress, since the fix leg
-itself cannot report anything, which strengthens §3's case for recording it.
+**Closed by #461** (filed as predicted above), along the preferred line, with one
+deliberate divergence in the identity key: **`(runId, findingIndex)`**, not
+`(finding id, head OID)`. `Finding.id` is session-supplied and validated only as a
+non-empty string — nothing makes it unique within one review — whereas an index into the
+validated artifact's own `findings` array is engine-authoritative and unique by
+construction; `runId` already pins the head and diff (the WAL is head-and-diff-keyed), so
+carrying a separate head OID would add a second, redundant currency check. `review/audit.ts`
+renders that index as the `[N]` prefix on every finding so a credential-free fix leg can
+copy the handle verbatim, the same way the classic path copies a `threadId`. The fix leg's
+report gained an optional `findingResponses` block validated against two independent facts
+(the leg was *served* that run's audit comment, per the proxy journal; the run's artifact
+*has* that many findings, per the WAL) — an unknown run, an out-of-range index, or a
+duplicate rejects the whole report, exactly as `threadResponses` does. A `disputed` response
+routes to §4's own escalation — the same `review-disputed` event, carrier, and #147 reentry
+path, tagged `source: "finding"`, reason `review-finding-disputed:<n>` — carrying the
+reviewer's finding body and the producer's reply. The divergence from "the engine posts the
+reply as a top-level comment": it does not post a *separate* comment per response; the
+escalation comment is the publication, and an `addressed` response rides the durable receipt
+only. Nothing about the verdict changes — a dispute is heard, never honored, by the engine.
+
+The residual §3 note still stands on its own account: on this path the per-round finding
+record (R2) remains the only *progress* signal a lane emits, which is why §3 records it.
 
 ## 5. Tendency — cross-PR finding-class accounting
 

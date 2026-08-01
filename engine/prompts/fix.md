@@ -59,7 +59,7 @@ happened.
   you actually handled this round (never a thread you skipped), in exactly this form:
 
   <<<SAPWOOD_RESULT>>>
-  {"threadResponses": [{"threadId": "<verbatim id from pr_review_threads>", "reply": "<what you did, or why you disagree>", "resolution": "addressed"}]}
+  {"threadResponses": [{"threadId": "<verbatim id from pr_review_threads>", "reply": "<what you did, or why you disagree>", "resolution": "addressed"}], "findingResponses": [{"runId": "<verbatim run from the audit comment>", "findingIndex": 0, "reply": "<what you did, or why you disagree>", "resolution": "disputed"}]}
   <<<END_SAPWOOD_RESULT>>>
 
   - `threadId` MUST be copied VERBATIM from the `id` field `pr_review_threads` gave
@@ -73,6 +73,14 @@ happened.
   - `reply` is never empty or whitespace-only — always say what you did or why you
     disagree.
   - One entry per thread you handled this round; omit any thread you didn't touch.
+  - `findingResponses` is the SAME contract for engine-agent findings, which arrive
+    in the audit comment (`getPRAuditComments`) rather than as review threads — omit
+    the key entirely when you handled none. `runId` is that comment's own `run` value,
+    copied verbatim; `findingIndex` is the number in the finding's `[N]` prefix, as
+    rendered (`- **[2] some-finding-id**` -> `"findingIndex": 2`). Same rules as
+    above: never invented, one entry per finding, `reply` never empty. A `disputed`
+    finding does NOT unblock the PR — the engine records it and escalates to a human
+    with your reasoning attached, so say precisely why the finding is wrong.
   - Nothing to report? Emit `{"threadResponses": []}` — never omit the block
     entirely, and never emit prose instead of it.
   - Nothing may follow the block's final sentinel.

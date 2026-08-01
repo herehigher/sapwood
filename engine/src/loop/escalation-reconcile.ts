@@ -194,6 +194,10 @@ export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   // `review-disputed-comment-failed`, likewise out of this table and likewise short-circuiting
   // before this event. Its payload carries `pr` (the driving lane's own), so an external
   // merge/close/label-removal resolves it exactly like every other pr-bearing `always` source.
+  // #461: the SAME kind now also carries the engine-agent path's audit-comment finding disputes
+  // (payload `source: "finding"` + `findings`, instead of `threads`) — deliberately NOT a second
+  // kind: same writer, same emission ordering, same carrier, same `pr` in the payload, so it needs
+  // the same row and would gain nothing from its own but a second place to forget to register.
   "review-disputed": "always",
   // #450 (design #402 R3, §3c; architectural review amendment 2026-07-31, item 1): the
   // convergence-stop escalation — conductor.ts's `escalateNonConvergent`, the FIXABLE branch's

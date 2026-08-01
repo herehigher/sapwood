@@ -69,18 +69,31 @@ function escapeCell(value: string): string {
  *  advisory — can never become an approval-parseable engine comment (#448, design #402 §2: the
  *  Advisory section gets "the SAME blockquoted, write-boundary-sanitized rendering `audit.ts`
  *  already applies"). */
-function renderFindingsList(findings: readonly ClassifiedFinding[]): string {
-  return findings.length > 0
-    ? findings
+function renderFindingsList(entries: readonly IndexedFinding[]): string {
+  return entries.length > 0
+    ? entries
         .map(
-          (f) =>
-            `- **${escapeCell(f.id)}**\n${f.body
+          ({ index, finding }) =>
+            `- **[${index}] ${escapeCell(finding.id)}**\n${finding.body
               .split("\n")
               .map((line) => `> ${line}`)
               .join("\n")}`,
         )
         .join("\n")
     : "- None recorded.";
+}
+
+/** #461: a finding paired with its position in `EngineReviewArtifact.findings` — the identity a
+ *  fix leg names in its `findingResponses` block (`loop/fix-response.ts`) to dispute or accept
+ *  ONE finding. The index is rendered in the audit comment (`[N]` above) because that comment is
+ *  the ONLY channel a credential-free fix leg reads engine-agent findings through
+ *  (`getPRAuditComments`), and it must be able to copy the handle verbatim the same way the
+ *  classic path copies a `threadId`. It is the ARTIFACT's own index, deliberately NOT a position
+ *  within the blocking/advisory section a finding happens to render under — the engine validates
+ *  a response against that same array, so the two must be the same number. */
+interface IndexedFinding {
+  index: number;
+  finding: ClassifiedFinding;
 }
 
 /** #513: the Provenance line's identity clause — "decisive reviewer identity" singular, plural
@@ -168,8 +181,9 @@ export function buildAuditComment(wal: EngineReviewWal, artifact: EngineReviewAr
   // exactly as it always has) rather than the raw `severity` field, so a D3-overridden finding
   // (severity requested "advisory" but forced back to "blocking") renders under the BLOCKING
   // heading — the heading a reader must act on, never the one a session tried to file it under.
-  const blocking = artifact.findings.filter((f) => effectiveSeverity(f) !== "advisory");
-  const advisory = artifact.findings.filter((f) => effectiveSeverity(f) === "advisory");
+  const indexed: IndexedFinding[] = artifact.findings.map((finding, index) => ({ index, finding }));
+  const blocking = indexed.filter((e) => effectiveSeverity(e.finding) !== "advisory");
+  const advisory = indexed.filter((e) => effectiveSeverity(e.finding) === "advisory");
   return `${buildAuditMarker(markerForWal(wal))}
 
 ## Sapwood engine review audit
