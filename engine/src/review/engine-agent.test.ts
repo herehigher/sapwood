@@ -381,6 +381,51 @@ test("cost-remainder: attempt 2's budget = costCapUsd - attempt 1's recorded cos
   assert.equal(runner.calls[1]!.maxBudgetUsd, 2); // 3 - 1
 });
 
+// ── #513: onReviewArtifact accumulates every executed attempt's spend, fires exactly once ──────
+
+test("#513 retry path: two EXECUTED attempts persist two sessionSpends entries (in order), decisive-only identities, onReviewArtifact fires exactly once", async () => {
+  // #513 gate② round 2 (P3-A): attempt 1 and attempt 2 report DISTINCT identities (both still
+  // distinguishable from the worker's WORKER_MODEL, so D5 passes on both) — with the old test,
+  // both attempts happened to report the SAME default AGENT_MODEL identity, so an implementation
+  // that wrongly accumulated identities across attempts (instead of scoping to the decisive one)
+  // would have deduped down to the identical asserted single-entry array and passed anyway. Only
+  // a genuinely DIFFERENT attempt-1 identity makes the "decisive-only" assertion below load-bearing.
+  const ATTEMPT_1_MODEL = "opus-legacy-attempt-1-only";
+  const { build, artifactCalls } = mkDeps({
+    runnerQueue: [
+      mkSessionResult({
+        resultText: "garbage — attempt 1 produced nothing usable",
+        costUsd: 1,
+        costKnown: true,
+        modelUsage: [{ model: ATTEMPT_1_MODEL, inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 }],
+      }),
+      mkSessionResult({ resultText: ALL_CONFIRMED, costUsd: 0.4, costKnown: true }), // default identity: AGENT_MODEL
+    ],
+  });
+  const result = await build().evaluate(ctx());
+  assert.equal(result.kind, "approved");
+  assert.equal(artifactCalls.length, 1, "onReviewArtifact must fire exactly once, on the verdict-producing attempt");
+  const { sessionSpends, sessionActualIdentities } = artifactCalls[0]!.artifact;
+  assert.deepEqual(sessionSpends, [
+    { kind: "known", usd: 1 },
+    { kind: "known", usd: 0.4 },
+  ]);
+  // Identities are scoped to the DECISIVE attempt (attempt 2, AGENT_MODEL) only — attempt 1's own
+  // DIFFERENT (failed) session identity (ATTEMPT_1_MODEL) is never folded in, even though its
+  // spend is.
+  assert.deepEqual(sessionActualIdentities, [{ provider: "anthropic", model: AGENT_MODEL }]);
+});
+
+test("#513: an unknown-cost attempt's spend is recorded too, when it's the ONLY (decisive) attempt", async () => {
+  const { build, artifactCalls } = mkDeps({
+    runnerQueue: [mkSessionResult({ resultText: ALL_CONFIRMED, costUsd: 0, costKnown: false })],
+  });
+  const result = await build().evaluate(ctx());
+  assert.equal(result.kind, "approved");
+  assert.equal(artifactCalls.length, 1);
+  assert.deepEqual(artifactCalls[0]!.artifact.sessionSpends, [{ kind: "unknown" }]);
+});
+
 test("cost-remainder: remainder <= 0 (attempt 1 cost meets/exceeds the cap) -> NO retry, unavailable", async () => {
   const { build, runner } = mkDeps({ runnerQueue: [mkSessionResult({ resultText: "garbage", costUsd: 3 })] });
   const result = await build().evaluate(ctx());
