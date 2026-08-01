@@ -511,11 +511,115 @@ test("shipped engine-reviewer prompt (#454, design #402 R6 §6a): the enforced-v
     /model separation, checked before the session[\s\S]*and again\s+afterwards/,
     // resolveIdentity/hashDiff (drive.ts) + checkAcSnapshotDrift (ac-snapshot.ts).
     /head\/base\/diff identity, and snapshotted-body drift/,
-    // RoleRunner.run()'s reviewCwd branch (peripheral.ts) — hardcoded, refuses an override.
-    /the static-only tool profile/,
+    // RoleRunner.run()'s reviewCwd branch (peripheral.ts) — hardcoded, refuses an override — is
+    // the only tool-profile claim made UNIVERSALLY; anything beyond "no writes" is runner-specific
+    // (#512: the codex-exec runner's sandbox does not match the Claude runner's tool grant).
+    /no writes, for every runner/,
   ]) {
     assert.match(prompt, row, `enforced row missing from the shipped prompt: ${row}`);
   }
+});
+
+// #512 (design adjudication 2026-08-01): the shipped prompt named a Claude-only tool surface in
+// three places, which suppressed codex-exec sessions' only tool (a shell) — pin the ABSENCE of the
+// contradictory wording, on the file as shipped, via the same loading path.
+test("shipped engine-reviewer prompt (#512): does not claim the session has Read/Grep/Glob or forbid Bash — those are Claude-only tool names, false for the codex-exec runner", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  // The materialized-tree bullet ("What you are reviewing") used to open with the Claude-only tool
+  // list; it must now name the CAPABILITY (grounding via inspection), not tool names. The Claude
+  // tool grant still appears LATER, legitimately, describing that ONE runner's actual hardcoded
+  // profile (see the next test) — so this assertion targets the old bullet's own unique wording,
+  // not the substring, which the new enforced-list bullet correctly reuses in a runner-scoped way.
+  assert.doesNotMatch(
+    prompt,
+    /your read-only working directory \(`Read`\/`Grep`\/`Glob`/,
+    "must not assert the materialized-tree bullet's old Claude-only tool list",
+  );
+  assert.doesNotMatch(
+    prompt,
+    /no write tools of any kind\) is a private checkout/,
+    "the old parenthetical tool-list phrasing must be gone",
+  );
+  assert.doesNotMatch(
+    prompt,
+    /the static-only tool profile.*—.*`Read`\/`Grep`\/`Glob`, no `Bash`, no writes, no forge access\.\s*\n\s*Hardcoded for review sessions/,
+    "must not claim the old blanket static-only tool profile as engine-enforced for every runner",
+  );
+  assert.doesNotMatch(
+    prompt,
+    /you have none of these\s*\n\s*tools; do not attempt to reach for them\./,
+    "must not tell the session it has no tools at all — false for codex-exec, which has a shell",
+  );
+});
+
+test("shipped engine-reviewer prompt (#512): the enforced containment claim is runner-specific, not a single 'static-only' profile", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.match(prompt, /no writes, for every runner/);
+  assert.match(prompt, /containment is runner-specific, not one shared "static" profile/);
+  assert.match(prompt, /codex-exec runner's read-only sandbox blocks writes\s*\n\s*but not shell execution or host-wide file reads/);
+  assert.match(prompt, /never claimed as an engine-enforced fence/);
+});
+
+test("shipped engine-reviewer prompt (#512): 'never execute / never reach the network' survives as an INSTRUCTION, not a claimed engine guarantee", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.match(prompt, /Never execute, never reach the network\./);
+  assert.match(prompt, /never to run the producer's code, build\/install\/test it, or make\s*\n\s*any network call/);
+  assert.match(
+    prompt,
+    /This is an INSTRUCTION, not a guarantee every runner mechanically enforces for\s*\n\s*you/,
+    "the non-negotiable must not be phrased as an engine-enforced guarantee — it is an instruction to the session",
+  );
+});
+
+// #512 (PM gate② round 2, P1-1, proven live): the first submitted round missed a FOURTH site — the
+// opening identity paragraph — and it was the BINDING one. "never run a shell command" directly
+// contradicted the "actually inspect the tree" instruction added at the materialized-tree bullet,
+// and it sits in the most authoritative position in the whole prompt. A live three-arm rerun (same
+// fixture, model, effort) showed the first round changed NOTHING observable (0 command_execution
+// items, same as main); fixing this site (plus the model-identity and capability-limit sites below)
+// produced 12 command_execution items and materially different findings. These three tests pin the
+// live-proven fix so a future edit cannot silently reintroduce the contradiction.
+test("shipped engine-reviewer prompt (#512, PM gate② round 2, P1-1): the opening identity paragraph no longer forbids a shell command, and states tree inspection is REQUIRED", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.doesNotMatch(
+    prompt,
+    /never execute the producer's code, never run a shell command, and/,
+    "the opening paragraph must not tell the session it may never run a shell command — that is the codex-exec runner's only tree-inspection tool",
+  );
+  assert.match(
+    prompt,
+    /You are a STATIC reviewer: you never execute the producer's code, and you have no write access/,
+    "the identity sentence keeps 'never execute the producer's code' and 'no write access' — both genuinely true for every runner",
+  );
+  assert.match(
+    prompt,
+    /You DO inspect the materialized tree read-only, with whatever means your session has\s*—?\s*\n?\s*that is REQUIRED, not optional/,
+    "the opening paragraph must affirmatively require tree inspection, in the prompt's most authoritative position",
+  );
+});
+
+test("shipped engine-reviewer prompt (#512, PM gate② round 2, P1-1): the model-identity claim is runner-neutral — not one more site claiming 'Claude'", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.doesNotMatch(
+    prompt,
+    /You are a different Claude model from/,
+    "must not claim the reviewing session is a Claude model — false for codex-exec, and this is exactly the property #443's cross-vendor D5 model separation exists to provide",
+  );
+  assert.match(prompt, /You run on a different model from the one that produced this PR/);
+});
+
+test("shipped engine-reviewer prompt (#512, PM gate② round 2, P1-1): the capability-limit paragraph states 'must not execute/reach the network' as a PROHIBITION, and 'cannot read live GitHub state' as the one genuine inability", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.doesNotMatch(
+    prompt,
+    /you cannot execute code, reach the network, or read\s*\n\s*live GitHub state/,
+    "must not phrase 'must not execute/reach the network' as an inability — for codex-exec it is a prohibition on a tool the session actually has",
+  );
+  assert.match(
+    prompt,
+    /you must not execute code or reach the network, and\s*\n\s*cannot read live GitHub state — is never itself a finding\./,
+    "keeps the paragraph's actual point (a capability limit is never itself a finding) while separating the prohibition from the one genuine inability",
+  );
 });
 
 test("shipped engine-reviewer prompt (#454, design #402 R6 §6a): the judged half is stated as unverifiable by the engine, row by row", () => {
@@ -559,6 +663,19 @@ test("shipped engine-reviewer prompt (#454, design #402 R6 §6b): the triage doc
     /"test-coverage"/,
     "§6a must not restate R1's advisory-eligible kind list — it cites the section that owns it",
   );
+});
+
+// #512: the runner-honesty rewrite touched three sites in the shipped prompt but must NOT touch
+// REQUIRED_PROMPT_PLACEHOLDERS or drop a placeholder from the shipped file — loadEngineReviewerPromptTemplate(undefined)
+// runs the SAME completeness check a custom promptFile gets (#74 fail-fast), so a regression here
+// would throw. Every other test in this file already constructs a reviewer against the shipped
+// default and would also throw on a missing placeholder; this test names the contract directly.
+test("loadEngineReviewerPromptTemplate: the shipped default prompt (post-#512 edit) still satisfies every REQUIRED_PROMPT_PLACEHOLDERS entry", () => {
+  assert.doesNotThrow(() => loadEngineReviewerPromptTemplate(undefined));
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  for (const placeholder of ["{{diff}}", "{{issue-body}}", "{{acceptance-criteria}}", "{{doctrine}}"]) {
+    assert.ok(prompt.includes(placeholder), `shipped prompt missing required placeholder ${placeholder}`);
+  }
 });
 
 test("loadEngineReviewerPromptTemplate: a custom template MISSING a required placeholder throws at load, naming the missing one (#74 fail-fast)", () => {

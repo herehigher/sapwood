@@ -60,6 +60,19 @@
 // telemetry becomes a cost-unknown ALERT event and `{ kind: "unknown" }` spend, which the caller
 // treats as fail-closed (never as `$0`). The wall-clock timeout below stays HARD — it is a timeout,
 // not a cost cap.
+//
+// SESSION INSPECTION CENSUS (#512, design adjudication 2026-08-01, "one honest-recording event"):
+// the shipped engine-reviewer prompt used to name a Claude-only tool surface, which suppressed this
+// runner's only tool — a shell — down to zero tree reads (the #443 shadow run that opened #512).
+// The prompt fix cannot be verified by a fixture (it is a live-model-behavior claim), and the
+// containment profile cannot ENFORCE "did it look" without becoming a ritual-authority gate the
+// adjudication explicitly rejected (options C/D). So this module does what R1/R2 already do for
+// budget and containment: it cannot enforce, so it RECORDS, honestly, from its own `--json` stream
+// — the same regime, applied to a third fact the runner can observe about itself but not control.
+// `ENGINE_REVIEW_SESSION_INSPECTION` carries the observed tool/command item count and is emitted
+// AFTER every session completes, success or not. It is EVIDENCE ONLY: nothing in this codebase
+// reads it to decide a verdict, a retry, or a budget — see its own doc comment below for why, and
+// never wire a reader for it without re-opening that adjudication first.
 import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -90,6 +103,29 @@ export const ENGINE_REVIEW_CONTAINMENT_GAP = "engine-review-containment-gap";
  *  a host-level fact for a human to chase (something may still be running and spending), never a
  *  reason to leave a gate② lane awaiting an exit that may never come. */
 export const ENGINE_REVIEW_ORPHANED_GROUP = "engine-review-orphaned-group";
+
+/** #512 (design adjudication 2026-08-01, "one honest-recording event" — same cannot-enforce ⇒
+ *  record-honestly regime as R1/R2 above): how many tool/command items this session's OWN `--json`
+ *  stream reported it ran (`parseCodexExecStream`'s `toolItemCount`), emitted once per session,
+ *  after it completes. This closes a REGRESSION channel a prompt-only fix leaves open — a future
+ *  model/CLI/prompt change silently returning to zero-inspection reviews would otherwise be
+ *  invisible until someone re-ran a bespoke harness (the #443 shadow run that found this in the
+ *  first place).
+ *
+ *  EVIDENCE ONLY, NEVER A GATE — this is the whole point of it existing at all:
+ *   - the adjudication explicitly REJECTED making "did it look" an engine-enforced check (options
+ *     C/D in #512): the signal is trivially satisfiable by an irrelevant `pwd`/`rg` with no bearing
+ *     on the criterion under review, so treating it as a gate would grant ritual authority over
+ *     something only a human reading the transcript can actually judge;
+ *   - nothing in `EngineAgentReviewer.evaluate()`, `agent-output.ts`'s validation, or the retry/
+ *     budget logic reads this event or `toolItemCount` — a verdict is derived exclusively from the
+ *     session's structured `perAC`/`findings` output, exactly as before this event existed;
+ *   - unlike `ENGINE_REVIEW_CONTAINMENT_GAP` (which is LOAD-BEARING and uses `requireEvent` — a
+ *     failed write there refuses the spawn), this event is emitted with the SAME best-effort
+ *     `event()` helper every other post-run record in this module uses: a broken/absent event
+ *     channel, or a failure to append, can never turn an observability record into a reason to fail
+ *     or retry a session that otherwise ran fine. */
+export const ENGINE_REVIEW_SESSION_INSPECTION = "engine-review-session-inspection";
 
 /** Facet 1: a read-only sandbox blocks writes, not execution — model-invoked shell commands can
  *  still RUN producer-controlled code from the reviewed tree. */
@@ -135,7 +171,41 @@ export interface CodexExecStreamTelemetry {
   /** Summed across every `turn.completed` in the stream (an exec run is normally one turn; summing
    *  means a multi-turn run reports its whole cost rather than its last turn's). */
   usage: CodexTokenUsage | null;
+  /** #512: count of `item.completed` items whose `item.type` is tool-ish (`CODEX_TOOL_ITEM_TYPES`)
+   *  — i.e. the session actually DID something, as opposed to only producing prose. Always a
+   *  number, never `null`: zero is a perfectly honest count (a session that never called a tool),
+   *  distinct from `usage`/`threadId`'s `null` (telemetry never seen at all). See
+   *  `ENGINE_REVIEW_SESSION_INSPECTION`'s doc for why this is recorded and never gated on.
+   *
+   *  HONEST BOUND (#512, PM gate② review, P2-1, valid finding — fix adopted as a documented bound,
+   *  NOT a streaming parser; see the adjudication at `MAX_CAPTURE_BYTES`'s own doc for why a
+   *  streaming NDJSON parser was rejected for an evidence-only counter). This count is computed
+   *  over the RETAINED capture window only (`appendCapped`/`MAX_CAPTURE_BYTES`, 8 MiB, tail-kept,
+   *  head-dropped). A session whose total stdout exceeds that bound may UNDERCOUNT — an
+   *  `item.completed` early in a pathologically verbose session can be dropped along with the rest
+   *  of the head before this parser ever sees it. The error is STRICTLY ONE-DIRECTIONAL: truncation
+   *  can only ever drop items, never fabricate one, so this count can read low or zero when the
+   *  session actually inspected the tree, but can never read positive when it did not. A low or
+   *  zero `toolItemCount` is therefore a prompt to read the session's own transcript
+   *  (`transcriptPath`) before concluding "no inspection happened" — never proof of it on its own. */
+  toolItemCount: number;
 }
+
+/** #512 (PM gate② review, P2): `item.completed`'s `item.type` values this parser counts as
+ *  TREE-INSPECTION activity — the signal `ENGINE_REVIEW_SESSION_INSPECTION` records, and the name
+ *  this set and the event both commit to. `command_execution` is a shell call — the ONE
+ *  tree-inspection capability this runner's containment profile actually grants (`--sandbox
+ *  read-only` permits reads; see this module's own top-of-file doc). `file_change`/`mcp_tool_call`
+ *  are included for forward compatibility with future CLI item shapes that would still count as
+ *  "did something to/via the tree"; this runner's own argv (`-c mcp_servers={}`) means the latter
+ *  should never actually appear. `web_search` is DELIBERATELY EXCLUDED even though this runner's
+ *  argv also disables it (`-c tools.web_search=false`, so it should never fire either): a web
+ *  search is not tree inspection, and counting it would inflate the exact signal this event exists
+ *  to report honestly if that argv flag were ever dropped. `agent_message` (prose) and `reasoning`
+ *  (the model's own chain-of-thought item, also prose) are deliberately NOT counted — an
+ *  `agent_message` is exactly the "answered from the diff alone" pattern #512 exists to detect,
+ *  not evidence of inspection. */
+const CODEX_TOOL_ITEM_TYPES: ReadonlySet<string> = new Set(["command_execution", "file_change", "mcp_tool_call"]);
 
 /** CODEX_BIN env override, else `codex` on PATH — deliberately the same shape as worker.ts's
  *  `discoverClaudeBin(CLAUDE_BIN)`, so both runners are discovered the same way. */
@@ -301,16 +371,21 @@ const CODEX_EFFORTS: readonly string[] = ["low", "medium", "high"];
  *  is how a mistyped config could silently widen the profile pinned above. */
 const CODEX_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/;
 
-/** Parse `codex exec --json`'s stdout event stream (one JSON object per line) for the two pieces of
- *  telemetry this executor needs. Tolerant by construction: a non-JSON line (the CLI prints a
- *  human-readable "Reading prompt from stdin..." banner before the stream starts), an unknown event
- *  type, or a truncated tail is skipped, never fatal. Anything it cannot find comes back `null` —
- *  which is what makes the honest-recording paths fire, rather than a fabricated value. */
+/** Parse `codex exec --json`'s stdout event stream (one JSON object per line) for the telemetry
+ *  this executor needs — thread id, summed token usage, and (#512) the observed tool/command item
+ *  count. Tolerant by construction: a non-JSON line (the CLI prints a human-readable "Reading
+ *  prompt from stdin..." banner before the stream starts), an unknown event type, or a truncated
+ *  tail is skipped, never fatal. `threadId`/`usage` come back `null` when never seen — what makes
+ *  the honest-recording paths fire, rather than a fabricated value; `toolItemCount` is always a
+ *  number (zero is itself an honest, recordable count — see `ENGINE_REVIEW_SESSION_INSPECTION`).
+ *  This function only ever sees what `stdout` retains — see `CodexExecStreamTelemetry.toolItemCount`'s
+ *  doc for the resulting one-directional undercount bound on very large streams (#512, P2-1). */
 export function parseCodexExecStream(stdout: string): CodexExecStreamTelemetry {
   let threadId: string | null = null;
   let inputTokens = 0;
   let outputTokens = 0;
   let sawUsage = false;
+  let toolItemCount = 0;
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.length === 0 || !trimmed.startsWith("{")) continue;
@@ -335,8 +410,14 @@ export function parseCodexExecStream(stdout: string): CodexExecStreamTelemetry {
         sawUsage = true;
       }
     }
+    if (rec.type === "item.completed" && typeof rec.item === "object" && rec.item !== null) {
+      const item = rec.item as Record<string, unknown>;
+      if (typeof item.type === "string" && CODEX_TOOL_ITEM_TYPES.has(item.type)) {
+        toolItemCount++;
+      }
+    }
   }
-  return { threadId, usage: sawUsage ? { inputTokens, outputTokens } : null };
+  return { threadId, usage: sawUsage ? { inputTokens, outputTokens } : null, toolItemCount };
 }
 
 /** Extract the session's ACTUAL (provider, model) identity from its own rollout transcript:
@@ -480,7 +561,13 @@ const DEFAULT_KILL_GRACE_MS = 200;
 const DEFAULT_LIVENESS_POLL_MS = 30_000;
 
 /** Bound on captured stdout/stderr, bytes. A runaway CLI must not be able to grow the engine's heap
- *  without limit; the tail is what carries `turn.completed`, so the HEAD is what gets dropped. */
+ *  without limit; the tail is what carries `turn.completed`, so the HEAD is what gets dropped. #512
+ *  (PM gate② review, P2-1): this is also the retention window `parseCodexExecStream`'s
+ *  `toolItemCount` is computed over — an `item.completed` for an early `command_execution` in a
+ *  session whose total stdout exceeds this bound is dropped along with the rest of the head, before
+ *  the parser ever sees it. Observed real streams are on the order of ~1.6 KB, three to four orders
+ *  of magnitude below this bound, so this is a documented edge case, not a fix: see
+ *  `CodexExecStreamTelemetry.toolItemCount`'s doc for why it stays that way. */
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 
 function appendCapped(buf: string, chunk: string): string {
@@ -724,6 +811,11 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
     }
 
     const telemetry = parseCodexExecStream(stdout);
+    // #512: the honest-recording census — emitted after EVERY session, regardless of outcome
+    // (done/failed/timeout), because "how many tool calls did it make" is itself the fact worth
+    // keeping even for a session that didn't finish cleanly. Best-effort like every other post-run
+    // event here (see ENGINE_REVIEW_SESSION_INSPECTION's own doc for why this one is never a gate).
+    this.event(ENGINE_REVIEW_SESSION_INSPECTION, { runner: this.runner, session: sessionId, toolItemCount: telemetry.toolItemCount });
     const identity = this.resolveIdentity(env, telemetry.threadId);
     const spend: ReviewSessionEvidence["spend"] =
       telemetry.usage === null ? { kind: "unknown" } : { kind: "estimated", usd: estimateCodexCostUsd(telemetry.usage, this.deps.pricing) };

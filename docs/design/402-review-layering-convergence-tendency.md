@@ -456,6 +456,18 @@ engine actually checks — the undocumented boundary this item exists to close:
 | head/base/diff identity; snapshotted-body drift fail-closed | everything else in the prompt's prose |
 | static-only tool profile (no `Bash`, no writes) | |
 
+**Row 7 (static-only tool profile) — SUPERSEDED BY #512 (2026-08-01).** This table
+records what #402/#454 decided AT THE TIME, when the shipped prompt's only runner was
+the Claude CLI (D1/D5, design #279) and "static-only" was true for the whole system.
+Once the `codex-exec` runner shipped (#443), that blanket claim became false for one
+runner (`codex-exec` has a shell; only its writes are blocked, per
+`engine-review-containment-gap`), and #512 found the shipped prompt still asserting it
+— suppressing that runner's only tree-inspection tool. #512 narrowed the enforced row to
+what is universally true (no write access, for every runner) and moved the rest to
+runner-specific containment, stated in `docs/security.md`'s `#443` exception rather than
+claimed as one shared engine-enforced fence. The historical row above is left as-shipped
+— this note documents the narrowing, it does not rewrite the record.
+
 **6b. The owner's prompt-tuning findings, folded into the shipped default.** These are
 the behaviors repeated hand-tuning converged on; per the issue's own framing they
 belong in the shipped prompt, not in one operator's habits:
