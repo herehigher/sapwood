@@ -4,8 +4,9 @@
 //
 // Steps: auth preflight -> user-vs-org -> ensure labels -> ensure milestones ->
 // ensure ProjectV2 board (Status lanes) -> write starter config.
-// The guard PreToolUse hook is wired in M1 (guard.ts does not exist yet) — deferred here
-// with a clear note, and is human-merge-only per CLAUDE.md.
+// The guard PreToolUse hook is built (guard.ts / guard-hook.ts) and wired live per session by
+// worker.ts at dispatch time, not by init — init only reports that, and that guard.ts/hook
+// wiring/security config are human-merge-only per CLAUDE.md.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -437,7 +438,10 @@ export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Pr
     actions.push(template.written ? `wrote issue template ${template.path}` : `issue template already present (${template.path})`);
   }
 
-  actions.push("guard hook: deferred to M1 (guard.ts not built yet) — human-merge-only when wired");
+  actions.push(
+    "guard hook: built and wired live into every worker session at dispatch time (by worker.ts, not by init) — " +
+      "guard.ts, hook wiring and security config stay human-merge-only",
+  );
   return { actions };
 }
 
