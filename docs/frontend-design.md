@@ -662,7 +662,8 @@ checklist item**):
 | `retro-pr-degraded` | A self-improvement proposal didn't come together this round |
 | `run-started` | Engine started a new run |
 | `instance-lock-taken-over` | Took over the engine lock left by a crashed run (pid {previousPid}) |
-| `round-phase` | Round {round_id} moved into {phase} |
+| `round-phase` | Round {round_id} moved into {phase}. The terminal `closed` entry additionally carries the idle-churn breaker's own per-round sample (#470): `idle` (this round dispatched nothing and left no lane in flight) and, for an idle round only, `fp` — a digest of every durable fact the round appended. Both are diagnostics for that breaker's ledger-derived streak, not feed copy; the sentence is unchanged |
+| `idle-churn-detected` | The loop ran {rounds} rounds in a row that changed nothing at all — parked for a human (#470). Names the standby probe signal(s) that kept opening those rounds. Not an attention *strip* item: like `rapid-restart-detected` and `consecutive-stalls-detected`, its waiting-on-a-human state is carried by its park episode (`PARKED (idle-churn)`), and it carries no issue |
 
 The same module captions lane states (`running` → "writing", `driving` → "PR
 under review", `handoff` → "handed off") and config keys (§3 E). Adding an

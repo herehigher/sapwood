@@ -906,6 +906,31 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   (db) => {
     db.exec(`ALTER TABLE workers ADD COLUMN gated_escalation_carrier TEXT NOT NULL DEFAULT 'issue';`);
   },
+  // 30 -> 31 (#470): the idle-churn breaker (loop/idle-churn.ts) parks through the same
+  // park_state machinery — the source CHECK gains its fifth member, by the same
+  // recreate-and-copy the 27->28 and 28->29 migrations used and for the same silent-
+  // INSERT-OR-IGNORE reason documented there (enterPark is INSERT OR IGNORE, so an unlisted
+  // source is swallowed with changes = 0 rather than raising — the fail-open shape this repo's
+  // doctrine hunts).
+  (db) => {
+    db.exec(`
+      CREATE TABLE park_state_new (
+        source         TEXT PRIMARY KEY CHECK (source IN ('llm', 'forge', 'rapid-restart', 'consecutive-stalls', 'idle-churn')),
+        reason         TEXT NOT NULL,
+        trigger_issue  INTEGER,
+        entered_at     TEXT NOT NULL,
+        last_probe_at  TEXT NOT NULL,
+        probe_attempts INTEGER NOT NULL DEFAULT 0,
+        escalated_at   TEXT,
+        canary_worker  TEXT,
+        reset_hint_at  TEXT
+      );
+      INSERT INTO park_state_new SELECT source, reason, trigger_issue, entered_at, last_probe_at,
+        probe_attempts, escalated_at, canary_worker, reset_hint_at FROM park_state;
+      DROP TABLE park_state;
+      ALTER TABLE park_state_new RENAME TO park_state;
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -1323,8 +1348,12 @@ export type EnvFailureSource = "llm" | "forge";
  *  in conductor.ts/round.ts must never treat it as an llm/forge episode. #407:
  *  `consecutive-stalls` (the stall breaker, loop/stall-breaker.ts) is the same shape as
  *  rapid-restart — no probe; it clears only when a later engine start observes the stall
- *  streak broken (or a human clears it). */
-export type ParkSource = EnvFailureSource | "rapid-restart" | "consecutive-stalls";
+ *  streak broken (or a human clears it). #470: `idle-churn` (the idle-churn breaker,
+ *  loop/idle-churn.ts) is probe-less for a different reason than either — there is nothing to
+ *  probe, because nothing is broken DOWN HERE: the engine is opening and closing rounds
+ *  perfectly, and what needs fixing (a probe signal counting work nothing can consume) is
+ *  upstream of anything the engine could re-test. It clears when a human clears it. */
+export type ParkSource = EnvFailureSource | "rapid-restart" | "consecutive-stalls" | "idle-churn";
 
 /** #168: one environment-failure park episode — ONE ROW PER SOURCE (see the schema v11->v12
  *  migration comment for why per-source rows and why this lives in the state DB, not a file

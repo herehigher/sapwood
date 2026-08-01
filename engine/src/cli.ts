@@ -508,10 +508,12 @@ export function formatStatus(s: StatusSnapshot): string {
       // #431: a rapid-restart episode has NO probe — its clearing story is different, and the
       // status line must not promise probing that will never happen. #407: consecutive-stalls
       // is the same probe-less shape with its own clearing story (stall-breaker.ts's doc).
+      // #470: idle-churn is a third probe-less shape (idle-churn.ts's doc) — same
+      // operator-clears-it story as consecutive-stalls.
       const recovery =
         p.source === "rapid-restart"
           ? "clears on a later start outside the restart window (docs/troubleshooting.md)"
-          : p.source === "consecutive-stalls"
+          : p.source === "consecutive-stalls" || p.source === "idle-churn"
             ? "stands until the operator clears it — no auto-clear (docs/troubleshooting.md)"
             : "probing on backoff, auto-resumes on recovery";
       lines.push(
