@@ -565,7 +565,12 @@ doctrine:
 #   # recursive `**`. Paths must be trimmed canonical repo-relative forms (no ./, /, .. segment,
 #   # //, or trailing /). A list at GitHub's 3,000-file ceiling escalates as unverifiable. Set
 #   # to [] to deliberately disable the mechanism (then sapwood does not fetch changed files).
-#   instructionPaths: [CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/**, AGENTS.md]
+#   # #527: the reviewer's OWN doctrine file is covered too, DERIVED from doctrine.file (so a
+#   # repointed doctrine path stays covered) — it is never listed here. engine/prompts/** covers
+#   # the shipped reviewer prompt; inert unless the target repo IS the engine's source tree. A
+#   # repointed reviewer.agent.promptFile outside that glob is NOT covered — add it by hand
+#   # (docs/security.md, "Which carriers are covered").
+#   instructionPaths: [CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/**, AGENTS.md, engine/prompts/**]
 #   holdLabels: [sapwood:hold]  # #248: human-applied WAIT-tier hold (three-tier escalation
 #                                # model: hold/needs-human/blocked, each one fact). Matched by
 #                                # EXACT case-insensitive identity everywhere (never substring —

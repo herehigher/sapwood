@@ -881,6 +881,16 @@ human-vetted" is stronger than what the second family's mechanism actually deliv
   an operator who repoints `doctrine.file` stays covered; the prompt glob is a literal default,
   inert in any target repo that is not the engine's own source tree.
 
+**Known gap in this family: a repointed `reviewer.agent.promptFile` is not covered.** The doctrine
+path can be derived because `loadConfig` captures `doctrine.fileRaw` before resolving it;
+`reviewer.agent.promptFile` keeps no such pre-resolution value, so there is nothing repo-relative
+to derive a pattern from and the literal `engine/prompts/**` glob is all that stands. An operator
+who points `reviewer.agent.promptFile` at a path outside that glob gets a reviewer prompt whose
+edits reach autonomous merge — the exact hole this section exists to close, for that one
+configuration. Closing it means capturing a `promptFileRaw` the same way `doctrine.fileRaw` is
+captured; tracked as #549. Until then, an operator who overrides
+`reviewer.agent.promptFile` should add that path to `escalation.instructionPaths` by hand.
+
 **The second family's protection is delayed by one round, not immediate — say so rather than
 overclaim.** Both the doctrine and the prompt are loaded by the ENGINE from its own
 config-resolved path at construction, never from the materialized tree under review. A PR editing
