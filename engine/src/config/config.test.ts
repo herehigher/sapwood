@@ -1713,12 +1713,12 @@ test("liveness: a watchdog window past Node's own setTimeout ceiling (~24.8 days
   );
 });
 
-// ── #234: forge MCP proxy config — ships OFF, shadow-mode-first when enabled ────────────────
+// ── #234/#551: forge MCP proxy config — ships ON by default (#551 flip), no `shadow` state ──
 
-test("proxy: defaults are off, shadow, and conservative caps/budget/timeout", () => {
+test("proxy (#551): defaults are enabled and conservative caps/budget/timeout; no `shadow` key exists on the parsed config", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\n");
-  assert.equal(cfg.proxy.enabled, false);
-  assert.equal(cfg.proxy.shadow, true);
+  assert.equal(cfg.proxy.enabled, true);
+  assert.ok(!("shadow" in cfg.proxy), "#551 deleted `shadow` from ProxyConfig entirely");
   assert.equal(cfg.proxy.caps.maxIssuesPerCall, 10);
   assert.equal(cfg.proxy.caps.defaultCommentsPerIssue, 20);
   assert.equal(cfg.proxy.caps.maxCommentsPerCall, 100);
@@ -1733,7 +1733,7 @@ test("proxy: defaults are off, shadow, and conservative caps/budget/timeout", ()
   assert.equal(cfg.proxy.timeoutMs, 30_000);
 });
 
-test("webAccess (#410): default is enabled — unlike proxy, this grant ships ON by default", () => {
+test("webAccess (#410): default is enabled, same as proxy (#551) — both grants ship ON by default", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\n");
   assert.equal(cfg.webAccess.enabled, true);
 });
@@ -1744,13 +1744,12 @@ test("webAccess (#410): a config key can disable it, and the section remains str
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nwebAccess: { bogusKey: true }\n"));
 });
 
-test("proxy: every key is overridable, and the section remains strict (rejects an unknown key)", () => {
+test("proxy: every remaining key is overridable, and the section remains strict (rejects an unknown key)", () => {
   const cfg = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\n" +
-      "proxy:\n  enabled: true\n  shadow: false\n  caps: { maxIssuesPerCall: 3 }\n  budget: { maxCallsPerSession: 5 }\n  timeoutMs: 5000\n",
+      "proxy:\n  enabled: false\n  caps: { maxIssuesPerCall: 3 }\n  budget: { maxCallsPerSession: 5 }\n  timeoutMs: 5000\n",
   );
-  assert.equal(cfg.proxy.enabled, true);
-  assert.equal(cfg.proxy.shadow, false);
+  assert.equal(cfg.proxy.enabled, false);
   assert.equal(cfg.proxy.caps.maxIssuesPerCall, 3);
   assert.equal(cfg.proxy.caps.defaultCommentsPerIssue, 20, "other caps keep their own defaults");
   assert.equal(cfg.proxy.budget.maxCallsPerSession, 5);

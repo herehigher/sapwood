@@ -504,19 +504,19 @@ the engine (`plan-review.ts`), never by a tool call of its own.
 
 ### The forge MCP proxy's role x tool matrix (#234, #244)
 
-`RoleRunner` peripheral sessions and worker legs can be attached (config-gated, shadow-mode-first
-— see [`configuration.md`](configuration.md#roles)) to a per-session, revocable, read-only forge
-MCP proxy that returns sanitized forge data verbatim, with no gate/verdict logic of its own
-(fresh-head counting, identity filtering, trigger-pin checks stay
-in `reviewer.ts`/`merge-driver.ts`). The live (state 3: `enabled: true, shadow: false`)
-production-attachment path is real code, exercised by tests — not merely
-constructible-but-inert — but whether a given deployment's OWN config flips it live is that
-deployment's choice; this shipped tree's own default config keeps the proxy off
-(`enabled: false`). Each session's role scopes it to a fixed subset of the tool
-algebra (`proxy/access.ts`'s `PROXY_ROLE_TOOL_MATRIX`), enforced server-side in the proxy itself
-(the CLI's own `--allowedTools` widening is noise reduction only, same stance as every other
-allow/deny pair on this page) — a role absent from the table below is granted **no tool at all**
-(deny-by-default, regression-tested):
+`RoleRunner` peripheral sessions and worker legs can be attached (config-gated, ON by default
+since #551 — see [`configuration.md`](configuration.md#roles)) to a per-session, revocable,
+read-only forge MCP proxy that returns sanitized forge data verbatim, with no gate/verdict logic
+of its own (fresh-head counting, identity filtering, trigger-pin checks stay in
+`reviewer.ts`/`merge-driver.ts`). The production-attachment path (state: `proxy.enabled: true`)
+is real code, exercised by tests — not merely constructible-but-inert — and it is **this shipped
+tree's own default**: an operator who leaves `proxy` unset gets a live, attached proxy, not an
+inert one; only an explicit `proxy.enabled: false` opts back out. Review sessions are exempt
+regardless of `enabled` — see the exception below. Each session's role scopes it to a fixed
+subset of the tool algebra (`proxy/access.ts`'s `PROXY_ROLE_TOOL_MATRIX`), enforced server-side
+in the proxy itself (the CLI's own `--allowedTools` widening is noise reduction only, same stance
+as every other allow/deny pair on this page) — a role absent from the table below is granted **no
+tool at all** (deny-by-default, regression-tested):
 
 | Role | Tools granted |
 | --- | --- |
@@ -525,7 +525,7 @@ allow/deny pair on this page) — a role absent from the table below is granted 
 | `architect` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `plan-reviewer` / `plan-drafter` / `plan-reviewer-confirm` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `retro` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
-| `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks` |
+| `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `getPRAuditComments` (camelCase wire name; #556 tracks normalizing it) |
 | *(any other role id)* | none — deny-by-default |
 
 **Scope, updated by #245: `WorkerSupervisor.resume()` now attaches a proxy too.** #244 shipped

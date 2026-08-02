@@ -109,7 +109,7 @@ Concurrency and dispatch shape.
 | `max` | `3` | Max concurrent workers (occupied lanes). |
 | `roundDispatchCap` | `2` | Max new dispatches in a single round/tick (conservative by design). |
 | `reserveCap` | `1` | **Accepted, not yet wired** — parsed and validated, but no engine code reads it yet. |
-| `prFixCap` | `4` | (#245/#246; default raised 2 → 4 by #450) A **cost ceiling**, not a quality ceiling — the hard cap `workers.fix_rounds` is checked against once the `FIXABLE` gate (#246) decides whether a further fix leg is warranted. The **quality stop** is `review/convergence.ts`'s progress classifier (#450, design #402 R3): a lane whose findings stop shrinking — the same finding recurring on code the fix leg just touched (`recurrence`), the count staying flat for two consecutive rounds (`flat`), or a new problem appearing inside the fix leg's own diff (`marginal-complexity`) — escalates to `needs-human` (`review-non-convergent:<signal>`) *before* this cap is ever consulted, citing the doctrine's design-re-entry principle (`docs/REVIEW-DOCTRINE.md`). `prFixCap` is reached only by a lane still measurably converging by that signal; raising it no longer trades quality for rounds, only cost for rounds. `0` still folds straight to `needs-human`, unchanged. `#245` ships the `fixing` lane state + fix-leg-resume machinery this cap gates; `#246` wires the gate decision itself. **A cap above `0` is not on its own enough to make the fix loop run ([#385](https://github.com/herehigher/sapwood/issues/385)):** the loop is only production-attached when [`proxy`](#proxy) is in its go-live state (`proxy.enabled: true` **and** `proxy.shadow: false`, both non-default). Until that flip, every `FIXABLE` gate degrades to a `fix-loop-unwired:<reason>` needs-human escalation — correct per #253's three-state design, and now **announced once at startup** (a `[sapwood:startup]` log line naming the flip, plus one durable `fix-loop-unattached` event) instead of only becoming visible on the first PR it escalates. Setting `prFixCap: 0` silences the announcement by making the fold explicit. |
+| `prFixCap` | `4` | (#245/#246; default raised 2 → 4 by #450) A **cost ceiling**, not a quality ceiling — the hard cap `workers.fix_rounds` is checked against once the `FIXABLE` gate (#246) decides whether a further fix leg is warranted. The **quality stop** is `review/convergence.ts`'s progress classifier (#450, design #402 R3): a lane whose findings stop shrinking — the same finding recurring on code the fix leg just touched (`recurrence`), the count staying flat for two consecutive rounds (`flat`), or a new problem appearing inside the fix leg's own diff (`marginal-complexity`) — escalates to `needs-human` (`review-non-convergent:<signal>`) *before* this cap is ever consulted, citing the doctrine's design-re-entry principle (`docs/REVIEW-DOCTRINE.md`). `prFixCap` is reached only by a lane still measurably converging by that signal; raising it no longer trades quality for rounds, only cost for rounds. `0` still folds straight to `needs-human`, unchanged. `#245` ships the `fixing` lane state + fix-leg-resume machinery this cap gates; `#246` wires the gate decision itself. **A cap above `0` runs the fix loop by default ([#551](https://github.com/herehigher/sapwood/issues/551) flipped `proxy.enabled`'s default to `true`; #385):** the loop is production-attached whenever [`proxy.enabled`](#proxy) is `true`, which it now is unless an operator explicitly opts out. Only an explicit `proxy.enabled: false` degrades every `FIXABLE` gate to a `fix-loop-unwired:<reason>` needs-human escalation — **announced once at startup** in that opt-out case (a `[sapwood:startup]` log line naming the opt-out, plus one durable `fix-loop-unattached` event) instead of only becoming visible on the first PR it escalates. Setting `prFixCap: 0` silences the announcement by making the fold explicit. |
 | `frictionMin` | `0` | **Accepted, not yet wired** — no dispatch rate-limit is enforced from it yet. |
 | `gatedReentryCap` | `2` | (#147) Bounds the **GATED RECLAIM** phase: a gate②-escalated PR that a human clears of **every** `escalation.humanLabels` entry (default `sapwood:needs-human` *and* `sapwood:blocked` — the same hold set dispatch honors) is reclaimed back to `driving` and re-driven through the existing gate①/gate② + merge path — no new worker, same PR/branch. Each reclaim counts as one attempt; once this many have re-escalated, a further label removal is rejected (re-applies `labels.needsHuman` + a "cap reached" comment) and the lane is never retried again — merge it by hand. `0` disables automatic reentry outright. **Which object to clear (#398):** the one the escalation was written on — "the label lives where the escalation was born", so a PR-caused escalation is cleared on the **PR** and an issue-caused one on the **issue**, never both. The engine records the carrier it used per lane, so a lane escalated before this split still releases on its issue. For a PR-carried lane the same read also honors `escalation.holdLabels` on the PR: a hold there SKIPs reclaim entirely and costs no attempt. |
 
@@ -758,39 +758,34 @@ an information request and still demands a definitive judgment is a shackle — 
 denial with first-class abstention is a guardrail). Credentials never leave the engine
 process: a role session gets a fixed, strictly-schema-validated tool algebra —
 `issue_details`, `issue_comments`, `issue_relations`, `search_issues` (#234), plus
-`pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks` (#244, the same raw-data
-contract, extended to PR review data — no gate/verdict logic in any tool; that stays in
-`reviewer.ts`/`merge-driver.ts`) — served over a minimal hand-rolled streamable-HTTP MCP
-server bound to `127.0.0.1` on an ephemeral port, authenticated by a random bearer token
-minted per session and revoked at teardown — never a file on disk, never an environment
-variable (the #218 credential-free spawn env is unaffected). Every call is journaled
-write-ahead (persist intent → fetch+cap → persist canonical response+hash → deliver)
-before the session ever sees a result, metered against a per-session call/byte budget,
-and — once accepted — bundled content-addressed as frozen evidence for later audit/replay.
-A session's role scopes it to a fixed subset of this algebra (deny-by-default for an
-unrecognized role) — see [`security.md`](security.md#the-forge-mcp-proxys-role-x-tool-matrix-234-244)'s
+`pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `getPRAuditComments` (#244,
+the same raw-data contract, extended to PR review data — no gate/verdict logic in any
+tool; that stays in `reviewer.ts`/`merge-driver.ts`) — served over a minimal hand-rolled
+streamable-HTTP MCP server bound to `127.0.0.1` on an ephemeral port, authenticated by a
+random bearer token minted per session and revoked at teardown — never a file on disk,
+never an environment variable (the #218 credential-free spawn env is unaffected). Every
+call is journaled write-ahead (persist intent → fetch+cap → persist canonical
+response+hash → deliver) before the session ever sees a result, metered against a
+per-session call/byte budget, and — once accepted — bundled content-addressed as frozen
+evidence for later audit/replay. A session's role scopes it to a fixed subset of this
+algebra (deny-by-default for an unrecognized role) — see
+[`security.md`](security.md#the-forge-mcp-proxys-role-x-tool-matrix-234-244)'s
 role x tool matrix table.
 
-**Ships OFF, and shadow-mode-first when enabled — a three-state model (#253).** Engine
-startup (`cli.ts`'s `runTickEngine`/`runRoundsEngine`, `round.ts`'s `buildFixLegResume`)
-reads both `enabled` and `shadow` to decide production attachment:
+**Ships ON by default — a two-state model (#551, deleting the earlier three-state
+`shadow` design, #253).** Engine startup (`cli.ts`'s `runTickEngine`/`runRoundsEngine`,
+`round.ts`'s `buildFixLegResume`) reads `enabled` to decide production attachment:
 
-1. **`enabled: false`** (default) — fully inert, no proxy server is ever constructed
-   anywhere, and no other `proxy.*` key changes any runtime behavior.
-2. **`enabled: true, shadow: true`** (the default once enabled — shadow mode) — the
-   proxy machinery is constructible and mintable (a scoped harness can call it directly
-   for a live bring-up run, exercising real calls/journals/spend end-to-end), but **zero
-   production attachment**: neither live driver ever attaches a real proxy handle to a
-   fix-loop worker leg, and no peripheral role session (aligning/architecting/
-   plan_review/harvesting/retro) ever gets one either. No session a real `sapwood run`
-   dispatches holds a handle, so no session's output can be proxy-informed — the shadow
-   guarantee is *structural* (attachment never happens), not a per-call effect check
-   layered on top of a live one.
-3. **`enabled: true, shadow: false`** — the deliberate go-live flip, taken only after a
-   shadow bring-up run has validated the proxy. Both live drivers attach a real handle to
-   the fix-loop worker leg, and every peripheral role session gets one too (`peripheral.ts`'s
-   `RoleRunner` `defaultProxy`, applied whenever a session's own `RoleSessionOpts.proxy`
-   is omitted — which every shipped stub does today).
+1. **`enabled: true`** (default since #551) — both live drivers attach a real handle to
+   the fix-loop worker leg, and every peripheral role session gets one too
+   (`peripheral.ts`'s `RoleRunner` `defaultProxy`, applied whenever a session's own
+   `RoleSessionOpts.proxy` is omitted — which every shipped stub does today).
+2. **`enabled: false`** (explicit opt-out) — fully inert, no proxy server is ever
+   constructed anywhere, and no other `proxy.*` key changes any runtime behavior. Review
+   sessions never get a handle regardless of `enabled`: `peripheral.ts` throws if a
+   caller supplies `proxy` together with `reviewCwd`, forces `proxyOpt = undefined` in
+   review mode, and both drivers construct their engine-review `RoleRunner`s without
+   `defaultProxy` — the default flip does not widen a review session's grant.
 
 `peripheral.ts`'s `RoleRunner` and `worker.ts`'s `WorkerSupervisor` (#244 extended the
 mechanism to worker legs' `dispatch()`, mirroring `RoleRunner`'s own `proxy` opt; #245
@@ -799,20 +794,35 @@ extended the same mechanism to `resume()` too — see
 this exists for) are the two attachment points; a caller-supplied `proxy` opt always
 wins over the RoleRunner-wide default, never silently overridden.
 
-**States 1 and 2 announce themselves** when [`lanes.prFixCap`](#lanes) is above `0`
-([#385](https://github.com/herehigher/sapwood/issues/385)): one `[sapwood:startup]` log line
-naming the go-live flip plus one durable `fix-loop-unattached` event, emitted once per run by
-both drivers — so "the fix loop I configured degrades to needs-human" is visible at startup,
-not first observed on an already-escalated PR. State 3 and `prFixCap: 0` are silent.
+**State 2 (`enabled: false`) announces itself** when [`lanes.prFixCap`](#lanes) is above
+`0` ([#385](https://github.com/herehigher/sapwood/issues/385)): one `[sapwood:startup]`
+log line naming the opt-out plus one durable `fix-loop-unattached` event, emitted once
+per run by both drivers — so "the fix loop I configured degrades to needs-human" is
+visible at startup, not first observed on an already-escalated PR. State 1 (the default)
+and `prFixCap: 0` are silent.
 
-**Still unwired regardless of state 3:** ordinary (non-fix-loop) `WorkerSupervisor.
+**What `enabled: true` (the default) actually costs.** Every peripheral role session
+(`po-pool`/`po-align`/`po-triage`/`harvest`/`architect`/`plan-reviewer`/`plan-drafter`/
+`plan-reviewer-confirm`/`retro`, `proxy/access.ts`'s `ISSUE_TOOLS` role scope) carries
+4 extra tool schemas (`issue_details`, `issue_comments`, `issue_relations`,
+`search_issues`) in its context on every round it runs, whether or not it ever calls
+one — the fix-loop worker leg's own scope (`PR_TOOLS`) is 5 tools
+(`pr_details`/`pr_reviews`/`pr_review_threads`/`pr_checks`/`getPRAuditComments` — the
+last is camelCase, the odd one out in the wire names; #556 tracks normalizing it). Each
+attached session also spins up one ephemeral `127.0.0.1` HTTP listener authenticated by
+a bearer token minted fresh for that session and revoked at teardown — never written to
+disk or an environment variable, but a real local process resource for the session's
+lifetime. Set `enabled: false` to avoid both costs; that reintroduces the needs-human
+degradation documented above for any lane whose `prFixCap` is above `0`.
+
+**Still unwired regardless of `enabled`:** ordinary (non-fix-loop) `WorkerSupervisor.
 dispatch()` for the main coding-worker leg has no production caller attaching a proxy —
-that would require touching `conductor.ts`'s DISPATCH call site, out of #253's own scope.
+that would require touching `conductor.ts`'s DISPATCH call site, out of #253's/#551's
+own scope.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `false` | Master switch — off means the proxy is fully inert; nothing is ever constructed. |
-| `shadow` | `true` | With `enabled: true`, gates PRODUCTION ATTACHMENT (not per-call effects): `true` (default once enabled) means no live driver ever attaches a real handle to any session — the machinery stays mintable for a scoped harness only; `false` is the deliberate go-live flip that attaches a real handle to every fix-loop worker leg and peripheral role session. |
+| `enabled` | `true` (#551; was `false`) | Master switch — off means the proxy is fully inert; nothing is ever constructed. On (the default) attaches a real handle to the fix-loop worker leg and every peripheral role session; review sessions are exempt regardless (see above). |
 | `caps.maxIssuesPerCall` | `10` | `issue_details`: max issue numbers per call. A caller-requested batch above this cap is **rejected** (typed error), never silently truncated. |
 | `caps.defaultCommentsPerIssue` | `20` | `issue_details`' default view: how many of an issue's **most recent** comments to include (fail-toward-inclusion — the newest comments are the ones most likely to carry an amendment to a stale body). Bounded, not rejected: `comments_complete`/counts/an omitted-range name the cut. |
 | `caps.maxCommentsPerCall` | `100` | `issue_comments`: max `lastN` a caller may request explicitly. Also the default view's cap when `fullCommentStreamOptIn` is true. |

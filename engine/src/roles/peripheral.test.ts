@@ -2536,7 +2536,12 @@ test("run (#285): reviewCwd combined with an explicit opts.proxy is refused (cal
   }
 });
 
-test("run (#285): reviewCwd NEVER attaches RoleRunnerDeps.defaultProxy either — structurally suppressed, not just opts.proxy-refused", async () => {
+// #551 (verification plan, "the widening regression this change could plausibly cause"): the
+// proxy.enabled default flip (false -> true) must NOT widen a review session's grant. This test
+// supplies a REAL RoleRunnerDeps.defaultProxy (the shape cli.ts now constructs unconditionally
+// once `enabled: true`, #551's default) and proves reviewCwd still refuses to consult it — the
+// suppression is structural (peripheral.ts's own run()), independent of what proxy.enabled is.
+test("run (#285, #551): reviewCwd NEVER attaches RoleRunnerDeps.defaultProxy either — structurally suppressed, not just opts.proxy-refused", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   const materializedDir = mkdtempSync(join(tmpdir(), "sapwood-role-materialized-"));
   try {
