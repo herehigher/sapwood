@@ -71,7 +71,7 @@ sapwood init
 7. **Scaffolds starter goal and review-doctrine files** at their configured paths
    (`goal.file`, `doctrine.file`) if missing — never overwrites an existing file.
 8. **Scaffolds `.github/ISSUE_TEMPLATE/`** (feature / fix / docs / chore, matching the
-   structure the gate⓪ plan-drafter normalizes toward) — each template is written only
+   structure the gate⓪ verification-plan-drafter normalizes toward) — each template is written only
    if that file is missing, so repos with their own templates are untouched.
 
 If `init` fails partway through (e.g. a `gh` scope problem), fix the reported issue and
@@ -365,10 +365,10 @@ label for you.
 As of gate⓪ (#88), a plan being present isn't enough on its own either: the configured
 `labels.planApproved` label (`sapwood:plan:approved` by default) is also required before
 `getReadyIssues` will dispatch an issue without `labels.verifyNa` — it
-means the plan-reviewer peripheral judged the acceptance criteria and verification plan
+means the verification-plan-reviewer peripheral judged the acceptance criteria and verification plan
 actually executable, not just present. See
 [`security.md`](security.md#the-planapproved-label-and-gate-88) for the full gate. The default rounds driver
-runs the plan-reviewer peripheral each round and applies it automatically when it approves
+runs the verification-plan-reviewer peripheral each round and applies it automatically when it approves
 a plan; `sapwood init` provisions the label like `sapwood:verify:n/a` and
 `sapwood:origin:agent` above.
 

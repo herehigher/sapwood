@@ -17,7 +17,7 @@
 //
 // THE CANDIDATE-SET INVARIANT (issue #110's Design section, the one thing that makes this role
 // different from every other #110 PR): the architect is the ONLY role whose session chooses
-// write TARGETS from a pool — plan-reviewer/plan-drafter (PR1) only ever write the ONE issue
+// write TARGETS from a pool — verification-plan-reviewer/verification-plan-drafter (PR1) only ever write the ONE issue
 // they were dispatched for, but the architect sees this round's WHOLE candidate batch at once
 // and picks which of them to flag. A session is untrusted output, not a trusted caller — so the
 // engine must independently verify every flagged issue number is actually a member of the
@@ -303,7 +303,7 @@ export function loadArchitectureChapter(path: string): string {
 }
 
 /** One candidate issue's block in the substituted prompt: number, title, labels, full body —
- *  the same information density the plan-reviewer prompt gives a single issue, repeated per
+ *  the same information density the verification-plan-reviewer prompt gives a single issue, repeated per
  *  candidate here since the architect judges the whole batch at once. */
 function formatCandidate(issue: Issue): string {
   const labels = issue.labels.length > 0 ? issue.labels.join(", ") : "(none)";

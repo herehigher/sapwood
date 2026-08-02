@@ -174,7 +174,7 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
     probe: async (ctx) => (await ctx.forge.getReadyIssues()).length > 0,
   },
   // #127 gate② F2: each candidate signal below only counts as work when the role that CONSUMES
-  // it is enabled. A plan-review candidate is only ever consumed by the plan-reviewer (gate⓪), a
+  // it is enabled. A plan-review candidate is only ever consumed by the verification-plan-reviewer (gate⓪), a
   // triage candidate only by the PO's aligning pass — with that role disabled
   // (roles.<role>.enabled: false) the candidate can never be consumed, so counting it would pin
   // this probe true forever: standby never engages and every round burns the remaining
@@ -182,10 +182,10 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
   {
     name: "plan-review-candidates",
     read: "forge",
-    consumer: "plan-review.ts gate⓪ — gated on cfg.roles.planReviewer.enabled",
+    consumer: "plan-review.ts gate⓪ — gated on cfg.roles.verificationPlanReviewer.enabled",
     terminal:
       "forge.ts needsPlanReview excludes `needsHuman`/`blocked`/`planless`/`decomposed`, so a candidate the reviewer cannot settle stops counting the moment its escalation lands (`plan-review-escalated` applies needsHuman); an approved one carries planApproved and fails the predicate on its own",
-    enabled: (ctx) => ctx.cfg.roles.planReviewer.enabled,
+    enabled: (ctx) => ctx.cfg.roles.verificationPlanReviewer.enabled,
     probe: async (ctx) => (await ctx.forge.getIssuesNeedingPlanReview()).length > 0,
   },
   {
@@ -216,16 +216,16 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
     // makes the probe literally `getPoolEligibleIssues() ∩ roundPool`, the exact set
     // createPlanReviewStub consumes. Round-pool selection runs UNCONDITIONALLY every round
     // regardless of roles.po.enabled (round-defaults.ts ~200); the repair SESSION is gated on
-    // roles.planReviewer.enabled (createPlanReviewStub's own gate) — same disabled-consumer rule.
+    // roles.verificationPlanReviewer.enabled (createPlanReviewStub's own gate) — same disabled-consumer rule.
     // This replaced round 3's `plan:approved` label exemption in the milestone catch-all, which
     // over-counted (a valid approved issue demoted off Ready, or the #94 forbidden state, both
     // pinned the probe true with nothing able to consume them) and under-delivered (the
     // broken-body case it was cited for never needed it — a broken body already fails
     // `planCompleteOrExempt` and counts on its own).
-    consumer: "plan-review.ts createPlanReviewStub class-2 repair — gated on cfg.roles.planReviewer.enabled",
+    consumer: "plan-review.ts createPlanReviewStub class-2 repair — gated on cfg.roles.verificationPlanReviewer.enabled",
     terminal:
       "the roundPool LABEL itself: applied atomically with pool selection (align.ts reconcilePoolLabels, always reachable, never role-gated) and removed by round-close (round.ts removeRoundPoolLabel) or the next round-open reconcile; a removal that fails deterministically caps at cfg.round.maxPoolRemovalAttempts and escalates (`round-pool-removal-capped` + needsHuman), which drops the issue out of isPoolEligible — so an unremovable label cannot pin this signal forever",
-    enabled: (ctx) => ctx.cfg.roles.planReviewer.enabled,
+    enabled: (ctx) => ctx.cfg.roles.verificationPlanReviewer.enabled,
     probe: async (ctx) => (await ctx.forge.getPoolEligibleIssues()).some((i) => labelsInclude(i.labels, ctx.cfg.labels.roundPool)),
   },
   {
@@ -236,10 +236,11 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
     // decomposes (or gate⓪ approves) — with BOTH gate⓪ roles off, nothing enabled can consume
     // that signal either; the only consumable signal left is Ready+dispatchable, already covered
     // by ready-issues above. Counting it anyway would pin the probe true and defeat standby.
-    consumer: "align.ts PO decomposition / plan-review.ts gate⓪ — gated on cfg.round.milestone AND (po.enabled || planReviewer.enabled)",
+    consumer:
+      "align.ts PO decomposition / plan-review.ts gate⓪ — gated on cfg.round.milestone AND (po.enabled || verificationPlanReviewer.enabled)",
     terminal:
       "the per-exclusion set inside the predicate, each of which is where a deterministic failure lands: `inProgress` (#391 — a claim, healed back to Ready by startup's F20 sweep if stale), cfg.escalation.humanLabels (#212 — a human already owns it), `planless` (#397 — the fence for an issue triage cannot draft), and fully-specified-without-a-consumable-signal (#432 — waiting on a human Ready-promotion). An issue no enabled role can act on carries one of these and stops counting",
-    enabled: (ctx) => Boolean(ctx.cfg.round.milestone) && (ctx.cfg.roles.po.enabled || ctx.cfg.roles.planReviewer.enabled),
+    enabled: (ctx) => Boolean(ctx.cfg.round.milestone) && (ctx.cfg.roles.po.enabled || ctx.cfg.roles.verificationPlanReviewer.enabled),
     probe: async (ctx) => {
       // Cheapest read first: zero open issues in the milestone settles the question with no
       // further fetch.

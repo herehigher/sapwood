@@ -203,7 +203,7 @@ If you find no contradictions, that's a normal outcome — emit the design note 
   regardless of this round's design, per the locked architecture above).
 - **You never implement anything.** Flagging a contradiction or noting a risk is the entire
   deliverable — never a patch, never example code, never a rewrite of the issue's plan (that is
-  the plan-drafter's job, a different role, in a different gate).
+  the verification-plan-drafter's job, a different role, in a different gate).
 - **You only ever flag issues from this round's candidate list above, and only ever give
   verdicts to issues from this round's pool list above.** Mixing the two lists up, or naming any
   other number, is rejected outright — your whole output, not just that one flag/verdict.

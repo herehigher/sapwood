@@ -35,8 +35,8 @@ description of it.
 ## Prompt assets (`engine/prompts/`)
 
 The shipped role prompts are the behavior surface for every autonomous session:
-`worker.md`, `fix.md`, `architect.md`, `plan-drafter.md`, `plan-reviewer.md`,
-`plan-reviewer-confirm.md`, `po.md`, `po-pool.md`, `harvest.md`, `retro.md`,
+`worker.md`, `fix.md`, `architect.md`, `verification-plan-drafter.md`, `verification-plan-reviewer.md`,
+`verification-plan-reviewer-confirm.md`, `po.md`, `po-pool.md`, `harvest.md`, `retro.md`,
 plus `goal-template.md` / `doctrine-template.md` (provisioned into a target
 repo by `sapwood init`) and `issue-templates/`.
 
@@ -45,7 +45,7 @@ repo by `sapwood init`) and `issue-templates/`.
   (`engine/src/roles/worker.ts`, `defaultPromptPath`).
 - Operators may override a role's prompt via its prompt-file config key —
   `promptFile` on most roles, plus the sibling keys `worker.fixPromptFile`,
-  `roles.planReviewer.confirmPromptFile`, and `roles.po.poolPromptFile`; a
+  `roles.verificationPlanReviewer.confirmPromptFile`, and `roles.po.poolPromptFile`; a
   relative path resolves against the config file's own directory, and a
   set-but-unreadable override fails rather than silently falling back
   (`engine/src/config/config.ts`).

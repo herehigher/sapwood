@@ -22,7 +22,11 @@ import {
   ROLE_ALLOWED_TOOLS,
   ROLE_DISALLOWED_TOOLS,
 } from "./peripheral.js";
-import { defaultPlanConfirmPromptPath, defaultPlanDrafterPromptPath, defaultPlanReviewerPromptPath } from "./plan-review.js";
+import {
+  defaultVerificationPlanConfirmPromptPath,
+  defaultVerificationPlanDrafterPromptPath,
+  defaultVerificationPlanReviewerPromptPath,
+} from "./plan-review.js";
 import { defaultFixPromptPath, defaultPromptPath } from "./worker.js";
 
 function sha256(content: string): string {
@@ -63,14 +67,22 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
   // architect holds a default WebFetch grant, which reaches github.com.
   // #529 (gate② round 3, optional cleanup): same further rewording as po.md above.
-  "architect.md": "cadfbdddfd470f41f5c6daf728bde931f554e3c590f5ad34240380f8d3cb1ec0",
+  // #413: hash moved for the gate⓪ rename ONLY — architect.md's single reference to the drafter
+  // role by name. No charter, grant, or instruction changed.
+  "architect.md": "986371462afe2674795e3acfcd3e39ebbf4abedea656e16f8e43789cac41f41c",
   // #457 (F36): intentional edits — execution-class ACs are plan noise (CI already enforces
-  // ci.requiredChecks unconditionally): plan-reviewer flags-and-strips them, the confirm pass
+  // ci.requiredChecks unconditionally): verification-plan-reviewer flags-and-strips them, the confirm pass
   // invalidates legacy plans carrying them, drafter/decompose never author them.
   // #529: same categorical→conditional GitHub-access fix as architect.md.
-  "plan-reviewer.md": "43a042fa33300b8421d3a98e6c253c3ac20a1b678d5b312875dc8f26673d691b",
-  "plan-reviewer-confirm.md": "895ae8b6dace1417d576e8398e9918921e78d28b96a4d9a7c07c245e7071ad2d",
-  "plan-drafter.md": "0d808e7075e91c91fa070aa3c68aa711a9de950a2cbb93d64ce3e0c664bfb188",
+  // #413: all three hashes moved for the gate⓪ rename ONLY — these files were renamed on disk
+  // (plan-reviewer.md -> verification-plan-reviewer.md, ...) and their in-body self-references
+  // and the {{roles.*.maxDraftCycles}} token follow the new role/config names. The names say
+  // what the role gates: an issue's VERIFICATION PLAN, not its plan of work. Nothing else in
+  // any of the three bodies changed — the charter tests below still assert the same clauses,
+  // verbatim, against the same wording.
+  "verification-plan-reviewer.md": "fcc3605d1da1be3147f2a17507813b1b5992938801951dbd037c8d05ba8aaa69",
+  "verification-plan-reviewer-confirm.md": "e17bc1399e028140b1976e27adf3770279bd80fbdbfd1129b3d348edc03776ec",
+  "verification-plan-drafter.md": "437789b2e8dec099a09338bbc3d6faf8653bca258a6207ec4ca57ccde09f16e4",
   "harvest.md": "82312e3ac79e42e008a9d7477d4b9e601623a9ebb1e5a4fe306e8b3f266d109d",
   // #453 (design #402 R5): intentional edit — the digest's new finding-class tendency table is
   // pointed at, with the design-source rule and the stated blind spot. The FIRST deliberate
@@ -90,16 +102,16 @@ test("prompt snapshot: architect.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultArchitectPromptPath())), SNAPSHOT_HASHES["architect.md"]);
 });
 
-test("prompt snapshot: plan-reviewer.md hash matches the pinned revision", () => {
-  assert.equal(sha256(readPrompt(defaultPlanReviewerPromptPath())), SNAPSHOT_HASHES["plan-reviewer.md"]);
+test("prompt snapshot: verification-plan-reviewer.md hash matches the pinned revision", () => {
+  assert.equal(sha256(readPrompt(defaultVerificationPlanReviewerPromptPath())), SNAPSHOT_HASHES["verification-plan-reviewer.md"]);
 });
 
-test("prompt snapshot: plan-reviewer-confirm.md hash matches the pinned revision", () => {
-  assert.equal(sha256(readPrompt(defaultPlanConfirmPromptPath())), SNAPSHOT_HASHES["plan-reviewer-confirm.md"]);
+test("prompt snapshot: verification-plan-reviewer-confirm.md hash matches the pinned revision", () => {
+  assert.equal(sha256(readPrompt(defaultVerificationPlanConfirmPromptPath())), SNAPSHOT_HASHES["verification-plan-reviewer-confirm.md"]);
 });
 
-test("prompt snapshot: plan-drafter.md hash matches the pinned revision", () => {
-  assert.equal(sha256(readPrompt(defaultPlanDrafterPromptPath())), SNAPSHOT_HASHES["plan-drafter.md"]);
+test("prompt snapshot: verification-plan-drafter.md hash matches the pinned revision", () => {
+  assert.equal(sha256(readPrompt(defaultVerificationPlanDrafterPromptPath())), SNAPSHOT_HASHES["verification-plan-drafter.md"]);
 });
 
 test("prompt snapshot: harvest.md hash matches the pinned revision", () => {
@@ -142,9 +154,9 @@ const ROLE_PROMPT_PATHS: Readonly<Record<string, readonly string[]>> = {
   "po-triage": [defaultPoPromptPath()],
   harvest: [defaultHarvestPromptPath()],
   architect: [defaultArchitectPromptPath()],
-  "plan-reviewer": [defaultPlanReviewerPromptPath()],
-  "plan-drafter": [defaultPlanDrafterPromptPath()],
-  "plan-reviewer-confirm": [defaultPlanConfirmPromptPath()],
+  "verification-plan-reviewer": [defaultVerificationPlanReviewerPromptPath()],
+  "verification-plan-drafter": [defaultVerificationPlanDrafterPromptPath()],
+  "verification-plan-reviewer-confirm": [defaultVerificationPlanConfirmPromptPath()],
   retro: [defaultRetroPromptPath()],
   // worker's PR_TOOLS grant is consumed by both the main dispatch leg (worker.md) and the
   // fix-loop leg (fix.md) — both mint with role: "worker" (worker.ts).
@@ -204,8 +216,8 @@ test("#535 pin: which roles hold a real WRITE grant matches ROLE_ALLOWED_TOOLS/R
   // `NotebookEdit`, which every one of these lists carries as its own distinct entry.
   const tokens = (list: string): Set<string> => new Set(list.split(","));
 
-  // The six peripheral-role allow-lists — five roles plus the plan-reviewer confirm variant:
-  // po/plan-reviewer/plan-drafter/confirm all byte-identical to the base, architect/po-align/
+  // The six peripheral-role allow-lists — five roles plus the verification-plan-reviewer confirm variant:
+  // po/verification-plan-reviewer/verification-plan-drafter/confirm all byte-identical to the base, architect/po-align/
   // po-triage widened only with WebSearch/WebFetch — must never include Write/Edit/MultiEdit,
   // and the shared deny-list must keep denying Bash outright — together, tier 1's "no write
   // tool channel exists at all" claim.
@@ -362,9 +374,9 @@ test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access d
 
 test("shipped role prompts (#321): sentinel examples are plain text with no adjacent markdown fences", () => {
   const prompts: ReadonlyArray<readonly [name: string, path: string, sentinelCount: number]> = [
-    ["plan-reviewer.md", defaultPlanReviewerPromptPath(), 2],
-    ["plan-reviewer-confirm.md", defaultPlanConfirmPromptPath(), 2],
-    ["plan-drafter.md", defaultPlanDrafterPromptPath(), 1],
+    ["verification-plan-reviewer.md", defaultVerificationPlanReviewerPromptPath(), 2],
+    ["verification-plan-reviewer-confirm.md", defaultVerificationPlanConfirmPromptPath(), 2],
+    ["verification-plan-drafter.md", defaultVerificationPlanDrafterPromptPath(), 1],
     ["po.md", defaultPoPromptPath(), 4],
     ["po-pool.md", defaultPoolPromptPath(), 1],
     ["po-decompose.md", defaultPoDecomposePromptPath(), 2],
@@ -399,8 +411,8 @@ test("architect.md (#235 AC item 3): no longer claims zero Read/repo access; ins
   assert.ok(body.toLowerCase().includes("cite"), "directs citing code evidence, not just asserting a contradiction");
 });
 
-test("plan-reviewer.md (#235 AC item 3): judges plan EXECUTABILITY, explicitly warned off demanding implementation-shaped acceptance criteria", () => {
-  const body = readPrompt(defaultPlanReviewerPromptPath());
+test("verification-plan-reviewer.md (#235 AC item 3): judges plan EXECUTABILITY, explicitly warned off demanding implementation-shaped acceptance criteria", () => {
+  const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
   assert.ok(body.toLowerCase().includes("executab"), "names plan executability as the judgment target");
   assert.ok(
     body.toLowerCase().includes("implementation-shaped") || body.toLowerCase().includes("already implemented"),
@@ -419,8 +431,8 @@ test("harvest.md (#235 AC item 3): repository reads must not alter ledger facts 
   assert.ok(body.includes("Read`/`Grep`/`Glob`"), "names the actual read-only grant");
 });
 
-test("plan-drafter.md (#235 PR-B follow-up F1): the matrix grants plan-drafter Read/Grep/Glob (it's a peripheral role, no allowedTools override at its plan-review.ts callsite — falls back to the base), so the prompt's old 'wanting to open a file = wrong role' line — which contradicted that grant — is gone, replaced by role-scoped discretion; 'plan-author ≠ plan-approver' and 'never implement' survive verbatim in spirit", () => {
-  const body = readPrompt(defaultPlanDrafterPromptPath());
+test("verification-plan-drafter.md (#235 PR-B follow-up F1): the matrix grants verification-plan-drafter Read/Grep/Glob (it's a peripheral role, no allowedTools override at its plan-review.ts callsite — falls back to the base), so the prompt's old 'wanting to open a file = wrong role' line — which contradicted that grant — is gone, replaced by role-scoped discretion; 'plan-author ≠ plan-approver' and 'never implement' survive verbatim in spirit", () => {
+  const body = readPrompt(defaultVerificationPlanDrafterPromptPath());
   assert.ok(
     !body.includes("wanting to open a file or run tests"),
     "the old blanket file-read prohibition (contradicting the matrix) is gone",
@@ -428,27 +440,27 @@ test("plan-drafter.md (#235 PR-B follow-up F1): the matrix grants plan-drafter R
   assert.ok(body.includes("Read`/`Grep`/`Glob`"), "names the actual read-only grant");
   assert.ok(body.includes("plan-author ≠ plan-approver."), "the plan-author ≠ plan-approver boundary survives verbatim");
   assert.ok(body.toLowerCase().includes("never implement"), "the never-implement boundary survives");
-  assert.ok(body.includes("producer ≠ plan-drafter."), "the core intent-prohibition heading survives verbatim");
+  assert.ok(body.includes("producer ≠ verification-plan-drafter."), "the core intent-prohibition heading survives verbatim");
 });
 
 // ── #283 (design #279 §5, D4): mandatory checkbox acceptance criteria ─────────────────────────
 
-test("plan-reviewer.md (#283): mandates literal `- [ ]` checkbox acceptance criteria — malformed/prose AC is named as not-dispatchable, not just a style nit", () => {
-  const body = readPrompt(defaultPlanReviewerPromptPath());
+test("verification-plan-reviewer.md (#283): mandates literal `- [ ]` checkbox acceptance criteria — malformed/prose AC is named as not-dispatchable, not just a style nit", () => {
+  const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
   assert.ok(body.includes("- [ ]"), "shows the literal checkbox syntax");
   assert.ok(body.toLowerCase().includes("not dispatchable"), "states the dispatch consequence explicitly");
 });
 
-test("plan-drafter.md (#283): mandates literal `- [ ]` checkbox acceptance criteria in whatever body it drafts", () => {
-  const body = readPrompt(defaultPlanDrafterPromptPath());
+test("verification-plan-drafter.md (#283): mandates literal `- [ ]` checkbox acceptance criteria in whatever body it drafts", () => {
+  const body = readPrompt(defaultVerificationPlanDrafterPromptPath());
   assert.ok(body.includes("- [ ] ...`"), "shows the literal checkbox syntax");
   assert.ok(body.toLowerCase().includes("not dispatchable"), "states the dispatch consequence explicitly");
 });
 
 // ── #457 (F36): execution-class ACs are plan noise — CI enforces them unconditionally ─────────
 
-test("#457 plan-reviewer.md: execution-class ACs are named as noise to FLAG AND STRIP within minor-correction latitude, moving the execution step to the Verification plan", () => {
-  const body = readPrompt(defaultPlanReviewerPromptPath());
+test("#457 verification-plan-reviewer.md: execution-class ACs are named as noise to FLAG AND STRIP within minor-correction latitude, moving the execution step to the Verification plan", () => {
+  const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
   assert.ok(body.includes("Execution-class criteria are noise — flag and strip them."), "the flag-and-strip rule is present");
   assert.match(
     body,
@@ -457,16 +469,19 @@ test("#457 plan-reviewer.md: execution-class ACs are named as noise to FLAG AND 
   assert.match(body, /fold the execution step into\s+the `## Verification plan`/);
 });
 
-test("#457 plan-reviewer-confirm.md: an execution-class AC on a legacy approved plan is a standing invalidate-check, with the brief directing the move to the Verification plan", () => {
-  const body = readPrompt(defaultPlanConfirmPromptPath());
+test("#457 verification-plan-reviewer-confirm.md: an execution-class AC on a legacy approved plan is a standing invalidate-check, with the brief directing the move to the Verification plan", () => {
+  const body = readPrompt(defaultVerificationPlanConfirmPromptPath());
   assert.match(body, /A second standing check \(F36\): an execution-class acceptance\s+criterion/);
   assert.match(body, /a still-approved plan carrying one is `invalidate`/);
   assert.match(body, /folded into the\s+`## Verification plan`/);
 });
 
-test("#457 plan-drafter.md + po-decompose.md: AC-authoring guidance forbids CI/suite/typecheck status as a criterion — the Verification plan owns execution steps", () => {
-  const drafter = readPrompt(defaultPlanDrafterPromptPath());
-  assert.ok(drafter.includes("Never write CI/suite/typecheck status as an acceptance criterion"), "plan-drafter carries the rule");
+test("#457 verification-plan-drafter.md + po-decompose.md: AC-authoring guidance forbids CI/suite/typecheck status as a criterion — the Verification plan owns execution steps", () => {
+  const drafter = readPrompt(defaultVerificationPlanDrafterPromptPath());
+  assert.ok(
+    drafter.includes("Never write CI/suite/typecheck status as an acceptance criterion"),
+    "verification-plan-drafter carries the rule",
+  );
   assert.match(drafter, /execution steps\s+belong in the `## Verification plan`/);
   const decompose = readPrompt(defaultPoDecomposePromptPath());
   assert.ok(decompose.includes("Never write CI/suite/typecheck status itself as a criterion"), "po-decompose carries the rule");
@@ -502,8 +517,8 @@ test("#409 fix.md: carries the authoritative-signals rule (a fix leg is where pa
   assert.ok(!body.includes("Check what already exists before you build."), "reuse-before-build is scoped to fresh work, not rework");
 });
 
-test("#409 plan-reviewer.md: unexecutable-mechanism plans are bounceable, WITHOUT licensing a re-litigation of the human's why/what", () => {
-  const body = readPrompt(defaultPlanReviewerPromptPath());
+test("#409 verification-plan-reviewer.md: unexecutable-mechanism plans are bounceable, WITHOUT licensing a re-litigation of the human's why/what", () => {
+  const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
   assert.ok(body.includes("Mechanism assumptions are plan defects."), "the plan-defect ground is present");
   assert.match(body, /A checkability defect, never a scope re-litigation\./, "explicitly bounded away from re-litigating scope");
   assert.ok(body.includes("not whether the underlying work is a good idea"), "the charter line forbidding re-litigation survives the edit");
@@ -545,7 +560,7 @@ test("#409: the rule is worded per role rather than one paragraph duplicated, an
   const worker = readPrompt(defaultPromptPath());
   const others = [
     defaultFixPromptPath(),
-    defaultPlanReviewerPromptPath(),
+    defaultVerificationPlanReviewerPromptPath(),
     defaultEngineReviewerPromptPath(),
     defaultDoctrineTemplatePath(),
   ].map(readPrompt);
@@ -563,8 +578,12 @@ test("#409: the rule is worded per role rather than one paragraph duplicated, an
   }
 });
 
-test("#409: plan-drafter.md and architect.md are deliberately untouched (charter conflicts recorded in the issue)", () => {
-  assert.equal(sha256(readPrompt(defaultPlanDrafterPromptPath())), SNAPSHOT_HASHES["plan-drafter.md"]);
+// #413 amends this test's claim rather than deleting it: both files are still untouched by
+// #409's CHARTER change (the conflicts recorded in that issue stand unresolved), but their
+// pinned hashes have since moved once, for #413's name-only gate⓪ rename. "Untouched" now means
+// untouched in substance, which is what #409 was asserting; the hash pin is what enforces it.
+test("#409: verification-plan-drafter.md and architect.md carry no charter change (conflicts recorded in the issue) — hash moved only for #413's rename", () => {
+  assert.equal(sha256(readPrompt(defaultVerificationPlanDrafterPromptPath())), SNAPSHOT_HASHES["verification-plan-drafter.md"]);
   assert.equal(sha256(readPrompt(defaultArchitectPromptPath())), SNAPSHOT_HASHES["architect.md"]);
 });
 

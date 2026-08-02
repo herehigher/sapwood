@@ -46,7 +46,7 @@ import { buildRetroDigest } from "./retro-digest.js";
  *  issues-only writes. Grants exactly what "propose via PR, never directly" needs: LOCAL git
  *  history/diff/status (its own worktree, never GitHub), file edits inside its own ephemeral
  *  worktree, and git branch/commit/push — nothing that mutates an issue (that is harvest's/
- *  plan-reviewer's/plan-drafter's scope, never retro's) and nothing that merges, reviews, or
+ *  verification-plan-reviewer's/verification-plan-drafter's scope, never retro's) and nothing that merges, reviews, or
  *  approves anything.
  *
  *  #111 PR-A: the live `gh pr view/list/diff` + `gh issue view/list` GitHub-browsing grants

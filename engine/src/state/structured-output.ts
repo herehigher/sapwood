@@ -1,5 +1,5 @@
 // structured-output.ts — #110's shared parsing primitive for a peripheral role session's final
-// STRUCTURED OUTPUT (PR1 of the #110 sequence: gate⓪'s plan-reviewer/plan-drafter are the first
+// STRUCTURED OUTPUT (PR1 of the #110 sequence: gate⓪'s verification-plan-reviewer/verification-plan-drafter are the first
 // consumers; PR2-4 add their own per-role zod schemas around the SAME sentinel-delimited shape
 // this module parses, rather than each role reinventing the block format).
 //

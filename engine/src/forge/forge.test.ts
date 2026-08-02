@@ -1094,7 +1094,7 @@ const GATE0_PROJECT_JSON = JSON.stringify({
               labels: ["plan:approved", "blocked"],
               body: "## Verification\n- run npm test",
             },
-            // #47: BOTH verify:n/a and plan:approved — a state the plan-reviewer prompt forbids
+            // #47: BOTH verify:n/a and plan:approved — a state the verification-plan-reviewer prompt forbids
             // ("never both dispatch paths on one issue"). Fail closed: excluded from dispatch
             // AND from plan-review (it needs a human cleanup, not another session) — #94
             // Codex retro-review P2.
@@ -2416,10 +2416,12 @@ test("getIssueComments: reuses parsePRComments' shape/pagination tolerance off t
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
-    return JSON.stringify([{ body: "please fix the plan", created_at: "2026-01-01T00:00:00Z", user: { login: "plan-reviewer" } }]);
+    return JSON.stringify([
+      { body: "please fix the plan", created_at: "2026-01-01T00:00:00Z", user: { login: "verification-plan-reviewer" } },
+    ]);
   };
   const comments = await forge.getIssueComments(9);
-  assert.deepEqual(comments, [{ login: "plan-reviewer", createdAt: "2026-01-01T00:00:00Z", body: "please fix the plan" }]);
+  assert.deepEqual(comments, [{ login: "verification-plan-reviewer", createdAt: "2026-01-01T00:00:00Z", body: "please fix the plan" }]);
   assert.ok(seen[0]!.some((a) => a.includes("issues/9/comments")));
   assert.ok(seen[0]!.includes("--paginate") && seen[0]!.includes("--slurp"));
 });

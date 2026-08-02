@@ -304,7 +304,7 @@ export interface IForge {
    *  empty body as "no plan", the same fail-closed outcome as a genuinely planless issue). */
   getIssueBody(issue: number): Promise<string>;
   /** #110 PR0: overwrite an issue's body (the WRITE counterpart to getIssueBody). Additive infra
-   *  for the structured-output rework: post-#110, the engine applies a plan-drafter's revised
+   *  for the structured-output rework: post-#110, the engine applies a verification-plan-drafter's revised
    *  body (and other role-session edits) itself, from validated data — the role session that
    *  produced the text never touches `gh` directly. Unused by any call site in this PR (zero
    *  behavior change); the first real caller lands in PR1/PR2. */
@@ -351,7 +351,7 @@ export interface IForge {
    *  merely for having entered the pool. */
   getPoolEligibleIssues(): Promise<Issue[]>;
   /** #87: an issue's current label set — the plan_review orchestrator's per-issue outcome
-   *  check after a plan-reviewer/plan-drafter session runs (distinguishing approved vs
+   *  check after a verification-plan-reviewer/verification-plan-drafter session runs (distinguishing approved vs
    *  needs-human vs still-awaiting without re-fetching the whole board). */
   getIssueLabels(issue: number): Promise<string[]>;
   /** #398: a PR's current label set — `getIssueLabels`' PR-side twin, and the READ half of the
@@ -365,8 +365,8 @@ export interface IForge {
   getPRLabels(pr: number): Promise<string[]>;
   /** #87: an ISSUE's conversation comments (distinct from getPRReviewData's PR comments,
    *  though the underlying GitHub REST endpoint is the same `issues/<n>/comments` either way —
-   *  PRs are issues under the hood). The plan_review orchestrator reads the plan-reviewer's
-   *  most recent comment as the plan-drafter's brief (#77 Amendment 2). Newest-last (gh's
+   *  PRs are issues under the hood). The plan_review orchestrator reads the verification-plan-reviewer's
+   *  most recent comment as the verification-plan-drafter's brief (#77 Amendment 2). Newest-last (gh's
    *  default chronological order). */
   getIssueComments(issue: number): Promise<PRComment[]>;
   /** #89: create a new issue (the PO peripheral's decomposition output) — title + body only.
@@ -2422,11 +2422,11 @@ function isDecomposed(labels: string[], l: ReadyCfg["labels"]): boolean {
  * paths below:
  *
  *  - `verifyNa` present (and `needsHuman` already ruled out) -> the doc-gate path. A human has
- *    effectively adjudicated this: the plan-reviewer peripheral only ever proposes `verifyNa`
+ *    effectively adjudicated this: the verification-plan-reviewer peripheral only ever proposes `verifyNa`
  *    paired WITH `needsHuman` in the same action, so `verifyNa` alone means a human accepted
  *    it by removing `needsHuman` themselves.
  *  - otherwise -> dispatchable only if a verification-plan section exists in the body AND
- *    `planApproved` is present (applied by the plan-reviewer peripheral, never by this gate).
+ *    `planApproved` is present (applied by the verification-plan-reviewer peripheral, never by this gate).
  *    Presence alone (pre-#88 behavior) is no longer sufficient.
  *
  * Reuses `extractVerificationPlan` directly rather than `hasVerificationPlan` — the latter's
@@ -2446,7 +2446,7 @@ function isDispatchable(body: string, labels: string[], l: ReadyCfg["labels"]): 
   if (isDecomposed(labels, l)) return false;
   if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
   // #94 Codex retro-review P2: BOTH dispatch-path labels on one issue is a state the
-  // plan-reviewer prompt forbids ("never apply both") — it can only arise from a stale or
+  // verification-plan-reviewer prompt forbids ("never apply both") — it can only arise from a stale or
   // manual label mutation. Fail closed BEFORE the verifyNa early-true below: a mixed-label
   // issue must not slip through the doc-gate path (which skips the red/green cycle); it waits
   // for a human to remove one of the two labels.
@@ -2483,7 +2483,7 @@ export function selectReadyIssues(project: ParsedProject, cfg: ReadyCfg): Issue[
  *  peripheral's candidate test. `needsHuman`/`blocked` are settled states (a human is already
  *  in the loop, or must act first) — never re-reviewed. `verifyNa` is the doc-gate path, a
  *  DIFFERENT dispatch route than plan-review's; an issue that already carries it needs no plan
- *  review (whether or not `needsHuman` also accompanies it, per the plan-reviewer's own
+ *  review (whether or not `needsHuman` also accompanies it, per the verification-plan-reviewer's own
  *  outcome-3 contract). The forbidden verifyNa+planApproved MIXED state (#94 Codex retro P2)
  *  is likewise not a review candidate: it needs a human label CLEANUP, not another session —
  *  isDispatchable already fail-closes it out of dispatch, and dispatching a reviewer at it
@@ -2567,7 +2567,7 @@ export function selectPoolEligibleIssues(project: ParsedProject, cfg: ReadyCfg):
  *  issues are excluded (the doc-gate path; no plan is expected). `needsHuman`/`blocked` are
  *  excluded (settled — a human is already in the loop, not a drafting target). An issue that
  *  already has SOME plan section is excluded too — triage's whole job is to fill the gap, not
- *  to re-draft an existing plan (that quality judgment belongs to gate⓪'s plan-reviewer). */
+ *  to re-draft an existing plan (that quality judgment belongs to gate⓪'s verification-plan-reviewer). */
 function needsPlanTriage(body: string, labels: string[], l: ReadyCfg["labels"]): boolean {
   if (isDecomposed(labels, l)) return false;
   if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;

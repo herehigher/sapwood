@@ -12,12 +12,32 @@ test("allowedToolsForRole: every issue-oriented peripheral role gets exactly ISS
     "po-triage",
     "harvest",
     "architect",
-    "plan-reviewer",
-    "plan-drafter",
-    "plan-reviewer-confirm",
+    "verification-plan-reviewer",
+    "verification-plan-drafter",
+    "verification-plan-reviewer-confirm",
     "retro",
   ]) {
     assert.deepEqual([...allowedToolsForRole(role)].sort(), [...ISSUE_TOOLS].sort(), `role: ${role}`);
+  }
+});
+
+// #413: the gate⓪ role ids are a deny-by-default MATRIX KEY, so a rename that misses this table
+// fails CLOSED — the role silently degrades to no tools at all instead of erroring. These two
+// tests are the tripwire for exactly that: the first pins the post-rename ids to the issue-tool
+// set, the second proves no id in the table resolves to the empty fallback (which is what a
+// half-applied rename would leave behind, and what the pre-#413 ids must now do).
+test("#413: every PROXY_ROLE_TOOL_MATRIX id resolves to a non-empty tool set — no key silently falls through to the deny-by-default empty array", () => {
+  const ids = Object.keys(PROXY_ROLE_TOOL_MATRIX);
+  assert.ok(ids.length > 0, "matrix is not empty");
+  for (const role of ids) {
+    assert.notDeepEqual(allowedToolsForRole(role), [], `matrix key resolves to the empty deny-by-default fallback: ${role}`);
+  }
+});
+
+test("#413: the pre-rename gate⓪ role ids are GONE from the matrix — a stale caller gets deny-by-default, not a quiet second grant", () => {
+  for (const stale of ["plan-reviewer", "plan-drafter", "plan-reviewer-confirm"]) {
+    assert.equal(stale in PROXY_ROLE_TOOL_MATRIX, false, `stale id still present: ${stale}`);
+    assert.deepEqual(allowedToolsForRole(stale), [], `stale id still granted tools: ${stale}`);
   }
 });
 

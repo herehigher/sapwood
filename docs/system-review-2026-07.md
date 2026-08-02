@@ -297,9 +297,9 @@ checklist each addition must update.
    current milestone); retro proposals must cite it.
 9. `--milestone M` CLI shortcut = scope + stop in one flag.
 10. Role paradigm spec doc (responsibility / write scope / idempotency /
-    validation / escalation); document plan-reviewer+drafter as one gate⓪
+    validation / escalation); document verification-plan-reviewer+drafter as one gate⓪
     adversarial pair.
-11. Issue templates by category + plan-drafter normalizes toward them (soft,
+11. Issue templates by category + verification-plan-drafter normalizes toward them (soft,
     prompt-level; gate⓪ keeps owning the semantic bar).
 12. Architect post-review context: feed last round's merged outcomes into the
     next pre-dispatch pass (closes the "who reviews merged architecture"

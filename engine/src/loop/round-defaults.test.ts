@@ -215,7 +215,7 @@ class MinimalSupervisor implements Supervisor {
  *
  *  #110 PR1/PR2: role sessions don't touch `gh` anymore — each must emit valid structured
  *  output for the engine to act on, or the engine's own isValid-driven retry doubles the call
- *  count (breaking this file's exact-call-count assertions). "plan-reviewer" emits a
+ *  count (breaking this file's exact-call-count assertions). "verification-plan-reviewer" emits a
  *  structured-output "approve" decision; "po-triage" emits a structured-output body revision.
  *  Issue numbers are recovered from the rendered prompt (every shipped issues-only role prompt
  *  renders "Number: #<n>" verbatim), and both carry their OWN BODY with a verification section
@@ -233,7 +233,7 @@ class ScriptedRunner {
   ) {}
   async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
     this.calls.push(opts);
-    if (opts.roleId === "plan-reviewer") {
+    if (opts.roleId === "verification-plan-reviewer") {
       const m = /Number: #(\d+)/.exec(opts.prompt);
       const issue = m ? Number(m[1]) : 0;
       const resultText =
@@ -487,7 +487,7 @@ test("createDefaultPeripherals (#109 gate② P2): with round.milestone set, the 
   // Drive the two candidate-consuming stubs directly (round.ts's SEQUENCE order is round.test.ts
   // territory; the scoping property under test is per-stub).
   await peripherals.plan_review!.run({ roundId: 1, phase: "plan_review", marker: null });
-  const reviewerCalls = runner.calls.filter((c) => c.roleId === "plan-reviewer");
+  const reviewerCalls = runner.calls.filter((c) => c.roleId === "verification-plan-reviewer");
   assert.equal(reviewerCalls.length, 1, "exactly one reviewer session — the in-milestone candidate only");
   assert.match(reviewerCalls[0]!.prompt, /in-scope review candidate/);
   assert.doesNotMatch(reviewerCalls[0]!.prompt, /out-of-scope/);
@@ -578,7 +578,7 @@ test("runRounds integration: wired with createDefaultPeripherals's output, a def
   // to noopPeripheralStub (which never calls runner.run at all).
   assert.ok(roleIdsDispatched.has("po-align"), "aligning dispatched a real PO session");
   assert.ok(roleIdsDispatched.has("architect"), "architecting dispatched a real architect session");
-  assert.ok(roleIdsDispatched.has("plan-reviewer"), "plan_review dispatched a real reviewer session");
+  assert.ok(roleIdsDispatched.has("verification-plan-reviewer"), "plan_review dispatched a real reviewer session");
   assert.ok(roleIdsDispatched.has("harvest"), "harvesting dispatched a real harvest session");
   assert.ok(roleIdsDispatched.has("retro"), "retro dispatched a real retro session");
   // The plan-review candidate actually converged (the scripted reviewer approved it) — proof
@@ -608,7 +608,7 @@ test("createDefaultPeripherals (#127): all five roles.<role>.enabled=false omits
     roles: {
       po: { enabled: false },
       architect: { enabled: false },
-      planReviewer: { enabled: false },
+      verificationPlanReviewer: { enabled: false },
       harvest: { enabled: false },
       retro: { enabled: false },
     },
@@ -850,7 +850,7 @@ test("createDefaultPeripherals #237 round-2 adjudication (2026-07-19, finding 1+
   state.close();
 });
 
-test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exactly ONCE — one line naming every disabled phase, carrying the gate⓪ dispatch-starvation warning when planReviewer is among them; nothing logged when all roles are enabled", () => {
+test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exactly ONCE — one line naming every disabled phase, carrying the gate⓪ dispatch-starvation warning when verificationPlanReviewer is among them; nothing logged when all roles are enabled", () => {
   const state = new State(":memory:");
   const forge = new FakeForge();
   const logged: string[] = [];
@@ -859,7 +859,7 @@ test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exac
     // verifyNa, so a hardcoded "plan:approved"/"verify:n/a" string in round-defaults.ts would
     // fail this test (the repo's no-hardcoded-label-at-call-sites rule, fable PR #101 P3).
     const cfg = mkCfg({
-      roles: { planReviewer: { enabled: false }, retro: { enabled: false } },
+      roles: { verificationPlanReviewer: { enabled: false }, retro: { enabled: false } },
       labels: { planApproved: "ok-to-build", verifyNa: "no-verify" },
     });
     createDefaultPeripherals({
@@ -877,7 +877,7 @@ test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exac
     assert.match(
       logged[0]!,
       /ok-to-build/,
-      "the planReviewer warning names the CONFIGURED planApproved label a human/external process must now apply",
+      "the verificationPlanReviewer warning names the CONFIGURED planApproved label a human/external process must now apply",
     );
     assert.match(logged[0]!, /no-verify/, "the configured verifyNa label too");
     assert.doesNotMatch(logged[0]!, /plan:approved/, "never the hardcoded default label name");
@@ -943,7 +943,7 @@ test("runRounds integration (#127): a disabled role spawns no session for its ph
   const roleIdsDispatched = new Set(runner.calls.map((c) => c.roleId));
   assert.ok(roleIdsDispatched.has("po-align"));
   assert.ok(roleIdsDispatched.has("architect"));
-  assert.ok(roleIdsDispatched.has("plan-reviewer"));
+  assert.ok(roleIdsDispatched.has("verification-plan-reviewer"));
   assert.ok(roleIdsDispatched.has("harvest"));
   state.close();
 });
