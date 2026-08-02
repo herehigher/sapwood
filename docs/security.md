@@ -988,10 +988,21 @@ This is a deliberate trade, not a defect — but it means any issue whose accept
 criteria require the shipped YAML to change has a **human-applied step that no worker can
 discharge**. Such issues are best written to ask for a paste-ready patch (which a worker
 *can* produce, in the PR body or a plain file) rather than for the edit itself, so the
-work is dispatchable and the acceptance criteria are honestly satisfiable. #386 is the
-worked example: its calibration guidance landed in the docs, while the matching
-`worker.budgetUsdSoft` comment had to ship as a patch for a human to apply. The guard
-constrains Claude tool calls, never a human's editor.
+work is dispatchable and the acceptance criteria are honestly satisfiable.
+
+#386 is the worked example, and it shows the shape such a handoff should take. Its
+calibration guidance landed in the docs directly; the matching `worker.budgetUsdSoft`
+comment could not, so it ships as a **checked-in, `git apply`-able patch** at
+`docs/patches/386-budget-calibration.patch`, whose header states what it changes, why it
+is a patch rather than a commit, and the two commands that apply and then delete it. As
+long as that file exists, the YAML-side change is **still pending** — the patch is the
+request, not the delivery. The guard constrains Claude tool calls, never a human's
+editor, so applying it takes an editor and no special ceremony.
+
+A patch file is the right carrier here precisely because it is verifiable from the tree:
+a reviewer (human or engine-agent) can confirm the pending change exists and applies,
+rather than taking a prose claim on trust. Prefer it over describing the edit only in a
+PR body, which the tree does not record and a diff-scoped reviewer cannot see.
 
 ### The `sapwood:human-merge-only` label (#397)
 
