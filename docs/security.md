@@ -964,7 +964,13 @@ would let a worker weaken the very mechanism that constrains it. Any change to t
 
 - `guard.ts` / the guard hook wiring
 - `reviewer.ts` / `merge-driver.ts`
-- security-relevant config (guard mode, reviewer mode, merge mode)
+- `sapwood.config.yaml` / `sapwood.config.json` — **the whole file**, not just its
+  security-relevant fields (guard mode, reviewer mode, merge mode). The guard's actual
+  match (`engine/src/guard/guard.ts`) is a path pattern on `sapwood.config.(ya?ml|json)`,
+  with no per-field carve-out: a comment-only edit, a non-security default, or reformatting
+  is blocked exactly like a guard-mode change. Do not read "security-relevant config" below
+  as scoping the block to a subset of the file's contents — it names *why* the file is
+  protected, not *how much* of it is.
 - `.claude/settings*.json` and `.github/workflows/**`
 
 The guard enforces this as a write-path denial (both for the `Write`/`Edit` tools and

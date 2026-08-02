@@ -68,9 +68,17 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // ci.requiredChecks unconditionally): plan-reviewer flags-and-strips them, the confirm pass
   // invalidates legacy plans carrying them, drafter/decompose never author them.
   // #529: same categorical→conditional GitHub-access fix as architect.md.
-  "plan-reviewer.md": "43a042fa33300b8421d3a98e6c253c3ac20a1b678d5b312875dc8f26673d691b",
+  // retro round #281: the "Feasibility against human-merge-only paths" check named
+  // "security-relevant config" as the protected slice of sapwood.config.*, which read as
+  // scoping the block to guard/reviewer/merge-mode fields — issue #386 (a comment-only
+  // budgetUsdSoft edit) slipped past gate⓪ on that reading and the resulting PR (#562) then
+  // failed gate② for real, unfixably (the guard blocks the whole file by path, not by field).
+  // Both bullets now say so explicitly.
+  "plan-reviewer.md": "409353d6c8607331c575fd4fe6222136026a8b55c67e573701b32292740d4a08",
   "plan-reviewer-confirm.md": "895ae8b6dace1417d576e8398e9918921e78d28b96a4d9a7c07c245e7071ad2d",
-  "plan-drafter.md": "0d808e7075e91c91fa070aa3c68aa711a9de950a2cbb93d64ce3e0c664bfb188",
+  // retro round #281: same fix as plan-reviewer.md above, mirrored into the drafter's own
+  // "if the brief flags a human-merge-only conflict" bullet.
+  "plan-drafter.md": "f6c7cf7abb7f6fe1314da551f5600c3382e7941352f7195c7f145e439a3d9f0c",
   "harvest.md": "82312e3ac79e42e008a9d7477d4b9e601623a9ebb1e5a4fe306e8b3f266d109d",
   // #453 (design #402 R5): intentional edit — the digest's new finding-class tendency table is
   // pointed at, with the design-source rule and the stated blind spot. The FIRST deliberate
@@ -563,8 +571,11 @@ test("#409: the rule is worded per role rather than one paragraph duplicated, an
   }
 });
 
-test("#409: plan-drafter.md and architect.md are deliberately untouched (charter conflicts recorded in the issue)", () => {
-  assert.equal(sha256(readPrompt(defaultPlanDrafterPromptPath())), SNAPSHOT_HASHES["plan-drafter.md"]);
+test("#409: architect.md is deliberately untouched (charter conflicts recorded in the issue)", () => {
+  // plan-drafter.md was untouched by #409 specifically, but has since been edited for an
+  // unrelated reason (retro round #281: the human-merge-only feasibility check under-scoped
+  // sapwood.config.* to its security-relevant fields) — its hash is covered by the direct
+  // snapshot test above instead of this #409-scoped assertion.
   assert.equal(sha256(readPrompt(defaultArchitectPromptPath())), SNAPSHOT_HASHES["architect.md"]);
 });
 
