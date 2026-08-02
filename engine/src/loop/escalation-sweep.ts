@@ -75,7 +75,7 @@
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
 import type { State } from "../state/state.js";
-import { CLEAR_KINDS, ESCALATION_SOURCES, openEscalations, RESOLVED_KIND } from "./escalation-reconcile.js";
+import { attentionProof, CLEAR_KINDS, ESCALATION_SOURCES, openEscalations, RESOLVED_KIND } from "./escalation-reconcile.js";
 
 /** The sweep's own receipt — appended only after the label removal returned. It is the latch (see
  *  the module doc's ordering note), and it is scoped to `(source, issue)` so a later
@@ -166,7 +166,11 @@ export function sweepableHolds(events: readonly { kind: string; payload: unknown
       sweepable.set(key, { source, issue, via });
       continue;
     }
-    const proof = ESCALATION_SOURCES[e.kind];
+    // #404: `attentionProof`, never a raw table lookup — a predicated kind's non-attention payload
+    // (a `reclaim-failed` continuing to `DRIVING`) applied no label, so it can own none, and the
+    // two folds must agree about that or the sweep would claim a hold `openEscalations` never
+    // opened.
+    const proof = attentionProof(e.kind, payload);
     if (proof === undefined) continue;
     const key = `${e.kind}:${issue}`;
     proven.set(key, proof === "always" || (proof === "payload" && payload?.labeled === 1));
