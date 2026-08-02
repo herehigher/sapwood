@@ -1394,9 +1394,14 @@ const ConfigSchemaRaw = z
         // #292: repo-root-relative reviewer-instruction paths whose PR edits require human
         // adjudication. The explicit empty list is a deliberate off-switch (and avoids even
         // fetching changed files); matching supports literal paths plus `*` and `**`.
+        // #527: `engine/prompts/**` covers the reviewer's OWN prompt carrier — inert for any
+        // target repo that is not the engine's source tree, load-bearing for a self-hosting
+        // deployment. The reviewer's other carrier, the doctrine file, is NOT a literal here: it
+        // is derived from `doctrine.file` at match time so a reconfigured path stays covered
+        // (instruction-path-escalation.ts's effectiveInstructionPaths).
         instructionPaths: z
           .array(InstructionPath)
-          .default(["CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md", ".claude/rules/**", "AGENTS.md"]),
+          .default(["CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md", ".claude/rules/**", "AGENTS.md", "engine/prompts/**"]),
         // #248: the WAIT-tier hold label list (three-tier escalation model) — a HUMAN-applied
         // "I'm actively reviewing this" signal, distinct from `humanLabels`' engine-written
         // ESCALATE tier. Optional here for the same "tell unset apart from explicitly set"

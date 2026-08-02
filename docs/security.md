@@ -845,19 +845,49 @@ they never feed sapwood's own dispatch loop.
 Standing reviewer instructions are authority, so sapwood treats their merge history as a trust
 chain. Before either a hosted-bot review trigger or a paid engine-agent session, the merge gate
 checks the PR's rename-aware changed-file list against `escalation.instructionPaths`. A match on
-an old or new path applies `labels.needsHuman` before review proceeds and posts one explanatory
-comment. If GitHub cannot provide a complete changed-file list within its API ceiling, the PR also
-escalates fail-closed. The exact needs-human PR label is the latch: later ticks neither fetch the
-file list nor repeat either write.
+an old or new path applies `labels.humanMergeOnly` (#397) before review proceeds and posts one
+explanatory comment. If GitHub cannot provide a complete changed-file list within its API ceiling,
+the PR also escalates fail-closed. The exact human-merge-only PR label is the latch: later ticks
+neither fetch the file list nor repeat either write.
 
-This ensures instructions absorbed by a review session were previously human-vetted, while an
-instruction edit in the current PR can never use its own new authority to reach autonomous merge.
-The default paths cover `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`,
-`.claude/rules/**`, and `AGENTS.md`, so the same rule protects both engine-agent context and the
-hosted bot's PR-head guidance. This is deliberately **escalation, not a guard write-denial**:
-editing standing instructions is legitimate work, and denying the edit would mask that intent.
-The worker may produce the change; a human must adjudicate it. Setting
-`escalation.instructionPaths: []` explicitly turns the mechanism off.
+This is deliberately **escalation, not a guard write-denial**: editing standing instructions is
+legitimate work, and denying the edit would mask that intent. The worker may produce the change; a
+human must adjudicate it. Setting `escalation.instructionPaths: []` explicitly turns the mechanism
+off.
+
+### Which carriers are covered, and how immediate the protection is (#527)
+
+Two families, protecting two different sessions, with two different timings. Being precise about
+this matters: the general claim "instructions absorbed by a review session were previously
+human-vetted" is stronger than what the second family's mechanism actually delivers.
+
+- **The ambient-context family** — `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`,
+  `.claude/rules/**`, `AGENTS.md`. These are absorbed from the checkout by **worker** and other
+  non-review sessions ([Ambient repo context: record, don't
+  seal](#ambient-repo-context-record-dont-seal-236)), and by a hosted bot reading the PR head.
+  They are **not** absorbed by sapwood's own gate② review session: it spawns with
+  `--setting-sources ""` (see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard-285)),
+  which also stops the session's own cwd `CLAUDE.md` from loading at all. Re-measured live on
+  2026-08-02 (#527), the same way the earlier measurement recorded in the peripheral-egress
+  section above was taken — a scratch directory whose `CLAUDE.md` declared a unique marker fact, a
+  one-shot `claude -p` asking for that fact: the default run answered with the marker, the
+  identical run with `--setting-sources ""` answered `UNKNOWN`. Same machine, same operator
+  settings, one flag changed — so the difference is the flag, not a local settings deny wearing
+  platform clothes.
+- **The reviewer's own carriers** — the doctrine file (`doctrine.file`, default
+  `docs/REVIEW-DOCTRINE.md`, substituted verbatim into the reviewer prompt) and the shipped
+  reviewer prompt itself (`engine/prompts/**`). These are what a gate② review session actually
+  reads as standing instruction. The doctrine path is **derived from config**, not a literal, so
+  an operator who repoints `doctrine.file` stays covered; the prompt glob is a literal default,
+  inert in any target repo that is not the engine's own source tree.
+
+**The second family's protection is delayed by one round, not immediate — say so rather than
+overclaim.** Both the doctrine and the prompt are loaded by the ENGINE from its own
+config-resolved path at construction, never from the materialized tree under review. A PR editing
+them therefore cannot weaken *its own* review; what it would weaken is **every subsequent review
+after it merges**. The escalation closes that: the edit cannot reach autonomous merge, so no
+un-vetted reviewer instruction ever becomes the authority for a later round. What it does not and
+cannot do is make an in-flight review notice the change.
 
 ## Human-merge-only paths
 
