@@ -1436,7 +1436,9 @@ async function runTickEngine(
     // reading back whether the PREVIOUS run ended in a watchdog stall and whether the streak has
     // reached liveness.maxConsecutiveStalls. See stall-breaker.ts's own doc.
     detectConsecutiveStalls(state, cfg, systemClock, log);
-    const forge = overrides.forge ?? new GithubForge(cfg);
+    // #438: an engine session has both announcement channels, so a paging ceiling in the board or
+    // review-thread reads lands in the durable event log, not only on stderr.
+    const forge = overrides.forge ?? new GithubForge(cfg, { log, state });
     // #253: the tick driver's TickDeps.fixLegResume — undefined (no handle/listener/token/journal
     // write/argv change on any production session — see buildTickFixLegResume's own doc for the
     // exact observable guarantee) unless cfg.proxy is in its production-attach state (enabled:
@@ -1610,7 +1612,8 @@ async function runRoundsEngine(
     // #407: the stall breaker — same placement pattern as the rapid-restart detector above; see
     // runTickEngine's own comment and stall-breaker.ts's doc.
     detectConsecutiveStalls(state, cfg, systemClock, log);
-    const forge = overrides.forge ?? new GithubForge(cfg);
+    // #438: same both-channel wiring as runTickEngine above.
+    const forge = overrides.forge ?? new GithubForge(cfg, { log, state });
     const engineReviewRunner =
       cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state, now: systemClock }) : null;
     const engineAgent = engineReviewRunner

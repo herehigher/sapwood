@@ -1822,6 +1822,163 @@ test("#378 collectReviewThreads: the 50-page ceiling bounds a runaway cursor (sa
   assert.equal(threads.length, 50);
 });
 
+// ── #438: a hit page ceiling is an ANNOUNCED truncation, never a silent partial answer ────────
+
+test("#438 collectReviewThreads: the page ceiling fires onPageCeiling exactly once with the partial counts; the return value is unchanged", async () => {
+  const seen: { unresolved: number; threads: number }[] = [];
+  let calls = 0;
+  const { unresolved, threads } = await collectReviewThreads(
+    async () => {
+      calls++;
+      return richThreadsPage([{ id: `T${calls}`, isResolved: false }], { hasNextPage: true, endCursor: "SAME" });
+    },
+    (partial) => seen.push(partial),
+  );
+  assert.deepEqual(seen, [{ unresolved: 50, threads: 50 }], "announced once, naming what it actually managed to count");
+  assert.equal(unresolved, 50, "return value is byte-identical to pre-#438 behaviour");
+  assert.equal(threads.length, 50);
+});
+
+test("#438 collectReviewThreads: a connection that pages to exhaustion never fires onPageCeiling", async () => {
+  const pages: Record<string, string> = {
+    "": richThreadsPage([{ id: "T1", isResolved: false }], { hasNextPage: true, endCursor: "P2" }),
+    P2: richThreadsPage([{ id: "T2", isResolved: false }], { hasNextPage: false, endCursor: null }),
+  };
+  let fired = 0;
+  const { unresolved } = await collectReviewThreads(
+    async (after) => pages[after ?? ""]!,
+    () => fired++,
+  );
+  assert.equal(fired, 0);
+  assert.equal(unresolved, 2);
+});
+
+test("#438 getPRReviewData: a truncated review-threads read is announced on BOTH channels, naming the PR and the partial count", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const logged: string[] = [];
+  const events: { kind: string; payload: unknown }[] = [];
+  const forge = new GithubForge(cfg, {
+    log: (m) => logged.push(m),
+    state: { appendEvent: (kind, payload) => events.push({ kind, payload }) },
+  });
+  let graphqlPages = 0;
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[0] === "pr") {
+      return JSON.stringify({
+        headRefOid: "H",
+        author: { login: "producer" },
+        updatedAt: "2026-01-01T00:00:00Z",
+        isDraft: false,
+        labels: [],
+        state: "OPEN",
+        reviews: [],
+      });
+    }
+    if (args[0] === "api" && args[1] === "graphql") {
+      graphqlPages++;
+      // Runaway cursor: hasNextPage never goes false, so the real 50-page ceiling is what stops it.
+      return richThreadsPage([{ id: `T${graphqlPages}`, isResolved: false }], { hasNextPage: true, endCursor: `CUR${graphqlPages}` });
+    }
+    return "[]"; // reactions + conversation comments
+  };
+
+  const data = await forge.getPRReviewData(77);
+  assert.equal(graphqlPages, 50, "the real ceiling ran, not a shortcut");
+  assert.equal(data.unresolvedThreads, 50, "the partial count is still returned — observability only, no behaviour change");
+  assert.equal(data.threads?.length, 50);
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.kind, "forge-page-ceiling");
+  assert.deepEqual(events[0]!.payload, { source: "review-threads", pr: 77, pages: 50, unresolved: 50, threads: 50 });
+  assert.equal(logged.length, 1);
+  assert.match(logged[0]!, /page ceiling/);
+  assert.match(logged[0]!, /#77/);
+  assert.match(logged[0]!, /50/);
+});
+
+test("#438 fetchProject: a truncated board read is announced on BOTH channels, naming the board and the partial item count", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" } });
+  const logged: string[] = [];
+  const events: { kind: string; payload: unknown }[] = [];
+  const forge = new GithubForge(cfg, {
+    log: (m) => logged.push(m),
+    state: { appendEvent: (kind, payload) => events.push({ kind, payload }) },
+  });
+  let projectPages = 0;
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+    projectPages++;
+    return JSON.stringify({
+      data: {
+        user: {
+          projectV2: {
+            id: "PVT_x",
+            field: { id: "F1", options: [] },
+            items: {
+              pageInfo: { hasNextPage: true, endCursor: `CUR${projectPages}` },
+              nodes: [
+                {
+                  id: `I${projectPages}`,
+                  content: { number: projectPages, title: "t", state: "OPEN", labels: { nodes: [] } },
+                  fieldValueByName: null,
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+  };
+
+  // listUnplacedIssues is the shortest fetchProject consumer that does NOT refuse on truncation.
+  await forge.listUnplacedIssues();
+  assert.equal(projectPages, 50);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.kind, "forge-page-ceiling");
+  assert.deepEqual(events[0]!.payload, { source: "project-items", owner: "o", projectNumber: 4, pages: 50, items: 50 });
+  assert.equal(logged.length, 1);
+  assert.match(logged[0]!, /page ceiling/);
+  assert.match(logged[0]!, /50/);
+});
+
+test("#438 the announcement is never load-bearing: no state (dry-run) and a throwing appendEvent both still return the partial read", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const logged: string[] = [];
+  const noState = new GithubForge(cfg, { log: (m) => logged.push(m) });
+  const brokenState = new GithubForge(cfg, {
+    log: (m) => logged.push(m),
+    state: {
+      appendEvent: () => {
+        throw new Error("state db is gone");
+      },
+    },
+  });
+  for (const f of [noState, brokenState]) {
+    let page = 0;
+    (f as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+      if (args[0] === "pr") {
+        return JSON.stringify({
+          headRefOid: "H",
+          author: { login: "p" },
+          updatedAt: "t",
+          isDraft: false,
+          labels: [],
+          state: "OPEN",
+          reviews: [],
+        });
+      }
+      if (args[0] === "api" && args[1] === "graphql") {
+        page++;
+        return richThreadsPage([{ id: `T${page}`, isResolved: false }], { hasNextPage: true, endCursor: `C${page}` });
+      }
+      return "[]";
+    };
+    assert.equal((await f.getPRReviewData(9)).unresolvedThreads, 50);
+  }
+  // noState: the ceiling line. brokenState: the ceiling line + the non-fatal append failure.
+  assert.equal(logged.length, 3);
+  assert.match(logged[2]!, /state db is gone/);
+});
+
 test("#378 assemblePRReviewData: threads ride along on PRReviewData; omitted -> undefined (no filtering possible, fail-closed)", () => {
   const view = JSON.stringify({
     headRefOid: "H",
