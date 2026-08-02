@@ -8,6 +8,7 @@
 
 import { createHash } from "node:crypto";
 import type { SapwoodConfig } from "../config/config.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { extractMarkdownSections } from "../util/markdown.js";
 import { ghWithTimeout } from "./gh.js";
 import { createMissingLabels, type LabelSpec, labelsInclude } from "./labels.js";
@@ -681,7 +682,7 @@ function isExactCompareRange(status: unknown): boolean {
  *  to a stderr line, which is all that surface has. */
 export interface ForgeDeps {
   log?: (message: string) => void;
-  state?: { appendEvent(kind: string, payload: unknown): void };
+  state?: { appendEvent(kind: EventKind, payload: unknown): void };
 }
 
 export class GithubForge implements IForge {
@@ -2040,6 +2041,34 @@ export function extractVerificationPlan(body: string): string | null {
 export function extractVerificationSection(body: string): string | null {
   const sections = extractMarkdownSections(body, /verification/);
   return sections.length ? sections.join("\n\n") : null;
+}
+
+/**
+ * Extract the agent-filed `Origin:` evidence line from an issue body (#442) — the triggering
+ * evidence a role names when IT files an issue (event id(s) / lane / episode / parent issue, or
+ * the literal `static scan` when the finding came from repo reading alone). Two facts, two
+ * authors: the engine's own round/proposal markers testify to PROCESS provenance and are the
+ * machine anchors; this line testifies to EVIDENCE provenance and is human triage prose only.
+ *
+ * The one engine consumer (align.ts's `validateAlignOutput`) checks the line is PRESENT and
+ * never what it SAYS — F15/#423: a role's self-report is exactly the kind of prose that must not
+ * become a dedupe or routing key. The engine-wide grep-invariant in align.test.ts pins that.
+ *
+ * Deliberately a plain line scan, NOT the fence-safe heading walk `extractMarkdownSections`
+ * does: the only failure it can produce is a false POSITIVE (an `Origin:` line that happens to
+ * sit inside a code fence satisfies the presence check), which costs a human one confusing
+ * triage read. Fence-safety would buy a false NEGATIVE instead — a whole valid align batch
+ * discarded over formatting — which is strictly worse for a line nothing routes on.
+ *
+ * Tolerates the emphasis wrapping the shipped template suggests (`_Origin: ..._`,
+ * `**Origin:** ...`). null when absent or empty — fail-closed, so a session that skipped the
+ * line is rejected rather than credited with unnamed provenance.
+ */
+export function extractOrigin(body: string): string | null {
+  const match = /^[ \t]*(?:[_*]{1,2})?Origin:(.*)$/m.exec(body);
+  if (!match) return null;
+  const text = match[1]!.replace(/^[_*\s]+/, "").replace(/[_*\s]+$/, "");
+  return text === "" ? null : text;
 }
 
 /** True if the issue carries a verification plan (Decision #8): verify:n/a label OR a

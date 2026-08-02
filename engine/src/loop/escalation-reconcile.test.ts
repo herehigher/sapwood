@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, IssueMeta, PRReviewData, PRStatus } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import { attentionProof, openEscalations, reconcileEscalations } from "./escalation-reconcile.js";
 
@@ -227,7 +228,7 @@ const NEEDS_HUMAN = "sapwood:needs-human";
 const tapEvents = (state: State): Array<[string, unknown]> => {
   const logged: Array<[string, unknown]> = [];
   const realAppend = state.appendEvent.bind(state);
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };
@@ -519,7 +520,7 @@ test("reconcileEscalations: a crash between observation and the latch write does
   // nothing durable landed. Simulated by making the append throw on the first attempt.
   const realAppend = state.appendEvent.bind(state);
   let crashed = false;
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     if (!crashed && kind === "escalation-resolved") {
       crashed = true;
       throw new Error("kill -9");
@@ -1139,7 +1140,7 @@ test("#398 cutover: a legacy event with NO carrier field is read on the ISSUE, e
 });
 
 test("#398 (review round 2): review-disputed and review-non-convergent carry the PR carrier too — a clean issue never resolves either", async () => {
-  for (const source of ["review-disputed", "review-non-convergent"]) {
+  for (const source of ["review-disputed", "review-non-convergent"] as const) {
     const forge = new FakeForge();
     const state = new State(":memory:");
     state.appendEvent(source, { worker: "w1", issue: 7, pr: 12, carrier: "pr", fixRounds: 2 });

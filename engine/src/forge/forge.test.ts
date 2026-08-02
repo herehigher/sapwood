@@ -11,6 +11,7 @@ import {
   countUnresolvedThreads,
   ENGINE_COMMENT_MARKER,
   extractAcceptanceCriteria,
+  extractOrigin,
   extractVerificationPlan,
   extractVerificationSection,
   fetchAllReviewThreads,
@@ -448,6 +449,27 @@ test("hasVerificationPlan: verify:n/a label OR a verification/acceptance section
   assert.equal(hasVerificationPlan("no plan here", ["Verify:N/A"], "verify:n/a"), true); // GitHub case variant
   assert.equal(hasVerificationPlan("no plan here", ["type:feature"], "verify:n/a"), false); // fail-closed
   assert.equal(hasVerificationPlan("", [], "verify:n/a"), false);
+});
+
+// ── extractOrigin (#442: the agent-filed evidence line — PRESENCE only, never a machine anchor) ──
+
+test("extractOrigin (#442): the shipped emphasis-wrapped trailer form, the bare form, and mid-body placement all read back", () => {
+  assert.equal(extractOrigin("## Why\n\nstuff\n\n_Origin: run evidence — lane-442, event #91._"), "run evidence — lane-442, event #91.");
+  assert.equal(extractOrigin("Origin: static scan"), "static scan");
+  assert.equal(extractOrigin("**Origin:** parent issue #435"), "parent issue #435");
+  assert.equal(extractOrigin("## Why\n\nOrigin: static scan\n\n## What\n\nmore"), "static scan");
+});
+
+test("extractOrigin (#442): absent, empty, or label-only -> null (fail-closed, so the align validator rejects rather than inventing provenance)", () => {
+  assert.equal(extractOrigin("## Why\n\nno provenance at all"), null);
+  assert.equal(extractOrigin(""), null);
+  assert.equal(extractOrigin("Origin:"), null);
+  assert.equal(extractOrigin("Origin:    "), null);
+  assert.equal(extractOrigin("_Origin: __"), null);
+  // Not the line form: a heading is a section, not the one-line evidence statement.
+  assert.equal(extractOrigin("## Origin\n\nstatic scan"), null);
+  // A word ENDING in "origin" must not satisfy the requirement.
+  assert.equal(extractOrigin("CrossOrigin: allowed"), null);
 });
 
 // ── extractVerificationPlan (#194: every matching section, without overlap duplication) ──

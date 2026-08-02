@@ -10,8 +10,8 @@
 // `gh pr review --approve`, rm/git rm of boundary files) and omits guard.py's
 // trading-domain categories A (funds) / B (private keys), so those are filtered out.
 //
-// Skips cleanly when python3 or the sibling 0day checkout is unavailable (e.g. CI without
-// 0day), so this never blocks the suite — it hardens locally and wherever both are present.
+// guard.py is vendored as a frozen fixture (fixtures/guard_py_snapshot/), so the only remaining
+// skip condition is a missing python3/python interpreter.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -22,7 +22,13 @@ import { guardDecision } from "./guard.js";
 
 const CWD = "/repo";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const ZERODAY_SRC = resolve(repoRoot, "..", "0day", "backend", "src");
+// Vendored, frozen snapshot of 0day's guard.py (provenance: fixtures/guard_py_snapshot/SOURCE.md).
+// It ships in-repo so the differential tests run in CI and in a worker's ephemeral worktree,
+// neither of which has a sibling ../0day checkout (#427). SAPWOOD_ZERODAY_SRC overrides it for
+// ad-hoc local comparison against a newer guard.py, e.g.
+// SAPWOOD_ZERODAY_SRC=../0day/backend/src npm --workspace engine test.
+const VENDORED_SRC = resolve(repoRoot, "engine", "src", "guard", "fixtures", "guard_py_snapshot");
+const ZERODAY_SRC = process.env.SAPWOOD_ZERODAY_SRC ? resolve(process.env.SAPWOOD_ZERODAY_SRC) : VENDORED_SRC;
 const GUARD_PY = join(ZERODAY_SRC, "zeroday", "loop", "guard.py");
 
 function pythonAvailable(): string | null {
@@ -286,10 +292,31 @@ test("#353 corpus: issue lifecycle verbs (close/reopen/transfer/delete) block ev
   }
 });
 
+// #427: the two differential tests below used to skip whenever a sibling ../0day checkout was
+// absent — i.e. in CI and in every dogfood worker's worktree, so the safety-parity guarantee
+// docs/PLAN.md documents for M1 never actually ran there. Guard the fixture itself so a moved
+// or dropped snapshot fails loudly instead of silently reverting them to a permanent skip.
+test("#427: the guard.py reference implementation ships in-repo (no sibling ../0day needed)", () => {
+  // The vendored fixture must be complete regardless; only the DEFAULT-resolution claim is
+  // conditional, since an ad-hoc SAPWOOD_ZERODAY_SRC run deliberately points elsewhere.
+  if (!process.env.SAPWOOD_ZERODAY_SRC) {
+    assert.equal(ZERODAY_SRC, VENDORED_SRC, "GUARD_PY resolves to the vendored fixture by default");
+  }
+  assert.ok(existsSync(GUARD_PY), `guard.py reference implementation missing: ${GUARD_PY}`);
+  assert.ok(existsSync(join(VENDORED_SRC, "SOURCE.md")), "fixture records its source commit");
+  // The package shape PY_DRIVER's `from zeroday.loop.guard import guard_decision` needs.
+  for (const p of [
+    ["zeroday", "__init__.py"],
+    ["zeroday", "loop", "__init__.py"],
+  ]) {
+    assert.ok(existsSync(join(VENDORED_SRC, ...p)), `importable package missing: ${p.join("/")}`);
+  }
+});
+
 test("differential: sapwood is at least as strict as guard.py on opaque + Category C", (t) => {
   const bin = pythonAvailable();
-  if (!bin || !existsSync(GUARD_PY)) {
-    t.skip(`differential test needs python + 0day guard.py (looked at ${GUARD_PY})`);
+  if (!bin) {
+    t.skip("differential test needs a python3/python interpreter");
     return;
   }
 
@@ -314,8 +341,8 @@ test("differential: sapwood is at least as strict as guard.py on opaque + Catego
 
 test("differential: 0day's shared-surface BLOCK cases all block in guard.ts", (t) => {
   const bin = pythonAvailable();
-  if (!bin || !existsSync(GUARD_PY)) {
-    t.skip("needs python + 0day guard.py");
+  if (!bin) {
+    t.skip("needs a python3/python interpreter");
     return;
   }
   // The exact opaque + Category C commands from 0day's authoritative bypass matrix.

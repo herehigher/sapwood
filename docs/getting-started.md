@@ -113,7 +113,12 @@ act.
 - **What you see:** the `Ready` issues that would be dispatch candidates and a cost
   estimate (`worker.budgetUsdSoft` × candidate count, compared with
   `cost.dailyBudgetUsd`). The candidate list is a rough upper bound: dry-run assumes
-  empty lanes and omits the live tick's in-flight and anti-starvation checks.
+  empty lanes and omits the live tick's in-flight and anti-starvation checks. The *cost*
+  side is only as good as `worker.budgetUsdSoft`, and the shipped `10` is calibrated for
+  small-to-medium work — on the shipped `opus`/`high` profile a substantive issue runs
+  ~$8–20 per leg, so the estimate reads low and legs hand off mid-work. Read
+  [Calibrating `budgetUsdSoft`](configuration.md#calibrating-budgetusdsoft) before
+  trusting this number for your own profile.
 - **Step up:** choose L1's single-issue profile, leave exactly one issue `Ready`, and
   supervise it with `sapwood run --until-idle`.
 - **Step down:** from any higher level, return here by stopping the active run and using
@@ -385,6 +390,33 @@ Any issue a human didn't personally author — including one an agent role opens
 behalf — should carry the configured `labels.originAgent` label (`sapwood:origin:agent` by
 default); see
 [`security.md`](security.md#the-originagent-label-convention) for why.
+
+### The `Origin:` line on agent-filed issues (#442)
+
+An issue the PO's align pass files ends its body with a one-line `Origin:` statement naming
+the **evidence that triggered it** — the event id(s), lane, episode, or parent issue it came
+from, or the literal `static scan` when the only evidence was the role reading this
+repository. That distinction is the point: a finding backed by something that actually
+happened in a run and a finding derived from reading code look identical on an issue page
+otherwise, and they deserve different amounts of trust when you triage them.
+
+Two different provenance facts, two different authors, deliberately kept apart:
+
+| | Who states it | Carrier | Read by the engine? |
+|---|---|---|---|
+| **Process** provenance — which round/pass filed it | the engine | the `Created by sapwood's round N PO alignment pass` comment, its `<!-- sapwood:round:N:aligning -->` / `<!-- sapwood:engine -->` markers, and the `<!-- sapwood:proposal:… -->` body trailer | yes — these are the machine anchors (reconcile, dedupe, the adjudication scan) |
+| **Evidence** provenance — what triggered the finding | the role's own session | the `Origin:` line | **no** |
+
+The engine checks only that the `Origin:` line **exists** — a proposed body without one is
+invalid session output, retried once and then degraded, the same as a malformed output block.
+It never parses, matches, or routes on what the line *says*. That is on purpose: a role's
+self-report about its own reasoning is prose, and prose is exactly what must not become a
+dedupe or routing key (the failure class F15 taught this project). Read it as testimony to
+weigh, not as a field. An engine-wide test pins the single presence-check call site, so the
+day something tries to consume the line, it fails loudly rather than quietly.
+
+The line is shipped default prompt text, so it is overridable like any other role prompt —
+point `roles.po.promptFile` at your own copy to change it.
 
 ## Next steps
 

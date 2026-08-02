@@ -23,6 +23,7 @@ import { NO_ROUND_DIRECTIVE } from "../config/directive.js";
 import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import {
@@ -543,7 +544,7 @@ test("createArchitectStub P2: a failed session is retried once; a successful ret
   const state = new State(":memory:");
   const logged: Array<[string, unknown]> = [];
   const realAppend = state.appendEvent.bind(state);
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };
@@ -568,7 +569,7 @@ test("createArchitectStub P2: two failed sessions -> marker STILL set (advisory 
   const state = new State(":memory:");
   const logged: Array<[string, unknown]> = [];
   const realAppend = state.appendEvent.bind(state);
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };
@@ -603,7 +604,7 @@ test("createArchitectStub #110: no structured output block at all, TWICE -> degr
   const state = new State(":memory:");
   const logged: Array<[string, unknown]> = [];
   const realAppend = state.appendEvent.bind(state);
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };
@@ -1513,7 +1514,7 @@ test("createArchitectStub #213: degrade OPEN — an invalid session (twice) with
   const state = new State(":memory:");
   const logged: Array<[string, unknown]> = [];
   const realAppend = state.appendEvent.bind(state);
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };
@@ -1542,7 +1543,7 @@ test("createArchitectStub #213: degrade with an EMPTY pool never fires `architec
   const state = new State(":memory:");
   const logged: Array<[string, unknown]> = [];
   const realAppend = state.appendEvent.bind(state);
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };

@@ -10,6 +10,7 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
 import { type DriverDeps, runDriver } from "./driver.js";
@@ -551,7 +552,7 @@ test("runDriver: the contained tick() throw is recorded as a structured tick-err
   const deps = baseDeps({ forge, sleep, stopMode: "once" });
   const logged: Array<[string, unknown]> = [];
   const realAppend = deps.state.appendEvent.bind(deps.state);
-  deps.state.appendEvent = (kind: string, payload: unknown) => {
+  deps.state.appendEvent = (kind: EventKind, payload: unknown) => {
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };

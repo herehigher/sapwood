@@ -33,8 +33,12 @@ import { z } from "zod";
 import type { SapwoodConfig } from "../config/config.js";
 import { resolveRoundDirective } from "../config/directive.js";
 import type { IForge, Issue } from "../forge/forge.js";
-import { extractVerificationPlan } from "../forge/forge.js";
+import { extractOrigin, extractVerificationPlan } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
+// po-pool's candidate digest now substitutes the SAME formatCandidate shape the architect
+// phase already substitutes for these same pool members one phase later — see
+// buildPoolCandidateDigest's own doc comment below.
+import { formatCandidate } from "../roles/architect.js";
 import type { RoleRunner, RoleSessionResult } from "../roles/peripheral.js";
 import {
   envFailureHook,
@@ -506,7 +510,9 @@ function proposalProgress(
  *  validateReviewerOutput/validateDrafterOutput): a planless created issue is not an INVALID
  *  session attempt here, it is a normal per-issue outcome the caller labels `needs-human` for
  *  (see createAligningStub below) — exactly the pre-#110 behavior, which never retried the
- *  session over a planless creation either. */
+ *  session over a planless creation either. #442 adds the ONE exception, at the bottom of this
+ *  function: the required `Origin:` evidence line, which unlike a plan has no downstream route
+ *  to supply it later. */
 /** #237: `inView` is the align session's ACTUAL injected view of existing issues (the rendered
  *  backlog-digest subset — buildBacklogDigest's `renderedIssueNumbers`), against which any
  *  `concerns` entry is bounds-checked. Omitted (undefined) skips that bounds check — every
@@ -550,6 +556,22 @@ export function validateAlignOutput(text: string, inView?: ReadonlySet<number>):
   const bodies = splitAlignIssueBodies(block.body, issues.length);
   if (!bodies) {
     return { ok: false, reason: `BODY block does not contain exactly ${issues.length} well-formed <<<ISSUE>>> segment(s)` };
+  }
+  // #442: the ONE content invariant this validator does enforce, and the exception that proves
+  // the rule above. A missing verification plan is a per-issue OUTCOME with a route (the
+  // `planless` label, a later triage pass) — a missing `Origin:` line has none: nothing
+  // downstream can reconstruct which evidence triggered a proposal once the session that knew
+  // is gone, so it is only ever recoverable by asking the session again. Hence a retryable
+  // invalid output, exactly like a malformed BODY segment. Rejected whole rather than per-issue,
+  // same fail-closed doctrine as the duplicate-title check above — a partial apply would file
+  // the compliant half and silently drop the rest. PRESENCE only; what the line SAYS is human
+  // triage prose the engine never reads (extractOrigin's own doc, F15).
+  const missingOrigin = bodies.findIndex((body) => extractOrigin(body) == null);
+  if (missingOrigin >= 0) {
+    return {
+      ok: false,
+      reason: `issue ${missingOrigin + 1} has no \`Origin:\` evidence line (use \`static scan\` when that is the honest answer)`,
+    };
   }
   return { ok: true, issues: issues.map((it, i) => ({ title: it.title, body: bodies[i]! })), concerns };
 }
@@ -863,13 +885,18 @@ async function updateIssueBodyIfUnchanged(
 // The engine ALWAYS computes the CANDIDATE set deterministically (Ready, milestone-scoped by
 // whatever `forge` already applies — see AlignDeps.forge — ordered prio:0-first then
 // issue-number-ascending, capped at ceil(lanes.roundDispatchCap * round.poolFactor)). #233:
-// controlled experiments across model tiers found a title-only PO pool-selection SESSION
-// selects EVERY candidate at every tier — it has no evidentiary basis to narrow the reservoir
-// from a bare title/number digest, so it just burns a session per round reproducing this same
-// deterministic set. Worse, `round.poolFactor` exists to absorb architect/gate⓪ attrition
-// AFTER selection; a session that DOES narrow the reservoir pre-gates risks underfilling the
-// round. So the deterministic candidate set is now the MAIN path — this is `selectRoundPool`'s
-// documented behavior AND `runPoolSelection`'s default (roles.po.poolSelection: false).
+// controlled experiments across model tiers found the (then title-only) PO pool-selection
+// SESSION selects EVERY candidate at every tier — it had no evidentiary basis to narrow the
+// reservoir from a bare title/number digest, so it just burned a session per round reproducing
+// this same deterministic set. Worse, `round.poolFactor` exists to absorb architect/gate⓪
+// attrition AFTER selection; a session that DOES narrow the reservoir pre-gates risks
+// underfilling the round. So the deterministic candidate set is the MAIN path — this is
+// `selectRoundPool`'s documented behavior AND `runPoolSelection`'s default
+// (roles.po.poolSelection: false). A later change gave the OPT-IN session itself (below) each
+// candidate's FULL body, not just title/number — that changed what the session is SHOWN when
+// `poolSelection: true`, not this #233 finding or the default it justifies: the finding was
+// never re-run against the body-bearing digest, so it remains the reason the default stays
+// `false`, not evidence about how a full-body session would behave.
 //
 // The session (originally "the PO explicitly selects a round pool") is KEPT as an opt-in
 // experiment behind `roles.po.poolSelection: true`, decoupled from `roles.po.enabled` (which
@@ -1190,16 +1217,63 @@ export function defaultPoolPromptPath(): string {
   return join(here, "..", "..", "prompts", "po-pool.md");
 }
 
-/** The pool-selection session's candidate digest — number, title, and the raw prio label (if
- *  any) for every candidate, in the SAME prio/number order the session sees as "already ranked
- *  for you." Deterministic, capped (reuses roles.po.backlogDigestMaxChars — the candidate set is
- *  naturally small, bounded by the pool cap, so this is a safety valve here, not a real budget
- *  most deployments tune). #231: whole-record packed (packDigestRecords), the same fix as
- *  buildBacklogDigest above — a candidate near the cap's tail is rendered or counted as
- *  omitted, never silently sliced away mid-line. */
-function buildPoolCandidateDigest(candidates: readonly Issue[], cfg: SapwoodConfig): BoundedDigest {
-  const lines = candidates.map((issue) => `- #${issue.number} — ${issue.title}`);
-  return packDigestRecords(lines, cfg.roles.po.backlogDigestMaxChars, "(no Ready candidates this round)", "candidate issue");
+/** The pool-selection session's candidate digest — each candidate renders as a
+ *  `formatCandidate`-shaped block (number, title, labels, FULL body — `architect.ts::
+ *  formatCandidate`, the exact same PER-CANDIDATE renderer the architect phase already
+ *  substitutes for these same round-pool members one phase later, at the engine's expense
+ *  either way), in the SAME prio/number order the session sees as "already ranked for you."
+ *  Reason: a title-only digest gave po-pool no signal to distinguish near-identical titles
+ *  (see `align.test.ts`'s "select the omitted candidate" / near-duplicate-title cases); the
+ *  architect phase pays for a full-body render of these same candidates one phase later
+ *  regardless, so substituting that same shape here costs nothing new. This is independent of
+ *  which forge tools po-pool holds (`proxy/access.ts`'s `PROXY_ROLE_TOOL_MATRIX` — po-pool keeps
+ *  its `ISSUE_TOOLS` grant; a role may hold a read-only lookup tool AND still get a body
+ *  substituted, the two are not exclusive). Be precise about how far the architect-phase
+ *  equivalence goes: the per-candidate render is byte-identical, but the ASSEMBLED digest is not
+ *  — the architect phase joins candidate blocks with `"\n\n---\n\n"` and caps via `capDigest`'s
+ *  mid-record character slicing under `roles.architect.poolDigestMaxChars`, while this digest
+ *  joins with a bare `"\n"` and caps via `packDigestRecords`' whole-record omission under
+ *  `roles.po.backlogDigestMaxChars` (see below). Same renderer, not the same rendering or the
+ *  same cap semantics — "the engine already pays this cost" is true of the per-candidate render
+ *  only. This REPLACES the pre-existing title-only line (`- #N — title`).
+ *
+ *  Capped by the SAME existing cap as before — `roles.po.backlogDigestMaxChars` (reused
+ *  deliberately, not a new budget). With a title-only digest that reuse WAS a safety valve most
+ *  deployments would never tune, since the digest was naturally far smaller than the cap. With
+ *  full-body candidates it is a REAL budget: this digest now has the same size profile as
+ *  `architect.poolDigestMaxChars`, not the tiny title-only one this cap was originally sized for
+ *  — see `docs/configuration.md`'s `po.backlogDigestMaxChars` row for the consequence when it
+ *  bites (a candidate can drop out of the round with nothing naming it; #558 tracks fixing the
+ *  shared omission marker). #231: whole-record packed (packDigestRecords), the same fix as
+ *  buildBacklogDigest above — a candidate near the cap's tail is rendered or counted as omitted,
+ *  never silently sliced away mid-line; a candidate's own multi-line body is one "record" for
+ *  this purpose (never split across the cap boundary).
+ *
+ *  `renderedCandidateNumbers` mirrors `buildBacklogDigest`'s `renderedIssueNumbers` — the
+ *  numbers actually packed into `text`, same order, honoring `packDigestRecords`' truncation.
+ *  This is a PREREQUISITE for showing full bodies at all: `runPoolSelection` used to validate a
+ *  session's selection against EVERY candidate (`candidates.map(c => c.number)`), not just the
+ *  ones this digest rendered — so a candidate `packDigestRecords` omitted under the cap could
+ *  still be named and ACCEPTED, contradicting po-pool.md's "you cannot select an issue you were
+ *  never shown" and align.ts's own claim (below) to validate against "the candidate set the
+ *  session was shown." That gap was latent (never triggered) on a title-only digest, because a
+ *  title-only line is short enough that the cap essentially never bites; substituting full
+ *  bodies here makes the cap a real budget and the bug reachable, which is why this fix ships
+ *  together with the substitution rather than separately. This return value is what makes the
+ *  validation claim true: the caller now builds its bound set from here, not from `candidates`
+ *  directly. */
+interface PoolCandidateDigest extends BoundedDigest {
+  renderedCandidateNumbers: number[];
+}
+
+function buildPoolCandidateDigest(candidates: readonly Issue[], cfg: SapwoodConfig): PoolCandidateDigest {
+  const lines = candidates.map((issue) => formatCandidate(issue));
+  const packed = packDigestRecords(lines, cfg.roles.po.backlogDigestMaxChars, "(no Ready candidates this round)", "candidate issue");
+  // packDigestRecords only ever drops a TRAILING run of whole records (its own doc comment) —
+  // so the first `packed.rendered` entries of `candidates` (the same order `lines` was built in)
+  // are exactly what made it into `packed.text`. Same technique buildBacklogDigest already uses
+  // for `renderedIssueNumbers`.
+  return { ...packed, renderedCandidateNumbers: candidates.slice(0, packed.rendered).map((issue) => issue.number) };
 }
 
 const PoolSelectionMetadataSchema = z.object({ selected: z.array(z.number().int().positive()) }).strict();
@@ -1362,12 +1436,16 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
       const now = deps.now;
       const role = cfg.roles.po;
       const template = loadRolePromptTemplate(role.poolPromptFile, defaultPoolPromptPath());
-      const candidateNumbers = candidates.map((c) => c.number);
       // computePoolCandidates already slices to ceil(roundDispatchCap * poolFactor) — the
       // candidate list's own length IS the effective cap (it can be smaller when Ready itself
       // has fewer eligible issues than the configured bound allows).
       const cap = candidates.length;
       const poolDigest = buildPoolCandidateDigest(candidates, cfg);
+      // #557 FIX 1: the bound set for validation is what the digest actually
+      // RENDERED, not every candidate computePoolCandidates produced — a candidate
+      // packDigestRecords omitted under the cap was never shown to the session, so it must be
+      // rejected the same way an out-of-bounds number is (see PoolCandidateDigest's own doc).
+      const candidateNumbers = poolDigest.renderedCandidateNumbers;
       // #231: input manifest for the pool-candidates channel — recorded ONLY on this real
       // session-dispatch path (never the replay branch above, nor the deterministic
       // no-session default: neither reads/shows a candidate digest to any session).

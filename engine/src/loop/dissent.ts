@@ -136,6 +136,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
+import { kindsTagged, soleKindTagged } from "../state/event-kinds/index.js";
 import type { State } from "../state/state.js";
 import { escalateToNeedsHuman } from "./escalation-writer.js";
 
@@ -459,8 +460,14 @@ const ConcernReceiptEventSchema = z
   .object({ round_id: z.number().int().positive(), issue: z.number().int().positive(), reason: z.string() })
   .passthrough();
 
-const DECISION_KINDS = ["triage-decision-accepted", "proposal-set-persisted"] as const;
-const RECEIPT_KIND = "concern-posted";
+/** #425: DERIVED from the central registry's `dissent-decision` / `dissent-receipt` tags rather
+ *  than re-spelled here — a new decision-bearing kind joins this fold by declaring the tag, and
+ *  event-kinds.test.ts reds if the two ever disagree. `soleKindTagged` (rather than a list) is
+ *  the receipt's shape: this fold compares `e.kind === DISSENT_RECEIPT_KIND` against exactly one kind,
+ *  so a SECOND kind acquiring the tag means the fold's shape is wrong, not that it should pick
+ *  one — hence a throw, not a silent first-match. Exported for the completeness test. */
+export const DISSENT_DECISION_KINDS = kindsTagged("dissent-decision");
+export const DISSENT_RECEIPT_KIND = soleKindTagged("dissent-receipt");
 
 /** #237 round-2 adjudication (finding 1): the DURABLE backstop `postConcerns` alone cannot be —
  *  see the module doc's own "finding 1" note for the exact crash window this closes. Reads every
@@ -496,7 +503,7 @@ const RECEIPT_KIND = "concern-posted";
  *  otherwise sit unswept until unrelated backlog work happened to wake the loop again.
  *
  *  #432 round 5 (P1-2, the TERMINAL this signal was missing): `POST_ESCALATED_KIND` is folded
- *  into the SAME receipt set `RECEIPT_KIND` (`concern-posted`) uses — both mean "no longer
+ *  into the SAME receipt set `DISSENT_RECEIPT_KIND` (`concern-posted`) uses — both mean "no longer
  *  pending" to this function, one because delivery succeeded, one because
  *  `escalateUnpostableConcern` gave up and handed it to a human after
  *  `cfg.roles.po.maxConcernPostAttempts` recorded failures. A concern that escalates therefore
@@ -506,11 +513,11 @@ const RECEIPT_KIND = "concern-posted";
  *  #469: narrowed to the ONE read it performs (same `Pick` style as `concernPostFailureCount`
  *  above) so probe-signals.ts's `ProbeCtx` can stay a narrow set of declared reads. */
 export function pendingDurableConcerns(state: Pick<State, "eventsAfterId">): Array<{ roundId: number; concern: Concern }> {
-  const events = state.eventsAfterId(0, [...DECISION_KINDS, RECEIPT_KIND, POST_ESCALATED_KIND]);
+  const events = state.eventsAfterId(0, [...DISSENT_DECISION_KINDS, DISSENT_RECEIPT_KIND, POST_ESCALATED_KIND]);
   const receiptKeys = new Set<string>();
   const decisionEvents: typeof events = [];
   for (const e of events) {
-    if (e.kind === RECEIPT_KIND || e.kind === POST_ESCALATED_KIND) {
+    if (e.kind === DISSENT_RECEIPT_KIND || e.kind === POST_ESCALATED_KIND) {
       const parsed = ConcernReceiptEventSchema.safeParse(e.payload);
       if (!parsed.success) continue; // malformed receipt — never thrown, just excluded from the "already delivered" set
       receiptKeys.add(`${parsed.data.round_id}:${parsed.data.issue}:${parsed.data.reason}`);

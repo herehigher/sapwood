@@ -15,6 +15,8 @@ import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
 import { deriveReviewAction } from "../roles/reviewer.js";
 import { defaultFixPromptPath } from "../roles/worker.js";
+import type { EventKind } from "../state/event-kinds/index.js";
+import type { EventPayloadFor } from "../state/event-kinds/payloads.js";
 import type { PendingThreadWrite } from "../state/state.js";
 import { State } from "../state/state.js";
 import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
@@ -314,7 +316,15 @@ test("fixLegJournalCursor (F1): picks up fix-leg-resumed and fix-leg-adopted eve
 
 test("fixLegJournalCursor: an event missing a journalCursor field (e.g. a hypothetical pre-F1 event) is skipped, never treated as a match", () => {
   const st = new State(":memory:");
-  st.appendEvent("fix-leg-started", { worker: "lane-fix", issue: 9, pr: 30, fixRounds: 1 }); // no journalCursor
+  // #425: the payload type now REQUIRES journalCursor, which is the point — this fixture is a
+  // pre-F1 row no current writer can produce, so it is cast in deliberately to keep proving the
+  // reader's own runtime guard still skips it.
+  st.appendEvent("fix-leg-started", {
+    worker: "lane-fix",
+    issue: 9,
+    pr: 30,
+    fixRounds: 1,
+  } as unknown as EventPayloadFor<"fix-leg-started">);
   assert.equal(fixLegJournalCursor(st, "lane-fix", 1), null);
   st.close();
 });
@@ -874,7 +884,7 @@ test("F3: completeThreadReply is atomic — a thrown appendEvent rolls back the 
   const st = new State(":memory:");
   const row = seedRow(st);
   const originalAppendEvent = st.appendEvent.bind(st);
-  st.appendEvent = ((kind: string, payload: unknown) => {
+  st.appendEvent = ((kind: EventKind, payload: unknown) => {
     if (kind === "fix-thread-reply-posted") throw new Error("simulated event-append failure");
     return originalAppendEvent(kind, payload);
   }) as typeof st.appendEvent;

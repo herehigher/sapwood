@@ -69,6 +69,14 @@ zero or more well-scoped issues. For EVERY issue you propose:
   the issue is fit for a headless worker to pick up later; a title alone is not an issue.
   Inherently unverifiable work (pure docs/chore) still needs a `## Verification` or
   `## Acceptance criteria` section explaining why, even if it just says so.
+- End the body with a one-line **`Origin:`** statement naming the evidence that triggered the
+  proposal: the event id(s), lane, episode, or parent issue it came from — or the literal
+  `static scan` when your only evidence is your own reading of this repository. A body with no
+  `Origin:` line is invalid output for this session, so write one for every issue. This line is
+  prose for human triage only: the engine checks that it EXISTS and never reads what it says,
+  never parses it, and never routes on it. That is exactly why it must be honest — a
+  repo-reading finding written up as a run observation buys nothing and costs a human the one
+  signal that separates the two. Cite the specific evidence rather than restating the Why.
 - Dedup in TWO steps before you file anything. The digest above is real but BOUNDED, not
   complete: it holds every OPEN issue plus only the RECENTLY closed ones, and it can be truncated
   (when it is, it says so, with counts). So (1) check every proposal against the digest, in-scope
@@ -235,7 +243,7 @@ before the first `<<<ISSUE>>>`, between two segments, or after the last `<<<END_
 <<<END_SAPWOOD_RESULT>>>
 <<<BODY>>>
 <<<ISSUE>>>
-... the ENTIRE body for "Add the thing", acceptance criteria + verification plan ...
+... the ENTIRE body for "Add the thing", acceptance criteria + verification plan + Origin line ...
 <<<END_ISSUE>>>
 <<<ISSUE>>>
 ... the ENTIRE body for "Document the thing" ...

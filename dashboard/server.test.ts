@@ -12,6 +12,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { EventKind } from "../engine/src/state/event-kinds/index.js";
 import { State } from "../engine/src/state/state.js";
 import {
   allowlistedConfig,
@@ -350,7 +351,13 @@ test("#407 /api/loop/state serves the newest run's terminal event verbatim — t
 // ── /api/events paging (§8) ────────────────────────────────────────────────────────────────
 
 const seedEvents = (s: State) => {
-  for (let i = 1; i <= 5; i++) s.appendEvent(`kind-${i}`, { n: i });
+  // #425: event kinds are a closed union now (engine/src/state/event-kinds/), so five declared
+  // kinds stand in for the generated names this fixture used before — /api/events is kind-blind,
+  // it only needs five distinct rows.
+  const kinds: EventKind[] = ["run-started", "dispatched", "merged", "handoff", "run-ended"];
+  kinds.forEach((kind, i) => {
+    s.appendEvent(kind, { n: i + 1 });
+  });
 };
 
 test("/api/events pages ascending by id and reports lastId", async () => {

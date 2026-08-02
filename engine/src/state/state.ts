@@ -11,6 +11,8 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { capDigest } from "../retro/retro-digest.js";
 import type { AcceptanceCriterion, AcSnapshot } from "../review/ac-snapshot.js";
+import type { EventKind } from "./event-kinds/index.js";
+import type { EventPayloadFor, EventPayloads, PayloadTypedKind } from "./event-kinds/payloads.js";
 
 // Ordered migrations. index N upgrades schema from user_version N to N+1. Append-only:
 // never edit a shipped migration, add a new one. user_version (a SQLite builtin) is the
@@ -2093,7 +2095,12 @@ export class State {
     return (this.db.prepare("SELECT DISTINCT pr FROM workers WHERE pr IS NOT NULL").all() as { pr: number }[]).map((r) => r.pr);
   }
 
-  appendEvent(kind: string, payload: unknown): void {
+  /** #425: `kind` is the closed union derived from the central registry (`state/event-kinds/`) —
+   *  an undeclared kind is a typecheck failure, not a row nobody ever reads. `payload` is
+   *  `unknown` for every kind EXCEPT the handful with a declared payload type (payloads.ts's
+   *  `EventPayloadFor`), where writer and reader share one shape. Compile-time only: this method
+   *  still stringifies whatever it is handed, with no runtime validation on the append path. */
+  appendEvent<K extends EventKind>(kind: K, payload: EventPayloadFor<K>): void {
     // #403 (F25) per-site decision: DELIBERATE wall-clock read, left as-is. `events.ts` answers
     // "when did the engine actually do this", so the honest source is the machine's clock at the
     // moment of the write — a seeded clock here would make the audit trail lie.
@@ -2217,7 +2224,7 @@ export class State {
    *  skip-decisions are read back OUT of that ledger (see `laneEventRecorded`) would then be
    *  reasoning from an incomplete history. Either both land or neither does, so a crashed pass
    *  is always re-runnable from an unchanged row. */
-  upsertWorkerWithEvent(row: WorkerRow, kind: string, payload: unknown): void {
+  upsertWorkerWithEvent(row: WorkerRow, kind: EventKind, payload: unknown): void {
     this.db.exec("BEGIN");
     try {
       this.upsertWorker(row);
@@ -3174,7 +3181,15 @@ export class State {
    *  gatherRetroFacts / gatherTouchedPRs / gatherDigestIssues used to call THIS and now don't.
    *  What is left is legitimate: callers passing an epoch/"all time" sentinel, where no clock is
    *  being compared at all. Keep it that way. */
-  eventsSince(sinceIso: string, kinds: string[]): { kind: string; payload: unknown }[] {
+  /** #425 phase 1.5: the TYPED access path for the kinds with a declared payload shape — call it
+   *  with a list of payload-typed kinds (fix-response.ts's `FIX_LEG_CURSOR_KINDS`, derived from
+   *  the registry's `fix-leg` tag) and each row's `payload` comes back as the shape the writer is
+   *  compelled to write, instead of `unknown` + a cast at the read site. Purely a compile-time
+   *  claim — nothing parses or validates here, so a reader that must tolerate legacy/foreign rows
+   *  still guards the fields it depends on (see `fixLegJournalCursor`). */
+  eventsSince<K extends PayloadTypedKind>(sinceIso: string, kinds: readonly K[]): { kind: K; payload: EventPayloads[K] }[];
+  eventsSince(sinceIso: string, kinds: readonly string[]): { kind: string; payload: unknown }[];
+  eventsSince(sinceIso: string, kinds: readonly string[]): { kind: string; payload: unknown }[] {
     if (kinds.length === 0) throw new Error("eventsSince: kinds must be non-empty");
     const placeholders = kinds.map(() => "?").join(",");
     const rows = this.db

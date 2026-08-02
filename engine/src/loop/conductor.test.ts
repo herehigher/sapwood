@@ -30,6 +30,7 @@ import { classicThreadFindingKey, engineAgentFindingKey } from "../review/findin
 import { type DriveOutcome, MergeDriver } from "../roles/merge-driver.js";
 import { CODEX_REVIEWER_LOGINS, CodexReviewer, type ReviewFallbackLock, type ReviewTriggerPin } from "../roles/reviewer.js";
 import { WorkerSupervisor } from "../roles/worker.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { State, type WorkerRow } from "../state/state.js";
 import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import { BASE_CI_RED_ESCALATED, BASE_CI_RED_OBSERVED, baseRedPin } from "./base-ci.js";
@@ -3926,7 +3927,7 @@ test("tick DRIVE (#451, gate② round 3 P1): the terminal worker update + review
   };
   seedFixResponseQueued(st, "lane-a", 2, 55, "head-2", [{ threadId: "PRRT_1", resolution: "disputed", reply: "disagree" }]);
   const originalAppendEvent = st.appendEvent.bind(st);
-  st.appendEvent = ((kind: string, payload: unknown) => {
+  st.appendEvent = ((kind: EventKind, payload: unknown) => {
     if (kind === "review-disputed") throw new Error("simulated event-append failure");
     return originalAppendEvent(kind, payload);
   }) as typeof st.appendEvent;
@@ -12395,7 +12396,7 @@ test("tick ceiling (#431 round 3, codex P2-1): the clear transition's WRITE ORDE
   const spied = new Proxy(st, {
     get(target, prop, receiver) {
       if (prop === "appendEvent") {
-        return (kind: string, payload: unknown) => {
+        return (kind: EventKind, payload: unknown) => {
           writes.push(`append:${kind}`);
           target.appendEvent(kind, payload);
         };

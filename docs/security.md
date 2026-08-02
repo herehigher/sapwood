@@ -14,6 +14,11 @@ requirement instead of any-non-author-approval, a threat model treating issue te
 adversarial), but those hardenings are not all in place yet — don't point an
 unhardened sapwood at a public repo with untrusted issue authors.
 
+Part of that same pre-public/post-public split: **event-kind renames are free today
+(reset the dogfood DB when you rename) and become additive-only after public release**,
+because a rename orphans users' existing `events` history. The rule is also recorded at
+the source it governs, `engine/src/state/event-kinds/index.ts`.
+
 ## producer ≠ reviewer ≠ merger
 
 The worker that writes code can never approve its own review or merge its own PR. This
@@ -528,6 +533,12 @@ tool at all** (deny-by-default, regression-tested):
 | `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `getPRAuditComments` (camelCase wire name; #556 tracks normalizing it) |
 | *(any other role id)* | none — deny-by-default |
 
+**This nine-role grant is deliberate, not an oversight to narrow.** Every one of these tools is
+read-only and costs nothing when a session never calls it, and a measured zero-call count is not
+evidence that a grant is unneeded: per #529, zero calls means the role's TASK never asked for a
+lookup, not that the capability itself has no use — the lever for changing that is the task step
+a prompt gives the role, not the grant it holds.
+
 **Scope, updated by #245: `WorkerSupervisor.resume()` now attaches a proxy too.** #244 shipped
 `dispatch()`-only attachment deliberately (the `resume()` crash-consistency machinery was already
 substantial, and consumer-shaped wiring belonged with the actual consumer). #245 (the M9 fix loop)
@@ -967,6 +978,42 @@ for `Bash` redirection/`tee`/`sed -i`/`git mv`/etc. against these paths, checked
 position-independently so a wrapper can't hide the write) — but the human-merge-only
 rule is also a process rule: even a PR that touches these files and somehow passes CI
 and review is not something the conductor should be configured to auto-merge.
+
+### `sapwood.config.*` is also the shipped starter config — a known consequence (#386)
+
+The denial above is path-based, not intent-based, and `sapwood.config.*` carries a second
+role that makes that worth stating explicitly: `sapwood init` ships **this repo's own
+root `sapwood.config.yaml`, verbatim**, as a new user's starter config
+(`engine/src/loop/init.ts`'s `sampleConfig()`/`ensureConfig()` — there is no separate
+template file). So the file a worker may not write and the commented example every new
+operator receives are the same object.
+
+The consequence: **a worker cannot land a change to the shipped config's own comments —
+even a purely editorial one carrying no security meaning at all.** The guard denies the
+write (`BLOCK [write-path] sapwood.config.* (engine/guard config) is human-merge-only`)
+without inspecting whether the edit touches `guard.mode` or a `#` comment, which is the
+correct fail-closed behaviour: an intent-aware exception is exactly the seam a worker
+could talk its way through.
+
+This is a deliberate trade, not a defect — but it means any issue whose acceptance
+criteria require the shipped YAML to change has a **human-applied step that no worker can
+discharge**. Such issues are best written to ask for a paste-ready patch (which a worker
+*can* produce, in the PR body or a plain file) rather than for the edit itself, so the
+work is dispatchable and the acceptance criteria are honestly satisfiable.
+
+#386 is the worked example, and it shows the shape such a handoff should take. Its
+calibration guidance landed in the docs directly; the matching `worker.budgetUsdSoft`
+comment could not, so it ships as a **checked-in, `git apply`-able patch** at
+`docs/patches/386-budget-calibration.patch`, whose header states what it changes, why it
+is a patch rather than a commit, and the two commands that apply and then delete it. As
+long as that file exists, the YAML-side change is **still pending** — the patch is the
+request, not the delivery. The guard constrains Claude tool calls, never a human's
+editor, so applying it takes an editor and no special ceremony.
+
+A patch file is the right carrier here precisely because it is verifiable from the tree:
+a reviewer (human or engine-agent) can confirm the pending change exists and applies,
+rather than taking a prose claim on trust. Prefer it over describing the edit only in a
+PR body, which the tree does not record and a diff-scoped reviewer cannot see.
 
 ### The `sapwood:human-merge-only` label (#397)
 

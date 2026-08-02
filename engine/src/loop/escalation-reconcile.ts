@@ -106,6 +106,7 @@
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
+import { ESCALATION_SOURCE_TAGS, type EventKind, kindsTagged } from "../state/event-kinds/index.js";
 import type { State } from "../state/state.js";
 import { BASE_CI_RED_CLEARED, BASE_CI_RED_ESCALATED, baseCiFailing, baseRedPin, readBaseCi } from "./base-ci.js";
 import { MERGED_BOARD_DONE_REASON } from "./conductor.js";
@@ -142,202 +143,82 @@ export interface PredicatedSource {
  *  visible row someone can close) rather than as a continuation (silently untracked — the F34
  *  class). Both emission sites have always written `next`, so this is a guard, not a live path. */
 const reclaimNeedsAttention = (payload: Record<string, unknown> | null): boolean => payload?.next !== "DRIVING";
-
-export const ESCALATION_SOURCES: Record<string, EscalationProof | PredicatedSource> = {
-  "gated-reentry-capped": "always",
-  "resume-capped": "always",
-  "resume-undecidable": "always",
-  "drive-no-pr": "always",
-  "drive-needs-human": "payload",
-  "ceiling-escalated": "never",
-  "rollback-escalated": "never",
-  "env-failure-preserved": "never",
-  // gate② round 2: the capped branch's own label FAILURE is a distinct attention item
-  // (frontend-design.md §3 flags it by name) and a strictly worse zombie than the capped event
-  // beside it — the two are mutually exclusive (conductor.ts's GATED RECLAIM `continue`s past
-  // the capped append when addLabel throws), and this path additionally never latches, so the
-  // row fails `gated_escalation_labeled = 1` forever and NO engine event will ever move that
-  // issue again. `never`, necessarily: the label write is precisely what failed, so its absence
-  // is the engine's own footprint, not a human's.
-  "gated-reentry-capped-label-failed": "never",
-  // #295 review round 2 (Codex P2): the fix-leg spawn-uncertainty escalation
-  // (conductor.ts's reconcileDrivingFixIntents "unconfirmed" branch). `always`: the event is
-  // emitted strictly AFTER its own addLabel succeeded (a failed write `continue`s with only the
-  // companion `-label-failed` event, which stays out of this table for the same reason
-  // gated-reentry-capped-label-failed does). Its payload carries `pr` (the driving lane's own),
-  // so an external merge/close of that PR resolves it like every other pr-bearing source.
-  "fix-leg-undecidable": "always",
-  // #295 review round 4 (Codex P1): the fix-round cap — in practice the MOST common escalation
-  // of all — was missing from this table entirely, so `openEscalations` skipped it and no
-  // external merge/close/label-removal could ever resolve it. `always`, for exactly the reason
-  // `fix-leg-undecidable` is: conductor.ts's cap branch appends `fix-rounds-capped` strictly
-  // AFTER its own addLabel returned (a throw emits `fix-rounds-cap-label-failed` and `break`s
-  // without this event), and its payload carries the driving lane's `pr`.
-  "fix-rounds-capped": "always",
-  // #457 review round 1 (P1): the verdict-rerun breaker's escalation (conductor.ts's shared
-  // fix-escalation branch) — same emission ordering as `fix-rounds-capped`, which it shares a
-  // branch with: appended strictly AFTER its own addLabel returned (a throw emits
-  // `fix-rounds-cap-label-failed` and `break`s without this event), payload carries the driving
-  // lane's `pr`. `always`, for the identical reason. Absent from this table it would be the F34
-  // failure class: an invisible escalation no external merge/close/label-removal could resolve.
-  "fix-leg-verdict-rerun": "always",
-  // #295 review round 10 (Codex P1): the two gate⓪ attention sources frontend-design.md §3 flags
-  // by name. Neither carries a PR.
-  //
-  // `verify-na-proposed` is `always`: emitted strictly AFTER both label writes, under the same
-  // fix-rounds-capped doctrine its own comment cites ("an escalation event may only claim what
-  // provably landed"), so the event cannot exist unless the label landed.
-  "verify-na-proposed": "always",
-  // #432 round 6 (P1-1, F34 discipline — round 5 had this as `always`, WRONG): dissent.ts's
-  // `escalateUnpostableConcern`, via the shared writer (escalation-writer.ts's
-  // `escalateToNeedsHuman`) — a durable concern that failed to post
-  // `cfg.roles.po.maxConcernPostAttempts` times (issue deleted/transferred/inaccessible). The
-  // event is now UNCONDITIONAL (appended regardless of whether the label write succeeded, exactly
-  // so a label-write failure on an already-broken issue can't ALSO suppress the terminal that's
-  // supposed to unpin the probe over it) — so its existence no longer proves the label landed.
-  // `payload`, matching `drive-needs-human`'s own classification: proven only when the event's
-  // OWN `labeled` field says `1`. No PR — a dissent concern is issue-only.
-  "concern-post-escalated": "payload",
-  // #432 round 6 (P2-3, F34 discipline — round 5 had this as `always`, WRONG for the identical
-  // reason above): round.ts/align.ts's `escalatePoolRemovalFailures`, via the same shared writer —
-  // a stale `roundPool` label whose removal failed deterministically
-  // `cfg.round.maxPoolRemovalAttempts` times (both call sites route through round.ts's
-  // `removeRoundPoolLabel`). `payload`: proven only when `labeled === 1`. No PR — round-pool
-  // membership is issue-only.
-  "round-pool-removal-capped": "payload",
-  // `plan-review-escalated` is `never`, NOT `always` (round 11, Codex P1 — a FALSE-CLEAR risk,
-  // the class this module's doctrine calls strictly worse than a zombie row). It has TWO emission
-  // sites with opposite orderings: plan-review.ts's own `escalate` appends after an unguarded
-  // `escalateForge`, but `runSessionWithRetry` (peripheral.ts) appends the degrade event FIRST
-  // and its callers (plan-review.ts:554/708/864) call `escalateForge` afterwards — so a failed
-  // addLabel there leaves the event standing with no label at all, and `always` would make the
-  // very next sweep read that absence as a human removal. Classified by the WEAKEST site, as the
-  // doctrine requires. Cost: it clears by issue closure only, which is still strictly more
-  // clearing than the zero paths it had.
-  "plan-review-escalated": "never",
-  // #451 (design #402 §4/D4, architectural review amendment 2026-07-31): the dispute-pricing
-  // escalation — conductor.ts's `escalateReviewDisputed`, the FIXABLE branch's dedicated
-  // "every unresolved current-head thread is disputed" path, distinct from (and disjoint with)
-  // both `fix-rounds-capped` and `fix-leg-verdict-rerun` above even though it shares their
-  // forge-before-terminal-upsert shape. `always`, for the SAME reason those two are: the event is
-  // appended strictly AFTER its own addLabel AND addIssueComment both returned successfully — a
-  // label-write failure appends only the companion `review-disputed-label-failed` (out of this
-  // table, same "label-first-or-no-event" doctrine as `gated-reentry-capped-label-failed`) and
-  // returns without ever reaching this event; a comment-write failure appends only
-  // `review-disputed-comment-failed`, likewise out of this table and likewise short-circuiting
-  // before this event. Its payload carries `pr` (the driving lane's own), so an external
-  // merge/close/label-removal resolves it exactly like every other pr-bearing `always` source.
-  // #461: the SAME kind now also carries the engine-agent path's audit-comment finding disputes
-  // (payload `source: "finding"` + `findings`, instead of `threads`) — deliberately NOT a second
-  // kind: same writer, same emission ordering, same carrier, same `pr` in the payload, so it needs
-  // the same row and would gain nothing from its own but a second place to forget to register.
-  "review-disputed": "always",
-  // #450 (design #402 R3, §3c; architectural review amendment 2026-07-31, item 1): the
-  // convergence-stop escalation — conductor.ts's `escalateNonConvergent`, the FIXABLE branch's
-  // dedicated "the progress classifier returned a STALLED verdict" path. Landed after this table's
-  // own #441/#468+#432-R6 discipline was set, so it is registered from the start rather than
-  // discovered as an F34 gap later (the amendment's own framing: "every needs-human-writing
-  // escalation kind absent from this table is the F34 class"). Distinct from (and disjoint with)
-  // `fix-rounds-capped`/`fix-leg-verdict-rerun`/`review-disputed` above even though it shares their
-  // forge-before-terminal-upsert shape — `driveDecision` (conductor.ts) only ever reaches this
-  // branch for a STALLED `progress` verdict, never a spent cap or a verdict rerun (the amendment's
-  // own three-way precedence keeps the three mutually exclusive on any one tick).
-  //
-  // `always`, following `fix-rounds-capped`'s OWN discipline exactly (the amendment's explicit
-  // instruction: "follow fix-rounds-capped's discipline"): the event is appended strictly AFTER
-  // its own `addLabel` AND `addIssueComment` both returned successfully — a label-write failure
-  // appends only the companion `review-non-convergent-label-failed` (out of this table, same
-  // "label-first-or-no-event" doctrine as `gated-reentry-capped-label-failed`) and returns without
-  // ever reaching this event; a comment-write failure appends only
-  // `review-non-convergent-comment-failed`, likewise out of this table and likewise
-  // short-circuiting before this event. Its payload carries `pr` (the driving lane's own), so an
-  // external merge/close/label-removal resolves it exactly like every other pr-bearing `always`
-  // source — including the #147 gated-reentry reclaim path this escalation's own comment points at.
-  "review-non-convergent": "always",
-  // #384 (F12): the MID-RUN orphan sweep's disposition (reconcile.ts's `sweepMidRunOrphanPrs`) —
-  // an open engine PR whose lane died, held for a human on its ISSUE through the shared writer
-  // (escalation-writer.ts's `escalateToNeedsHuman`). `payload`, necessarily and for the same reason
-  // `concern-post-escalated` above is: that writer appends its event UNCONDITIONALLY, recording the
-  // label write's own outcome in `labeled`, so the event's existence proves nothing on its own.
-  // Registered from the start rather than discovered as an F34 gap later — its payload carries both
-  // the `issue` this table keys on and the orphan `pr`, so a merge or close of that PR resolves it
-  // exactly like every other pr-bearing source, which is the common ending here (a human either
-  // finishes the orphan PR or closes it).
-  "orphan-pr-escalated": "payload",
-  // DELIBERATELY ABSENT (#441): `resume-held`. It is a new event kind that leaves a lane stopped,
-  // so the question "does it need a row here?" is exactly the one F34 punishes getting wrong —
-  // answered NO, on purpose, for two independent reasons. (1) It is not a new attention item: it
-  // OBSERVES a `needs-human`/`blocked` label suppressing a handoff resume, and whoever owns that
-  // label already has the item — an engine escalation has its own row above, and a hand-applied
-  // hold's owner is the person who typed it (#397's needs-human split, #400's one-carrier rule).
-  // Listing it would double-count one fact. (2) Structurally it MUST stay out: escalation-sweep.ts
-  // refuses to touch an issue with any open escalation, so a `resume-held` row would block the
-  // sweep of the very stale label that produced it — the F34 wedge, rebuilt by its own fix.
-  //
-  // DELIBERATELY ABSENT (#431): `ceiling-breach-entered` and `rapid-restart-detected` — the
-  // same F34 question, answered NO for both, on the same structural ground: this table is the
-  // needs-human-LABEL reconciler, keyed by the issue in each event's payload
-  // (openEscalations), and neither kind carries an issue or applies a label.
-  //  - `ceiling-breach-entered` (and its round-2 closing receipt `ceiling-breach-cleared`) is
-  //    observability for a SELF-RESOLVING state (the ceiling wait clears when the day rolls /
-  //    the config changes / the process restarts); the attention item on that path is the
-  //    pre-existing `ceiling-escalated` (its row is above), emitted per-lane WITH an issue
-  //    when the drain window actually expires someone's work.
-  //  - `rapid-restart-detected`'s waiting-on-a-human state is carried by its durable
-  //    `rapid-restart` park episode (park_state row + `park-escalated`/`park-resumed`
-  //    lifecycle + the ESCALATION marker + `sapwood status` — the same engine-level channel
-  //    every park uses; `park-escalated` itself is likewise not in this table). Listing the
-  //    detection event here would double-count the episode and give the reconciler a row no
-  //    external merge/close/label-removal could ever resolve.
-  //
-  // DELIBERATELY ABSENT (#407): `consecutive-stalls-detected` — the stall breaker
-  // (loop/stall-breaker.ts) reuses the rapid-restart shape verbatim, so the #431 ruling above
-  // applies verbatim too: its waiting-on-a-human state is carried by its durable
-  // `consecutive-stalls` park episode (row + park-escalated/park-resumed lifecycle + ESCALATION
-  // marker + `sapwood status`), the event carries no issue and applies no label, and its
-  // clearing story is the breaker's own (operator-explicit park_state row deletion, observed
-  // and receipted by the next start — stall-breaker.ts's module doc), never this table's
-  // label/close/merge reconciliation.
-  //
-  // DELIBERATELY ABSENT (#470): `idle-churn-detected` — the idle-churn breaker
-  // (loop/idle-churn.ts) is the third detector built on the park/needs-human paradigm, so the
-  // #431/#407 ruling above applies to it verbatim, and it is recorded here rather than silently
-  // omitted because #470's own AC asks for this table's ruling on the kind. Its waiting-on-a-human
-  // state is carried by its durable `idle-churn` park episode (row + park-escalated lifecycle +
-  // ESCALATION marker + `sapwood status`); the event carries NO issue and applies NO label, so
-  // `openEscalations` would skip it on the `issue === undefined` guard even if it were listed —
-  // a listed row would be dead weight that reads as coverage. Its clearing story is the park's
-  // own (operator-explicit park_state row deletion; the round loop's `waitForDispatchClear`
-  // observes the row's absence and resumes), never this table's label/close/merge reconciliation.
-  //
-  // DELIBERATELY ABSENT (#502): `base-ci-red-escalated` — the fourth run-level detector, and the
-  // same F34 question answered NO for the same STRUCTURAL reason the three above give. This table
-  // is the needs-human-LABEL reconciler, keyed by the ISSUE in each event's payload; a red default
-  // branch is a RUN-level fact with no issue, no PR and no label, so `openEscalations` would skip
-  // it on the `issue === undefined` guard even if it were listed and a listed row would be dead
-  // weight that reads as coverage (#470's own words). What is DIFFERENT about it, and why it is
-  // named here rather than merely omitted: unlike the three park-carried kinds, its resolution IS
-  // this module's job — `reconcileBaseCiEscalation` below observes base-green on the same
-  // once-per-round pass and appends the same `escalation-resolved` receipt every row above emits,
-  // keyed on `source` alone. So the kind reuses this module's resolution vocabulary and observer
-  // without pretending to be an issue-keyed strip row.
-  //
-  // #404: the two PREDICATE kinds frontend-design.md §3 flags — attention items only for the
-  // payloads `reclaimNeedsAttention` admits (see its doc), and the reason `PredicatedSource`
-  // exists at all. Both are `always` FOR THOSE PAYLOADS, and only for those:
-  //  - `reclaim-failed` on `ESCALATE`: conductor.ts's else-branch awaits an UNGUARDED
-  //    `addLabel(issue, needsHuman)` before its terminal upsert and before this append, so a
-  //    thrown label write propagates and the event never lands — the same
-  //    "label-first-or-no-event" proof `drive-no-pr` has. Its `DRIVING` twin labels NOTHING (both
-  //    the ordinary rescue and the env-failure clean+PR rescue), which is exactly why granting
-  //    the KIND `always` would have been a false-clear machine: the label is missing immediately.
-  //  - `reclaim-done` on `ESCALATE_NOPR`: same shape — the no-PR branch awaits an unguarded
-  //    `addLabel` and only then appends; the `DRIVING` branch applies no label at all.
-  // Neither payload carries a `pr` (the escalating variants are precisely the ones with no PR, or
-  // whose PR was abandoned with the lane), so both resolve by issue closure or label removal.
-  "reclaim-failed": { proof: "always", attention: reclaimNeedsAttention },
-  "reclaim-done": { proof: "always", attention: reclaimNeedsAttention },
+/** #404: the payload predicates, keyed by kind. Only the two reclaim kinds have one — the
+ *  registry tag carries each source's PROOF MODE (the fact every consumer needs), and the
+ *  predicate stays here with the reader that defines what "waiting on a person" means for a
+ *  payload, since a function is not something a declaration table can hold. `attentionProof`
+ *  below is still the ONE reader of both halves, so a kind can never end up registered in one
+ *  place and predicated in another. */
+const ATTENTION_PREDICATES: Partial<Record<EventKind, (payload: Record<string, unknown> | null) => boolean>> = {
+  "reclaim-failed": reclaimNeedsAttention,
+  "reclaim-done": reclaimNeedsAttention,
 };
+
+/** #425: DERIVED from the central registry's `escalation-source:*` tags instead of being a
+ *  re-spelled table here. This is the list whose omissions this repo has actually paid for —
+ *  `fix-rounds-capped`, the most common escalation of all, was missing for four review rounds
+ *  (#295 round 4) — so its membership is now a property each kind DECLARES on itself in
+ *  `state/event-kinds/`, next to the proof-mode rationale, and event-kinds.test.ts fails in both
+ *  directions if this table and those tags ever disagree.
+ *
+ *  What did NOT move, and why: the "label absence is only a human act if the engine provably
+ *  applied the label" doctrine in this module's own header, and the DELIBERATELY-ABSENT rulings
+ *  below. Those are statements about kinds that are NOT sources — there is no tag for them to
+ *  hang off, and they belong with the reconciler whose behaviour they explain. */
+export const ESCALATION_SOURCES: Record<string, EscalationProof | PredicatedSource> = Object.fromEntries(
+  ESCALATION_SOURCE_TAGS.flatMap((tag) => {
+    const proof = tag.slice("escalation-source:".length) as EscalationProof;
+    return kindsTagged(tag).map((kind) => {
+      const attention = ATTENTION_PREDICATES[kind];
+      return [kind, attention === undefined ? proof : { proof, attention }] as const;
+    });
+  }),
+);
+
+/** The same set as `Object.keys(ESCALATION_SOURCES)`, but TYPED — the ledger-read list both this
+ *  module and escalation-sweep.ts pass to `eventsAfterId`. `Object.keys` widens to `string[]`
+ *  (the escape hatch #425 set out to close); reading straight off the tags keeps the list a
+ *  checked `EventKind[]`, so a kind that leaves the registry breaks the read at compile time
+ *  instead of silently narrowing the fold to nothing. */
+export const ESCALATION_SOURCE_KINDS: EventKind[] = ESCALATION_SOURCE_TAGS.flatMap((tag) => kindsTagged(tag));
+
+// DELIBERATELY ABSENT from the table above — kinds that leave a lane stopped but are NOT
+// issue-keyed needs-human attention items. Recorded here rather than merely omitted, because
+// "does this kind need a row?" is exactly the question F34 punishes getting wrong, and an
+// unexplained absence reads as an oversight:
+//
+//  - `resume-held` (#441). Two independent reasons. (1) It is not a NEW attention item: it
+//    OBSERVES a `needs-human`/`blocked` label suppressing a handoff resume, and whoever owns that
+//    label already has the item — an engine escalation has its own row, and a hand-applied hold's
+//    owner is the person who typed it (#397's needs-human split, #400's one-carrier rule).
+//    Listing it would double-count one fact. (2) Structurally it MUST stay out: escalation-sweep
+//    .ts refuses to touch an issue with any open escalation, so a `resume-held` row would block
+//    the sweep of the very stale label that produced it — the F34 wedge, rebuilt by its own fix.
+//
+//  - `ceiling-breach-entered` / `ceiling-breach-cleared` (#431), `rapid-restart-detected` (#431),
+//    `consecutive-stalls-detected` (#407), `idle-churn-detected` (#470). The same answer for the
+//    same structural reason: this table is the needs-human-LABEL reconciler, keyed by the ISSUE in
+//    each event's payload (`openEscalations`), and none of these carries an issue or applies a
+//    label — `openEscalations` would skip them on the `issue === undefined` guard even if listed,
+//    so a listed row would be dead weight that reads as coverage. The ceiling's real attention
+//    item is the per-lane `ceiling-escalated` (which IS a source); each detector's is its own
+//    durable park episode (park_state row + `park-escalated`/`park-resumed` lifecycle + the
+//    ESCALATION marker + `sapwood status`), cleared by an operator-explicit park_state deletion,
+//    never by this table's label/close/merge reconciliation.
+//
+//  - `base-ci-red-escalated` (#502). Same structural ground — a red default branch is a RUN-level
+//    fact with no issue, no PR and no label. What is DIFFERENT, and why it is named rather than
+//    merely omitted: unlike the park-carried kinds, its resolution IS this module's job.
+//    `reconcileBaseCiEscalation` below observes base-green on the same once-per-round pass and
+//    appends the same `escalation-resolved` receipt every row above emits, keyed on `source`
+//    alone — so the kind reuses this module's resolution vocabulary and observer without
+//    pretending to be an issue-keyed strip row.
+//
+//  - every `*-label-failed` / `*-comment-failed` companion EXCEPT
+//    `gated-reentry-capped-label-failed`. Those companions are emitted INSTEAD of their terminal
+//    (the label-first-or-no-event doctrine), and the terminal is the row. The one exception is a
+//    source precisely because its capped branch never latches, so nothing else will ever move
+//    that issue — see its own declaration for the argument.
 
 /** The ONE reader of the table above, and the one definition of "does this event leave work
  *  waiting on a person" (#404) — returns the kind's proof mode, or `undefined` when the kind is
@@ -364,8 +245,12 @@ export function attentionProof(kind: string, payload: Record<string, unknown> | 
  *  #447 (PR #463 gate② P2): `lane-revived` belongs here for the same reason `gated-reentry`
  *  does — it is the OTHER way a `failed` lane returns to `driving`, and the attention item it
  *  clears (`env-failure-preserved`) is precisely the one revival exists to answer. Without it a
- *  revived, actively-driving lane keeps its strip row and keeps costing a per-round forge read. */
-export const CLEAR_KINDS = ["dispatched", "merged", "gated-reentry", "lane-revived"] as const;
+ *  revived, actively-driving lane keeps its strip row and keeps costing a per-round forge read.
+ *
+ *  #425: DERIVED from the central registry's `escalation-clear` tag — the same treatment
+ *  ESCALATION_SOURCES above got, for the same reason (a clear kind missing here is the mirror
+ *  image of a source missing there: a strip row nothing can retire). */
+export const CLEAR_KINDS = kindsTagged("escalation-clear");
 
 /** #295 review round 5 (Codex P2), narrowed in round 6: a clear event must not erase an escalation
  *  THAT SAME OPERATION produced. conductor's `case "merged"` calls `handleRollbackFailure` — which
@@ -573,7 +458,7 @@ export async function reconcileEscalations(
   const warn = log ?? console.error;
   let open: Map<string, OpenEscalation>;
   try {
-    open = openEscalations(state.eventsAfterId(0, [...Object.keys(ESCALATION_SOURCES), ...CLEAR_KINDS, RESOLVED_KIND]));
+    open = openEscalations(state.eventsAfterId(0, [...ESCALATION_SOURCE_KINDS, ...CLEAR_KINDS, RESOLVED_KIND]));
   } catch (e) {
     // Fail closed: an unreadable ledger must never risk a duplicate append (we cannot tell what
     // was already resolved). A later round reads it again.

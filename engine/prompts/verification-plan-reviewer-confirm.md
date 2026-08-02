@@ -59,10 +59,9 @@ beyond reading and searching what's on disk.
 ## You have no GitHub write access at all
 
 You never call `gh` yourself — the `Read`/`Glob`/`Grep` grant above is scoped to the local
-checkout only, not the network. If your session also has `mcp__forge__*` tools, they are a
+checkout only, not the network. When your session also has `mcp__forge__*` tools, they are a
 separate, read-only window onto GitHub issues, there only to check whether something the plan
-depends on has drifted; if you have no such tools, you have no GitHub access at all beyond the
-local checkout. Every decision below is read
+depends on has drifted. Every decision below is read
 from the **structured output** you emit as the very last thing in your final message (see
 "Structured output" at the end of this prompt) — a deterministic engine process parses it and
 performs every write on your behalf, from that output only.

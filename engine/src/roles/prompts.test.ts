@@ -9,7 +9,7 @@ import { defaultPoolPromptPath, defaultPoPromptPath } from "../loop/align.js";
 import { defaultPoDecomposePromptPath } from "../loop/decompose.js";
 import { defaultHarvestPromptPath } from "../loop/harvest.js";
 import { defaultDoctrineTemplatePath } from "../loop/init.js";
-import { PROXY_ROLE_TOOL_MATRIX } from "../proxy/access.js";
+import { allowedToolsForRole, PROXY_ROLE_TOOL_MATRIX } from "../proxy/access.js";
 import { defaultRetroPromptPath, RETRO_ALLOWED_TOOLS, RETRO_DISALLOWED_TOOLS } from "../retro/retro.js";
 import { defaultEngineReviewerPromptPath } from "../review/engine-agent.js";
 import { defaultArchitectPromptPath } from "./architect.js";
@@ -61,36 +61,94 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // check covers it. Same class of fix as #444 above, on the state axis instead of the milestone
   // axis: the session could not see a fact that shipped and closed, so it re-proposed one (#525
   // vs. #461, hours apart).
-  "po.md": "f22e6ceb4dbf4532c52de24b63994a1f60af4a1f9cab0be0ec830f4a7299725c",
+  // #442: intentional edit — align mode now requires a one-line `Origin:` evidence statement in
+  // every proposed body (event ids / lane / episode / parent issue, or the literal `static
+  // scan`), and says outright that the engine only checks the line EXISTS. Round provenance was
+  // already engine-stamped; EVIDENCE provenance had no carrier at all, so a run-observation
+  // finding and a repo-reading one were indistinguishable on the issue page.
+  "po.md": "6a6c6bbec284ce563a3e6b7277c9cfc3d8fe302eb41fa2241dabdfae071ad9c7",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
   // architect holds a default WebFetch grant, which reaches github.com.
   // #529 (gate② round 3, optional cleanup): same further rewording as po.md above.
-  // #413: hash moved for the gate⓪ rename ONLY — architect.md's single reference to the drafter
-  // role by name. No charter, grant, or instruction changed.
-  "architect.md": "986371462afe2674795e3acfcd3e39ebbf4abedea656e16f8e43789cac41f41c",
+  // #533 originally proposed removing this grant; the owner reversed that direction. architect
+  // KEEPS its ISSUE_TOOLS grant — the surviving change from the #533 work is the ask itself,
+  // rewritten from conditional prose to an unconditional-when-attached numbered task-list step:
+  // "Cross-issue search" (search_issues on a candidate's key terms for related open/
+  // recently-updated issues OUTSIDE the pool, issue_details the hits before judging) plus a
+  // doc-drift rule (a locked decision surfacing only in an issue, never the architecture chapter,
+  // is doc drift, never authoritative).
+  // gate② #557 (finding 9): "search_issues returns a title and labels only, never body text"
+  // was false — the tool returns number/title/state/labels/updatedAt (IssueSearchResult), and
+  // "only" denied fields the "open or recently-updated" ask right above depends on. Named the
+  // real field set at both mentions (the capability paragraph and the Cross-issue search step).
+  // #533 reversal cleanup: the fallback clause ("if you have no such tools, you have no way to
+  // see issues outside this round's candidate/pool lists") was itself a false completeness claim
+  // — architect also holds a default WebFetch/WebSearch grant, named a few lines below. Rewritten
+  // to enumerate the real fallback set (substituted context, worktree, WebSearch/WebFetch when
+  // attached) instead of asserting a closure over all of them.
+  // #413: hash moved again for the gate⓪ rename — architect.md's single reference to the drafter
+  // role by name follows the new name. No charter, grant, or instruction changed by the rename.
+  "architect.md": "4b028b293c378d4fb2b5d376e44c9c30afe2f0add05d4ba76cf48440f4c612e7",
   // #457 (F36): intentional edits — execution-class ACs are plan noise (CI already enforces
   // ci.requiredChecks unconditionally): verification-plan-reviewer flags-and-strips them, the confirm pass
   // invalidates legacy plans carrying them, drafter/decompose never author them.
   // #529: same categorical→conditional GitHub-access fix as architect.md.
-  // #413: all three hashes moved for the gate⓪ rename ONLY — these files were renamed on disk
-  // (plan-reviewer.md -> verification-plan-reviewer.md, ...) and their in-body self-references
-  // and the {{roles.*.maxDraftCycles}} token follow the new role/config names. The names say
-  // what the role gates: an issue's VERIFICATION PLAN, not its plan of work. Nothing else in
-  // any of the three bodies changed — the charter tests below still assert the same clauses,
-  // verbatim, against the same wording.
-  "verification-plan-reviewer.md": "fcc3605d1da1be3147f2a17507813b1b5992938801951dbd037c8d05ba8aaa69",
-  "verification-plan-reviewer-confirm.md": "e17bc1399e028140b1976e27adf3770279bd80fbdbfd1129b3d348edc03776ec",
-  "verification-plan-drafter.md": "437789b2e8dec099a09338bbc3d6faf8653bca258a6207ec4ca57ccde09f16e4",
-  "harvest.md": "82312e3ac79e42e008a9d7477d4b9e601623a9ebb1e5a4fe306e8b3f266d109d",
+  // #413: the three gate⓪ files were renamed on disk (plan-reviewer.md ->
+  // verification-plan-reviewer.md, ...) and their in-body self-references and the
+  // {{roles.*.maxDraftCycles}} token follow the new role/config names. The names say what the
+  // role gates: an issue's VERIFICATION PLAN, not its plan of work. The rename carries the
+  // #533-reversal content edits below unchanged; both moves land in each hash exactly once.
+  // #533 proposed removing plan-reviewer's ISSUE_TOOLS grant; the owner reversed that direction
+  // — the grant is unchanged (still in `proxy/access.ts`'s matrix). This edit drops the original
+  // closure claim ("if you have no such tools, you have no GitHub access at all") that #533's own
+  // narrowing had left in place — a completeness claim over "GitHub access" as a whole, banned by
+  // the same rule #529 exists to enforce — in favor of a plain "when your session has the tools"
+  // statement with no claim about the absent case.
+  "verification-plan-reviewer.md": "3df51d72e1e2176f03e736a8c8a25b71f2657aefd05ed75d94e3aa74477de9b1",
+  // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
+  // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
+  // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
+  // either way.
+  "verification-plan-reviewer-confirm.md": "8be3f563358fb335803c0755f445c0c42ecdeb9804c853b3855a63a6e0a70d75",
+  // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — the
+  // drafter's brief is still its primary instruction set; the forge grant (never removed) is a
+  // read-only aid, never a write path, exactly as this file has always said.
+  "verification-plan-drafter.md": "72f7bc5d99dc96c4a2133359a39f6c892ad1139687779944562b4dc2634642dc",
+  // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
+  // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
+  // grant was never removed, so the capability paragraph again names it (when attached) instead
+  // of denying it.
+  "harvest.md": "657601c73250a9fd169d909779cddec8a23433936bf20a99533e827def2fd52e",
   // #453 (design #402 R5): intentional edit — the digest's new finding-class tendency table is
   // pointed at, with the design-source rule and the stated blind spot. The FIRST deliberate
   // change to this file since #235 pinned it as "already code-aware, do not touch"; that ruling
   // was about tool scope, not about the role's analysis inputs, so it is not re-litigated here.
-  "retro.md": "266dfa04d6a36405e911eb6d0db60f929f5400d99aef8d72d1f388306b8d7f0e",
+  // #533 proposed removing retro's ISSUE_TOOLS grant; the owner reversed that direction — the
+  // grant stays, which means the "you have no `gh` access at all" sentence #533's removal would
+  // have made true is FALSE again, and live: #551 flipped `proxy.enabled` to default true, so
+  // retro genuinely holds these tools in every deployment. Fixed to state what's actually true —
+  // no `gh` CLI, no shell beyond git (`RETRO_ALLOWED_TOOLS` is git-only Bash), but a real
+  // read-only `mcp__forge__*` issue grant — as a single positive statement about that one named
+  // channel, not a list of what retro lacks.
+  "retro.md": "76996f79411b5fa30c36c2e9f28b041e889fa7927f26ccca7b76cdc23c85a01d",
   // #529: same categorical→conditional GitHub-access fix as architect.md.
-  "po-pool.md": "13e4b27cad513e06bd0b99bed6dce612600d477e8b2a654fffa81649f2672c18",
+  // #533 proposed removing po-pool's ISSUE_TOOLS grant and substituting each candidate's full
+  // body in its place; the owner reversed the grant-removal half only. po-pool KEEPS its
+  // ISSUE_TOOLS grant (unchanged in `proxy/access.ts`) — the substitution survives independently:
+  // `align.ts::buildPoolCandidateDigest` still renders each candidate with
+  // `architect.ts::formatCandidate` (number, title, labels, FULL body) instead of a title-only
+  // line, under the SAME existing cap (`roles.po.backlogDigestMaxChars`) — the architect phase
+  // pays for this exact render one phase later regardless, so substituting it here is free
+  // either way, independent of what po-pool's own grant is. The prompt now says both are true: a
+  // full body is substituted per candidate, AND the forge tools remain available for anything
+  // beyond what a shown candidate's entry carries.
+  // gate② #557 (finding 6): the flat "every candidate below already carries its full issue
+  // body" / "everything you need to decide is already here" claims were unconditional over code
+  // that truncates whole records past the cap with no lookup fallback — now scoped to what's
+  // actually rendered, and the session is told what the omission marker means.
+  "po-pool.md": "a3e2391424151767aa10ecd8fb3b1d2ec5f92fb77ff695e4961fd775d46c54f4",
   "po-decompose.md": "3289b0f37585b84fdce67319f9ae4b2e82c8873b13b2a292adef25b1bca79ae2",
 };
 
@@ -325,7 +383,18 @@ test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access d
   // Requires "GitHub access" adjacent (not "GitHub ... access" with a gap) so this deliberately
   // does NOT match every file's "## You have no GitHub write access at all" heading — that
   // claim is correctly scoped to writes and true regardless of any web grant.
-  const NO_GITHUB_ACCESS_DENIAL = /\b(?:no|never|nothing)\b[^.]{0,60}\bGitHub access\b/i;
+  //
+  // WIDENED to a second token, `` `gh` ``/`gh` — retro.md's own "you have no `gh` access at
+  // all" carried the identical categorical-denial shape as "no GitHub access" but escaped this
+  // exact regex on a single token swap (GitHub -> `gh`), which is exactly how it survived #529's
+  // own AC-2 test while granted ISSUE_TOOLS on `main` — a LIVE drift, not a hypothetical one:
+  // #551 flipped `proxy.enabled` to default true, so retro genuinely held these tools in every
+  // deployment while this sentence claimed otherwise. `gh`'s own `\b...\b` word-boundary (not
+  // just a bare substring check) is deliberate: "no gh access" must match, but "no high access"
+  // (a real English phrase containing the literal substring "gh access") must NOT — verified by
+  // its own test below. The optional surrounding backticks (`` `?...`? ``) tolerate retro.md's
+  // own markdown-code-span styling without requiring it.
+  const NO_GITHUB_ACCESS_DENIAL = /\b(?:no|never|nothing)\b[^.]{0,60}(?:\bGitHub\b|`?\bgh\b`?)\s+access\b/i;
 
   for (const [role, tools] of Object.entries(PROXY_ROLE_TOOL_MATRIX)) {
     if (tools.length === 0) continue; // nothing granted, nothing to be dishonest about
@@ -370,6 +439,19 @@ test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access d
   // realistic failure mode this test exists to catch (a stale denial nobody meant to leave in)
   // doesn't produce that shape. Not fixed here; noted so the next reader doesn't mistake this
   // test for airtight.
+
+  // Self-check, since the regex widening is the AC: the escaped case that motivated the widening,
+  // exercised DIRECTLY against the regex (in ADDITION to the FOR loop above, which now also
+  // exercises it live against retro.md's actual, fixed text — retro holds a non-empty grant, so
+  // it's a subject of that loop too). This direct check asserts the widened regex itself is
+  // correct independent of any one prompt's current wording, so a FUTURE role/prompt reusing this
+  // exact phrasing is still caught even if retro.md's own text drifts again.
+  assert.ok(NO_GITHUB_ACCESS_DENIAL.test("you have no `gh` access at all"), "retro.md's actual sentence must match the widened regex");
+  assert.ok(NO_GITHUB_ACCESS_DENIAL.test("you have no gh access at all"), "the bare (unbackticked) form must also match");
+  assert.ok(
+    !NO_GITHUB_ACCESS_DENIAL.test("there is no high access door on this floor"),
+    'false-positive guard: "high access" contains the literal substring "gh access" but must NOT match — the \\bgh\\b word boundary is what prevents it',
+  );
 });
 
 test("shipped role prompts (#321): sentinel examples are plain text with no adjacent markdown fences", () => {
@@ -544,6 +626,14 @@ test("#409 po.md: align mode states reuse-before-build as a rule, including the 
   assert.match(body, /propose nothing/, "the propose-nothing case is explicit");
 });
 
+test("#442 po.md: align mode requires an `Origin:` evidence line, names `static scan` as the honest literal for a repo-reading finding, and says the engine never reads what it says", () => {
+  const body = readPrompt(defaultPoPromptPath());
+  assert.match(body, /`Origin:`/, "the required line is named literally, the way the engine's presence check spells it");
+  assert.match(body, /static scan/, "the literal a purely repo-derived finding must use");
+  assert.match(body, /never reads what it says|never parses it|for human triage only/i, "stated as prose, not a machine anchor");
+  assert.match(body, /invalid output/, "a missing Origin line is an invalid session output, not a soft nudge");
+});
+
 test("#409 doctrine-template.md: the authoritative-signals invariant carries the ordering, the contract-format exemption, and the failure-direction requirement", () => {
   const body = readPrompt(defaultDoctrineTemplatePath());
   assert.ok(body.includes("Authoritative signals over inferred text."), "the invariant is present in the shipped starter doctrine");
@@ -580,12 +670,25 @@ test("#409: the rule is worded per role rather than one paragraph duplicated, an
 
 // #413 amends this test's claim rather than deleting it: both files are still untouched by
 // #409's CHARTER change (the conflicts recorded in that issue stand unresolved), but their
-// pinned hashes have since moved once, for #413's name-only gate⓪ rename. "Untouched" now means
-// untouched in substance, which is what #409 was asserting; the hash pin is what enforces it.
-test("#409: verification-plan-drafter.md and architect.md carry no charter change (conflicts recorded in the issue) — hash moved only for #413's rename", () => {
+// pinned hashes have since moved — for the forge-tool-ask rework (recorded in its own
+// SNAPSHOT_HASHES comment above) and for #413's name-only gate⓪ rename. "Untouched" means
+// untouched by #409's charter change, which is what #409 was asserting; the hash pin enforces it.
+test("#409: verification-plan-drafter.md and architect.md carry no #409 charter change (conflicts recorded in the issue) — later hash moves are each recorded above", () => {
   assert.equal(sha256(readPrompt(defaultVerificationPlanDrafterPromptPath())), SNAPSHOT_HASHES["verification-plan-drafter.md"]);
   assert.equal(sha256(readPrompt(defaultArchitectPromptPath())), SNAPSHOT_HASHES["architect.md"]);
 });
+
+// A reverse-direction test ("a role holding NO PROXY_ROLE_TOOL_MATRIX grant must not have a
+// prompt that asks for an mcp__forge__ lookup") was drafted alongside AC-2 above during a
+// since-reversed proposal to narrow this matrix to two roles. It is deliberately NOT restored:
+// every role in PROXY_ROLE_TOOL_MATRIX holds a non-empty grant (nine ISSUE_TOOLS roles plus
+// worker's PR_TOOLS — see access.ts), so the test would have zero real subjects among shipped
+// roles — its own sanity assertions (`allowedToolsForRole(role)` must be `[]`) would fail
+// immediately for every role it named, not pass vacuously. A version scoped to a synthetic
+// non-existent role would exercise nothing but the `?? []` fallback `allowedToolsForRole`'s own
+// unit tests (access.test.ts) already cover directly. AC-2 above remains the live, non-vacuous
+// guard in this direction: it fails the moment a prompt's prose disagrees with its role's actual
+// (currently non-empty, for all nine) matrix grant.
 
 // ── #410: WebSearch/WebFetch grant wording — po.md's mode-aware external-check section, the
 // reworded "stay inside your scope" bullet, and both roles' first-class abstention wording ──
@@ -644,6 +747,40 @@ test("#410 po.md + architect.md: both name a first-class abstention — an expli
     architect.includes('verify this" belongs in the note as honestly as any contradiction or risk you flag.'),
     "architect.md states the abstention explicitly, not just implies it",
   );
+});
+
+test("architect.md: the cross-issue search ask is UNCONDITIONAL-when-attached and lives in the numbered task list (never only in the capability paragraph) — a permission the model may decline is what produced #529's own measured zero in the first place", () => {
+  const body = readPrompt(defaultArchitectPromptPath());
+  const taskListStart = body.indexOf("## What you do — every pass, all of these");
+  assert.ok(taskListStart > 0, "sanity: the numbered task list section exists");
+  const taskList = body.slice(taskListStart);
+  assert.match(
+    taskList,
+    /\*\*Cross-issue search \(mandatory whenever the tool is attached/,
+    "the ask is a numbered task-list item, not just capability prose",
+  );
+  assert.ok(taskList.includes("mcp__forge__search_issues"), "names the actual tool to call");
+  assert.ok(taskList.includes("mcp__forge__issue_details"), "names the required follow-up (search_issues carries no body text)");
+  assert.ok(
+    taskList.toLowerCase().includes("doc drift"),
+    "names the doc-drift rule — a decision found only in an issue is never treated as authoritative",
+  );
+  assert.match(
+    taskList,
+    /OUTSIDE this\s+round's pool/,
+    "scoped to the cross-issue-consistency mission, not the round's own candidate/pool lists",
+  );
+});
+
+test("po-pool.md: names its mcp__forge__ grant (po-pool holds ISSUE_TOOLS, unchanged) AND describes the digest as carrying each candidate's full body, not just its title — the two are independent, not exclusive", () => {
+  const body = readPrompt(defaultPoolPromptPath());
+  assert.deepEqual(
+    [...allowedToolsForRole("po-pool")].sort(),
+    [...allowedToolsForRole("architect")].sort(),
+    "sanity: po-pool holds the same non-empty ISSUE_TOOLS grant as architect",
+  );
+  assert.ok(body.includes("mcp__forge__"), "po-pool's real forge grant is named in its prompt, not silently omitted");
+  assert.ok(body.includes("full issue body"), "names what the substituted digest now actually carries");
 });
 
 test("#410 architect.md: names WebSearch/WebFetch alongside the existing read-only grant, gated on the deployment's own grant state", () => {
