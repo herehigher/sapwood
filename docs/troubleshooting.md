@@ -515,6 +515,46 @@ Two deliberate limits:
 Repairs are idempotent — a startup that fails partway simply retries on the next start, and a
 forge failure on one issue never aborts the pass or the run.
 
+### A dead lane's open PR is found mid-run, not only at the next start
+
+A worker can push its branch and open its PR and *then* die, before the engine ever associates
+that PR with the lane. The lane settles `failed` with no PR on record, its issue is handed back
+to `Ready`, and the PR stays open with nobody driving it. Startup reconcile finds this — but
+only at the next restart, which in a live run meant one PR sitting unowned for the whole run
+while its issue was picked up again from scratch.
+
+Every tick, after the tick's reclaims have landed and before it dispatches anything, sapwood
+now looks at the lanes that ended **terminally with no PR of their own**. Usually there are
+none and it stops there, costing nothing; when there are, one open-PR listing answers for all
+of them. A PR it matches to such a lane — by that lane's engine-authored owner marker, or,
+failing that, by an unmarked body whose closing keyword names that lane's issue and no other —
+is:
+
+- reported as `orphan-detected` (with `midRun: true`, naming the lane and the PR), and
+- handed to a person — `labels.needsHuman` on the **issue** (`orphan-pr-escalated`), so the
+  requeued issue cannot be re-dispatched behind the still-open PR.
+
+Then it is your call: finish or close that PR (either resolves the attention item on its own,
+like every other escalation), or remove the label to hand the issue back to the pool.
+
+Each dead lane is checked **once**, whatever the answer — this is not a per-tick board scan —
+and the check is suspended while the engine is parked, for the same reason the lane revival
+above waits: under a forge park, the forge is the very thing that is down.
+
+Two deliberate limits:
+
+- **The closing-keyword fallback can over-report, on purpose.** The marker is the reliable
+  signal, but this residue exists *because* the engine never got to stamp one, so a match on the
+  PR body is the only thing that can see the case at all. It is kept
+  narrow — asked only about issues of lanes already known dead, never about a body that carries
+  an owner marker, and never when two open PRs claim the same issue — and it never looks at a PR
+  some lane already holds, or at an issue a live lane is working right now. What is left is one
+  removable `needs-human` label on an issue where somebody else's PR happens to name it, traded
+  against the alternative: an unowned PR nobody sees for the rest of the run.
+- **It never adopts the PR back into the drive loop.** The engine auto-drives a dead lane's PR
+  only where it can prove the worktree was clean; this path is reached precisely when it
+  cannot, and auto-merging possibly-incomplete work is the one outcome here you could not undo.
+
 ### Empty rounds over a backlog that can't move
 
 Rounds churn (and burn paid role sessions) only while there is work an **enabled role can

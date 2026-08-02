@@ -954,9 +954,10 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     onStop: () => wakeFromSleep?.(),
   });
   const signalledNow = (): boolean => stopSignal.requested();
-  // #380: has a tick already run under the stop request? See driver.ts's identical flag — the
-  // abortable sleep starts the drain promptly; the drain itself then paces on the cadence.
-  let drainTicked = false;
+  // #380 x #381 (F6): this loop needs NO drain-pacing flag of its own — the one wait that runs
+  // past the signal (the executing phase's drain loop) uses `drainWait` below, which is
+  // deliberately not signal-abortable; every interTickWait caller here stops looping the moment
+  // the signal flips. driver.ts, which has no such split, carries the flag instead.
   /** #380: no LIVE worker process left to drain (running + fixing; a `driving` lane has no
    *  process to hand off — see driver.ts's identical predicate for the full rationale). */
   const liveLanesDrained = (): boolean => deps.state.runningWorkers().length === 0 && deps.state.fixingWorkers().length === 0;
@@ -996,10 +997,27 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           finish();
         };
       }
-      // #380: only until the drain is under way — after that the cadence paces the drain
-      // itself (driver.ts's interTickWait carries the same guard, same reason).
-      if (signalledNow() && !drainTicked) wakeFromSleep?.();
+      if (signalledNow()) wakeFromSleep?.();
     });
+  /** #381 (F6): the DRAIN path's wait — the same cadence as interTickWait above, deliberately
+   *  NOT signal-abortable. Every OTHER caller of interTickWait stops looping the moment
+   *  `signalled` flips (the loop-top return, the `!signalled` throttle guard, the standby
+   *  slicing condition), so an instantly-resolved wait there is exactly the shutdown-latency
+   *  win it was built for. The executing phase's drain loop is the one caller that keeps ticking
+   *  PAST the signal on purpose — an already-open round always finishes draining, never kills
+   *  in-flight work — so for it, and only it, the abort turned every iteration into a no-wait
+   *  iteration: tick pacing collapsed from the configured cadence to a ms-interval busy loop
+   *  (dogfood 2026-07-24, F6: 3 ticks in 3ms vs. the 5 ticks/20s the same run paced correctly
+   *  before the signal), spinning CPU, flooding the log and amplifying duplicate events.
+   *  Shutdown latency is unaffected in the way that matters: the drain ends when the last lane
+   *  finishes, which is worker time (minutes), not cadence — the busy loop never made it finish
+   *  sooner, it just re-probed the same unfinished lanes thousands of times. */
+  const drainWait = (ms: number): Promise<void> =>
+    deps.sleep
+      ? deps.sleep(ms)
+      : new Promise<void>((resolve) => {
+          setTimeout(resolve, ms);
+        });
 
   let ticks = 0;
   let tickErrors = 0;
@@ -1234,7 +1252,6 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  sleep the normal cadence around this). Also updates the FINAL stop-condition counters. */
   const runTick = async (tickDeps: TickDeps): Promise<TickResult | null> => {
     try {
-      if (signalledNow()) drainTicked = true; // #380: the drain is under way — pace it on cadence
       const result = await tick(tickDeps);
       ticks++;
       deps.onTick?.(result);
@@ -1538,11 +1555,6 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // was unreachable; with multi-wave refill, "graceful wind-down" means in-flight lanes
       // finish but no further wave opens once ANY run-level condition has fired.
       if (!freshBatch || stopHit || finalStopHit) return false;
-      // #380 (F5): a requested stop freezes new waves here too. tick()'s own gate already
-      // refuses to dispatch under `stopRequested`, so this is not what makes the freeze correct
-      // — it just stops this loop paying for the wave's own probes (a countOpenIssuesInMilestone
-      // round-trip) to decide something the gate has already decided.
-      if (signalledNow()) return false;
       // #379 gate② P1: a totally-failed pool-label reconcile blocks every wave this round — see
       // poolReconcileFailedThisRound's own doc for why an empty selection alone doesn't park.
       if (poolReconcileFailedThisRound()) {
@@ -1558,6 +1570,13 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         emitRoundStop(round, stopHit);
         return false;
       }
+      // #380 (F5): a requested stop freezes new waves too — tick()'s own gate has already
+      // decided that, so this only stops the loop paying a countOpenIssuesInMilestone
+      // round-trip per drain tick to re-derive it. Deliberately BELOW the quota check above,
+      // not above it: the round-dispatch-cap hit is a durable fact about the round (the quota
+      // really is spent) that the ledger records identically drain or no drain — skipping it
+      // would silently drop `round-stop` bookkeeping the moment an operator hits Ctrl-C.
+      if (signalledNow()) return false;
       if (cfg.round.milestone) {
         try {
           const openLeft = await deps.forge.countOpenIssuesInMilestone(cfg.round.milestone);
@@ -1621,7 +1640,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // its DISPATCH phase, so a lane that frees up on this very tick can be refilled by the SAME
     // call (#124 multi-wave refill) whenever quota + milestone scope still allow it. Never
     // abandoned early by a signal: an already-open round always finishes draining (never kills
-    // in-flight work) — only opening a NEW round afterward is withheld.
+    // in-flight work) — only opening a NEW round afterward is withheld. Which is exactly why the
+    // wait here is drainWait, not interTickWait (#381/F6): a loop that keeps ticking past the
+    // signal must keep PACING past it too — see drainWait's own doc.
     //
     /** #380 (F5): this loop's exit. Ordinarily "nothing in flight" — but once a stop signal has
      *  been requested every tick is the KILL_SWITCH drain path, which freezes DRIVE and RESUME
@@ -1634,7 +1655,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       signalledNow() ? liveLanesDrained() : deps.state.activeWorkers().length === 0 && !recoveryBeatPending;
     for (;;) {
       if (drainedEnoughToExit()) break;
-      await interTickWait(deps.tickIntervalSec * 1000);
+      await drainWait(deps.tickIntervalSec * 1000);
       const attempt = await tryDispatchWave();
       const remaining = Math.max(0, cfg.lanes.roundDispatchCap - dispatchedThisRound());
       const tickResult = await runTick(

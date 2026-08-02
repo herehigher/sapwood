@@ -99,6 +99,10 @@
 // any observation); only genuinely-open escalations cost anything, at most 2 read-only calls
 // each per round. That bound is the number of things actually waiting on a human, which is small
 // by construction — if it is not, the operator has a much louder problem than this sweep's cost.
+// #404 widened only the LEDGER read: registering the two reclaim kinds pulls their every-lane
+// events into the kind filter, including the ordinary continuations the predicate then drops.
+// That is one more SQLite scan of rows this process already writes — the FORGE bound above is
+// untouched, since a dropped payload never reaches an observation.
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
@@ -106,12 +110,40 @@ import type { State } from "../state/state.js";
 import { BASE_CI_RED_CLEARED, BASE_CI_RED_ESCALATED, baseCiFailing, baseRedPin, readBaseCi } from "./base-ci.js";
 import { MERGED_BOARD_DONE_REASON } from "./conductor.js";
 
-/** How each escalation kind proves it actually applied the needs-human label — see the module
- *  doc's "label absence" note for why this table exists and what a wrong entry would cost.
+/** How an escalation kind proves it actually applied the needs-human label — see the module doc's
+ *  "label absence" note for why this table exists and what a wrong entry would cost.
  *  `always`: the event cannot exist unless the label landed. `payload`: the event records the
  *  outcome itself (`labeled`). `never`: best-effort or no label at all — label absence proves
  *  nothing, so these resolve only by closure/merge. */
-export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
+export type EscalationProof = "always" | "payload" | "never";
+
+/** #404: a source whose events are attention items only for SOME payloads. The table was
+ *  KIND-keyed — an event kind either waits on a person or it does not — which is true of every
+ *  row but the two reclaim kinds, whose own `next` decides it. Registering them as bare `always`
+ *  would track every ordinary lane continuation (and, worse, grant `label-removed` to paths that
+ *  never labelled anything); leaving them out is the F34 hole #404 exists to close. So a row may
+ *  carry its own payload predicate alongside its proof mode, and `attentionProof` below is the
+ *  ONE reader — deliberately a widened row rather than a parallel map, so a kind can never end up
+ *  registered in one place and predicated in another. */
+export interface PredicatedSource {
+  proof: EscalationProof;
+  /** THE definition of "this payload leaves work waiting on a person", for this kind. */
+  attention: (payload: Record<string, unknown> | null) => boolean;
+}
+
+/** The shared attention condition for BOTH reclaim kinds (#404), written ONCE: a lane whose
+ *  `next` is the automatic continuation (`DRIVING` — the PR exists and the drive gate takes it
+ *  from here) is not waiting on anybody; every other disposition is (`ESCALATE`,
+ *  `ESCALATE_NOPR` — conductor.ts's laneOnReclaimFailed/laneOnReclaimDone). docs/frontend-design
+ *  .md §3 states the same rule in prose for the dashboard's strip; the fold there consumes
+ *  `attentionProof` rather than re-encoding it.
+ *
+ *  Fail direction, for a malformed/legacy payload with no `next` at all: it reads as ATTENTION (a
+ *  visible row someone can close) rather than as a continuation (silently untracked — the F34
+ *  class). Both emission sites have always written `next`, so this is a guard, not a live path. */
+const reclaimNeedsAttention = (payload: Record<string, unknown> | null): boolean => payload?.next !== "DRIVING";
+
+export const ESCALATION_SOURCES: Record<string, EscalationProof | PredicatedSource> = {
   "gated-reentry-capped": "always",
   "resume-capped": "always",
   "resume-undecidable": "always",
@@ -222,6 +254,16 @@ export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   // external merge/close/label-removal resolves it exactly like every other pr-bearing `always`
   // source — including the #147 gated-reentry reclaim path this escalation's own comment points at.
   "review-non-convergent": "always",
+  // #384 (F12): the MID-RUN orphan sweep's disposition (reconcile.ts's `sweepMidRunOrphanPrs`) —
+  // an open engine PR whose lane died, held for a human on its ISSUE through the shared writer
+  // (escalation-writer.ts's `escalateToNeedsHuman`). `payload`, necessarily and for the same reason
+  // `concern-post-escalated` above is: that writer appends its event UNCONDITIONALLY, recording the
+  // label write's own outcome in `labeled`, so the event's existence proves nothing on its own.
+  // Registered from the start rather than discovered as an F34 gap later — its payload carries both
+  // the `issue` this table keys on and the orphan `pr`, so a merge or close of that PR resolves it
+  // exactly like every other pr-bearing source, which is the common ending here (a human either
+  // finishes the orphan PR or closes it).
+  "orphan-pr-escalated": "payload",
   // DELIBERATELY ABSENT (#441): `resume-held`. It is a new event kind that leaves a lane stopped,
   // so the question "does it need a row here?" is exactly the one F34 punishes getting wrong —
   // answered NO, on purpose, for two independent reasons. (1) It is not a new attention item: it
@@ -280,15 +322,34 @@ export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   // keyed on `source` alone. So the kind reuses this module's resolution vocabulary and observer
   // without pretending to be an issue-keyed strip row.
   //
-  // KNOWN, BOUNDED GAP (#295 review round 10, deferred to #404): frontend-design.md §3 also
-  // flags two PREDICATE kinds — `reclaim-failed` when `payload.next` is not an automatic
-  // continuation, and `reclaim-done` on its no-PR branch. They are attention items only for
-  // SOME payloads, and this table is kind-keyed, not payload-keyed. Externally closing such an
-  // issue therefore emits no `escalation-resolved` and its strip row persists. Deferred rather
-  // than bolted on: expressing "attention iff payload P" needs a predicate layer this table does
-  // not have, and the condition itself lives in the dashboard's fold — the two should be derived
-  // from one shared definition, not encoded twice. Stated here rather than silently omitted.
+  // #404: the two PREDICATE kinds frontend-design.md §3 flags — attention items only for the
+  // payloads `reclaimNeedsAttention` admits (see its doc), and the reason `PredicatedSource`
+  // exists at all. Both are `always` FOR THOSE PAYLOADS, and only for those:
+  //  - `reclaim-failed` on `ESCALATE`: conductor.ts's else-branch awaits an UNGUARDED
+  //    `addLabel(issue, needsHuman)` before its terminal upsert and before this append, so a
+  //    thrown label write propagates and the event never lands — the same
+  //    "label-first-or-no-event" proof `drive-no-pr` has. Its `DRIVING` twin labels NOTHING (both
+  //    the ordinary rescue and the env-failure clean+PR rescue), which is exactly why granting
+  //    the KIND `always` would have been a false-clear machine: the label is missing immediately.
+  //  - `reclaim-done` on `ESCALATE_NOPR`: same shape — the no-PR branch awaits an unguarded
+  //    `addLabel` and only then appends; the `DRIVING` branch applies no label at all.
+  // Neither payload carries a `pr` (the escalating variants are precisely the ones with no PR, or
+  // whose PR was abandoned with the lane), so both resolve by issue closure or label removal.
+  "reclaim-failed": { proof: "always", attention: reclaimNeedsAttention },
+  "reclaim-done": { proof: "always", attention: reclaimNeedsAttention },
 };
+
+/** The ONE reader of the table above, and the one definition of "does this event leave work
+ *  waiting on a person" (#404) — returns the kind's proof mode, or `undefined` when the kind is
+ *  not an attention source OR its own predicate rejects this payload. Both ledger folds go
+ *  through it (`openEscalations` here, `sweepableHolds` in escalation-sweep.ts) and so will the
+ *  dashboard's strip fold, so no two readers can disagree about which payloads count. */
+export function attentionProof(kind: string, payload: Record<string, unknown> | null): EscalationProof | undefined {
+  const entry = ESCALATION_SOURCES[kind];
+  if (entry === undefined) return undefined;
+  if (typeof entry === "string") return entry;
+  return entry.attention(payload) ? entry.proof : undefined;
+}
 
 /** Events that CLEAR an issue-scoped attention item without resolving it externally — the
  *  dashboard's own fold (docs/frontend-design.md, "Attention items fold over the whole event
@@ -432,7 +493,7 @@ export function openEscalations(events: readonly { kind: string; payload: unknow
       }
       continue;
     }
-    const proof = ESCALATION_SOURCES[e.kind];
+    const proof = attentionProof(e.kind, payload);
     if (proof === undefined) continue;
     const pr = payloadNumber(payload, "pr");
     const key = `${e.kind}:${issue}`;

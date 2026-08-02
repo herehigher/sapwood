@@ -9,7 +9,7 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, IssueMeta, PRReviewData, PRStatus } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import { State } from "../state/state.js";
-import { openEscalations, reconcileEscalations } from "./escalation-reconcile.js";
+import { attentionProof, openEscalations, reconcileEscalations } from "./escalation-reconcile.js";
 
 /** A minimal fake IForge — every method the module under test doesn't touch is a harmless no-op
  *  (same shape as dissent.test.ts's FakeForge). `issueStates`/`issueLabels`/`prStates` are the
@@ -1154,4 +1154,85 @@ test("#398 (review round 2): review-disputed and review-non-convergent carry the
     assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source, via: "label-removed" }], source);
     state.close();
   }
+});
+
+// ── #404: the two PREDICATE sources (reclaim-failed / reclaim-done) ──────────────────────────
+
+test("attentionProof (#404): the predicate is the ONE definition of 'this payload waits on a person'", () => {
+  // Not an attention source at all -> undefined, unchanged for every kind-keyed row.
+  assert.equal(attentionProof("dispatched", { issue: 7 }), undefined);
+  assert.equal(attentionProof("fix-rounds-capped", { issue: 7 }), "always");
+  // The two predicate kinds: attention iff `next` is not the automatic continuation.
+  assert.equal(attentionProof("reclaim-failed", { issue: 7, next: "ESCALATE" }), "always");
+  assert.equal(attentionProof("reclaim-failed", { issue: 7, next: "DRIVING" }), undefined);
+  assert.equal(attentionProof("reclaim-done", { issue: 7, next: "ESCALATE_NOPR" }), "always");
+  assert.equal(attentionProof("reclaim-done", { issue: 7, next: "DRIVING" }), undefined);
+});
+
+test("openEscalations (#404): a reclaim-failed is tracked on ESCALATE and NOT on the DRIVING continuation", () => {
+  const open = openEscalations([
+    { kind: "reclaim-failed", payload: { worker: "w1", issue: 7, next: "ESCALATE" } },
+    { kind: "reclaim-failed", payload: { worker: "w2", issue: 8, next: "DRIVING" } },
+  ]);
+  assert.deepEqual([...open.keys()], ["reclaim-failed:7"]);
+  // Label-proven: conductor's ESCALATE branch awaits an UNGUARDED addLabel before this append.
+  assert.equal(open.get("reclaim-failed:7")?.labelProven, true);
+});
+
+test("openEscalations (#404): a reclaim-done is tracked on its no-PR branch and NOT on the PR branch", () => {
+  const open = openEscalations([
+    { kind: "reclaim-done", payload: { worker: "w1", issue: 7, next: "ESCALATE_NOPR" } },
+    { kind: "reclaim-done", payload: { worker: "w2", issue: 8, next: "DRIVING" } },
+  ]);
+  assert.deepEqual([...open.keys()], ["reclaim-done:7"]);
+  assert.equal(open.get("reclaim-done:7")?.labelProven, true);
+});
+
+test("reconcileEscalations (#404): an externally-closed issue resolves each attention variant EXACTLY once", async () => {
+  for (const [source, next] of [
+    ["reclaim-failed", "ESCALATE"],
+    ["reclaim-done", "ESCALATE_NOPR"],
+  ] as const) {
+    const forge = new FakeForge();
+    const state = new State(":memory:");
+    state.appendEvent(source, { worker: "w1", issue: 7, next });
+    forge.issueStates[7] = "CLOSED";
+    forge.issueLabels[7] = [NEEDS_HUMAN];
+    const logged = tapEvents(state);
+
+    await reconcileEscalations(forge, state, mkCfg());
+    assert.deepEqual(resolvedEvents(logged), [{ issue: 7, source, via: "issue-closed" }], source);
+
+    // Steady state: the fold drops it, so the re-sweep re-emits nothing and reads nothing.
+    forge.reads.length = 0;
+    await reconcileEscalations(forge, state, mkCfg());
+    assert.equal(resolvedEvents(logged).length, 1, source);
+    assert.deepEqual(forge.reads, [], source);
+    assert.deepEqual(forge.writes, [], source);
+    state.close();
+  }
+});
+
+test("reconcileEscalations (#404): the continuation payloads resolve NOTHING and cost zero forge reads", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("reclaim-failed", { worker: "w1", issue: 7, next: "DRIVING" });
+  state.appendEvent("reclaim-done", { worker: "w2", issue: 8, next: "DRIVING" });
+  forge.issueStates[7] = "CLOSED";
+  forge.issueStates[8] = "CLOSED";
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), []);
+  assert.deepEqual(forge.reads, []);
+  state.close();
+});
+
+test("openEscalations (#404): a later dispatch clears a tracked reclaim escalation like any other issue-scoped row", () => {
+  const open = openEscalations([
+    { kind: "reclaim-done", payload: { worker: "w1", issue: 7, next: "ESCALATE_NOPR" } },
+    { kind: "dispatched", payload: { worker: "w2", issue: 7 } },
+  ]);
+  assert.equal(open.size, 0);
 });

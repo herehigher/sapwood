@@ -430,3 +430,19 @@ test("reconcile + sweep (r2 P1, no churn): repeated passes over a CLOSED-PR esca
   assert.equal(sweptEvents(state).length, 1);
   state.close();
 });
+
+test("sweepableHolds (#404): the ownership fold reads the SAME payload predicate as openEscalations", () => {
+  // The ESCALATE branch labelled the issue before its event, so a resolved one is sweepable...
+  const proven = sweepableHolds([
+    { kind: "reclaim-failed", payload: { worker: "w1", issue: 7, next: "ESCALATE" } },
+    { kind: "escalation-resolved", payload: { issue: 7, source: "reclaim-failed", via: "issue-closed" } },
+  ]);
+  assert.deepEqual([...proven.values()], [{ source: "reclaim-failed", issue: 7, via: "issue-closed" }]);
+  // ...while the DRIVING continuation never labelled anything, so it can never own a label to
+  // sweep. Both folds go through `attentionProof`, so they cannot disagree about which is which.
+  const continuation = sweepableHolds([
+    { kind: "reclaim-failed", payload: { worker: "w1", issue: 7, next: "DRIVING" } },
+    { kind: "escalation-resolved", payload: { issue: 7, source: "reclaim-failed", via: "issue-closed" } },
+  ]);
+  assert.equal(continuation.size, 0);
+});

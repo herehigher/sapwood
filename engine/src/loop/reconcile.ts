@@ -1,8 +1,9 @@
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { type BoardPlacement, type IForge, type OpenPrBody, referencedIssue } from "../forge/forge.js";
+import { type BoardPlacement, findLaneOwnedPr, hasPrOwnerMarker, type IForge, type OpenPrBody, referencedIssue } from "../forge/forge.js";
 import { labelsIncludeAny } from "../forge/labels.js";
 import type { EscalationCarrier, State, WorkerRow } from "../state/state.js";
+import { escalateToNeedsHuman } from "./escalation-writer.js";
 
 export type StartupOrphan =
   | { kind: "issue"; issue: number; reason: "in-progress" | "unplaced" }
@@ -393,6 +394,174 @@ export async function reviveEnvFailedPrLanes(
     }
   }
   return revived;
+}
+
+/** #384 (F12): the escalation this sweep raises — registered in escalation-reconcile.ts's
+ *  `ESCALATION_SOURCES` as `payload` proof, so a merge/close of the orphan PR, a closure of its
+ *  issue, or a human removing the hold resolves it exactly like every other issue-carried
+ *  escalation, with no second reconciliation path. */
+export const ORPHAN_PR_ESCALATED = "orphan-pr-escalated";
+/** The one-way per-lane latch: this terminal, PR-less lane HAS been asked "is there an engine PR
+ *  out there with your name on it?" — recorded whichever way the answer came out, so the sweep
+ *  costs at most ONE forge read per dead lane for the life of the repo, never one per tick. */
+const ORPHAN_SWEEP_CHECKED = "orphan-sweep-checked";
+
+/** What the mid-run sweep found: an OPEN PR a dead lane left behind, and HOW it was matched —
+ *  `marker` is the engine's own structural owner stamp, `prose` the narrow closing-keyword
+ *  fallback below. The distinction rides in the event so a reviewer of the ledger can tell an
+ *  authoritative match from an inferred one without re-deriving it. */
+export interface MidRunOrphan {
+  pr: number;
+  issue: number;
+  worker: string;
+  via: "marker" | "prose";
+}
+
+/** THE ORPHAN PR THIS DEAD LANE LEFT BEHIND, or null. Two tiers, structured signal first:
+ *
+ *  1. `findLaneOwnedPr` — the ENGINE-AUTHORED `sapwood:pr-owner` marker naming this exact lane
+ *     and issue (#377). Authoritative, unambiguous, and the only signal the association path
+ *     itself will act on.
+ *  2. FALLBACK, and deliberately narrow: an open PR with NO owner marker at all whose body
+ *     closes/references THIS candidate's issue and no other (`referencedIssue`), and which is the
+ *     ONLY such PR. This tier is not decoration — it is the only tier that can see the live F12
+ *     case at all. The residue exists precisely BECAUSE the association failed (an inconclusive
+ *     forge write during the quota storm, a branch already gone, an unwired lane-PR surface), and
+ *     a failed association is exactly the state in which no marker was ever stamped: PR #365
+ *     carried none, which is why startup's own prose match (`diffStartupOrphans`) was the thing
+ *     that eventually found it. A marker-only sweep would be honest and useless here.
+ *
+ *  Which failure direction the fallback favours, stated rather than left for the reviewer to
+ *  discover: it can produce a FALSE POSITIVE — a PR someone else wrote whose body says "closes
+ *  #207" while lane-207 happens to be dead. That costs one `needs-human` label on the issue,
+ *  visible, removable, and arguably the right answer anyway (a second producer must not be
+ *  dispatched at an issue that already has an open PR). The FALSE NEGATIVE it trades against is
+ *  the bug this issue exists to fix: an unowned PR nobody sees for the remainder of the run,
+ *  while its issue is re-dispatched behind it. The fallback is narrowed three ways so the
+ *  positive direction stays small: it is asked only about the ISSUES OF LANES ALREADY KNOWN
+ *  DEAD (never the whole open-PR list), it refuses any body carrying an owner marker at all
+ *  (`hasPrOwnerMarker` — that PR's ownership is the marker's business, including the ambiguous
+ *  two-disagreeing-markers case), and two prose matches for one issue read as ambiguous, not as
+ *  a pick. */
+function laneOrphanPr(openPrs: readonly OpenPrBody[], w: WorkerRow): { pr: number; via: "marker" | "prose" } | null {
+  const marked = findLaneOwnedPr(openPrs, w.name, w.issue);
+  if (marked !== null) return { pr: marked, via: "marker" };
+  const claimed = openPrs.filter((pr) => !hasPrOwnerMarker(pr.body) && referencedIssue(pr.body) === w.issue);
+  return claimed.length === 1 ? { pr: claimed[0]!.number, via: "prose" } : null;
+}
+
+/** The forge surface the mid-run sweep needs. `listOpenPrBodies` is DUCK-TYPED (optional) for the
+ *  same reason cli.ts's `buildLanePrAssociator` duck-types the rest of `LanePrForge`: it is a
+ *  `GithubForge` method that is deliberately not part of the narrower `IForge` every test double
+ *  implements. Production always has it; a bare-`IForge` double degrades to a no-op sweep. */
+export type OrphanSweepForge = Pick<IForge, "addLabel"> & Partial<Pick<GithubOpenPrReader, "listOpenPrBodies">>;
+
+interface GithubOpenPrReader {
+  listOpenPrBodies(): Promise<OpenPrBody[]>;
+}
+
+/** #384 (F12): notice an open engine PR whose lane is dead MID-RUN, instead of only at the next
+ *  startup reconcile.
+ *
+ *  The live case (dogfood run 2026-07-24): lane #207 died, `reclaimTerminalLane` saw no PR on the
+ *  probe, so the issue was requeued to Ready and the lane settled `failed` with a NULL `pr` — but
+ *  the worker had ALREADY pushed and opened PR #365. `diffStartupOrphans` above would have caught
+ *  it, except it runs exactly once, at startup: nothing re-scanned, the PR sat unowned for the
+ *  whole run, and the issue was free to be re-dispatched behind it (duplicate work).
+ *
+ *  WHY THIS IS NOT A PER-TICK BOARD SCAN. The candidate set is LOCAL and small: terminal lanes
+ *  with no PR on record (`terminalPrlessWorkers`), each latched after its single check. In the
+ *  steady state — and in every tick where nothing died — the pass makes ZERO forge calls and
+ *  returns before it asks for anything. When a lane does die, ONE bounded `gh pr list` answers for
+ *  every candidate in that pass. Detection is therefore within ONE tick of the death, which is
+ *  what "bounded number of ticks" costs here.
+ *
+ *  WHAT COUNTS AS "THIS LANE'S PR": the engine's own owner marker first, a deliberately narrow
+ *  prose fallback second — see `laneOrphanPr` below, which also names which failure direction
+ *  that fallback trades toward and why it cannot simply be dropped.
+ *
+ *  A CANDIDATE WHOSE ISSUE A LIVE LANE OWNS IS NOT SWEPT AT ALL (and is not latched either — it
+ *  becomes a candidate again once that lane settles). After a dead lane's issue is requeued, a
+ *  FRESH lane may be working it, and that lane's own not-yet-associated PR would prose-match the
+ *  DEAD lane's issue perfectly. Holding the issue then would fence off live, healthy work on the
+ *  strength of an inferred match — the one false positive worth spending a local DB read to avoid.
+ *
+ *  DISPOSITION: needs-human on the ISSUE, via the shared writer, with the PR in the payload.
+ *  Holding the issue is what closes the duplicate-work risk (`isPoolEligible` excludes held
+ *  issues), and the payload's `pr` is what lets escalation-reconcile resolve the item when the
+ *  orphan PR is merged or closed. Deliberately NOT auto-adoption into `driving`: the engine adopts
+ *  a dead lane's PR only where it can prove the worktree was clean (reclaimTerminalLane's
+ *  `rescued` branch), and this pass — reached precisely because the lane's PR was NEVER
+ *  associated — has no such proof. Auto-driving possibly-incomplete work toward merge is the one
+ *  mistake here that a human cannot undo; the hold is the one they can.
+ *
+ *  AN OPEN PARK EPISODE SUSPENDS THE PASS, on the pass's own authority (the same one-owner
+ *  placement `reviveEnvFailedPrLanes` uses): under a FORGE park the forge is the thing that is
+ *  down, and under an LLM park the delay costs only detection latency that the resume pays back.
+ *
+ *  Crash-rerun: the latch is written AFTER the escalation, so a kill in between re-checks the
+ *  same lane next tick and re-runs an idempotent label write. A forge read that throws latches
+ *  NOTHING — the lane keeps its place in the candidate set. */
+export async function sweepMidRunOrphanPrs(
+  forge: OrphanSweepForge,
+  state: Pick<State, "isParked" | "terminalPrlessWorkers" | "reconcileWorkers" | "ownedPrNumbers" | "latestLaneEventKind" | "appendEvent">,
+  cfg: { labels: { needsHuman: string } },
+  log: (message: string) => void = console.error,
+): Promise<MidRunOrphan[]> {
+  const listOpenPrBodies = forge.listOpenPrBodies?.bind(forge);
+  if (listOpenPrBodies === undefined) return [];
+  let candidates: WorkerRow[];
+  let ownedPrs: Set<number>;
+  try {
+    if (state.isParked()) return [];
+    // The same owning set startup reconciliation calls an owner (running/driving/fixing/handoff).
+    const live = new Set(state.reconcileWorkers().map((w) => w.issue));
+    ownedPrs = new Set(state.ownedPrNumbers());
+    candidates = state
+      .terminalPrlessWorkers()
+      .filter((w) => !live.has(w.issue) && state.latestLaneEventKind([ORPHAN_SWEEP_CHECKED], w.name, w.issue) === null);
+  } catch (error) {
+    log(`[sapwood:reconcile] mid-run orphan sweep could not read the worker table; skipped: ${String(error)}`);
+    return [];
+  }
+  if (candidates.length === 0) return [];
+  let openPrs: OpenPrBody[];
+  try {
+    openPrs = await listOpenPrBodies();
+  } catch (error) {
+    log(`[sapwood:reconcile] mid-run orphan sweep could not list open PRs; retrying next tick: ${String(error)}`);
+    return [];
+  }
+  // A PR some worker row already holds is nobody's orphan (`ownedPrNumbers` — a driving lane's,
+  // a gated-reentry lane's, a merged lane's), and one lane's orphan is not also the next lane's:
+  // two dead lanes on the same requeued issue must not raise the same attention item twice.
+  const unowned = openPrs.filter((pr) => !ownedPrs.has(pr.number));
+  const claimedThisPass = new Set<number>();
+  const orphans: MidRunOrphan[] = [];
+  for (const w of candidates) {
+    const found = laneOrphanPr(
+      unowned.filter((pr) => !claimedThisPass.has(pr.number)),
+      w,
+    );
+    if (found !== null) {
+      const { pr, via } = found;
+      state.appendEvent("orphan-detected", {
+        kind: "pr",
+        pr,
+        issue: w.issue,
+        reason: "open-engine-pr",
+        worker: w.name,
+        midRun: true,
+        via,
+      });
+      await escalateToNeedsHuman(forge, state, cfg, w.issue, ORPHAN_PR_ESCALATED, { pr, worker: w.name, via });
+      orphans.push({ pr, issue: w.issue, worker: w.name, via });
+      claimedThisPass.add(pr);
+      log(`[sapwood:reconcile] PR #${pr} is open but its lane ${w.name} (#${w.issue}) is dead (${via}) — issue held for a human.`);
+    }
+    state.appendEvent(ORPHAN_SWEEP_CHECKED, { worker: w.name, issue: w.issue, pr: found?.pr ?? null });
+  }
+  return orphans;
 }
 
 export interface RoleSweepOptions {

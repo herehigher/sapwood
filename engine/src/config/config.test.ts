@@ -89,6 +89,9 @@ test("#292: escalation.instructionPaths has trust-chain defaults, is configurabl
     ".claude/CLAUDE.md",
     ".claude/rules/**",
     "AGENTS.md",
+    // #527: the reviewer's own prompt carrier. Inert for any target repo that isn't the engine's
+    // own source tree; closes the carrier for a self-hosting deployment.
+    "engine/prompts/**",
   ]);
   assert.deepEqual(
     parseConfig(`${base}escalation: { instructionPaths: ["**/AGENTS.md", instructions/*.md] }`).escalation.instructionPaths,

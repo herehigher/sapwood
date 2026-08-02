@@ -5114,3 +5114,130 @@ test("runRounds #470: standby stays the FIRST line — a genuinely empty backlog
   assert.equal(state.isParked(), false);
   state.close();
 });
+
+// ── #381 (F6): the executing phase's DRAIN wait is paced, never signal-abortable ─────────────
+
+/** The drain-pacing probe. `sleep` logs its start, yields to a MACROTASK, then logs its end;
+ *  the tests' own onTick logs a tick. A loop that actually AWAITS its wait produces strict
+ *  wait-start -> wait-end -> tick alternation. The F6 busy loop — a signal-abortable wait on a
+ *  path that keeps ticking after the signal — resolves on a MICROTASK instead, so its next tick
+ *  lands between a wait-start and its own wait-end. Microtasks always precede macrotasks, so the
+ *  discriminator here is ORDERING, not elapsed time: no wall-clock margin decides this verdict
+ *  (docs/REVIEW-DOCTRINE.md's no-timing-dependent-assertions invariant). */
+function drainPacingProbe(): { sleep: (ms: number) => Promise<void>; events: string[] } {
+  const events: string[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    events.push(`wait-start:${ms}`);
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    events.push("wait-end");
+  };
+  return { sleep, events };
+}
+
+/** Every wait is awaited to completion (nothing ticks inside one), and every wait is the
+ *  configured cadence. */
+function assertPacedWaits(events: string[], expectedMs: number, minWaits: number): void {
+  const waits = events.filter((e) => e.startsWith("wait-start:"));
+  assert.ok(waits.length >= minWaits, `expected >=${minWaits} paced waits, got ${waits.length} in ${JSON.stringify(events)}`);
+  for (const w of waits) {
+    assert.equal(w, `wait-start:${expectedMs}`, `every wait honors the configured cadence: ${JSON.stringify(events)}`);
+  }
+  for (const [i, e] of events.entries()) {
+    if (!e.startsWith("wait-start:")) continue;
+    assert.equal(events[i + 1], "wait-end", `a tick ran before the wait it was supposed to sit behind: ${JSON.stringify(events)}`);
+  }
+}
+
+/** A lane that stays in flight for `alive` probes and then reports done — bounds the drain loop
+ *  so a pacing regression FAILS the assertions below instead of hanging the suite. */
+class CountdownSupervisor extends FakeSupervisor {
+  constructor(private alive: number) {
+    super();
+  }
+  override async probe(w: string): Promise<LaneProbe> {
+    if (this.alive > 0) {
+      this.alive--;
+      return { done: false, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false };
+    }
+    return this.probes[w] ?? { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false };
+  }
+}
+
+test("runRounds #381 (F6): a ROUND-STOPPED drain keeps ticking at tickIntervalSec after a stop signal — the signal-abortable wait made it a ms-interval busy loop", async () => {
+  const { sleep, events } = drainPacingProbe();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "i1", labels: ["prio:3-feature"] }];
+  const hits: RoundStopHit[] = [];
+  let stop = (): void => {};
+  const deps = baseDeps({
+    forge,
+    supervisor: new CountdownSupervisor(3),
+    sleep,
+    tickIntervalSec: 5,
+    // cap 1: wave 1 dispatches issue 1 and the very next drain iteration records the round stop,
+    // so every wait asserted below happens in the round-stopped state.
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }),
+    onRoundStop: (_id, hit) => hits.push(hit),
+  });
+  deps.registerSignals = (requestStop) => {
+    stop = once(requestStop); // #380: latched — a re-signal on every tick would be a HARD EXIT
+    return () => {};
+  };
+  deps.onTick = () => {
+    events.push("tick");
+    stop(); // the signal lands on the very first tick — the whole drain below runs post-signal
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.ok(
+    hits.some((h) => h.name === "roundDispatchCap"),
+    "the drain asserted below really did run in the round-stopped state",
+  );
+  assertPacedWaits(events, 5000, 3);
+  deps.state.close();
+});
+
+test("runRounds #381 (F6): a KILL_SWITCH wind-down drain keeps ticking at tickIntervalSec after a stop signal — no busy loop, no log flood", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const { sleep, events } = drainPacingProbe();
+    const forge = new FakeForge();
+    forge.ready = [{ number: 1, title: "i1", labels: ["prio:3-feature"] }];
+    const state = new State(join(dir, "sapwood.sqlite"));
+    let stop = (): void => {};
+    const deps = baseDeps({
+      forge,
+      state,
+      supervisor: new CountdownSupervisor(3),
+      sleep,
+      tickIntervalSec: 5,
+      cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 3 } }),
+    });
+    deps.registerSignals = (requestStop) => {
+      stop = once(requestStop); // #380: latched — a re-signal on every tick would be a HARD EXIT
+      return () => {};
+    };
+    const drainingTicks: number[] = [];
+    deps.onTick = (r) => {
+      events.push("tick");
+      if (r.ceilingReasons.includes("kill-switch")) drainingTicks.push(r.drainRequested.length);
+      // Wind-down starts once the round is already executing with a lane in flight: the switch
+      // freezes dispatch and drains inside tick(), and the signal arrives with it (the operator
+      // who flips the switch is the same one hitting Ctrl-C — the F6 shape).
+      writeFileSync(join(dir, "KILL_SWITCH"), "");
+      stop();
+    };
+    const result = await runRounds(deps);
+    assert.equal(result.stoppedBy, "kill-switch");
+    assert.ok(drainingTicks.length >= 2, `the drain asserted below is the kill-switch wind-down, got ${JSON.stringify(drainingTicks)}`);
+    assertPacedWaits(events, 5000, 3);
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -63,7 +63,7 @@ import {
   type DisputeEscalation,
   type FixResponseWriteOutcome,
 } from "./fix-response.js";
-import { reviveEnvFailedPrLanes } from "./reconcile.js";
+import { reviveEnvFailedPrLanes, sweepMidRunOrphanPrs } from "./reconcile.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure scheduling core (parity targets — keep semantics identical to guard's bash twin)
@@ -3358,6 +3358,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
     fixingReclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued, costUsd, modelUsage });
   }
+
+  // ── MID-RUN ORPHAN SWEEP (#384, F12): every lane-terminal transition of this tick has now
+  //   landed, so this is the earliest point at which a lane that died THIS tick without a PR on
+  //   record is visible. If the worker had already pushed and opened a PR the engine never got to
+  //   associate, that PR is now open and unowned — startup reconcile would find it, but only after
+  //   a restart (the live 2026-07-24 case: PR #365 unowned for the whole run while its issue rolled
+  //   back for a full re-dispatch). Placed BEFORE DISPATCH deliberately: the hold it writes lands
+  //   on the issue the DEAD path requeued to Ready in this same tick, so nothing can re-dispatch
+  //   behind the open PR. Zero forge calls on a tick where no lane died pr-less, one bounded
+  //   `gh pr list` otherwise; never throws (contained, see its own doc). Runs regardless of
+  //   `paused` for the same reason GATED RECLAIM below does — it spawns nothing, it only records
+  //   what a human now owns.
+  await sweepMidRunOrphanPrs(forge, state, cfg, deps.log);
 
   // ── GATED RECLAIM (#147): a failed lane that DRIVE escalated (gate②/mergeDecision
   //   needs-human — the ONLY "failed + a PR number" shape, see gatedFailedWorkers' doc) whose
