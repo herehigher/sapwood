@@ -29,6 +29,12 @@
 Two kinds of content: technical invariants this repo's review history has already flagged more
 than once, and doctrine for how the loop should treat review findings in general.
 
+**Carrier split (#434).** This file governs the **engine's own** reviewer; standing
+review-*discipline* rules for the **external** review bot live in the repo-root
+[`AGENTS.md`](../AGENTS.md), which that bot reads directly, and per-PR context stays in the
+verification plan appended to the review-request comment. The three carriers deliberately do not
+restate each other — a rule belongs to exactly one of them.
+
 ## Technical invariants
 
 Recurring failure classes, stated as judgment rules for LLM reviewers — deliberately NOT a
