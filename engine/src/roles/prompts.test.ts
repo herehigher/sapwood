@@ -106,7 +106,13 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // narrowing had left in place — a completeness claim over "GitHub access" as a whole, banned by
   // the same rule #529 exists to enforce — in favor of a plain "when your session has the tools"
   // statement with no claim about the absent case.
-  "verification-plan-reviewer.md": "3df51d72e1e2176f03e736a8c8a25b71f2657aefd05ed75d94e3aa74477de9b1",
+  // retro round #281: the "Feasibility against human-merge-only paths" check named
+  // "security-relevant config" as the protected slice of sapwood.config.*, which read as
+  // scoping the block to guard/reviewer/merge-mode fields — issue #386 (a comment-only
+  // budgetUsdSoft edit) slipped past gate⓪ on that reading and the resulting PR (#562) then
+  // failed gate② for real, unfixably (the guard blocks the whole file by path, not by field).
+  // Both bullets now say so explicitly.
+  "verification-plan-reviewer.md": "132d51eebdad5dd0edf1e746baa4c9d93ad306782be7d1fdcb8b8c74f544e403",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
   // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
@@ -115,7 +121,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — the
   // drafter's brief is still its primary instruction set; the forge grant (never removed) is a
   // read-only aid, never a write path, exactly as this file has always said.
-  "verification-plan-drafter.md": "72f7bc5d99dc96c4a2133359a39f6c892ad1139687779944562b4dc2634642dc",
+  // retro round #281: same fix as verification-plan-reviewer.md above, mirrored into the
+  // drafter's own "if the brief flags a human-merge-only conflict" bullet.
+  "verification-plan-drafter.md": "1be2278294a53e7702b1f860e0aafbfe4933495c928b218878434cae3e19cb9f",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
   // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
   // grant was never removed, so the capability paragraph again names it (when attached) instead
@@ -668,13 +676,11 @@ test("#409: the rule is worded per role rather than one paragraph duplicated, an
   }
 });
 
-// #413 amends this test's claim rather than deleting it: both files are still untouched by
-// #409's CHARTER change (the conflicts recorded in that issue stand unresolved), but their
-// pinned hashes have since moved — for the forge-tool-ask rework (recorded in its own
-// SNAPSHOT_HASHES comment above) and for #413's name-only gate⓪ rename. "Untouched" means
-// untouched by #409's charter change, which is what #409 was asserting; the hash pin enforces it.
-test("#409: verification-plan-drafter.md and architect.md carry no #409 charter change (conflicts recorded in the issue) — later hash moves are each recorded above", () => {
-  assert.equal(sha256(readPrompt(defaultVerificationPlanDrafterPromptPath())), SNAPSHOT_HASHES["verification-plan-drafter.md"]);
+test("#409: architect.md carries no #409 charter change (conflicts recorded in the issue) — later hash moves are each recorded above", () => {
+  // verification-plan-drafter.md was untouched by #409 specifically, but has since been edited
+  // for unrelated reasons (the forge-tool-ask rework, #413's rename, and retro round #281's
+  // human-merge-only scope fix — each recorded in its own SNAPSHOT_HASHES comment above) — its
+  // hash is covered by the direct snapshot test above instead of this #409-scoped assertion.
   assert.equal(sha256(readPrompt(defaultArchitectPromptPath())), SNAPSHOT_HASHES["architect.md"]);
 });
 

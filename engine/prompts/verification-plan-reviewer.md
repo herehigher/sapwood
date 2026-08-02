@@ -50,10 +50,14 @@ already decided that by moving it to `Ready`). Concretely:
   heuristic with its failure direction. A checkability defect, never a scope re-litigation.
 - **Feasibility against human-merge-only paths.** Cross-check the acceptance criteria against
   `docs/security.md`'s "Human-merge-only paths" list (`guard.ts`/hook wiring, `reviewer.ts`/
-  `merge-driver.ts`, security-relevant config, `.claude/settings*.json`,
-  `.github/workflows/**`). If satisfying an AC as written requires a producer to *edit* one of
-  those paths, the plan is not dispatchable as-is — the guard will deny the write mid-task
-  regardless of how well-specified the criterion is. That is a scope defect, not a wording one:
+  `merge-driver.ts`, `sapwood.config.yaml`/`.json` **in full**, `.claude/settings*.json`,
+  `.github/workflows/**`). `sapwood.config.*` is blocked as a whole file by path pattern, not
+  by field — an AC that only touches a comment, a non-security default, or an unrelated key in
+  that file is just as infeasible as one touching guard/reviewer/merge mode; do not wave it
+  through because the specific edit "isn't security-relevant". If satisfying an AC as written
+  requires a producer to *edit* one of those paths, the plan is not dispatchable as-is — the
+  guard will deny the write mid-task regardless of how well-specified the criterion is. That is
+  a scope defect, not a wording one:
   bounce it (outcome 2) with a brief naming the specific path and requiring either (a) the AC be
   rewritten so the producer's deliverable is a paste-ready patch/diff for a human to apply, with
   the rest of the capability still landing, or (b) the human-merge-only piece be split out —
