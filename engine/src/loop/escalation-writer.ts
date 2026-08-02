@@ -38,7 +38,6 @@
 // `poolRemovalEscalated` — so a caller retrying after a crash-interrupted attempt re-attempts
 // the (idempotent, GitHub-side no-op-if-already-applied) label write and completes the missing
 // event, rather than silently re-escalating something already handed to a human.
-import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
 import type { State } from "../state/state.js";
 
@@ -53,9 +52,12 @@ import type { State } from "../state/state.js";
  *  which is always safe (the label write is idempotent, and this function recomputes its own
  *  outcome fresh on every call — it never assumes a prior attempt's result). */
 export async function escalateToNeedsHuman(
-  forge: IForge,
+  // #384: the two members this writer actually uses, rather than the whole `IForge`/`SapwoodConfig`
+  // — every existing caller still satisfies it, and a narrow caller (reconcile.ts's mid-run orphan
+  // sweep) no longer has to carry a full forge/config it has no other use for.
+  forge: Pick<IForge, "addLabel">,
   state: Pick<State, "appendEvent">,
-  cfg: SapwoodConfig,
+  cfg: { labels: { needsHuman: string } },
   issue: number,
   eventKind: string,
   extraPayload: Record<string, unknown>,

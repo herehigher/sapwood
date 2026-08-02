@@ -2065,6 +2065,34 @@ export class State {
       .all() as unknown as WorkerRow[];
   }
 
+  /** #384 (F12): lanes that ended TERMINALLY with no PR of their own on record — the entire
+   *  local precondition for an orphaned engine PR. A lane only ever gets its `pr` column written
+   *  at the running->driving transition (or the DEAD-with-PR rescue), so a terminal row with a
+   *  NULL `pr` is exactly the shape of a lane the engine lost track of before it could associate
+   *  what the worker had already pushed — the live 2026-07-24 case (lane #207 `failed`, pr NULL,
+   *  PR #365 open and unowned for the rest of the run).
+   *
+   *  Deliberately DISJOINT from `gatedFailedWorkers`/`unlabeledGatedWorkers` above on the same
+   *  one column: a `failed` row that DOES carry a pr is already some other path's property
+   *  (gated reentry, #447 revival), and this set must never create a second owner for it.
+   *  `done` is included for the same reason `failed` is — reclaim-done's own no-PR branch is a
+   *  standing attention item, and a merged lane always carries the pr it merged. */
+  terminalPrlessWorkers(): WorkerRow[] {
+    return this.db
+      .prepare("SELECT * FROM workers WHERE state IN ('failed', 'done') AND pr IS NULL ORDER BY name")
+      .all() as unknown as WorkerRow[];
+  }
+
+  /** #384 (F12): every PR number ANY worker row currently holds, in any state — the "somebody
+   *  already owns this PR" set the mid-run orphan sweep subtracts before it matches anything.
+   *  Deliberately state-blind (the same `ownedPrs` concept `diffStartupOrphans` builds from its
+   *  own row snapshot): a `driving` lane's PR, a gated-reentry lane's PR and a merged lane's PR
+   *  are all equally not-an-orphan, and the sweep must never hand a second owner a PR one of
+   *  those paths is already driving. */
+  ownedPrNumbers(): number[] {
+    return (this.db.prepare("SELECT DISTINCT pr FROM workers WHERE pr IS NOT NULL").all() as { pr: number }[]).map((r) => r.pr);
+  }
+
   appendEvent(kind: string, payload: unknown): void {
     // #403 (F25) per-site decision: DELIBERATE wall-clock read, left as-is. `events.ts` answers
     // "when did the engine actually do this", so the honest source is the machine's clock at the

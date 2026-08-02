@@ -222,6 +222,16 @@ export const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   // external merge/close/label-removal resolves it exactly like every other pr-bearing `always`
   // source — including the #147 gated-reentry reclaim path this escalation's own comment points at.
   "review-non-convergent": "always",
+  // #384 (F12): the MID-RUN orphan sweep's disposition (reconcile.ts's `sweepMidRunOrphanPrs`) —
+  // an open engine PR whose lane died, held for a human on its ISSUE through the shared writer
+  // (escalation-writer.ts's `escalateToNeedsHuman`). `payload`, necessarily and for the same reason
+  // `concern-post-escalated` above is: that writer appends its event UNCONDITIONALLY, recording the
+  // label write's own outcome in `labeled`, so the event's existence proves nothing on its own.
+  // Registered from the start rather than discovered as an F34 gap later — its payload carries both
+  // the `issue` this table keys on and the orphan `pr`, so a merge or close of that PR resolves it
+  // exactly like every other pr-bearing source, which is the common ending here (a human either
+  // finishes the orphan PR or closes it).
+  "orphan-pr-escalated": "payload",
   // DELIBERATELY ABSENT (#441): `resume-held`. It is a new event kind that leaves a lane stopped,
   // so the question "does it need a row here?" is exactly the one F34 punishes getting wrong —
   // answered NO, on purpose, for two independent reasons. (1) It is not a new attention item: it
