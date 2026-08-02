@@ -1396,8 +1396,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // #154 (Codex P1, PR #160): the run-level spend stop must freeze a tick's OWN refill the
     // moment its reclaim phase banks the crossing spend — thunk evaluated inside tick(),
     // post-reclaim (see TickDeps.runSpendStopCrossed). Only wired when the stop is configured.
+    // #429: + the tick's completed-but-unbanked terminal spend (deferred PR association).
     ...(deps.stop?.afterSpendUsd !== undefined
-      ? { runSpendStopCrossed: () => deps.state.spentUsdAfterId(runSpendAnchorId) >= deps.stop!.afterSpendUsd! }
+      ? {
+          runSpendStopCrossed: (unsettledUsd: number) =>
+            deps.state.spentUsdAfterId(runSpendAnchorId) + unsettledUsd >= deps.stop!.afterSpendUsd!,
+        }
       : {}),
     // #168: passthrough — see RoundDeps.probeLlmReachable's doc comment.
     ...(deps.probeLlmReachable !== undefined ? { probeLlmReachable: deps.probeLlmReachable } : {}),
