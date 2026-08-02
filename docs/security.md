@@ -1061,15 +1061,19 @@ Any GitHub issue created *by an agent* (as opposed to authored directly by a hum
 must carry the `origin:agent` label. `sapwood init` provisions this label like the rest
 of the taxonomy.
 
-Today this is a **convention, not yet enforced machinery** — no part of sapwood
-currently opens issues on your behalf, so nothing yet applies the label automatically.
-The machinery lands with v0.2's round-orchestrator peripheral roles (see
-[`PLAN.md`](PLAN.md)'s v0.2 chapter): when a peripheral role (e.g. goal-alignment /
-decomposition) opens an issue, it will apply `origin:agent` itself, and an
-agent-created issue will additionally require **explicit human confirmation** before it
-can enter `Ready` — an agent can propose work, but a human still decides what actually
-enters the dispatch queue. Provisioning the label now means that gate can be turned on
-later without a taxonomy migration.
+The labelling is **shipped machinery, not just a convention**. Two PO roles open issues
+on your behalf today, and each applies the label itself at creation time as part of its
+governance pass: the aligning role (`engine/src/loop/align.ts`, goal-alignment
+proposals) and the decomposition role (`engine/src/loop/decompose.ts`, #310's `split`
+children). Both label idempotently, so a resumed run re-applies rather than skips it —
+provenance is marked on every agent-created issue, not best-effort.
+
+The human confirmation such an issue needs is the ordinary `Ready` move, and no separate
+gate mechanism exists or is needed. Per [`PLAN.md`](PLAN.md)'s "Ready-as-signature"
+section (locked 2026-07-17, issues #237/#238), moving *any* issue to `Ready` — agent- or
+human-authored — is itself the human signature endorsing that issue's why/what. An agent
+can propose work; a human still decides what actually enters the dispatch queue, and
+that card move *is* the decision.
 
 ## The `plan:approved` label and gate⓪ (#88)
 
