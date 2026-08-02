@@ -45,6 +45,7 @@ import {
   parseSubIssues,
   prOwnerMarker,
   projectQuery,
+  RECENTLY_CLOSED_ISSUES_LIMIT,
   readPrOwner,
   SUB_ISSUE_IDS_QUERY,
   SUB_ISSUES_QUERY,
@@ -2136,6 +2137,47 @@ test("listOpenIssues #215: rejects an exactly-limit-sized response but accepts l
   assert.equal((await forge.listOpenIssues()).length, 999);
   issueCount = 1000;
   await assert.rejects(() => forge.listOpenIssues(), /backlog read is incomplete \(limit 1000\)/);
+});
+
+test("listRecentlyClosedIssues #528: one BOUNDED closed-issue read, same fields as listOpenIssues", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify([
+      { number: 461, title: "Shipped fact", body: "one", labels: [{ name: "type:bug" }], milestone: { title: "v0.2.1" } },
+      { number: 5, title: "Older closed gap", body: "two", labels: [], milestone: null },
+    ]);
+  };
+  assert.deepEqual(await forge.listRecentlyClosedIssues(), [
+    { number: 461, title: "Shipped fact", body: "one", labels: ["type:bug"], milestone: "v0.2.1" },
+    { number: 5, title: "Older closed gap", body: "two", labels: [] },
+  ]);
+  const args = seen[0]!;
+  assert.equal(seen.length, 1, "one read — no pagination loop");
+  assert.deepEqual(args.slice(0, 2), ["issue", "list"]);
+  assert.ok(args.includes("--state") && args.includes("closed"));
+  assert.ok(args.includes("number,title,body,labels,milestone"));
+  assert.ok(args.includes("--limit") && args.includes(String(RECENTLY_CLOSED_ISSUES_LIMIT)));
+  assert.ok(args.includes("--search") && args.includes("sort:updated-desc"), "recency-ordered, so the bound keeps the RECENT tail");
+});
+
+test("listRecentlyClosedIssues #528: an exactly-limit-sized response is the BOUND, never an incompleteness error", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  (forge as unknown as { gh: () => Promise<string> }).gh = async () =>
+    JSON.stringify(
+      Array.from({ length: RECENTLY_CLOSED_ISSUES_LIMIT }, (_, index) => ({
+        number: index + 1,
+        title: `Closed ${index + 1}`,
+        labels: [],
+        milestone: null,
+      })),
+    );
+  // Unlike listOpenIssues (whose completeness is load-bearing for the fail-closed create
+  // boundary), this read is a BOUNDED backstop by design — hitting the bound is the normal case.
+  assert.equal((await forge.listRecentlyClosedIssues()).length, RECENTLY_CLOSED_ISSUES_LIMIT);
 });
 
 // ── #110 PR0: updateIssueBody — the WRITE counterpart to getIssueBody, additive infra for the

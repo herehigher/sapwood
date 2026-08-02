@@ -529,10 +529,15 @@ export class RoundScopedForge implements IForge {
   }
   listOpenIssues(): Promise<Issue[]> {
     // This is intentionally the full OPEN backlog: PO proposal marker reconciliation and
-    // normalized-title dedup must see issues created without a milestone. A reconciled issue
-    // CLOSED by a human between crash and rerun remains a known, accepted blind spot because
-    // this scan is open-issues-only by design. Digest-only milestone scoping lives in align.ts.
+    // normalized-title dedup must see issues created without a milestone. Digest-only milestone
+    // scoping lives in align.ts. #528: the closed half of that surface is listRecentlyClosedIssues
+    // below — this method stays open-only.
     return this.inner.listOpenIssues();
+  }
+  /** #528: passthrough, deliberately NOT milestone-scoped — same rationale as listOpenIssues
+   *  above: a shipped fact must be dedup-visible whatever milestone it carried. */
+  listRecentlyClosedIssues(): Promise<Issue[]> {
+    return this.inner.listRecentlyClosedIssues();
   }
 
   /** #89: same milestone scoping as getIssuesNeedingPlanReview above — the PO/triage
@@ -719,6 +724,9 @@ export class PoolScopedForge implements IForge {
   }
   listOpenIssues() {
     return this.inner.listOpenIssues();
+  }
+  listRecentlyClosedIssues() {
+    return this.inner.listRecentlyClosedIssues();
   }
   getIssuesNeedingPlanTriage() {
     return this.inner.getIssuesNeedingPlanTriage();

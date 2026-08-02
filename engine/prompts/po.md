@@ -51,7 +51,11 @@ all the same and it is listed for exactly one reason: so you can check your prop
 (Un-milestoned issues are the shape previous align rounds' own proposals carry — that is where
 self-duplication happens.) Do not re-propose work any entry already covers, in or out of scope,
 even when the title uses different wording. Hold annotations identify parked gaps; they remain
-existing work and must not be duplicated.
+existing work and must not be duplicated. Entries annotated `[recently closed — do not
+re-propose]` are the tail of recently CLOSED issues: work that already shipped or was settled.
+They are not decomposition targets and not open work — they are there so a fact that shipped
+hours ago does not come back as a fresh proposal. Treat a match against one exactly as you would
+a match against an open entry: propose nothing for that gap.
 
 <backlog-digest>
 {{backlog.digest}}
@@ -66,9 +70,10 @@ zero or more well-scoped issues. For EVERY issue you propose:
   Inherently unverifiable work (pure docs/chore) still needs a `## Verification` or
   `## Acceptance criteria` section explaining why, even if it just says so.
 - Dedup in TWO steps before you file anything. The digest above is real but BOUNDED, not
-  complete: it holds only OPEN issues, and it can be truncated (when it is, it says so, with
-  counts). So (1) check every proposal against the digest, in-scope entries and out-of-scope ones
-  alike, and (2) when the forge search tool is attached to this session, call
+  complete: it holds every OPEN issue plus only the RECENTLY closed ones, and it can be truncated
+  (when it is, it says so, with counts). So (1) check every proposal against the digest, in-scope
+  entries, out-of-scope ones and closed ones alike, and (2) when the forge search tool is
+  attached to this session, call
   `mcp__forge__search_issues` on each proposal's key terms — the distinctive nouns, the file or
   symbol name your evidence came from — BEFORE proposing it. If that tool isn't there, treat its
   absence like any other missing tool: say so in the issue body's rationale rather than writing
