@@ -968,6 +968,31 @@ position-independently so a wrapper can't hide the write) — but the human-merg
 rule is also a process rule: even a PR that touches these files and somehow passes CI
 and review is not something the conductor should be configured to auto-merge.
 
+### `sapwood.config.*` is also the shipped starter config — a known consequence (#386)
+
+The denial above is path-based, not intent-based, and `sapwood.config.*` carries a second
+role that makes that worth stating explicitly: `sapwood init` ships **this repo's own
+root `sapwood.config.yaml`, verbatim**, as a new user's starter config
+(`engine/src/loop/init.ts`'s `sampleConfig()`/`ensureConfig()` — there is no separate
+template file). So the file a worker may not write and the commented example every new
+operator receives are the same object.
+
+The consequence: **a worker cannot land a change to the shipped config's own comments —
+even a purely editorial one carrying no security meaning at all.** The guard denies the
+write (`BLOCK [write-path] sapwood.config.* (engine/guard config) is human-merge-only`)
+without inspecting whether the edit touches `guard.mode` or a `#` comment, which is the
+correct fail-closed behaviour: an intent-aware exception is exactly the seam a worker
+could talk its way through.
+
+This is a deliberate trade, not a defect — but it means any issue whose acceptance
+criteria require the shipped YAML to change has a **human-applied step that no worker can
+discharge**. Such issues are best written to ask for a paste-ready patch (which a worker
+*can* produce, in the PR body or a plain file) rather than for the edit itself, so the
+work is dispatchable and the acceptance criteria are honestly satisfiable. #386 is the
+worked example: its calibration guidance landed in the docs, while the matching
+`worker.budgetUsdSoft` comment had to ship as a patch for a human to apply. The guard
+constrains Claude tool calls, never a human's editor.
+
 ### The `sapwood:human-merge-only` label (#397)
 
 The same phrase now also names a **label**, deliberately — one fact, one term. Where the
