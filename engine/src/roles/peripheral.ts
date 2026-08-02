@@ -104,15 +104,20 @@ import {
  *  a live plan-reviewer session, unable to get a shell, spawned three subagents attempting to
  *  get one indirectly (contained: the children inherit this SAME deny list, so they reached no
  *  shell either — see this codebase's #235 PR-A read-containment note above; the fan-out was an
- *  undeclared cost/concurrency channel, not a security escalation). Both names were confirmed
- *  live in the current CLI's role-shaped tool surface by direct probe before being added here —
- *  `Workflow` was considered and DROPPED: no such tool exists in that probed surface, and
- *  denying-and-documenting an unverifiable name is exactly the defect class this round exists
- *  to cure. This reaches the hardcoded review profile too (reviewMode below hardcodes
- *  `ROLE_ALLOWED_TOOLS`/`ROLE_DISALLOWED_TOOLS` directly, never a caller override) — the gate②
- *  reviewer's deny rests on the DECLARED-CONTRACT argument, not a cost argument: that session
- *  already carries a hard CLI `--max-budget-usd` ceiling (RoleSessionOpts.maxBudgetUsd), so its
- *  fan-out was already bounded by construction. Escape hatch, if large-diff review quality ever
+ *  undeclared cost/concurrency channel, not a security escalation). Both names' REGISTRY
+ *  presence was confirmed by direct probe run WITH the deny in place: both were absent from the
+ *  usable tool surface, but the error text itself ("Agent exists but is not enabled in this
+ *  context") establishes the name is registered; the pre-deny #534 incident, where a live session
+ *  really did spawn three subagents, is the other leg of evidence — neither claims either name is
+ *  live in the role-shaped tool surface. `Workflow` was considered and DROPPED: no such tool
+ *  exists in that probed surface, and denying-and-documenting an unverifiable name is exactly the
+ *  defect class this round exists to cure. This reaches the hardcoded review profile too
+ *  (reviewMode below hardcodes `ROLE_ALLOWED_TOOLS`/`ROLE_DISALLOWED_TOOLS` directly, never a
+ *  caller override) — the gate② reviewer's deny rests on the DECLARED-CONTRACT argument, not a
+ *  cost argument: that session already carries a hard CLI `--max-budget-usd` ceiling
+ *  (RoleSessionOpts.maxBudgetUsd), so the deny closes an undeclared capability, not an unbounded
+ *  cost (whether a child's spend counts against that same ceiling is unprobed CLI accounting; the
+ *  argument does not rest on it). Escape hatch, if large-diff review quality ever
  *  measurably suffers from the loss of parallel sub-reads: split a `REVIEW_DISALLOWED_TOOLS`
  *  constant at the `reviewMode` branch in run() below — a one-constant change, not a redesign.
  *

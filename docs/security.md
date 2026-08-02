@@ -235,8 +235,9 @@ the worker's own Bash lexical tripwire already calls — now ALSO recognizes `We
 `WebSearch` `tool_use` blocks directly from the structured stream-json transcript
 (unconditionally, not gated by `worker.egressSuspectCommands`: unlike Bash, where most
 executables are legitimate, these two tool names ARE the entire sanctioned peripheral-egress
-channel). `RoleRunner.run()` calls it on every session's own completed jsonl and emits the
-identical `egress-suspect` ledger event kind the worker's tripwire uses — `round-artifact.ts`'s
+channel), and — by that same unconditional branch — `Agent`/`Task` `tool_use` blocks too (see
+the #534 paragraph below). `RoleRunner.run()` calls it on every session's own completed jsonl and
+emits the identical `egress-suspect` ledger event kind the worker's tripwire uses — `round-artifact.ts`'s
 existing assembler needs no changes to surface either kind. This flagging is deliberately
 **content-driven, not role-gated**: `--allowedTools`/`--disallowedTools` is a noise-reduction
 permission layer, not a schema removal (see [Worker denylist vs. peripheral allowlist](#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry)
@@ -402,7 +403,7 @@ with a real write grant).** This is a name-list deny of the ONE known
 spawn channel over a CLI-defined, version-drifting tool surface — the engine denies the tool
 names `Agent`/`Task` because those are the names a live probe found in the current CLI's
 role-shaped tool list, never a claim that the session's capability set is closed: the same
-"authorization surface this engine does not control" caveat two paragraphs above applies
+"authorization surface this engine does not control" caveat in the paragraph above applies
 here too — a future CLI version could rename, add, or remove a spawn-shaped tool, and only a
 live probe (not this document) can say what that surface currently contains. **Scoped to the
 `claude` executor**: the #443/#501 executor seam lets gate② run on the `codex-exec` runner
@@ -412,10 +413,10 @@ at all — that runner's containment is its own, entirely different shape (a rea
 not a tool-name deny list), disclosed separately as `engine-review-containment-gap`. The gate②
 `claude`-runner reviewer's deny
 rests on the **declared-contract** argument alone, not a cost argument: that session already
-carries a hard, CLI-enforced `--max-budget-usd` ceiling (`RoleSessionOpts.maxBudgetUsd`), with
-any child's spend rolling into the parent's own record, so its fan-out was already bounded by
-construction before this deny — the deny closes an undeclared capability, not an unbounded
-cost. Escape hatch, named in the #534 decision record: if large-diff review quality ever
+carries a hard, CLI-enforced `--max-budget-usd` ceiling (`RoleSessionOpts.maxBudgetUsd`), so the
+deny closes an undeclared capability, not an unbounded cost (whether a *child's* spend counts
+against that same ceiling is CLI accounting this repo has not probed; the argument does not rest
+on it). Escape hatch, named in the #534 decision record: if large-diff review quality ever
 measurably suffers from the loss of parallel sub-reads, split a `REVIEW_DISALLOWED_TOOLS`
 constant at the `reviewMode` branch in `peripheral.ts` — a one-constant change. **The
 code-producing worker deliberately retains spawn capability** — `WORKER_DISALLOWED_TOOLS`

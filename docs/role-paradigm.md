@@ -156,12 +156,15 @@ role's writes UP this ladder over adding a pattern-level deny.
    `Agent`/`Task` — for every session wired through this matrix, including the hardcoded
    `claude`-runner review profile (`RoleRunner.run()`'s `reviewMode` branch hardcodes
    `ROLE_ALLOWED_TOOLS`/`ROLE_DISALLOWED_TOOLS` directly, never a caller-supplied override — see
-   the review-kinds section above). A spawned child inherits its parent's `--allowedTools`/
-   `--disallowedTools` and the same guard hook (ordinary Claude Code subagent behavior, not
-   anything this engine configures), so every boundary this ladder describes — read containment,
-   the write/exec veto, and now the spawn veto — is transitive to any child a session manages to
-   spawn, not just a property of the parent session alone. **`retro`, the sixth role, does NOT
-   belong in this tier**:
+   the "Gate② reviewer kinds, including engine-agent" section above). A spawned child inherits
+   its parent's `--allowedTools`/`--disallowedTools` — ordinary Claude Code subagent behavior, not
+   anything this engine configures. The #534 incident evidenced exactly that leg and no more: the
+   three subagents a live `plan-reviewer` session spawned reached no shell either, because the
+   blanket `Bash` deny came with them. Whether the guard hook is
+   equally transitive — and therefore whether read containment, which only the hook enforces and
+   only under `guard.mode: hard`, reaches a child — has never been probed: the deny-list
+   observation above evidences the `--allowedTools`/`--disallowedTools` leg only, and must not be
+   read as covering the guard hook too. **`retro`, the sixth role, does NOT belong in this tier**:
    `RETRO_ALLOWED_TOOLS` (`engine/src/retro/retro.ts::RETRO_ALLOWED_TOOLS`) grants a real `Write`/`Edit`/`MultiEdit`
    channel plus `Bash` scoped to eight specific `git` subcommands including `commit` and `push`
    (`branch`/`checkout`/`add`/`commit`/`push`/`diff`/`status`/`log`) —

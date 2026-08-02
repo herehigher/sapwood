@@ -340,7 +340,7 @@ export function scanEgressSuspects(jsonl: string, suspectCommands: readonly stri
         // #534: same unconditional stance as WebFetch/WebSearch above — see this function's own
         // doc. Prefer `description` (the short human-readable summary), fall back to `prompt`.
         const rec = input as Record<string, unknown>;
-        const detail = typeof rec.description === "string" ? rec.description : typeof rec.prompt === "string" ? rec.prompt : null;
+        const detail = (typeof rec.description === "string" && rec.description) || (typeof rec.prompt === "string" && rec.prompt) || null;
         if (detail === null) continue;
         if (addHit(b.name, detail.slice(0, EGRESS_SNIPPET_MAX_CHARS))) return { hits, truncated: true };
       }

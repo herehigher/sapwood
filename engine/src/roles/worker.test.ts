@@ -335,6 +335,14 @@ test("scanEgressSuspects (#534): Agent/Task description snippets are capped at 2
   assert.equal(hits[0]?.snippet, longDescription.slice(0, 200));
 });
 
+test("scanEgressSuspects (#534 fix): an EMPTY `description` with a usable `prompt` falls back to `prompt` — an empty string is a string, not absent", () => {
+  const jsonl = agentToolUseLine("Agent", { description: "", prompt: "spawn a subagent to check CI" });
+  assert.deepEqual(scanEgressSuspects(jsonl, []), {
+    hits: [{ executable: "Agent", snippet: "spawn a subagent to check CI" }],
+    truncated: false,
+  });
+});
+
 // ── #110 PR0: parseResultText — the read side for a role session's structured final-message
 //    output. Mirrors parseCostUsd's own tolerance test shapes exactly (same fixture style). ──
 test("parseResultText: takes the last result line's `result` string", () => {
