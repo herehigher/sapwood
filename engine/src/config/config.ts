@@ -773,34 +773,33 @@ const Roles = z
 // other cap in this section.
 //
 // #253: engine startup (cli.ts's runTickEngine/runRoundsEngine, round.ts's buildFixLegResume)
-// now actually READS these two flags, per a three-state model (#253 review round 2, H1 —
-// PM-narrowed ruling: `shadow` gates PRODUCTION ATTACHMENT, never per-consumer effect-
-// suppression — building effect-suppression into every forge write a proxy-informed session's
-// output could reach would be over-machinery for a transitional validation mode):
+// reads `enabled` to decide production attachment. #551 deleted the three-state model's middle
+// state (`shadow`): it never had distinct runtime semantics — `proxy/mint.ts::createProxyMint`
+// reads only `caps`/`budget`/`timeoutMs`, never `enabled`, so a scoped harness could always mint
+// in any state, and the three production attachment guards only ever consulted `enabled`. Two
+// states now:
 //
-//   1. `enabled: false` (default): fully inert, exactly as #234 originally shipped. No engine
-//      startup path constructs anything; flipping every other proxy.* key changes nothing.
-//   2. `enabled: true, shadow: true` (the default once enabled — "shadow mode first"): the proxy
-//      machinery (createProxyMint, buildTickFixLegResume, round.ts's buildFixLegResume) is
-//      CONSTRUCTIBLE and mintable by a scoped harness (this is how the shadow bring-up run,
-//      #253's own item 2/3, exercises real calls/journals/spend end-to-end) — but ZERO
-//      PRODUCTION ATTACHMENT: neither live driver ever builds a real `TickDeps.fixLegResume`,
-//      and `runRoundsEngine` never builds a `RoleRunner` `defaultProxy`. No session a real
-//      `sapwood run` dispatches — peripheral role session or fix-loop worker leg — ever holds a
-//      handle, so no session's output can be proxy-informed. The shadow guarantee is structural
-//      (no attachment happens at all), not a per-call effect check layered on top of a live one.
-//   3. `enabled: true, shadow: false`: the deliberate go-live flip, taken only after the shadow
-//      bring-up validates the proxy. Both live drivers attach a real `fixLegResume` to the
-//      fix-loop worker leg, and `runRoundsEngine` attaches a real `defaultProxy` to every
-//      peripheral role session (aligning/architecting/plan_review/harvesting/retro).
+//   1. `enabled: false`: fully inert, exactly as #234 originally shipped. No engine startup path
+//      constructs anything; flipping every other proxy.* key changes nothing. `prFixCap > 0`
+//      with `enabled: false` still degrades every FIXABLE gate to a `fix-loop-unattached`
+//      needs-human escalation (`cli.ts::announceFixLoopUnattached`) — an honest, distinguishable
+//      opt-out, not silent.
+//   2. `enabled: true` (#551 default): full production attachment. Both live drivers attach a
+//      real `fixLegResume` to the fix-loop worker leg, and `runRoundsEngine` attaches a real
+//      `defaultProxy` to every peripheral role session (aligning/architecting/plan_review/
+//      harvesting/retro). This flip is SILENT — a config that omits the `proxy` block entirely
+//      goes from fully-inert to production-attached with no error and no prompt (#551, PR body).
 //
-// STILL UNWIRED regardless of state 3: ordinary (non-fix-loop) `WorkerSupervisor.dispatch()` for
-// the main coding-worker leg has no production caller attaching a proxy — that would require
-// touching conductor.ts's DISPATCH call site, out of #253's own scope (see its PR).
+// STILL UNWIRED regardless of `enabled`: ordinary (non-fix-loop) `WorkerSupervisor.dispatch()`
+// for the main coding-worker leg has no production caller attaching a proxy — that would require
+// touching conductor.ts's DISPATCH call site, out of #253's/#551's own scope. Review sessions
+// also never get a handle regardless of `enabled`: `peripheral.ts` throws on `proxy` +
+// `reviewCwd`, forces `proxyOpt = undefined` in review mode, and both drivers construct their
+// engine-review `RoleRunner`s without `defaultProxy` — #551 asserted this explicitly as the
+// regression the flip could plausibly have caused.
 const ProxyConfig = z
   .object({
-    enabled: z.boolean().default(false),
-    shadow: z.boolean().default(true),
+    enabled: z.boolean().default(true),
     caps: z
       .object({
         maxIssuesPerCall: z.number().int().positive().default(10),

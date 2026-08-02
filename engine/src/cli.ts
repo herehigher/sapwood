@@ -1144,40 +1144,37 @@ export function checkWebAccessSettingsDenial(
   }
 }
 
-/** #385 (F10): the degraded-configuration announcement — `lanes.prFixCap > 0` (an operator has
- *  configured a fix loop) while the proxy is NOT in its production-attach state, so no live
- *  driver ever builds a real `TickDeps.fixLegResume` (buildTickFixLegResume / round.ts's
- *  buildFixLegResume both return `undefined`). Every FIXABLE gate then degrades to a
- *  `fix-loop-unwired:<reason>` needs-human escalation (conductor.ts, #246 C1) — correct per
- *  #253's three-state design, but until now only observable AFTER a PR had already been pushed
- *  to needs-human. This says it ONCE at startup, per run, instead: one log naming the exact
- *  go-live flip, one durable event for the dashboard/replay. No behavior change to the
- *  three-state design itself — this is pure detection.
+/** #385 (F10), simplified by #551: the degraded-configuration announcement —
+ *  `lanes.prFixCap > 0` (an operator has configured a fix loop) while `proxy.enabled` is
+ *  explicitly `false` (an opt-out), so no live driver ever builds a real
+ *  `TickDeps.fixLegResume` (buildTickFixLegResume / round.ts's buildFixLegResume both return
+ *  `undefined`). Every FIXABLE gate then degrades to a `fix-loop-unwired:<reason>` needs-human
+ *  escalation (conductor.ts, #246 C1). This says it ONCE at startup, per run: one log naming the
+ *  opt-out, one durable event for the dashboard/replay. Pure detection, no behavior change.
  *
  *  Deliberately silent for the two NON-degraded halves of the matrix: `prFixCap: 0` is an
  *  operator's explicit opt-out (folding straight to needs-human IS the configured behavior, not
- *  a surprise), and `enabled: true, shadow: false` is the working configuration.
+ *  a surprise), and `enabled: true` (#551 default) is the working configuration.
  *
  *  Same best-effort startup-pass stance as checkWebAccessSettingsDenial above: never blocks,
  *  never throws out, at most one log line + one event. Exported for direct testing. */
 export function announceFixLoopUnattached(
-  cfg: { lanes: Pick<SapwoodConfig["lanes"], "prFixCap">; proxy: Pick<SapwoodConfig["proxy"], "enabled" | "shadow"> },
+  cfg: { lanes: Pick<SapwoodConfig["lanes"], "prFixCap">; proxy: Pick<SapwoodConfig["proxy"], "enabled"> },
   state: Pick<State, "appendEvent">,
   log: (message: string) => void = console.error,
 ): void {
   const { prFixCap } = cfg.lanes;
-  const { enabled, shadow } = cfg.proxy;
-  if (prFixCap <= 0 || (enabled && !shadow)) return;
-  const reason = enabled ? "proxy-shadow" : "proxy-disabled";
+  const { enabled } = cfg.proxy;
+  if (prFixCap <= 0 || enabled) return;
+  const reason = "proxy-disabled";
   try {
     log(
       `[sapwood:startup] lanes.prFixCap=${prFixCap} but the fix loop is not production-attached ` +
-        `(proxy.enabled=${enabled}, proxy.shadow=${shadow}) — every FIXABLE review gate will degrade to a ` +
-        "needs-human escalation (fix-loop-unwired) instead of dispatching a fix leg; set `proxy.enabled: true` " +
-        "and `proxy.shadow: false` to go live (docs/configuration.md, `proxy`), or `lanes.prFixCap: 0` to make " +
-        "the fold explicit",
+        `(proxy.enabled=${enabled}) — every FIXABLE review gate will degrade to a needs-human escalation ` +
+        "(fix-loop-unwired) instead of dispatching a fix leg; set `proxy.enabled: true` (docs/configuration.md, " +
+        "`proxy`) to go live, or `lanes.prFixCap: 0` to make the fold explicit",
     );
-    state.appendEvent("fix-loop-unattached", { prFixCap, proxyEnabled: enabled, proxyShadow: shadow, reason });
+    state.appendEvent("fix-loop-unattached", { prFixCap, proxyEnabled: enabled, reason });
   } catch (error) {
     log(`[sapwood:startup] fix-loop attachment announcement failed (non-fatal, startup continues): ${String(error)}`);
   }
@@ -1297,22 +1294,16 @@ function buildLanePrAssociator(forge: IForge, log: (message: string) => void): (
  *  for why that's harmless for journal uniqueness). Evaluating whether a fix leg needs its own
  *  tracked attempt ordinal is live-run territory (#253 item 3), not plumbed here.
  *
- *  #253 review round 2 (Codex sol-high, H1 — PM-narrowed three-state ruling): `shadow` gates
- *  PRODUCTION ATTACHMENT, not per-consumer effect-suppression.
- *    1. `enabled: false` (default): nothing constructed. Unchanged.
- *    2. `enabled: true, shadow: true` (the default once enabled): this function still returns
- *       `undefined` — NO production attachment. The proxy machinery stays constructible/mintable
- *       (this function, `createProxyMint`, round.ts's `buildFixLegResume` are all still callable
- *       directly by a scoped harness — that's how the owner's live shadow bring-up run (#253
- *       item 2/3) exercises it) but no LIVE `sapwood run` session ever holds a handle, so no
- *       session's output can be proxy-informed. The shadow guarantee is structural, not a
- *       per-call effect check.
- *    3. `enabled: true, shadow: false`: full production attachment — the deliberate go-live flip,
- *       taken only after the shadow bring-up validates the proxy.
- *  A FIXABLE gate degrades to the pre-#246 needs-human escalation (#246 C1) in states 1 AND 2,
- *  unchanged from before this issue — only state 3 makes FIXUP dispatch itself live.
+ *  #551 deleted the three-state model's middle state (`shadow` had no distinct runtime
+ *  semantics — see config.ts's `ProxyConfig` doc). Two states now:
+ *    1. `enabled: false` (opt-out): nothing constructed. This function returns `undefined`; no
+ *       production attachment.
+ *    2. `enabled: true` (#551 default): full production attachment — this function returns a
+ *       real `FixLegResumeDeps`.
+ *  A FIXABLE gate degrades to the pre-#246 needs-human escalation (#246 C1) in state 1, unchanged
+ *  from before this issue — state 2 makes FIXUP dispatch itself live.
  *
- *  Observable guarantee in states 1/2 (#253 review round 2, H4 — narrowed from an overreaching
+ *  Observable guarantee in state 1 (#253 review round 2, H4 — narrowed from an overreaching
  *  "byte-for-byte" claim): no proxy handle, no HTTP listener, no bearer token, no forge_proxy_
  *  journal write, no ProxyForge call, no argv change (`--mcp-config`/widened `--allowedTools`) on
  *  ANY production session. The module graph still loads and this function still runs (returning
@@ -1327,7 +1318,7 @@ export function buildTickFixLegResume(
   now: () => Date,
   log?: (message: string) => void,
 ): FixLegResumeDeps | undefined {
-  if (!cfg.proxy.enabled || cfg.proxy.shadow) return undefined;
+  if (!cfg.proxy.enabled) return undefined;
   return {
     renderFixPrompt,
     mintProxy: createProxyMint({ cfg, forge, state, roundId: 0, phase: "tick", now, ...(log !== undefined ? { log } : {}) }),
@@ -1441,8 +1432,8 @@ async function runTickEngine(
     const forge = overrides.forge ?? new GithubForge(cfg, { log, state });
     // #253: the tick driver's TickDeps.fixLegResume — undefined (no handle/listener/token/journal
     // write/argv change on any production session — see buildTickFixLegResume's own doc for the
-    // exact observable guarantee) unless cfg.proxy is in its production-attach state (enabled:
-    // true, shadow: false).
+    // exact observable guarantee) unless cfg.proxy is in its production-attach state
+    // (proxy.enabled: true, #551 default).
     const fixLegResume = buildTickFixLegResume(cfg, forge, state, renderFixPrompt, systemClock, log);
     const engineReviewRunner =
       cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state, now: systemClock }) : null;
@@ -1645,16 +1636,17 @@ async function runRoundsEngine(
     // (none of round-defaults.ts's stubs supply one today) would still win — see peripheral.ts's
     // RoleRunnerDeps.defaultProxy doc.
     //
-    // #253 review round 2 (H1, PM-narrowed three-state ruling — see buildTickFixLegResume's own
-    // doc for the full rationale): `enabled && !shadow` gates PRODUCTION ATTACHMENT here too — with
-    // `shadow: true` (the default once enabled), NO RoleRunner ever gets a defaultProxy, so no
-    // peripheral session anywhere holds a handle; the shadow guarantee is structural rather than a
-    // per-consumer effect check. Only `enabled: true, shadow: false` (the deliberate go-live flip)
-    // constructs one. `enabled: false` (the default): unchanged, today's behavior.
-    const defaultProxy =
-      cfg.proxy.enabled && !cfg.proxy.shadow
-        ? { mint: createProxyMint({ cfg, forge, state, roundId: 0, phase: "peripheral", now: systemClock, log }) }
-        : undefined;
+    // #551 deleted the three-state model's middle state (see buildTickFixLegResume's own doc for
+    // the full rationale): `cfg.proxy.enabled` alone gates PRODUCTION ATTACHMENT here too. With
+    // `enabled: false` (opt-out), NO RoleRunner ever gets a defaultProxy, so no peripheral session
+    // anywhere holds a handle. `enabled: true` (#551 default) constructs one for every peripheral
+    // role session this RoleRunner instance runs. Review sessions never get one regardless — see
+    // peripheral.ts's own doc: it throws on `proxy` + `reviewCwd`, forcing `proxyOpt = undefined`
+    // in review mode, and both drivers construct their engine-review `RoleRunner`s (this file's
+    // `engineReviewRunner` above; round.ts's own construction site) without `defaultProxy`.
+    const defaultProxy = cfg.proxy.enabled
+      ? { mint: createProxyMint({ cfg, forge, state, roundId: 0, phase: "peripheral", now: systemClock, log }) }
+      : undefined;
     const runner = new RoleRunner({
       cfg,
       ...overrides.roleRunnerDeps,

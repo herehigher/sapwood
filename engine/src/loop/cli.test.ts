@@ -795,51 +795,37 @@ test("checkWebAccessSettingsDenial (Codex sol-high PR #417 review, P1): state.ap
 // PR has already been pushed to needs-human. Same best-effort startup-pass shape as
 // checkWebAccessSettingsDenial above: never blocks, never throws, at most one log + one event. ──
 
-/** #385: the config matrix this announcement is defined over — `lanes.prFixCap` x the three
- *  `proxy` states (#253's model). Only the two DEGRADED rows (cap > 0, no production attachment)
- *  announce; `cap: 0` is a deliberate operator opt-out of the fix loop entirely, and the live row
- *  is the working configuration. */
-const fixLoopMatrix = (prFixCap: number, enabled: boolean, shadow: boolean) => ({
+/** #385, simplified by #551: the config matrix this announcement is defined over —
+ *  `lanes.prFixCap` x the two `proxy` states left after #551 deleted `shadow`. Only the DEGRADED
+ *  row (cap > 0, `enabled: false`) announces; `cap: 0` is a deliberate operator opt-out of the
+ *  fix loop entirely, and `enabled: true` (#551 default) is the working configuration. */
+const fixLoopMatrix = (prFixCap: number, enabled: boolean) => ({
   lanes: { prFixCap },
-  proxy: { enabled, shadow },
+  proxy: { enabled },
 });
 
-test("announceFixLoopUnattached (#385): prFixCap > 0 with the proxy disabled -> one log line + one durable event saying FIXABLE degrades to needs-human", () => {
+test("announceFixLoopUnattached (#385, #551): prFixCap > 0 with the proxy disabled -> one log line + one durable event saying FIXABLE degrades to needs-human", () => {
   const logs: string[] = [];
   const events: Array<[string, unknown]> = [];
-  announceFixLoopUnattached(fixLoopMatrix(4, false, true), { appendEvent: (kind, payload) => events.push([kind, payload]) }, (line) =>
+  announceFixLoopUnattached(fixLoopMatrix(4, false), { appendEvent: (kind, payload) => events.push([kind, payload]) }, (line) =>
     logs.push(line),
   );
   assert.equal(events.length, 1);
   const [kind, payload] = events[0]!;
   assert.equal(kind, "fix-loop-unattached");
-  assert.deepEqual(payload, { prFixCap: 4, proxyEnabled: false, proxyShadow: true, reason: "proxy-disabled" });
+  assert.deepEqual(payload, { prFixCap: 4, proxyEnabled: false, reason: "proxy-disabled" });
   assert.equal(logs.length, 1);
   // The log must name BOTH what degrades and the exact flip that fixes it — the whole point of
   // the issue is that an operator with prFixCap > 0 reasonably expects a live fix loop.
   assert.ok(logs[0]!.includes("needs-human"), "names the degradation");
-  assert.ok(logs[0]!.includes("proxy.enabled: true") && logs[0]!.includes("proxy.shadow: false"), "names the go-live flip");
+  assert.ok(logs[0]!.includes("proxy.enabled: true"), "names the go-live flip");
 });
 
-test("announceFixLoopUnattached (#385): prFixCap > 0 with the proxy in shadow mode -> the same single announcement, reason distinguishing shadow from disabled", () => {
-  const logs: string[] = [];
-  const events: Array<[string, unknown]> = [];
-  announceFixLoopUnattached(fixLoopMatrix(2, true, true), { appendEvent: (kind, payload) => events.push([kind, payload]) }, (line) =>
-    logs.push(line),
-  );
-  assert.equal(events.length, 1);
-  assert.equal(events[0]![0], "fix-loop-unattached");
-  assert.deepEqual(events[0]![1], { prFixCap: 2, proxyEnabled: true, proxyShadow: true, reason: "proxy-shadow" });
-  assert.equal(logs.length, 1);
-  assert.ok(logs[0]!.includes("proxy.shadow: false"), "shadow mode's flip is the single shadow -> false step");
-});
-
-test("announceFixLoopUnattached (#385): the two NON-degraded halves of the matrix are completely silent — a live proxy, and prFixCap: 0 in every proxy state", () => {
+test("announceFixLoopUnattached (#385, #551): the two NON-degraded halves of the matrix are completely silent — proxy.enabled: true, and prFixCap: 0 regardless of proxy.enabled", () => {
   for (const cfg of [
-    fixLoopMatrix(4, true, false), // production-attached: the fix loop an operator configured exists
-    fixLoopMatrix(0, false, true), // cap 0: a deliberate opt-out; #246's fold to needs-human IS the config
-    fixLoopMatrix(0, true, true),
-    fixLoopMatrix(0, true, false),
+    fixLoopMatrix(4, true), // production-attached (#551 default): the fix loop an operator configured exists
+    fixLoopMatrix(0, false), // cap 0: a deliberate opt-out; #246's fold to needs-human IS the config
+    fixLoopMatrix(0, true),
   ]) {
     const logs: string[] = [];
     const events: unknown[] = [];
@@ -853,7 +839,7 @@ test("announceFixLoopUnattached (#385): state.appendEvent throwing never escapes
   const logs: string[] = [];
   assert.doesNotThrow(() => {
     announceFixLoopUnattached(
-      fixLoopMatrix(4, false, true),
+      fixLoopMatrix(4, false),
       {
         appendEvent: () => {
           throw new Error("SQLITE_BUSY: database is locked");
@@ -1838,8 +1824,8 @@ function fakeProxyForgeForCli(): ProxyForge {
   };
 }
 
-test("buildTickFixLegResume (#253): cfg.proxy.enabled: false (the default) -> undefined — fixLegResume stays entirely unset (no handle, no listener, no journal write, no argv change)", () => {
-  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" } });
+test("buildTickFixLegResume (#253, #551): cfg.proxy.enabled: false (explicit opt-out) -> undefined — fixLegResume stays entirely unset (no handle, no listener, no journal write, no argv change)", () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" }, proxy: { enabled: false } });
   const state = new State(":memory:");
   try {
     const forge = fakeProxyForgeForCli() as unknown as IForge;
@@ -1850,27 +1836,30 @@ test("buildTickFixLegResume (#253): cfg.proxy.enabled: false (the default) -> un
   }
 });
 
-test("buildTickFixLegResume (#253 review round 2, H1): cfg.proxy.enabled: true, shadow: true (the DEFAULT once enabled) -> undefined — shadow gates production ATTACHMENT, never a per-consumer effect", () => {
-  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" }, proxy: { enabled: true } });
-  assert.equal(cfg.proxy.shadow, true);
+test("buildTickFixLegResume (#551): cfg.proxy.enabled: true (the DEFAULT — nothing set) -> a real fixLegResume whose mintProxy carries round 0 / phase 'tick' as its fixed audit identity", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" } });
+  assert.equal(cfg.proxy.enabled, true, "#551: proxy.enabled defaults to true with nothing set");
   const state = new State(":memory:");
   try {
     const forge = fakeProxyForgeForCli() as unknown as IForge;
-    const result = buildTickFixLegResume(cfg, forge, state, (i, p) => `fix #${i} for PR #${p}`, realClock);
-    assert.equal(
-      result,
-      undefined,
-      "shadow mode: the tick driver never attaches a fixLegResume, even though the machinery stays mintable directly",
-    );
+    const renderFixPrompt = (issueNumber: number, pr: number): string => `fix #${issueNumber} for PR #${pr}`;
+    const result = buildTickFixLegResume(cfg, forge, state, renderFixPrompt, realClock);
+    assert.ok(result, "expected a real fixLegResume under the new default");
+    const handle = await result.mintProxy({ role: "worker", session: "lane-default-abc" });
+    try {
+      assert.ok(handle.url, "a real handle carries a real URL");
+    } finally {
+      await handle.stop();
+    }
   } finally {
     state.close();
   }
 });
 
-test("buildTickFixLegResume (#253): cfg.proxy.enabled: true, shadow: false (the go-live flip) -> a real fixLegResume whose mintProxy carries round 0 / phase 'tick' as its fixed audit identity", async () => {
+test("buildTickFixLegResume (#253): cfg.proxy.enabled: true -> a real fixLegResume whose mintProxy carries round 0 / phase 'tick' as its fixed audit identity", async () => {
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" },
-    proxy: { enabled: true, shadow: false },
+    proxy: { enabled: true },
   });
   const state = new State(":memory:");
   try {

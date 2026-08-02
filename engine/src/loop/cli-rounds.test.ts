@@ -408,7 +408,7 @@ test("sapwood run (default driver): runEngine reaches runRounds via createDefaul
   }
 });
 
-test("sapwood run (default driver, #253): cfg.proxy.enabled: true, shadow: false (the go-live flip) wires a REAL default forge MCP proxy into the RoleRunner — a real role session actually gets --mcp-config + widened mcp__forge__* allowedTools", async () => {
+test("sapwood run (default driver, #253, #551): cfg.proxy.enabled: true wires a REAL default forge MCP proxy into the RoleRunner — a real role session actually gets --mcp-config + widened mcp__forge__* allowedTools", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-rounds-proxy-"));
   try {
     const argvLog = join(dir, "argv.log");
@@ -423,7 +423,7 @@ test("sapwood run (default driver, #253): cfg.proxy.enabled: true, shadow: false
       logging: { path: "logs/engine.log" },
       roles: { retro: { enabled: false } },
       round: { standby: { enabled: false } },
-      proxy: { enabled: true, shadow: false },
+      proxy: { enabled: true },
     });
 
     let stop = (): void => {};
@@ -465,8 +465,8 @@ test("sapwood run (default driver, #253): cfg.proxy.enabled: true, shadow: false
   }
 });
 
-test("sapwood run (default driver, #253 review round 2, H1): cfg.proxy.enabled: true, shadow: true (the DEFAULT once enabled) -> the RoleRunner NEVER gets a defaultProxy — a real role session's argv carries no --mcp-config, no mcp__forge__* tool name, at all", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-rounds-proxy-shadow-"));
+test("sapwood run (default driver, #551): cfg.proxy.enabled: false (explicit opt-out) -> the RoleRunner NEVER gets a defaultProxy — a real role session's argv carries no --mcp-config, no mcp__forge__* tool name, at all", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-rounds-proxy-disabled-"));
   try {
     const argvLog = join(dir, "argv.log");
     const bin = mkStub(
@@ -480,9 +480,9 @@ test("sapwood run (default driver, #253 review round 2, H1): cfg.proxy.enabled: 
       logging: { path: "logs/engine.log" },
       roles: { retro: { enabled: false } },
       round: { standby: { enabled: false } },
-      proxy: { enabled: true }, // shadow defaults true
+      proxy: { enabled: false },
     });
-    assert.equal(cfg.proxy.shadow, true);
+    assert.equal(cfg.proxy.enabled, false);
 
     let stop = (): void => {};
     const overrides: EngineOverrides = {
@@ -516,7 +516,7 @@ test("sapwood run (default driver, #253 review round 2, H1): cfg.proxy.enabled: 
     assert.ok(sentinels.length > 0, "expected at least one real role session to have run to completion");
 
     const argvText = readFileSync(argvLog, "utf8");
-    assert.ok(!argvText.includes("--mcp-config"), "shadow mode: no session anywhere gets a proxy attached");
+    assert.ok(!argvText.includes("--mcp-config"), "proxy.enabled: false: no session anywhere gets a proxy attached");
     // #444: bind to the AUTHORITATIVE signal — the value of the tool-list flags themselves —
     // rather than scanning the whole argv blob. The blob also carries the rendered PROMPT, and
     // po.md now names `mcp__forge__search_issues` in prose (telling the align session to search
@@ -526,7 +526,7 @@ test("sapwood run (default driver, #253 review round 2, H1): cfg.proxy.enabled: 
     const toolListValues = args.filter((_arg, i) => args[i - 1] === "--allowedTools" || args[i - 1] === "--disallowedTools");
     assert.ok(toolListValues.length > 0, "expected the spawned session(s) to carry a tool-list flag at all");
     for (const value of toolListValues) {
-      assert.ok(!value.includes("mcp__forge__"), "shadow mode: allowedTools is never widened");
+      assert.ok(!value.includes("mcp__forge__"), "proxy.enabled: false: allowedTools is never widened");
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

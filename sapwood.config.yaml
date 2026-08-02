@@ -503,13 +503,14 @@ doctrine:
 #                              # "Exceeded USD budget" and keeps the engine parked.
 
 # #234/#244: engine-hosted, read-only forge MCP proxy for role sessions and worker legs
-# (supersedes #217). #253: engine startup now reads BOTH flags as a three-state model —
-# enabled: false is fully inert; enabled: true, shadow: true (default once enabled) makes the
-# proxy constructible/mintable for a scoped shadow bring-up run, but ATTACHES it to zero
-# production sessions (no live fix-loop worker leg, no peripheral role session ever gets a
-# handle — the shadow guarantee is structural, not a per-call effect check); enabled: true,
-# shadow: false is the deliberate go-live flip that attaches a real handle everywhere. Ordinary
-# (non-fix-loop) worker dispatch remains unwired regardless of shadow (out of #253's scope).
+# (supersedes #217). #253/#551: engine startup reads `enabled` as a two-state model (#551
+# deleted the earlier `shadow` middle state, which never had distinct runtime semantics) —
+# enabled: false is fully inert (nothing constructed, no production session ever gets a
+# handle); enabled: true (the #551 default) attaches a real handle everywhere: the live
+# fix-loop worker leg AND every peripheral role session. Ordinary (non-fix-loop) worker
+# dispatch remains unwired regardless of enabled (out of #253's/#551's scope). Review
+# sessions never get a handle regardless of enabled (peripheral.ts refuses proxy+reviewCwd
+# together and never attaches the RoleRunner-wide default in review mode).
 # Credentials never leave the engine process: a session gets a role-scoped subset of a fixed tool
 # set over a bearer-token-authenticated local HTTP server, minted per session, revoked at
 # teardown — issue-oriented tools (issue_details/issue_comments/issue_relations/search_issues,
@@ -517,8 +518,7 @@ doctrine:
 # #244 — the fix-loop worker leg's PR-review evidence channel) for the `worker` role. No gate/
 # verdict logic lives in any tool; that stays in reviewer.ts/merge-driver.ts.
 # proxy:
-#   enabled: false
-#   shadow: true
+#   enabled: true  # #551 default; set to false to opt out (fully inert)
 #   caps:
 #     maxIssuesPerCall: 10        # issue_details: over-cap requests are REJECTED, never truncated
 #     defaultCommentsPerIssue: 20 # issue_details' default view: most-recent-N comments (fail
