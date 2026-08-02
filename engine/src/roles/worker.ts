@@ -89,12 +89,13 @@ export function parseCostUsdOrNull(jsonl: string): number | null {
   return cost;
 }
 
-/** #304 / #410: one suspicious egress-shaped call observed in a completed session's stream-json
- *  transcript — either a lexically suspicious Bash executable (a worker leg) or a structured
+/** #304 / #410 / #534: one suspicious egress-shaped call observed in a completed session's
+ *  stream-json transcript — a lexically suspicious Bash executable (a worker leg), a structured
  *  WebFetch/WebSearch tool_use block (a peripheral role session granted the #410 web-access
- *  tools). `executable` names the Bash executable OR the literal tool name (`"WebFetch"`/
- *  `"WebSearch"`); `snippet` is evidence, not a command/query to replay, and is capped so a
- *  single tool call cannot inflate the events ledger without bound. */
+ *  tools), or a structured Agent/Task tool_use block (the #534 subagent-spawn channel).
+ *  `executable` names the Bash executable OR the literal tool name (`"WebFetch"`/`"WebSearch"`/
+ *  `"Agent"`/`"Task"`); `snippet` is evidence, not a command/query/description to replay, and is
+ *  capped so a single tool call cannot inflate the events ledger without bound. */
 export interface EgressSuspect {
   executable: string;
   snippet: string;
@@ -247,9 +248,9 @@ export interface EgressSuspectScan {
   truncated: boolean;
 }
 
-/** #304 / #410: scans `tool_use` blocks from stream-json and returns deduplicated egress hits —
- *  the ONE scanner for both egress-shaped signals this codebase has (#410's decision record:
- *  "the audit reuses the existing scanner... no second scanner is introduced"):
+/** #304 / #410 / #534: scans `tool_use` blocks from stream-json and returns deduplicated egress
+ *  hits — the ONE scanner for all three egress-shaped signal families this codebase has (#410's
+ *  decision record: "the audit reuses the existing scanner... no second scanner is introduced"):
  *
  *  - **Bash** (#304, worker legs): only the executable position is considered (after leading
  *    assignments plus ordinary `env`/`sudo` prefixes) against the CALLER-SUPPLIED
@@ -275,11 +276,27 @@ export interface EgressSuspectScan {
  *    tool the leg was never granted is exactly what a post-hoc tripwire should surface, not
  *    suppress.
  *
+ *  - **Agent/Task** (#534): the SAME unconditional stance as WebFetch/WebSearch, for the same
+ *    reason and by the same PM ruling — a peripheral role session's `ROLE_DISALLOWED_TOOLS` now
+ *    name-denies subagent spawn (#534), so an `Agent`/`Task` `tool_use` block appearing in ANY
+ *    leg's jsonl (worker leg included — a worker leg is not denied these names, so a hit here is
+ *    a legitimate spawn ATTEMPT, not an attempted circumvention. This scanner reads only the
+ *    assistant `tool_use` block, never the paired `tool_result`, so — same as every other family
+ *    above — a hit is never proof the spawn actually went through, only that it was requested;
+ *    the tripwire still journals it, same as a Bash hit journals legitimate worker activity that
+ *    happens to match the configured suspect list) is exactly the post-hoc-visible signal this
+ *    scanner exists to surface. `executable`
+ *    carries the literal tool name (`Agent` or `Task`); `snippet` is the spawn's `description`
+ *    field when it is a NON-EMPTY string (the short, human-readable summary a live #534
+ *    transcript showed the model supplies, e.g. `"Check if #485 already shipped"`), falling back
+ *    to `prompt` when `description` is empty or absent — never neither, so a hit is never
+ *    recorded with an empty snippet when the block carries usable text.
+ *
  *  Same tolerance as the sibling parsers: malformed/partial lines and malformed blocks are
  *  skipped silently. Collection stops at the engine-owned per-leg cap, bounding both evidence and
- *  its dedup set (shared across both signal kinds — one session emitting a mix of Bash suspects
- *  and web calls is still bounded by ONE cap, not one each). This is a post-hoc tripwire, never a
- *  deny decision. */
+ *  its dedup set (shared across all three signal families — Bash, WebFetch/WebSearch, and
+ *  Agent/Task — one session emitting a mix of any of them is still bounded by ONE cap, not one
+ *  each). This is a post-hoc tripwire, never a deny decision. */
 export function scanEgressSuspects(jsonl: string, suspectCommands: readonly string[]): EgressSuspectScan {
   const suspects = new Set(suspectCommands);
   const hits: EgressSuspect[] = [];
@@ -322,6 +339,14 @@ export function scanEgressSuspects(jsonl: string, suspectCommands: readonly stri
       } else if (b.name === "WebFetch" || b.name === "WebSearch") {
         const detail = (input as Record<string, unknown>)[b.name === "WebFetch" ? "url" : "query"];
         if (typeof detail !== "string") continue;
+        if (addHit(b.name, detail.slice(0, EGRESS_SNIPPET_MAX_CHARS))) return { hits, truncated: true };
+      } else if (b.name === "Agent" || b.name === "Task") {
+        // #534: same unconditional stance as WebFetch/WebSearch above — see this function's own
+        // doc. Prefer `description` (the short human-readable summary) when non-empty, else
+        // fall back to `prompt`.
+        const rec = input as Record<string, unknown>;
+        const detail = (typeof rec.description === "string" && rec.description) || (typeof rec.prompt === "string" && rec.prompt) || null;
+        if (detail === null) continue;
         if (addHit(b.name, detail.slice(0, EGRESS_SNIPPET_MAX_CHARS))) return { hits, truncated: true };
       }
     }

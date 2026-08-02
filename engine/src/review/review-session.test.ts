@@ -262,7 +262,11 @@ test("end-to-end: the review session's tool profile is Read/Grep/Glob only, no B
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     const at = (flag: string): string => seen[seen.indexOf(flag) + 1] ?? "";
     assert.equal(at("--allowedTools"), "Read,Grep,Glob");
-    assert.equal(at("--disallowedTools"), "Write,Edit,MultiEdit,NotebookEdit,Bash");
+    assert.equal(
+      at("--disallowedTools"),
+      "Write,Edit,MultiEdit,NotebookEdit,Bash,Agent,Task",
+      "#534: subagent spawn denied by name for the gate② reviewer too — declared-contract argument, not cost (its --max-budget-usd is already a hard ceiling)",
+    );
     // Codex sol-high PR #300 review, P1: a review session DOES carry a --mcp-config — the
     // explicit EMPTY one (paired with --strict-mcp-config), never a forge proxy's. "no proxy"
     // and "no --mcp-config at all" are two different claims; only the former holds here.

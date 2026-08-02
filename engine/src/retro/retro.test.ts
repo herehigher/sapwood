@@ -162,6 +162,23 @@ test("RETRO_DISALLOWED_TOOLS: explicitly denies merge/review/ready, issue mutati
   // #111 PR-B: with zero gh allows left, the gh denies (this one included) are regression
   // trip-wires — kept byte-identical, same stance as peripheral.ts's ROLE_DISALLOWED_TOOLS.
   assert.ok(RETRO_DISALLOWED_TOOLS.includes("Bash(gh pr create *--body-file*)"));
+  assert.equal(
+    RETRO_DISALLOWED_TOOLS,
+    "NotebookEdit,Bash(git push*main*),Bash(git push*master*)," +
+      "Bash(gh pr merge*),Bash(gh pr review*),Bash(gh pr ready*)," +
+      "Bash(gh pr edit*),Bash(gh issue edit*),Bash(gh issue comment*),Bash(gh api*)," +
+      "Bash(gh pr create *--body-file*),Agent,Task",
+    "pinned regression string — a future edit here must be deliberate, not silent",
+  );
+  // #534: RETRO_DISALLOWED_TOOLS is an INDEPENDENT literal (not `= ROLE_DISALLOWED_TOOLS`, unlike
+  // every other role's deny list), so peripheral.ts's Agent/Task addition does NOT reach retro
+  // automatically — this constant needed its own, explicit append. Retro is the one peripheral
+  // role holding a real Write/Edit/MultiEdit + Bash(git commit/push…) grant, so an unblocked
+  // retro fan-out would be a fan-out of write-capable children, not read-only ones.
+  for (const spawnTool of ["Agent", "Task"]) {
+    assert.ok(RETRO_DISALLOWED_TOOLS.split(",").includes(spawnTool), `${spawnTool} explicitly denied — no subagent spawn`);
+  }
+  assert.ok(!RETRO_DISALLOWED_TOOLS.split(",").includes("Workflow"), "#534: no such tool in the probed CLI surface — not denied");
 });
 
 test("createRetroStub: every dispatched session carries RETRO_ALLOWED_TOOLS/RETRO_DISALLOWED_TOOLS — never the base issues-only scope", async () => {

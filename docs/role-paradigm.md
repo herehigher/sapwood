@@ -142,9 +142,13 @@ role's writes UP this ladder over adding a pattern-level deny.
    modes and architect widen this further still, to also include `WebSearch`/`WebFetch` under the
    default config (see their own Write-scope rows below for the exact grant) — never `Write`,
    `Edit`, or `MultiEdit` either way. This is paired with the hard veto
-   `ROLE_DISALLOWED_TOOLS = "Write,Edit,MultiEdit,NotebookEdit,Bash"`
+   `ROLE_DISALLOWED_TOOLS = "Write,Edit,MultiEdit,NotebookEdit,Bash,Agent,Task"`
    (`engine/src/roles/peripheral.ts::ROLE_DISALLOWED_TOOLS`, which wins over any allow from any source, including a
-   target repo's own checked-out settings): no `Bash` grant at all, so for them a whole bypass
+   target repo's own checked-out settings — except under a target's managed-settings
+   `allowManagedPermissionRulesOnly: true`, where the CLI's own contract says CLI-argument
+   permission rules (`--disallowedTools` is one) are ignored entirely, discarding this whole
+   list, not just the `Agent`/`Task` deny below; whether the engine should detect and refuse that
+   mode is open, see issue #554): no `Bash` grant at all, so for them a whole bypass
    class (short-flag aliases, quoting escapes) is structurally moot rather than pattern-denied
    (#110; see [`security.md`](security.md#issues-only-role-sessions-carry-no-shell-110)). This is
    the strongest tier for writes, for these five, because there is nothing to intercept — the
@@ -152,7 +156,19 @@ role's writes UP this ladder over adding a pattern-level deny.
    by the guard hook's worktree confinement (`checkReadContainment` in `guard.ts`) — enforced
    under the default `guard.mode: hard` (`engine/src/config/config.ts::Guard`), degraded to observe-only (logged, never
    denied) under an operator-configured `guard.mode: soft` (`applyGuardMode`, `engine/src/guard/guard-hook.ts::applyGuardMode`)
-   — not by this ladder. **`retro`, the sixth role, does NOT belong in this tier**:
+   — not by this ladder. **#534:** `ROLE_DISALLOWED_TOOLS` also name-denies subagent spawn —
+   `Agent`/`Task` — for every session wired through this matrix, including the hardcoded
+   `claude`-runner review profile (`RoleRunner.run()`'s `reviewMode` branch hardcodes
+   `ROLE_ALLOWED_TOOLS`/`ROLE_DISALLOWED_TOOLS` directly, never a caller-supplied override — see
+   the "Gate② reviewer kinds, including engine-agent" section above). A spawned child inherits
+   its parent's `--allowedTools`/`--disallowedTools` — ordinary Claude Code subagent behavior, not
+   anything this engine configures. The #534 incident evidenced exactly that leg and no more: the
+   three subagents a live `plan-reviewer` session spawned reached no shell either, because the
+   blanket `Bash` deny came with them. Whether the guard hook is
+   equally transitive — and therefore whether read containment, which only the hook enforces and
+   only under `guard.mode: hard`, reaches a child — has never been probed: the deny-list
+   observation above evidences the `--allowedTools`/`--disallowedTools` leg only, and must not be
+   read as covering the guard hook too. **`retro`, the sixth role, does NOT belong in this tier**:
    `RETRO_ALLOWED_TOOLS` (`engine/src/retro/retro.ts::RETRO_ALLOWED_TOOLS`) grants a real `Write`/`Edit`/`MultiEdit`
    channel plus `Bash` scoped to eight specific `git` subcommands including `commit` and `push`
    (`branch`/`checkout`/`add`/`commit`/`push`/`diff`/`status`/`log`) —
@@ -164,7 +180,11 @@ role's writes UP this ladder over adding a pattern-level deny.
    `Write`/`Edit`/`MultiEdit` or those `git` subcommands — so the write
    capability genuinely exists here, unlike the five roles above. Its containment is a shape this
    ladder does not cleanly name; see its own per-role section below (`### retro (retro)`) for what
-   actually holds it. **The plan-reviewer's freshness re-confirm session (#214, a variant pass
+   actually holds it. **#534:** the subagent-spawn deny above is `ROLE_DISALLOWED_TOOLS`-specific
+   and does NOT reach retro automatically — `RETRO_DISALLOWED_TOOLS` is an independent literal,
+   not derived from the shared constant (unlike every other role's deny list in this doc), so its
+   own `Agent`/`Task` deny lives in `RETRO_DISALLOWED_TOOLS` itself, appended there directly
+   rather than inherited. **The plan-reviewer's freshness re-confirm session (#214, a variant pass
    within `plan_review`, not a whole new role) carries `CONFIRM_ALLOWED_TOOLS =
    ROLE_ALLOWED_TOOLS`** (`engine/src/roles/peripheral.ts::CONFIRM_ALLOWED_TOOLS`) — byte-identical to the base grant
    since #235, so it is no longer a narrower exception; it stays tier 1 for WRITES on the same

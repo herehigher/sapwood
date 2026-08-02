@@ -97,12 +97,21 @@ export const RETRO_ALLOWED_TOOLS =
  *  #235 PR-B: `NotebookEdit` added as the same cross-source veto every issues-only role's deny
  *  list now carries (`--disallowedTools` overrides ANY source, including a target repo's own
  *  checked-out `.claude/settings.json`) — retro never needed notebook editing, so closing that
- *  channel explicitly costs nothing and matches the rest of the matrix. */
+ *  channel explicitly costs nothing and matches the rest of the matrix.
+ *
+ *  #534 (PM ruling + fable architectural review, 2026-08-02): `Agent,Task` appended — this
+ *  constant is NOT derived from peripheral.ts's ROLE_DISALLOWED_TOOLS (every other divergent-
+ *  looking role deny — PLAN_DRAFTER/CONFIRM/PO/HARVEST — is `= ROLE_DISALLOWED_TOOLS`; retro is
+ *  the one exception), so adding the spawn deny THERE alone would have left retro free to spawn
+ *  subagents while documentation claimed the boundary was universal. That gap matters more here
+ *  than anywhere else in the matrix: retro is the ONE peripheral role holding a REAL `Write`/
+ *  `Edit`/`MultiEdit` + `Bash(git commit/push …)` grant (RETRO_ALLOWED_TOOLS above), so an
+ *  unblocked retro fan-out would be a fan-out of WRITE-CAPABLE children, not read-only ones. */
 export const RETRO_DISALLOWED_TOOLS =
   "NotebookEdit,Bash(git push*main*),Bash(git push*master*)," +
   "Bash(gh pr merge*),Bash(gh pr review*),Bash(gh pr ready*)," +
   "Bash(gh pr edit*),Bash(gh issue edit*),Bash(gh issue comment*),Bash(gh api*)," +
-  "Bash(gh pr create *--body-file*)";
+  "Bash(gh pr create *--body-file*),Agent,Task";
 
 // ── #111 PR-B: the PR-proposal scratch file — retro's session→engine return channel ─────────
 

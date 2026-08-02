@@ -100,12 +100,39 @@ import {
  *  Read-only git (`git log` etc.) deliberately stays OUT: the blanket Bash deny already covers
  *  it, and the issue's own scope explicitly excludes adding it as a distinct grant.
  *
+ *  #534 (PM ruling + fable architectural review, 2026-08-02): `Agent`/`Task` denied by name —
+ *  a live plan-reviewer session, unable to get a shell, spawned three subagents attempting to
+ *  get one indirectly. The shell/write leg is evidenced and contained: the children inherit this
+ *  SAME `--disallowedTools` deny list, so they reached no shell either, and the fan-out itself was
+ *  an undeclared cost/concurrency channel, not a shell/write escalation. The READ-containment leg
+ *  is a separate question this incident does NOT evidence either way: a spawned child retains
+ *  `Read`/`Grep`/`Glob`, and that channel is contained only by the guard hook's
+ *  `checkReadContainment` (`guard.ts`, #235 PR-A) — whether that hook is equally transitive to a
+ *  child process has never been probed (see `docs/role-paradigm.md`'s tier-1 write-scope row for
+ *  the same caveat), so "not a security escalation" is scoped to the shell/write channel here,
+ *  never stated of the incident as a whole. Both names' REGISTRY
+ *  presence was confirmed by direct probe run WITH the deny in place: both were absent from the
+ *  usable tool surface, but the error text itself ("Agent exists but is not enabled in this
+ *  context") establishes the name is registered; the pre-deny #534 incident, where a live session
+ *  really did spawn three subagents, is the other leg of evidence — neither claims either name is
+ *  live in the role-shaped tool surface. `Workflow` was considered and DROPPED: no such tool
+ *  exists in that probed surface, and denying-and-documenting an unverifiable name is exactly the
+ *  defect class this round exists to cure. This reaches the hardcoded review profile too
+ *  (reviewMode below hardcodes `ROLE_ALLOWED_TOOLS`/`ROLE_DISALLOWED_TOOLS` directly, never a
+ *  caller override) — the gate② reviewer's deny rests on the DECLARED-CONTRACT argument, not a
+ *  cost argument: that session already carries a hard CLI `--max-budget-usd` ceiling
+ *  (RoleSessionOpts.maxBudgetUsd), so the deny closes an undeclared capability, not an unbounded
+ *  cost (whether a child's spend counts against that same ceiling is unprobed CLI accounting; the
+ *  argument does not rest on it). Escape hatch, if large-diff review quality ever
+ *  measurably suffers from the loss of parallel sub-reads: split a `REVIEW_DISALLOWED_TOOLS`
+ *  constant at the `reviewMode` branch in run() below — a one-constant change, not a redesign.
+ *
  *  Kept as regression trip-wires (peripheral.test.ts pins these exact strings, and the derived
  *  per-role pairs below): a future PR that re-widens either list — an added allow entry, a
  *  removed deny entry — lands inside a failing test rather than silently reopening either the
  *  read-containment boundary or the write/exec boundary this pair enforces. */
 export const ROLE_ALLOWED_TOOLS = "Read,Grep,Glob";
-export const ROLE_DISALLOWED_TOOLS = "Write,Edit,MultiEdit,NotebookEdit,Bash";
+export const ROLE_DISALLOWED_TOOLS = "Write,Edit,MultiEdit,NotebookEdit,Bash,Agent,Task";
 
 /** The plan-DRAFTER's deny list (#77 Amendment 2's plan-author ≠ plan-approver chain): kept as
  *  its OWN named export — the same regression-trip-wire stance ROLE_DISALLOWED_TOOLS itself
@@ -1027,13 +1054,13 @@ export class RoleRunner {
       }
 
       const jsonl = this.readJsonl(jsonlPath);
-      // #410: audit by REUSING worker.ts's existing egress scanner (no second scanner) — reads
-      // this SAME jsonl for WebFetch/WebSearch tool_use blocks and emits the identical
-      // `egress-suspect` ledger event worker.ts's own Bash tripwire uses. Codex sol-high PR #417
-      // review, P2-b (corrects an earlier, inaccurate version of this comment): this is
-      // content-driven, not role-gated — scanEgressSuspects hits on ANY WebFetch/WebSearch
-      // tool_use block in this jsonl regardless of whether opts.allowedTools actually granted
-      // the tool (see scanEgressSuspects' own doc, worker.ts). For an UNGRANTED role
+      // #410 / #534: audit by REUSING worker.ts's existing egress scanner (no second scanner) —
+      // reads this SAME jsonl for WebFetch/WebSearch AND Agent/Task tool_use blocks and emits the
+      // identical `egress-suspect` ledger event worker.ts's own Bash tripwire uses. Codex sol-high
+      // PR #417 review, P2-b (corrects an earlier, inaccurate version of this comment): this is
+      // content-driven, not role-gated — scanEgressSuspects hits on ANY WebFetch/WebSearch or
+      // Agent/Task tool_use block in this jsonl regardless of whether opts.allowedTools actually
+      // granted the tool (see scanEgressSuspects' own doc, worker.ts). For an UNGRANTED role
       // (plan-reviewer, etc.) a hit here would mean the session attempted a tool call the CLI's
       // permission layer then denied — evidence worth surfacing, not a case this scan silently
       // drops. Contained: best-effort, never throws, never affects the session's own outcome.

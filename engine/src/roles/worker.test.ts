@@ -249,7 +249,7 @@ test("scanEgressSuspects (#410): Bash and WebFetch/WebSearch hits share ONE dedu
   assert.equal(truncated, false);
 });
 
-test("scanEgressSuspects (#410): a non-string url/query, or a name other than WebFetch/WebSearch/Bash, is a non-hit — never a throw", () => {
+test("scanEgressSuspects (#410): a non-string url/query, or a name other than WebFetch/WebSearch/Bash/Agent/Task, is a non-hit — never a throw", () => {
   const jsonl = [
     JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "WebFetch", input: { url: 42 } }] } }),
     JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "WebSearch", input: {} }] } }),
@@ -274,6 +274,83 @@ test("scanEgressSuspects (#410): the per-session cap is shared across a long run
   const scan = scanEgressSuspects(jsonl, []);
   assert.equal(scan.hits.length, MAX_EGRESS_SUSPECTS_PER_LEG);
   assert.equal(scan.truncated, true);
+});
+
+// ── #534: the SAME scanner also recognizes Agent/Task tool_use blocks — unconditionally, the
+// SAME stance and SAME rationale as the WebFetch/WebSearch extension immediately above: a
+// peripheral role session's ROLE_DISALLOWED_TOOLS now name-denies subagent spawn, so an
+// attempted (or, for an ungated leg, a genuine) spawn is exactly the post-hoc-visible signal
+// this scanner exists to surface. No second scanner: this is scanEgressSuspects itself,
+// extended again. ──────────────────────────────────────────────────────────────────────────
+
+const agentToolUseLine = (name: "Agent" | "Task", input: Record<string, unknown>): string =>
+  JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name, input }] } });
+
+test("scanEgressSuspects (#534): Agent/Task tool_use blocks hit UNCONDITIONALLY — an EMPTY suspectCommands list (Bash detection fully disabled) still catches both, snippet prefers `description`", () => {
+  const jsonl = [
+    agentToolUseLine("Agent", { description: "Check if #485 already shipped", prompt: "run `git log --oneline -5 -- engine/...`" }),
+    agentToolUseLine("Task", { description: "Run git log queries on conductor.ts", prompt: "..." }),
+  ].join("\n");
+  assert.deepEqual(scanEgressSuspects(jsonl, []), {
+    hits: [
+      { executable: "Agent", snippet: "Check if #485 already shipped" },
+      { executable: "Task", snippet: "Run git log queries on conductor.ts" },
+    ],
+    truncated: false,
+  });
+});
+
+test("scanEgressSuspects (#534): a missing `description` falls back to `prompt`; a missing/non-string BOTH is a non-hit, never a throw", () => {
+  const jsonl = [
+    agentToolUseLine("Agent", { prompt: "no description field here" }),
+    agentToolUseLine("Task", { description: 42 }),
+    agentToolUseLine("Agent", {}),
+  ].join("\n");
+  assert.deepEqual(scanEgressSuspects(jsonl, []), {
+    hits: [{ executable: "Agent", snippet: "no description field here" }],
+    truncated: false,
+  });
+});
+
+test("scanEgressSuspects (#534): Bash, WebFetch/WebSearch, and Agent/Task hits share ONE dedup set (a duplicate crossing signal families is caught) and ONE per-session cap (reached only by counting hits from all three families together)", () => {
+  // Cross-family duplicate: a Bash command that literally invokes a program named "Task"
+  // produces the exact SAME (executable, snippet) key as a genuine Agent/Task spawn whose
+  // description matches that fragment text verbatim. A dedup structure partitioned by signal
+  // family (one Set per family) would never catch this — each family's Set only ever sees
+  // entries from its own branch — so this pair must collapse to ONE hit under a truly shared Set.
+  const crossFamilyText = "Task --status";
+  const bashSuspects = Array.from({ length: 7 }, (_, i) => `curl${i}`);
+  const jsonl = [
+    bashToolUseLine(crossFamilyText),
+    agentToolUseLine("Task", { description: crossFamilyText }),
+    // 7 more unique hits per family — 22 unique hits total (1 cross-family pair + 7 + 7 + 7),
+    // well under MAX_EGRESS_SUSPECTS_PER_LEG (20) for any ONE family alone, but over it in
+    // aggregate. A three-independent-caps implementation (one cap per family) would let all 22
+    // through untruncated; the real shared cap must stop at 20.
+    ...bashSuspects.map((name, i) => bashToolUseLine(`${name} https://example.invalid/bash-${i}`)),
+    ...Array.from({ length: 7 }, (_, i) => webToolUseLine(i % 2 === 0 ? "WebFetch" : "WebSearch", `https://example.invalid/web-${i}`)),
+    ...Array.from({ length: 7 }, (_, i) => agentToolUseLine(i % 2 === 0 ? "Agent" : "Task", { description: `spawn-${i}` })),
+  ].join("\n");
+  const { hits, truncated } = scanEgressSuspects(jsonl, ["Task", ...bashSuspects]);
+  assert.equal(truncated, true);
+  assert.equal(hits.length, MAX_EGRESS_SUSPECTS_PER_LEG);
+  assert.equal(hits.filter((h) => h.executable === "Task" && h.snippet === crossFamilyText).length, 1);
+});
+
+test("scanEgressSuspects (#534): Agent/Task description snippets are capped at 200 characters, same bound as a Bash/WebFetch snippet", () => {
+  const longDescription = "x".repeat(240);
+  const { hits } = scanEgressSuspects(agentToolUseLine("Agent", { description: longDescription }), []);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.snippet.length, 200);
+  assert.equal(hits[0]?.snippet, longDescription.slice(0, 200));
+});
+
+test("scanEgressSuspects (#534 fix): an EMPTY `description` with a usable `prompt` falls back to `prompt` — an empty string is a string, not absent", () => {
+  const jsonl = agentToolUseLine("Agent", { description: "", prompt: "spawn a subagent to check CI" });
+  assert.deepEqual(scanEgressSuspects(jsonl, []), {
+    hits: [{ executable: "Agent", snippet: "spawn a subagent to check CI" }],
+    truncated: false,
+  });
 });
 
 // ── #110 PR0: parseResultText — the read side for a role session's structured final-message
