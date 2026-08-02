@@ -260,6 +260,29 @@ test("#535 pin: which roles hold a real WRITE grant matches ROLE_ALLOWED_TOOLS/R
         `real for this subcommand. docs/role-paradigm.md's tier-1/tier-2 membership needs updating.`,
     );
   }
+
+  // #536 gate② round-4 F3: the two claims above are presence-only. docs/role-paradigm.md's own
+  // retro row goes further — "zero `gh` entries of any kind" in RETRO_ALLOWED_TOOLS, and "exactly
+  // these eight" git subcommands, not "at least these eight". Neither is pinned above: a ninth
+  // `Bash(git ...)` grant, or a `Bash(gh ...)` grant re-added to the allow-list, leaves every
+  // assertion above green while falsifying the doc. The `gh` case also reopens a path around the
+  // tier-3 `openProposalPR` choke point that the doc leans on.
+  for (const tool of retroGranted) {
+    assert.ok(
+      !tool.startsWith("Bash(gh "),
+      `retro.ts's RETRO_ALLOWED_TOOLS now includes ${tool} — a \`gh\` verb reached the allow-list, ` +
+        `falsifying docs/role-paradigm.md's "zero \`gh\` entries of any kind" claim and opening a ` +
+        `path around the tier-3 openProposalPR choke point. docs/role-paradigm.md needs updating.`,
+    );
+  }
+  const retroGitGrantTokens = [...retroGranted].filter((t) => t.startsWith("Bash(git "));
+  assert.strictEqual(
+    retroGitGrantTokens.length,
+    RETRO_GIT_SUBCOMMANDS.length,
+    `retro.ts's RETRO_ALLOWED_TOOLS grants ${retroGitGrantTokens.length} \`git\` subcommand(s) ` +
+      `(${retroGitGrantTokens.join(", ")}), not the eight docs/role-paradigm.md describes as ` +
+      `"exactly these eight" — a subcommand was added or removed. docs/role-paradigm.md needs updating.`,
+  );
 });
 
 test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access denial while its role holds a non-empty PROXY_ROLE_TOOL_MATRIX grant", () => {
