@@ -70,7 +70,11 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // recently-updated issues OUTSIDE the pool, issue_details the hits before judging) plus a
   // doc-drift rule (a locked decision surfacing only in an issue, never the architecture chapter,
   // is doc drift, never authoritative).
-  "architect.md": "40bf054e9b44662ec237eab148c1e125c13aa3d2e31a632111f7f7d03f15ed60",
+  // gate② #557 (finding 9): "search_issues returns a title and labels only, never body text"
+  // was false — the tool returns number/title/state/labels/updatedAt (IssueSearchResult), and
+  // "only" denied fields the "open or recently-updated" ask right above depends on. Named the
+  // real field set at both mentions (the capability paragraph and the Cross-issue search step).
+  "architect.md": "ffa1509e3a18be53dc87e9a53cc3c62d519b503b75ecfaa05799e9a5727d98d7",
   // #457 (F36): intentional edits — execution-class ACs are plan noise (CI already enforces
   // ci.requiredChecks unconditionally): plan-reviewer flags-and-strips them, the confirm pass
   // invalidates legacy plans carrying them, drafter/decompose never author them.
@@ -88,7 +92,11 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   "plan-drafter.md": "b438b2a3cffce955203db79b4fd40623474a91182ad0fa593026c46a3a6c5819",
   // #533: same grant-removal fix as plan-reviewer.md above — targets arrive as bare #N, comments
   // are round-stats boilerplate, and the prompt already forbids expanding targets.
-  "harvest.md": "f0b334d9fba4b89617061adef41a08f540a0444fab8ac5eb15efdbdf67d98381",
+  // gate② #557 (finding 3): the flat "no tool of yours can post a comment or read from GitHub
+  // either — the round artifact substituted above is everything you have" dropped the worktree
+  // checkout clause the file's own line ~29 (and the sibling plan-drafter/plan-reviewer prompts)
+  // already grant — restored to match.
+  "harvest.md": "1cfb22b1dd4e5e972623af4e724007e6e66b7b4c9410073a87d0d4646c55c743",
   // #453 (design #402 R5): intentional edit — the digest's new finding-class tendency table is
   // pointed at, with the design-source rule and the stated blind spot. The FIRST deliberate
   // change to this file since #235 pinned it as "already code-aware, do not touch"; that ruling
@@ -104,7 +112,11 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // (number, title, labels, FULL body) instead of a title-only line, under the SAME existing cap
   // (roles.po.backlogDigestMaxChars) — no new cap, no new renderer. The conditional
   // "use one to check a candidate's full body" ask (measured at zero calls) is gone entirely.
-  "po-pool.md": "c1bee9b99639bf210172c7655443c9517be79704b442aa99a6719337f121b0b1",
+  // gate② #557 (finding 6): the flat "every candidate below already carries its full issue
+  // body" / "everything you need to decide is already here" claims were unconditional over code
+  // that truncates whole records past the cap with no lookup fallback — now scoped to what's
+  // actually rendered, and the session is told what the omission marker means.
+  "po-pool.md": "2f1f831c4323a390f1318ed7c68d54c5ffe38ccc5acfb8b138b2f5f01748f4d1",
   "po-decompose.md": "3289b0f37585b84fdce67319f9ae4b2e82c8873b13b2a292adef25b1bca79ae2",
 };
 
@@ -661,13 +673,29 @@ test("#533 reverse-direction, THE TRAP: po.md serves two matrix rows with OPPOSI
   assert.ok(triageStart > alignStart, "sanity: triage-mode section anchor found, after align's");
   assert.ok(sharedSectionsStart > triageStart, "sanity: the next shared (mode-agnostic) section anchor found, after triage's");
 
+  // The shared preamble (po.md:10-11, "## You have no GitHub write access at all") is NOT
+  // mode-gated — po.md is one file substituted whole, so this preamble renders to a po-triage
+  // session exactly as much as a po-align one. It already mentions `mcp__forge__search_issues`
+  // (naming the tool po-align legitimately holds), so the guard against a real trap lives HERE,
+  // not just in the triage-mode section below: the mention must stay scoped to align mode's dedup
+  // step ("for align mode's dedup step") rather than reading as an unscoped grant every mode could
+  // act on. This is the assertion that catches mutation (ii) — deleting the scoping clause so the
+  // preamble reads as "call it whenever you need it" — which a bare file-wide
+  // no-mcp__forge__-mention check (like the triage-section one below) cannot catch, because the
+  // mention itself is legitimate; only its SCOPE can drift.
+  const sharedPreamble = po.slice(0, alignStart);
+  assert.ok(
+    sharedPreamble.includes("mcp__forge__search_issues") && sharedPreamble.includes("for align mode's dedup step"),
+    "po.md's shared preamble must scope its mcp__forge__search_issues mention to align mode's dedup step — this preamble renders to po-triage sessions too, so an unscoped mention would read as a grant a triage session (which holds none) could act on",
+  );
+
   // The align-mode section legitimately names mcp__forge__search_issues (po-align's own
   // unconditional dedup-step ask, kept by the ruling) — that is NOT the drift this test guards
   // against, so it is deliberately not asserted against here.
   const triageSection = po.slice(triageStart, sharedSectionsStart);
   assert.ok(
     !triageSection.includes("mcp__forge__"),
-    "po.md's triage-mode section must never ask for an mcp__forge__ lookup — po-triage holds no grant, and this section is exactly what po-triage's session renders",
+    "po.md's triage-mode section (rendered as part of the whole file to EVERY po session, po-align included — this assertion is scoped to the SLICE, not to what a triage session uniquely sees) must never ask for an mcp__forge__ lookup — po-triage holds no grant",
   );
 });
 

@@ -2756,9 +2756,12 @@ test("runPoolSelection: roles.po.poolSelection=true — a fake runner's selectio
 // now substitutes each candidate's FULL formatCandidate-shaped body (number, title, labels,
 // body) instead of a title-only line, under the SAME EXISTING cap (roles.po.backlogDigestMaxChars
 // — no new cap, no new renderer). These two tests are the "reaches the rendered prompt, not just
-// the builder" + "the cap behaves" evidence the issue calls for at the unit level (a live session
-// run separately, see scripts/live-po-pool-533.ts, additionally confirms the ACTUAL claude CLI
-// transcript carries the substituted body verbatim).
+// the builder" + "the cap behaves" evidence the issue calls for, verified at the unit level only:
+// they assert against `runner.calls[0].prompt`, the exact string this engine process built and
+// would hand to the `claude` CLI's argv. A separate live-session check was attempted to confirm
+// the ACTUAL claude CLI stream-json transcript echoes that prompt verbatim too — that check came
+// back NEGATIVE (the stream-json transcript does not echo the initial user-turn prompt at all),
+// so no such confirmation exists and none is claimed here.
 test("runPoolSelection #533: the po-pool session's ACTUAL rendered prompt (not merely the digest builder's return value) carries each candidate's FULL body, in formatCandidate's number/title/labels/body shape — proof the substitution reaches the session, not just a local string", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2

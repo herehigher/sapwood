@@ -1196,22 +1196,33 @@ export function defaultPoolPromptPath(): string {
 
 /** The pool-selection session's candidate digest — #533 (PM ruling 2026-08-02): each candidate
  *  now renders as a `formatCandidate`-shaped block (number, title, labels, FULL body —
- *  `architect.ts::formatCandidate`, the exact same renderer the architect phase already
- *  substitutes for these same round-pool members one phase later, at the engine's expense
- *  either way), in the SAME prio/number order the session sees as "already ranked for you."
+ *  `architect.ts::formatCandidate`, the exact same PER-CANDIDATE renderer the architect phase
+ *  already substitutes for these same round-pool members one phase later, at the engine's
+ *  expense either way), in the SAME prio/number order the session sees as "already ranked for
+ *  you." Be precise about how far that equivalence goes: the per-candidate render is
+ *  byte-identical, but the ASSEMBLED digest is not — the architect phase joins candidate blocks
+ *  with `"\n\n---\n\n"` and caps via `capDigest`'s mid-record character slicing under
+ *  `roles.architect.poolDigestMaxChars`, while this digest joins with a bare `"\n"` and caps via
+ *  `packDigestRecords`' whole-record omission under `roles.po.backlogDigestMaxChars` (see below).
+ *  Same renderer, not the same rendering or the same cap semantics — "the engine already pays
+ *  this cost" is true of the per-candidate render only.
  *  This REPLACES the pre-#533 title-only line (`- #N — title`) and the `issue_details` grant
  *  po-pool used to hold to fill the gap a bare title left: the ruling's finding was that
  *  substituting the body the architect phase pays for anyway strictly dominates a conditional
  *  per-candidate lookup (deterministic, one round-trip cheaper, auditable) — see
  *  `proxy/access.ts`'s `PROXY_ROLE_TOOL_MATRIX` doc comment for the full reasoning.
  *
- *  Deterministic, capped by the SAME existing cap as before — `roles.po.backlogDigestMaxChars`
- *  (reused deliberately, not a new budget: the candidate set is naturally small, bounded by the
- *  pool cap, so this is a safety valve here, not a real budget most deployments tune). #231:
- *  whole-record packed (packDigestRecords), the same fix as buildBacklogDigest above — a
- *  candidate near the cap's tail is rendered or counted as omitted, never silently sliced away
- *  mid-line; a candidate's own multi-line body is one "record" for this purpose (never split
- *  across the cap boundary). */
+ *  Capped by the SAME existing cap as before — `roles.po.backlogDigestMaxChars` (reused
+ *  deliberately, not a new budget). Pre-#533 that reuse WAS a safety valve most deployments would
+ *  never tune, since a title-only pool digest was naturally far smaller than the cap. Post-#533
+ *  it is a REAL budget: full-body candidates give this digest the same size profile as
+ *  `architect.poolDigestMaxChars`, not the tiny title-only one this cap was originally sized for
+ *  — see `docs/configuration.md`'s `po.backlogDigestMaxChars` row for the consequence when it
+ *  bites (a candidate can drop out of the round with nothing naming it; #558 tracks fixing the
+ *  shared omission marker). #231: whole-record packed (packDigestRecords), the same fix as
+ *  buildBacklogDigest above — a candidate near the cap's tail is rendered or counted as omitted,
+ *  never silently sliced away mid-line; a candidate's own multi-line body is one "record" for
+ *  this purpose (never split across the cap boundary). */
 function buildPoolCandidateDigest(candidates: readonly Issue[], cfg: SapwoodConfig): BoundedDigest {
   const lines = candidates.map((issue) => formatCandidate(issue));
   return packDigestRecords(lines, cfg.roles.po.backlogDigestMaxChars, "(no Ready candidates this round)", "candidate issue");

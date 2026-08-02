@@ -732,7 +732,20 @@ export class RoleRunner {
     // the listener (no HTTP server bound), the bearer token (none minted, none to revoke), and the
     // --mcp-config/journal-identity plumbing for a session that could never make a call anyway —
     // never claim it saves context, that claim belongs to the matrix change above.
-    const proxyOpt = reviewMode || allowedToolsForRole(opts.roleId).length === 0 ? undefined : (opts.proxy ?? this.deps.defaultProxy);
+    const roleGrantsProxyTools = allowedToolsForRole(opts.roleId).length > 0;
+    // gate② #557 (PM ruling, matching the reviewCwd+opts.proxy precedent a few lines up): the
+    // RoleRunner-wide `defaultProxy` skips silently for an empty-grant role (that IS the
+    // mint-skip's whole point — no caller had to ask for that). But a caller-supplied
+    // `opts.proxy` for an empty-grant role is a DIFFERENT thing — a caller explicitly asking for
+    // a proxy this role can never use — so it is refused loudly, the same way reviewCwd+opts.proxy
+    // is refused above, rather than silently discarded (docs/configuration.md's "always wins over
+    // the RoleRunner-wide default, never silently overridden" must stay true for both guards).
+    if (!reviewMode && !roleGrantsProxyTools && opts.proxy !== undefined) {
+      throw new Error(
+        `role "${opts.roleId}" holds no PROXY_ROLE_TOOL_MATRIX grant (access.ts) — opts.proxy must not be set for a role whose grant is empty (caller bug, not a silent override); the RoleRunner-wide default proxy is skipped silently for this role, but an explicit opts.proxy is not`,
+      );
+    }
+    const proxyOpt = reviewMode || !roleGrantsProxyTools ? undefined : (opts.proxy ?? this.deps.defaultProxy);
     let proxyHandle: ForgeProxyHandle | undefined;
     if (proxyOpt) {
       try {

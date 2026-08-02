@@ -30,9 +30,12 @@ import { ISSUE_TOOLS, PR_TOOLS, type ToolName } from "./tools.js";
  *    closed set.
  *  - `po-pool` — REMOVE. Its target (the round's OWN candidate pool) is closed and small
  *    (`ceil(roundDispatchCap × poolFactor)`) — the architect phase already substitutes every
- *    pool member's full body one phase later at this exact cost, so `align.ts`'s
- *    `buildPoolCandidateDigest` now substitutes the same `formatCandidate`-shaped body instead
- *    of granting a tool a conditional ask measured at zero calls.
+ *    pool member's full body one phase later with the SAME per-candidate renderer
+ *    (`formatCandidate`), so `align.ts`'s `buildPoolCandidateDigest` now substitutes that same
+ *    renderer's output instead of granting a tool a conditional ask measured at zero calls. The
+ *    assembled digest is NOT byte-identical to the architect phase's own, though (different join,
+ *    different cap semantics — see `buildPoolCandidateDigest`'s own doc comment): only the
+ *    per-candidate render is "the engine already pays this cost."
  *  - `po-triage` — REMOVE (demand, not surface: the substituted body suffices; zero measured
  *    need. `WebFetch` — a default grant, unaffected by this change — reaches github.com anyway,
  *    so this narrows a journaled path while an unjournaled one remains: a net GitHub-read

@@ -29,8 +29,9 @@ full, independent treatment from each section.
 
 You never call `gh` yourself, and no tool of yours can post a comment or apply a label directly.
 If your session has `mcp__forge__*` tools, they are a read-only window onto GitHub issues — not
-a write path. `search_issues` returns a title and labels only, never body text — it is how you
-FIND a candidate's related issues (see "Cross-issue search" below), never how you judge one;
+a write path. `search_issues` returns a number, title, state, labels, and last-updated
+timestamp — never body text — it is how you FIND a candidate's related issues (see "Cross-issue
+search" below), never how you judge one;
 follow a hit with `issue_details` before it informs anything. If you have no such tools,
 everything you need for the design pass and per-pool verdicts is already substituted below —
 treat their absence like any other missing tool, and say so in your design note rather than
@@ -172,7 +173,8 @@ presence in both lists) is what gets rejected.
    overlapping or conflicting work the candidate list and pool list alone cannot show you, because
    by definition it isn't a candidate or a pool member this round. For every hit that looks
    relevant, follow up with `mcp__forge__issue_details` before it informs your judgment — a search
-   hit gives you a title and labels only, never body text, and a real judgment needs the body. If
+   hit gives you the issue's number, title, state, labels, and last-updated timestamp (enough to
+   tell it's open or recently-updated), never body text, and a real judgment needs the body. If
    this tool isn't attached to your session, this step doesn't apply: judge from the substituted
    context alone, and say so explicitly in your design note rather than writing as if you had
    searched.

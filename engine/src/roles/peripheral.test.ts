@@ -2209,12 +2209,16 @@ test("run: #253 a session's OWN RoleSessionOpts.proxy wins over RoleRunnerDeps.d
   }
 });
 
-// #533 (PM ruling 2026-08-02): a role holding NO PROXY_ROLE_TOOL_MATRIX grant skips minting
-// entirely — folded into the SAME proxyOpt guard as reviewMode, not a separate branch. Precise
-// about what this saves (see peripheral.ts's own doc comment at the proxyOpt assignment): the
-// listener/token/mcp-config plumbing only — mcp-server.ts already serves an empty tool list to a
-// minted-but-ungranted role, so the CONTEXT-SCHEMA saving is the matrix change alone, not this.
-test("run: #533 a role with an EMPTY PROXY_ROLE_TOOL_MATRIX grant never mints, even with RoleRunnerDeps.defaultProxy AND opts.proxy both present — no listener, no token, no --mcp-config", async () => {
+// #533 (PM ruling 2026-08-02): a role holding NO PROXY_ROLE_TOOL_MATRIX grant skips minting the
+// RoleRunner-wide DEFAULT proxy entirely — folded into the SAME proxyOpt guard as reviewMode, not
+// a separate branch. Precise about what this saves (see peripheral.ts's own doc comment at the
+// proxyOpt assignment): the listener/token/mcp-config plumbing only — mcp-server.ts already
+// serves an empty tool list to a minted-but-ungranted role, so the CONTEXT-SCHEMA saving is the
+// matrix change alone, not this. This is the SILENT half of the guard — no caller ever asked for
+// a proxy here, so there is nothing to be loud about. See the next test for the LOUD half: an
+// explicit opts.proxy for the same empty-grant role is a caller bug, refused the same way
+// reviewCwd+opts.proxy is refused (gate② #557 PM ruling).
+test("run: #533 a role with an EMPTY PROXY_ROLE_TOOL_MATRIX grant never mints RoleRunnerDeps.defaultProxy — no listener, no token, no --mcp-config", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(
@@ -2222,7 +2226,6 @@ test("run: #533 a role with an EMPTY PROXY_ROLE_TOOL_MATRIX grant never mints, e
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const { calls: defaultCalls, handle: defaultHandle } = fakeProxyHandle();
-    const { calls: ownCalls, handle: ownHandle } = fakeProxyHandle();
     const runner = mkRunner(dir, bin, {
       defaultProxy: {
         mint: async () => {
@@ -2238,17 +2241,44 @@ test("run: #533 a role with an EMPTY PROXY_ROLE_TOOL_MATRIX grant never mints, e
       model: "sonnet",
       effort: "medium",
       fallbackModel: "sonnet",
-      proxy: {
-        mint: async () => {
-          ownCalls.minted++;
-          return ownHandle as unknown as Awaited<ReturnType<NonNullable<RoleSessionOpts["proxy"]>["mint"]>>;
-        },
-      },
     });
     assert.equal(defaultCalls.minted, 0, "the RoleRunner-wide default must not be minted for an empty-grant role");
-    assert.equal(ownCalls.minted, 0, "even a caller-supplied opts.proxy must not be minted for an empty-grant role");
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     assert.ok(!seen.includes("--mcp-config"), "no --mcp-config was injected — the mint never happened");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// gate② #557 (PM ruling, matching the reviewCwd+opts.proxy precedent): an EXPLICIT opts.proxy for
+// a role whose PROXY_ROLE_TOOL_MATRIX grant is empty is a caller bug, not a silent override — the
+// caller asked for a proxy this role can never use, so it is refused loudly, same shape as the
+// reviewCwd+opts.proxy refusal a few hundred lines up. This keeps docs/configuration.md's "a
+// caller-supplied proxy opt always wins over the RoleRunner-wide default, never silently
+// overridden" literally true: an empty-grant role's explicit opts.proxy no longer gets silently
+// discarded, it throws.
+test("run: #557 an EXPLICIT opts.proxy for a role with an EMPTY PROXY_ROLE_TOOL_MATRIX grant is refused (caller bug, not a silent override)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const runner = mkRunner(dir, bin);
+    // "retro" holds no PROXY_ROLE_TOOL_MATRIX grant post-#533 (removed — see access.ts).
+    await assert.rejects(
+      () =>
+        runner.run({
+          roleId: "retro",
+          prompt: "p",
+          model: "sonnet",
+          effort: "medium",
+          fallbackModel: "sonnet",
+          proxy: {
+            mint: async () => {
+              throw new Error("must never be called");
+            },
+          },
+        }),
+      /holds no PROXY_ROLE_TOOL_MATRIX grant/,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
