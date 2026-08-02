@@ -15,9 +15,11 @@ import {
   type CommitInfo,
   type IForge,
   type Issue,
+  type OpenPrBody,
   type PRCheckItem,
   type PRReviewData,
   type PRStatus,
+  prOwnerMarker,
   type ReviewThreadSpan,
   type ReviewThreadsPage,
   readPrOwner,
@@ -97,6 +99,12 @@ class FakeForge extends UnstubbedForge implements IForge {
   }
   override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
+  }
+  /** #384: the open-PR list the mid-run orphan sweep duck-types for. Empty by default, so every
+   *  pre-#384 fixture behaves exactly as before (the sweep finds no marked PR and latches). */
+  openPrBodies: OpenPrBody[] = [];
+  async listOpenPrBodies(): Promise<OpenPrBody[]> {
+    return this.openPrBodies;
   }
   ready: Issue[] = [];
   readyReads = 0;
@@ -1299,6 +1307,71 @@ test("#377 gate② round 3 (P1): the deferral does NOT apply under a kill switch
   }
 });
 
+test("#429: a lane deferred by the PR-association retry is charged to the SAME tick's round budget, and still banks exactly once at settle", async () => {
+  // The #423 review finding: the deferral's `continue` skips reclaimTerminalLane — the only
+  // writer of the spend ledger — so a FINISHED lane's real cost stayed invisible to the same
+  // tick's budget gates for the whole retry window, and a lane whose spend had already crossed
+  // the cap could let that same tick admit a fresh wave.
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-blip", 3);
+  forge.ready = [{ number: 9, title: "", labels: [] }];
+  // A FINISHED lane worth $12: the money is spent. Only the LEDGER WRITE waits for the PR
+  // association to resolve.
+  const probe = { ...DEFAULT_PROBE, done: true, hasPr: false, costUsd: 12, prAssociationInconclusive: true };
+  sup.probes["lane-blip"] = probe;
+  // $25 already banked this round against the default $30 cap — under it until the deferred
+  // $12 is counted, over it the moment it is. Reads the live ledger too, so the settle tick
+  // below cannot pass by ignoring what was actually written.
+  const roundSpendUsd = () => 25 + st.spentUsdAfterId(0);
+
+  // The whole retry window: every deferred tick sees the completed cost.
+  for (let i = 0; i < 3; i++) {
+    const deferred = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), roundSpendUsd });
+    assert.equal(deferred.overBudget, true, `tick ${i}: the deferred lane's completed cost crossed cost.roundBudgetUsd`);
+    assert.ok(deferred.dispatched.some((d) => d.kind === "skipped" && d.issue === 9 && d.reason === "over-budget"));
+    assert.deepEqual(sup.dispatched, [] as Issue[], `tick ${i}: no fresh wave on a budget the finished lane already blew`);
+    assert.equal(st.spentUsdAfterId(0), 0, `tick ${i}: the ledger stays untouched — settleTerminalWorker is still its only writer`);
+  }
+
+  // AC3: the honesty event's shape/payload is unchanged — one per deferred tick, same payload.
+  const unknowns = st.eventsSince("1970-01-01T00:00:00.000Z", ["lane-pr-unknown"]);
+  assert.equal(unknowns.length, 3);
+  assert.deepEqual(unknowns[0], {
+    kind: "lane-pr-unknown",
+    payload: { worker: "lane-blip", issue: 3, note: "PR association unknown (forge write failed) — retrying next tick." },
+  });
+
+  // The forge recovers and the retry finds the PR. The leg banks — once.
+  sup.probes["lane-blip"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 372, costUsd: 12 };
+  const settled = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), roundSpendUsd });
+  assert.equal(settled.reclaimed.length, 1);
+  assert.equal(st.getWorker("lane-blip")?.state, "driving");
+  assert.equal(st.spentUsdAfterId(0), 12, "banked exactly once — never double-booked across defer -> settle");
+  st.close();
+});
+
+test("#429: a deferred lane's cost is visible to the SAME tick's daily ceiling", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-blip", 3);
+  // $12 spent against a $10 daily cap: the ceiling is already breached, the ledger just does
+  // not know it yet. Pre-#429 the breach only surfaced once the association resolved.
+  sup.probes["lane-blip"] = { ...DEFAULT_PROBE, done: true, hasPr: false, costUsd: 12, prAssociationInconclusive: true };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg({ cost: { dailyBudgetUsd: 10 } }),
+  });
+  assert.equal(r.ceilingBreached, true);
+  assert.deepEqual(r.ceilingReasons, ["daily-budget"]);
+  st.close();
+});
+
 test("tick reclaim: KEEP stays, DONE+PR -> done/DRIVING, DONE+noPR -> escalate+needs-human", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
@@ -1658,6 +1731,38 @@ test("tick reclaim: DEAD lane with NO PR is torn down, board handed back to read
   assert.deepEqual(sup.reclaimed, ["lane-dead"]);
   assert.deepEqual(forge.boardSet, [[4, "ready"]]);
   assert.equal(st.getWorker("lane-dead")?.state, "failed");
+  st.close();
+});
+
+test("#384 (F12): a DEAD lane's already-pushed engine PR is found in the SAME tick it dies — orphan event + needs-human disposition, no restart", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  seedRunning(st, "lane-dead", 4);
+  // The live F12 shape: the worker pushed and opened its PR, then died before the engine could
+  // associate it — the probe reports NO pr, so reclaim requeues the issue and the PR is left
+  // open, unowned, and (association never having run) carrying no owner marker either. A second
+  // PR marked for another lane proves the sweep answers per candidate, not per open PR.
+  forge.openPrBodies = [
+    { number: 365, body: "## Why\n\nCloses #4" },
+    { number: 366, body: prOwnerMarker("lane-other", 9) },
+  ];
+  sup.probes["lane-dead"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+  assert.equal(st.getWorker("lane-dead")?.state, "failed");
+  assert.deepEqual(
+    st.eventsAfterId(0, ["orphan-detected"]).map((e) => e.payload),
+    [{ kind: "pr", pr: 365, issue: 4, reason: "open-engine-pr", worker: "lane-dead", midRun: true, via: "prose" }],
+  );
+  assert.deepEqual(
+    st.eventsAfterId(0, ["orphan-pr-escalated"]).map((e) => e.payload),
+    [{ issue: 4, pr: 365, worker: "lane-dead", via: "prose", labeled: 1 }],
+  );
+  assert.ok(
+    forge.labelsAdded.some(([issue, label]) => issue === 4 && label === cfg.labels.needsHuman),
+    "the requeued issue is held, so the same run cannot re-dispatch it behind the open PR",
+  );
   st.close();
 });
 

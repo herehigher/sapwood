@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import {
+  announceFixLoopUnattached,
   applyMilestoneOverride,
   assertStopMilestoneExists,
   buildTickFixLegResume,
@@ -786,6 +787,84 @@ test("checkWebAccessSettingsDenial (Codex sol-high PR #417 review, P1): state.ap
   assert.ok(
     logs.some((line) => line.includes("web-access denial check failed") && line.includes("non-fatal")),
     "the containment catch's own note is also logged",
+  );
+});
+
+// ── #385 (F10): announceFixLoopUnattached — the degraded `prFixCap > 0` + fix-loop-unattached
+// combination announces itself ONCE at startup instead of only surfacing per-escalation, once a
+// PR has already been pushed to needs-human. Same best-effort startup-pass shape as
+// checkWebAccessSettingsDenial above: never blocks, never throws, at most one log + one event. ──
+
+/** #385: the config matrix this announcement is defined over — `lanes.prFixCap` x the three
+ *  `proxy` states (#253's model). Only the two DEGRADED rows (cap > 0, no production attachment)
+ *  announce; `cap: 0` is a deliberate operator opt-out of the fix loop entirely, and the live row
+ *  is the working configuration. */
+const fixLoopMatrix = (prFixCap: number, enabled: boolean, shadow: boolean) => ({
+  lanes: { prFixCap },
+  proxy: { enabled, shadow },
+});
+
+test("announceFixLoopUnattached (#385): prFixCap > 0 with the proxy disabled -> one log line + one durable event saying FIXABLE degrades to needs-human", () => {
+  const logs: string[] = [];
+  const events: Array<[string, unknown]> = [];
+  announceFixLoopUnattached(fixLoopMatrix(4, false, true), { appendEvent: (kind, payload) => events.push([kind, payload]) }, (line) =>
+    logs.push(line),
+  );
+  assert.equal(events.length, 1);
+  const [kind, payload] = events[0]!;
+  assert.equal(kind, "fix-loop-unattached");
+  assert.deepEqual(payload, { prFixCap: 4, proxyEnabled: false, proxyShadow: true, reason: "proxy-disabled" });
+  assert.equal(logs.length, 1);
+  // The log must name BOTH what degrades and the exact flip that fixes it — the whole point of
+  // the issue is that an operator with prFixCap > 0 reasonably expects a live fix loop.
+  assert.ok(logs[0]!.includes("needs-human"), "names the degradation");
+  assert.ok(logs[0]!.includes("proxy.enabled: true") && logs[0]!.includes("proxy.shadow: false"), "names the go-live flip");
+});
+
+test("announceFixLoopUnattached (#385): prFixCap > 0 with the proxy in shadow mode -> the same single announcement, reason distinguishing shadow from disabled", () => {
+  const logs: string[] = [];
+  const events: Array<[string, unknown]> = [];
+  announceFixLoopUnattached(fixLoopMatrix(2, true, true), { appendEvent: (kind, payload) => events.push([kind, payload]) }, (line) =>
+    logs.push(line),
+  );
+  assert.equal(events.length, 1);
+  assert.equal(events[0]![0], "fix-loop-unattached");
+  assert.deepEqual(events[0]![1], { prFixCap: 2, proxyEnabled: true, proxyShadow: true, reason: "proxy-shadow" });
+  assert.equal(logs.length, 1);
+  assert.ok(logs[0]!.includes("proxy.shadow: false"), "shadow mode's flip is the single shadow -> false step");
+});
+
+test("announceFixLoopUnattached (#385): the two NON-degraded halves of the matrix are completely silent — a live proxy, and prFixCap: 0 in every proxy state", () => {
+  for (const cfg of [
+    fixLoopMatrix(4, true, false), // production-attached: the fix loop an operator configured exists
+    fixLoopMatrix(0, false, true), // cap 0: a deliberate opt-out; #246's fold to needs-human IS the config
+    fixLoopMatrix(0, true, true),
+    fixLoopMatrix(0, true, false),
+  ]) {
+    const logs: string[] = [];
+    const events: unknown[] = [];
+    announceFixLoopUnattached(cfg, { appendEvent: (_kind, payload) => events.push(payload) }, (line) => logs.push(line));
+    assert.deepEqual(events, [], `no event for ${JSON.stringify(cfg)}`);
+    assert.deepEqual(logs, [], `no log for ${JSON.stringify(cfg)}`);
+  }
+});
+
+test("announceFixLoopUnattached (#385): state.appendEvent throwing never escapes — startup is never blocked by an announcement", () => {
+  const logs: string[] = [];
+  assert.doesNotThrow(() => {
+    announceFixLoopUnattached(
+      fixLoopMatrix(4, false, true),
+      {
+        appendEvent: () => {
+          throw new Error("SQLITE_BUSY: database is locked");
+        },
+      },
+      (line) => logs.push(line),
+    );
+  });
+  assert.ok(
+    logs.some((line) => line.includes("fix-loop attachment announcement failed") && line.includes("non-fatal")),
+    "the containment catch's own note is logged",
   );
 });
 

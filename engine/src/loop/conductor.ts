@@ -63,7 +63,7 @@ import {
   type DisputeEscalation,
   type FixResponseWriteOutcome,
 } from "./fix-response.js";
-import { reviveEnvFailedPrLanes } from "./reconcile.js";
+import { reviveEnvFailedPrLanes, sweepMidRunOrphanPrs } from "./reconcile.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure scheduling core (parity targets — keep semantics identical to guard's bash twin)
@@ -1490,8 +1490,13 @@ export interface TickDeps {
    *  spend banked by THIS tick's reclaim freezes THIS tick's refill. Without it the drivers'
    *  own post-tick check lags one tick and a crossed spend budget still buys one more wave
    *  (the exact same-tick window #124 gate② P1-2 closed for cost.roundBudgetUsd). Unset (no
-   *  spend stop configured) → no check, no cost. */
-  runSpendStopCrossed?: () => boolean;
+   *  spend stop configured) → no check, no cost.
+   *
+   *  #429: `unsettledUsd` is THIS tick's completed-but-unbanked terminal spend — a lane held by
+   *  the PR-association retry has really spent it, but settleTerminalWorker (atomic state+spend,
+   *  #223) hasn't written it yet. Implementations add it to their ledger read; ignoring the
+   *  argument reproduces the pre-#429 behavior exactly. */
+  runSpendStopCrossed?: (unsettledUsd: number) => boolean;
   /** #168: the LLM reachability probe — a deterministic check (no LLM JUDGMENT: success is
    *  "did the process exit 0 and print pong", never a model's opinion). The real
    *  implementation (worker.ts's probeLlmPing, wired by cli.ts) is a minimal inference ping on
@@ -3118,11 +3123,24 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     fixResponses.push(await attemptThreadWrite(forge, state, cfg, pending, iso));
   }
   const reclaimed: ReclaimOutcome[] = [];
+  /** #429: completed-but-unbanked spend, USD, TICK-LOCAL. A lane held by deferForUnknownPr has
+   *  FINISHED and really spent `p.costUsd`; only its LEDGER WRITE waits for the PR association to
+   *  resolve. Banking it early is not an option — settleTerminalWorker is deliberately atomic
+   *  (state+spend in one transaction, #223), so an early recordSpend would double-book when the
+   *  real settle lands. So the cost is carried here instead and folded into this tick's SPEND
+   *  GATES only (daily ceiling, round budget, run spend stop): nothing is persisted, defer->settle
+   *  still writes exactly one ledger row, and the same tick that observes the deferral also
+   *  observes the money. Reset every tick by construction — a lane deferred again next tick is
+   *  re-counted from its fresh probe, never accumulated across ticks. */
+  let unsettledTerminalUsd = 0;
 
   // ── RECLAIM: classify each in-flight lane from its 4 completion signals ──
   for (const w of state.runningWorkers()) {
     const p = await supervisor.probe(w.name);
-    if (deferForUnknownPr(state, w, p)) continue;
+    if (deferForUnknownPr(state, w, p)) {
+      unsettledTerminalUsd += p.costUsd ?? 0;
+      continue;
+    }
     // Terminal sentinel (handoff/done/failed) -> record + transition out of `running`. Shared
     // with the kill-switch gate above; returns null for KEEP/DEAD, handled below.
     const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
@@ -3266,7 +3284,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const fixingReclaimed: ReclaimOutcome[] = [];
   for (const w of state.fixingWorkers()) {
     const p = await supervisor.probe(w.name);
-    if (deferForUnknownPr(state, w, p)) continue;
+    if (deferForUnknownPr(state, w, p)) {
+      unsettledTerminalUsd += p.costUsd ?? 0; // #429, same reason as the RECLAIM loop above
+      continue;
+    }
     const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
     if (terminal) {
       fixingReclaimed.push(terminal);
@@ -3332,6 +3353,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
     fixingReclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued, costUsd, modelUsage });
   }
+
+  // ── MID-RUN ORPHAN SWEEP (#384, F12): every lane-terminal transition of this tick has now
+  //   landed, so this is the earliest point at which a lane that died THIS tick without a PR on
+  //   record is visible. If the worker had already pushed and opened a PR the engine never got to
+  //   associate, that PR is now open and unowned — startup reconcile would find it, but only after
+  //   a restart (the live 2026-07-24 case: PR #365 unowned for the whole run while its issue rolled
+  //   back for a full re-dispatch). Placed BEFORE DISPATCH deliberately: the hold it writes lands
+  //   on the issue the DEAD path requeued to Ready in this same tick, so nothing can re-dispatch
+  //   behind the open PR. Zero forge calls on a tick where no lane died pr-less, one bounded
+  //   `gh pr list` otherwise; never throws (contained, see its own doc). Runs regardless of
+  //   `paused` for the same reason GATED RECLAIM below does — it spawns nothing, it only records
+  //   what a human now owns.
+  await sweepMidRunOrphanPrs(forge, state, cfg, deps.log);
 
   // ── GATED RECLAIM (#147): a failed lane that DRIVE escalated (gate②/mergeDecision
   //   needs-human — the ONLY "failed + a PR number" shape, see gatedFailedWorkers' doc) whose
@@ -3561,9 +3595,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const tickNow = now();
   state.touchLastTick(tickNow);
   const processStartedAt = deps.processStartedAt ?? tickNow;
+  /** #429: the ledger's daily total PLUS this tick's completed-but-unbanked terminal spend (see
+   *  `unsettledTerminalUsd`). Every daily-budget consumer in this tick reads through here, so the
+   *  gate that decides and the announcement that narrates it can never disagree. */
+  const dailySpendAsOf = (asOf: Date): number => state.dailySpendUsd(asOf) + unsettledTerminalUsd;
   const ceilingReasonsAsOf = (asOf: Date): CeilingReason[] =>
     evaluateCeiling({
-      dailySpendUsd: state.dailySpendUsd(asOf),
+      dailySpendUsd: dailySpendAsOf(asOf),
       dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
       wallClockElapsedSec: (asOf.getTime() - processStartedAt.getTime()) / 1000,
       maxWallClockSec: cfg.cost.maxWallClockSec,
@@ -4117,7 +4155,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               ceilingBreached: ceilingReasonsAsOf(now()).length > 0,
               parkActive: parkedBeforeProbes,
               overBudget: driveOverBudget,
-              runSpendStop: deps.runSpendStopCrossed?.() ?? false,
+              runSpendStop: deps.runSpendStopCrossed?.(unsettledTerminalUsd) ?? false,
             });
             if (admissionBlock != null) {
               const reason = `fix-leg-admission-blocked:${admissionBlock}`;
@@ -4377,7 +4415,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     reconcileCeilingAnnouncements(state, ceilingReasons, {
       wallClockElapsedSec: (nowDate.getTime() - processStartedAt.getTime()) / 1000,
       maxWallClockSec: cfg.cost.maxWallClockSec,
-      dailySpendUsd: state.dailySpendUsd(nowDate),
+      dailySpendUsd: dailySpendAsOf(nowDate),
       dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
     });
     state.recordCeilingBreach(ceilingReasons, nowDate);
@@ -4408,7 +4446,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     reconcileCeilingAnnouncements(state, [], {
       wallClockElapsedSec: (nowDate.getTime() - processStartedAt.getTime()) / 1000,
       maxWallClockSec: cfg.cost.maxWallClockSec,
-      dailySpendUsd: state.dailySpendUsd(nowDate),
+      dailySpendUsd: dailySpendAsOf(nowDate),
       dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
     });
     state.clearCeilingBreach();
@@ -4537,8 +4575,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // Shared fresh-spend gates for RESUME + DISPATCH. Both launch a Claude worker leg, so both
   // observe pause/park/ceiling and post-reclaim round/run spend at this exact point.
   const dispatched: DispatchOutcome[] = [];
-  const overBudget = budgetExceeded(deps.roundSpendUsd?.() ?? 0, cfg.cost.roundBudgetUsd);
-  const runSpendStop = deps.runSpendStopCrossed?.() ?? false;
+  // #429: both read the ledger, so both add this tick's completed-but-unbanked terminal spend.
+  const overBudget = budgetExceeded((deps.roundSpendUsd?.() ?? 0) + unsettledTerminalUsd, cfg.cost.roundBudgetUsd);
+  const runSpendStop = deps.runSpendStopCrossed?.(unsettledTerminalUsd) ?? false;
 
   // ── RESUME (#172): recover terminal handoff lanes before admitting fresh Ready work ──
   // Same issue/worker/session/worktree, board remains In Progress. A successful resume becomes

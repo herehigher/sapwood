@@ -991,6 +991,25 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       }
       if (signalled) wakeFromSleep?.();
     });
+  /** #381 (F6): the DRAIN path's wait — the same cadence as interTickWait above, deliberately
+   *  NOT signal-abortable. Every OTHER caller of interTickWait stops looping the moment
+   *  `signalled` flips (the loop-top return, the `!signalled` throttle guard, the standby
+   *  slicing condition), so an instantly-resolved wait there is exactly the shutdown-latency
+   *  win it was built for. The executing phase's drain loop is the one caller that keeps ticking
+   *  PAST the signal on purpose — an already-open round always finishes draining, never kills
+   *  in-flight work — so for it, and only it, the abort turned every iteration into a no-wait
+   *  iteration: tick pacing collapsed from the configured cadence to a ms-interval busy loop
+   *  (dogfood 2026-07-24, F6: 3 ticks in 3ms vs. the 5 ticks/20s the same run paced correctly
+   *  before the signal), spinning CPU, flooding the log and amplifying duplicate events.
+   *  Shutdown latency is unaffected in the way that matters: the drain ends when the last lane
+   *  finishes, which is worker time (minutes), not cadence — the busy loop never made it finish
+   *  sooner, it just re-probed the same unfinished lanes thousands of times. */
+  const drainWait = (ms: number): Promise<void> =>
+    deps.sleep
+      ? deps.sleep(ms)
+      : new Promise<void>((resolve) => {
+          setTimeout(resolve, ms);
+        });
 
   let ticks = 0;
   let tickErrors = 0;
@@ -1377,8 +1396,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // #154 (Codex P1, PR #160): the run-level spend stop must freeze a tick's OWN refill the
     // moment its reclaim phase banks the crossing spend — thunk evaluated inside tick(),
     // post-reclaim (see TickDeps.runSpendStopCrossed). Only wired when the stop is configured.
+    // #429: + the tick's completed-but-unbanked terminal spend (deferred PR association).
     ...(deps.stop?.afterSpendUsd !== undefined
-      ? { runSpendStopCrossed: () => deps.state.spentUsdAfterId(runSpendAnchorId) >= deps.stop!.afterSpendUsd! }
+      ? {
+          runSpendStopCrossed: (unsettledUsd: number) =>
+            deps.state.spentUsdAfterId(runSpendAnchorId) + unsettledUsd >= deps.stop!.afterSpendUsd!,
+        }
       : {}),
     // #168: passthrough — see RoundDeps.probeLlmReachable's doc comment.
     ...(deps.probeLlmReachable !== undefined ? { probeLlmReachable: deps.probeLlmReachable } : {}),
@@ -1603,10 +1626,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // its DISPATCH phase, so a lane that frees up on this very tick can be refilled by the SAME
     // call (#124 multi-wave refill) whenever quota + milestone scope still allow it. Never
     // abandoned early by a signal: an already-open round always finishes draining (never kills
-    // in-flight work) — only opening a NEW round afterward is withheld.
+    // in-flight work) — only opening a NEW round afterward is withheld. Which is exactly why the
+    // wait here is drainWait, not interTickWait (#381/F6): a loop that keeps ticking past the
+    // signal must keep PACING past it too — see drainWait's own doc.
     for (;;) {
       if (deps.state.activeWorkers().length === 0 && !recoveryBeatPending) break;
-      await interTickWait(deps.tickIntervalSec * 1000);
+      await drainWait(deps.tickIntervalSec * 1000);
       const attempt = await tryDispatchWave();
       const remaining = Math.max(0, cfg.lanes.roundDispatchCap - dispatchedThisRound());
       const tickResult = await runTick(

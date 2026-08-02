@@ -1144,6 +1144,45 @@ export function checkWebAccessSettingsDenial(
   }
 }
 
+/** #385 (F10): the degraded-configuration announcement — `lanes.prFixCap > 0` (an operator has
+ *  configured a fix loop) while the proxy is NOT in its production-attach state, so no live
+ *  driver ever builds a real `TickDeps.fixLegResume` (buildTickFixLegResume / round.ts's
+ *  buildFixLegResume both return `undefined`). Every FIXABLE gate then degrades to a
+ *  `fix-loop-unwired:<reason>` needs-human escalation (conductor.ts, #246 C1) — correct per
+ *  #253's three-state design, but until now only observable AFTER a PR had already been pushed
+ *  to needs-human. This says it ONCE at startup, per run, instead: one log naming the exact
+ *  go-live flip, one durable event for the dashboard/replay. No behavior change to the
+ *  three-state design itself — this is pure detection.
+ *
+ *  Deliberately silent for the two NON-degraded halves of the matrix: `prFixCap: 0` is an
+ *  operator's explicit opt-out (folding straight to needs-human IS the configured behavior, not
+ *  a surprise), and `enabled: true, shadow: false` is the working configuration.
+ *
+ *  Same best-effort startup-pass stance as checkWebAccessSettingsDenial above: never blocks,
+ *  never throws out, at most one log line + one event. Exported for direct testing. */
+export function announceFixLoopUnattached(
+  cfg: { lanes: Pick<SapwoodConfig["lanes"], "prFixCap">; proxy: Pick<SapwoodConfig["proxy"], "enabled" | "shadow"> },
+  state: Pick<State, "appendEvent">,
+  log: (message: string) => void = console.error,
+): void {
+  const { prFixCap } = cfg.lanes;
+  const { enabled, shadow } = cfg.proxy;
+  if (prFixCap <= 0 || (enabled && !shadow)) return;
+  const reason = enabled ? "proxy-shadow" : "proxy-disabled";
+  try {
+    log(
+      `[sapwood:startup] lanes.prFixCap=${prFixCap} but the fix loop is not production-attached ` +
+        `(proxy.enabled=${enabled}, proxy.shadow=${shadow}) — every FIXABLE review gate will degrade to a ` +
+        "needs-human escalation (fix-loop-unwired) instead of dispatching a fix leg; set `proxy.enabled: true` " +
+        "and `proxy.shadow: false` to go live (docs/configuration.md, `proxy`), or `lanes.prFixCap: 0` to make " +
+        "the fold explicit",
+    );
+    state.appendEvent("fix-loop-unattached", { prFixCap, proxyEnabled: enabled, proxyShadow: shadow, reason });
+  } catch (error) {
+    log(`[sapwood:startup] fix-loop attachment announcement failed (non-fatal, startup continues): ${String(error)}`);
+  }
+}
+
 /** #76: the exit log line naming whichever stop condition fired — e.g. "sapwood run: stop
  *  condition hit — afterIssuesMerged=3 (merged 3)". Pure + exported for testing; only called
  *  when result.stopCondition is set (stoppedBy "stop-condition", or "once" when the single
@@ -1444,6 +1483,10 @@ async function runTickEngine(
     // #410 amendment: same best-effort startup-pass stance as the board normalization above —
     // detects, never blocks, never mutates.
     checkWebAccessSettingsDenial(cfg, state, log);
+    // #385 F10: same stance again — announces the `prFixCap > 0` + unattached-fix-loop
+    // combination ONCE here, rather than leaving it to surface per-escalation on an already
+    // needs-human PR. See announceFixLoopUnattached's own doc.
+    announceFixLoopUnattached(cfg, state, log);
     await reconcileStartup(forge, state, cfg, log);
     // #391 F19: same best-effort startup pass — correct the gated-reentry marker on lanes whose
     // hold label is observably live, so removing that label is the only manual step a human needs.
@@ -1629,6 +1672,10 @@ async function runRoundsEngine(
     // #410 amendment: same best-effort startup-pass stance as the board normalization above —
     // detects, never blocks, never mutates.
     checkWebAccessSettingsDenial(cfg, state, log);
+    // #385 F10: same stance again — announces the `prFixCap > 0` + unattached-fix-loop
+    // combination ONCE here, rather than leaving it to surface per-escalation on an already
+    // needs-human PR. See announceFixLoopUnattached's own doc.
+    announceFixLoopUnattached(cfg, state, log);
     await reconcileStartup(forge, state, cfg, log);
     // #391 F19: same best-effort startup pass — correct the gated-reentry marker on lanes whose
     // hold label is observably live, so removing that label is the only manual step a human needs.

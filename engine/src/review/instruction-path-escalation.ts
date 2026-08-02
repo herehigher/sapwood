@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, PRChangedFile } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
@@ -54,6 +55,39 @@ export function matchedInstructionPaths(files: readonly PRChangedFile[], pattern
   return [...matched];
 }
 
+/**
+ * #527: the patterns #292's trust chain is actually enforced against — the configured list PLUS
+ * the reviewer's own doctrine carrier, which is a target-repo file in EVERY deployment and whose
+ * text is substituted verbatim into every engine-agent review prompt. A literal default entry
+ * would not do: an operator who repoints `doctrine.file` must stay covered, so the path is
+ * DERIVED from config rather than hardcoded. The reviewer's other carrier, the shipped prompt
+ * (`engine/prompts/**`), is a plain default-list entry instead — it only exists in a
+ * self-hosting target repo, and `reviewer.agent.promptFile` keeps no pre-resolution raw value to
+ * derive one from.
+ *
+ * Repo-relative by construction: `cfg.doctrine.file` is resolved to an ABSOLUTE local path by
+ * loadConfig for the engine's own reads, which would both fail `InstructionPath` validation and
+ * never match a forge's repo-relative changed-file paths — so the pre-resolution `fileRaw` is
+ * what's matched (falling back to `file`, which is still raw when cfg came from ConfigSchema.parse
+ * directly). A value that isn't repo-relative-shaped (absolute, or escaping via `..`) is skipped
+ * rather than smuggled in: it can never correspond to a changed-file path anyway. Assumes the
+ * config file sits at the repo root, the same assumption every other repo-relative config path
+ * already makes.
+ *
+ * An empty configured list stays the documented off-switch — nothing is unioned onto it, so no
+ * forge read happens. Duplicates are harmless: matching de-duplicates by matched PATH, not by
+ * pattern.
+ */
+export function effectiveInstructionPaths(cfg: SapwoodConfig): string[] {
+  const configured = cfg.escalation.instructionPaths;
+  if (configured.length === 0) return [];
+  const doctrine = cfg.doctrine.fileRaw ?? cfg.doctrine.file;
+  const repoRelative = doctrine.startsWith("./") ? doctrine.slice(2) : doctrine;
+  const outsideRepo =
+    repoRelative.length === 0 || isAbsolute(repoRelative) || repoRelative.startsWith("/") || repoRelative.split("/").includes("..");
+  return outsideRepo ? [...configured] : [...configured, repoRelative];
+}
+
 /** #292: shared result used by both reviewer kinds so instruction-authority escalation cannot
  * drift between the classic review trigger and the engine-agent paid-session preflight.
  * Escalated `matchedPaths` are render-safe by contract for every downstream sink. */
@@ -96,7 +130,7 @@ export async function escalateInstructionPathChanges(input: {
   labels: readonly string[];
   cfg: SapwoodConfig;
 }): Promise<InstructionPathEscalationResult> {
-  const patterns = input.cfg.escalation.instructionPaths;
+  const patterns = effectiveInstructionPaths(input.cfg);
   if (patterns.length === 0) return { kind: "clear" };
   // #397 bucket 2: this path's verdict is "a human must MERGE this PR", never "the machine got
   // stuck" — so both the latch and the write are `humanMergeOnly`, and `needsHuman` is not written

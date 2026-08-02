@@ -3,7 +3,14 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { type IssueMeta, type PRStatus, referencedIssue, type StartupReconcileData } from "../forge/forge.js";
+import {
+  type IssueMeta,
+  type OpenPrBody,
+  type PRStatus,
+  prOwnerMarker,
+  referencedIssue,
+  type StartupReconcileData,
+} from "../forge/forge.js";
 import { State, type WorkerRow } from "../state/state.js";
 import {
   auditGatedEscalationFlags,
@@ -12,6 +19,7 @@ import {
   type ReconcileForge,
   reconcileStartup,
   reviveEnvFailedPrLanes,
+  sweepMidRunOrphanPrs,
   sweepStaleRoleSessions,
 } from "./reconcile.js";
 
@@ -766,6 +774,218 @@ test("role debris sweep removes confirmed-dead role debris only", () => {
     assert.equal(existsSync(join(worktrees, "lane-171")), true);
     assert.deepEqual(events, [{ session: "role-dead-aaaa", removed: ["worktree", "sentinel"] }]);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── #384 (F12): MID-RUN orphan detection — a dead lane's still-open engine PR ────────────────
+
+const SWEEP_CFG = { labels: { needsHuman: "sapwood:needs-human" } };
+
+function mkSweepForge(prs: OpenPrBody[]) {
+  const added: Array<[number, string]> = [];
+  const forge = {
+    added,
+    reads: 0,
+    throwOnAddLabel: false,
+    async listOpenPrBodies(): Promise<OpenPrBody[]> {
+      forge.reads++;
+      return prs;
+    },
+    async addLabel(issue: number, label: string): Promise<void> {
+      if (forge.throwOnAddLabel) throw new Error("gh label write failed");
+      added.push([issue, label]);
+    },
+  };
+  return forge;
+}
+
+/** The live F12 residue: lane #207 died before the engine could associate the PR the worker had
+ *  already pushed — `failed`, pr NULL, while PR #365 stayed open and unowned. */
+function seedDeadPrlessLane(state: State, issue: number): void {
+  state.upsertWorker(worker(issue, "failed"));
+}
+
+test("#384 F12: a dead lane's still-open engine PR is detected mid-run and disposed to needs-human", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-orphan-sweep-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    seedDeadPrlessLane(state, 207);
+    const forge = mkSweepForge([
+      { number: 365, body: `Closes #207\n\n${prOwnerMarker("lane-207", 207)}` },
+      { number: 366, body: "an unrelated human PR mentioning #207" },
+    ]);
+    assert.deepEqual(await sweepMidRunOrphanPrs(forge, state, SWEEP_CFG), [{ pr: 365, issue: 207, worker: "lane-207", via: "marker" }]);
+    assert.deepEqual(forge.added, [[207, "sapwood:needs-human"]], "the issue is held so the requeue cannot re-dispatch it");
+    const events = state.eventsAfterId(0, ["orphan-detected", "orphan-pr-escalated"]);
+    assert.deepEqual(
+      events.map((e) => e.kind),
+      ["orphan-detected", "orphan-pr-escalated"],
+      "event + disposition, in that order",
+    );
+    assert.deepEqual(events[0]?.payload, {
+      kind: "pr",
+      pr: 365,
+      issue: 207,
+      reason: "open-engine-pr",
+      worker: "lane-207",
+      midRun: true,
+      via: "marker",
+    });
+    assert.deepEqual(events[1]?.payload, { issue: 207, pr: 365, worker: "lane-207", via: "marker", labeled: 1 });
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#384 F12: the sweep is one-way per lane — a second pass re-escalates nothing and costs zero forge reads", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-orphan-sweep-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    seedDeadPrlessLane(state, 207);
+    const forge = mkSweepForge([{ number: 365, body: prOwnerMarker("lane-207", 207) }]);
+    await sweepMidRunOrphanPrs(forge, state, SWEEP_CFG);
+    assert.deepEqual(await sweepMidRunOrphanPrs(forge, state, SWEEP_CFG), []);
+    assert.equal(forge.reads, 1, "the checked lane leaves the candidate set, so the second pass never asks the forge");
+    assert.deepEqual(forge.added, [[207, "sapwood:needs-human"]]);
+    assert.equal(state.eventsAfterId(0, ["orphan-pr-escalated"]).length, 1);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#384 F12: a candidate lane with no open PR of its own is checked once, silently — no orphan, no label", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-orphan-sweep-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    seedDeadPrlessLane(state, 207);
+    const forge = mkSweepForge([
+      { number: 366, body: "Closes #999" }, // somebody else's issue
+      { number: 367, body: `Closes #207\n\n${prOwnerMarker("lane-999", 999)}` }, // marked: prose never overrides
+      { number: 368, body: "Closes #207 and closes #208" }, // ambiguous prose is not a pick
+    ]);
+    assert.deepEqual(await sweepMidRunOrphanPrs(forge, state, SWEEP_CFG), []);
+    assert.deepEqual(forge.added, []);
+    assert.equal(state.eventsAfterId(0, ["orphan-detected", "orphan-pr-escalated"]).length, 0);
+    await sweepMidRunOrphanPrs(forge, state, SWEEP_CFG);
+    assert.equal(forge.reads, 1, "checked is checked — a clean lane is not re-read every tick either");
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#384 F12: lanes another path already owns are never candidates — zero forge reads", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-orphan-sweep-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    state.upsertWorker(worker(300, "running"));
+    state.upsertWorker(worker(301, "driving", 500));
+    state.upsertWorker(worker(302, "handoff"));
+    state.upsertWorker(worker(303, "fixing", 501));
+    state.upsertWorker(worker(304, "failed", 502)); // gated reentry / #447 revival property
+    const forge = mkSweepForge([{ number: 502, body: prOwnerMarker("lane-304", 304) }]);
+    assert.deepEqual(await sweepMidRunOrphanPrs(forge, state, SWEEP_CFG), []);
+    assert.equal(forge.reads, 0);
+    assert.deepEqual(forge.added, []);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#384 F12: an unreadable PR list is contained and retried — the lane keeps its place in the candidate set", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-orphan-sweep-"));
+  const state = new State(join(root, "state.sqlite"));
+  const logs: string[] = [];
+  try {
+    seedDeadPrlessLane(state, 207);
+    const broken = {
+      async listOpenPrBodies(): Promise<OpenPrBody[]> {
+        throw new Error("gh rate limited");
+      },
+      async addLabel(): Promise<void> {},
+    };
+    await assert.doesNotReject(() => sweepMidRunOrphanPrs(broken, state, SWEEP_CFG, (m) => logs.push(m)));
+    assert.match(logs.join("\n"), /gh rate limited/);
+    const forge = mkSweepForge([{ number: 365, body: prOwnerMarker("lane-207", 207) }]);
+    assert.deepEqual(await sweepMidRunOrphanPrs(forge, state, SWEEP_CFG), [{ pr: 365, issue: 207, worker: "lane-207", via: "marker" }]);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#384 F12: an open park episode suspends the sweep entirely", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-orphan-sweep-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    seedDeadPrlessLane(state, 207);
+    state.enterPark("forge", "probe failed", null, "2026-07-24T00:00:00.000Z");
+    const forge = mkSweepForge([{ number: 365, body: prOwnerMarker("lane-207", 207) }]);
+    assert.deepEqual(await sweepMidRunOrphanPrs(forge, state, SWEEP_CFG), []);
+    assert.equal(forge.reads, 0, "the forge may be the very thing that is down");
+    assert.equal(state.eventsAfterId(0, ["orphan-detected"]).length, 0);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#384 F12: a forge that cannot list open PRs at all (a bare IForge double) degrades to a no-op", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-orphan-sweep-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    seedDeadPrlessLane(state, 207);
+    assert.deepEqual(await sweepMidRunOrphanPrs({ async addLabel(): Promise<void> {} }, state, SWEEP_CFG), []);
+    assert.equal(state.eventsAfterId(0, ["orphan-detected", "orphan-sweep-checked"]).length, 0, "nothing latched — nothing was checked");
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#384 F12: the LIVE case — an UNMARKED PR the engine never got to associate is matched by its closing keyword", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-orphan-sweep-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    seedDeadPrlessLane(state, 207);
+    // PR #365's real shape: the worker opened it, the association never landed (the quota storm
+    // exhausted the retry budget), so no owner marker was ever stamped on it.
+    const forge = mkSweepForge([{ number: 365, body: "## Why\n\nCloses #207" }]);
+    assert.deepEqual(await sweepMidRunOrphanPrs(forge, state, SWEEP_CFG), [{ pr: 365, issue: 207, worker: "lane-207", via: "prose" }]);
+    assert.deepEqual(forge.added, [[207, "sapwood:needs-human"]]);
+    const detected = state.eventsAfterId(0, ["orphan-detected"])[0]?.payload as { via?: string } | undefined;
+    assert.equal(detected?.via, "prose", "an inferred match says so in the ledger");
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#384 F12: a dead lane whose issue a LIVE lane now owns is left alone — and stays a candidate for later", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-orphan-sweep-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    // The requeued issue was re-dispatched: lane-207 is dead, lane-207b is working #207 right now
+    // and its own PR is not associated yet. Prose alone would fence off that live work.
+    state.upsertWorker(worker(207, "failed"));
+    state.upsertWorker({ ...worker(207, "running"), name: "lane-207b" });
+    const forge = mkSweepForge([{ number: 365, body: "Closes #207" }]);
+    assert.deepEqual(await sweepMidRunOrphanPrs(forge, state, SWEEP_CFG), []);
+    assert.equal(forge.reads, 0);
+    assert.deepEqual(forge.added, []);
+    assert.equal(state.eventsAfterId(0, ["orphan-sweep-checked"]).length, 0, "not latched — it is checked once the live lane settles");
+    // And once that lane HAS its PR, the PR is owned outright — no prose match can take it back,
+    // even after the lane itself goes terminal and stops owning the ISSUE.
+    state.upsertWorker({ ...worker(207, "failed", 365), name: "lane-207b" });
+    state.upsertWorker({ ...worker(207, "failed"), name: "lane-207c" }); // a second dead, PR-less lane
+    assert.deepEqual(await sweepMidRunOrphanPrs(forge, state, SWEEP_CFG), []);
+    assert.deepEqual(forge.added, []);
+  } finally {
+    state.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
