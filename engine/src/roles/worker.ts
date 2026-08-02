@@ -1433,6 +1433,58 @@ interface Lane {
   ghConfigDir?: string;
 }
 
+/** #69: recursive `.git`-excluding mtime/ctime scan — "is anything under this worktree newer
+ *  than `sinceMs`?". Never invokes git (see retainOrDeleteWorktree's doc for why `git status
+ *  --porcelain` was REJECTED: it can invoke a worker-set clean filter, the #65 RCE class).
+ *  Directory timestamps are checked too (a deleted file is also an uncommitted change, visible
+ *  only as its parent dir's bumped timestamp), `lstatSync` never follows symlinks (a planted
+ *  broken/absolute link is judged by the link itself), and BOTH mtime and ctime are compared
+ *  (ctime can't be backdated by unprivileged code — fable P2-b). The baseline comparison is
+ *  INCLUSIVE (`>=`, Codex PR #72 round-2 P2): on a coarse-resolution filesystem a worker can
+ *  write WIP in the SAME timestamp tick as the baseline, landing an entry exactly equal to
+ *  sinceMs — a strict `>` would read that as clean and DELETE it (a WIP-loss false-negative the
+ *  degrade-to-human policy forbids). `>=` widens the fail-safe-dirty window by one tick, the
+ *  correct direction (the policy accepts false-positive-dirty, never false-negative-clean).
+ *  Fails safe (dirty) on any unreadable/unstatable path or an unknown baseline — every caller
+ *  only ever deletes on an explicit `false`.
+ *
+ *  #428: module-level (was a WorkerSupervisor private method) so peripheral.ts's retro
+ *  worktree-retention check reuses THIS scan rather than growing a second implementation of the
+ *  same heuristic. Only the BASELINE differs between the two callers — a lane's immutable
+ *  `dispatched_at` here, the worktree's own git-index mtime there. */
+export function worktreeMaybeDirty(worktreePath: string, sinceMs: number): boolean {
+  if (!Number.isFinite(sinceMs)) return true; // unknown baseline -> can't prove clean
+  const touchedSince = (p: string): boolean => {
+    const s = lstatSync(p);
+    return s.mtimeMs >= sinceMs || s.ctimeMs >= sinceMs;
+  };
+  const stack: string[] = [worktreePath];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries: Dirent[];
+    try {
+      if (touchedSince(dir)) return true; // entry added/removed in this dir
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return true; // unreadable -> fail-safe: treat as possibly dirty
+    }
+    for (const e of entries) {
+      if (e.name === ".git") continue;
+      const p = join(dir, e.name);
+      if (e.isDirectory()) {
+        stack.push(p); // its own timestamps are checked when popped
+        continue;
+      }
+      try {
+        if (touchedSince(p)) return true;
+      } catch {
+        return true; // unstatable -> fail-safe dirty
+      }
+    }
+  }
+  return false;
+}
+
 export class WorkerSupervisor implements Supervisor {
   private readonly dir: string;
   private readonly worktreeRoot: string;
@@ -2779,7 +2831,7 @@ export class WorkerSupervisor implements Supervisor {
   inspectWorktree(name: string): ReclaimResult {
     const worktreePath = join(this.worktreeRoot, name);
     if (!existsSync(worktreePath)) return { worktreePath: null, worktreeRetained: false };
-    return { worktreePath, worktreeRetained: this.worktreeMaybeDirty(worktreePath, this.dispatchedBaselineMs(name)) };
+    return { worktreePath, worktreeRetained: worktreeMaybeDirty(worktreePath, this.dispatchedBaselineMs(name)) };
   }
 
   /** #69: dirty-worktree retention (replaces #60/#62's supervisor-side git commit+push, and the
@@ -2802,7 +2854,7 @@ export class WorkerSupervisor implements Supervisor {
   private retainOrDeleteWorktree(name: string): ReclaimResult {
     const worktreePath = join(this.worktreeRoot, name);
     if (!existsSync(worktreePath)) return { worktreePath: null, worktreeRetained: false };
-    if (this.worktreeMaybeDirty(worktreePath, this.dispatchedBaselineMs(name))) {
+    if (worktreeMaybeDirty(worktreePath, this.dispatchedBaselineMs(name))) {
       return { worktreePath, worktreeRetained: true }; // left on disk — caller escalates
     }
     try {
@@ -2817,51 +2869,6 @@ export class WorkerSupervisor implements Supervisor {
     // prune` (which runs in the TRUSTED main repo, not a worker tree) is a future operator/
     // housekeeping step, deliberately not run here to keep this path git-free.
     return { worktreePath, worktreeRetained: false };
-  }
-
-  /** Recursive `.git`-excluding mtime/ctime scan. Never invokes git. Directory timestamps are
-   *  checked too (a deleted file is also an uncommitted change, visible only as its parent
-   *  dir's bumped timestamp), `lstatSync` never follows symlinks (a planted broken/absolute
-   *  link is judged by the link itself), and BOTH mtime and ctime are compared (ctime can't be
-   *  backdated by unprivileged code — fable P2-b). The baseline comparison is INCLUSIVE (`>=`,
-   *  Codex PR #72 round-2 P2): on a coarse-resolution filesystem a worker can write WIP in the
-   *  SAME timestamp tick as dispatch, landing an entry exactly equal to sinceMs — a strict `>`
-   *  would read that as clean and DELETE it (a WIP-loss false-negative the degrade-to-human
-   *  policy forbids). `>=` widens the fail-safe-dirty window by one tick, the correct direction
-   *  (the policy accepts false-positive-dirty, never false-negative-clean). Fails safe (dirty)
-   *  on any unreadable/unstatable path or an unknown baseline — the caller only ever deletes on
-   *  an explicit `false`. */
-  private worktreeMaybeDirty(worktreePath: string, sinceMs: number): boolean {
-    if (!Number.isFinite(sinceMs)) return true; // unknown baseline -> can't prove clean
-    const touchedSince = (p: string): boolean => {
-      const s = lstatSync(p);
-      return s.mtimeMs >= sinceMs || s.ctimeMs >= sinceMs;
-    };
-    const stack: string[] = [worktreePath];
-    while (stack.length > 0) {
-      const dir = stack.pop()!;
-      let entries: Dirent[];
-      try {
-        if (touchedSince(dir)) return true; // entry added/removed in this dir
-        entries = readdirSync(dir, { withFileTypes: true });
-      } catch {
-        return true; // unreadable -> fail-safe: treat as possibly dirty
-      }
-      for (const e of entries) {
-        if (e.name === ".git") continue;
-        const p = join(dir, e.name);
-        if (e.isDirectory()) {
-          stack.push(p); // its own timestamps are checked when popped
-          continue;
-        }
-        try {
-          if (touchedSince(p)) return true;
-        } catch {
-          return true; // unstatable -> fail-safe dirty
-        }
-      }
-    }
-    return false;
   }
 
   /** The IMMUTABLE first-dispatch time (`dispatched_at`) that the dirty-worktree retention

@@ -379,12 +379,27 @@ function isWorktreeLocalRef(ref: string): boolean {
  *  must not be allowed to shadow the real ref. Never throws: any missing/unexpected
  *  git-internals shape (a git version this wasn't tested against, a ref this doesn't know how
  *  to resolve) is an HONEST "couldn't determine" (null), never a guess. */
-export function resolveWorktreeHead(worktreePath: string): string | null {
+/** #428: the `gitdir:` pointer half of resolveWorktreeHead below, factored out so a second
+ *  pure-filesystem git-plumbing reader (peripheral.ts's retro dirty check, which baselines on
+ *  `<gitDir>/index`'s mtime) resolves a linked worktree's real git directory the SAME way rather
+ *  than re-parsing the pointer file itself. Null on anything that isn't a linked worktree
+ *  (`.git` absent, unreadable, or a plain DIRECTORY) — honest "couldn't determine", never a
+ *  guess, exactly as resolveWorktreeHead's own doc describes. */
+export function resolveWorktreeGitDir(worktreePath: string): string | null {
   try {
     const dotGitContent = tryReadTrim(join(worktreePath, ".git"));
     if (dotGitContent === null || !dotGitContent.startsWith("gitdir:")) return null;
     const gitDirRaw = dotGitContent.slice("gitdir:".length).trim();
-    const gitDir = isAbsolute(gitDirRaw) ? gitDirRaw : resolve(worktreePath, gitDirRaw);
+    return isAbsolute(gitDirRaw) ? gitDirRaw : resolve(worktreePath, gitDirRaw);
+  } catch {
+    return null;
+  }
+}
+
+export function resolveWorktreeHead(worktreePath: string): string | null {
+  try {
+    const gitDir = resolveWorktreeGitDir(worktreePath);
+    if (gitDir === null) return null;
     const head = tryReadTrim(join(gitDir, "HEAD"));
     if (head === null) return null;
     if (HEX40.test(head)) return head.toLowerCase(); // detached HEAD

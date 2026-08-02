@@ -262,13 +262,16 @@ function factVars(facts: RetroFacts): Record<string, string> {
  *  isn't a multiple of N skips the session entirely (still sets the marker; the phase always
  *  closes, never wedges the round).
  *
- *  KNOWN GAP: peripheral.ts's RoleRunner always deletes a session's ephemeral worktree
- *  afterward (documented there as safe because an issues-only role session never has real
- *  WIP) — retro is the first role that breaks that assumption: a session that times out or
- *  crashes after editing but before committing+pushing loses that attempt's draft silently,
- *  with no #69-style dirty-worktree retention/escalation. Accepted for this scoped PR (no
- *  safety issue — retro proposes nothing destructive, and the next round's retro simply tries
- *  again); worth revisiting if this proves costly in practice. */
+ *  #428 (closes the gap this doc used to name): peripheral.ts's RoleRunner no longer deletes
+ *  retro's worktree unconditionally. A session that times out or crashes after editing but
+ *  before committing+pushing now has its worktree RETAINED on disk, with a durable
+ *  `role-worktree-retained` event naming the path and this round's id — see
+ *  RoleRunner.maybeRetainWorktree for the exact gate (write-capable grant + non-"done" outcome +
+ *  a pure-filesystem, git-index-baselined dirty check) and its stated failure directions. The
+ *  happy path is unchanged: a session that pushes and exits 0 still has its worktree deleted.
+ *  Still deliberately NOT a #69-style needs-human escalation — retro has no issue/PR to attach
+ *  one to and a lost draft is low-stakes (the next round simply tries again); the point is only
+ *  that the loss is now recorded rather than silent. */
 export function createRetroStub(deps: RetroDeps): PeripheralStub {
   return {
     async run({ roundId, marker }) {
@@ -323,6 +326,9 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
           allowedTools: RETRO_ALLOWED_TOOLS,
           disallowedTools: RETRO_DISALLOWED_TOOLS,
           scratchFile: RETRO_SCRATCH_FILE,
+          // #428: diagnostic only — lets the runner's `role-worktree-retained` event name the
+          // round whose retro draft was kept when a session died before pushing.
+          roundId,
         },
         issue: 0, // round-level spend, no single associated issue — same 0 sentinel as harvest.ts
         now: deps.now,

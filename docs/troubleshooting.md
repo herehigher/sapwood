@@ -76,6 +76,20 @@ To resolve: go to the path named in the comment, decide whether the uncommitted 
 are worth keeping (commit/push them yourself, or discard the worktree by hand), then
 remove the configured `labels.needsHuman` label. The lane will not be reused until you do.
 
+### A retained `retro` worktree
+
+Role sessions get the same protection in a deliberately lighter form. `retro` is the one
+role that writes code (it drafts a self-improvement proposal and pushes it as a branch), so
+when a retro session ends in a timeout/crash/failure with uncommitted edits still in its
+worktree, that worktree is kept on disk instead of deleted, and a `role-worktree-retained`
+event records the path, the round, the outcome, and how dirtiness was determined.
+
+There is **no label, no comment, and nothing to clear** — a retro session has no issue or PR
+to escalate against, and a lost draft costs one round's proposals at most (the next round's
+retro starts over from the same history). The retention exists purely so the loss is
+diagnosable rather than silent. Salvage the draft if it's worth keeping, otherwise delete
+the directory; nothing in the loop waits on either.
+
 ## Kill switch recovery
 
 If `data/KILL_SWITCH` is set (via `/sapwood-stop` or by hand), all new dispatch and
