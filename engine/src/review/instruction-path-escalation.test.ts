@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema } from "../config/config.js";
 import type { IForge, PRChangedFile } from "../forge/forge.js";
-import { escalateInstructionPathChanges, instructionPathMatches, matchedInstructionPaths } from "./instruction-path-escalation.js";
+import {
+  effectiveInstructionPaths,
+  escalateInstructionPathChanges,
+  instructionPathMatches,
+  matchedInstructionPaths,
+} from "./instruction-path-escalation.js";
 
 test("#292 instructionPathMatches: matching is checkout-safe case-insensitive and * stays within one segment", () => {
   assert.equal(instructionPathMatches("CLAUDE.md", "CLAUDE.md"), true);
@@ -171,4 +176,99 @@ test("#292 escalation helper: matched paths are defanged before rendering in an 
   });
   assert.doesNotMatch(comment, /evil`|\n|\u202e/);
   assert.match(comment, /`\.claude\/rules\/evil\?\?\?@user\.md`/);
+});
+
+test("#527 effectiveInstructionPaths: the engine-resolved doctrine file is unioned in, in repo-relative form", () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  assert.ok(effectiveInstructionPaths(cfg).includes("docs/REVIEW-DOCTRINE.md"));
+  // The reviewer's other carrier ships as a default list entry, not a derived one.
+  assert.ok(effectiveInstructionPaths(cfg).includes("engine/prompts/**"));
+});
+
+test("#527 effectiveInstructionPaths: an operator-reconfigured doctrine.file is followed by its raw repo-relative form, never loadConfig's absolute path", () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 }, doctrine: { file: "review/rules.md" } });
+  // Mirrors loadConfig's annotation: fileRaw keeps the pre-resolution value, file becomes absolute.
+  cfg.doctrine.fileRaw = "review/rules.md";
+  cfg.doctrine.file = "/home/op/repo/review/rules.md";
+  const patterns = effectiveInstructionPaths(cfg);
+  assert.ok(patterns.includes("review/rules.md"));
+  assert.ok(!patterns.includes("docs/REVIEW-DOCTRINE.md"));
+  assert.ok(
+    patterns.every((pattern) => !pattern.startsWith("/")),
+    "an absolute path could never match a repo-relative changed-file path",
+  );
+});
+
+test("#527 effectiveInstructionPaths: a doctrine path outside the repo-relative shape is skipped, not smuggled in", () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  for (const outside of ["/etc/doctrine.md", "../sibling/doctrine.md"]) {
+    cfg.doctrine.fileRaw = outside;
+    assert.deepEqual(effectiveInstructionPaths(cfg), cfg.escalation.instructionPaths);
+  }
+});
+
+test("#527 effectiveInstructionPaths: the [] off-switch still disables everything, doctrine included", () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 }, escalation: { instructionPaths: [] } });
+  assert.deepEqual(effectiveInstructionPaths(cfg), []);
+});
+
+test("#527 escalation helper: a PR editing the doctrine file escalates through the existing #292 path", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  const labels: string[] = [];
+  let comments = 0;
+  const forge = {
+    // Rename-aware: the doctrine file is matched under its PREVIOUS name too.
+    getPRChangedFiles: async () => ({
+      files: [{ filename: "docs/DOCTRINE.md", previousFilename: "docs/REVIEW-DOCTRINE.md" }],
+      complete: true,
+    }),
+    addPRLabel: async (_pr: number, label: string) => {
+      labels.push(label);
+    },
+    addPRComment: async () => {
+      comments++;
+    },
+  } satisfies Pick<IForge, "getPRChangedFiles" | "addPRLabel" | "addPRComment">;
+
+  assert.deepEqual(await escalateInstructionPathChanges({ forge, pr: 7, labels, cfg }), {
+    kind: "escalated",
+    matchedPaths: ["docs/REVIEW-DOCTRINE.md"],
+    reason: "instruction-path-change",
+  });
+  assert.equal((await escalateInstructionPathChanges({ forge, pr: 7, labels, cfg })).kind, "latched");
+  assert.deepEqual(labels, [cfg.labels.humanMergeOnly]);
+  assert.equal(comments, 1);
+});
+
+test("#527 escalation helper: a PR editing the reviewer prompt escalates in a self-hosting deployment", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  const forge = {
+    getPRChangedFiles: async () => ({ files: [{ filename: "engine/prompts/engine-reviewer.md" }], complete: true }),
+    addPRLabel: async () => {},
+    addPRComment: async () => {},
+  } satisfies Pick<IForge, "getPRChangedFiles" | "addPRLabel" | "addPRComment">;
+  assert.deepEqual(await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg }), {
+    kind: "escalated",
+    matchedPaths: ["engine/prompts/engine-reviewer.md"],
+    reason: "instruction-path-change",
+  });
+});
+
+test("#527 escalation helper: a target repo with no engine/prompts and an untouched doctrine sees no behavior change", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  const forge = {
+    getPRChangedFiles: async () => ({ files: [{ filename: "src/app.ts" }, { filename: "docs/PLAN.md" }], complete: true }),
+    addPRLabel: async () => assert.fail("a non-instruction PR writes no label"),
+    addPRComment: async () => assert.fail("a non-instruction PR posts no comment"),
+  } satisfies Pick<IForge, "getPRChangedFiles" | "addPRLabel" | "addPRComment">;
+  assert.deepEqual(await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg }), { kind: "clear" });
+});
+
+test("#527 escalation helper: with instructionPaths [] a doctrine edit still reaches no forge call", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 }, escalation: { instructionPaths: [] } });
+  const forge = new Proxy({}, { get: () => () => assert.fail("disabled escalation must not touch forge") }) as Pick<
+    IForge,
+    "getPRChangedFiles" | "addPRLabel" | "addPRComment"
+  >;
+  assert.deepEqual(await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg }), { kind: "clear" });
 });
