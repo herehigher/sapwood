@@ -1757,10 +1757,6 @@ test("proxy: every remaining key is overridable, and the section remains strict 
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nproxy: { bogusKey: true }\n"));
 });
 
-test("proxy (#551): a config carrying `proxy.shadow` fails startup with an unknown-key error naming it", () => {
-  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nproxy:\n  enabled: true\n  shadow: false\n"), /shadow/);
-});
-
 test("proxy: #244's new caps (maxReviewThreadsPerCall/maxCommentsPerThread) are overridable independently of the #234 caps", () => {
   const cfg = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\n" + "proxy:\n  caps: { maxReviewThreadsPerCall: 5, maxCommentsPerThread: 7 }\n",

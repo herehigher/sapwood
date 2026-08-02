@@ -753,19 +753,25 @@ exit once details land) was superseded, pre-implementation, by #234's design: an
 engine-hosted, read-only forge MCP proxy, built to widen what a session may ask for
 without ever forcing a verdict once it has asked. **Two-state production model (#253,
 shipped 2026-07-19; narrowed from three states to two by #551, 2026-08-02).**
-`enabled: true` (default since #551) attaches a real handle to both live drivers — a
-real `TickDeps.fixLegResume` (`mintProxy` + `renderFixPrompt`) to the fix loop's worker
-leg, and a real `RoleRunner` `defaultProxy` to every peripheral role session — two
-distinct seams, not one shared mechanism. `enabled: false` (explicit opt-out) stays
-fully inert — no proxy server is ever constructed, and no other `proxy.*` key changes
+`enabled: true` (default since #551) attaches a real handle to both live drivers' own
+fix-loop worker leg — a real `TickDeps.fixLegResume` (`mintProxy` + `renderFixPrompt`)
+— and, in `runRoundsEngine` only, a real `RoleRunner` `defaultProxy` to every
+peripheral role session; `runTickEngine` constructs no peripheral runner and attaches
+no `defaultProxy` at all — two distinct seams, not one shared mechanism, and not
+symmetric across the two drivers. `enabled: false` (explicit opt-out) stays fully
+inert — no proxy server is ever constructed, and no other `proxy.*` key changes
 runtime behavior. #253 originally shipped a third, middle state (`shadow: true`,
-mintable-but-unattached, for a scoped bring-up harness); #551 deleted it once the
-bring-up validated the proxy and no runtime path was found to depend on that state
-existing — the proxy's own mint (`proxy/mint.ts`) never read `enabled` or `shadow` in
-the first place, so a scoped harness could always mint directly regardless of
-production-attachment state. Production ships attached by default; opting out is a
-deliberate config change, not the shipped default. The criterion drove the *design*;
-see [`configuration.md`](configuration.md#proxy) for the full two-state contract. The same
+mintable-but-unattached, for a scoped bring-up harness). The reason #551 deleted it is
+not that the bring-up transition had completed — it is that the state was semantically
+empty from the start: the proxy's own mint (`proxy/mint.ts`'s `createProxyMint`) never
+read `enabled` or `shadow` at all, so a scoped harness could always mint directly
+regardless of production-attachment state, and the three production attachment guards'
+only reads of `shadow` were as `enabled && !shadow`, which collapses to `enabled` once
+the middle state is gone — there was never anything state 2 provided that
+`enabled: false` didn't equally provide. Production ships attached by default; opting
+out is a deliberate config change, not the shipped default. The criterion drove the
+*design*; see [`configuration.md`](configuration.md#proxy) for the full two-state
+contract. The same
 2026-07-17 M8 round cut two further
 mechanism issues from this posture: #213 (one batched architect session — explicit
 `drop`/`needs-human` verdicts per round-pool member, with an unlisted member reading

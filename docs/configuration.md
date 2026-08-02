@@ -778,26 +778,13 @@ role x tool matrix table.
 1. **`enabled: true`** (default since #551) — both live drivers attach a real handle to
    the fix-loop worker leg, and every peripheral role session gets one too
    (`peripheral.ts`'s `RoleRunner` `defaultProxy`, applied whenever a session's own
-   `RoleSessionOpts.proxy` is omitted — which every shipped stub does today). **This flip
-   is silent**: a config that omits the `proxy` block entirely goes from fully-inert to
-   production-attached with no error and no prompt — there is nothing to catch this at
-   parse time, since omission is valid in both the old and new schema.
+   `RoleSessionOpts.proxy` is omitted — which every shipped stub does today).
 2. **`enabled: false`** (explicit opt-out) — fully inert, no proxy server is ever
    constructed anywhere, and no other `proxy.*` key changes any runtime behavior. Review
    sessions never get a handle regardless of `enabled`: `peripheral.ts` throws if a
    caller supplies `proxy` together with `reviewCwd`, forces `proxyOpt = undefined` in
    review mode, and both drivers construct their engine-review `RoleRunner`s without
    `defaultProxy` — the default flip does not widen a review session's grant.
-
-#551 deleted the earlier `shadow` key: it never had distinct runtime semantics — the
-proxy's own mint (`proxy/mint.ts`'s `createProxyMint`) reads only `caps`/`budget`/
-`timeoutMs`, never `enabled` or `shadow`, so a scoped harness could always mint
-directly regardless of state; the three production attachment guards (`cli.ts`'s
-`buildTickFixLegResume`/`defaultProxy`, `round.ts`'s `buildFixLegResume`) only ever
-consulted `enabled && !shadow`, which collapses to `enabled` once the middle state is
-gone. **This half of the migration is loud**: `ProxyConfig` is `.strict()`, so a config
-still carrying `proxy.shadow` fails to parse at startup with an unknown-key error naming
-`shadow` — there is no silent-shim path for the deletion, unlike the default flip above.
 
 `peripheral.ts`'s `RoleRunner` and `worker.ts`'s `WorkerSupervisor` (#244 extended the
 mechanism to worker legs' `dispatch()`, mirroring `RoleRunner`'s own `proxy` opt; #245
@@ -812,6 +799,19 @@ log line naming the opt-out plus one durable `fix-loop-unattached` event, emitte
 per run by both drivers — so "the fix loop I configured degrades to needs-human" is
 visible at startup, not first observed on an already-escalated PR. State 1 (the default)
 and `prFixCap: 0` are silent.
+
+**What `enabled: true` (the default) actually costs.** Every peripheral role session
+(`po-pool`/`po-align`/`po-triage`/`harvest`/`architect`/`plan-reviewer`/`plan-drafter`/
+`plan-reviewer-confirm`/`retro`, `proxy/access.ts`'s `ISSUE_TOOLS` role scope) carries
+4 extra tool schemas (`issue_details`, `issue_comments`, `issue_relations`,
+`search_issues`) in its context on every round it runs, whether or not it ever calls
+one — the fix-loop worker leg's own scope (`PR_TOOLS`) is 5 tools
+(`pr_details`/`pr_reviews`/`pr_review_threads`/`pr_checks`/`pr_audit_comments`). Each
+attached session also spins up one ephemeral `127.0.0.1` HTTP listener authenticated by
+a bearer token minted fresh for that session and revoked at teardown — never written to
+disk or an environment variable, but a real local process resource for the session's
+lifetime. Set `enabled: false` to avoid both costs; that reintroduces the needs-human
+degradation documented above for any lane whose `prFixCap` is above `0`.
 
 **Still unwired regardless of `enabled`:** ordinary (non-fix-loop) `WorkerSupervisor.
 dispatch()` for the main coding-worker leg has no production caller attaching a proxy —

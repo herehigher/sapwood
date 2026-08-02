@@ -1642,8 +1642,9 @@ async function runRoundsEngine(
     // anywhere holds a handle. `enabled: true` (#551 default) constructs one for every peripheral
     // role session this RoleRunner instance runs. Review sessions never get one regardless — see
     // peripheral.ts's own doc: it throws on `proxy` + `reviewCwd`, forcing `proxyOpt = undefined`
-    // in review mode, and both drivers construct their engine-review `RoleRunner`s (this file's
-    // `engineReviewRunner` above; round.ts's own construction site) without `defaultProxy`.
+    // in review mode, and both drivers construct their engine-review `RoleRunner`s without
+    // `defaultProxy` — this file's own two construction sites (`runTickEngine`'s at cli.ts:1439,
+    // `runRoundsEngine`'s at cli.ts:1609; round.ts constructs no `RoleRunner` at all).
     const defaultProxy = cfg.proxy.enabled
       ? { mint: createProxyMint({ cfg, forge, state, roundId: 0, phase: "peripheral", now: systemClock, log }) }
       : undefined;

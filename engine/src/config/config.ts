@@ -776,19 +776,21 @@ const Roles = z
 // reads `enabled` to decide production attachment. #551 deleted the three-state model's middle
 // state (`shadow`): it never had distinct runtime semantics — `proxy/mint.ts::createProxyMint`
 // reads only `caps`/`budget`/`timeoutMs`, never `enabled`, so a scoped harness could always mint
-// in any state, and the three production attachment guards only ever consulted `enabled`. Two
-// states now:
+// in any state, and the three production attachment guards only ever consulted
+// `enabled && !shadow`, which collapses to `enabled` once the middle state is gone. Two states
+// now:
 //
 //   1. `enabled: false`: fully inert, exactly as #234 originally shipped. No engine startup path
 //      constructs anything; flipping every other proxy.* key changes nothing. `prFixCap > 0`
-//      with `enabled: false` still degrades every FIXABLE gate to a `fix-loop-unattached`
-//      needs-human escalation (`cli.ts::announceFixLoopUnattached`) — an honest, distinguishable
-//      opt-out, not silent.
+//      with `enabled: false` still degrades every FIXABLE gate to a needs-human escalation —
+//      `conductor.ts` appends one `fix-leg-dispatch-unconfigured` event PER GATE (reason
+//      `fix-loop-unwired:<reason>`). That is distinct from `cli.ts::announceFixLoopUnattached`,
+//      which emits a separate `fix-loop-unattached` event ONCE PER RUN at startup — a startup
+//      announcement, not itself a gate escalation.
 //   2. `enabled: true` (#551 default): full production attachment. Both live drivers attach a
 //      real `fixLegResume` to the fix-loop worker leg, and `runRoundsEngine` attaches a real
 //      `defaultProxy` to every peripheral role session (aligning/architecting/plan_review/
-//      harvesting/retro). This flip is SILENT — a config that omits the `proxy` block entirely
-//      goes from fully-inert to production-attached with no error and no prompt (#551, PR body).
+//      harvesting/retro).
 //
 // STILL UNWIRED regardless of `enabled`: ordinary (non-fix-loop) `WorkerSupervisor.dispatch()`
 // for the main coding-worker leg has no production caller attaching a proxy — that would require
