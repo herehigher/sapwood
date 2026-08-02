@@ -147,12 +147,17 @@ says. Tightening any of them in prose here is a no-op; the check is the source o
 - **a `rejected` verdict always carries a non-empty findings array** — the engine derives the
   verdict from your blocking findings and your per-AC statuses, synthesizing a finding for each
   `cannot-confirm` when you wrote none. The per-AC path blocks independently of any severity.
-- **model separation, checked before the session runs (against configuration) and again
-  afterwards (against this session's own recorded model usage)** — a verdict from a model
+- **model separation, checked against this session's own recorded model usage after it runs — the
+  binding check, for every runner — and additionally against configuration before the session
+  runs when the runner's identity is statically derivable (`runner: claude`; skipped pre-session
+  for `runner: codex-exec`, whose vendor is not derivable from config)** — a verdict from a model
   indistinguishable from the producer's never gates; it fails closed to unavailable.
 - **head/base/diff identity, and snapshotted-body drift** — the diff you are given is the exact
-  object the engine pinned; a head/base that moves mid-resolution, or an issue body edited since
-  dispatch, stops the review rather than reviewing a moved target.
+  object the engine pinned; on a head/base mismatch mid-resolution the engine re-pins to the new
+  value and reviews that, once — a second mismatch queues this tick instead, and the engine never
+  reviews a target that fails to match its own pin. For a lane with an AC snapshot recorded at
+  dispatch (the normal case since #283), an issue body edited since then stops the review, routed
+  to a human instead; a lane with no snapshot recorded drives without this particular check.
 - **no writes, for every runner** — a review session can never modify the tree or reach the forge.
   Beyond that, containment is runner-specific, not one shared "static" profile: the Claude runner's
   tool grant (`Read`/`Grep`/`Glob`, no `Bash`, no forge access) is hardcoded in `RoleRunner.run()`'s

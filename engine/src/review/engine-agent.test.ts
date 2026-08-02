@@ -552,8 +552,10 @@ test("shipped engine-reviewer prompt (#454, design #402 R6 §6a): the enforced-v
     /`severity: "advisory"` is honored only for the allowlisted kinds/,
     // deriveApprovalResult's rejected branch (agent-output.ts).
     /a `rejected` verdict always carries a non-empty findings array/,
-    // modelSeparationUnavailableReason, pre-session config + post-session modelUsage (engine-agent.ts).
-    /model separation, checked before the session[\s\S]*and again\s+afterwards/,
+    // modelSeparationUnavailableReason: post-session modelUsage always runs (the binding check);
+    // pre-session config comparison only when configuredReviewerIdentity() is non-null, i.e.
+    // `runner: claude` — it returns null (skipped) for `runner: codex-exec` (engine-agent.ts:454-456,475).
+    /model separation, checked against this session's own recorded model usage after it runs[\s\S]*statically derivable/,
     // resolveIdentity/hashDiff (drive.ts) + checkAcSnapshotDrift (ac-snapshot.ts).
     /head\/base\/diff identity, and snapshotted-body drift/,
     // RoleRunner.run()'s reviewCwd branch (peripheral.ts) — hardcoded, refuses an override — is
