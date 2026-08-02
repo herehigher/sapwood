@@ -285,7 +285,10 @@ reviewer:
 #     backlogDigestMaxChars: 20000 # Max chars for the milestone-scoped open-issue digest
 #                                  # injected into align mode; deterministic cuts are marked.
 #                                  # #212: also reused, unmodified, as the pool-selection
-#                                  # candidate digest's cap (naturally far smaller).
+#                                  # candidate digest's cap. That digest now carries each
+#                                  # candidate's FULL body, not just title/number, so it is a
+#                                  # REAL budget on that path too, not the "naturally far
+#                                  # smaller" knob it once was.
 #     model: sonnet
 #     effort: medium
 #     # fallbackModel: sonnet # Every role accepts this key too. Set "none" to fail loud rather
@@ -302,15 +305,20 @@ reviewer:
 #                        # round (poolFactor below), no session spawned. `true` restores the
 #                        # #212 session (poolPromptFile) that picks a SUBSET of the engine's
 #                        # candidate digest. Benchmark finding: controlled testing across model
-#                        # tiers showed this session selects EVERY candidate at every tier — a
-#                        # bare title/number digest gives it no evidentiary basis to narrow the
-#                        # reservoir, so it just pays for a session to reproduce the same
+#                        # tiers — against the THEN title/number-only session, before it was
+#                        # given each candidate's full body — showed this session selects EVERY
+#                        # candidate at every tier: it had no evidentiary basis to narrow the
+#                        # reservoir, so it just paid for a session to reproduce the same
 #                        # deterministic fallback. `poolFactor` deliberately over-selects to
 #                        # absorb architect/gate⓪ attrition AFTER selection; a session that DOES
 #                        # narrow the reservoir pre-gates risks underfilling the round instead.
-#                        # If you re-run this experiment, isolate worktree/code reads for that
-#                        # run — production sessions may read the repo, but that is an
-#                        # uncontrolled signal for THIS experiment (titles/numbers only).
+#                        # This finding was never re-run against today's body-bearing digest, so
+#                        # it remains the reason the default stays false, not a description of
+#                        # what the opt-in session sees now. If you re-run this experiment,
+#                        # isolate worktree/code reads for that run — production sessions may
+#                        # read the repo, but that is an uncontrolled signal for THIS experiment
+#                        # (this session's intended input is each candidate's title/number/
+#                        # labels/body, not a repo read).
 #   planReviewer: # #214: gate⓪ is scoped to the ROUND POOL — every pool entry, a PRIOR-round
 #     #             plan:approved gets a lightweight confirm pass (below), not skipped outright;
 #     #             plan:approved now means "approved when granted, re-endorsed at every pool

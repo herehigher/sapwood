@@ -174,8 +174,8 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
   // returned map. round.ts's runPeripheral already defaults any unset phase to
   // noopPeripheralStub (`peripherals[phase] ?? noopPeripheralStub`), so a disabled phase
   // no-ops with its marker set exactly like the pre-#127 skeleton did — no round.ts change.
-  // planDrafter has no toggle of its own: it only ever runs from inside the plan_review
-  // stub, so roles.planReviewer.enabled is gate⓪'s ONE unit switch.
+  // verificationPlanDrafter has no toggle of its own: it only ever runs from inside the plan_review
+  // stub, so roles.verificationPlanReviewer.enabled is gate⓪'s ONE unit switch.
   //
   // #212 AC7 / #233: the aligning phase's round-pool selection is NEVER gated by
   // roles.po.enabled — "the selection bound must not depend on an optional role". So, unlike
@@ -184,9 +184,10 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
   // like afterward (align.ts's runPoolSelection); with the PO off, only alignStub's own work is
   // skipped — runPoolSelection still runs unconditionally. #233: runPoolSelection's OWN
   // behavior no longer depends on roles.po.enabled either — it depends on its own switch,
-  // `roles.po.poolSelection` (default false): a title-only pool-selection session is now an
-  // opt-in experiment (controlled testing found it selects every candidate at every tier, so
-  // the deterministic engine-computed selection is the default MAIN path, not a fallback for
+  // `roles.po.poolSelection` (default false): the pool-selection session is an opt-in
+  // experiment (controlled testing — against the then title-only session, before it was given
+  // each candidate's full body — found it selects every candidate at every tier, so the
+  // deterministic engine-computed selection is the default MAIN path, not a fallback for
   // roles.po.enabled=false specifically). The rerun-not-resume marker check happens HERE (not
   // inside alignStub) so a crash mid-selection (after alignStub's own work already externalized)
   // restarts at THIS phase with a still-null marker and safely redoes only the (idempotent)
@@ -330,7 +331,7 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
       },
     };
   }
-  if (deps.cfg.roles.planReviewer.enabled) peripherals.plan_review = createPlanReviewStub(shared);
+  if (deps.cfg.roles.verificationPlanReviewer.enabled) peripherals.plan_review = createPlanReviewStub(shared);
   if (deps.cfg.roles.harvest.enabled) peripherals.harvesting = createHarvestStub(shared);
   if (deps.cfg.roles.retro.enabled) peripherals.retro = createRetroStub(shared);
 
@@ -340,7 +341,7 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
     [
       ["po", "aligning"],
       ["architect", "architecting"],
-      ["planReviewer", "plan_review"],
+      ["verificationPlanReviewer", "plan_review"],
       ["harvest", "harvesting"],
       ["retro", "retro"],
     ] as const
@@ -365,7 +366,7 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
     }
     // #127 gate② F1: disabling gate⓪'s roles silently starves ALL dispatch — forge.ts's
     // dispatchability gate still (correctly, PLAN Decision #8) requires the planApproved label
-    // (or verifyNa), and only the plan-reviewer applies planApproved; the PO is what triages
+    // (or verifyNa), and only the verification-plan-reviewer applies planApproved; the PO is what triages
     // plan-less issues INTO that pipeline. The gating must not soften, so warn loudly, here,
     // once (this same line — still a single startup log).
     const gateWarnings: string[] = [];

@@ -7,3 +7,6 @@ data/
 .DS_Store
 .codegraph/
 .worktrees/
+
+# python bytecode from the vendored guard.py fixture (engine/src/guard/fixtures)
+__pycache__/

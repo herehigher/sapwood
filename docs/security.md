@@ -139,8 +139,8 @@ that could ever reach the grant. `po-pool` (align.ts's third `PO_ALLOWED_TOOLS` 
 the ungranted base unconditionally: it renders a distinct prompt (`po-pool.md`), never `po.md`.
 
 **The review family stays offline by construction** — with one honestly-scoped exception named
-below. `plan-reviewer`, `plan-drafter`,
-`plan-reviewer-confirm`, and every gate② `engine-agent` review session never reference
+below. `verification-plan-reviewer`, `verification-plan-drafter`,
+`verification-plan-reviewer-confirm`, and every gate② `engine-agent` review session never reference
 `cfg.webAccess` at all — refusal is the absence of a wire-up, not a check that could be
 misconfigured. Gate②'s review-session mode (`reviewCwd`, see below) goes further still: it
 REFUSES a caller-supplied `allowedTools` outright (thrown, not silently accepted) alongside
@@ -335,7 +335,7 @@ layer that this denylist silently supplies.
 ## Issues-only role sessions: read-only, worktree-confined, no shell (#110, #235)
 
 Workers are guarded by the argv-inspecting hook above. The round orchestrator's
-issues-only peripheral roles — plan-reviewer, plan-drafter, PO/align+triage+pool,
+issues-only peripheral roles — verification-plan-reviewer, verification-plan-drafter, PO/align+triage+pool,
 harvest, and architect — take a different, stronger approach on the WRITE side: they
 hold no `Bash` tool grant at all, and no `Write`/`Edit`/`MultiEdit`/`NotebookEdit`
 grant either. Each session's only output channel is its final message, which ends in a
@@ -408,7 +408,7 @@ not a trip-wire.
 
 **#534: `--disallowedTools` also carries a name-list deny of the subagent-spawn channel —
 `Agent`/`Task` — for every role session whose deny list derives from `ROLE_DISALLOWED_TOOLS`
-(po, architect, plan-reviewer, plan-drafter, harvest, and the plan-reviewer's confirm variant)
+(po, architect, verification-plan-reviewer, verification-plan-drafter, harvest, and the verification-plan-reviewer's confirm variant)
 and, because `RoleRunner.run()`'s `reviewMode` branch hardcodes `ROLE_ALLOWED_TOOLS`/
 `ROLE_DISALLOWED_TOOLS` directly, the `claude`-runner gate② reviewer too. `retro` gets the
 identical `Agent`/`Task` deny by a SEPARATE append to `RETRO_DISALLOWED_TOOLS` (`retro.ts`) —
@@ -528,10 +528,16 @@ tool at all** (deny-by-default, regression-tested):
 | `po-pool` / `po-align` / `po-triage` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `harvest` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `architect` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
-| `plan-reviewer` / `plan-drafter` / `plan-reviewer-confirm` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
+| `verification-plan-reviewer` / `verification-plan-drafter` / `verification-plan-reviewer-confirm` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `retro` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `getPRAuditComments` (camelCase wire name; #556 tracks normalizing it) |
 | *(any other role id)* | none — deny-by-default |
+
+**This nine-role grant is deliberate, not an oversight to narrow.** Every one of these tools is
+read-only and costs nothing when a session never calls it, and a measured zero-call count is not
+evidence that a grant is unneeded: per #529, zero calls means the role's TASK never asked for a
+lookup, not that the capability itself has no use — the lever for changing that is the task step
+a prompt gives the role, not the grant it holds.
 
 **Scope, updated by #245: `WorkerSupervisor.resume()` now attaches a proxy too.** #244 shipped
 `dispatch()`-only attachment deliberately (the `resume()` crash-consistency machinery was already
@@ -979,6 +985,42 @@ position-independently so a wrapper can't hide the write) — but the human-merg
 rule is also a process rule: even a PR that touches these files and somehow passes CI
 and review is not something the conductor should be configured to auto-merge.
 
+### `sapwood.config.*` is also the shipped starter config — a known consequence (#386)
+
+The denial above is path-based, not intent-based, and `sapwood.config.*` carries a second
+role that makes that worth stating explicitly: `sapwood init` ships **this repo's own
+root `sapwood.config.yaml`, verbatim**, as a new user's starter config
+(`engine/src/loop/init.ts`'s `sampleConfig()`/`ensureConfig()` — there is no separate
+template file). So the file a worker may not write and the commented example every new
+operator receives are the same object.
+
+The consequence: **a worker cannot land a change to the shipped config's own comments —
+even a purely editorial one carrying no security meaning at all.** The guard denies the
+write (`BLOCK [write-path] sapwood.config.* (engine/guard config) is human-merge-only`)
+without inspecting whether the edit touches `guard.mode` or a `#` comment, which is the
+correct fail-closed behaviour: an intent-aware exception is exactly the seam a worker
+could talk its way through.
+
+This is a deliberate trade, not a defect — but it means any issue whose acceptance
+criteria require the shipped YAML to change has a **human-applied step that no worker can
+discharge**. Such issues are best written to ask for a paste-ready patch (which a worker
+*can* produce, in the PR body or a plain file) rather than for the edit itself, so the
+work is dispatchable and the acceptance criteria are honestly satisfiable.
+
+#386 is the worked example, and it shows the shape such a handoff should take. Its
+calibration guidance landed in the docs directly; the matching `worker.budgetUsdSoft`
+comment could not, so it ships as a **checked-in, `git apply`-able patch** at
+`docs/patches/386-budget-calibration.patch`, whose header states what it changes, why it
+is a patch rather than a commit, and the two commands that apply and then delete it. As
+long as that file exists, the YAML-side change is **still pending** — the patch is the
+request, not the delivery. The guard constrains Claude tool calls, never a human's
+editor, so applying it takes an editor and no special ceremony.
+
+A patch file is the right carrier here precisely because it is verifiable from the tree:
+a reviewer (human or engine-agent) can confirm the pending change exists and applies,
+rather than taking a prose claim on trust. Prefer it over describing the edit only in a
+PR body, which the tree does not record and a diff-scoped reviewer cannot see.
+
 ### The `sapwood:human-merge-only` label (#397)
 
 The same phrase now also names a **label**, deliberately — one fact, one term. Where the
@@ -1159,7 +1201,7 @@ that gap: a plan must also pass agent quality review before dispatch.
 `verify:n/a`, **both** a verification-plan section in the body **and** the
 `plan:approved` label — plan presence alone no longer dispatches. `verify:n/a` still
 routes through the doc-gate path, but only when `needs-human` is absent: the
-plan-reviewer peripheral may *propose* `verify:n/a` for genuinely unverifiable work, but
+verification-plan-reviewer peripheral may *propose* `verify:n/a` for genuinely unverifiable work, but
 it always pairs that proposal with `needs-human` in the same action, so it's a human —
 never the agent — who actually opens the doc-gate path, by removing `needs-human`
 themselves. `needs-human` and `blocked` block dispatch unconditionally, regardless of
@@ -1173,7 +1215,7 @@ missing, the engine posts that as a comment (the brief), and the loop dispatches
 reviewer (plan-author ≠ plan-approver — the reviewer never approves a plan it
 authored), never a full worker lane, and it never implements the issue itself. The
 draft then comes back through a fresh plan-review. The cycle is bounded — at most
-`roles.planReviewer.maxDraftCycles` draft→re-review attempts per issue (default 2) —
+`roles.verificationPlanReviewer.maxDraftCycles` draft→re-review attempts per issue (default 2) —
 after which the loop applies `needs-human` with the full attempt trail preserved
 (Decision #9's degrade-to-human). Every attempt is externalized as issue edits/
 comments, so a human can inspect or intervene at any point. The Ready-gate enforcement
@@ -1181,7 +1223,7 @@ above is unchanged by any of this: implementation dispatch still requires
 `plan:approved` (or adjudicated `verify:n/a`) — only the repair path became more
 autonomous.
 
-The plan-reviewer/plan-drafter sessions are wired and, since #110, pure computation:
+The verification-plan-reviewer/verification-plan-drafter sessions are wired and, since #110, pure computation:
 neither holds a `Bash` tool grant, so neither ever runs `gh` itself. Each session's
 final message ends in a structured, sentinel-delimited output block; the engine
 (`plan-review.ts`) parses it, validates it against a zod schema, re-checks the one
@@ -1191,10 +1233,10 @@ and only then applies `plan:approved` (or any body correction) itself via `IForg
 Malformed, schema-invalid, or content-invalid output is treated as a failed attempt:
 retried once, then escalated to `needs-human` with the full attempt trail, exactly like
 an outright session crash. The shipped default prompt lives at
-`engine/prompts/plan-reviewer.md` (`roles.planReviewer.promptFile` overrides it — same
+`engine/prompts/verification-plan-reviewer.md` (`roles.verificationPlanReviewer.promptFile` overrides it — same
 `#74` pattern as `worker.promptFile`).
 
-**`plan:approved` is re-endorsed, not permanent (#214).** The plan-reviewer's candidate
+**`plan:approved` is re-endorsed, not permanent (#214).** The verification-plan-reviewer's candidate
 sweep above is now scoped to the round pool rather than the whole Ready lane, and a
 prior round's `plan:approved` is re-checked — a lightweight, zero-forge-write-on-confirm
 session — every time that issue re-enters a pool, before its approval is trusted for

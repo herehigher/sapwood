@@ -2,7 +2,7 @@
 // Amendment 2's self-heal): gate⓪'s draft -> re-review orchestration for every Ready-lane
 // issue that hasn't yet passed plan review this round.
 //
-// #110 PR1 rework: the plan-reviewer/plan-drafter sessions are PURE COMPUTATION now — no `gh`
+// #110 PR1 rework: the verification-plan-reviewer/verification-plan-drafter sessions are PURE COMPUTATION now — no `gh`
 // tool grant is ever exercised by their prompts (the (now-unused) allow/deny-list constants in
 // peripheral.ts are untouched; stripping them is PR5's sweep, not this one's). Each session's
 // final message ends in a structured block (structured-output.ts's sentinel format); THIS module
@@ -76,23 +76,23 @@ export function planReviewMarker(roundId: number): string {
   return `<!-- sapwood:round:${roundId}:plan_review -->`;
 }
 
-export function defaultPlanReviewerPromptPath(): string {
+export function defaultVerificationPlanReviewerPromptPath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
   // engine/src/<domain> (tsx) and engine/dist/<domain> (built) are both two levels below engine/ — same
   // resolution rationale as worker.ts's defaultPromptPath.
-  return join(here, "..", "..", "prompts", "plan-reviewer.md");
+  return join(here, "..", "..", "prompts", "verification-plan-reviewer.md");
 }
 
-export function defaultPlanDrafterPromptPath(): string {
+export function defaultVerificationPlanDrafterPromptPath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
-  return join(here, "..", "..", "prompts", "plan-drafter.md");
+  return join(here, "..", "..", "prompts", "verification-plan-drafter.md");
 }
 
 /** #214: the freshness re-confirm prompt's shipped default path — same two-level resolution as
- *  defaultPlanReviewerPromptPath/defaultPlanDrafterPromptPath above. */
-export function defaultPlanConfirmPromptPath(): string {
+ *  defaultVerificationPlanReviewerPromptPath/defaultVerificationPlanDrafterPromptPath above. */
+export function defaultVerificationPlanConfirmPromptPath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
-  return join(here, "..", "..", "prompts", "plan-reviewer-confirm.md");
+  return join(here, "..", "..", "prompts", "verification-plan-reviewer-confirm.md");
 }
 
 /** Load a role prompt TEMPLATE, raw and un-substituted (#74 pattern, generalized beyond
@@ -124,14 +124,14 @@ function configVars(cfg: SapwoodConfig): Record<string, string> {
     "labels.needsHuman": cfg.labels.needsHuman,
     "labels.blocked": cfg.labels.blocked,
     "labels.verifyNa": cfg.labels.verifyNa,
-    "roles.planReviewer.maxDraftCycles": String(cfg.roles.planReviewer.maxDraftCycles),
+    "roles.verificationPlanReviewer.maxDraftCycles": String(cfg.roles.verificationPlanReviewer.maxDraftCycles),
   };
 }
 
 /** `{{var}}` substitution for role prompts (#74's pattern, reused: simple regex substitution,
  *  FAILS CLOSED on any unknown `{{...}}` placeholder — never a silent literal pass-through).
  *  Wider var set than worker.ts's renderPromptTemplate (issue + config + role-specific `extra`
- *  vars, e.g. the plan-drafter's `{{reviewer.brief}}`), so implemented locally rather than
+ *  vars, e.g. the verification-plan-drafter's `{{reviewer.brief}}`), so implemented locally rather than
  *  reusing that function's fixed issue-only var map. */
 export function renderRolePrompt(template: string, issue: Issue, cfg: SapwoodConfig, extra: Record<string, string> = {}): string {
   const cvars = configVars(cfg);
@@ -156,14 +156,14 @@ export function renderRolePrompt(template: string, issue: Issue, cfg: SapwoodCon
 // check is treated exactly like a schema-invalid one: an invalid attempt for runSessionWithRetry
 // purposes (retry once, then degrade), never silently honored and never silently dropped.
 
-const PlanReviewerMetadataSchema = z
+const VerificationPlanReviewerMetadataSchema = z
   .object({
     decision: z.enum(["approve", "draft_request", "verify_na"]),
     issue: z.number().int().positive(),
   })
   .strict();
 
-const PlanDrafterMetadataSchema = z
+const VerificationPlanDrafterMetadataSchema = z
   .object({
     issue: z.number().int().positive(),
   })
@@ -181,7 +181,7 @@ export interface ReviewerDecision {
 
 export type ReviewerValidation = { ok: true; decision: ReviewerDecision } | { ok: false; reason: string };
 
-/** Parse + schema-validate + content-verify a plan-reviewer session's structured output.
+/** Parse + schema-validate + content-verify a verification-plan-reviewer session's structured output.
  *  `currentBody` is the issue body AS OF THIS CYCLE (already fetched to render the reviewer's
  *  own prompt) — the content-invariant check for an "approve" with no body revision runs
  *  against it, since in that case the reviewer's approval is a claim about the body AS IT
@@ -195,7 +195,7 @@ export function validateReviewerOutput(text: string, expectedIssue: number, curr
   } catch {
     return { ok: false, reason: "structured output metadata is not valid JSON" };
   }
-  const parsed = PlanReviewerMetadataSchema.safeParse(metadata);
+  const parsed = VerificationPlanReviewerMetadataSchema.safeParse(metadata);
   if (!parsed.success) {
     return { ok: false, reason: `structured output metadata failed schema validation: ${describeZodError(parsed.error)}` };
   }
@@ -229,7 +229,7 @@ export function validateReviewerOutput(text: string, expectedIssue: number, curr
 
 export type DrafterValidation = { ok: true; body: string } | { ok: false; reason: string };
 
-/** Parse + schema-validate + content-verify a plan-drafter session's structured output. The
+/** Parse + schema-validate + content-verify a verification-plan-drafter session's structured output. The
  *  drafter's ENTIRE deliverable is the revised body — content-verified the same way an
  *  "approve" claim is (issue #110: "re-verify... any returned/drafted issue body"). */
 export function validateDrafterOutput(text: string, expectedIssue: number): DrafterValidation {
@@ -241,7 +241,7 @@ export function validateDrafterOutput(text: string, expectedIssue: number): Draf
   } catch {
     return { ok: false, reason: "structured output metadata is not valid JSON" };
   }
-  const parsed = PlanDrafterMetadataSchema.safeParse(metadata);
+  const parsed = VerificationPlanDrafterMetadataSchema.safeParse(metadata);
   if (!parsed.success) {
     return { ok: false, reason: `structured output metadata failed schema validation: ${describeZodError(parsed.error)}` };
   }
@@ -266,7 +266,7 @@ export function validateDrafterOutput(text: string, expectedIssue: number): Draf
   return { ok: true, body: block.body };
 }
 
-const PlanConfirmMetadataSchema = z
+const VerificationPlanConfirmMetadataSchema = z
   .object({
     decision: z.enum(["confirm", "invalidate"]),
     issue: z.number().int().positive(),
@@ -294,7 +294,7 @@ export function validateConfirmOutput(text: string, expectedIssue: number): Conf
   } catch {
     return { ok: false, reason: "structured output metadata is not valid JSON" };
   }
-  const parsed = PlanConfirmMetadataSchema.safeParse(metadata);
+  const parsed = VerificationPlanConfirmMetadataSchema.safeParse(metadata);
   if (!parsed.success) {
     return { ok: false, reason: `structured output metadata failed schema validation: ${describeZodError(parsed.error)}` };
   }
@@ -323,9 +323,11 @@ function reviewerDegradeReason(result: RoleSessionResult, expectedIssue: number,
 }
 
 function drafterDegradeReason(result: RoleSessionResult, expectedIssue: number): string {
-  if (result.outcome !== "done") return `plan-drafter session failed twice (${result.outcome})`;
+  if (result.outcome !== "done") return `verification-plan-drafter session failed twice (${result.outcome})`;
   const v = validateDrafterOutput(result.resultText ?? "", expectedIssue);
-  return v.ok ? "plan-drafter output valid" : `plan-drafter produced invalid structured output twice: ${v.reason}`;
+  return v.ok
+    ? "verification-plan-drafter output valid"
+    : `verification-plan-drafter produced invalid structured output twice: ${v.reason}`;
 }
 
 function confirmDegradeReason(result: RoleSessionResult, expectedIssue: number): string {
@@ -412,7 +414,7 @@ function approvedThisRound(state: State, roundId: number, issueNumber: number): 
  *
  *  #214 `seed`: when supplied, cycle 0's reviewer SESSION is skipped entirely — `seed.decision`
  *  (always a synthetic `"draft_request"` today) is used as that cycle's decision directly, and
- *  `seed.trailEntry` is pushed in place of the normal `cycle 0: plan-reviewer session ... ->`
+ *  `seed.trailEntry` is pushed in place of the normal `cycle 0: verification-plan-reviewer session ... ->`
  *  trail line. This is confirmOneIssue's ONLY hook into this function: an "invalidate" confirm
  *  verdict reuses this exact draft→re-review cycle (reviewer brief -> drafter -> re-review, same
  *  maxDraftCycles cap, same escalation path) rather than a bespoke copy of it. Cycle 1 onward runs
@@ -437,7 +439,7 @@ async function reviewOneIssue(
   seed?: { decision: ReviewerDecision; trailEntry: string },
 ): Promise<boolean> {
   const l = deps.cfg.labels;
-  const maxCycles = deps.cfg.roles.planReviewer.maxDraftCycles;
+  const maxCycles = deps.cfg.roles.verificationPlanReviewer.maxDraftCycles;
   const now = deps.now;
   const marker = planReviewMarker(roundId);
   const trail: string[] = [];
@@ -493,13 +495,13 @@ async function reviewOneIssue(
       trail.push(seed.trailEntry);
     } else {
       const reviewerPrompt = renderRolePrompt(reviewerTemplate, currentIssue, deps.cfg);
-      const reviewerRole = deps.cfg.roles.planReviewer;
+      const reviewerRole = deps.cfg.roles.verificationPlanReviewer;
 
       const reviewResult = await runSessionWithRetry({
         runner: deps.runner,
         state: deps.state,
         session: {
-          roleId: "plan-reviewer",
+          roleId: "verification-plan-reviewer",
           prompt: reviewerPrompt,
           model: reviewerRole.model,
           effort: reviewerRole.effort,
@@ -538,7 +540,7 @@ async function reviewOneIssue(
         // simply gets no verdict THIS pass; it re-matches next round once dispatch resumes. NO
         // needs-human, NO plan-review-escalated (that event is for a genuine review failure, not
         // an environment outage).
-        trail.push(`cycle ${cycle}: plan-reviewer session ${reviewResult.name} -> environment park (provider outage)`);
+        trail.push(`cycle ${cycle}: verification-plan-reviewer session ${reviewResult.name} -> environment park (provider outage)`);
         return true;
       }
 
@@ -548,14 +550,14 @@ async function reviewOneIssue(
           : { ok: false, reason: `reviewer session failed twice (${reviewResult.outcome})` };
 
       if (!validated.ok) {
-        trail.push(`cycle ${cycle}: plan-reviewer session ${reviewResult.name} -> ${validated.reason}`);
+        trail.push(`cycle ${cycle}: verification-plan-reviewer session ${reviewResult.name} -> ${validated.reason}`);
         // runSessionWithRetry already appended the plan-review-escalated STATE event above (on
         // its own second invalid/failed attempt) — only the forge-visible half is still needed.
         await escalateForge(validated.reason);
         return false;
       }
       decision = validated.decision;
-      trail.push(`cycle ${cycle}: plan-reviewer session ${reviewResult.name} -> ${decision.decision}`);
+      trail.push(`cycle ${cycle}: verification-plan-reviewer session ${reviewResult.name} -> ${decision.decision}`);
     }
 
     if (decision.decision === "approve") {
@@ -610,7 +612,7 @@ async function reviewOneIssue(
       // strip plan:approved itself (#147: engine label REMOVAL is reserved for
       // cfg.labels.roundPool alone, round.ts's removeRoundPoolLabel), and the session's own
       // free-text explanation (decision.body) habitually only names removing needs-human — the
-      // plan-reviewer prompt's outcome-3 framing was written for the unapproved case, where that
+      // verification-plan-reviewer prompt's outcome-3 framing was written for the unapproved case, where that
       // alone is correct. On THIS reachable path, following that comment literally would leave
       // the forbidden verifyNa+planApproved mixed state (#94) — excluded from both dispatch
       // (forge.ts's isDispatchable) and pool re-entry (forge.ts's isPoolEligible, #214) alike, a
@@ -655,13 +657,13 @@ async function reviewOneIssue(
     await deps.forge.addIssueComment(issue.number, `${decision.body}\n\n${marker}`);
 
     const drafterPrompt = renderRolePrompt(drafterTemplate, currentIssue, deps.cfg, { "reviewer.brief": decision.body! });
-    const drafterRole = deps.cfg.roles.planDrafter;
+    const drafterRole = deps.cfg.roles.verificationPlanDrafter;
 
     const drafterResult = await runSessionWithRetry({
       runner: deps.runner,
       state: deps.state,
       session: {
-        roleId: "plan-drafter",
+        roleId: "verification-plan-drafter",
         prompt: drafterPrompt,
         model: drafterRole.model,
         effort: drafterRole.effort,
@@ -694,21 +696,21 @@ async function reviewOneIssue(
     if (drafterResult.envParked) {
       // #374: same stance as the reviewer branch above — the engine parked instead of
       // escalating; this issue gets no drafted revision THIS pass, it re-matches next round.
-      trail.push(`cycle ${cycle}: plan-drafter session ${drafterResult.name} -> environment park (provider outage)`);
+      trail.push(`cycle ${cycle}: verification-plan-drafter session ${drafterResult.name} -> environment park (provider outage)`);
       return true;
     }
 
     const draftValidated: DrafterValidation =
       drafterResult.outcome === "done"
         ? validateDrafterOutput(drafterResult.resultText ?? "", issue.number)
-        : { ok: false, reason: `plan-drafter session failed twice (${drafterResult.outcome})` };
+        : { ok: false, reason: `verification-plan-drafter session failed twice (${drafterResult.outcome})` };
 
     if (!draftValidated.ok) {
-      trail.push(`cycle ${cycle}: plan-drafter session ${drafterResult.name} -> ${draftValidated.reason}`);
+      trail.push(`cycle ${cycle}: verification-plan-drafter session ${drafterResult.name} -> ${draftValidated.reason}`);
       await escalateForge(draftValidated.reason);
       return false;
     }
-    trail.push(`cycle ${cycle}: plan-drafter session ${drafterResult.name} -> drafted a revised body`);
+    trail.push(`cycle ${cycle}: verification-plan-drafter session ${drafterResult.name} -> drafted a revised body`);
     await deps.forge.updateIssueBody(issue.number, draftValidated.body);
     // Loop back -> re-run the reviewer against the drafter's edit (body refetched above).
   }
@@ -806,15 +808,15 @@ async function confirmOneIssue(
 
   const currentIssue: Issue = { ...issue, body: currentBody };
   const confirmPrompt = renderRolePrompt(confirmTemplate, currentIssue, deps.cfg);
-  // The confirm pass shares the plan-reviewer's own role config (model/effort/fallback) — #214
-  // only introduces a distinct PROMPT (roles.planReviewer.confirmPromptFile), not a distinct role.
-  const reviewerRole = deps.cfg.roles.planReviewer;
+  // The confirm pass shares the verification-plan-reviewer's own role config (model/effort/fallback) — #214
+  // only introduces a distinct PROMPT (roles.verificationPlanReviewer.confirmPromptFile), not a distinct role.
+  const reviewerRole = deps.cfg.roles.verificationPlanReviewer;
 
   const result = await runSessionWithRetry({
     runner: deps.runner,
     state: deps.state,
     session: {
-      roleId: "plan-reviewer-confirm",
+      roleId: "verification-plan-reviewer-confirm",
       prompt: confirmPrompt,
       model: reviewerRole.model,
       effort: reviewerRole.effort,
@@ -862,7 +864,7 @@ async function confirmOneIssue(
     // attempt (same session-validity degrade shape as reviewOneIssue's reviewer branch) — only
     // the forge-visible half is still needed here.
     await escalateNeedsHuman(deps, issue, roundId, validated.reason, [
-      `confirm: plan-reviewer(confirm) session ${result.name} -> ${validated.reason}`,
+      `confirm: verification-plan-reviewer(confirm) session ${result.name} -> ${validated.reason}`,
     ]);
     return false;
   }
@@ -876,7 +878,7 @@ async function confirmOneIssue(
   // brief (validateConfirmOutput already required it non-empty for "invalidate").
   return await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId, {
     decision: { decision: "draft_request", issue: issue.number, body: validated.body! },
-    trailEntry: `confirm: plan-reviewer(confirm) session ${result.name} -> invalidate`,
+    trailEntry: `confirm: verification-plan-reviewer(confirm) session ${result.name} -> invalidate`,
   });
 }
 
@@ -919,9 +921,18 @@ export function createPlanReviewStub(deps: PlanReviewDeps): PeripheralStub {
       // PeripheralStub.ranSession's own doc.
       let ranSession = false;
       if (poolMembers.length > 0) {
-        const reviewerTemplate = loadRolePromptTemplate(deps.cfg.roles.planReviewer.promptFile, defaultPlanReviewerPromptPath());
-        const drafterTemplate = loadRolePromptTemplate(deps.cfg.roles.planDrafter.promptFile, defaultPlanDrafterPromptPath());
-        const confirmTemplate = loadRolePromptTemplate(deps.cfg.roles.planReviewer.confirmPromptFile, defaultPlanConfirmPromptPath());
+        const reviewerTemplate = loadRolePromptTemplate(
+          deps.cfg.roles.verificationPlanReviewer.promptFile,
+          defaultVerificationPlanReviewerPromptPath(),
+        );
+        const drafterTemplate = loadRolePromptTemplate(
+          deps.cfg.roles.verificationPlanDrafter.promptFile,
+          defaultVerificationPlanDrafterPromptPath(),
+        );
+        const confirmTemplate = loadRolePromptTemplate(
+          deps.cfg.roles.verificationPlanReviewer.confirmPromptFile,
+          defaultVerificationPlanConfirmPromptPath(),
+        );
         for (let i = 0; i < poolMembers.length; i++) {
           const issue = poolMembers[i]!;
           if (labelsInclude(issue.labels, l.verifyNa)) continue; // class 4: doc-gate path, untouched

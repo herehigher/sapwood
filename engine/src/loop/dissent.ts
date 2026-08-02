@@ -63,7 +63,7 @@
 //   - its body no longer hashes to the concern's own recorded hash -> outcome "body-changed".
 //     #237 finding 1 (2026-07-18 adjudication): renamed from "issue-edited" — this outcome makes
 //     NO claim about who changed the body. This engine's OWN writes (a later triage pass drafting
-//     a plan into the same issue, a plan-reviewer/drafter revision, ...) trigger it exactly like
+//     a plan into the same issue, a verification-plan-reviewer/drafter revision, ...) trigger it exactly like
 //     a human edit would; there is no provenance tracking here to tell them apart, deliberately
 //     (PM ruling, marginal-complexity: a bounded blind spot with this honesty note, not new
 //     machinery). The self-heal for "body-changed" is RE-RAISE, not re-read: this event only

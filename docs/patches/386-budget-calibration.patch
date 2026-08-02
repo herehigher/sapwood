@@ -1,0 +1,40 @@
+# Pending human-applied patch — issue #386, PR #562
+#
+# WHAT: adds the worker.budgetUsdSoft calibration guidance to the shipped
+#       sapwood.config.yaml comment, completing AC1's "Shipped YAML comment + docs"
+#       (the docs half landed in PR #562; this is the YAML half).
+#
+# WHY IT IS A PATCH AND NOT A COMMIT: sapwood.config.* is a guard-enforced
+#       human-merge-only path (engine/src/guard/guard.ts protectedPathLabel).
+#       An autonomous worker's write is denied at the tool level:
+#         BLOCK [write-path] sapwood.config.* (engine/guard config) is human-merge-only
+#       The guard constrains Claude tool calls, never a human's editor. See
+#       docs/security.md "sapwood.config.* is also the shipped starter config".
+#
+# APPLY (from the repo root), then delete this file:
+#       git apply docs/patches/386-budget-calibration.patch
+#       git rm docs/patches/386-budget-calibration.patch
+#
+# Generated against sapwood.config.yaml at blob f448bdc. If the file has since
+# moved, the hunk still locates by context (offset-tolerant); re-check the result.
+diff --git a/sapwood.config.yaml b/sapwood.config.yaml
+index f448bdc..b699d52 100644
+--- a/sapwood.config.yaml
++++ b/sapwood.config.yaml
+@@ -93,6 +93,16 @@ worker:
+   #                   rate-table approximation (see pricingFile below), not the real billed
+   #                   cost; it's reconciled against the real total_cost_usd (logged) once the
+   #                   worker finishes.
++  #                   CALIBRATION (#386, dogfood 2026-07-24): this default suits SMALL-to-
++  #                   MEDIUM work. With the shipped opus/high profile above, one leg of a
++  #                   substantive implementation issue costs ~$8-20 — at 10, every substantive
++  #                   first leg handed off before opening a PR (3/3 observed); 20 carried them
++  #                   through in one go. Nothing broke: the handoff is graceful and maxResumes
++  #                   resumes the same branch — a low cap costs re-priming, not work. It does
++  #                   NOT move alone: budgetUsdSoft x lanes.max should stay under
++  #                   cost.roundBudgetUsd (10 x 3 = exactly the shipped 30), or the round
++  #                   throttle just becomes the new bottleneck. See docs/configuration.md
++  #                   "Calibrating budgetUsdSoft".
+   # maxResumes: 2   # Fresh budgeted legs allowed after the initial leg hands off. 0 disables
+   #                   automatic resume; exhaustion latches the lane + adds needs-human once.
+   # pricingFile: pricing/my-rates.yaml

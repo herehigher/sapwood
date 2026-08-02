@@ -11,7 +11,7 @@
 // allow-list is PR5's sweep, not this one's). Its final message ends in a structured block
 // (structured-output.ts's sentinel format); THIS module parses it, validates it against a
 // per-role zod schema, and performs every issue-comment write itself via IForge. Unlike
-// plan-reviewer/plan-drafter (one BODY block per session, one issue per session), a single
+// verification-plan-reviewer/verification-plan-drafter (one BODY block per session, one issue per session), a single
 // harvest session briefs a VARIABLE number of issues in one pass — the round's whole
 // needs-human set — so its comment bodies travel as an ARRAY of short strings INSIDE the JSON
 // metadata rather than the single sentinel-delimited BODY segment: harvest's own prompt caps
@@ -85,7 +85,7 @@ export function harvestMarker(roundId: number): string {
 export function defaultHarvestPromptPath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
   // engine/src/<domain> (tsx) and engine/dist/<domain> (built) are both two levels below engine/ — same
-  // resolution rationale as plan-review.ts's defaultPlanReviewerPromptPath.
+  // resolution rationale as plan-review.ts's defaultVerificationPlanReviewerPromptPath.
   return join(here, "..", "..", "prompts", "harvest.md");
 }
 

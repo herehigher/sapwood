@@ -1850,9 +1850,9 @@ test("runRounds standby: a KILL_SWITCH created MID-backoff-wait is acknowledged 
   }
 });
 
-test("runRounds standby (#127 gate② F2): plan-review candidates do NOT count as work when planReviewer is disabled — standby still engages instead of the disabled-role signal pinning the probe true forever", async () => {
+test("runRounds standby (#127 gate② F2): plan-review candidates do NOT count as work when verificationPlanReviewer is disabled — standby still engages instead of the disabled-role signal pinning the probe true forever", async () => {
   const forge = new FakeForge();
-  // The one probe signal present is a candidate ONLY the (disabled) plan-reviewer could
+  // The one probe signal present is a candidate ONLY the (disabled) verification-plan-reviewer could
   // consume — pre-fix, this pinned probeHasWork true and standby never engaged.
   forge.planReviewCandidates = [{ number: 9, title: "unconsumable gate⓪ candidate", labels: [] }];
   // #127 gate② R2: prove the SHORT-CIRCUIT, not just the outcome — with the consuming role
@@ -1876,7 +1876,7 @@ test("runRounds standby (#127 gate② F2): plan-review candidates do NOT count a
     state,
     sleep,
     tickIntervalSec: 5,
-    cfg: mkCfg({ roles: { planReviewer: { enabled: false } }, round: { standby: { enabled: true } } }),
+    cfg: mkCfg({ roles: { verificationPlanReviewer: { enabled: false } }, round: { standby: { enabled: true } } }),
   });
   deps.registerSignals = (requestStop) => {
     stop = once(requestStop);
@@ -1946,7 +1946,7 @@ test("runRounds standby (#127 gate② F2): plan-TRIAGE candidates do NOT count a
 test("runRounds standby (#127 gate② R1): with BOTH gate⓪ roles disabled, open milestone issues do NOT count as work — the only consumable signal left is Ready+dispatchable, so standby still engages", async () => {
   const forge = new FakeForge();
   // A milestone-scoped run whose milestone still holds open issues — but nothing enabled can
-  // consume them: no PO to decompose/triage, no plan-reviewer to approve, and none are Ready.
+  // consume them: no PO to decompose/triage, no verification-plan-reviewer to approve, and none are Ready.
   // Pre-fix, the probe's milestone catch-all counted them unconditionally and pinned standby off.
   forge.milestoneOpenCounts = [3];
   const state = new State(":memory:");
@@ -1963,7 +1963,7 @@ test("runRounds standby (#127 gate② R1): with BOTH gate⓪ roles disabled, ope
     sleep,
     tickIntervalSec: 5,
     cfg: mkCfg({
-      roles: { po: { enabled: false }, planReviewer: { enabled: false } },
+      roles: { po: { enabled: false }, verificationPlanReviewer: { enabled: false } },
       round: { milestone: "M-X", standby: { enabled: true } },
     }),
   });
@@ -2596,7 +2596,7 @@ test("isRoundFullyDegraded: every role disabled (nothing was even configured to 
     roles: {
       po: { enabled: false, poolSelection: false },
       architect: { enabled: false },
-      planReviewer: { enabled: false },
+      verificationPlanReviewer: { enabled: false },
       harvest: { enabled: false },
       retro: { enabled: false },
     },
@@ -3388,7 +3388,7 @@ test("runRounds standby (#212 probe residual fix): a mixed milestone (one held, 
 //    `listOpenIssues()` read is the FULL repo backlog — an off-board milestone issue is real work
 //    the board-scoped triage/review reads can never see. Round 2 also missed that the aligning
 //    phase consumes MORE than plan-triage (split-labeled decompose candidates, decomposed-parent
-//    journal recovery — both via decompose.ts/align.ts) and that plan-reviewer self-heals
+//    journal recovery — both via decompose.ts/align.ts) and that verification-plan-reviewer self-heals
 //    `plan:approved` Ready issues with a broken body through the deliberately body-independent
 //    pool (plan-review.ts's class-2 `confirmOneIssue`), which runs even with `po.enabled: false`.
 //    Round 3 restored the catch-all EXACTLY as it stood on origin/main and added a label-driven
@@ -3581,7 +3581,7 @@ test("runRounds standby (#432 F32, Codex P1-1 decomposed): a decomposed parent s
 test("runRounds standby (#432 F32): a Ready-lane issue carrying plan:approved with NO verification-plan section AT ALL still counts as work, through the catch-all's planCompleteOrExempt check alone — round 4 removed planApproved from the label set, and this shape never needed it", async () => {
   // po.enabled: false isolates the catch-all as the ONLY signal that can see this issue: with po
   // ON, getIssuesNeedingPlanTriage would ALSO return it true (needsPlanTriage never checks
-  // planApproved, only extractVerificationPlan(body)). planReviewer stays enabled so the NEW
+  // planApproved, only extractVerificationPlan(body)). verificationPlanReviewer stays enabled so the NEW
   // getPoolEligibleIssues probe line is live too — but forge.poolEligible is deliberately left at
   // its default [] below, so THAT line can't be what makes this pass either. The only path left is
   // the catch-all: a body with NO plan section at all fails planCompleteOrExempt on its own,
@@ -3592,7 +3592,7 @@ test("runRounds standby (#432 F32): a Ready-lane issue carrying plan:approved wi
   forge.planReviewCandidates = []; // needsPlanReview fails closed too: plan:approved is already present
   forge.milestoneOpenCounts = [1];
   const cfg = mkCfg({
-    roles: { po: { enabled: false }, planReviewer: { enabled: true } },
+    roles: { po: { enabled: false }, verificationPlanReviewer: { enabled: true } },
     round: { milestone: "M4", standby: { enabled: true } },
   });
   forge.openIssues = [

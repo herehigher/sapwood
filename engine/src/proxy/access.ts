@@ -24,9 +24,9 @@ export const PROXY_ROLE_TOOL_MATRIX: Readonly<Record<string, readonly ToolName[]
   "po-triage": ISSUE_TOOLS,
   harvest: ISSUE_TOOLS,
   architect: ISSUE_TOOLS,
-  "plan-reviewer": ISSUE_TOOLS,
-  "plan-drafter": ISSUE_TOOLS,
-  "plan-reviewer-confirm": ISSUE_TOOLS,
+  "verification-plan-reviewer": ISSUE_TOOLS,
+  "verification-plan-drafter": ISSUE_TOOLS,
+  "verification-plan-reviewer-confirm": ISSUE_TOOLS,
   retro: ISSUE_TOOLS,
   worker: PR_TOOLS,
 });

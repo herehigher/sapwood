@@ -1,27 +1,71 @@
-# 07 — Dashboard (v0.2 — not yet built)
+# 07 — Dashboard (v0.2 — partly built)
 
-The dashboard is designed but not implemented. There is no `dashboard/` workspace, frontend package, data server, launcher command, or dashboard test suite in the repository today (`package.json` lists only `engine`).
+The dashboard is **designed in full and built in part**. The `dashboard/`
+workspace exists and is load-bearing in CI; its data server is complete against
+the design's data contract; the UI is still a scaffold. Read this section as
+"which half is real", not as a specification — the authoritative
+feature-by-feature spec is [frontend-design.md](../frontend-design.md), and this
+guide deliberately does not mirror it.
 
 ## What exists today
 
-- `docs/frontend-design.md` specifies information architecture, visual language, accessibility, event copy, API shapes, replay semantics, controls, empty/error states, and performance budgets.
-- `docs/loop-walkthrough-v0.2.md` defines the engine states and source-of-truth boundaries the UI must render.
-- `docs/round-artifact.md` documents the canonical per-round artifact.
-- The repository contains live-run logs and engine state under `data/`, but no committed dashboard fixture package or demo application.
-- The engine already persists enabling sources: append-only `events` and `spend_ledger`, `rounds`/`round_artifacts`, live worker telemetry (`est_cost_usd`, `context_tokens`, `token_composition`), and explicit transition/degrade/attention-related events (`engine/src/state/state.ts`, `engine/src/loop/round-artifact.ts`). These are engine records, not a dashboard API.
+**The workspace.** Root `package.json` lists `workspaces: ["engine",
+"dashboard"]`, so root `-ws` test/typecheck/build reach it. `dashboard/` carries
+`package.json` (`@sapwood/dashboard`), `index.html`, `vite.config.ts`, and two
+tsconfigs — `tsconfig.json` (bundler resolution, DOM) for `src/` and
+`tsconfig.server.json` (NodeNext, no DOM) for the server; `npm run typecheck`
+runs both. Runtime dependencies are held to React, React DOM, TanStack Query and
+anime.js by a test, per the design's weight budget — no chart library, no CSS
+framework.
 
-## Planned architecture (from the design)
+**The data server** (`dashboard/server.ts`, #142/#360) serves the whole data
+contract: four read routes (`GET /api/loop/state`, `/api/events`, `/api/spend`,
+`/api/rounds`), the single `dashboard.controls`-gated `POST /api/control`, and
+the `dashboard/dist` statics. `createDashboardServer()` opens the engine's own
+`State` in `readOnly` mode and binds `127.0.0.1` (default port 4517). It imports
+the engine's `State`/config rather than re-querying SQLite, so `sapwood status`
+and the dashboard cannot disagree; the config surface is an explicit allowlist;
+the write route creates/removes the engine's `PAUSE`/`KILL_SWITCH` sentinels and
+never writes a row. The design's §9 "Server — what has landed" records the
+decisions behind those choices.
 
-TODO: `docs/frontend-design.md` specifies a small dashboard npm workspace with a read-only local data server over `data/sapwood.sqlite`, resolved non-secret config fields, and bounded log/state endpoints. The browser should not open SQLite directly or call GitHub. The data boundary is intended to expose named views and an ordered events API, with schema-version handling and redaction at the server.
+**A thin data layer and design system.** `src/api/` has the fetch client, the
+typed payloads, and the polling TanStack Query hooks; `src/tokens.css` +
+`src/contrast.ts` implement the design tokens and the WCAG-AA quality-floor
+checker (`npm run contrast`); the one bundled display face is committed under
+`src/fonts/`.
 
-TODO: the UI is specified around a loop/round hero, lane board, activity feed, needs-attention strip, and cost strip, plus a read-only config drawer. Replay uses append-only events and spend rows with round rows/artifacts as chapter boundaries; mutable live-only state is kept separate from replay. The design also names narrowly scoped pause/stop/start sentinel controls, but the engine and security docs remain authoritative for whether that write surface is enabled.
+**Tests and CI.** The workspace has its own suite — `server.test.ts` (the engine-state
+derivation truth table, every route's shape and paging contract, the read-only
+handle, the loopback bind, the control route's defenses) plus `src/api/api.test.ts`,
+`src/scaffold.test.ts` and `src/tokens.test.ts` — 60 tests, run with `node --test`
+like the engine's. `.github/workflows/ci.yml` runs `npm --workspace dashboard run
+typecheck` and `npm --workspace dashboard test`, so the workspace is gated, not
+merely present.
 
-No frontend framework, state library, chart library, API implementation, or package versions are locked in executable code today. The design explicitly avoids a chart dependency for simple SVG cost graphics, but this remains TODO until a dashboard package exists.
+**Upstream of all of it,** the engine already persists the enabling sources:
+append-only `events` and `spend_ledger`, `rounds`/`round_artifacts`, live worker
+telemetry (`est_cost_usd`, `context_tokens`, `token_composition`), and explicit
+transition/degrade/attention events (`engine/src/state/state.ts`,
+`engine/src/loop/round-artifact.ts`).
 
-## TODO
+## What is still TODO
 
-The entire implementation is TODO: the workspace, the read-only data server and
-its API routes, every panel, replay, the launcher command, and the dashboard's
-own tests. The authoritative feature-by-feature specification is
-[frontend-design.md](../frontend-design.md) — this guide deliberately does not
-mirror it. The root `README.md` roadmap is the milestone-level status view.
+- **The UI itself.** `src/App.tsx` is a scaffold shell that renders just enough
+  of the payloads to prove the data layer polls and re-renders. The §3 modules —
+  loop/round hero, lane board, activity feed, needs-attention strip, cost strip,
+  read-only config drawer, and the controls/confirm flow — each land in their own
+  issue and none has landed yet.
+- **Replay.** The event-folding reducer shared between live and replay, the
+  player, and the `?demo` fixture package do not exist; no committed dashboard
+  fixture or demo application is in the repo.
+- **The launcher.** There is no `sapwood dashboard` command — `sapwood --help`
+  lists `init`, `run`, `status`, `park`, `validate` only. `createDashboardServer()`
+  has no production caller yet; until the launcher lands the server is started
+  from code (the tests do exactly that), and the frontend runs under `vite` dev
+  with `/api` proxied to port 4517.
+- **`spend.runUsd` stays `null`** until the follow-up that persists the run
+  anchor; the header meter falls back whole to the daily tier by design.
+
+The root [`README.md`](../../README.md) roadmap remains the milestone-level
+status view.

@@ -10,7 +10,7 @@
 // performs every forge write itself — exactly what createAligningStub is being tested for here.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -381,8 +381,12 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
 
 // A body that satisfies extractVerificationPlan (the content check createAligningStub applies
 // per created/drafted issue — a business-logic outcome, never a session-validity gate).
-const PLAN_BODY = "Body.\n## Verification\n- run npm test";
-const NO_PLAN_BODY = "Just a title, no plan.";
+// Both carry the #442 `Origin:` line: it is a SESSION-validity gate (validateAlignOutput), so
+// every fixture body an align session is scripted to emit must have one — orthogonal to whether
+// the body also carries a plan, which is the per-issue business outcome these two constants are
+// actually about.
+const PLAN_BODY = "Body.\n## Verification\n- run npm test\n\n_Origin: static scan_";
+const NO_PLAN_BODY = "Just a title, no plan.\n\n_Origin: static scan_";
 
 test("createAligningStub: marker present -> returns it unchanged, no forge/session calls at all (idempotence)", async () => {
   const forge = new FakeForge();
@@ -790,8 +794,8 @@ test("createAligningStub: multiple declared issues are each processed independen
     doneResult(
       "po-align-1",
       alignResultText([
-        { title: "a", body: "## Acceptance criteria\n- x" },
-        { title: "b", body: "no plan here" },
+        { title: "a", body: "## Acceptance criteria\n- x\n\n_Origin: static scan_" },
+        { title: "b", body: "no plan here\n\n_Origin: static scan_" },
       ]),
     ),
   ]);
@@ -1477,7 +1481,7 @@ test("createAligningStub P2: a failed align session is retried once; a successfu
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
     failedResult("po-align-0"),
-    doneResult("po-align-0-retry", alignResultText([{ title: "t", body: "## Verification\n- x" }])),
+    doneResult("po-align-0-retry", alignResultText([{ title: "t", body: PLAN_BODY }])),
   ]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
@@ -1624,7 +1628,7 @@ test("createAligningStub #110: a malformed align block on the FIRST attempt is r
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
     doneResult("po-align-0", "not structured at all"),
-    doneResult("po-align-0-retry", alignResultText([{ title: "t", body: "## Verification\n- x" }])),
+    doneResult("po-align-0-retry", alignResultText([{ title: "t", body: PLAN_BODY }])),
   ]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
@@ -1972,7 +1976,7 @@ test("createAligningStub #110: an align block with a wrong number of <<<ISSUE>>>
   const runner = new ScriptedRunner([
     // Metadata declares 2 issues, but the BODY block only carries one segment.
     doneResult("po-align-0", sapwoodResult({ issues: [{ title: "a" }, { title: "b" }] }, issueSegment("only one body"))),
-    doneResult("po-align-0-retry", alignResultText([{ title: "a", body: "## Verification\n- x" }])),
+    doneResult("po-align-0-retry", alignResultText([{ title: "a", body: PLAN_BODY }])),
   ]);
   const state = new State(":memory:");
   const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
@@ -1988,7 +1992,7 @@ test("createAligningStub #110: an align block with a wrong number of <<<ISSUE>>>
 test("createAligningStub P3: a customized labels.originAgent value is what gets stamped — never a hardcoded 'origin:agent'", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({ labels: { ...LEGACY_LABEL_CONFIG.labels, originAgent: "bot:made" } });
-  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "t", body: "## Verification\n- x" }]))]);
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "t", body: PLAN_BODY }]))]);
   const state = new State(":memory:");
   const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
@@ -2459,17 +2463,56 @@ test("validateAlignOutput: well-formed empty declaration -> ok, empty array", ()
 test("validateAlignOutput: well-formed multi-issue declaration -> ok, titles and bodies paired in order", () => {
   const result = validateAlignOutput(
     alignResultText([
-      { title: "first", body: "Body one." },
-      { title: "second", body: "Body two." },
+      { title: "first", body: "Body one.\n\n_Origin: static scan_" },
+      { title: "second", body: "Body two.\n\n_Origin: static scan_" },
     ]),
   );
   assert.ok(result.ok);
   if (result.ok) {
     assert.deepEqual(result.issues, [
-      { title: "first", body: "Body one." },
-      { title: "second", body: "Body two." },
+      { title: "first", body: "Body one.\n\n_Origin: static scan_" },
+      { title: "second", body: "Body two.\n\n_Origin: static scan_" },
     ]);
   }
+});
+
+// ── #442: the Origin evidence line is required of every agent-filed body ─────────────────────
+
+test("#442 AC1: a proposal body with no `Origin:` line fails align's own output validation — the same channel that already rejects a malformed BODY segment", () => {
+  const result = validateAlignOutput(alignResultText([{ title: "Add X", body: "Body.\n## Verification\n- run npm test" }]));
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /Origin:/.test(result.reason), `reason names the missing line: ${!result.ok ? result.reason : ""}`);
+});
+
+test("#442 AC1: one Origin-less body among several rejects the WHOLE batch, and the reason names which segment", () => {
+  const result = validateAlignOutput(
+    alignResultText([
+      { title: "first", body: PLAN_BODY },
+      { title: "second", body: "Body two, no provenance." },
+    ]),
+  );
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /issue 2\b/.test(result.reason), `reason names the 1-based segment: ${!result.ok ? result.reason : ""}`);
+});
+
+test("#442 AC1: `Origin: static scan` — the literal the template names for a repo-reading finding — satisfies the requirement", () => {
+  const result = validateAlignOutput(alignResultText([{ title: "Add X", body: "Body.\n## Verification\n- x\n\n_Origin: static scan_" }]));
+  assert.ok(result.ok);
+});
+
+test("#442 AC1: an empty issues array carries no bodies, so the Origin requirement cannot make a zero-proposal round invalid", () => {
+  assert.ok(validateAlignOutput(alignResultText([])).ok);
+});
+
+test("#442 AC2 grep-invariant (engine-wide): `extractOrigin` has exactly ONE production call site — align.ts's output validator, which checks PRESENCE — and no other engine module reads the line at all. Origin is human triage prose (F15: a role's self-report is not a machine anchor); the day it becomes a dedupe/routing input, this test is what says so out loud", () => {
+  const srcDir = new URL("../", import.meta.url);
+  const files = readdirSync(srcDir, { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+  assert.ok(files.includes("loop/align.ts") && files.includes("forge/forge.ts"), "sanity: the two known modules are in the scan set");
+  const callers = files.filter((f) => f !== "forge/forge.ts" && /\bextractOrigin\(/.test(readFileSync(new URL(f, srcDir), "utf8")));
+  assert.deepEqual(callers.sort(), ["loop/align.ts"], "extractOrigin has no consumer beyond align's validator");
+  const alignSrc = readFileSync(new URL("loop/align.ts", srcDir), "utf8");
+  assert.equal((alignSrc.match(/\bextractOrigin\(/g) ?? []).length, 1, "one call, not a second one that reads the text");
+  assert.match(alignSrc, /extractOrigin\([^)]*\) == null/, "the single call is a null/presence check, never a read of what the line SAYS");
 });
 
 test("validateTriageOutput: missing body -> fail-closed", () => {
@@ -2751,6 +2794,124 @@ test("runPoolSelection: roles.po.poolSelection=true — a fake runner's selectio
   assert.match(call.prompt, /#1 —/);
   assert.match(call.prompt, /#3 —/);
   assert.doesNotMatch(call.prompt, /#4 —/, "the candidate digest itself is already cap-bounded — #4 was never even shown");
+});
+
+// buildPoolCandidateDigest substitutes each candidate's FULL formatCandidate-shaped body
+// (number, title, labels, body) instead of a title-only line, under the SAME EXISTING cap
+// (roles.po.backlogDigestMaxChars — no new cap, no new renderer) — independent of po-pool's own
+// forge-tool grant (unchanged, still ISSUE_TOOLS). These two tests are the "reaches the rendered
+// prompt, not just the builder" + "the cap behaves" evidence for that substitution, verified at
+// the unit level only: they assert against `runner.calls[0].prompt`, the exact string this
+// engine process built and would hand to the `claude` CLI's argv. A separate live-session check
+// was attempted to confirm the ACTUAL claude CLI stream-json transcript echoes that prompt
+// verbatim too — that check came back NEGATIVE (the stream-json transcript does not echo the
+// initial user-turn prompt at all), so no such confirmation exists and none is claimed here.
+test("runPoolSelection: the po-pool session's ACTUAL rendered prompt (not merely the digest builder's return value) carries each candidate's FULL body, in formatCandidate's number/title/labels/body shape — proof the substitution reaches the session, not just a local string", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2
+  const distinctiveMarker = "ZQWERTY-ONLY-IN-THE-BODY-NEVER-THE-TITLE-77219";
+  forge.ready = [
+    { number: 1, title: "issue 1", labels: ["sapwood:prio:3", "sapwood:type:feature"], body: `Full body for #1.\n\n${distinctiveMarker}` },
+    { number: 2, title: "issue 2", labels: ["sapwood:prio:3"], body: "Full body for #2, unrelated." },
+  ];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1, 2]))]);
+  const state = new State(":memory:");
+  await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 1);
+  const { prompt } = runner.calls[0]!;
+  // The distinctive marker exists ONLY inside issue #1's body — a title-only digest (the
+  // pre-#533 shape) could never produce this string. Its presence in the SESSION'S OWN prompt
+  // (not just buildPoolCandidateDigest's return value in isolation) is the actual proof.
+  assert.ok(prompt.includes(distinctiveMarker), "candidate #1's full body text must reach the rendered session prompt");
+  assert.ok(prompt.includes("Full body for #2, unrelated."), "candidate #2's full body text must reach the rendered session prompt too");
+  // formatCandidate's exact shape: "### #N — title\nLabels: ...\n\n<body>" — asserted structurally,
+  // not just "the words appear somewhere," so a future renderer swap that drops the shape (but
+  // coincidentally keeps the substrings) still fails this test.
+  assert.match(prompt, /### #1 — issue 1\nLabels: sapwood:prio:3, sapwood:type:feature\n\nFull body for #1\./);
+  assert.match(prompt, /### #2 — issue 2\nLabels: sapwood:prio:3\n\nFull body for #2, unrelated\./);
+});
+
+test("runPoolSelection: the SAME existing cap (roles.po.backlogDigestMaxChars) still behaves once candidates carry full bodies — a candidate past the cap is OMITTED WHOLE (never a partially-sliced body), and the omission is counted in the truncation marker", async () => {
+  const forge = new FakeForge();
+  // A tiny cap so two ~200-char bodies cannot both fit — forces real truncation behavior to
+  // exercise, rather than trusting it never triggers with realistic-sized bodies.
+  const cfg = mkCfg({
+    roles: { po: { poolSelection: true, backlogDigestMaxChars: 400 } },
+    lanes: { max: 3, roundDispatchCap: 2 },
+    round: { poolFactor: 1 },
+  }); // cap = 2 candidates structurally, but the CHAR cap bites first — sized so #1's whole
+  // formatCandidate block (392 chars) fits but #2's does not (both together would be ~700+)
+  const longBody = (n: number): string => `Body content for candidate #${n}, padded so it is unmistakably long. `.repeat(4);
+  forge.ready = [
+    { number: 1, title: "first candidate", labels: [], body: longBody(1) },
+    { number: 2, title: "second candidate", labels: [], body: longBody(2) },
+  ];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 1);
+  const { prompt } = runner.calls[0]!;
+  assert.ok(prompt.includes("### #1 — first candidate"), "the first (fits-under-cap) candidate is rendered in full");
+  assert.ok(prompt.includes(longBody(1).trim().slice(0, 30)), "candidate #1's body text itself (not just its header) reached the prompt");
+  assert.ok(
+    !prompt.includes("### #2 — second candidate"),
+    "the second candidate — whose FULL block doesn't fit the cap — is omitted WHOLE, never a partial/sliced body fragment",
+  );
+  assert.match(
+    prompt,
+    /\[\.\.\.\s*1\s*more candidate issue\(s\) omitted/,
+    "the truncation marker names the omission count, so the session isn't silently shown an incomplete-looking list",
+  );
+});
+
+// The test above proves OMISSION (a candidate past the char cap never reaches the prompt) but
+// never attempts to SELECT the omitted number — so it could not have caught this bug:
+// `runPoolSelection` validated against EVERY candidate (`candidates.map(c => c.number)`), not
+// the digest's own rendered subset, so a session naming an omitted-but-real candidate PASSED
+// validation. This bug is latent on a title-only digest (a title-only line is short enough that
+// the cap essentially never bites), reachable once candidates carry full bodies — which is why
+// this fix ships together with the substitution above rather than separately. This test closes
+// that gap: same truncation setup as above, but the scripted session's output NAMES the omitted
+// candidate (#2). It must be rejected exactly like a number that was never a candidate at all —
+// retried once, then degraded OPEN to the full deterministic set (never silently accepted).
+test("runPoolSelection: selecting a candidate that packDigestRecords omitted under the cap is invalid — the session cannot select what it was never shown, even though #2 IS a real candidate", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({
+    roles: { po: { poolSelection: true, backlogDigestMaxChars: 400 } },
+    lanes: { max: 3, roundDispatchCap: 2 },
+    round: { poolFactor: 1 },
+  }); // same sizing as the truncation test above: #1's block fits, #2's does not
+  const longBody = (n: number): string => `Body content for candidate #${n}, padded so it is unmistakably long. `.repeat(4);
+  forge.ready = [
+    { number: 1, title: "first candidate", labels: [], body: longBody(1) },
+    { number: 2, title: "second candidate", labels: [], body: longBody(2) },
+  ];
+  // #2 IS a genuine candidate (computePoolCandidates produced it) — it was only omitted from the
+  // RENDERED digest by the char cap. Naming it must still fail: the bound set is what was shown,
+  // not what merely exists in the candidate list.
+  const badSelection = poolResultText([1, 2]);
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", badSelection), doneResult("role-po-pool-2", badSelection)]);
+  const state = new State(":memory:");
+  const events = tapEvents(state);
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 3 });
+  assert.equal(
+    runner.calls.length,
+    2,
+    "retried exactly once before degrading — the omitted-candidate selection is never silently accepted",
+  );
+  assert.deepEqual(
+    selected.map((i) => i.number).sort((a, b) => a - b),
+    [1, 2],
+    "degraded OPEN to the full deterministic candidate set (not an empty pool, and not a partial accept of just #1)",
+  );
+  const degraded = events.find(([kind]) => kind === "pool-degraded");
+  assert.ok(degraded, "a durable honesty event was recorded");
+  const reason = (degraded![1] as { reason: string }).reason;
+  assert.match(
+    reason,
+    /not in the candidate list: 2/,
+    "the degrade reason names #2 as out-of-bounds — invalid because it was never RENDERED, not because it isn't a real candidate",
+  );
 });
 
 test("runPoolSelection: an out-of-bounds selection (an issue number outside the candidate list) is invalid, retried once, then degrades OPEN to the full deterministic candidate set", async () => {

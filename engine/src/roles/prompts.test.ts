@@ -9,7 +9,7 @@ import { defaultPoolPromptPath, defaultPoPromptPath } from "../loop/align.js";
 import { defaultPoDecomposePromptPath } from "../loop/decompose.js";
 import { defaultHarvestPromptPath } from "../loop/harvest.js";
 import { defaultDoctrineTemplatePath } from "../loop/init.js";
-import { PROXY_ROLE_TOOL_MATRIX } from "../proxy/access.js";
+import { allowedToolsForRole, PROXY_ROLE_TOOL_MATRIX } from "../proxy/access.js";
 import { defaultRetroPromptPath, RETRO_ALLOWED_TOOLS, RETRO_DISALLOWED_TOOLS } from "../retro/retro.js";
 import { defaultEngineReviewerPromptPath } from "../review/engine-agent.js";
 import { defaultArchitectPromptPath } from "./architect.js";
@@ -22,7 +22,11 @@ import {
   ROLE_ALLOWED_TOOLS,
   ROLE_DISALLOWED_TOOLS,
 } from "./peripheral.js";
-import { defaultPlanConfirmPromptPath, defaultPlanDrafterPromptPath, defaultPlanReviewerPromptPath } from "./plan-review.js";
+import {
+  defaultVerificationPlanConfirmPromptPath,
+  defaultVerificationPlanDrafterPromptPath,
+  defaultVerificationPlanReviewerPromptPath,
+} from "./plan-review.js";
 import { defaultFixPromptPath, defaultPromptPath } from "./worker.js";
 
 function sha256(content: string): string {
@@ -57,36 +61,102 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // check covers it. Same class of fix as #444 above, on the state axis instead of the milestone
   // axis: the session could not see a fact that shipped and closed, so it re-proposed one (#525
   // vs. #461, hours apart).
-  "po.md": "f22e6ceb4dbf4532c52de24b63994a1f60af4a1f9cab0be0ec830f4a7299725c",
+  // #442: intentional edit — align mode now requires a one-line `Origin:` evidence statement in
+  // every proposed body (event ids / lane / episode / parent issue, or the literal `static
+  // scan`), and says outright that the engine only checks the line EXISTS. Round provenance was
+  // already engine-stamped; EVIDENCE provenance had no carrier at all, so a run-observation
+  // finding and a repo-reading one were indistinguishable on the issue page.
+  "po.md": "6a6c6bbec284ce563a3e6b7277c9cfc3d8fe302eb41fa2241dabdfae071ad9c7",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
   // architect holds a default WebFetch grant, which reaches github.com.
   // #529 (gate② round 3, optional cleanup): same further rewording as po.md above.
-  "architect.md": "cadfbdddfd470f41f5c6daf728bde931f554e3c590f5ad34240380f8d3cb1ec0",
+  // #533 originally proposed removing this grant; the owner reversed that direction. architect
+  // KEEPS its ISSUE_TOOLS grant — the surviving change from the #533 work is the ask itself,
+  // rewritten from conditional prose to an unconditional-when-attached numbered task-list step:
+  // "Cross-issue search" (search_issues on a candidate's key terms for related open/
+  // recently-updated issues OUTSIDE the pool, issue_details the hits before judging) plus a
+  // doc-drift rule (a locked decision surfacing only in an issue, never the architecture chapter,
+  // is doc drift, never authoritative).
+  // gate② #557 (finding 9): "search_issues returns a title and labels only, never body text"
+  // was false — the tool returns number/title/state/labels/updatedAt (IssueSearchResult), and
+  // "only" denied fields the "open or recently-updated" ask right above depends on. Named the
+  // real field set at both mentions (the capability paragraph and the Cross-issue search step).
+  // #533 reversal cleanup: the fallback clause ("if you have no such tools, you have no way to
+  // see issues outside this round's candidate/pool lists") was itself a false completeness claim
+  // — architect also holds a default WebFetch/WebSearch grant, named a few lines below. Rewritten
+  // to enumerate the real fallback set (substituted context, worktree, WebSearch/WebFetch when
+  // attached) instead of asserting a closure over all of them.
+  // #413: hash moved again for the gate⓪ rename — architect.md's single reference to the drafter
+  // role by name follows the new name. No charter, grant, or instruction changed by the rename.
+  "architect.md": "4b028b293c378d4fb2b5d376e44c9c30afe2f0add05d4ba76cf48440f4c612e7",
   // #457 (F36): intentional edits — execution-class ACs are plan noise (CI already enforces
-  // ci.requiredChecks unconditionally): plan-reviewer flags-and-strips them, the confirm pass
+  // ci.requiredChecks unconditionally): verification-plan-reviewer flags-and-strips them, the confirm pass
   // invalidates legacy plans carrying them, drafter/decompose never author them.
   // #529: same categorical→conditional GitHub-access fix as architect.md.
+  // #413: the three gate⓪ files were renamed on disk (plan-reviewer.md ->
+  // verification-plan-reviewer.md, ...) and their in-body self-references and the
+  // {{roles.*.maxDraftCycles}} token follow the new role/config names. The names say what the
+  // role gates: an issue's VERIFICATION PLAN, not its plan of work. The rename carries the
+  // #533-reversal content edits below unchanged; both moves land in each hash exactly once.
+  // #533 proposed removing plan-reviewer's ISSUE_TOOLS grant; the owner reversed that direction
+  // — the grant is unchanged (still in `proxy/access.ts`'s matrix). This edit drops the original
+  // closure claim ("if you have no such tools, you have no GitHub access at all") that #533's own
+  // narrowing had left in place — a completeness claim over "GitHub access" as a whole, banned by
+  // the same rule #529 exists to enforce — in favor of a plain "when your session has the tools"
+  // statement with no claim about the absent case.
   // retro round #281: the "Feasibility against human-merge-only paths" check named
   // "security-relevant config" as the protected slice of sapwood.config.*, which read as
   // scoping the block to guard/reviewer/merge-mode fields — issue #386 (a comment-only
   // budgetUsdSoft edit) slipped past gate⓪ on that reading and the resulting PR (#562) then
   // failed gate② for real, unfixably (the guard blocks the whole file by path, not by field).
   // Both bullets now say so explicitly.
-  "plan-reviewer.md": "409353d6c8607331c575fd4fe6222136026a8b55c67e573701b32292740d4a08",
-  "plan-reviewer-confirm.md": "895ae8b6dace1417d576e8398e9918921e78d28b96a4d9a7c07c245e7071ad2d",
-  // retro round #281: same fix as plan-reviewer.md above, mirrored into the drafter's own
-  // "if the brief flags a human-merge-only conflict" bullet.
-  "plan-drafter.md": "f6c7cf7abb7f6fe1314da551f5600c3382e7941352f7195c7f145e439a3d9f0c",
-  "harvest.md": "82312e3ac79e42e008a9d7477d4b9e601623a9ebb1e5a4fe306e8b3f266d109d",
+  "verification-plan-reviewer.md": "132d51eebdad5dd0edf1e746baa4c9d93ad306782be7d1fdcb8b8c74f544e403",
+  // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
+  // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
+  // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
+  // either way.
+  "verification-plan-reviewer-confirm.md": "8be3f563358fb335803c0755f445c0c42ecdeb9804c853b3855a63a6e0a70d75",
+  // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — the
+  // drafter's brief is still its primary instruction set; the forge grant (never removed) is a
+  // read-only aid, never a write path, exactly as this file has always said.
+  // retro round #281: same fix as verification-plan-reviewer.md above, mirrored into the
+  // drafter's own "if the brief flags a human-merge-only conflict" bullet.
+  "verification-plan-drafter.md": "1be2278294a53e7702b1f860e0aafbfe4933495c928b218878434cae3e19cb9f",
+  // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
+  // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
+  // grant was never removed, so the capability paragraph again names it (when attached) instead
+  // of denying it.
+  "harvest.md": "657601c73250a9fd169d909779cddec8a23433936bf20a99533e827def2fd52e",
   // #453 (design #402 R5): intentional edit — the digest's new finding-class tendency table is
   // pointed at, with the design-source rule and the stated blind spot. The FIRST deliberate
   // change to this file since #235 pinned it as "already code-aware, do not touch"; that ruling
   // was about tool scope, not about the role's analysis inputs, so it is not re-litigated here.
-  "retro.md": "266dfa04d6a36405e911eb6d0db60f929f5400d99aef8d72d1f388306b8d7f0e",
+  // #533 proposed removing retro's ISSUE_TOOLS grant; the owner reversed that direction — the
+  // grant stays, which means the "you have no `gh` access at all" sentence #533's removal would
+  // have made true is FALSE again, and live: #551 flipped `proxy.enabled` to default true, so
+  // retro genuinely holds these tools in every deployment. Fixed to state what's actually true —
+  // no `gh` CLI, no shell beyond git (`RETRO_ALLOWED_TOOLS` is git-only Bash), but a real
+  // read-only `mcp__forge__*` issue grant — as a single positive statement about that one named
+  // channel, not a list of what retro lacks.
+  "retro.md": "76996f79411b5fa30c36c2e9f28b041e889fa7927f26ccca7b76cdc23c85a01d",
   // #529: same categorical→conditional GitHub-access fix as architect.md.
-  "po-pool.md": "13e4b27cad513e06bd0b99bed6dce612600d477e8b2a654fffa81649f2672c18",
+  // #533 proposed removing po-pool's ISSUE_TOOLS grant and substituting each candidate's full
+  // body in its place; the owner reversed the grant-removal half only. po-pool KEEPS its
+  // ISSUE_TOOLS grant (unchanged in `proxy/access.ts`) — the substitution survives independently:
+  // `align.ts::buildPoolCandidateDigest` still renders each candidate with
+  // `architect.ts::formatCandidate` (number, title, labels, FULL body) instead of a title-only
+  // line, under the SAME existing cap (`roles.po.backlogDigestMaxChars`) — the architect phase
+  // pays for this exact render one phase later regardless, so substituting it here is free
+  // either way, independent of what po-pool's own grant is. The prompt now says both are true: a
+  // full body is substituted per candidate, AND the forge tools remain available for anything
+  // beyond what a shown candidate's entry carries.
+  // gate② #557 (finding 6): the flat "every candidate below already carries its full issue
+  // body" / "everything you need to decide is already here" claims were unconditional over code
+  // that truncates whole records past the cap with no lookup fallback — now scoped to what's
+  // actually rendered, and the session is told what the omission marker means.
+  "po-pool.md": "a3e2391424151767aa10ecd8fb3b1d2ec5f92fb77ff695e4961fd775d46c54f4",
   "po-decompose.md": "3289b0f37585b84fdce67319f9ae4b2e82c8873b13b2a292adef25b1bca79ae2",
 };
 
@@ -98,16 +168,16 @@ test("prompt snapshot: architect.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultArchitectPromptPath())), SNAPSHOT_HASHES["architect.md"]);
 });
 
-test("prompt snapshot: plan-reviewer.md hash matches the pinned revision", () => {
-  assert.equal(sha256(readPrompt(defaultPlanReviewerPromptPath())), SNAPSHOT_HASHES["plan-reviewer.md"]);
+test("prompt snapshot: verification-plan-reviewer.md hash matches the pinned revision", () => {
+  assert.equal(sha256(readPrompt(defaultVerificationPlanReviewerPromptPath())), SNAPSHOT_HASHES["verification-plan-reviewer.md"]);
 });
 
-test("prompt snapshot: plan-reviewer-confirm.md hash matches the pinned revision", () => {
-  assert.equal(sha256(readPrompt(defaultPlanConfirmPromptPath())), SNAPSHOT_HASHES["plan-reviewer-confirm.md"]);
+test("prompt snapshot: verification-plan-reviewer-confirm.md hash matches the pinned revision", () => {
+  assert.equal(sha256(readPrompt(defaultVerificationPlanConfirmPromptPath())), SNAPSHOT_HASHES["verification-plan-reviewer-confirm.md"]);
 });
 
-test("prompt snapshot: plan-drafter.md hash matches the pinned revision", () => {
-  assert.equal(sha256(readPrompt(defaultPlanDrafterPromptPath())), SNAPSHOT_HASHES["plan-drafter.md"]);
+test("prompt snapshot: verification-plan-drafter.md hash matches the pinned revision", () => {
+  assert.equal(sha256(readPrompt(defaultVerificationPlanDrafterPromptPath())), SNAPSHOT_HASHES["verification-plan-drafter.md"]);
 });
 
 test("prompt snapshot: harvest.md hash matches the pinned revision", () => {
@@ -150,9 +220,9 @@ const ROLE_PROMPT_PATHS: Readonly<Record<string, readonly string[]>> = {
   "po-triage": [defaultPoPromptPath()],
   harvest: [defaultHarvestPromptPath()],
   architect: [defaultArchitectPromptPath()],
-  "plan-reviewer": [defaultPlanReviewerPromptPath()],
-  "plan-drafter": [defaultPlanDrafterPromptPath()],
-  "plan-reviewer-confirm": [defaultPlanConfirmPromptPath()],
+  "verification-plan-reviewer": [defaultVerificationPlanReviewerPromptPath()],
+  "verification-plan-drafter": [defaultVerificationPlanDrafterPromptPath()],
+  "verification-plan-reviewer-confirm": [defaultVerificationPlanConfirmPromptPath()],
   retro: [defaultRetroPromptPath()],
   // worker's PR_TOOLS grant is consumed by both the main dispatch leg (worker.md) and the
   // fix-loop leg (fix.md) — both mint with role: "worker" (worker.ts).
@@ -212,8 +282,8 @@ test("#535 pin: which roles hold a real WRITE grant matches ROLE_ALLOWED_TOOLS/R
   // `NotebookEdit`, which every one of these lists carries as its own distinct entry.
   const tokens = (list: string): Set<string> => new Set(list.split(","));
 
-  // The six peripheral-role allow-lists — five roles plus the plan-reviewer confirm variant:
-  // po/plan-reviewer/plan-drafter/confirm all byte-identical to the base, architect/po-align/
+  // The six peripheral-role allow-lists — five roles plus the verification-plan-reviewer confirm variant:
+  // po/verification-plan-reviewer/verification-plan-drafter/confirm all byte-identical to the base, architect/po-align/
   // po-triage widened only with WebSearch/WebFetch — must never include Write/Edit/MultiEdit,
   // and the shared deny-list must keep denying Bash outright — together, tier 1's "no write
   // tool channel exists at all" claim.
@@ -321,7 +391,18 @@ test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access d
   // Requires "GitHub access" adjacent (not "GitHub ... access" with a gap) so this deliberately
   // does NOT match every file's "## You have no GitHub write access at all" heading — that
   // claim is correctly scoped to writes and true regardless of any web grant.
-  const NO_GITHUB_ACCESS_DENIAL = /\b(?:no|never|nothing)\b[^.]{0,60}\bGitHub access\b/i;
+  //
+  // WIDENED to a second token, `` `gh` ``/`gh` — retro.md's own "you have no `gh` access at
+  // all" carried the identical categorical-denial shape as "no GitHub access" but escaped this
+  // exact regex on a single token swap (GitHub -> `gh`), which is exactly how it survived #529's
+  // own AC-2 test while granted ISSUE_TOOLS on `main` — a LIVE drift, not a hypothetical one:
+  // #551 flipped `proxy.enabled` to default true, so retro genuinely held these tools in every
+  // deployment while this sentence claimed otherwise. `gh`'s own `\b...\b` word-boundary (not
+  // just a bare substring check) is deliberate: "no gh access" must match, but "no high access"
+  // (a real English phrase containing the literal substring "gh access") must NOT — verified by
+  // its own test below. The optional surrounding backticks (`` `?...`? ``) tolerate retro.md's
+  // own markdown-code-span styling without requiring it.
+  const NO_GITHUB_ACCESS_DENIAL = /\b(?:no|never|nothing)\b[^.]{0,60}(?:\bGitHub\b|`?\bgh\b`?)\s+access\b/i;
 
   for (const [role, tools] of Object.entries(PROXY_ROLE_TOOL_MATRIX)) {
     if (tools.length === 0) continue; // nothing granted, nothing to be dishonest about
@@ -366,13 +447,26 @@ test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access d
   // realistic failure mode this test exists to catch (a stale denial nobody meant to leave in)
   // doesn't produce that shape. Not fixed here; noted so the next reader doesn't mistake this
   // test for airtight.
+
+  // Self-check, since the regex widening is the AC: the escaped case that motivated the widening,
+  // exercised DIRECTLY against the regex (in ADDITION to the FOR loop above, which now also
+  // exercises it live against retro.md's actual, fixed text — retro holds a non-empty grant, so
+  // it's a subject of that loop too). This direct check asserts the widened regex itself is
+  // correct independent of any one prompt's current wording, so a FUTURE role/prompt reusing this
+  // exact phrasing is still caught even if retro.md's own text drifts again.
+  assert.ok(NO_GITHUB_ACCESS_DENIAL.test("you have no `gh` access at all"), "retro.md's actual sentence must match the widened regex");
+  assert.ok(NO_GITHUB_ACCESS_DENIAL.test("you have no gh access at all"), "the bare (unbackticked) form must also match");
+  assert.ok(
+    !NO_GITHUB_ACCESS_DENIAL.test("there is no high access door on this floor"),
+    'false-positive guard: "high access" contains the literal substring "gh access" but must NOT match — the \\bgh\\b word boundary is what prevents it',
+  );
 });
 
 test("shipped role prompts (#321): sentinel examples are plain text with no adjacent markdown fences", () => {
   const prompts: ReadonlyArray<readonly [name: string, path: string, sentinelCount: number]> = [
-    ["plan-reviewer.md", defaultPlanReviewerPromptPath(), 2],
-    ["plan-reviewer-confirm.md", defaultPlanConfirmPromptPath(), 2],
-    ["plan-drafter.md", defaultPlanDrafterPromptPath(), 1],
+    ["verification-plan-reviewer.md", defaultVerificationPlanReviewerPromptPath(), 2],
+    ["verification-plan-reviewer-confirm.md", defaultVerificationPlanConfirmPromptPath(), 2],
+    ["verification-plan-drafter.md", defaultVerificationPlanDrafterPromptPath(), 1],
     ["po.md", defaultPoPromptPath(), 4],
     ["po-pool.md", defaultPoolPromptPath(), 1],
     ["po-decompose.md", defaultPoDecomposePromptPath(), 2],
@@ -407,8 +501,8 @@ test("architect.md (#235 AC item 3): no longer claims zero Read/repo access; ins
   assert.ok(body.toLowerCase().includes("cite"), "directs citing code evidence, not just asserting a contradiction");
 });
 
-test("plan-reviewer.md (#235 AC item 3): judges plan EXECUTABILITY, explicitly warned off demanding implementation-shaped acceptance criteria", () => {
-  const body = readPrompt(defaultPlanReviewerPromptPath());
+test("verification-plan-reviewer.md (#235 AC item 3): judges plan EXECUTABILITY, explicitly warned off demanding implementation-shaped acceptance criteria", () => {
+  const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
   assert.ok(body.toLowerCase().includes("executab"), "names plan executability as the judgment target");
   assert.ok(
     body.toLowerCase().includes("implementation-shaped") || body.toLowerCase().includes("already implemented"),
@@ -427,8 +521,8 @@ test("harvest.md (#235 AC item 3): repository reads must not alter ledger facts 
   assert.ok(body.includes("Read`/`Grep`/`Glob`"), "names the actual read-only grant");
 });
 
-test("plan-drafter.md (#235 PR-B follow-up F1): the matrix grants plan-drafter Read/Grep/Glob (it's a peripheral role, no allowedTools override at its plan-review.ts callsite — falls back to the base), so the prompt's old 'wanting to open a file = wrong role' line — which contradicted that grant — is gone, replaced by role-scoped discretion; 'plan-author ≠ plan-approver' and 'never implement' survive verbatim in spirit", () => {
-  const body = readPrompt(defaultPlanDrafterPromptPath());
+test("verification-plan-drafter.md (#235 PR-B follow-up F1): the matrix grants verification-plan-drafter Read/Grep/Glob (it's a peripheral role, no allowedTools override at its plan-review.ts callsite — falls back to the base), so the prompt's old 'wanting to open a file = wrong role' line — which contradicted that grant — is gone, replaced by role-scoped discretion; 'plan-author ≠ plan-approver' and 'never implement' survive verbatim in spirit", () => {
+  const body = readPrompt(defaultVerificationPlanDrafterPromptPath());
   assert.ok(
     !body.includes("wanting to open a file or run tests"),
     "the old blanket file-read prohibition (contradicting the matrix) is gone",
@@ -436,27 +530,27 @@ test("plan-drafter.md (#235 PR-B follow-up F1): the matrix grants plan-drafter R
   assert.ok(body.includes("Read`/`Grep`/`Glob`"), "names the actual read-only grant");
   assert.ok(body.includes("plan-author ≠ plan-approver."), "the plan-author ≠ plan-approver boundary survives verbatim");
   assert.ok(body.toLowerCase().includes("never implement"), "the never-implement boundary survives");
-  assert.ok(body.includes("producer ≠ plan-drafter."), "the core intent-prohibition heading survives verbatim");
+  assert.ok(body.includes("producer ≠ verification-plan-drafter."), "the core intent-prohibition heading survives verbatim");
 });
 
 // ── #283 (design #279 §5, D4): mandatory checkbox acceptance criteria ─────────────────────────
 
-test("plan-reviewer.md (#283): mandates literal `- [ ]` checkbox acceptance criteria — malformed/prose AC is named as not-dispatchable, not just a style nit", () => {
-  const body = readPrompt(defaultPlanReviewerPromptPath());
+test("verification-plan-reviewer.md (#283): mandates literal `- [ ]` checkbox acceptance criteria — malformed/prose AC is named as not-dispatchable, not just a style nit", () => {
+  const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
   assert.ok(body.includes("- [ ]"), "shows the literal checkbox syntax");
   assert.ok(body.toLowerCase().includes("not dispatchable"), "states the dispatch consequence explicitly");
 });
 
-test("plan-drafter.md (#283): mandates literal `- [ ]` checkbox acceptance criteria in whatever body it drafts", () => {
-  const body = readPrompt(defaultPlanDrafterPromptPath());
+test("verification-plan-drafter.md (#283): mandates literal `- [ ]` checkbox acceptance criteria in whatever body it drafts", () => {
+  const body = readPrompt(defaultVerificationPlanDrafterPromptPath());
   assert.ok(body.includes("- [ ] ...`"), "shows the literal checkbox syntax");
   assert.ok(body.toLowerCase().includes("not dispatchable"), "states the dispatch consequence explicitly");
 });
 
 // ── #457 (F36): execution-class ACs are plan noise — CI enforces them unconditionally ─────────
 
-test("#457 plan-reviewer.md: execution-class ACs are named as noise to FLAG AND STRIP within minor-correction latitude, moving the execution step to the Verification plan", () => {
-  const body = readPrompt(defaultPlanReviewerPromptPath());
+test("#457 verification-plan-reviewer.md: execution-class ACs are named as noise to FLAG AND STRIP within minor-correction latitude, moving the execution step to the Verification plan", () => {
+  const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
   assert.ok(body.includes("Execution-class criteria are noise — flag and strip them."), "the flag-and-strip rule is present");
   assert.match(
     body,
@@ -465,16 +559,19 @@ test("#457 plan-reviewer.md: execution-class ACs are named as noise to FLAG AND 
   assert.match(body, /fold the execution step into\s+the `## Verification plan`/);
 });
 
-test("#457 plan-reviewer-confirm.md: an execution-class AC on a legacy approved plan is a standing invalidate-check, with the brief directing the move to the Verification plan", () => {
-  const body = readPrompt(defaultPlanConfirmPromptPath());
+test("#457 verification-plan-reviewer-confirm.md: an execution-class AC on a legacy approved plan is a standing invalidate-check, with the brief directing the move to the Verification plan", () => {
+  const body = readPrompt(defaultVerificationPlanConfirmPromptPath());
   assert.match(body, /A second standing check \(F36\): an execution-class acceptance\s+criterion/);
   assert.match(body, /a still-approved plan carrying one is `invalidate`/);
   assert.match(body, /folded into the\s+`## Verification plan`/);
 });
 
-test("#457 plan-drafter.md + po-decompose.md: AC-authoring guidance forbids CI/suite/typecheck status as a criterion — the Verification plan owns execution steps", () => {
-  const drafter = readPrompt(defaultPlanDrafterPromptPath());
-  assert.ok(drafter.includes("Never write CI/suite/typecheck status as an acceptance criterion"), "plan-drafter carries the rule");
+test("#457 verification-plan-drafter.md + po-decompose.md: AC-authoring guidance forbids CI/suite/typecheck status as a criterion — the Verification plan owns execution steps", () => {
+  const drafter = readPrompt(defaultVerificationPlanDrafterPromptPath());
+  assert.ok(
+    drafter.includes("Never write CI/suite/typecheck status as an acceptance criterion"),
+    "verification-plan-drafter carries the rule",
+  );
   assert.match(drafter, /execution steps\s+belong in the `## Verification plan`/);
   const decompose = readPrompt(defaultPoDecomposePromptPath());
   assert.ok(decompose.includes("Never write CI/suite/typecheck status itself as a criterion"), "po-decompose carries the rule");
@@ -510,8 +607,8 @@ test("#409 fix.md: carries the authoritative-signals rule (a fix leg is where pa
   assert.ok(!body.includes("Check what already exists before you build."), "reuse-before-build is scoped to fresh work, not rework");
 });
 
-test("#409 plan-reviewer.md: unexecutable-mechanism plans are bounceable, WITHOUT licensing a re-litigation of the human's why/what", () => {
-  const body = readPrompt(defaultPlanReviewerPromptPath());
+test("#409 verification-plan-reviewer.md: unexecutable-mechanism plans are bounceable, WITHOUT licensing a re-litigation of the human's why/what", () => {
+  const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
   assert.ok(body.includes("Mechanism assumptions are plan defects."), "the plan-defect ground is present");
   assert.match(body, /A checkability defect, never a scope re-litigation\./, "explicitly bounded away from re-litigating scope");
   assert.ok(body.includes("not whether the underlying work is a good idea"), "the charter line forbidding re-litigation survives the edit");
@@ -537,6 +634,14 @@ test("#409 po.md: align mode states reuse-before-build as a rule, including the 
   assert.match(body, /propose nothing/, "the propose-nothing case is explicit");
 });
 
+test("#442 po.md: align mode requires an `Origin:` evidence line, names `static scan` as the honest literal for a repo-reading finding, and says the engine never reads what it says", () => {
+  const body = readPrompt(defaultPoPromptPath());
+  assert.match(body, /`Origin:`/, "the required line is named literally, the way the engine's presence check spells it");
+  assert.match(body, /static scan/, "the literal a purely repo-derived finding must use");
+  assert.match(body, /never reads what it says|never parses it|for human triage only/i, "stated as prose, not a machine anchor");
+  assert.match(body, /invalid output/, "a missing Origin line is an invalid session output, not a soft nudge");
+});
+
 test("#409 doctrine-template.md: the authoritative-signals invariant carries the ordering, the contract-format exemption, and the failure-direction requirement", () => {
   const body = readPrompt(defaultDoctrineTemplatePath());
   assert.ok(body.includes("Authoritative signals over inferred text."), "the invariant is present in the shipped starter doctrine");
@@ -553,7 +658,7 @@ test("#409: the rule is worded per role rather than one paragraph duplicated, an
   const worker = readPrompt(defaultPromptPath());
   const others = [
     defaultFixPromptPath(),
-    defaultPlanReviewerPromptPath(),
+    defaultVerificationPlanReviewerPromptPath(),
     defaultEngineReviewerPromptPath(),
     defaultDoctrineTemplatePath(),
   ].map(readPrompt);
@@ -571,13 +676,25 @@ test("#409: the rule is worded per role rather than one paragraph duplicated, an
   }
 });
 
-test("#409: architect.md is deliberately untouched (charter conflicts recorded in the issue)", () => {
-  // plan-drafter.md was untouched by #409 specifically, but has since been edited for an
-  // unrelated reason (retro round #281: the human-merge-only feasibility check under-scoped
-  // sapwood.config.* to its security-relevant fields) — its hash is covered by the direct
-  // snapshot test above instead of this #409-scoped assertion.
+test("#409: architect.md carries no #409 charter change (conflicts recorded in the issue) — later hash moves are each recorded above", () => {
+  // verification-plan-drafter.md was untouched by #409 specifically, but has since been edited
+  // for unrelated reasons (the forge-tool-ask rework, #413's rename, and retro round #281's
+  // human-merge-only scope fix — each recorded in its own SNAPSHOT_HASHES comment above) — its
+  // hash is covered by the direct snapshot test above instead of this #409-scoped assertion.
   assert.equal(sha256(readPrompt(defaultArchitectPromptPath())), SNAPSHOT_HASHES["architect.md"]);
 });
+
+// A reverse-direction test ("a role holding NO PROXY_ROLE_TOOL_MATRIX grant must not have a
+// prompt that asks for an mcp__forge__ lookup") was drafted alongside AC-2 above during a
+// since-reversed proposal to narrow this matrix to two roles. It is deliberately NOT restored:
+// every role in PROXY_ROLE_TOOL_MATRIX holds a non-empty grant (nine ISSUE_TOOLS roles plus
+// worker's PR_TOOLS — see access.ts), so the test would have zero real subjects among shipped
+// roles — its own sanity assertions (`allowedToolsForRole(role)` must be `[]`) would fail
+// immediately for every role it named, not pass vacuously. A version scoped to a synthetic
+// non-existent role would exercise nothing but the `?? []` fallback `allowedToolsForRole`'s own
+// unit tests (access.test.ts) already cover directly. AC-2 above remains the live, non-vacuous
+// guard in this direction: it fails the moment a prompt's prose disagrees with its role's actual
+// (currently non-empty, for all nine) matrix grant.
 
 // ── #410: WebSearch/WebFetch grant wording — po.md's mode-aware external-check section, the
 // reworded "stay inside your scope" bullet, and both roles' first-class abstention wording ──
@@ -636,6 +753,40 @@ test("#410 po.md + architect.md: both name a first-class abstention — an expli
     architect.includes('verify this" belongs in the note as honestly as any contradiction or risk you flag.'),
     "architect.md states the abstention explicitly, not just implies it",
   );
+});
+
+test("architect.md: the cross-issue search ask is UNCONDITIONAL-when-attached and lives in the numbered task list (never only in the capability paragraph) — a permission the model may decline is what produced #529's own measured zero in the first place", () => {
+  const body = readPrompt(defaultArchitectPromptPath());
+  const taskListStart = body.indexOf("## What you do — every pass, all of these");
+  assert.ok(taskListStart > 0, "sanity: the numbered task list section exists");
+  const taskList = body.slice(taskListStart);
+  assert.match(
+    taskList,
+    /\*\*Cross-issue search \(mandatory whenever the tool is attached/,
+    "the ask is a numbered task-list item, not just capability prose",
+  );
+  assert.ok(taskList.includes("mcp__forge__search_issues"), "names the actual tool to call");
+  assert.ok(taskList.includes("mcp__forge__issue_details"), "names the required follow-up (search_issues carries no body text)");
+  assert.ok(
+    taskList.toLowerCase().includes("doc drift"),
+    "names the doc-drift rule — a decision found only in an issue is never treated as authoritative",
+  );
+  assert.match(
+    taskList,
+    /OUTSIDE this\s+round's pool/,
+    "scoped to the cross-issue-consistency mission, not the round's own candidate/pool lists",
+  );
+});
+
+test("po-pool.md: names its mcp__forge__ grant (po-pool holds ISSUE_TOOLS, unchanged) AND describes the digest as carrying each candidate's full body, not just its title — the two are independent, not exclusive", () => {
+  const body = readPrompt(defaultPoolPromptPath());
+  assert.deepEqual(
+    [...allowedToolsForRole("po-pool")].sort(),
+    [...allowedToolsForRole("architect")].sort(),
+    "sanity: po-pool holds the same non-empty ISSUE_TOOLS grant as architect",
+  );
+  assert.ok(body.includes("mcp__forge__"), "po-pool's real forge grant is named in its prompt, not silently omitted");
+  assert.ok(body.includes("full issue body"), "names what the substituted digest now actually carries");
 });
 
 test("#410 architect.md: names WebSearch/WebFetch alongside the existing read-only grant, gated on the deployment's own grant state", () => {

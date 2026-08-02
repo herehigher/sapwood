@@ -35,6 +35,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import { classifyEnvFailure, type EnvFailurePatterns, type EnvFailureSource } from "../loop/env-failure.js";
+import { allowedToolsForRole } from "../proxy/access.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
@@ -72,7 +73,7 @@ import {
 } from "./worker.js";
 
 /** #235 PR-B (owner ruling 2026-07-17): the allow/deny matrix for EVERY issues-only peripheral
- *  role (plan-reviewer, plan-drafter, PO/align+triage+pool, harvest, architect) — the ONE place
+ *  role (verification-plan-reviewer, verification-plan-drafter, PO/align+triage+pool, harvest, architect) — the ONE place
  *  this matrix is defined, per-role exports below just naming which pair each session wires
  *  in. Two prior rulings combine here:
  *
@@ -97,12 +98,12 @@ import {
  *  name, not a pattern) closes command execution entirely — no `git`, no `gh`, no shell of any
  *  kind. This SUBSUMES the old per-pattern `Bash(gh ...)` denies (#101/#102's `--body-file`/
  *  `-F`/`-l`/`-p` bypass classes are moot when there is no Bash grant to bypass THROUGH at all)
- *  and the plan-drafter's/PO's extra label-mutation denies below — simplified accordingly.
+ *  and the verification-plan-drafter's/PO's extra label-mutation denies below — simplified accordingly.
  *  Read-only git (`git log` etc.) deliberately stays OUT: the blanket Bash deny already covers
  *  it, and the issue's own scope explicitly excludes adding it as a distinct grant.
  *
  *  #534 (PM ruling + fable architectural review, 2026-08-02): `Agent`/`Task` denied by name —
- *  a live plan-reviewer session, unable to get a shell, spawned three subagents attempting to
+ *  a live verification-plan-reviewer session, unable to get a shell, spawned three subagents attempting to
  *  get one indirectly. The shell/write leg is evidenced and contained: the children inherit this
  *  SAME `--disallowedTools` deny list, so they reached no shell either, and the fan-out itself was
  *  an undeclared cost/concurrency channel, not a shell/write escalation. The READ-containment leg
@@ -176,8 +177,8 @@ export const PO_DISALLOWED_TOOLS = ROLE_DISALLOWED_TOOLS;
  *  align.ts's po-align/po-triage sessions) chooses between its own granted export here and the
  *  ungranted base (ROLE_ALLOWED_TOOLS/PO_ALLOWED_TOOLS) depending on `cfg.webAccess.enabled` —
  *  the config key is read AT THE CALL SITE, never inside RoleRunner itself, so a role this
- *  module doesn't wire the ternary for (every review-family session: plan-reviewer,
- *  plan-drafter, plan-reviewer-confirm, and reviewCwd's hardcoded gate② profile) has NO config
+ *  module doesn't wire the ternary for (every review-family session: verification-plan-reviewer,
+ *  verification-plan-drafter, verification-plan-reviewer-confirm, and reviewCwd's hardcoded gate② profile) has NO config
  *  path that could ever reach WebSearch/WebFetch — refusal by construction, not by convention.
  *  `po-pool` (align.ts's third PO_ALLOWED_TOOLS caller) is deliberately excluded — it renders a
  *  DIFFERENT prompt (`po-pool.md`, never `po.md`) and stays on the ungranted base regardless of
@@ -188,7 +189,7 @@ export const PO_ALIGN_ALLOWED_TOOLS = `${ROLE_ALLOWED_TOOLS},${PERIPHERAL_WEB_TO
 export const PO_TRIAGE_ALLOWED_TOOLS = `${ROLE_ALLOWED_TOOLS},${PERIPHERAL_WEB_TOOLS}`;
 
 export interface RoleSessionOpts {
-  /** A short, log-friendly role identity ("plan-reviewer", "plan-drafter", ...) — becomes
+  /** A short, log-friendly role identity ("verification-plan-reviewer", "verification-plan-drafter", ...) — becomes
    *  part of the session's lane/sentinel name, never interpreted. */
   roleId: string;
   prompt: string;
@@ -703,6 +704,38 @@ export class RoleRunner {
           "opts.allowedTools/opts.disallowedTools must not be set together with reviewCwd",
       );
     }
+    // Structural guard, not a live optimization: access.ts's PROXY_ROLE_TOOL_MATRIX is
+    // deny-by-default (its own header comment — a role absent from the matrix, or present with an
+    // empty grant, gets `[]`, never a default-allow branch a future edit could forget to wire).
+    // Today every role that reaches this method holds a non-empty grant (the nine ISSUE_TOOLS
+    // roles, plus worker's PR_TOOLS), so this branch is never taken by any shipped role and saves
+    // nothing right now — do not claim otherwise. It exists so that IF a future edit ever removes
+    // a role from the matrix again (or ships a new role with no grant), that role's session
+    // structurally skips minting a proxy it could never use, rather than relying on every call
+    // site to remember to check `allowedToolsForRole` itself. `roleGrantsProxyTools` is a pure
+    // lookup (no side effect), so it — and the caller-bug check below that depends on it — belong
+    // up here with the rest of this method's caller-bug validation, BEFORE the jsonlFd `openSync`
+    // a few lines down: gate② #557 FIX 5 found this check living AFTER that open, so a caller
+    // triggering it (opts.proxy set for a role with an empty grant) leaked the open fd and its
+    // file — the throw unwound past the point that opens it, and the try/finally that tears
+    // proxy/process state down doesn't start until after this validation block either. Validating
+    // first means the throw fires before anything is created, the same "fail before touching
+    // disk" posture the guard-hook/materializedCwd checks above already use — nothing here needs
+    // jsonlPath, the sessionId, or settingsJson.
+    const roleGrantsProxyTools = allowedToolsForRole(opts.roleId).length > 0;
+    // Matching the reviewCwd+opts.proxy precedent a few lines up: the RoleRunner-wide
+    // `defaultProxy` skips silently for a grantless role (that IS the mint-skip's whole point —
+    // no caller had to ask for that). But a caller-supplied `opts.proxy` for a grantless role is a
+    // DIFFERENT thing — a caller explicitly asking for a proxy that role could never use — so it
+    // is refused loudly, the same way reviewCwd+opts.proxy is refused above, rather than silently
+    // discarded (docs/configuration.md's "always wins over the RoleRunner-wide default, never
+    // silently overridden" must stay true for both guards). As above, no shipped role can trigger
+    // this today; it is here for the same future-edit case.
+    if (!reviewMode && !roleGrantsProxyTools && opts.proxy !== undefined) {
+      throw new Error(
+        `role "${opts.roleId}" holds no PROXY_ROLE_TOOL_MATRIX grant (access.ts) — opts.proxy must not be set for a role whose grant is empty (caller bug, not a silent override); the RoleRunner-wide default proxy is skipped silently for this role, but an explicit opts.proxy is not`,
+      );
+    }
     const sessionId = randomUUID();
     const jsonlPath = this.path(name, "jsonl");
     const jsonlFd = openSync(jsonlPath, "w");
@@ -722,7 +755,9 @@ export class RoleRunner {
     // and not the RoleRunner-wide default either; this is enforced HERE, structurally, so a
     // review session can never silently inherit a proxy some other caller configured
     // RoleRunnerDeps.defaultProxy with.
-    const proxyOpt = reviewMode ? undefined : (opts.proxy ?? this.deps.defaultProxy);
+    // `roleGrantsProxyTools` and its caller-bug check are computed ABOVE now — see that block's
+    // own doc for why (gate② #557 FIX 5, an fd/file leak on the throw path).
+    const proxyOpt = reviewMode || !roleGrantsProxyTools ? undefined : (opts.proxy ?? this.deps.defaultProxy);
     let proxyHandle: ForgeProxyHandle | undefined;
     if (proxyOpt) {
       try {
@@ -1060,7 +1095,7 @@ export class RoleRunner {
       // content-driven, not role-gated — scanEgressSuspects hits on ANY WebFetch/WebSearch or
       // Agent/Task tool_use block in this jsonl regardless of whether opts.allowedTools actually
       // granted the tool (see scanEgressSuspects' own doc, worker.ts). For an UNGRANTED role
-      // (plan-reviewer, etc.) a hit here would mean the session attempted a tool call the CLI's
+      // (verification-plan-reviewer, etc.) a hit here would mean the session attempted a tool call the CLI's
       // permission layer then denied — evidence worth surfacing, not a case this scan silently
       // drops. Contained: best-effort, never throws, never affects the session's own outcome.
       this.recordEgressSuspects(name, jsonl);
@@ -1641,8 +1676,8 @@ export interface RetriedSession {
   /** #374 (dogfood F16/F17): OPTIONAL environment-failure classification — the role-session
    *  side of the SAME park/probe/canary paradigm conductor.ts's worker-leg reclaim path already
    *  uses (env-failure.ts's classifyEnvFailure). Wired uniformly through this ONE shared helper
-   *  covers every role-session call site at once (po-align/po-triage/architect/plan-reviewer/
-   *  plan-drafter/harvest/retro all call runSessionWithRetry). Kept as a SEPARATE field, never
+   *  covers every role-session call site at once (po-align/po-triage/architect/verification-plan-reviewer/
+   *  verification-plan-drafter/harvest/retro all call runSessionWithRetry). Kept as a SEPARATE field, never
    *  widening `state` above's Pick type, for the same "existing callers/test fakes keep
    *  compiling unchanged" reason contextManifest already documents — omitted here means zero
    *  behavior change from pre-#374.
