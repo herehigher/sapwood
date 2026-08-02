@@ -10,7 +10,7 @@ import { defaultPoDecomposePromptPath } from "../loop/decompose.js";
 import { defaultHarvestPromptPath } from "../loop/harvest.js";
 import { defaultDoctrineTemplatePath } from "../loop/init.js";
 import { PROXY_ROLE_TOOL_MATRIX } from "../proxy/access.js";
-import { defaultRetroPromptPath } from "../retro/retro.js";
+import { defaultRetroPromptPath, RETRO_ALLOWED_TOOLS, RETRO_DISALLOWED_TOOLS } from "../retro/retro.js";
 import { defaultEngineReviewerPromptPath } from "../review/engine-agent.js";
 import { defaultArchitectPromptPath } from "./architect.js";
 import {
@@ -20,6 +20,7 @@ import {
   PO_ALLOWED_TOOLS,
   PO_TRIAGE_ALLOWED_TOOLS,
   ROLE_ALLOWED_TOOLS,
+  ROLE_DISALLOWED_TOOLS,
 } from "./peripheral.js";
 import { defaultPlanConfirmPromptPath, defaultPlanDrafterPromptPath, defaultPlanReviewerPromptPath } from "./plan-review.js";
 import { defaultFixPromptPath, defaultPromptPath } from "./worker.js";
@@ -184,6 +185,104 @@ test("gate② round 3 pin: ROLES_WITH_DEFAULT_WEB_ACCESS matches peripheral.ts's
         `will silently stop covering it — the #529 defect class, one level up`,
     );
   }
+});
+
+// ── #535: write-grant membership pin — docs/role-paradigm.md's write-scope-ladder tier-1
+// membership (five peripheral roles hold no real write channel) and tier-2 (retro is the sixth
+// role, and does NOT belong at tier 1) are both hand-maintained prose derived from these same
+// exported constants. That membership drifted twice in one week (#530/#531 found tier-1 still
+// listing retro despite its real write grant; #535 found tier-2's "none of the six" claim was
+// false for the same reason) — same shape as ROLES_WITH_DEFAULT_WEB_ACCESS above, so it gets the
+// same treatment: pinned against the source of truth rather than left free-floating.
+test("#535 pin: which roles hold a real WRITE grant matches ROLE_ALLOWED_TOOLS/RETRO_ALLOWED_TOOLS — docs/role-paradigm.md's tier-1 membership needs updating when this fails", () => {
+  // Exact comma-delimited token membership — plain `.includes("Edit")` would also match
+  // `NotebookEdit`, which every one of these lists carries as its own distinct entry.
+  const tokens = (list: string): Set<string> => new Set(list.split(","));
+
+  // The six peripheral-role allow-lists — five roles plus the plan-reviewer confirm variant:
+  // po/plan-reviewer/plan-drafter/confirm all byte-identical to the base, architect/po-align/
+  // po-triage widened only with WebSearch/WebFetch — must never include Write/Edit/MultiEdit,
+  // and the shared deny-list must keep denying Bash outright — together, tier 1's "no write
+  // tool channel exists at all" claim.
+  for (const [name, tools] of [
+    ["ROLE_ALLOWED_TOOLS", ROLE_ALLOWED_TOOLS],
+    ["PO_ALLOWED_TOOLS", PO_ALLOWED_TOOLS],
+    ["CONFIRM_ALLOWED_TOOLS", CONFIRM_ALLOWED_TOOLS],
+    ["ARCHITECT_ALLOWED_TOOLS", ARCHITECT_ALLOWED_TOOLS],
+    ["PO_ALIGN_ALLOWED_TOOLS", PO_ALIGN_ALLOWED_TOOLS],
+    ["PO_TRIAGE_ALLOWED_TOOLS", PO_TRIAGE_ALLOWED_TOOLS],
+  ] as const) {
+    const granted = tokens(tools);
+    for (const tool of ["Write", "Edit", "MultiEdit"] as const) {
+      assert.ok(
+        !granted.has(tool),
+        `peripheral.ts's ${name} now includes ${tool} — a peripheral role just gained a real ` +
+          `write channel. docs/role-paradigm.md's tier-1 membership needs updating.`,
+      );
+    }
+  }
+  assert.ok(
+    tokens(ROLE_DISALLOWED_TOOLS).has("Bash"),
+    "peripheral.ts's ROLE_DISALLOWED_TOOLS no longer denies Bash outright — the five " +
+      "peripheral roles' tier-1 'no shell channel' claim depends on this. " +
+      "docs/role-paradigm.md's tier-1 membership needs updating.",
+  );
+
+  // retro is the sixth role and the one that does NOT belong at tier 1: a real Write/Edit/
+  // MultiEdit grant, plus Bash scoped to exactly these eight `git` subcommands (including
+  // `commit` and `push`) — and its own deny-list must not deny any of them.
+  const RETRO_GIT_SUBCOMMANDS = ["branch", "checkout", "add", "commit", "push", "diff", "status", "log"] as const;
+  assert.strictEqual(RETRO_GIT_SUBCOMMANDS.length, 8, "sanity: this list itself must name eight subcommands");
+  const retroGranted = tokens(RETRO_ALLOWED_TOOLS);
+  const retroDenied = tokens(RETRO_DISALLOWED_TOOLS);
+  for (const tool of ["Write", "Edit", "MultiEdit"] as const) {
+    assert.ok(
+      retroGranted.has(tool),
+      `retro.ts's RETRO_ALLOWED_TOOLS no longer includes ${tool} — retro would move OUT of the ` +
+        `real-write-grant category. docs/role-paradigm.md's tier-1/tier-2 membership needs updating.`,
+    );
+    assert.ok(
+      !retroDenied.has(tool),
+      `retro.ts's RETRO_DISALLOWED_TOOLS now denies ${tool} — retro's write grant is no longer ` +
+        `real. docs/role-paradigm.md's tier-1/tier-2 membership needs updating.`,
+    );
+  }
+  for (const sub of RETRO_GIT_SUBCOMMANDS) {
+    const pattern = `Bash(git ${sub}*)`;
+    assert.ok(
+      retroGranted.has(pattern),
+      `retro.ts's RETRO_ALLOWED_TOOLS is missing ${pattern} — the eight-subcommand git grant ` +
+        `docs/role-paradigm.md describes has changed. Update the doc's tier-1 membership.`,
+    );
+    assert.ok(
+      !retroDenied.has(pattern),
+      `retro.ts's RETRO_DISALLOWED_TOOLS now denies ${pattern} — retro's git grant is no longer ` +
+        `real for this subcommand. docs/role-paradigm.md's tier-1/tier-2 membership needs updating.`,
+    );
+  }
+
+  // #536 gate② round-4 F3: the two claims above are presence-only. docs/role-paradigm.md's own
+  // retro row goes further — "zero `gh` entries of any kind" in RETRO_ALLOWED_TOOLS, and "exactly
+  // these eight" git subcommands, not "at least these eight". Neither is pinned above: a ninth
+  // `Bash(git ...)` grant, or a `Bash(gh ...)` grant re-added to the allow-list, leaves every
+  // assertion above green while falsifying the doc. The `gh` case also reopens a path around the
+  // tier-3 `openProposalPR` choke point that the doc leans on.
+  for (const tool of retroGranted) {
+    assert.ok(
+      !tool.startsWith("Bash(gh "),
+      `retro.ts's RETRO_ALLOWED_TOOLS now includes ${tool} — a \`gh\` verb reached the allow-list, ` +
+        `falsifying docs/role-paradigm.md's "zero \`gh\` entries of any kind" claim and opening a ` +
+        `path around the tier-3 openProposalPR choke point. docs/role-paradigm.md needs updating.`,
+    );
+  }
+  const retroGitGrantTokens = [...retroGranted].filter((t) => t.startsWith("Bash(git "));
+  assert.strictEqual(
+    retroGitGrantTokens.length,
+    RETRO_GIT_SUBCOMMANDS.length,
+    `retro.ts's RETRO_ALLOWED_TOOLS grants ${retroGitGrantTokens.length} \`git\` subcommand(s) ` +
+      `(${retroGitGrantTokens.join(", ")}), not the eight docs/role-paradigm.md describes as ` +
+      `"exactly these eight" — a subcommand was added or removed. docs/role-paradigm.md needs updating.`,
+  );
 });
 
 test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access denial while its role holds a non-empty PROXY_ROLE_TOOL_MATRIX grant", () => {
