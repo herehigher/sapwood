@@ -134,6 +134,16 @@ export function budgetExceeded(total: number, cap: number): boolean {
 
 export type CeilingReason = "kill-switch" | "daily-budget" | "wall-clock";
 
+/** #380 (F5): what a bounded drain is being run FOR. A superset of CeilingReason by exactly one
+ *  member — "stop-signal", the in-memory SIGTERM/SIGINT request (TickDeps.stopRequested) that
+ *  shares the kill switch's whole drain path (see the gate at the top of tick()). The reason is
+ *  the ONLY thing that forks between the two: it is what a `ceiling-escalated` event, a drain
+ *  escalation comment, and `sapwood status` say happened, and a human reading "kill-switch"
+ *  after a plain SIGTERM would go hunting for a sentinel file nobody ever wrote. Deliberately
+ *  NOT a CeilingReason member: evaluateCeiling can never produce it (it isn't a cost/wall-clock
+ *  ceiling) and it is not announceable (same as "kill-switch" — it has its own visibility). */
+export type DrainReason = CeilingReason | "stop-signal";
+
 // #431 (F29): the engine-session gap machinery that used to live here (ENGINE_SESSION_GAP_SEC,
 // engineSessionGapSec, State.engineSessionStart's started_at resurrection) is DELETED, not
 // relocated. It measured PROCESS LIVENESS, not autonomous action: a parked wait loop refreshed
@@ -1397,9 +1407,10 @@ export interface TickResult {
   /** #14 engine ceiling (daily USD cap / wall-clock cap): a breach freezes ALL new dispatch
    *  this tick (every ready issue skipped with reason "ceiling") regardless of
    *  lanes/caps/budget below. #69: also true (reasons = ["kill-switch"]) when the global
-   *  kill-switch gate short-circuited the whole tick to drain-only. */
+   *  kill-switch gate short-circuited the whole tick to drain-only — and #380: likewise
+   *  (reasons = ["stop-signal"]) when a SIGTERM/SIGINT took that same gate. */
   ceilingBreached: boolean;
-  ceilingReasons: CeilingReason[];
+  ceilingReasons: DrainReason[];
   /** Running-worker names asked to gracefully hand off (SIGTERM) this tick because of the
    *  ceiling breach. Idempotent to call every tick while still breached (empty once no
    *  workers are running, or the ceiling clears). */
@@ -1474,6 +1485,14 @@ export interface TickDeps {
    *  sentinel. Reclaim/drive (in-flight lanes, PR review/merge progression) are untouched either
    *  way; only new-lane dispatch is suppressed. Default false (today's behavior unchanged). */
   forceDispatchPause?: boolean;
+  /** #380 (F5): "a stop was requested out-of-band" — the drivers' SIGTERM/SIGINT flag, read as a
+   *  THUNK at the top-of-tick gate below (never a caller-captured boolean: a signal landing mid
+   *  tick must be seen by the very next gate). True routes this tick down the EXACT KILL_SWITCH
+   *  drain path — dispatch frozen, running/fixing lanes asked to hand off, hard kill past
+   *  cfg.cost.drainWindowSec — so the two stop semantics cannot fork. Unlike the switch this is
+   *  process-local and dies with the process; the recorded reason is "stop-signal", not
+   *  "kill-switch" (see DrainReason). Omitted (direct library/test callers): today's behavior. */
+  stopRequested?: () => boolean;
   /** #124: per-CALL override for the DISPATCH loop's cap check below, replacing
    *  cfg.lanes.roundDispatchCap for this one tick only. Omitted (the tick-driver's path,
    *  driver.ts) -> cfg.lanes.roundDispatchCap applies unchanged, its original meaning: a flat
@@ -1887,7 +1906,7 @@ async function drainThenEscalate(
   state: State,
   supervisor: Supervisor,
   cfg: SapwoodConfig,
-  reasons: CeilingReason[],
+  reasons: DrainReason[],
   nowDate: Date,
   iso: () => string,
   drivingDrain: DrivingDrainMode,
@@ -2936,8 +2955,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   Blocked: rollback retry, DRIVE/merge, DISPATCH, and the kill+requeue of DEAD lanes (all
   //   "new work"). Accepted trade-off (#69 policy: rare edges degrade to less machinery): a
   //   switch flipped MID-tick, after this check passed, takes effect at the next tick's gate.
+  //   #380 (F5): a requested STOP SIGNAL (SIGTERM/SIGINT, TickDeps.stopRequested) takes this
+  //   same gate, deliberately sharing every line below rather than growing a second stop path
+  //   whose semantics could drift from the switch's. Only the recorded REASON differs (see
+  //   DrainReason); the switch wins the naming when both are true, since it is the durable,
+  //   human-visible fact a restart would still find.
   const killSwitchActive = state.isKillSwitchActive();
-  if (killSwitchActive) {
+  const stopSignalled = deps.stopRequested?.() ?? false;
+  if (killSwitchActive || stopSignalled) {
+    const drainReason: DrainReason = killSwitchActive ? "kill-switch" : "stop-signal";
     // A confirmed resume intent means its child already exists despite the DB still saying
     // `handoff`. Reconcile these rows BEFORE the drain snapshot so the hard safety boundary
     // supervises and drains reality in this same tick; this is adoption, never a spawn.
@@ -3006,7 +3032,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       state,
       supervisor,
       cfg,
-      ["kill-switch"],
+      [drainReason],
       now(),
       iso,
       // #375 review round 1 (P1): DRIVE never runs under an active kill switch (this branch
@@ -3019,7 +3045,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       dispatched: [],
       overBudget: false,
       ceilingBreached: true,
-      ceilingReasons: ["kill-switch"],
+      ceilingReasons: [drainReason],
       drainRequested,
       escalated,
       driven: [],

@@ -270,7 +270,11 @@ class FakeSupervisor implements Supervisor {
   inspectWorktree(): { worktreePath: string | null; worktreeRetained: boolean } {
     return { worktreePath: null, worktreeRetained: false };
   }
-  requestHandoff(): boolean {
+  /** #380: every graceful-handoff request the drain made — the stop-signal tests' proof that a
+   *  signal drained live lanes rather than abandoning them. */
+  handoffRequested: string[] = [];
+  requestHandoff(w: string): boolean {
+    this.handoffRequested.push(w);
     return true;
   }
   clearStaleFixEntrySentinel(): void {}
@@ -349,12 +353,26 @@ const baseDeps = (over: Partial<RoundDeps> = {}): RoundDeps => ({
   ...over,
 });
 
+/** #380: `requestStop` is TWO-STAGE now — the second call is a genuine second signal, i.e. the
+ *  immediate hard exit (`process.exit`, or an injected RoundDeps.hardExit). Every bail-out net
+ *  in this suite fires from a per-phase/per-sleep hook that runs many times, and several also
+ *  fire their net again after runRounds returns, so they all latch: request the stop once,
+ *  ignore the rest. A test that WANTS the second-signal behavior uses `requestStop` raw. */
+function once(fn: () => void): () => void {
+  let fired = false;
+  return () => {
+    if (fired) return;
+    fired = true;
+    fn();
+  };
+}
+
 /** Bounded safety net: stop the loop after `maxRounds` peripheral-phase invocations so a
  *  round.ts bug (never closing, never stopping) fails the test instead of hanging the suite. */
 function boundedStopOnPhase(deps: RoundDeps, maxPhaseCalls: number): () => void {
   let stop = () => {};
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   let calls = 0;
@@ -541,8 +559,12 @@ test("runRounds idle throttle: a signal during the idle wait exits promptly — 
   const stopSafety = boundedStopOnPhase(deps, 12);
   const inner = deps.registerSignals!;
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
-    return inner(requestStop);
+    // #380: ONE latch shared by both nets (this test's and the safety net's) — two independent
+    // `once` wrappers over the same requestStop would each get a turn, and the second turn is a
+    // second signal, i.e. an immediate hard exit of the test process.
+    const single = once(requestStop);
+    stop = single;
+    return inner(single);
   };
   const result = await runRounds(deps);
   stopSafety();
@@ -1167,7 +1189,7 @@ test("runRounds: a graceful signal (not KILL_SWITCH) still lets the in-flight ro
   const deps = baseDeps({ forge, sleep, peripherals: allPeripherals(log) });
   let stop = () => {};
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   // Signal arrives mid-round (right after 'aligning' runs) — the round must still finish
@@ -1182,6 +1204,77 @@ test("runRounds: a graceful signal (not KILL_SWITCH) still lets the in-flight ro
     ["aligning", "architecting", "plan_review", "harvesting", "retro"],
   );
   assert.equal(result.rounds, 1); // the round closed cleanly; only the NEXT round was withheld
+  deps.state.close();
+});
+
+// ── #380 (F5): SIGTERM/SIGINT = the KILL_SWITCH drain path ──────────────────────────────────
+// The graceful contract above is unchanged (the round already open still closes properly); what
+// #380 adds is what happens to the WORK in flight while it does: dispatch freezes and live lanes
+// are drained, instead of new waves launching and running workers being abandoned. Signals come
+// through the registerSignals seam; the real process wiring lives in stop-signal.test.ts.
+
+test("#380 runRounds: a stop signal freezes dispatch and DRAINS the executing round's live lane", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [
+    { number: 1, title: "a", labels: ["prio:0-critical"] },
+    { number: 2, title: "b", labels: ["prio:0-critical"] },
+  ];
+  const sup = new FakeSupervisor();
+  // Lane 1 dispatches on the round's first wave and stays alive; the signal lands right after,
+  // so the SECOND wave (issue 2, well within the default roundDispatchCap) must never launch.
+  const deps = baseDeps({ forge, supervisor: sup, sleep, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 2 } }) });
+  let stop = () => {};
+  deps.registerSignals = (requestStop) => {
+    stop = once(requestStop);
+    return () => {};
+  };
+  let ticks = 0;
+  deps.onTick = () => {
+    ticks++;
+    if (ticks === 1) stop(); // SIGTERM right after the first (dispatching) tick
+    // The worker complies with the drain request it got on tick 2 — .handoff, reclaimed on tick 3.
+    if (ticks === 2) sup.probes["lane-1-1"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 0, hasPr: false };
+  };
+
+  const result = await runRounds(deps);
+
+  assert.equal(result.stoppedBy, "signal");
+  assert.deepEqual(sup.dispatchedIssues, [1], "the second wave never launched — dispatch froze on the signal");
+  assert.deepEqual(sup.handoffRequested, ["lane-1-1"], "the live lane was drained gracefully, not abandoned");
+  assert.equal(deps.state.getWorker("lane-1-1")?.state, "handoff");
+  assert.equal(deps.state.activeWorkers().length, 0);
+  deps.state.close();
+});
+
+test("#380 runRounds: a SECOND stop signal during the drain hard-exits immediately", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "a", labels: ["prio:0-critical"] }];
+  const sup = new FakeSupervisor();
+  const exits: number[] = [];
+  const deps = baseDeps({ forge, supervisor: sup, sleep, hardExit: (code) => exits.push(code) });
+  let stop = () => {};
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop; // raw: this test IS the double-signal case
+    return () => {};
+  };
+  let ticks = 0;
+  deps.onTick = () => {
+    ticks++;
+    if (ticks === 1) stop(); // first signal: drain
+    if (ticks === 2) {
+      stop(); // second signal, mid-drain, lane still alive
+      // The real hardExit is process.exit and never returns; the spy does, so settle the lane to
+      // keep this test bounded rather than re-proving the (already covered) drain.
+      sup.probes["lane-1-1"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 0, hasPr: false };
+    }
+  };
+
+  const result = await runRounds(deps);
+
+  assert.deepEqual(exits, [130], "the second signal hard-exits (128+SIGINT), without waiting for the drain");
+  assert.equal(result.stoppedBy, "signal");
   deps.state.close();
 });
 
@@ -1616,7 +1709,7 @@ test("runRounds standby: fresh empty board — the FIRST round always opens (the
     peripherals: allPeripherals(log),
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -1666,7 +1759,7 @@ test("runRounds standby: SIGINT during a standby wait exits promptly — the wai
     cfg: mkCfg({ round: { standby: { enabled: true } } }),
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -1696,7 +1789,7 @@ test("runRounds standby: the backoff wait is capped at round.standby.backoffCapS
     cfg: mkCfg({ round: { standby: { enabled: true, backoffCapSec: 25 } } }),
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -1785,7 +1878,7 @@ test("runRounds standby (#127 gate② F2): plan-review candidates do NOT count a
     cfg: mkCfg({ roles: { planReviewer: { enabled: false } }, round: { standby: { enabled: true } } }),
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -1830,7 +1923,7 @@ test("runRounds standby (#127 gate② F2): plan-TRIAGE candidates do NOT count a
     cfg: mkCfg({ roles: { po: { enabled: false } }, round: { standby: { enabled: true } } }),
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -1874,7 +1967,7 @@ test("runRounds standby (#127 gate② R1): with BOTH gate⓪ roles disabled, ope
     }),
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -2038,7 +2131,7 @@ test("runRounds standby (#391 F21): a milestone backlog whose every open issue i
     peripherals: allPeripherals(log),
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -2135,7 +2228,7 @@ test("runRounds standby: stop.onMilestoneComplete completing EXTERNALLY before s
     stop: { onMilestoneComplete: "M4" },
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -2296,7 +2389,7 @@ test("runRounds standby: a truly exhausted round.milestone (0 open issues) contr
     cfg: mkCfg({ round: { milestone: "M4", standby: { enabled: true } } }),
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -2929,7 +3022,7 @@ test("runRounds #374 review (Codex sol-high verify-pass finding 2, P2): stop.onM
   };
   const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 1, stop: { onMilestoneComplete: "M4" } });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -3251,7 +3344,7 @@ test("runRounds standby (#212 probe residual fix): a milestone whose open issues
   };
   const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -3340,7 +3433,7 @@ test("runRounds standby (#432 F32): a milestone whose open non-Ready issues are 
   };
   const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 5, cfg, peripherals: allPeripherals(log) });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -3553,7 +3646,7 @@ test("runRounds standby (#432 round 4): a milestone issue carrying ONLY verify:n
   };
   const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 5, cfg, peripherals: allPeripherals(log) });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -3588,7 +3681,7 @@ test("runRounds standby (#432 round 4, P1-1 regression pin): the #94 forbidden v
   };
   const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 5, cfg, peripherals: allPeripherals(log) });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -3629,7 +3722,7 @@ test("runRounds standby (#432 round 4, P1-1 regression pin): a VALID approved is
   };
   const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 5, cfg, peripherals: allPeripherals(log) });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -3699,7 +3792,7 @@ test("runRounds standby (#432 round 5, Codex P1-1, RED vs round 4): a Ready, ELI
   };
   const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 5, cfg, peripherals: allPeripherals(log) });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -3796,7 +3889,7 @@ test("runRounds standby (#432 round 5, P1-2, the TERMINAL): a durable dissent co
   };
   const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 5, cfg, peripherals: allPeripherals(log) });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -3850,7 +3943,7 @@ test("runRounds standby (#432 round 5, P2-3): a stale roundPool label that fails
     poolLabel: cfg.labels.roundPool, // round-close only sweeps stale pool labels when a pool is actually configured
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -4589,7 +4682,7 @@ test("runRounds (#433): standby must never withhold the next round while a CARRI
     if (phase === "retro") forge.issueLabels[377] = [];
   };
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   await runRounds(deps);
@@ -4625,7 +4718,7 @@ test("runRounds (#431 AC3): the ceiling-wait loop announces the breach ONCE — 
     cfg: mkCfg({ cost: { maxWallClockSec: 100 } }),
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -4673,7 +4766,7 @@ test("runRounds (#431 round 2, codex P1): a standby dwell that outlives maxWallC
     peripherals: allPeripherals(log),
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -4740,7 +4833,7 @@ test("runRounds (#431 round 4, codex finding 5): the ROUND-WAIT clear site's wri
     cfg: mkCfg({ cost: { dailyBudgetUsd: 50 } }),
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const stopSafety = boundedStopOnPhase(deps, 8);
@@ -4805,7 +4898,7 @@ test("runRounds (#431 rounds 5-6, codex P1): the round-wait green-light clear re
     },
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -4965,7 +5058,7 @@ test("runRounds #470: a legitimate WAIT — a driving lane on pending CI — nev
     }),
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
@@ -5007,7 +5100,7 @@ test("runRounds #470: standby stays the FIRST line — a genuinely empty backlog
     }),
   });
   deps.registerSignals = (requestStop) => {
-    stop = requestStop;
+    stop = once(requestStop);
     return () => {};
   };
   const result = await runRounds(deps);
