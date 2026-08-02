@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
+import type { EventKind } from "./event-kinds/index.js";
 import { backfillLegacyRoundCursors, MIGRATIONS, type ModelUsageEntry, SCHEMA_VERSION, State } from "./state.js";
 
 // In-memory DB keeps tests hermetic (no disk, no cleanup). WAL pragma is a no-op on
@@ -3401,19 +3402,25 @@ test("countEvents counts one kind only (§8's ring count)", () => {
 
 test("eventsPage pages ascending by id across every kind, with id/ts/payload", () => {
   const s = mem();
-  for (let i = 1; i <= 5; i++) s.appendEvent(`kind-${i}`, { n: i });
+  // #425: eventsPage is the kind-BLIND read (the dashboard needs every kind), so this fixture
+  // wants five distinct kinds; five declared ones stand in for the generated names it used
+  // before the registry closed the union.
+  const paged: EventKind[] = ["run-started", "dispatched", "merged", "handoff", "run-ended"];
+  paged.forEach((kind, i) => {
+    s.appendEvent(kind, { n: i + 1 });
+  });
 
   const first = s.eventsPage(0, 2);
   assert.deepEqual(
     first.map((e) => e.id),
     [1, 2],
   );
-  assert.deepEqual(first[0], { id: 1, ts: first[0]!.ts, kind: "kind-1", payload: { n: 1 } });
+  assert.deepEqual(first[0], { id: 1, ts: first[0]!.ts, kind: paged[0], payload: { n: 1 } });
   assert.ok(first[0]!.ts.length > 0);
 
   assert.deepEqual(
     s.eventsPage(2, 2).map((e) => e.kind),
-    ["kind-3", "kind-4"],
+    [paged[2], paged[3]],
   );
   assert.deepEqual(s.eventsPage(5, 10), [], "past the tail is empty, not an error");
   s.close();
@@ -3501,7 +3508,7 @@ test("spendPage pages the ledger ascending by id, rows verbatim", () => {
 test("listRounds is the rounds spine: every row, artifact left-joined, cursors and event counts", () => {
   const s = mem();
   // Round 1: two events inside its window, closed WITH an artifact.
-  s.appendEvent("before", {}); // id 1 — belongs to no round
+  s.appendEvent("run-started", {}); // id 1 — belongs to no round
   const r1 = s.startRound("2026-07-24T10:00:00.000Z");
   s.appendEvent("dispatched", { issue: 86 });
   s.appendEvent("merged", { pr: 94 });

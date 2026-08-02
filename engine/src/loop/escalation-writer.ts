@@ -39,6 +39,7 @@
 // the (idempotent, GitHub-side no-op-if-already-applied) label write and completes the missing
 // event, rather than silently re-escalating something already handed to a human.
 import type { IForge } from "../forge/forge.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import type { State } from "../state/state.js";
 
 /** Best-effort `needs-human` label write + UNCONDITIONAL outcome-bearing terminal event — see
@@ -59,7 +60,7 @@ export async function escalateToNeedsHuman(
   state: Pick<State, "appendEvent">,
   cfg: { labels: { needsHuman: string } },
   issue: number,
-  eventKind: string,
+  eventKind: EventKind,
   extraPayload: Record<string, unknown>,
 ): Promise<void> {
   let labeled = 1;

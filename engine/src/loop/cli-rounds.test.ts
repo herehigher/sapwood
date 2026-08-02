@@ -17,6 +17,7 @@ import { ConfigSchema, configHash, dashboardConfigSubset, type SapwoodConfig } f
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus, StartupReconcileData } from "../forge/forge.js";
 import type { LabelSpec } from "../forge/labels.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import type { PeripheralPhase } from "./round.js";
 
@@ -1365,7 +1366,7 @@ test("#407 terminal table (gate② P2), stale-lock startup failure: a throw in t
   const throwing = new Proxy(state, {
     get(target, prop, receiver) {
       if (prop === "appendEvent") {
-        return (kind: string, payload: Record<string, unknown>) => {
+        return (kind: EventKind, payload: Record<string, unknown>) => {
           if (kind === "instance-lock-taken-over") throw new Error("takeover append exploded");
           return target.appendEvent(kind, payload);
         };

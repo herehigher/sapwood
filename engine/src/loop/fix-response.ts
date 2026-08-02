@@ -47,6 +47,7 @@ import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, ReviewThreadsPage } from "../forge/forge.js";
 import { TOOL_PR_AUDIT_COMMENTS, TOOL_PR_REVIEW_THREADS } from "../proxy/tools.js";
 import { parseEngineReviewArtifact } from "../review/audit.js";
+import { kindsTagged } from "../state/event-kinds/index.js";
 import type { FixResponseSettleOutcome, ForgeProxyJournalRow, PendingThreadWrite, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 
@@ -300,10 +301,20 @@ export function knownAuditFindingCounts(
  *  null only when NO cursor-bearing event exists for (worker, fixRounds) at all — the caller
  *  treats null as "trust nothing this round", fail-closed; `journalCursor: 0` (a session with no
  *  prior journal rows at cursor time) is a perfectly valid cursor, not "no cursor found". */
+/** #425: the three cursor-bearing fix-leg kinds, DERIVED from the registry's `fix-leg` tag
+ *  instead of the inline array that used to sit in the read below. The same tag keys the payload
+ *  map (state/event-kinds/payloads.ts), so this list and `eventsSince`'s typed overload are the
+ *  same fact — a fourth cursor-bearing kind gets its payload type by declaring the tag. */
+export const FIX_LEG_CURSOR_KINDS = kindsTagged("fix-leg");
+
 export function fixLegJournalCursor(state: Pick<State, "eventsSince">, worker: string, fixRounds: number): number | null {
-  const events = state.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-started", "fix-leg-resumed", "fix-leg-adopted"]);
+  const events = state.eventsSince("1970-01-01T00:00:00.000Z", FIX_LEG_CURSOR_KINDS);
   for (let i = events.length - 1; i >= 0; i--) {
-    const payload = events[i]!.payload as { worker?: unknown; fixRounds?: unknown; journalCursor?: unknown };
+    // #425 phase 1.5: `payload` is typed (FixLegCursorPayload) rather than cast — the writer in
+    // conductor.ts is held to the SAME shape, so renaming a field there fails to compile HERE.
+    // The `typeof` guard stays anyway: the typed read is a compile-time claim about what this
+    // engine writes, and this fold also crosses legacy rows written before a field existed.
+    const payload = events[i]!.payload;
     if (payload.worker === worker && payload.fixRounds === fixRounds && typeof payload.journalCursor === "number") {
       return payload.journalCursor;
     }

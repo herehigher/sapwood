@@ -3738,7 +3738,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // holds a lane driving for many ticks after a revert).
       if (outcome.reviewerTransition) {
         const t = outcome.reviewerTransition;
-        const evKind = `reviewer-fallback-${t.kind}`;
+        const evKind = `reviewer-fallback-${t.kind}` as const; // #425: `as const` keeps this a template-LITERAL type, so it narrows to the two declared kinds
         const last = state.lastReviewerFallbackEvent(w.name);
         const alreadyAnnounced = last != null && last.kind === evKind && last.mode === t.mode && last.pr === pr && last.head === t.head;
         if (!alreadyAnnounced) {

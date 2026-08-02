@@ -83,6 +83,7 @@ import { join } from "node:path";
 // itself is not modified by this feature — these are plain exported functions with no Claude-shaped
 // state behind them.
 import { awaitKillGrace, sessionTreeIsGone } from "../roles/peripheral.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { createExitLossDetector } from "../util/heartbeat.js";
 import type { ReviewSessionEvidence, ReviewSessionExecutor, ReviewSessionIdentity, ReviewSessionRequest } from "./review-session.js";
 
@@ -527,7 +528,7 @@ export interface CodexExecExecutorDeps {
   log?: (message: string) => void;
   /** The engine's durable event channel (state.appendEvent), for R1/R2's honest-recording events.
    *  Optional and best-effort: observability must never become a gate on the review. */
-  appendEvent?: (kind: string, payload: unknown) => void;
+  appendEvent?: (kind: EventKind, payload: unknown) => void;
   /** Injected `spawn` (tests pass a fake child). */
   spawnFn?: typeof spawn;
   /** Injected unique-suffix source for session artifact names. */
@@ -858,7 +859,7 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
    *  `runReviewSession` maps it to `unavailable`: no session runs unrecorded. An absent
    *  `appendEvent` dep is also a refusal, not a pass: a composition that wired this runner without
    *  a durable event channel cannot honor the disclosure the docs make on its behalf. */
-  private requireEvent(kind: string, payload: unknown): void {
+  private requireEvent(kind: EventKind, payload: unknown): void {
     if (!this.deps.appendEvent) {
       throw new Error(
         `codex review session: no durable event channel wired, so the ${kind} record cannot be written — ` +
@@ -878,7 +879,7 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
    *  gate on the review (the same stance production.ts takes for the verdict event). Used for every
    *  POST-run record — by then the session has already run, and losing an after-the-fact note must
    *  not change what the gate concludes. */
-  private event(kind: string, payload: unknown): void {
+  private event(kind: EventKind, payload: unknown): void {
     try {
       this.deps.appendEvent?.(kind, payload);
     } catch (err) {

@@ -36,6 +36,7 @@ import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import { classifyEnvFailure, type EnvFailurePatterns, type EnvFailureSource } from "../loop/env-failure.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
 import { createExitLossDetector, createHeartbeatGate } from "../util/heartbeat.js";
 import { awaitSpawnConfirmation } from "../util/spawn-confirm.js";
@@ -1596,7 +1597,7 @@ export interface RetriedSession {
   issue: number;
   now: () => Date;
   /** The event kind appended on a SECOND non-"done" outcome (e.g. "architect-degraded"). */
-  degradeEvent: string;
+  degradeEvent: EventKind;
   /** Built from the final (second) attempt's result — callers keep full control over their own
    *  event payload shape (some include `attempts: 2`, some fold in an `issue` key only when
    *  non-zero — see harvest.ts/retro.ts vs. align.ts), so behavior stays byte-identical to what
