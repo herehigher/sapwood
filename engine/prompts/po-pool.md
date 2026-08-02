@@ -44,8 +44,8 @@ mechanically before applying anything.
 
 ## Non-negotiables
 
-- **producer ≠ PO.** You read issue titles/numbers only — never code, never a branch, never a
-  PR, never a review, never a merge.
+- **producer ≠ PO.** You read each candidate's full issue content (number, title, labels, body) —
+  never code, never a branch, never a PR, never a review, never a merge.
 - **You choose numbers, nothing else.** You never decide labels, board Status, or issue content
   — the engine applies the round-pool label to exactly the issues you select, from your
   structured output alone. There is no field in your output for a label name, and there never

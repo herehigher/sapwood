@@ -867,13 +867,18 @@ async function updateIssueBodyIfUnchanged(
 // The engine ALWAYS computes the CANDIDATE set deterministically (Ready, milestone-scoped by
 // whatever `forge` already applies — see AlignDeps.forge — ordered prio:0-first then
 // issue-number-ascending, capped at ceil(lanes.roundDispatchCap * round.poolFactor)). #233:
-// controlled experiments across model tiers found a title-only PO pool-selection SESSION
-// selects EVERY candidate at every tier — it has no evidentiary basis to narrow the reservoir
-// from a bare title/number digest, so it just burns a session per round reproducing this same
-// deterministic set. Worse, `round.poolFactor` exists to absorb architect/gate⓪ attrition
-// AFTER selection; a session that DOES narrow the reservoir pre-gates risks underfilling the
-// round. So the deterministic candidate set is now the MAIN path — this is `selectRoundPool`'s
-// documented behavior AND `runPoolSelection`'s default (roles.po.poolSelection: false).
+// controlled experiments across model tiers found the (then title-only) PO pool-selection
+// SESSION selects EVERY candidate at every tier — it had no evidentiary basis to narrow the
+// reservoir from a bare title/number digest, so it just burned a session per round reproducing
+// this same deterministic set. Worse, `round.poolFactor` exists to absorb architect/gate⓪
+// attrition AFTER selection; a session that DOES narrow the reservoir pre-gates risks
+// underfilling the round. So the deterministic candidate set is the MAIN path — this is
+// `selectRoundPool`'s documented behavior AND `runPoolSelection`'s default
+// (roles.po.poolSelection: false). #533 (PM ruling 2026-08-02) later gave the OPT-IN session
+// itself (below) each candidate's FULL body, not just title/number — that changed what the
+// session is SHOWN when `poolSelection: true`, not this #233 finding or the default it
+// justifies: the finding was never re-run against the body-bearing digest, so it remains the
+// reason the default stays `false`, not evidence about how a full-body session would behave.
 //
 // The session (originally "the PO explicitly selects a round pool") is KEPT as an opt-in
 // experiment behind `roles.po.poolSelection: true`, decoupled from `roles.po.enabled` (which
@@ -1222,10 +1227,29 @@ export function defaultPoolPromptPath(): string {
  *  shared omission marker). #231: whole-record packed (packDigestRecords), the same fix as
  *  buildBacklogDigest above — a candidate near the cap's tail is rendered or counted as omitted,
  *  never silently sliced away mid-line; a candidate's own multi-line body is one "record" for
- *  this purpose (never split across the cap boundary). */
-function buildPoolCandidateDigest(candidates: readonly Issue[], cfg: SapwoodConfig): BoundedDigest {
+ *  this purpose (never split across the cap boundary).
+ *
+ *  #557 FIX 1 (PM ruling 2026-08-02, reverses the prior round's ruling): `renderedCandidateNumbers`
+ *  mirrors `buildBacklogDigest`'s `renderedIssueNumbers` — the numbers actually packed into
+ *  `text`, same order, honoring `packDigestRecords`' truncation. Before this, `runPoolSelection`
+ *  validated a session's selection against EVERY candidate (`candidates.map(c => c.number)`),
+ *  not just the ones this digest rendered — so a candidate `packDigestRecords` omitted under the
+ *  cap could still be named and ACCEPTED, contradicting po-pool.md's "you cannot select an issue
+ *  you were never shown" and align.ts's own claim (below) to validate against "the candidate set
+ *  the session was shown." This return value is what makes that claim true: the caller now
+ *  builds its bound set from here, not from `candidates` directly. */
+interface PoolCandidateDigest extends BoundedDigest {
+  renderedCandidateNumbers: number[];
+}
+
+function buildPoolCandidateDigest(candidates: readonly Issue[], cfg: SapwoodConfig): PoolCandidateDigest {
   const lines = candidates.map((issue) => formatCandidate(issue));
-  return packDigestRecords(lines, cfg.roles.po.backlogDigestMaxChars, "(no Ready candidates this round)", "candidate issue");
+  const packed = packDigestRecords(lines, cfg.roles.po.backlogDigestMaxChars, "(no Ready candidates this round)", "candidate issue");
+  // packDigestRecords only ever drops a TRAILING run of whole records (its own doc comment) —
+  // so the first `packed.rendered` entries of `candidates` (the same order `lines` was built in)
+  // are exactly what made it into `packed.text`. Same technique buildBacklogDigest already uses
+  // for `renderedIssueNumbers`.
+  return { ...packed, renderedCandidateNumbers: candidates.slice(0, packed.rendered).map((issue) => issue.number) };
 }
 
 const PoolSelectionMetadataSchema = z.object({ selected: z.array(z.number().int().positive()) }).strict();
@@ -1388,12 +1412,16 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
       const now = deps.now;
       const role = cfg.roles.po;
       const template = loadRolePromptTemplate(role.poolPromptFile, defaultPoolPromptPath());
-      const candidateNumbers = candidates.map((c) => c.number);
       // computePoolCandidates already slices to ceil(roundDispatchCap * poolFactor) — the
       // candidate list's own length IS the effective cap (it can be smaller when Ready itself
       // has fewer eligible issues than the configured bound allows).
       const cap = candidates.length;
       const poolDigest = buildPoolCandidateDigest(candidates, cfg);
+      // #557 FIX 1 (PM ruling): the bound set for validation is what the digest actually
+      // RENDERED, not every candidate computePoolCandidates produced — a candidate
+      // packDigestRecords omitted under the cap was never shown to the session, so it must be
+      // rejected the same way an out-of-bounds number is (see PoolCandidateDigest's own doc).
+      const candidateNumbers = poolDigest.renderedCandidateNumbers;
       // #231: input manifest for the pool-candidates channel — recorded ONLY on this real
       // session-dispatch path (never the replay branch above, nor the deterministic
       // no-session default: neither reads/shows a candidate digest to any session).

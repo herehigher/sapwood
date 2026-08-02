@@ -33,9 +33,12 @@ a write path. `search_issues` returns a number, title, state, labels, and last-u
 timestamp — never body text — it is how you FIND a candidate's related issues (see "Cross-issue
 search" below), never how you judge one;
 follow a hit with `issue_details` before it informs anything. If you have no such tools,
-everything you need for the design pass and per-pool verdicts is already substituted below —
-treat their absence like any other missing tool, and say so in your design note rather than
-writing as if you had searched. Either way, every decision below is read
+cross-issue search (below) simply does not apply — you have no way to see issues outside this
+round's candidate/pool lists, so a conflict such a search would have caught stays invisible;
+judge instead from what's substituted below plus your read-only worktree checkout (see both
+just after this section), treat the tools' absence like any other missing tool, and say so
+explicitly in your design note rather than writing as if you had searched. Either way, every
+decision below is read
 from the **structured output** you emit as the very last thing in your final message (see
 "Structured output" at the end of this prompt) — a deterministic engine process parses it and
 performs every comment/label write on your behalf, from that output only. If you find yourself

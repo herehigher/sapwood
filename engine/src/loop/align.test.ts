@@ -2820,6 +2820,54 @@ test("runPoolSelection #533: the SAME existing cap (roles.po.backlogDigestMaxCha
   );
 });
 
+// #557 FIX 1 (PM ruling 2026-08-02): the test above proves OMISSION (a candidate past the char
+// cap never reaches the prompt) but never attempts to SELECT the omitted number — so it could
+// not have caught the bug the PM found: `runPoolSelection` validated against EVERY candidate
+// (`candidates.map(c => c.number)`), not the digest's own rendered subset, so a session naming
+// an omitted-but-real candidate PASSED validation. This test closes that gap: same truncation
+// setup as above, but the scripted session's output NAMES the omitted candidate (#2). It must
+// be rejected exactly like a number that was never a candidate at all — retried once, then
+// degraded OPEN to the full deterministic set (never silently accepted).
+test("runPoolSelection #557 FIX 1: selecting a candidate that packDigestRecords omitted under the cap is invalid — the session cannot select what it was never shown, even though #2 IS a real candidate", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({
+    roles: { po: { poolSelection: true, backlogDigestMaxChars: 400 } },
+    lanes: { max: 3, roundDispatchCap: 2 },
+    round: { poolFactor: 1 },
+  }); // same sizing as the truncation test above: #1's block fits, #2's does not
+  const longBody = (n: number): string => `Body content for candidate #${n}, padded so it is unmistakably long. `.repeat(4);
+  forge.ready = [
+    { number: 1, title: "first candidate", labels: [], body: longBody(1) },
+    { number: 2, title: "second candidate", labels: [], body: longBody(2) },
+  ];
+  // #2 IS a genuine candidate (computePoolCandidates produced it) — it was only omitted from the
+  // RENDERED digest by the char cap. Naming it must still fail: the bound set is what was shown,
+  // not what merely exists in the candidate list.
+  const badSelection = poolResultText([1, 2]);
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", badSelection), doneResult("role-po-pool-2", badSelection)]);
+  const state = new State(":memory:");
+  const events = tapEvents(state);
+  const selected = await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 3 });
+  assert.equal(
+    runner.calls.length,
+    2,
+    "retried exactly once before degrading — the omitted-candidate selection is never silently accepted",
+  );
+  assert.deepEqual(
+    selected.map((i) => i.number).sort((a, b) => a - b),
+    [1, 2],
+    "degraded OPEN to the full deterministic candidate set (not an empty pool, and not a partial accept of just #1)",
+  );
+  const degraded = events.find(([kind]) => kind === "pool-degraded");
+  assert.ok(degraded, "a durable honesty event was recorded");
+  const reason = (degraded![1] as { reason: string }).reason;
+  assert.match(
+    reason,
+    /not in the candidate list: 2/,
+    "the degrade reason names #2 as out-of-bounds — invalid because it was never RENDERED, not because it isn't a real candidate",
+  );
+});
+
 test("runPoolSelection: an out-of-bounds selection (an issue number outside the candidate list) is invalid, retried once, then degrades OPEN to the full deterministic candidate set", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2

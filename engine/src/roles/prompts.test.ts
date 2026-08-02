@@ -74,7 +74,13 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // was false — the tool returns number/title/state/labels/updatedAt (IssueSearchResult), and
   // "only" denied fields the "open or recently-updated" ask right above depends on. Named the
   // real field set at both mentions (the capability paragraph and the Cross-issue search step).
-  "architect.md": "ffa1509e3a18be53dc87e9a53cc3c62d519b503b75ecfaa05799e9a5727d98d7",
+  // gate② #557 round 2 (FIX 4): "if you have no such tools, everything you need for the design
+  // pass and per-pool verdicts is already substituted below" was compound-flat — it ignored the
+  // worktree checkout (a separate, always-available input) and flatly contradicted the
+  // Cross-issue-search step's own claim that a search finds conflicts the substituted context
+  // "cannot show you." Rewritten to name what's actually true when the tools are absent: search
+  // doesn't apply, judge from substituted context + worktree, say so.
+  "architect.md": "14f1fc222873aa5feddd3cf06c7cb6b6841295ce59509320d4ddbf275f64cbfc",
   // #457 (F36): intentional edits — execution-class ACs are plan noise (CI already enforces
   // ci.requiredChecks unconditionally): plan-reviewer flags-and-strips them, the confirm pass
   // invalidates legacy plans carrying them, drafter/decompose never author them.
@@ -89,7 +95,10 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   "plan-reviewer-confirm.md": "a76a13911654ca79084e30aefd0792a2a97de6df78a4f5b15b67483af80cd3a6",
   // #533: same grant-removal fix as plan-reviewer.md above — the drafter's brief is its ENTIRE
   // instruction set; a lookup invites out-of-brief drift.
-  "plan-drafter.md": "b438b2a3cffce955203db79b4fd40623474a91182ad0fa593026c46a3a6c5819",
+  // gate② #557 round 2 (FIX 4): "the reviewer's brief above and the worktree checkout below are
+  // everything you have to ground a repair with" omitted the substituted issue body above it —
+  // the artifact actually being repaired, and clearly also something the session has. Named.
+  "plan-drafter.md": "11858041488d6246f796c929af5dbf63157588ba817e1ae482dd94c8c242d971",
   // #533: same grant-removal fix as plan-reviewer.md above — targets arrive as bare #N, comments
   // are round-stats boilerplate, and the prompt already forbids expanding targets.
   // gate② #557 (finding 3): the flat "no tool of yours can post a comment or read from GitHub
@@ -116,7 +125,10 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // body" / "everything you need to decide is already here" claims were unconditional over code
   // that truncates whole records past the cap with no lookup fallback — now scoped to what's
   // actually rendered, and the session is told what the omission marker means.
-  "po-pool.md": "2f1f831c4323a390f1318ed7c68d54c5ffe38ccc5acfb8b138b2f5f01748f4d1",
+  // gate② #557 round 2 (FIX 2): the "producer ≠ PO" non-negotiable still said "You read issue
+  // titles/numbers only" — contradicted by this same file's own opening paragraph (full body
+  // substituted) and by finding 6's fix above it. Corrected to name what's actually substituted.
+  "po-pool.md": "cc4fa2deb0c683e8e2cb4369d6ad506443ed8d051748334a243b2f20189aedca",
   "po-decompose.md": "3289b0f37585b84fdce67319f9ae4b2e82c8873b13b2a292adef25b1bca79ae2",
 };
 
@@ -696,6 +708,29 @@ test("#533 reverse-direction, THE TRAP: po.md serves two matrix rows with OPPOSI
   assert.ok(
     !triageSection.includes("mcp__forge__"),
     "po.md's triage-mode section (rendered as part of the whole file to EVERY po session, po-align included — this assertion is scoped to the SLICE, not to what a triage session uniquely sees) must never ask for an mcp__forge__ lookup — po-triage holds no grant",
+  );
+
+  // gate② #557 FIX 6: the three slices above stop at `sharedSectionsStart` ("## Reading the
+  // repository") — everything from THERE to EOF (the rest of "Reading the repository", the
+  // WebSearch/WebFetch section with its OWN nested {{po.mode}} subsections, "Raising a concern",
+  // "Non-negotiables", and the structured-output spec with ITS OWN nested align/triage
+  // subsections) was never checked by any assertion in this test. That tail renders to a
+  // po-triage session exactly as much as the preamble does (one file, substituted whole), so an
+  // mcp__forge__ ask added under ANY of those later headings — shared or align-scoped, since
+  // this tail's own nested align-only subsections (e.g. the WebSearch/WebFetch section's `### If
+  // {{po.mode}} is align`) have no dedicated exclusion here the way the top-level align-mode
+  // section (34-89) does — would reach a grantless po-triage session and pass silently: only the
+  // generic file-hash snapshot
+  // test would move, which is the non-semantic protection this test exists to replace. Today's
+  // po.md has no mcp__forge__ mention anywhere past `sharedSectionsStart` (verified: the only
+  // mentions in the whole file are the scoped preamble one and align-mode's own, both already
+  // asserted above) — a future align-scoped mention here would need the same explicit "for align
+  // mode's X step" scoping the preamble uses, and this assertion updated deliberately alongside
+  // it, not silently.
+  const sharedTail = po.slice(sharedSectionsStart);
+  assert.ok(
+    !sharedTail.includes("mcp__forge__"),
+    "po.md's shared tail (everything from '## Reading the repository' to EOF, including its own nested {{po.mode}} subsections) must never ask for an mcp__forge__ lookup unscoped — po-triage holds no grant and this whole tail renders to it",
   );
 });
 

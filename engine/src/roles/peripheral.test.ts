@@ -2257,11 +2257,20 @@ test("run: #533 a role with an EMPTY PROXY_ROLE_TOOL_MATRIX grant never mints Ro
 // caller-supplied proxy opt always wins over the RoleRunner-wide default, never silently
 // overridden" literally true: an empty-grant role's explicit opts.proxy no longer gets silently
 // discarded, it throws.
-test("run: #557 an EXPLICIT opts.proxy for a role with an EMPTY PROXY_ROLE_TOOL_MATRIX grant is refused (caller bug, not a silent override)", async () => {
+//
+// gate② #557 FIX 5: this throw used to fire AFTER `openSync(jsonlPath, "w")` had already run —
+// the caller-bug validation moved up in run() to before that open (see the block's own doc in
+// peripheral.ts), so this test also asserts the PRE-THROW filesystem state: no `.jsonl` file (an
+// open, unclosed fd) and no other session-name artifact is left behind by a rejected call. Before
+// that reorder, a leaked fd/file existed here and this test's prior form (deleting the whole temp
+// dir afterward, asserting nothing about what was in it) would have passed either way — masking
+// the leak entirely.
+test("run: #557 an EXPLICIT opts.proxy for a role with an EMPTY PROXY_ROLE_TOOL_MATRIX grant is refused (caller bug, not a silent override) — and leaves no stray fd/artifact behind", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(dir, FAST_STUB);
     const runner = mkRunner(dir, bin);
+    const before = readdirSync(dir);
     // "retro" holds no PROXY_ROLE_TOOL_MATRIX grant post-#533 (removed — see access.ts).
     await assert.rejects(
       () =>
@@ -2278,6 +2287,16 @@ test("run: #557 an EXPLICIT opts.proxy for a role with an EMPTY PROXY_ROLE_TOOL_
           },
         }),
       /holds no PROXY_ROLE_TOOL_MATRIX grant/,
+    );
+    const after = readdirSync(dir);
+    assert.deepEqual(
+      after.slice().sort(),
+      before.slice().sort(),
+      "the rejected call must not have created ANY new file in the session state dir (no leaked jsonl/sentinel)",
+    );
+    assert.ok(
+      !after.some((f) => f.endsWith(".jsonl")),
+      "no jsonl file (which would mean an fd was opened and never closed) exists after the caller-bug throw",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

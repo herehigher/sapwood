@@ -669,9 +669,14 @@ const Roles = z
       // #215: hard bound on the engine-assembled {{backlog.digest}} injected into align mode.
       // capDigest marks every cut; the floor leaves room for its marker and for the explicit
       // zero/read-failure notes, which must never collapse into an indistinguishable blank.
-      // #212: also reused (unmodified) as the pool-selection candidate digest's cap — that
-      // digest is naturally far smaller (bounded by the pool cap, a handful of issues), so this
-      // shared knob is a safety valve there too, not a dedicated budget most deployments tune.
+      // #212: also reused (unmodified) as the pool-selection candidate digest's cap. Pre-#533
+      // that digest was naturally far smaller (title-only lines, bounded by the pool cap — a
+      // handful of issues), so this shared knob was a safety valve there too, not a dedicated
+      // budget most deployments tune. #533 (PM ruling 2026-08-02) changed that: each pool
+      // candidate now carries its FULL body, giving this digest the same size profile as
+      // `roles.architect.poolDigestMaxChars` below — a REAL budget on that path now, not a
+      // knob most deployments can ignore (see `docs/configuration.md`'s row for the
+      // consequence when it bites).
       backlogDigestMaxChars: z.number().int().min(200).default(20_000),
       // #127: false -> round-defaults.ts omits the aligning stub; the phase no-ops via
       // round.ts's existing noopPeripheralStub default (see roles.planReviewer.enabled above
@@ -679,22 +684,27 @@ const Roles = z
       // runs every round regardless of this flag; see align.ts's runPoolSelection and
       // `poolSelection` below, which is what actually gates the SESSION now.
       enabled: z.boolean().default(true),
-      // #233: default `false` — a title-only pool-selection SESSION is now an opt-in
-      // experiment, decoupled from `enabled` above (which still only gates align/triage).
-      // Controlled tiered testing found the session selects EVERY candidate at every model
-      // tier — it has no evidentiary basis (a bare title/number digest) to narrow the
-      // reservoir, so paying for a session every round just reproduces the deterministic
-      // fallback it would otherwise degrade to. Worse, `round.poolFactor` exists specifically
-      // to over-select and absorb gate⓪/architect attrition; a session that DOES narrow the
-      // reservoir pre-gates risks underfilling the round for no observed benefit. The one
-      // non-trivial selection ever observed was traced to contaminated test context, not a
-      // real judgment the session made from candidate titles alone. `true` restores the
-      // #212 session path unchanged (validation, retry-once, degrade-open to the full
-      // candidate set, the durable `pool-selected` event, label reconcile) for deployments
-      // that want to keep experimenting with it. Benchmark note: when evaluating the
-      // experimental selector, isolate worktree/code reads for that run — production
-      // sessions may read the repo, but that is an uncontrolled signal for this specific
-      // experiment (the session is meant to judge from titles/numbers alone).
+      // #233: default `false` — the pool-selection SESSION is an opt-in experiment, decoupled
+      // from `enabled` above (which still only gates align/triage). Controlled tiered testing
+      // — run against the THEN title-only session, before #533 gave it full candidate bodies —
+      // found the session selects EVERY candidate at every model tier: it had no evidentiary
+      // basis (a bare title/number digest) to narrow the reservoir, so paying for a session
+      // every round just reproduced the deterministic fallback it would otherwise degrade to.
+      // Worse, `round.poolFactor` exists specifically to over-select and absorb gate⓪/architect
+      // attrition; a session that DOES narrow the reservoir pre-gates risks underfilling the
+      // round for no observed benefit. The one non-trivial selection ever observed was traced
+      // to contaminated test context, not a real judgment the session made from candidate
+      // titles alone. `true` restores the #212 session path unchanged (validation, retry-once,
+      // degrade-open to the full candidate set, the durable `pool-selected` event, label
+      // reconcile) for deployments that want to keep experimenting with it. #533 (PM ruling
+      // 2026-08-02) later substituted each candidate's FULL body into that opt-in session's
+      // digest — the finding above was never re-run against that body-bearing input, so it
+      // remains the reason the default stays `false`, not a claim about what today's opt-in
+      // session is actually shown. Benchmark note: when evaluating the experimental selector,
+      // isolate worktree/code reads for that run — production sessions may read the repo, but
+      // that is an uncontrolled signal for this specific experiment (the pre-#533 session's
+      // intended input was titles/numbers alone; post-#533 it also includes each candidate's
+      // full body, deliberately).
       poolSelection: z.boolean().default(false),
     })
       .strict()

@@ -548,12 +548,24 @@ target set is genuinely open-ended.
 
 **Per-removed-role decision record** (a removed tool produces no call, so "no call" proves
 nothing — evidenced by decision + reason + falsifier + reversal path, not by a session):
-falsifier = an attempted `mcp__forge__*` call surfacing in any transcript over the next N dogfood
-rounds, or a session artifact stating a lookup was needed (each removed role's prompt already
-carries a "say so when a check is missing" breadcrumb, per #410). Reversal path, identical for
-all seven: one matrix line (`proxy/access.ts`), one prompt paragraph (per role), one test mapping
-row (`prompts.test.ts`'s `ROLE_PROMPT_PATHS` — re-adding the entry is what re-arms #529's AC-2
-test for that role). **Honest residual:** a role that never reaches for the tool but reasons
+falsifier = an attempted `mcp__forge__*` call surfacing in any transcript over the next **10**
+dogfood rounds, or a session artifact stating a lookup was needed. That second channel is uneven
+across the seven, not a uniform breadcrumb — verified per role, not asserted: `po-triage`
+(po.md's triage-mode section) carries the exact #410 idiom ("treat their absence like any other
+missing tool ... rather than writing as if you had searched"); `retro` and `harvest` each carry a
+general honesty convention ("say so" rather than fabricate or assume) a felt lookup-gap would
+likely surface through, though neither names a missing tool specifically; `plan-reviewer` and
+`plan-drafter` each carry a "say so" / "there is no such tool" sentence, but about a WRITE-tool
+absence or a doc-gate label — not about a missing lookup; `plan-reviewer-confirm` and `po-pool`
+carry no such instruction at all (po-pool's entire deliverable is selected numbers — there is no
+prose channel to say anything in). For those last two, the transcript-scan falsifier above is the
+ONLY channel; that is an honest gap, not a second belt-and-suspenders one. Reversal path,
+identical for all seven: one matrix line (`proxy/access.ts`) plus one prompt paragraph (per role)
+actually naming the restored tool. **No test mapping row needs restoring** — `prompts.test.ts`'s
+`ROLE_PROMPT_PATHS` already maps all seven and was never removed; re-adding the matrix grant
+alone re-arms #529's AC-2 test for that role, since the loop it drives skips only zero-length
+grants (`if (tools.length === 0) continue`). **Honest residual:** a role that never reaches for
+the tool but reasons
 *worse* without it is undetectable except by a human or retro reading its outputs — zero-call
 evidence can never accumulate for a role that has no tool at all. Removal is mechanically cheap to
 reverse but epistemically self-sealing; that asymmetry is exactly why `proxy/access.ts` — though

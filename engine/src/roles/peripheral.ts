@@ -703,6 +703,38 @@ export class RoleRunner {
           "opts.allowedTools/opts.disallowedTools must not be set together with reviewCwd",
       );
     }
+    // #533 (PM ruling 2026-08-02): a role whose PROXY_ROLE_TOOL_MATRIX grant is now EMPTY (seven
+    // roles, post-#533) skips minting too — folded into this same guard rather than a separate
+    // branch. Be precise about what this actually saves, per the ruling: mcp-server.ts's
+    // `tools/list` AND `ForgeProxyHandle.toolNames` already filter to the role's allowed set, so
+    // an empty-grant role minted anyway would be served an empty tool list regardless — the
+    // CONTEXT-SCHEMA saving (a smaller mcp-config, no forge server section in the session's own
+    // view) comes from the MATRIX change alone, not from this skip. What THIS skip alone saves is
+    // the listener (no HTTP server bound), the bearer token (none minted, none to revoke), and the
+    // --mcp-config/journal-identity plumbing for a session that could never make a call anyway —
+    // never claim it saves context, that claim belongs to the matrix change above.
+    // `roleGrantsProxyTools` is a pure lookup (no side effect), so it — and the caller-bug check
+    // below that depends on it — belong up here with the rest of this method's caller-bug
+    // validation, BEFORE the jsonlFd `openSync` a few lines down: gate② #557 FIX 5 found this
+    // check living AFTER that open, so a caller triggering it (opts.proxy set for a role with an
+    // empty grant) leaked the open fd and its file — the throw unwound past the point that opens
+    // it, and the try/finally that tears proxy/process state down doesn't start until after this
+    // validation block either. Validating first means the throw fires before anything is
+    // created, the same "fail before touching disk" posture the guard-hook/materializedCwd
+    // checks above already use — nothing here needs jsonlPath, the sessionId, or settingsJson.
+    const roleGrantsProxyTools = allowedToolsForRole(opts.roleId).length > 0;
+    // gate② #557 (PM ruling, matching the reviewCwd+opts.proxy precedent a few lines up): the
+    // RoleRunner-wide `defaultProxy` skips silently for an empty-grant role (that IS the
+    // mint-skip's whole point — no caller had to ask for that). But a caller-supplied
+    // `opts.proxy` for an empty-grant role is a DIFFERENT thing — a caller explicitly asking for
+    // a proxy this role can never use — so it is refused loudly, the same way reviewCwd+opts.proxy
+    // is refused above, rather than silently discarded (docs/configuration.md's "always wins over
+    // the RoleRunner-wide default, never silently overridden" must stay true for both guards).
+    if (!reviewMode && !roleGrantsProxyTools && opts.proxy !== undefined) {
+      throw new Error(
+        `role "${opts.roleId}" holds no PROXY_ROLE_TOOL_MATRIX grant (access.ts) — opts.proxy must not be set for a role whose grant is empty (caller bug, not a silent override); the RoleRunner-wide default proxy is skipped silently for this role, but an explicit opts.proxy is not`,
+      );
+    }
     const sessionId = randomUUID();
     const jsonlPath = this.path(name, "jsonl");
     const jsonlFd = openSync(jsonlPath, "w");
@@ -722,29 +754,8 @@ export class RoleRunner {
     // and not the RoleRunner-wide default either; this is enforced HERE, structurally, so a
     // review session can never silently inherit a proxy some other caller configured
     // RoleRunnerDeps.defaultProxy with.
-    // #533 (PM ruling 2026-08-02): a role whose PROXY_ROLE_TOOL_MATRIX grant is now EMPTY (seven
-    // roles, post-#533) skips minting too — folded into this same guard rather than a separate
-    // branch. Be precise about what this actually saves, per the ruling: mcp-server.ts's
-    // `tools/list` AND `ForgeProxyHandle.toolNames` already filter to the role's allowed set, so
-    // an empty-grant role minted anyway would be served an empty tool list regardless — the
-    // CONTEXT-SCHEMA saving (a smaller mcp-config, no forge server section in the session's own
-    // view) comes from the MATRIX change alone, not from this skip. What THIS skip alone saves is
-    // the listener (no HTTP server bound), the bearer token (none minted, none to revoke), and the
-    // --mcp-config/journal-identity plumbing for a session that could never make a call anyway —
-    // never claim it saves context, that claim belongs to the matrix change above.
-    const roleGrantsProxyTools = allowedToolsForRole(opts.roleId).length > 0;
-    // gate② #557 (PM ruling, matching the reviewCwd+opts.proxy precedent a few lines up): the
-    // RoleRunner-wide `defaultProxy` skips silently for an empty-grant role (that IS the
-    // mint-skip's whole point — no caller had to ask for that). But a caller-supplied
-    // `opts.proxy` for an empty-grant role is a DIFFERENT thing — a caller explicitly asking for
-    // a proxy this role can never use — so it is refused loudly, the same way reviewCwd+opts.proxy
-    // is refused above, rather than silently discarded (docs/configuration.md's "always wins over
-    // the RoleRunner-wide default, never silently overridden" must stay true for both guards).
-    if (!reviewMode && !roleGrantsProxyTools && opts.proxy !== undefined) {
-      throw new Error(
-        `role "${opts.roleId}" holds no PROXY_ROLE_TOOL_MATRIX grant (access.ts) — opts.proxy must not be set for a role whose grant is empty (caller bug, not a silent override); the RoleRunner-wide default proxy is skipped silently for this role, but an explicit opts.proxy is not`,
-      );
-    }
+    // #533/#557: `roleGrantsProxyTools` and its caller-bug check are computed ABOVE now — see
+    // that block's own doc for why (FIX 5, an fd/file leak on the throw path).
     const proxyOpt = reviewMode || !roleGrantsProxyTools ? undefined : (opts.proxy ?? this.deps.defaultProxy);
     let proxyHandle: ForgeProxyHandle | undefined;
     if (proxyOpt) {

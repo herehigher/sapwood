@@ -184,9 +184,10 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
   // like afterward (align.ts's runPoolSelection); with the PO off, only alignStub's own work is
   // skipped — runPoolSelection still runs unconditionally. #233: runPoolSelection's OWN
   // behavior no longer depends on roles.po.enabled either — it depends on its own switch,
-  // `roles.po.poolSelection` (default false): a title-only pool-selection session is now an
-  // opt-in experiment (controlled testing found it selects every candidate at every tier, so
-  // the deterministic engine-computed selection is the default MAIN path, not a fallback for
+  // `roles.po.poolSelection` (default false): the pool-selection session is an opt-in
+  // experiment (controlled testing — against the then title-only session, before #533 gave it
+  // each candidate's full body — found it selects every candidate at every tier, so the
+  // deterministic engine-computed selection is the default MAIN path, not a fallback for
   // roles.po.enabled=false specifically). The rerun-not-resume marker check happens HERE (not
   // inside alignStub) so a crash mid-selection (after alignStub's own work already externalized)
   // restarts at THIS phase with a still-null marker and safely redoes only the (idempotent)
