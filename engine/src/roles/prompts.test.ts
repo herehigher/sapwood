@@ -199,10 +199,11 @@ test("#535 pin: which roles hold a real WRITE grant matches ROLE_ALLOWED_TOOLS/R
   // `NotebookEdit`, which every one of these lists carries as its own distinct entry.
   const tokens = (list: string): Set<string> => new Set(list.split(","));
 
-  // The five peripheral-role allow-lists (po/plan-reviewer/plan-drafter/confirm all byte-
-  // identical to the base, architect/po-align/po-triage widened only with WebSearch/WebFetch)
-  // must never include Write/Edit/MultiEdit, and the shared deny-list must keep denying Bash
-  // outright — together, tier 1's "no write tool channel exists at all" claim.
+  // The six peripheral-role allow-lists — five roles plus the plan-reviewer confirm variant:
+  // po/plan-reviewer/plan-drafter/confirm all byte-identical to the base, architect/po-align/
+  // po-triage widened only with WebSearch/WebFetch — must never include Write/Edit/MultiEdit,
+  // and the shared deny-list must keep denying Bash outright — together, tier 1's "no write
+  // tool channel exists at all" claim.
   for (const [name, tools] of [
     ["ROLE_ALLOWED_TOOLS", ROLE_ALLOWED_TOOLS],
     ["PO_ALLOWED_TOOLS", PO_ALLOWED_TOOLS],

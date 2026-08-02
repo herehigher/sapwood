@@ -5,9 +5,12 @@ For the six peripheral roles below, sapwood's deterministic engine (`runRounds`,
 behalf — each role session is a scoped, bounded subordinate whose judgment reaches
 GitHub only through the engine (#110). The **worker is the write-capable exception** and is
 out of this doc's peripheral-role scope: worker sessions hold real write grants
-(`Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),...`, with only
-`Bash(gh pr merge*)`/`Bash(gh pr ready*)` deny-listed — `engine/src/roles/worker.ts::WORKER_DISALLOWED_TOOLS`,
-noise-reduction only) and open their own PRs; their actual boundary is tier 2 of the
+(`Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),...`, with seven `gh` verbs
+deny-listed — `engine/src/roles/worker.ts::WORKER_DISALLOWED_TOOLS`: `gh pr merge*`/`gh pr
+ready*` plus #350's `gh pr review*`/`gh release*` are CLI-surface noise reduction atop
+guard.ts's own block, while #488's `gh issue edit*`/`gh label*`/`gh project*` are
+governance-signal containment — a producer must never forge the labels/board `Status` the
+engine's gates trust) and open their own PRs; their actual boundary is tier 2 of the
 ladder below, the fail-closed guard hook intercepting merge/approve/ready — see
 [`security.md`](security.md). Gate② reviewers are also not peripheral roles; their separate
 contract is summarized below. This doc is the contract every peripheral role session
@@ -170,10 +173,14 @@ role's writes UP this ladder over adding a pattern-level deny.
    modify `guard.ts` or its wiring** — it is human-merge-only
    (`CLAUDE.md` non-negotiables). Five of the six roles below — po, architect, plan-reviewer,
    plan-drafter, harvest — sit at tier 1 and do NOT rely on this tier as their primary boundary;
-   for them it is only the backstop under tier 1's absence-of-capability. `retro`, the sixth, is
-   the exception: it holds a real `Write`/`Edit`/`MultiEdit` grant (see tier 1's note above and its
-   own `### retro (retro)` section below), so — like the worker — this tier is its actual boundary,
-   not a backstop.
+   for them it is only the backstop under tier 1's absence-of-capability. `retro`, the sixth, does
+   NOT sit at tier 1 (it holds a real `Write`/`Edit`/`MultiEdit` grant — see tier 1's note above),
+   so for retro this tier IS load-bearing rather than a backstop: specifically, the guard hook's
+   worktree write confinement (`checkWritePath`/`checkBashWritePath` in `guard.ts`) is what
+   constrains the real write grant it holds. That is not retro's whole containment, though — its
+   own `### retro (retro)` row below names the actual combination: this narrowed grant with no
+   `gh` entries at all, plus the tier-3 `openProposalPR` choke point gated on an engine-side
+   `forge.branchExists` check.
 3. **Choke point** — the role's session emits untrusted structured output (a
    sentinel-delimited JSON block, `structured-output.ts`, or retro's scratch file);
    exactly one engine module parses it, validates it fail-closed against a zod schema
@@ -305,7 +312,7 @@ bounds the loop — at the bound, the engine escalates rather than cycling forev
 | Element | Detail |
 |---|---|
 | Responsibility | Round-close summary: briefs the round's needs-human issues with round context (a few lines each, not a report). The write-target BOUND is closed-form pre-session — the engine-built round artifact (`round-artifact.ts`) computes the `needsHuman` set from the durable ledger BEFORE the session runs; the session may brief any subset of that set, including none (an empty `comments` array is valid — the phase closes normally, no degradation event), but never an issue OUTSIDE it. `engine/src/loop/harvest.ts::createHarvestStub`. |
-| Write scope | Tier 1 (unreachable): no tool grant, plus an explicit `HARVEST_DISALLOWED_TOOLS` (`harvest.ts::HARVEST_DISALLOWED_TOOLS`, denies `gh issue edit*` — regression trip-wire; harvest writes comments only, never a label or body edit). Tier 3 choke point: `harvest.ts::createHarvestStub` is the sole caller of `forge.addIssueComment` for this phase; every target is set-checked against the pre-computed `needsHumanIssues` list. |
+| Write scope | Tier 1 (unreachable) for writes: `createHarvestStub` passes only `disallowedTools` (`harvest.ts::createHarvestStub`), no `allowedTools`, so `peripheral.ts`'s `opts.allowedTools ?? ROLE_ALLOWED_TOOLS` fallthrough gives it the same base `ROLE_ALLOWED_TOOLS = "Read,Grep,Glob"` READ floor as the other four tier-1 roles above — no WRITE grant. `HARVEST_DISALLOWED_TOOLS` (`harvest.ts::HARVEST_DISALLOWED_TOOLS`) is now byte-identical to the base `ROLE_DISALLOWED_TOOLS` (`peripheral.ts::ROLE_DISALLOWED_TOOLS`) — a regression trip-wire only, the same shape as the plan-drafter's `PLAN_DRAFTER_DISALLOWED_TOOLS` above; the standalone `gh issue edit*` pattern-deny it once carried was dropped once the blanket Bash deny made it redundant. Harvest writes comments only, never a label or body edit. Tier 3 choke point: `harvest.ts::createHarvestStub` is the sole caller of `forge.addIssueComment` for this phase; every target is set-checked against the pre-computed `needsHumanIssues` list. |
 | Marker idempotency | `harvestMarker(roundId)` (`harvest.ts::harvestMarker`), standard convention. No needs-human issues to brief → no session run, but the phase still closes with its marker set (`harvest.ts::createHarvestStub`). |
 | Output schema + validation | `HarvestMetadataSchema` (`harvest.ts::HarvestMetadataSchema`, `comments: [{issue, body}]`) validated by `validateHarvestOutput` (`harvest.ts::validateHarvestOutput`) — schema PLUS a set cross-check: every `issue` must be inside the engine's pre-computed `needsHumanIssues` set, or the WHOLE batch fails (never a partial apply); duplicate issue numbers in one batch are also rejected outright. An empty `comments` array is valid ("nothing to brief" is a legitimate outcome). |
 | Escalation path | Advisory, degrade-and-proceed — a summary role must never wedge round termination. A session that fails twice or never validates fires `harvest-degraded` (`harvest.ts::createHarvestStub`, payload shape preserved exactly across the #110 rework: `{round_id, outcome, session, attempts}`); the phase closes with no comments posted. |
