@@ -280,7 +280,11 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
       // post-reclaim. Only wired when the stop is configured.
       const spendStopThunk: Pick<TickDeps, "runSpendStopCrossed"> =
         deps.stop?.afterSpendUsd !== undefined
-          ? { runSpendStopCrossed: () => deps.state.spentUsdAfterId(runSpendAnchorId) >= deps.stop!.afterSpendUsd! }
+          ? // #429: + the tick's completed-but-unbanked terminal spend (deferred PR association).
+            {
+              runSpendStopCrossed: (unsettledUsd) =>
+                deps.state.spentUsdAfterId(runSpendAnchorId) + unsettledUsd >= deps.stop!.afterSpendUsd!,
+            }
           : {};
       const tickDeps: TickDeps = stopConditionHit
         ? { ...deps, ...spendStopThunk, processStartedAt, forceDispatchPause: true }
