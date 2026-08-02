@@ -2209,6 +2209,51 @@ test("run: #253 a session's OWN RoleSessionOpts.proxy wins over RoleRunnerDeps.d
   }
 });
 
+// #533 (PM ruling 2026-08-02): a role holding NO PROXY_ROLE_TOOL_MATRIX grant skips minting
+// entirely — folded into the SAME proxyOpt guard as reviewMode, not a separate branch. Precise
+// about what this saves (see peripheral.ts's own doc comment at the proxyOpt assignment): the
+// listener/token/mcp-config plumbing only — mcp-server.ts already serves an empty tool list to a
+// minted-but-ungranted role, so the CONTEXT-SCHEMA saving is the matrix change alone, not this.
+test("run: #533 a role with an EMPTY PROXY_ROLE_TOOL_MATRIX grant never mints, even with RoleRunnerDeps.defaultProxy AND opts.proxy both present — no listener, no token, no --mcp-config", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const { calls: defaultCalls, handle: defaultHandle } = fakeProxyHandle();
+    const { calls: ownCalls, handle: ownHandle } = fakeProxyHandle();
+    const runner = mkRunner(dir, bin, {
+      defaultProxy: {
+        mint: async () => {
+          defaultCalls.minted++;
+          return defaultHandle as unknown as Awaited<ReturnType<NonNullable<RoleSessionOpts["proxy"]>["mint"]>>;
+        },
+      },
+    });
+    // "retro" holds no PROXY_ROLE_TOOL_MATRIX grant post-#533 (removed — see access.ts).
+    await runner.run({
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      proxy: {
+        mint: async () => {
+          ownCalls.minted++;
+          return ownHandle as unknown as Awaited<ReturnType<NonNullable<RoleSessionOpts["proxy"]>["mint"]>>;
+        },
+      },
+    });
+    assert.equal(defaultCalls.minted, 0, "the RoleRunner-wide default must not be minted for an empty-grant role");
+    assert.equal(ownCalls.minted, 0, "even a caller-supplied opts.proxy must not be minted for an empty-grant role");
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    assert.ok(!seen.includes("--mcp-config"), "no --mcp-config was injected — the mint never happened");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: #253 no RoleRunnerDeps.defaultProxy and no opts.proxy -> today's behavior, byte-for-byte unchanged (no --mcp-config, base allowedTools)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {

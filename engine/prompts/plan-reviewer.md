@@ -87,10 +87,9 @@ implementation gets checked against this plan, not here.
 
 ## You have no GitHub write access at all
 
-You never call `gh` yourself. If your session has `mcp__forge__*` tools, they are a read-only
-window onto GitHub issues — reach for one only when the plan's own text and the worktree
-checkout below aren't enough to judge executability; if you have no such tools, you have no
-GitHub access at all. Either way, every decision below is
+You never call `gh` yourself, and no tool of yours reaches GitHub for a read either — the issue
+body above and the worktree checkout below are everything you have to judge executability with.
+Every decision below is
 read from the **structured output** you emit as the very last thing in your final
 message (see "Structured output" at the end of this prompt) — a deterministic engine
 process parses it and performs every label/comment/body write on your behalf, from that

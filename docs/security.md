@@ -520,13 +520,61 @@ tool at all** (deny-by-default, regression-tested):
 
 | Role | Tools granted |
 | --- | --- |
-| `po-pool` / `po-align` / `po-triage` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
-| `harvest` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
+| `po-align` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `architect` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
-| `plan-reviewer` / `plan-drafter` / `plan-reviewer-confirm` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
-| `retro` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `getPRAuditComments` (camelCase wire name; #556 tracks normalizing it) |
-| *(any other role id)* | none — deny-by-default |
+| *(any other role id, including `po-pool`, `po-triage`, `harvest`, `plan-reviewer`, `plan-drafter`, `plan-reviewer-confirm`, `retro`)* | none — deny-by-default |
+
+**#533 (PM ruling 2026-08-02, "2 keep / 7 remove") narrowed this from #234's original 7-role
+issue-tool consumer set to exactly TWO — `po-pool`/`po-triage`/`harvest`/`plan-reviewer`/
+`plan-drafter`/`plan-reviewer-confirm`/`retro` all lost the grant.** #529 had already fixed a
+FALSE claim (six prompts said "no tool reaches GitHub" while the matrix genuinely granted one);
+#533 answers the harder question #529's own live 2×2 evidence raised — a true grant with no task
+that ever asks for it is just as much a drift as a false denial, only silent instead of loud.
+The ruling's two-step test, applied to every role: **(1) Charter** — is the job defined over a SET
+of issues, or over one substituted artifact? Only the former is a lookup candidate. **(2)
+Closedness** — if that set is knowable and small, SUBSTITUTE it; a lookup wins only when the
+target set is genuinely open-ended.
+
+| Role | Decision | Reason |
+| --- | --- | --- |
+| `po-align` | **keep** | Dedup runs against the WHOLE open backlog (po.md's unconditional `search_issues` step on every proposal's key terms, `po.md:~72`) — genuinely open-ended, fails closedness. The only role whose live 2×2 arm produced a nonzero call. |
+| `architect` | **keep, ask rewritten** | Cross-issue search for related open/recently-updated issues OUTSIDE this round's pool — by definition not a substitutable closed set. The OLD ask was half theater: `forge.ts::searchIssues` (`gh search issues --json number,title,state,labels,updatedAt`) carries no body text, and the old lookup target (a locked architecture decision) was already substituted verbatim as `<architecture-chapter>`. New ask (`architect.md`'s "Cross-issue search" step, unconditional whenever the tool is attached): search a candidate's key terms, `issue_details` the hits before judging, and treat a locked decision found only in an issue (never the architecture chapter) as DOC DRIFT — never as authoritative. |
+| `po-pool` | **remove + substitute** | Its target (this round's OWN candidate pool) is closed and small (`ceil(roundDispatchCap × poolFactor)`), and the architect phase ALREADY substitutes every pool member's full body one phase later, at this exact rendering — the engine pays this cost either way. `align.ts::buildPoolCandidateDigest` now renders each candidate with `architect.ts::formatCandidate` (number, title, labels, full body) under the SAME existing cap (`roles.po.backlogDigestMaxChars`) instead of holding a conditional `issue_details` grant that measured zero calls. |
+| `po-triage` | **remove** | Demand, not surface: the substituted issue body suffices, zero measured need. Accepted bounded residual: `po-triage` keeps its default `WebSearch`/`WebFetch` grant, and `WebFetch` reaches `github.com` directly — removing the journaled, repo-scoped, capped forge path while an unjournaled WebFetch path remains is a net GitHub-read surface change of about zero. |
+| `plan-reviewer` / `plan-drafter` / `plan-reviewer-confirm` | **remove** | Charter fails step 1: each judges/drafts ONE substituted artifact (an issue body, a reviewer brief, a repo-drift question the confirm session's own READ-ONLY worktree grant already answers) — never a set. |
+| `harvest` | **remove** | Charter fails step 1: targets arrive as bare `#N`, comments are round-stats boilerplate, and the prompt already forbids expanding targets beyond the pre-computed needs-human set. |
+| `retro` | **remove** | Repairs a LIVE declared-session-contract drift, not a hypothetical one: `retro.md` already said "you have no `gh` access at all" while this matrix granted it `ISSUE_TOOLS` — the exact defect class #529 exists to kill, live on `main` before this change. Removing the grant makes that sentence TRUE with **zero prose edit**. Also: retro is the one peripheral role with a real write channel (a pushed branch) — minimum ambient read matters most exactly here. |
+
+**Per-removed-role decision record** (a removed tool produces no call, so "no call" proves
+nothing — evidenced by decision + reason + falsifier + reversal path, not by a session):
+falsifier = an attempted `mcp__forge__*` call surfacing in any transcript over the next N dogfood
+rounds, or a session artifact stating a lookup was needed (each removed role's prompt already
+carries a "say so when a check is missing" breadcrumb, per #410). Reversal path, identical for
+all seven: one matrix line (`proxy/access.ts`), one prompt paragraph (per role), one test mapping
+row (`prompts.test.ts`'s `ROLE_PROMPT_PATHS` — re-adding the entry is what re-arms #529's AC-2
+test for that role). **Honest residual:** a role that never reaches for the tool but reasons
+*worse* without it is undetectable except by a human or retro reading its outputs — zero-call
+evidence can never accumulate for a role that has no tool at all. Removal is mechanically cheap to
+reverse but epistemically self-sealing; that asymmetry is exactly why `proxy/access.ts` — though
+not formally on the human-merge-only list — got a `sapwood:needs-human` label on the PR that
+narrowed it, by spirit rather than by the letter of that list.
+
+**Accepted bounded blind spot (not closed by this change or by #528):** a human-Readied issue
+that duplicates an open issue OUTSIDE the round's pool is caught by nobody — `po-align`'s dedup
+runs only on its own proposals before proposing them, never against an issue a human already
+moved to `Ready`. Recorded here as an accepted gap, not claimed as covered.
+
+**The mint-skip.** `peripheral.ts::RoleRunner.run()` folds `allowedToolsForRole(opts.roleId)
+.length === 0` into the SAME guard that already suppresses a review session's proxy — an
+empty-grant role (all seven removed above) never mints at all, caller-supplied `opts.proxy` or
+`RoleRunnerDeps.defaultProxy` alike. Be precise about what this saves: `mcp-server.ts` already
+filters both `tools/list` and `ForgeProxyHandle.toolNames` to a role's allowed set, so a minted
+empty-grant role was ALREADY served an empty tool list before this change — the CONTEXT-SCHEMA
+saving (a smaller `--mcp-config`, no forge server section in the session's own view) comes from
+the MATRIX change alone. The mint-skip saves only the listener (no HTTP server bound), the bearer
+token (none minted, none to revoke), and the `--mcp-config`/journal-identity plumbing for a
+session that could never make a call anyway.
 
 **Scope, updated by #245: `WorkerSupervisor.resume()` now attaches a proxy too.** #244 shipped
 `dispatch()`-only attachment deliberately (the `resume()` crash-consistency machinery was already

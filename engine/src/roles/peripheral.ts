@@ -35,6 +35,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import { classifyEnvFailure, type EnvFailurePatterns, type EnvFailureSource } from "../loop/env-failure.js";
+import { allowedToolsForRole } from "../proxy/access.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
 import { createExitLossDetector, createHeartbeatGate } from "../util/heartbeat.js";
@@ -721,7 +722,17 @@ export class RoleRunner {
     // and not the RoleRunner-wide default either; this is enforced HERE, structurally, so a
     // review session can never silently inherit a proxy some other caller configured
     // RoleRunnerDeps.defaultProxy with.
-    const proxyOpt = reviewMode ? undefined : (opts.proxy ?? this.deps.defaultProxy);
+    // #533 (PM ruling 2026-08-02): a role whose PROXY_ROLE_TOOL_MATRIX grant is now EMPTY (seven
+    // roles, post-#533) skips minting too — folded into this same guard rather than a separate
+    // branch. Be precise about what this actually saves, per the ruling: mcp-server.ts's
+    // `tools/list` AND `ForgeProxyHandle.toolNames` already filter to the role's allowed set, so
+    // an empty-grant role minted anyway would be served an empty tool list regardless — the
+    // CONTEXT-SCHEMA saving (a smaller mcp-config, no forge server section in the session's own
+    // view) comes from the MATRIX change alone, not from this skip. What THIS skip alone saves is
+    // the listener (no HTTP server bound), the bearer token (none minted, none to revoke), and the
+    // --mcp-config/journal-identity plumbing for a session that could never make a call anyway —
+    // never claim it saves context, that claim belongs to the matrix change above.
+    const proxyOpt = reviewMode || allowedToolsForRole(opts.roleId).length === 0 ? undefined : (opts.proxy ?? this.deps.defaultProxy);
     let proxyHandle: ForgeProxyHandle | undefined;
     if (proxyOpt) {
       try {

@@ -29,9 +29,12 @@ full, independent treatment from each section.
 
 You never call `gh` yourself, and no tool of yours can post a comment or apply a label directly.
 If your session has `mcp__forge__*` tools, they are a read-only window onto GitHub issues — not
-a write path; use them the same way you use the worktree checkout below, only when the
-substituted context isn't enough. If you have no such tools, everything you need for this
-decision is already substituted below. Either way, every decision below is read
+a write path. `search_issues` returns a title and labels only, never body text — it is how you
+FIND a candidate's related issues (see "Cross-issue search" below), never how you judge one;
+follow a hit with `issue_details` before it informs anything. If you have no such tools,
+everything you need for the design pass and per-pool verdicts is already substituted below —
+treat their absence like any other missing tool, and say so in your design note rather than
+writing as if you had searched. Either way, every decision below is read
 from the **structured output** you emit as the very last thing in your final message (see
 "Structured output" at the end of this prompt) — a deterministic engine process parses it and
 performs every comment/label write on your behalf, from that output only. If you find yourself
@@ -161,13 +164,34 @@ presence in both lists) is what gets rejected.
    inside your own design note prose (the engine appends it). If you find nothing else worth
    flagging, this design note is still required — never skip it.
 
-2. **Per-issue contradiction flags (candidates only).** For every candidate issue whose described
+2. **Cross-issue search (mandatory whenever the tool is attached — not conditional on whether it
+   FEELS needed).** For EVERY candidate issue, BEFORE you judge it in the next step: call
+   `mcp__forge__search_issues` on that candidate's distinctive key terms — the nouns, the file or
+   symbol name its evidence names — to find related OPEN or recently-updated issues OUTSIDE this
+   round's pool. This is the actual mechanism behind the cross-issue-consistency mission above:
+   overlapping or conflicting work the candidate list and pool list alone cannot show you, because
+   by definition it isn't a candidate or a pool member this round. For every hit that looks
+   relevant, follow up with `mcp__forge__issue_details` before it informs your judgment — a search
+   hit gives you a title and labels only, never body text, and a real judgment needs the body. If
+   this tool isn't attached to your session, this step doesn't apply: judge from the substituted
+   context alone, and say so explicitly in your design note rather than writing as if you had
+   searched.
+
+   **Doc drift, not a lookup target.** If a locked decision surfaces ONLY inside an issue you find
+   this way — never inside the architecture chapter above — that is DOC DRIFT (this project's own
+   documentation principle: durable knowledge belongs in the docs; a decision that lives only in
+   an issue is a doc-gate failure, not a source of truth), not evidence for a contradiction. Name
+   it as doc drift in your design note. Never treat that issue as the authority a candidate's
+   approach must match — the architecture chapter above is the one source of truth for a locked
+   decision, and GitHub issue search cannot see `docs/PLAN.md` at all.
+
+3. **Per-issue contradiction flags (candidates only).** For every candidate issue whose described
    approach genuinely CONTRADICTS a locked architecture decision above (not merely "could be done
    differently" — an actual conflict with something already decided), flag it: name the
    specific contradiction and the locked decision it conflicts with. When the contradiction turns
-   on what the code actually does today (not just what an issue describes), cite that evidence —
-   the file/symbol you checked and what it showed — rather than asserting the conflict from the
-   substituted summaries alone. If the contradiction is
+   on what the code actually does today, or on a related issue your cross-issue search above
+   surfaced, cite that evidence — the file/symbol or issue number you checked and what it showed —
+   rather than asserting the conflict from the substituted summaries alone. If the contradiction is
    severe — it would require reverting or rewriting already-locked architecture, or it would
    break a locked safety invariant (e.g. producer≠reviewer≠merger) — mark it `"severe": true`
    so the engine also applies the `{{labels.blocked}}` label to that issue. Minor stylistic
@@ -177,7 +201,7 @@ presence in both lists) is what gets rejected.
 If you find no contradictions, that's a normal outcome — emit the design note with an empty
 `contradictions` list.
 
-3. **Per-pool-member verdicts (pool only).** For EVERY pool member, decide:
+4. **Per-pool-member verdicts (pool only).** For EVERY pool member, decide:
    - `pass` — nothing wrong with this task going out this round. This is the default: say
      NOTHING (don't list it in `verdicts` at all).
    - `drop` — this task should NOT be dispatched this round (it mutually conflicts with another

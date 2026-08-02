@@ -5,24 +5,25 @@ import { test } from "node:test";
 import { allowedToolsForRole, PROXY_ROLE_TOOL_MATRIX } from "./access.js";
 import { ISSUE_TOOLS, PR_TOOLS, TOOL_NAMES } from "./tools.js";
 
-test("allowedToolsForRole: every issue-oriented peripheral role gets exactly ISSUE_TOOLS", () => {
-  for (const role of [
-    "po-pool",
-    "po-align",
-    "po-triage",
-    "harvest",
-    "architect",
-    "plan-reviewer",
-    "plan-drafter",
-    "plan-reviewer-confirm",
-    "retro",
-  ]) {
+// #533 (PM ruling 2026-08-02, "2 keep / 7 remove"): the issue-tool consumer set is narrowed from
+// 7 roles to exactly 2 — po-align (whole-backlog dedup, genuinely open-ended) and architect
+// (cross-issue search for related open/recently-updated issues, also open-ended). See
+// access.ts's own PROXY_ROLE_TOOL_MATRIX doc comment for the full per-role reasoning.
+test("allowedToolsForRole: the two roles the #533 ruling kept get exactly ISSUE_TOOLS", () => {
+  for (const role of ["po-align", "architect"]) {
     assert.deepEqual([...allowedToolsForRole(role)].sort(), [...ISSUE_TOOLS].sort(), `role: ${role}`);
   }
 });
 
 test("allowedToolsForRole: the fix-loop worker leg gets exactly PR_TOOLS", () => {
   assert.deepEqual([...allowedToolsForRole("worker")].sort(), [...PR_TOOLS].sort());
+});
+
+test("allowedToolsForRole: #533 removed roles now get NO tool — deny-by-default, same as any unrecognized role", () => {
+  for (const role of ["po-pool", "po-triage", "harvest", "plan-reviewer", "plan-drafter", "plan-reviewer-confirm", "retro"]) {
+    assert.deepEqual(allowedToolsForRole(role), [], `role: ${role}`);
+    assert.ok(!(role in PROXY_ROLE_TOOL_MATRIX), `role "${role}" must be ABSENT from the matrix, not present with an empty array`);
+  }
 });
 
 test("allowedToolsForRole: deny-by-default — an unrecognized role gets NO tool, never a default-allow", () => {

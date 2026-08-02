@@ -265,6 +265,34 @@ This is coarse — round-phase granularity, not per-issue — but deliberately s
 partially-worked round's remaining candidates are picked up next round (or once
 dispatchable again) rather than risking duplicate sessions/writes on a resume.
 
+## The forge MCP proxy grant — narrowed to two roles (#533)
+
+Separate from the write-scope ladder above: which roles may READ GitHub issue data through the
+forge MCP proxy (`proxy/access.ts`'s `PROXY_ROLE_TOOL_MATRIX`), not which may write. Full table
+and per-role reasoning live in [`security.md`](security.md#the-forge-mcp-proxys-role-x-tool-matrix-234-244)
+— this is the distilled version for this doc's own per-role sections below.
+
+#529 fixed prompts that FALSELY denied a grant they held. The live 2×2 evidence #529 produced
+while verifying that fix raised the harder, opposite question: a role can hold a TRUE grant with
+no task that ever asks for it, which is drift too — just silent instead of loud. #533's ruling
+answers it with a two-step test: **(1) Charter** — is the job defined over a SET of issues, or
+over one substituted artifact? Only the former is a lookup candidate. **(2) Closedness** — if
+that set is knowable and small, SUBSTITUTE it; a lookup wins only when the target set is
+genuinely open-ended.
+
+| Role | Grant | Reason |
+| --- | --- | --- |
+| `po-align` | **keep** | Dedup runs against the WHOLE open backlog — genuinely open-ended. |
+| `architect` | **keep, ask rewritten** | Finds related open/recently-updated issues OUTSIDE this round's pool — not a substitutable closed set; a locked decision found only in an issue (never the architecture chapter) is DOC DRIFT, never authoritative. |
+| `po-pool` | remove, substitute instead | Target is this round's OWN closed candidate pool — `align.ts::buildPoolCandidateDigest` now substitutes each candidate's full body (`architect.ts::formatCandidate`) rather than holding a lookup grant. |
+| `po-triage` | remove | Demand, not surface — substituted body suffices, zero measured need. |
+| `plan-reviewer` / `plan-drafter` / `plan-reviewer-confirm` | remove | Each judges/drafts ONE substituted artifact, never a set — charter fails step 1. |
+| `harvest` | remove | Targets arrive as bare `#N`; charter fails step 1. |
+| `retro` | remove | Repairs a live drift: `retro.md` already said "you have no `gh` access at all" while holding the grant — removal makes that sentence true with zero prose edit. |
+
+`worker`'s `PR_TOOLS` grant (the fix-loop leg's PR-review evidence channel) is untouched — out of
+#533's scope by the ruling's own disposition table.
+
 ## Per-role sections
 
 ### po (aligning)

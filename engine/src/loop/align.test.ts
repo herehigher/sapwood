@@ -2752,6 +2752,71 @@ test("runPoolSelection: roles.po.poolSelection=true — a fake runner's selectio
   assert.doesNotMatch(call.prompt, /#4 —/, "the candidate digest itself is already cap-bounded — #4 was never even shown");
 });
 
+// #533 (PM ruling 2026-08-02): po-pool's ISSUE_TOOLS grant is removed; buildPoolCandidateDigest
+// now substitutes each candidate's FULL formatCandidate-shaped body (number, title, labels,
+// body) instead of a title-only line, under the SAME EXISTING cap (roles.po.backlogDigestMaxChars
+// — no new cap, no new renderer). These two tests are the "reaches the rendered prompt, not just
+// the builder" + "the cap behaves" evidence the issue calls for at the unit level (a live session
+// run separately, see scripts/live-po-pool-533.ts, additionally confirms the ACTUAL claude CLI
+// transcript carries the substituted body verbatim).
+test("runPoolSelection #533: the po-pool session's ACTUAL rendered prompt (not merely the digest builder's return value) carries each candidate's FULL body, in formatCandidate's number/title/labels/body shape — proof the substitution reaches the session, not just a local string", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2
+  const distinctiveMarker = "ZQWERTY-ONLY-IN-THE-BODY-NEVER-THE-TITLE-77219";
+  forge.ready = [
+    { number: 1, title: "issue 1", labels: ["sapwood:prio:3", "sapwood:type:feature"], body: `Full body for #1.\n\n${distinctiveMarker}` },
+    { number: 2, title: "issue 2", labels: ["sapwood:prio:3"], body: "Full body for #2, unrelated." },
+  ];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1, 2]))]);
+  const state = new State(":memory:");
+  await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 1);
+  const { prompt } = runner.calls[0]!;
+  // The distinctive marker exists ONLY inside issue #1's body — a title-only digest (the
+  // pre-#533 shape) could never produce this string. Its presence in the SESSION'S OWN prompt
+  // (not just buildPoolCandidateDigest's return value in isolation) is the actual proof.
+  assert.ok(prompt.includes(distinctiveMarker), "candidate #1's full body text must reach the rendered session prompt");
+  assert.ok(prompt.includes("Full body for #2, unrelated."), "candidate #2's full body text must reach the rendered session prompt too");
+  // formatCandidate's exact shape: "### #N — title\nLabels: ...\n\n<body>" — asserted structurally,
+  // not just "the words appear somewhere," so a future renderer swap that drops the shape (but
+  // coincidentally keeps the substrings) still fails this test.
+  assert.match(prompt, /### #1 — issue 1\nLabels: sapwood:prio:3, sapwood:type:feature\n\nFull body for #1\./);
+  assert.match(prompt, /### #2 — issue 2\nLabels: sapwood:prio:3\n\nFull body for #2, unrelated\./);
+});
+
+test("runPoolSelection #533: the SAME existing cap (roles.po.backlogDigestMaxChars) still behaves once candidates carry full bodies — a candidate past the cap is OMITTED WHOLE (never a partially-sliced body), and the omission is counted in the truncation marker", async () => {
+  const forge = new FakeForge();
+  // A tiny cap so two ~200-char bodies cannot both fit — forces real truncation behavior to
+  // exercise, rather than trusting it never triggers with realistic-sized bodies.
+  const cfg = mkCfg({
+    roles: { po: { poolSelection: true, backlogDigestMaxChars: 400 } },
+    lanes: { max: 3, roundDispatchCap: 2 },
+    round: { poolFactor: 1 },
+  }); // cap = 2 candidates structurally, but the CHAR cap bites first — sized so #1's whole
+  // formatCandidate block (392 chars) fits but #2's does not (both together would be ~700+)
+  const longBody = (n: number): string => `Body content for candidate #${n}, padded so it is unmistakably long. `.repeat(4);
+  forge.ready = [
+    { number: 1, title: "first candidate", labels: [], body: longBody(1) },
+    { number: 2, title: "second candidate", labels: [], body: longBody(2) },
+  ];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  await runPoolSelection({ now: realClock, forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 1);
+  const { prompt } = runner.calls[0]!;
+  assert.ok(prompt.includes("### #1 — first candidate"), "the first (fits-under-cap) candidate is rendered in full");
+  assert.ok(prompt.includes(longBody(1).trim().slice(0, 30)), "candidate #1's body text itself (not just its header) reached the prompt");
+  assert.ok(
+    !prompt.includes("### #2 — second candidate"),
+    "the second candidate — whose FULL block doesn't fit the cap — is omitted WHOLE, never a partial/sliced body fragment",
+  );
+  assert.match(
+    prompt,
+    /\[\.\.\.\s*1\s*more candidate issue\(s\) omitted/,
+    "the truncation marker names the omission count, so the session isn't silently shown an incomplete-looking list",
+  );
+});
+
 test("runPoolSelection: an out-of-bounds selection (an issue number outside the candidate list) is invalid, retried once, then degrades OPEN to the full deterministic candidate set", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2

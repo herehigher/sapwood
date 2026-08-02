@@ -9,7 +9,7 @@ import { defaultPoolPromptPath, defaultPoPromptPath } from "../loop/align.js";
 import { defaultPoDecomposePromptPath } from "../loop/decompose.js";
 import { defaultHarvestPromptPath } from "../loop/harvest.js";
 import { defaultDoctrineTemplatePath } from "../loop/init.js";
-import { PROXY_ROLE_TOOL_MATRIX } from "../proxy/access.js";
+import { allowedToolsForRole, PROXY_ROLE_TOOL_MATRIX } from "../proxy/access.js";
 import { defaultRetroPromptPath, RETRO_ALLOWED_TOOLS, RETRO_DISALLOWED_TOOLS } from "../retro/retro.js";
 import { defaultEngineReviewerPromptPath } from "../review/engine-agent.js";
 import { defaultArchitectPromptPath } from "./architect.js";
@@ -63,22 +63,48 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
   // architect holds a default WebFetch grant, which reaches github.com.
   // #529 (gate② round 3, optional cleanup): same further rewording as po.md above.
-  "architect.md": "cadfbdddfd470f41f5c6daf728bde931f554e3c590f5ad34240380f8d3cb1ec0",
+  // #533 (PM ruling 2026-08-02, "2 keep / 7 remove"): architect KEEPS its ISSUE_TOOLS grant, but
+  // the ask is rewritten — the old ask was half theater (search_issues carries no body text, and
+  // the old lookup target was already substituted verbatim). New unconditional-when-attached
+  // "Cross-issue search" step (search_issues on a candidate's key terms for related open/
+  // recently-updated issues OUTSIDE the pool, issue_details the hits before judging) plus a
+  // doc-drift rule (a locked decision surfacing only in an issue, never the architecture chapter,
+  // is doc drift, never authoritative).
+  "architect.md": "40bf054e9b44662ec237eab148c1e125c13aa3d2e31a632111f7f7d03f15ed60",
   // #457 (F36): intentional edits — execution-class ACs are plan noise (CI already enforces
   // ci.requiredChecks unconditionally): plan-reviewer flags-and-strips them, the confirm pass
   // invalidates legacy plans carrying them, drafter/decompose never author them.
   // #529: same categorical→conditional GitHub-access fix as architect.md.
-  "plan-reviewer.md": "43a042fa33300b8421d3a98e6c253c3ac20a1b678d5b312875dc8f26673d691b",
-  "plan-reviewer-confirm.md": "895ae8b6dace1417d576e8398e9918921e78d28b96a4d9a7c07c245e7071ad2d",
-  "plan-drafter.md": "0d808e7075e91c91fa070aa3c68aa711a9de950a2cbb93d64ce3e0c664bfb188",
-  "harvest.md": "82312e3ac79e42e008a9d7477d4b9e601623a9ebb1e5a4fe306e8b3f266d109d",
+  // #533 (PM ruling 2026-08-02): plan-reviewer's ISSUE_TOOLS grant is REMOVED (charter fails
+  // step 1 of the ruling's two-step test — the job judges ONE substituted artifact, never a set)
+  // — the conditional "if your session has mcp__forge__* tools" ask is replaced with a flat,
+  // always-true statement so matrix and prose cannot drift apart again.
+  "plan-reviewer.md": "ed4572ef2e0989ffcc528093ad1ad2c4f0588e03e318644e12e68205e4995c67",
+  // #533: same grant-removal fix as plan-reviewer.md above — plan-reviewer-confirm's one
+  // question (repo drift) is answered by its own READ-ONLY worktree grant, never a forge lookup.
+  "plan-reviewer-confirm.md": "a76a13911654ca79084e30aefd0792a2a97de6df78a4f5b15b67483af80cd3a6",
+  // #533: same grant-removal fix as plan-reviewer.md above — the drafter's brief is its ENTIRE
+  // instruction set; a lookup invites out-of-brief drift.
+  "plan-drafter.md": "b438b2a3cffce955203db79b4fd40623474a91182ad0fa593026c46a3a6c5819",
+  // #533: same grant-removal fix as plan-reviewer.md above — targets arrive as bare #N, comments
+  // are round-stats boilerplate, and the prompt already forbids expanding targets.
+  "harvest.md": "f0b334d9fba4b89617061adef41a08f540a0444fab8ac5eb15efdbdf67d98381",
   // #453 (design #402 R5): intentional edit — the digest's new finding-class tendency table is
   // pointed at, with the design-source rule and the stated blind spot. The FIRST deliberate
   // change to this file since #235 pinned it as "already code-aware, do not touch"; that ruling
   // was about tool scope, not about the role's analysis inputs, so it is not re-litigated here.
+  // #533 (PM ruling 2026-08-02): retro's ISSUE_TOOLS grant is REMOVED (it repairs a live
+  // declared-session-contract drift), but this file needed ZERO prose edits — it already said
+  // "you have no `gh` access at all" (line ~100); removing the grant makes that sentence TRUE.
+  // Hash UNCHANGED from #453 above — the whole point of this row is that no edit was needed.
   "retro.md": "266dfa04d6a36405e911eb6d0db60f929f5400d99aef8d72d1f388306b8d7f0e",
   // #529: same categorical→conditional GitHub-access fix as architect.md.
-  "po-pool.md": "13e4b27cad513e06bd0b99bed6dce612600d477e8b2a654fffa81649f2672c18",
+  // #533 (PM ruling 2026-08-02): po-pool's ISSUE_TOOLS grant is REMOVED + engine substitution
+  // added — buildPoolCandidateDigest now renders each candidate with architect.ts::formatCandidate
+  // (number, title, labels, FULL body) instead of a title-only line, under the SAME existing cap
+  // (roles.po.backlogDigestMaxChars) — no new cap, no new renderer. The conditional
+  // "use one to check a candidate's full body" ask (measured at zero calls) is gone entirely.
+  "po-pool.md": "c1bee9b99639bf210172c7655443c9517be79704b442aa99a6719337f121b0b1",
   "po-decompose.md": "3289b0f37585b84fdce67319f9ae4b2e82c8873b13b2a292adef25b1bca79ae2",
 };
 
@@ -313,7 +339,16 @@ test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access d
   // Requires "GitHub access" adjacent (not "GitHub ... access" with a gap) so this deliberately
   // does NOT match every file's "## You have no GitHub write access at all" heading — that
   // claim is correctly scoped to writes and true regardless of any web grant.
-  const NO_GITHUB_ACCESS_DENIAL = /\b(?:no|never|nothing)\b[^.]{0,60}\bGitHub access\b/i;
+  //
+  // #533 (PM ruling 2026-08-02): WIDENED to a second token, `` `gh` ``/`gh` — retro.md's own "you
+  // have no `gh` access at all" carried the identical categorical-denial shape as "no GitHub
+  // access" but escaped this exact regex on a single token swap (GitHub -> `gh`), which is
+  // exactly how it survived #529's own AC-2 test while granted ISSUE_TOOLS on `main`. `gh`'s own
+  // `\b...\b` word-boundary (not just a bare substring check) is deliberate: "no gh access" must
+  // match, but "no high access" (a real English phrase containing the literal substring
+  // "gh access") must NOT — verified by its own test below. The optional surrounding backticks
+  // (`` `?...`? ``) tolerate retro.md's own markdown-code-span styling without requiring it.
+  const NO_GITHUB_ACCESS_DENIAL = /\b(?:no|never|nothing)\b[^.]{0,60}(?:\bGitHub\b|`?\bgh\b`?)\s+access\b/i;
 
   for (const [role, tools] of Object.entries(PROXY_ROLE_TOOL_MATRIX)) {
     if (tools.length === 0) continue; // nothing granted, nothing to be dishonest about
@@ -358,6 +393,18 @@ test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access d
   // realistic failure mode this test exists to catch (a stale denial nobody meant to leave in)
   // doesn't produce that shape. Not fixed here; noted so the next reader doesn't mistake this
   // test for airtight.
+
+  // #533 (gate②-style self-check, since the regex widening is the AC): the escaped case that
+  // motivated the widening, exercised DIRECTLY against the regex (not through the FOR loop above
+  // — retro is no longer in PROXY_ROLE_TOOL_MATRIX post-#533, so the loop never reaches its
+  // prompt; this asserts the widened regex itself is correct, independent of retro's current
+  // matrix membership, so a FUTURE role re-granted a tool with this exact phrasing is still caught).
+  assert.ok(NO_GITHUB_ACCESS_DENIAL.test("you have no `gh` access at all"), "retro.md's actual sentence must match the widened regex");
+  assert.ok(NO_GITHUB_ACCESS_DENIAL.test("you have no gh access at all"), "the bare (unbackticked) form must also match");
+  assert.ok(
+    !NO_GITHUB_ACCESS_DENIAL.test("there is no high access door on this floor"),
+    'false-positive guard: "high access" contains the literal substring "gh access" but must NOT match — the \\bgh\\b word boundary is what prevents it',
+  );
 });
 
 test("shipped role prompts (#321): sentinel examples are plain text with no adjacent markdown fences", () => {
@@ -563,9 +610,65 @@ test("#409: the rule is worded per role rather than one paragraph duplicated, an
   }
 });
 
-test("#409: plan-drafter.md and architect.md are deliberately untouched (charter conflicts recorded in the issue)", () => {
+test("#409: plan-drafter.md and architect.md were untouched by #409 itself (charter conflicts recorded in that issue) — #533 IS the first edit to either since, for the unrelated forge-tool-ask reason recorded in ITS own SNAPSHOT_HASHES comment above", () => {
   assert.equal(sha256(readPrompt(defaultPlanDrafterPromptPath())), SNAPSHOT_HASHES["plan-drafter.md"]);
   assert.equal(sha256(readPrompt(defaultArchitectPromptPath())), SNAPSHOT_HASHES["architect.md"]);
+});
+
+// ── #533 (PM ruling 2026-08-02): reverse-direction test — a role holding NO
+// PROXY_ROLE_TOOL_MATRIX grant must not have a prompt that ASKS for an mcp__forge__ lookup.
+// Companion to #529's AC-2 test above (which catches the opposite drift: a prompt DENYING a
+// grant the role actually holds). Driven off the matrix itself, same "fails the moment the
+// matrix and the prose disagree" contract as AC-2. ──────────────────────────────────────────
+
+test("#533 reverse-direction: a role-EXCLUSIVE prompt (never shared with a granted role) holding no matrix grant never mentions mcp__forge__ anywhere in the file", () => {
+  const EXCLUSIVE_ZERO_GRANT_ROLES: Readonly<Record<string, string>> = {
+    "po-pool": defaultPoolPromptPath(),
+    "plan-reviewer": defaultPlanReviewerPromptPath(),
+    "plan-drafter": defaultPlanDrafterPromptPath(),
+    "plan-reviewer-confirm": defaultPlanConfirmPromptPath(),
+    harvest: defaultHarvestPromptPath(),
+    retro: defaultRetroPromptPath(),
+  };
+  for (const [role, path] of Object.entries(EXCLUSIVE_ZERO_GRANT_ROLES)) {
+    assert.deepEqual(
+      [...allowedToolsForRole(role)],
+      [],
+      `sanity: role "${role}" must hold NO PROXY_ROLE_TOOL_MATRIX grant for this test to mean anything — update this test's role list if the matrix changed`,
+    );
+    const body = readPrompt(path);
+    assert.ok(
+      !body.includes("mcp__forge__"),
+      `${path} (role "${role}") holds no forge proxy grant but its prompt names an mcp__forge__ tool — the ask and the matrix have drifted apart`,
+    );
+  }
+});
+
+test("#533 reverse-direction, THE TRAP: po.md serves two matrix rows with OPPOSITE decisions (po-align keeps the grant, po-triage does not) — a bare file-wide check would false-positive on align mode's legitimate mcp__forge__search_issues ask, so the test must be MODE-AWARE, mirroring po.md's own {{po.mode}} scoping rather than splitting the file", () => {
+  assert.deepEqual(
+    [...allowedToolsForRole("po-align")].sort(),
+    [...allowedToolsForRole("architect")].sort(),
+    "sanity: po-align still holds a grant",
+  );
+  assert.ok(allowedToolsForRole("po-align").length > 0, "sanity: po-align still holds a non-empty grant");
+  assert.deepEqual([...allowedToolsForRole("po-triage")], [], "sanity: po-triage must hold NO grant for this test to mean anything");
+
+  const po = readPrompt(defaultPoPromptPath());
+  const alignStart = po.indexOf("### If `{{po.mode}}` is `align`: decompose the goal into new issues");
+  const triageStart = po.indexOf("### If `{{po.mode}}` is `triage`: draft a plan into an existing plan-less issue");
+  const sharedSectionsStart = po.indexOf("## Reading the repository");
+  assert.ok(alignStart > 0, "sanity: align-mode section anchor found");
+  assert.ok(triageStart > alignStart, "sanity: triage-mode section anchor found, after align's");
+  assert.ok(sharedSectionsStart > triageStart, "sanity: the next shared (mode-agnostic) section anchor found, after triage's");
+
+  // The align-mode section legitimately names mcp__forge__search_issues (po-align's own
+  // unconditional dedup-step ask, kept by the ruling) — that is NOT the drift this test guards
+  // against, so it is deliberately not asserted against here.
+  const triageSection = po.slice(triageStart, sharedSectionsStart);
+  assert.ok(
+    !triageSection.includes("mcp__forge__"),
+    "po.md's triage-mode section must never ask for an mcp__forge__ lookup — po-triage holds no grant, and this section is exactly what po-triage's session renders",
+  );
 });
 
 // ── #410: WebSearch/WebFetch grant wording — po.md's mode-aware external-check section, the
@@ -625,6 +728,35 @@ test("#410 po.md + architect.md: both name a first-class abstention — an expli
     architect.includes('verify this" belongs in the note as honestly as any contradiction or risk you flag.'),
     "architect.md states the abstention explicitly, not just implies it",
   );
+});
+
+test("#533 architect.md: the cross-issue search ask is UNCONDITIONAL-when-attached and lives in the numbered task list (never only in the capability paragraph) — a permission the model may decline is what produced the #529/#533 zero in the first place", () => {
+  const body = readPrompt(defaultArchitectPromptPath());
+  const taskListStart = body.indexOf("## What you do — every pass, all of these");
+  assert.ok(taskListStart > 0, "sanity: the numbered task list section exists");
+  const taskList = body.slice(taskListStart);
+  assert.match(
+    taskList,
+    /\*\*Cross-issue search \(mandatory whenever the tool is attached/,
+    "the ask is a numbered task-list item, not just capability prose",
+  );
+  assert.ok(taskList.includes("mcp__forge__search_issues"), "names the actual tool to call");
+  assert.ok(taskList.includes("mcp__forge__issue_details"), "names the required follow-up (search_issues carries no body text)");
+  assert.ok(
+    taskList.toLowerCase().includes("doc drift"),
+    "names the doc-drift rule — a decision found only in an issue is never treated as authoritative",
+  );
+  assert.match(
+    taskList,
+    /OUTSIDE this\s+round's pool/,
+    "scoped to the cross-issue-consistency mission, not the round's own candidate/pool lists",
+  );
+});
+
+test("#533 po-pool.md: no mcp__forge__ ask remains, and the digest is described as carrying each candidate's full body, not just its title", () => {
+  const body = readPrompt(defaultPoolPromptPath());
+  assert.ok(!body.includes("mcp__forge__"), "the removed grant's ask is gone from the prose, not just the matrix");
+  assert.ok(body.includes("full issue body"), "names what the substituted digest now actually carries");
 });
 
 test("#410 architect.md: names WebSearch/WebFetch alongside the existing read-only grant, gated on the deployment's own grant state", () => {
