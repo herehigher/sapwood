@@ -14,6 +14,7 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { LaneProbe, Supervisor } from "./conductor.js";
@@ -794,7 +795,7 @@ test("createDefaultPeripherals #237 round-2 adjudication (2026-07-19, finding 1+
     },
   };
   const realAppend = state.appendEvent.bind(state);
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     if (kind === "concern-posted") throw new Error("simulated crash: concern-posted append lost");
     realAppend(kind, payload);
   };

@@ -27,6 +27,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
 import { capDigest } from "../retro/retro-digest.js";
+import { kindsTagged } from "../state/event-kinds/index.js";
 import type { RoundRow, State } from "../state/state.js";
 
 export const ROUND_ARTIFACT_SCHEMA_VERSION = 1;
@@ -135,44 +136,15 @@ export type RoundArtifact = z.infer<typeof RoundArtifactSchema>;
 
 /** Event kinds this artifact reads — deliberately excludes standby-wait/standby-exit (run-scoped,
  *  never appended while a round is open) and anything else that isn't part of a round's own
- *  mechanical record (module doc, design guidance #6). */
-export const ROUND_ARTIFACT_EVENT_KINDS = [
-  "dispatched",
-  "merged",
-  "reclaim-done",
-  "reclaim-failed",
-  "reclaim-dead",
-  "drive-needs-human",
-  "drive-queued",
-  "drive-stopped",
-  "drive-no-pr",
-  "plan-review-escalated",
-  "egress-suspect",
-  "handoff",
-  "ceiling-escalated",
-  "gated-reentry",
-  "gated-reentry-capped",
-  "rollback-recovered",
-  "rollback-escalated",
-  "reviewer-fallback-switch",
-  "reviewer-fallback-revert",
-  "round-stop",
-  "po-degraded",
-  "triage-degraded",
-  "architect-degraded",
-  "harvest-degraded",
-  "retro-degraded",
-  "retro-pr-opened",
-  "retro-pr-degraded",
-  "align-summary",
-  // #237: PO-dissent concerns actually delivered this round (dissent.ts's postConcerns).
-  "concern-posted",
-  // #374 review (Codex sol-high finding 4, P2): align.ts's po-pool selection session's own
-  // degrade event — previously entirely ABSENT from this list, so a pool-selection-only quota
-  // storm (roles.po.poolSelection: true) never showed up in degradedPhases at all, and
-  // round.ts's empty-spin breaker could never see it.
-  "pool-degraded",
-];
+ *  mechanical record (module doc, design guidance #6).
+ *
+ *  #425: DERIVED from the central registry's `round-artifact` tag rather than re-spelled here.
+ *  The per-kind rationale that used to sit inline (why `pool-degraded` belongs, what
+ *  `concern-posted` means here) moved onto each kind's own declaration in `state/event-kinds/`,
+ *  so a kind states its surfaces in ONE place — and event-kinds.test.ts reds if a tagged kind
+ *  goes missing from this list or an untagged one appears in it. That test is the mechanism the
+ *  #374 omission (`pool-degraded` absent from this list for a whole milestone) needed. */
+export const ROUND_ARTIFACT_EVENT_KINDS = kindsTagged("round-artifact");
 
 /** Maps a `*-degraded` event kind to the human-readable phase name recorded in the artifact.
  *  #374 review (Codex sol-high finding 4): "pool-degraded" added (see ROUND_ARTIFACT_EVENT_KINDS'

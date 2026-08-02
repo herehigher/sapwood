@@ -211,10 +211,10 @@ test("narrative logger and structured events ledger remain partitioned", () => {
   const state = new State(":memory:");
   try {
     logger.log("[sapwood:run] narrative only");
-    assert.deepEqual(state.eventsAfterId(0, ["partition-test"]), []);
-    state.appendEvent("partition-test", { transition: "durable" });
+    assert.deepEqual(state.eventsAfterId(0, ["tick-error"]), []);
+    state.appendEvent("tick-error", { transition: "durable" });
     assert.deepEqual(lines, ["[sapwood:run] narrative only"]);
-    assert.equal(state.eventsAfterId(0, ["partition-test"]).length, 1);
+    assert.equal(state.eventsAfterId(0, ["tick-error"]).length, 1);
   } finally {
     state.close();
   }

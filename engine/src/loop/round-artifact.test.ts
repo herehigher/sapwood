@@ -267,8 +267,11 @@ test("assembleRoundArtifact: an unrecognized event kind is ignored, never throws
 });
 
 test("ROUND_ARTIFACT_EVENT_KINDS: never includes the run-scoped standby events (design guidance #6)", () => {
-  assert.ok(!ROUND_ARTIFACT_EVENT_KINDS.includes("standby-wait"));
-  assert.ok(!ROUND_ARTIFACT_EVENT_KINDS.includes("standby-exit"));
+  // #425: the list is DERIVED and literal-typed now, so `.includes` of an untagged kind is a
+  // type error rather than a runtime false — widened to `string[]` so the assertion still runs.
+  const kinds: readonly string[] = ROUND_ARTIFACT_EVENT_KINDS;
+  assert.ok(!kinds.includes("standby-wait"));
+  assert.ok(!kinds.includes("standby-exit"));
 });
 
 test("assembleRoundArtifact #237: concern-posted events populate the concerns section, in ledger order", () => {

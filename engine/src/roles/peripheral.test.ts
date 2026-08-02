@@ -10,6 +10,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import { DEFAULT_LLM_FAILURE_PATTERNS, type EnvFailureSource } from "../loop/env-failure.js";
+import type { EventKind } from "../state/event-kinds/index.js";
+import type { EventPayloadFor } from "../state/event-kinds/payloads.js";
 import type { ParkRow } from "../state/state.js";
 import type { ContextManifest } from "./context-manifest.js";
 import {
@@ -1418,11 +1420,11 @@ class FakeRunner {
 
 class FakeState {
   spends: Array<[string, number, number]> = [];
-  events: Array<[string, Record<string, unknown>]> = [];
+  events: Array<[EventKind, unknown]> = [];
   recordSpend(worker: string, issue: number, usd: number): void {
     this.spends.push([worker, issue, usd]);
   }
-  appendEvent(kind: string, payload: Record<string, unknown>): void {
+  appendEvent<K extends EventKind>(kind: K, payload: EventPayloadFor<K>): void {
     this.events.push([kind, payload]);
   }
 }
@@ -1433,7 +1435,7 @@ const mkOpts = (runner: FakeRunner, state: FakeState, isValid: RetriedSession["i
   session: { roleId: "test-role", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" },
   issue: 0,
   now: () => new Date("2026-07-11T00:00:00Z"),
-  degradeEvent: "test-degraded",
+  degradeEvent: "harvest-degraded",
   degradePayload: (result) => ({ attempts: 2, exitCode: result.exitCode }),
   degradeMessage: (result) => `test role degraded: ${result.outcome}`,
   ...(isValid !== undefined ? { isValid } : {}),
@@ -1470,7 +1472,7 @@ test('runSessionWithRetry + isValid: "done" but invalid on BOTH attempts — deg
   const result = await runSessionWithRetry(mkOpts(runner, state, () => false));
   assert.equal(runner.calls.length, 2);
   assert.equal(state.events.length, 1);
-  assert.equal(state.events[0]![0], "test-degraded");
+  assert.equal(state.events[0]![0], "harvest-degraded");
   assert.deepEqual(state.events[0]![1], { attempts: 2, exitCode: result.exitCode });
   assert.equal(result.outcome, "done"); // last attempt's raw result is still returned as-is
 });
@@ -1487,7 +1489,7 @@ test("runSessionWithRetry + isValid: a THROWING validator counts as invalid — 
   );
   assert.equal(runner.calls.length, 2, "a throwing validator still drives the retry-once path");
   assert.equal(state.events.length, 1);
-  assert.equal(state.events[0]![0], "test-degraded");
+  assert.equal(state.events[0]![0], "harvest-degraded");
   assert.equal(result.outcome, "done"); // last attempt's raw result still returned as-is
 });
 
@@ -1522,7 +1524,7 @@ test("runSessionWithRetry: isValid OMITTED — behavior is byte-identical to tod
   await runSessionWithRetry(mkOpts(failRunner, failState, undefined));
   assert.equal(failRunner.calls.length, 2);
   assert.equal(failState.events.length, 1);
-  assert.equal(failState.events[0]![0], "test-degraded");
+  assert.equal(failState.events[0]![0], "harvest-degraded");
 });
 
 // ── #374: runSessionWithRetry's OPTIONAL envFailure hook — a fake park-episode store, no real
@@ -1594,7 +1596,7 @@ test("runSessionWithRetry + envFailure: an ordinary (non-classified) failure sti
   assert.equal(runner.calls.length, 2, "ordinary failures still get the normal retry-once");
   assert.equal(park.enterCalls.length, 0);
   assert.equal(state.events.length, 1);
-  assert.equal(state.events[0]![0], "test-degraded", "no env classification -> the caller's own degradeEvent still fires");
+  assert.equal(state.events[0]![0], "harvest-degraded", "no env classification -> the caller's own degradeEvent still fires");
 });
 
 test("runSessionWithRetry + envFailure: a non-classified attempt CLEARS an already-open llm episode (provider proved reachable) and emits park-resumed", async () => {
@@ -1628,7 +1630,7 @@ test("runSessionWithRetry + envFailure (PM review P3): a TIMEOUT outcome does NO
   // classified attempts; an unclassified timeout falls through to it unchanged).
   assert.equal(runner.calls.length, 2);
   assert.equal(
-    state.events.some(([kind]) => kind === "test-degraded"),
+    state.events.some(([kind]) => kind === "harvest-degraded"),
     true,
   );
 });
@@ -1674,7 +1676,7 @@ test("runSessionWithRetry: envFailure OMITTED -> zero behavior change (classific
     "no envFailure wired -> the ordinary retry-once-then-degrade path, unaffected by failureText content",
   );
   assert.equal(state.events.length, 1);
-  assert.equal(state.events[0]![0], "test-degraded");
+  assert.equal(state.events[0]![0], "harvest-degraded");
 });
 
 // ── #236: runSessionWithRetry's OPTIONAL context-manifest recording — round/phase key prefix

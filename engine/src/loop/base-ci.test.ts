@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { BranchChecksPage, IForge, PRCheckItem } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import {
   BASE_CI_RED_CLEARED,
@@ -55,7 +56,7 @@ class FakeForge extends UnstubbedForge implements IForge {
   }
 }
 
-const ev = (kind: string, payload: unknown) => ({ kind, payload });
+const ev = (kind: EventKind, payload: unknown) => ({ kind, payload });
 const observed = (sha: string, at: string, failing: string[]) => ev(BASE_CI_RED_OBSERVED, { sha, at, failing });
 
 const deps = (forge: FakeForge, state: State, cfg: SapwoodConfig, at = "2026-08-01T10:00:00.000Z") => ({
@@ -203,7 +204,7 @@ test("reconcileEscalations (#502): base-green clears the pin RECEIPT-FIRST — t
   const spied = new Proxy(state, {
     get(target, prop, receiver) {
       if (prop === "appendEvent") {
-        return (kind: string, payload: unknown) => {
+        return (kind: EventKind, payload: unknown) => {
           if (kind === RESOLVED_KIND || kind === BASE_CI_RED_CLEARED) order.push(kind);
           target.appendEvent(kind, payload);
         };

@@ -39,6 +39,7 @@ import { renderFactsTemplate } from "../loop/harvest.js";
 import type { PeripheralStub } from "../loop/round.js";
 import { envFailureHook, type RoleRunner, runSessionWithRetry } from "../roles/peripheral.js";
 import { loadRolePromptTemplate } from "../roles/plan-review.js";
+import { kindsTagged } from "../state/event-kinds/index.js";
 import type { RoundRow, State } from "../state/state.js";
 import { buildRetroDigest } from "./retro-digest.js";
 
@@ -227,8 +228,12 @@ export interface RetroFacts {
 /** The event kinds retro's own "raw material" comes from (prompts/retro.md: bounced plans,
  *  review rejections, budget overruns) — backs BOTH gatherRetroFacts's counts (below) and
  *  retro-digest.ts's per-issue digest detail (buildRetroDigest's `issueEventKinds` param, run()
- *  below) — one list, not two independently-maintained ones. */
-const RETRO_EVENT_KINDS = ["handoff", "drive-needs-human", "plan-review-escalated", "ceiling-escalated"];
+ *  below) — one list, not two independently-maintained ones.
+ *
+ *  #425: DERIVED from the central registry's `retro` tag rather than re-spelled here — the
+ *  kinds themselves are declared once in `state/event-kinds/`, and event-kinds.test.ts asserts
+ *  this list and those tags stay in agreement in both directions. Exported for that test. */
+export const RETRO_EVENT_KINDS = kindsTagged("retro");
 
 export function gatherRetroFacts(state: State, round: RoundRow): RetroFacts {
   // #403 (F25), PR #430 gate② P2: the round window is the id cursor `startRound` stamps, NOT

@@ -16,6 +16,7 @@ import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, IssueMeta, PRReviewData, PRStatus } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import {
   type Concern,
@@ -164,7 +165,7 @@ const mkCfg = (mentions: string[] = ["owner"]): SapwoodConfig =>
 const tapEvents = (state: State): Array<[string, unknown]> => {
   const logged: Array<[string, unknown]> = [];
   const realAppend = state.appendEvent.bind(state);
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };

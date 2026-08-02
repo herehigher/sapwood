@@ -34,14 +34,18 @@
 // `addPRComment(...).catch(() => {})`). A failed item's section says so, in place of its data.
 import type { IForge, PRComment, PRReviewData } from "../forge/forge.js";
 import { findingKeyPath } from "../review/finding-key.js";
+import { kindsTagged } from "../state/event-kinds/index.js";
 import type { RoundRow, State } from "../state/state.js";
 
 /** Durable event kinds whose payload carries a `pr` field (conductor.ts's DRIVE-phase
  *  appendEvent call sites) — the digest's "PRs touched this round" source. Deliberately NOT
  *  the reviewer-fallback announcement events (`reviewer-fallback-*`): those report on the
  *  review-gate MECHANISM, not on a PR's own content, and are already implied by whichever of
- *  the four kinds below the same driveOne tick also appends. */
-export const PR_TOUCHED_EVENT_KINDS = ["merged", "drive-needs-human", "drive-queued", "drive-stopped"];
+ *  the four kinds below the same driveOne tick also appends.
+ *
+ *  #425: DERIVED from the central registry's `pr-touched` tag — see RETRO_EVENT_KINDS' own note
+ *  in retro.ts for why the lists are tag queries now rather than re-spelled strings. */
+export const PR_TOUCHED_EVENT_KINDS = kindsTagged("pr-touched");
 
 /** Every PR number touched by the round, sorted ascending, deduped. Pure given `state`'s
  *  current contents — exported so tests can assert on it directly, same convention as

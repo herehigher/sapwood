@@ -175,7 +175,7 @@ test("gatherTouchedPRs: only PR_TOUCHED_EVENT_KINDS count — an unrelated event
   state.appendEvent("dispatched", { worker: "a", issue: 1 }); // not in PR_TOUCHED_EVENT_KINDS, and has no pr
   state.appendEvent("reviewer-fallback-switch", { worker: "a", issue: 1, pr: 99, mode: "codex", head: "x" });
   assert.deepEqual(gatherTouchedPRs(state, round), []);
-  assert.ok(!PR_TOUCHED_EVENT_KINDS.includes("reviewer-fallback-switch"));
+  assert.ok(!(PR_TOUCHED_EVENT_KINDS as readonly string[]).includes("reviewer-fallback-switch"));
   state.close();
 });
 

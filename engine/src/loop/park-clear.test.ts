@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runPark } from "../cli.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { INSTANCE_LOCK_FILENAME, type ParkSource, State } from "../state/state.js";
 import { clearParksReceiptFirst } from "./park-clear.js";
 
@@ -23,7 +24,7 @@ function recorder(s: State): { state: Parameters<typeof clearParksReceiptFirst>[
     calls,
     state: {
       parkedSources: () => s.parkedSources(),
-      appendEvent: (kind: string, payload: unknown) => {
+      appendEvent: (kind: EventKind, payload: unknown) => {
         calls.push(`append:${kind}`);
         return s.appendEvent(kind, payload);
       },

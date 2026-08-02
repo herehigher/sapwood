@@ -22,6 +22,7 @@ import type { ContextManifest } from "../roles/context-manifest.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import { PO_ALIGN_ALLOWED_TOOLS, PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, PO_TRIAGE_ALLOWED_TOOLS } from "../roles/peripheral.js";
 import { loadRolePromptTemplate } from "../roles/plan-review.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import {
@@ -288,7 +289,7 @@ const failedResult = (name: string): RoleSessionResult => ({
 const tapEvents = (state: State): Array<[string, unknown]> => {
   const logged: Array<[string, unknown]> = [];
   const realAppend = state.appendEvent.bind(state);
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };
@@ -304,7 +305,7 @@ const tapEvents = (state: State): Array<[string, unknown]> => {
 const tapAndPoisonEvents = (state: State, poisonKind: string): Array<[string, unknown]> => {
   const logged: Array<[string, unknown]> = [];
   const realAppend = state.appendEvent.bind(state);
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     logged.push([kind, payload]);
     if (kind === poisonKind) throw new Error(`simulated ${poisonKind} append failure`);
     realAppend(kind, payload);
@@ -1019,7 +1020,7 @@ test("createAligningStub #232 F3 (Codex sol high review of PR #249): crash after
   // same "intercept one call site" idiom the #216 tests above use for forge calls.
   const realAppend = state.appendEvent.bind(state);
   let failReceipt = true;
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     if (kind === "proposal-created" && failReceipt) {
       failReceipt = false;
       throw new Error("crash after comment, before receipt");

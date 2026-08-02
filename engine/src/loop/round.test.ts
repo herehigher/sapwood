@@ -28,6 +28,7 @@ import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { WorkerProxyOpts } from "../roles/worker.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
 import {
@@ -772,7 +773,7 @@ test("runRounds #95: every round-stop hit is persisted via appendEvent, not just
   });
   const logged: Array<[string, unknown]> = [];
   const realAppend = deps.state.appendEvent.bind(deps.state);
-  deps.state.appendEvent = (kind: string, payload: unknown) => {
+  deps.state.appendEvent = (kind: EventKind, payload: unknown) => {
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };
@@ -1679,7 +1680,7 @@ test("noopPeripheralStub: echoes the incoming marker, or 'noop' on a first attem
 function spyOnEvents(state: State): Array<[string, unknown]> {
   const events: Array<[string, unknown]> = [];
   const realAppend = state.appendEvent.bind(state);
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     events.push([kind, payload]);
     realAppend(kind, payload);
   };
@@ -2303,7 +2304,7 @@ test("runRounds standby: a failing standby-wait/-exit event write is telemetry-o
   const state = new State(":memory:");
   // Every standby event write fails (transient disk/SQLite trouble) — everything else persists.
   const realAppend = state.appendEvent.bind(state);
-  state.appendEvent = (kind: string, payload: unknown) => {
+  state.appendEvent = (kind: EventKind, payload: unknown) => {
     if (kind.startsWith("standby-")) throw new Error("disk full");
     realAppend(kind, payload);
   };
@@ -2703,7 +2704,7 @@ test("isRoundFullyDegraded (#394 gate② round 2 fix): wasResumed=true reproduce
  *  stub appends the SAME durable event round-artifact.ts's degradedPhases already scans for.
  *  Shared by both #374 tests below. */
 function mkFullyDegradingPeripherals(log: Array<{ phase: PeripheralPhase; marker: string | null }>, state: State) {
-  const degrade = (phase: PeripheralPhase, kind: string, payload: (roundId: number) => Record<string, unknown>) => ({
+  const degrade = (phase: PeripheralPhase, kind: EventKind, payload: (roundId: number) => Record<string, unknown>) => ({
     async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
       log.push({ phase, marker: ctx.marker });
       state.appendEvent(kind, payload(ctx.roundId));
@@ -2796,7 +2797,7 @@ function mkEmptyPoolWeeklyLimitStormPeripherals(
   log: Array<{ phase: PeripheralPhase; marker: string | null }>,
   state: State,
 ): Partial<Record<PeripheralPhase, PeripheralStub>> {
-  const degrades = (phase: PeripheralPhase, kind: string, payload: (roundId: number) => Record<string, unknown>) => ({
+  const degrades = (phase: PeripheralPhase, kind: EventKind, payload: (roundId: number) => Record<string, unknown>) => ({
     async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
       log.push({ phase, marker: ctx.marker });
       state.appendEvent(kind, payload(ctx.roundId));
@@ -4811,7 +4812,7 @@ test("runRounds (#431 round 4, codex finding 5): the ROUND-WAIT clear site's wri
   const spied = new Proxy(st, {
     get(target, prop, receiver) {
       if (prop === "appendEvent") {
-        return (kind: string, payload: unknown) => {
+        return (kind: EventKind, payload: unknown) => {
           if (kind === "ceiling-breach-cleared") writes.push("append:ceiling-breach-cleared");
           target.appendEvent(kind, payload);
         };

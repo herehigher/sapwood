@@ -75,7 +75,7 @@
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
 import type { State } from "../state/state.js";
-import { attentionProof, CLEAR_KINDS, ESCALATION_SOURCES, openEscalations, RESOLVED_KIND } from "./escalation-reconcile.js";
+import { attentionProof, CLEAR_KINDS, ESCALATION_SOURCE_KINDS, openEscalations, RESOLVED_KIND } from "./escalation-reconcile.js";
 
 /** The sweep's own receipt — appended only after the label removal returned. It is the latch (see
  *  the module doc's ordering note), and it is scoped to `(source, issue)` so a later
@@ -84,7 +84,7 @@ export const SWEPT_KIND = "needs-human-swept";
 
 /** Every event kind the fold below reads. Exported so a caller reads the ledger ONCE and hands
  *  the same array to both folds (`openEscalations` ignores kinds it does not know). */
-export const SWEEP_EVENT_KINDS = [...Object.keys(ESCALATION_SOURCES), ...CLEAR_KINDS, RESOLVED_KIND, SWEPT_KIND];
+export const SWEEP_EVENT_KINDS = [...ESCALATION_SOURCE_KINDS, ...CLEAR_KINDS, RESOLVED_KIND, SWEPT_KIND];
 
 /** The ONLY resolution witnesses that authorize removing the engine's hold — an allowlist, so a
  *  `via` this module has never heard of (a future arm, a legacy ledger row) can never sweep.

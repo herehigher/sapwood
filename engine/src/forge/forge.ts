@@ -8,6 +8,7 @@
 
 import { createHash } from "node:crypto";
 import type { SapwoodConfig } from "../config/config.js";
+import type { EventKind } from "../state/event-kinds/index.js";
 import { extractMarkdownSections } from "../util/markdown.js";
 import { ghWithTimeout } from "./gh.js";
 import { createMissingLabels, type LabelSpec, labelsInclude } from "./labels.js";
@@ -681,7 +682,7 @@ function isExactCompareRange(status: unknown): boolean {
  *  to a stderr line, which is all that surface has. */
 export interface ForgeDeps {
   log?: (message: string) => void;
-  state?: { appendEvent(kind: string, payload: unknown): void };
+  state?: { appendEvent(kind: EventKind, payload: unknown): void };
 }
 
 export class GithubForge implements IForge {

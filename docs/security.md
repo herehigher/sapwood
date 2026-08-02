@@ -14,6 +14,11 @@ requirement instead of any-non-author-approval, a threat model treating issue te
 adversarial), but those hardenings are not all in place yet — don't point an
 unhardened sapwood at a public repo with untrusted issue authors.
 
+Part of that same pre-public/post-public split: **event-kind renames are free today
+(reset the dogfood DB when you rename) and become additive-only after public release**,
+because a rename orphans users' existing `events` history. The rule is also recorded at
+the source it governs, `engine/src/state/event-kinds/index.ts`.
+
 ## producer ≠ reviewer ≠ merger
 
 The worker that writes code can never approve its own review or merge its own PR. This

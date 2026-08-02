@@ -33,11 +33,15 @@
 // lost-exit-notification `await exitPromise` (this issue's own premise — the child died and
 // Node's 'exit' event for it never arrived) instead of only silencing telemetry and leaving the
 // engine to fall silent until the liveness watchdog kills the whole process over one lost signal.
+import type { EventKind } from "../state/event-kinds/index.js";
 import type { State } from "../state/state.js";
 
 export interface HeartbeatGate {
-  /** Call once per interval/loop tick. Appends `kind`/`payload` only when BOTH guards pass. */
-  tick: (kind: string, payload: Record<string, unknown>) => void;
+  /** Call once per interval/loop tick. Appends `kind`/`payload` only when BOTH guards pass.
+   *  #425: `kind` is the registry union, not `string` — this wrapper is the one generic append
+   *  seam in the engine, so leaving it wide would have been a hole straight through
+   *  `appendEvent`'s own narrowing. */
+  tick: (kind: EventKind, payload: Record<string, unknown>) => void;
 }
 
 export function createHeartbeatGate(state: Pick<State, "appendEvent" | "maxEventId">, isAlive: () => boolean): HeartbeatGate {
