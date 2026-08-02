@@ -375,7 +375,18 @@ was closed, never before.
 over allow from ANY source, including a target repo's own checked-out
 `.claude/settings.json`, an authorization surface this engine does not control — so
 this is the real boundary, not a convention a repo's own config could quietly
-override. Because no shell exists for these sessions to reach `gh` (or anything else)
+override, **with one known exception this engine does not detect**: a target's
+managed settings can set `allowManagedPermissionRulesOnly: true`, and the shipped
+CLI's own contract for that mode (verified directly against the binary) reads "only
+permission rules (allow/deny/ask) from managed settings are respected. User, project,
+local, and CLI argument permission rules are ignored." `--disallowedTools` IS a
+CLI-argument permission rule, so under that mode sapwood's ENTIRE `--disallowedTools`
+containment layer is discarded wholesale — not just the `Agent`/`Task` deny below, the
+blanket `Bash` and write denies too — and the guard hook is no backstop for the loss,
+since `guardDecision()` only inspects write/read/Bash-shaped calls and passes
+everything else through. Whether the engine should detect and refuse that managed
+mode is an open decision, not resolved here — tracked in issue #554. Because no shell
+exists for these sessions to reach `gh` (or anything else)
 through at all, the pattern-layer bypass classes earlier hardening closed one glob at
 a time (#102's short `-F`/`-l`/`-p` flag aliases, #108's quoted/escaped `-F`
 spellings) are structurally moot for them — not closed by a better pattern, but by
@@ -401,11 +412,16 @@ addition above did not reach it automatically; see the retro row of `docs/role-p
 write-scope tier ladder for why retro's own deny matters most (it is the one peripheral role
 with a real write grant).** This is a name-list deny of the ONE known
 spawn channel over a CLI-defined, version-drifting tool surface — the engine denies the tool
-names `Agent`/`Task` because those are the names a live probe found in the current CLI's
-role-shaped tool list, never a claim that the session's capability set is closed: the same
-"authorization surface this engine does not control" caveat in the paragraph above applies
-here too — a future CLI version could rename, add, or remove a spawn-shaped tool, and only a
-live probe (not this document) can say what that surface currently contains. **Scoped to the
+names `Agent`/`Task` on two separate legs of evidence, neither of which is "a live probe found
+these names in the current CLI's role-shaped tool list": both names' REGISTRY presence was
+confirmed by a direct probe run WITH the deny already in place — both were absent from the
+usable tool surface, but the error text itself ("Agent exists but is not enabled in this
+context") establishes the name is registered — and the pre-deny #534 incident, where a live
+session really did spawn three subagents, is the other leg. Neither leg claims either name is
+live in the role-shaped tool surface; this is never a claim that the session's capability set is
+closed: the same "authorization surface this engine does not control" caveat in the paragraph
+above applies here too — a future CLI version could rename, add, or remove a spawn-shaped tool,
+and only a live probe (not this document) can say what that surface currently contains. **Scoped to the
 `claude` executor**: the #443/#501 executor seam lets gate② run on the `codex-exec` runner
 instead (`reviewer.agent.runner: codex-exec`, see [Peripheral network egress](#peripheral-network-egress-websearchwebfetch-detected-not-pinned-410)
 above, "The exception, stated exactly"), where `--disallowedTools` does not exist as a concept

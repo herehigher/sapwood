@@ -142,9 +142,13 @@ role's writes UP this ladder over adding a pattern-level deny.
    modes and architect widen this further still, to also include `WebSearch`/`WebFetch` under the
    default config (see their own Write-scope rows below for the exact grant) — never `Write`,
    `Edit`, or `MultiEdit` either way. This is paired with the hard veto
-   `ROLE_DISALLOWED_TOOLS = "Write,Edit,MultiEdit,NotebookEdit,Bash"`
+   `ROLE_DISALLOWED_TOOLS = "Write,Edit,MultiEdit,NotebookEdit,Bash,Agent,Task"`
    (`engine/src/roles/peripheral.ts::ROLE_DISALLOWED_TOOLS`, which wins over any allow from any source, including a
-   target repo's own checked-out settings): no `Bash` grant at all, so for them a whole bypass
+   target repo's own checked-out settings — except under a target's managed-settings
+   `allowManagedPermissionRulesOnly: true`, where the CLI's own contract says CLI-argument
+   permission rules (`--disallowedTools` is one) are ignored entirely, discarding this whole
+   list, not just the `Agent`/`Task` deny below; whether the engine should detect and refuse that
+   mode is open, see issue #554): no `Bash` grant at all, so for them a whole bypass
    class (short-flag aliases, quoting escapes) is structurally moot rather than pattern-denied
    (#110; see [`security.md`](security.md#issues-only-role-sessions-carry-no-shell-110)). This is
    the strongest tier for writes, for these five, because there is nothing to intercept — the
