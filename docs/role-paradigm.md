@@ -7,10 +7,13 @@ GitHub only through the engine (#110). The **worker is the write-capable excepti
 out of this doc's peripheral-role scope: worker sessions hold real write grants
 (`Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),...`, with seven `gh` verbs
 deny-listed — `engine/src/roles/worker.ts::WORKER_DISALLOWED_TOOLS`: `gh pr merge*`/`gh pr
-ready*` plus #350's `gh pr review*`/`gh release*` are CLI-surface noise reduction atop
-guard.ts's own block, while #488's `gh issue edit*`/`gh label*`/`gh project*` are
-governance-signal containment — a producer must never forge the labels/board `Status` the
-engine's gates trust) and open their own PRs; their actual boundary is tier 2 of the
+ready*` are the permission-layer half of this repo's producer≠merger boundary (CLAUDE.md
+non-negotiables), defense-in-depth atop guard.ts's own primary, wrapper-bypass-resistant
+argv-layer block; #350's `gh pr review*`/`gh release*` are surface narrowing — neither is
+needed by any stock worker workflow, so denying them too costs nothing; #488's `gh issue
+edit*`/`gh label*`/`gh project*` are governance-signal containment — a producer must never
+forge the labels/board `Status` the engine's gates trust) and open their own PRs; their
+actual boundary is tier 2 of the
 ladder below, the fail-closed guard hook intercepting merge/approve/ready — see
 [`security.md`](security.md). Gate② reviewers are also not peripheral roles; their separate
 contract is summarized below. This doc is the contract every peripheral role session
@@ -176,11 +179,15 @@ role's writes UP this ladder over adding a pattern-level deny.
    for them it is only the backstop under tier 1's absence-of-capability. `retro`, the sixth, does
    NOT sit at tier 1 (it holds a real `Write`/`Edit`/`MultiEdit` grant — see tier 1's note above),
    so for retro this tier IS load-bearing rather than a backstop: specifically, the guard hook's
-   worktree write confinement (`checkWritePath`/`checkBashWritePath` in `guard.ts`) is what
-   constrains the real write grant it holds. That is not retro's whole containment, though — its
-   own `### retro (retro)` row below names the actual combination: this narrowed grant with no
+   worktree write confinement (`checkWritePath`/`checkBashWritePath` in `guard.ts`) constrains
+   the real write grant it holds — enforced under the default `guard.mode: hard`
+   (`engine/src/config/config.ts::Guard`), degraded to observe-only (logged, never denied) under
+   an operator-configured `guard.mode: soft` (`applyGuardMode`, `engine/src/guard/guard-hook.ts::applyGuardMode`
+   — the same global short-circuit as tier 1's read containment above, not specific to writes).
+   That is not retro's whole containment, and under `soft` it is *all* that is left of it: its
+   own `### retro (retro)` row below names the actual combination — this narrowed grant with no
    `gh` entries at all, plus the tier-3 `openProposalPR` choke point gated on an engine-side
-   `forge.branchExists` check.
+   `forge.branchExists` check, neither of which depends on `guard.mode`.
 3. **Choke point** — the role's session emits untrusted structured output (a
    sentinel-delimited JSON block, `structured-output.ts`, or retro's scratch file);
    exactly one engine module parses it, validates it fail-closed against a zod schema
