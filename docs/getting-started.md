@@ -113,7 +113,12 @@ act.
 - **What you see:** the `Ready` issues that would be dispatch candidates and a cost
   estimate (`worker.budgetUsdSoft` × candidate count, compared with
   `cost.dailyBudgetUsd`). The candidate list is a rough upper bound: dry-run assumes
-  empty lanes and omits the live tick's in-flight and anti-starvation checks.
+  empty lanes and omits the live tick's in-flight and anti-starvation checks. The *cost*
+  side is only as good as `worker.budgetUsdSoft`, and the shipped `10` is calibrated for
+  small-to-medium work — on the shipped `opus`/`high` profile a substantive issue runs
+  ~$8–20 per leg, so the estimate reads low and legs hand off mid-work. Read
+  [Calibrating `budgetUsdSoft`](configuration.md#calibrating-budgetusdsoft) before
+  trusting this number for your own profile.
 - **Step up:** choose L1's single-issue profile, leave exactly one issue `Ready`, and
   supervise it with `sapwood run --until-idle`.
 - **Step down:** from any higher level, return here by stopping the active run and using
