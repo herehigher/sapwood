@@ -1254,7 +1254,7 @@ test("#380 runRounds: a SECOND stop signal during the drain hard-exits immediate
   const sup = new FakeSupervisor();
   const exits: number[] = [];
   const deps = baseDeps({ forge, supervisor: sup, sleep, hardExit: (code) => exits.push(code) });
-  let stop = () => {};
+  let stop: (signal?: NodeJS.Signals) => void = () => {};
   deps.registerSignals = (requestStop) => {
     stop = requestStop; // raw: this test IS the double-signal case
     return () => {};
@@ -1262,9 +1262,9 @@ test("#380 runRounds: a SECOND stop signal during the drain hard-exits immediate
   let ticks = 0;
   deps.onTick = () => {
     ticks++;
-    if (ticks === 1) stop(); // first signal: drain
+    if (ticks === 1) stop("SIGINT"); // first signal: drain
     if (ticks === 2) {
-      stop(); // second signal, mid-drain, lane still alive
+      stop("SIGINT"); // second signal, mid-drain, lane still alive
       // The real hardExit is process.exit and never returns; the spy does, so settle the lane to
       // keep this test bounded rather than re-proving the (already covered) drain.
       sup.probes["lane-1-1"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 0, hasPr: false };
@@ -1273,7 +1273,7 @@ test("#380 runRounds: a SECOND stop signal during the drain hard-exits immediate
 
   const result = await runRounds(deps);
 
-  assert.deepEqual(exits, [130], "the second signal hard-exits (128+SIGINT), without waiting for the drain");
+  assert.deepEqual(exits, [130], "the second SIGINT hard-exits with 128+SIGINT, without waiting for the drain");
   assert.equal(result.stoppedBy, "signal");
   deps.state.close();
 });

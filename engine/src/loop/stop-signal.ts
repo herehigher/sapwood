@@ -15,29 +15,41 @@
 // vs "kill-switch"), so a human reading a `ceiling-escalated` event or `sapwood status` after a
 // drain isn't sent hunting for a sentinel file that was never written.
 //
-// SECOND signal = immediate hard exit (128+SIGINT convention): the drain is bounded by
-// cfg.cost.drainWindowSec, and an operator who has already asked once and wants out NOW must
-// not have to reach for SIGKILL. That is why the default registration uses `process.on`, not
-// `process.once`: a `once` listener un-registers itself after the first signal and leaves the
-// second one to Node's default disposition — which happens to terminate too, but only by
-// accident of listener bookkeeping, untestable and silently broken by any future second
-// listener on the same signal.
+// SECOND signal = immediate hard exit: the drain is bounded by cfg.cost.drainWindowSec, and an
+// operator who has already asked once and wants out NOW must not have to reach for SIGKILL.
+// That is why the default registration uses `process.on`, not `process.once`: a `once` listener
+// un-registers itself after the first signal and leaves the second one to Node's default
+// disposition — which happens to terminate too, but only by accident of listener bookkeeping,
+// untestable and silently broken by any future second listener on the same signal.
+//
+// The exit code follows the POSIX 128+signum convention external tooling reads (143 for
+// SIGTERM, 130 for SIGINT), so a systemd unit or CI wrapper can tell WHICH signal ended the run
+// — hence the seam carries the signal's identity rather than collapsing both into one code.
+
+import { constants } from "node:os";
 
 /** Registers the stop-signal source; returns a teardown function. The drivers' injectable seam
  *  (DriverDeps/RoundDeps.registerSignals) so tests can request a stop without touching real
  *  process signal handlers — and so several driver instances in one test process don't fight
- *  over them. */
-export type RegisterSignals = (requestStop: () => void) => () => void;
+ *  over them. `requestStop` takes WHICH signal fired: it decides the second-signal exit code
+ *  (see hardExitCodeFor). Optional, because a caller that has no signal to name — an injected
+ *  test seam, or any future non-signal stop source — is still a legitimate stop request. */
+export type RegisterSignals = (requestStop: (signal?: NodeJS.Signals) => void) => () => void;
 
-/** The real thing: SIGINT + SIGTERM, both wired to the same handler, `on` (not `once`) so the
- *  SECOND signal reaches installStopSignal's hard-exit branch rather than Node's default. */
-export function defaultRegisterSignals(requestStop: () => void): () => void {
-  const handler = (): void => requestStop();
-  process.on("SIGINT", handler);
-  process.on("SIGTERM", handler);
+/** The signals a stop request can arrive on, in one place: the real registration below and the
+ *  exit-code mapping are the same list, so neither can gain a signal the other doesn't know. */
+const STOP_SIGNALS = ["SIGINT", "SIGTERM"] as const;
+
+/** The real thing: SIGINT + SIGTERM, each naming itself, `on` (not `once`) so the SECOND signal
+ *  reaches installStopSignal's hard-exit branch rather than Node's default. */
+export function defaultRegisterSignals(requestStop: (signal?: NodeJS.Signals) => void): () => void {
+  const handlers = STOP_SIGNALS.map((signal) => {
+    const handler = (): void => requestStop(signal);
+    process.on(signal, handler);
+    return [signal, handler] as const;
+  });
   return () => {
-    process.removeListener("SIGINT", handler);
-    process.removeListener("SIGTERM", handler);
+    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
   };
 }
 
@@ -60,17 +72,26 @@ export interface StopSignal {
   dispose: () => void;
 }
 
-/** 128 + SIGINT(2). Both signals share it: the registerSignals seam carries no signal identity,
- *  and the code's only job here is to say "died by signal, not a clean stop". */
+/** 128 + SIGINT(2) — the fallback for a stop request that names no signal (an injected test
+ *  seam, or any future non-signal stop source). "Died by signal, not a clean stop" is the least
+ *  it can say; a request that DOES name its signal gets the exact code instead. */
 export const HARD_EXIT_CODE = 130;
+
+/** The POSIX 128+signum exit code for the signal that triggered a hard exit — 143 for SIGTERM,
+ *  130 for SIGINT — read off `os.constants.signals` rather than hardcoded numbers, so the code
+ *  is the platform's own signum. Unnamed signal -> HARD_EXIT_CODE. */
+export function hardExitCodeFor(signal?: NodeJS.Signals): number {
+  const signum = signal ? constants.signals[signal] : undefined;
+  return signum === undefined ? HARD_EXIT_CODE : 128 + signum;
+}
 
 /** Install the two-stage stop: first signal requests the drain, second hard-exits. */
 export function installStopSignal(opts: StopSignalOpts = {}): StopSignal {
   let requested = false;
-  const dispose = (opts.registerSignals ?? defaultRegisterSignals)(() => {
+  const dispose = (opts.registerSignals ?? defaultRegisterSignals)((signal?: NodeJS.Signals) => {
     if (requested) {
-      opts.log?.("[sapwood:stop] second stop signal — hard exit now, in-flight lanes are NOT drained");
-      (opts.hardExit ?? ((code: number) => process.exit(code)))(HARD_EXIT_CODE);
+      opts.log?.(`[sapwood:stop] second stop signal${signal ? ` (${signal})` : ""} — hard exit now, in-flight lanes are NOT drained`);
+      (opts.hardExit ?? ((code: number) => process.exit(code)))(hardExitCodeFor(signal));
       return;
     }
     requested = true;

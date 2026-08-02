@@ -284,7 +284,9 @@ export interface RoundDeps {
   /** Same seam (and same two-stage semantics) as DriverDeps.registerSignals — calling
    *  `requestStop` twice models a second signal, i.e. the immediate hard exit (#380). */
   registerSignals?: RegisterSignals;
-  /** #380: the second-signal hard exit. Default `process.exit`; tests inject a spy. */
+  /** #380: the second-signal hard exit, called with the POSIX 128+signum code for whichever
+   *  signal fired (stop-signal.ts's hardExitCodeFor). Default `process.exit`; tests inject a
+   *  spy. */
   hardExit?: (code: number) => void;
   onTick?: (result: TickResult) => void;
   log?: (message: string) => void;

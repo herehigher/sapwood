@@ -87,8 +87,9 @@ export interface DriverDeps extends TickDeps {
    *  process don't fight over them). Calling `requestStop` TWICE models a second signal — the
    *  immediate hard exit (#380). */
   registerSignals?: RegisterSignals;
-  /** #380: the second-signal hard exit. Default `process.exit`, which never returns; tests
-   *  inject a spy (same seam style as watchdogExit below). */
+  /** #380: the second-signal hard exit, called with the POSIX 128+signum code for whichever
+   *  signal fired (stop-signal.ts's hardExitCodeFor). Default `process.exit`, which never
+   *  returns; tests inject a spy (same seam style as watchdogExit below). */
   hardExit?: (code: number) => void;
   /** #395: the liveness watchdog's exit hook — fired (after the durable `engine-stalled` event
    *  is appended) once `state.maxEventId()` has gone unchanged for a full

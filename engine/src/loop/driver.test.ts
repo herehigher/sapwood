@@ -415,7 +415,7 @@ test("#380 runDriver: a SECOND stop signal during the drain hard-exits immediate
   sup.probes["lane-run"] = { done: false, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false };
   const exits: number[] = [];
   const deps = baseDeps({ supervisor: sup, state, sleep, hardExit: (code) => exits.push(code) });
-  let stop = () => {};
+  let stop: (signal?: NodeJS.Signals) => void = () => {};
   deps.registerSignals = (requestStop) => {
     stop = requestStop;
     return () => {};
@@ -423,9 +423,9 @@ test("#380 runDriver: a SECOND stop signal during the drain hard-exits immediate
   let ticks = 0;
   deps.onTick = () => {
     ticks++;
-    if (ticks === 1) stop(); // first signal: drain
+    if (ticks === 1) stop("SIGTERM"); // first signal: drain
     if (ticks === 2) {
-      stop(); // second signal, mid-drain, with the lane still very much alive
+      stop("SIGTERM"); // second signal, mid-drain, with the lane still very much alive
       // The real hardExit is process.exit and never returns; the spy does, so let the drained
       // lane settle to keep this test bounded rather than spinning the (already-proven) drain.
       sup.probes["lane-run"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 0, hasPr: false };
@@ -434,7 +434,7 @@ test("#380 runDriver: a SECOND stop signal during the drain hard-exits immediate
 
   const result = await runDriver(deps);
 
-  assert.deepEqual(exits, [130], "the second signal hard-exits (128+SIGINT), without waiting for the drain");
+  assert.deepEqual(exits, [143], "the second SIGTERM hard-exits with 128+SIGTERM, without waiting for the drain");
   assert.equal(result.stoppedBy, "signal");
   state.close();
 });

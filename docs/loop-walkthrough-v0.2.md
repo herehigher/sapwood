@@ -108,7 +108,7 @@ Note the asymmetry: **milestone scoping** (`round.milestone`, or the
 |---|---|---|---|---|
 | Stop condition | `stop.*` / `--stop-*` hit | **finish fully** | harvest+retro run, round closes | 0 |
 | Signal (1st) | SIGINT/SIGTERM | **drained**: dispatch freezes, live lanes asked to hand off, handoff window (`drainWindowSec`) → hard kill | harvest+retro run, round closes | 0 |
-| Signal (2nd) | SIGINT/SIGTERM while draining | abandoned — no drain, no reclaim | abandoned mid-phase | **130** |
+| Signal (2nd) | SIGINT/SIGTERM while draining | abandoned — no drain, no reclaim | abandoned mid-phase | **128+signum** (143 TERM / 130 INT) |
 | Kill switch | `data/KILL_SWITCH` | handoff window (`drainWindowSec`, default 300 s) → hard kill | **skipped** — round left unclosed | **1** |
 | Crash | process death | orphaned; reclaimed by 4-signal logic on restart | round left unclosed | — |
 | (PAUSE) | `data/PAUSE` | not an exit: dispatch freezes, everything else continues | rounds keep cycling | — |
@@ -135,10 +135,12 @@ from the sentinel:
 - The *round* still closes properly (harvest+retro run, exit 0). A signal says
   "stop taking on work", the sentinel says "stop, now, and stay stopped" —
   only the sentinel is durable and survives a restart.
-- A **second** signal received while draining exits immediately with 130
-  (128+SIGINT): in-flight lanes are left to the crash-reclaim path. The drain
-  is bounded but not instant, and an operator who asks twice should never have
-  to reach for SIGKILL.
+- A **second** signal received while draining exits immediately, with the
+  POSIX `128+signum` code for whichever signal it was (143 for SIGTERM, 130
+  for SIGINT — so a systemd unit or CI wrapper reads the same convention it
+  does from any other daemon); in-flight lanes are left to the crash-reclaim
+  path. The drain is bounded but not instant, and an operator who asks twice
+  should never have to reach for SIGKILL.
 
 ## 4. Crash & resume semantics (rerun-not-resume)
 
@@ -162,7 +164,7 @@ from the sentinel:
 | Engine day (hard) | `cost.dailyBudgetUsd` | freeze all dispatch + drain + escalate | after drain window |
 | Engine process (hard) | `cost.maxWallClockSec` (default **24 h**, #431: a per-process attention alarm — one clock per process life, fresh on every restart) | same freeze+drain | after drain window |
 | Human (hard) | `data/KILL_SWITCH` | freeze + drain + hard kill, exit 1 | after drain window |
-| Human (signal) | SIGTERM / SIGINT (#380) | the same freeze + drain, exit 0 once drained; a second signal exits 130 at once | after drain window |
+| Human (signal) | SIGTERM / SIGINT (#380) | the same freeze + drain, exit 0 once drained; a second signal exits at once with 128+signum | after drain window |
 
 Soft tiers preserve work (hard-killing a worker re-burns the same tokens on
 requeue, forever); hard tiers exist so the ceiling is actually a ceiling.

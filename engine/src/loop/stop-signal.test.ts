@@ -27,8 +27,8 @@ test("installStopSignal: first signal requests the stop and wakes the sleeper; i
   s.dispose();
 });
 
-test("installStopSignal: a SECOND signal received while draining hard-exits immediately (128+SIGINT)", () => {
-  let stop = () => {};
+test("installStopSignal: a SECOND signal received while draining hard-exits immediately", () => {
+  let stop: (signal?: NodeJS.Signals) => void = () => {};
   let wakes = 0;
   const exits: number[] = [];
   const s = installStopSignal({
@@ -47,6 +47,47 @@ test("installStopSignal: a SECOND signal received while draining hard-exits imme
   s.dispose();
 });
 
+// The exit code carries WHICH signal ended the run (128+signum, the POSIX convention external
+// tooling reads): a systemd unit or CI wrapper distinguishing "terminated by TERM" from
+// "interrupted" gets the same answer from sapwood as from any other daemon.
+for (const [signal, code] of [
+  ["SIGTERM", 143],
+  ["SIGINT", 130],
+] as const) {
+  test(`installStopSignal: a second ${signal} hard-exits with ${code} (128+signum)`, () => {
+    let stop: (signal?: NodeJS.Signals) => void = () => {};
+    const exits: number[] = [];
+    const s = installStopSignal({
+      registerSignals: (requestStop) => {
+        stop = requestStop;
+        return () => {};
+      },
+      hardExit: (c) => exits.push(c),
+    });
+    stop(signal);
+    stop(signal);
+    assert.deepEqual(exits, [code]);
+    s.dispose();
+  });
+}
+
+test("installStopSignal: a second signal with no identity falls back to 130 — the seam stays usable without one", () => {
+  let stop: (signal?: NodeJS.Signals) => void = () => {};
+  const exits: number[] = [];
+  const s = installStopSignal({
+    registerSignals: (requestStop) => {
+      stop = requestStop;
+      return () => {};
+    },
+    hardExit: (c) => exits.push(c),
+  });
+  stop("SIGTERM"); // the FIRST signal's identity is irrelevant — only the exiting one names the code
+  stop();
+  assert.deepEqual(exits, [HARD_EXIT_CODE]);
+  assert.equal(HARD_EXIT_CODE, 130);
+  s.dispose();
+});
+
 test("installStopSignal: dispose() tears the listeners down", () => {
   let disposed = 0;
   const s = installStopSignal({ registerSignals: () => () => disposed++ });
@@ -55,16 +96,16 @@ test("installStopSignal: dispose() tears the listeners down", () => {
 });
 
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
-  test(`defaultRegisterSignals: a real ${sig} delivered to this process reaches the handler`, async () => {
+  test(`defaultRegisterSignals: a real ${sig} delivered to this process reaches the handler, naming itself`, async () => {
     const before = process.listenerCount(sig);
-    const fired = new Promise<void>((resolve) => {
-      const dispose = defaultRegisterSignals(() => {
+    const named = await new Promise<NodeJS.Signals | undefined>((resolve) => {
+      const dispose = defaultRegisterSignals((signal) => {
         dispose();
-        resolve();
+        resolve(signal);
       });
       process.kill(process.pid, sig);
     });
-    await fired;
+    assert.equal(named, sig, "the handler carries WHICH signal fired — the hard-exit code depends on it");
     assert.equal(process.listenerCount(sig), before, "the teardown removed exactly what it added");
   });
 }
