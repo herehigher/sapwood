@@ -15,9 +15,11 @@ import {
   type CommitInfo,
   type IForge,
   type Issue,
+  type OpenPrBody,
   type PRCheckItem,
   type PRReviewData,
   type PRStatus,
+  prOwnerMarker,
   type ReviewThreadSpan,
   type ReviewThreadsPage,
   readPrOwner,
@@ -97,6 +99,12 @@ class FakeForge extends UnstubbedForge implements IForge {
   }
   override async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
+  }
+  /** #384: the open-PR list the mid-run orphan sweep duck-types for. Empty by default, so every
+   *  pre-#384 fixture behaves exactly as before (the sweep finds no marked PR and latches). */
+  openPrBodies: OpenPrBody[] = [];
+  async listOpenPrBodies(): Promise<OpenPrBody[]> {
+    return this.openPrBodies;
   }
   ready: Issue[] = [];
   readyReads = 0;
@@ -1658,6 +1666,38 @@ test("tick reclaim: DEAD lane with NO PR is torn down, board handed back to read
   assert.deepEqual(sup.reclaimed, ["lane-dead"]);
   assert.deepEqual(forge.boardSet, [[4, "ready"]]);
   assert.equal(st.getWorker("lane-dead")?.state, "failed");
+  st.close();
+});
+
+test("#384 (F12): a DEAD lane's already-pushed engine PR is found in the SAME tick it dies — orphan event + needs-human disposition, no restart", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  seedRunning(st, "lane-dead", 4);
+  // The live F12 shape: the worker pushed and opened its PR, then died before the engine could
+  // associate it — the probe reports NO pr, so reclaim requeues the issue and the PR is left
+  // open, unowned, and (association never having run) carrying no owner marker either. A second
+  // PR marked for another lane proves the sweep answers per candidate, not per open PR.
+  forge.openPrBodies = [
+    { number: 365, body: "## Why\n\nCloses #4" },
+    { number: 366, body: prOwnerMarker("lane-other", 9) },
+  ];
+  sup.probes["lane-dead"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+  assert.equal(st.getWorker("lane-dead")?.state, "failed");
+  assert.deepEqual(
+    st.eventsAfterId(0, ["orphan-detected"]).map((e) => e.payload),
+    [{ kind: "pr", pr: 365, issue: 4, reason: "open-engine-pr", worker: "lane-dead", midRun: true, via: "prose" }],
+  );
+  assert.deepEqual(
+    st.eventsAfterId(0, ["orphan-pr-escalated"]).map((e) => e.payload),
+    [{ issue: 4, pr: 365, worker: "lane-dead", via: "prose", labeled: 1 }],
+  );
+  assert.ok(
+    forge.labelsAdded.some(([issue, label]) => issue === 4 && label === cfg.labels.needsHuman),
+    "the requeued issue is held, so the same run cannot re-dispatch it behind the open PR",
+  );
   st.close();
 });
 
