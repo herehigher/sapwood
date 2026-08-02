@@ -533,6 +533,12 @@ tool at all** (deny-by-default, regression-tested):
 | `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `getPRAuditComments` (camelCase wire name; #556 tracks normalizing it) |
 | *(any other role id)* | none — deny-by-default |
 
+**This nine-role grant is deliberate, not an oversight to narrow.** Every one of these tools is
+read-only and costs nothing when a session never calls it, and a measured zero-call count is not
+evidence that a grant is unneeded: per #529, zero calls means the role's TASK never asked for a
+lookup, not that the capability itself has no use — the lever for changing that is the task step
+a prompt gives the role, not the grant it holds.
+
 **Scope, updated by #245: `WorkerSupervisor.resume()` now attaches a proxy too.** #244 shipped
 `dispatch()`-only attachment deliberately (the `resume()` crash-consistency machinery was already
 substantial, and consumer-shaped wiring belonged with the actual consumer). #245 (the M9 fix loop)

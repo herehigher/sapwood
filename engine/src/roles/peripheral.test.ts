@@ -2211,6 +2211,103 @@ test("run: #253 a session's OWN RoleSessionOpts.proxy wins over RoleRunnerDeps.d
   }
 });
 
+// Structural guard, not a live-role optimization: every role that reaches RoleRunner.run() today
+// holds a non-empty PROXY_ROLE_TOOL_MATRIX grant (access.ts's nine ISSUE_TOOLS roles plus
+// worker's PR_TOOLS), so no shipped role can exercise this branch. It guards a FUTURE edit that
+// removes a role's matrix entry (or ships a new role with none) — access.ts's own deny-by-default
+// doctrine says such a role gets `[]`, and this test proves the runner honors that by skipping
+// the mint rather than minting a proxy the role could never call through (mcp-server.ts already
+// filters `tools/list` to the role's grant, so a stray mint here would waste only the
+// listener/token/--mcp-config plumbing, never actual capability). Uses a synthetic role id absent
+// from the matrix — deliberately not a real role name, since every real role holds a grant.
+test("run: a role with an EMPTY PROXY_ROLE_TOOL_MATRIX grant never mints RoleRunnerDeps.defaultProxy — no listener, no token, no --mcp-config", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const { calls: defaultCalls, handle: defaultHandle } = fakeProxyHandle();
+    const runner = mkRunner(dir, bin, {
+      defaultProxy: {
+        mint: async () => {
+          defaultCalls.minted++;
+          return defaultHandle as unknown as Awaited<ReturnType<NonNullable<RoleSessionOpts["proxy"]>["mint"]>>;
+        },
+      },
+    });
+    // Synthetic role id: absent from PROXY_ROLE_TOOL_MATRIX, so allowedToolsForRole returns `[]`
+    // by deny-by-default (access.ts). No shipped role id has this property.
+    await runner.run({
+      roleId: "not-a-real-role",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+    });
+    assert.equal(defaultCalls.minted, 0, "the RoleRunner-wide default must not be minted for an empty-grant role");
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    assert.ok(!seen.includes("--mcp-config"), "no --mcp-config was injected — the mint never happened");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Same future-edit guard as above, LOUD half: an EXPLICIT opts.proxy for a role whose
+// PROXY_ROLE_TOOL_MATRIX grant is empty is a caller bug, not a silent override — the caller asked
+// for a proxy that role can never use, so it is refused loudly, same shape as the
+// reviewCwd+opts.proxy refusal a few hundred lines up. This keeps docs/configuration.md's "a
+// caller-supplied proxy opt always wins over the RoleRunner-wide default, never silently
+// overridden" literally true even for a grantless role: its explicit opts.proxy does not get
+// silently discarded, it throws. No shipped role can trigger this today (all hold grants); this
+// exercises the guard via a synthetic role id absent from the matrix.
+//
+// gate② #557 FIX 5: this throw used to fire AFTER `openSync(jsonlPath, "w")` had already run —
+// the caller-bug validation moved up in run() to before that open (see the block's own doc in
+// peripheral.ts), so this test also asserts the PRE-THROW filesystem state: no `.jsonl` file (an
+// open, unclosed fd) and no other session-name artifact is left behind by a rejected call. Before
+// that reorder, a leaked fd/file existed here and this test's prior form (deleting the whole temp
+// dir afterward, asserting nothing about what was in it) would have passed either way — masking
+// the leak entirely.
+test("run: an EXPLICIT opts.proxy for a role with an EMPTY PROXY_ROLE_TOOL_MATRIX grant is refused (caller bug, not a silent override) — and leaves no stray fd/artifact behind", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const runner = mkRunner(dir, bin);
+    const before = readdirSync(dir);
+    // Synthetic role id: absent from PROXY_ROLE_TOOL_MATRIX, so allowedToolsForRole returns `[]`
+    // by deny-by-default (access.ts). No shipped role id has this property.
+    await assert.rejects(
+      () =>
+        runner.run({
+          roleId: "not-a-real-role",
+          prompt: "p",
+          model: "sonnet",
+          effort: "medium",
+          fallbackModel: "sonnet",
+          proxy: {
+            mint: async () => {
+              throw new Error("must never be called");
+            },
+          },
+        }),
+      /holds no PROXY_ROLE_TOOL_MATRIX grant/,
+    );
+    const after = readdirSync(dir);
+    assert.deepEqual(
+      after.slice().sort(),
+      before.slice().sort(),
+      "the rejected call must not have created ANY new file in the session state dir (no leaked jsonl/sentinel)",
+    );
+    assert.ok(
+      !after.some((f) => f.endsWith(".jsonl")),
+      "no jsonl file (which would mean an fd was opened and never closed) exists after the caller-bug throw",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: #253 no RoleRunnerDeps.defaultProxy and no opts.proxy -> today's behavior, byte-for-byte unchanged (no --mcp-config, base allowedTools)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
