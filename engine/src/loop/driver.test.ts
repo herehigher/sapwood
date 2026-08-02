@@ -141,6 +141,9 @@ class FakeForge extends UnstubbedForge implements IForge {
 
 class FakeSupervisor implements Supervisor {
   probes: Record<string, LaneProbe> = {};
+  /** #380: every graceful-handoff request the drain made — the SIGTERM tests' proof that a
+   *  signal actually drained live lanes rather than abandoning them. */
+  handoffRequested: string[] = [];
   /** #76: every issue number ever passed to dispatch() — the wind-down tests' proof that a
    *  stop-condition freeze actually prevented a NEW dispatch, not just that there was nothing
    *  eligible to dispatch. */
@@ -166,7 +169,8 @@ class FakeSupervisor implements Supervisor {
   inspectWorktree(): { worktreePath: string | null; worktreeRetained: boolean } {
     return { worktreePath: null, worktreeRetained: false };
   }
-  requestHandoff(): boolean {
+  requestHandoff(w: string): boolean {
+    this.handoffRequested.push(w);
     return true;
   }
   clearStaleFixEntrySentinel(): void {}
@@ -307,7 +311,21 @@ test("runDriver --until-idle: keeps ticking while a dispatched lane is still act
   const forge = new FakeForge();
   forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
   const sup = new FakeSupervisor();
-  const deps = baseDeps({ forge, supervisor: sup, sleep, stopMode: "until-idle", cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }) });
+  // #380: the bail-out signal below now DRAINS rather than abandoning the lane, and a lane whose
+  // probe never goes terminal (this fixture's) only leaves `running` via the drain's bounded
+  // hard-kill escalation. A seeded clock advanced one full second per tick (never the real one:
+  // the escalation compares against a second-resolution stored timestamp, so real-clock ticks
+  // milliseconds apart would make the escalating tick's INDEX a race) plus a zero drain window
+  // puts that escalation on the tick right after the drain request, deterministically.
+  let clock = new Date("2026-07-24T00:00:00Z");
+  const deps = baseDeps({
+    forge,
+    supervisor: sup,
+    sleep,
+    stopMode: "until-idle",
+    now: () => clock,
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 }, cost: { drainWindowSec: 0 } }),
+  });
   // After tick 1, the issue is dispatched and running (still in flight) -> not idle -> tick 2
   // sees the same lane still "running" (FakeSupervisor's default probe never completes it) ->
   // still not idle. Bound the test with a manual stop via a signal after a few ticks so a bug
@@ -320,11 +338,12 @@ test("runDriver --until-idle: keeps ticking while a dispatched lane is still act
   };
   deps.onTick = () => {
     ticks++;
-    if (ticks >= 3) stop();
+    clock = new Date(clock.getTime() + 1000);
+    if (ticks === 3) stop(); // exactly once — a second call is a second signal (hard exit)
   };
   const result = await runDriver(deps);
   assert.equal(result.stoppedBy, "signal"); // never reached "idle" — the lane stayed active
-  assert.equal(ticks, 3);
+  assert.equal(ticks, 5, "3 ordinary ticks, then a drain-request tick and the hard-kill tick that ends the never-terminal lane");
   deps.state.close();
 });
 
@@ -345,6 +364,79 @@ test("runDriver: a signal mid-sleep stops the loop before the next tick starts (
   assert.equal(result.ticks, 1); // exactly one (completed) tick — the signal fired during the sleep, not mid-tick
   assert.deepEqual(calls, [5000]);
   deps.state.close();
+});
+
+// ── #380 (F5): SIGTERM/SIGINT = the KILL_SWITCH drain path, not a bare loop exit. The dogfood
+// symptom was the opposite of both halves: dispatch kept going and running workers were left
+// mid-work. Signals are modeled through the registerSignals seam (a second `requestStop` call
+// IS the second signal) — the real process wiring is proven in stop-signal.test.ts against
+// actual SIGTERM/SIGINT delivery. ──
+
+test("#380 runDriver: a stop signal freezes dispatch and DRAINS the running lane before exiting cleanly", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const state = new State(":memory:");
+  state.upsertWorker({ name: "lane-run", issue: 2, session_id: "s", state: "running", started_at: "t", ended_at: null });
+  sup.probes["lane-run"] = { done: false, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false };
+  const deps = baseDeps({ forge, supervisor: sup, state, sleep });
+  let stop = () => {};
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  let ticks = 0;
+  deps.onTick = () => {
+    ticks++;
+    if (ticks === 1) {
+      stop(); // SIGTERM lands after one ordinary tick...
+      forge.ready = [{ number: 9, title: "t", labels: ["prio:0-critical"] }]; // ...and work appears right after
+    }
+    // The worker complies with the drain request it got on tick 2: it commits its WIP and
+    // writes .handoff, which tick 3's terminal reclaim records.
+    if (ticks === 2) sup.probes["lane-run"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 0, hasPr: false };
+  };
+
+  const result = await runDriver(deps);
+
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(ticks, 3, "tick 2 requested the drain, tick 3 reclaimed the drained lane — then the loop exited");
+  assert.deepEqual(sup.handoffRequested, ["lane-run"], "the live lane was asked to hand off gracefully, never abandoned");
+  assert.equal(state.getWorker("lane-run")?.state, "handoff", "drained to a resumable handoff, not killed mid-work");
+  assert.deepEqual(sup.dispatchedIssues, [], "dispatch stayed frozen from the signal onward");
+  state.close();
+});
+
+test("#380 runDriver: a SECOND stop signal during the drain hard-exits immediately", async () => {
+  const { sleep } = mkSleepSpy();
+  const sup = new FakeSupervisor();
+  const state = new State(":memory:");
+  state.upsertWorker({ name: "lane-run", issue: 2, session_id: "s", state: "running", started_at: "t", ended_at: null });
+  sup.probes["lane-run"] = { done: false, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false };
+  const exits: number[] = [];
+  const deps = baseDeps({ supervisor: sup, state, sleep, hardExit: (code) => exits.push(code) });
+  let stop: (signal?: NodeJS.Signals) => void = () => {};
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  let ticks = 0;
+  deps.onTick = () => {
+    ticks++;
+    if (ticks === 1) stop("SIGTERM"); // first signal: drain
+    if (ticks === 2) {
+      stop("SIGTERM"); // second signal, mid-drain, with the lane still very much alive
+      // The real hardExit is process.exit and never returns; the spy does, so let the drained
+      // lane settle to keep this test bounded rather than spinning the (already-proven) drain.
+      sup.probes["lane-run"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 0, hasPr: false };
+    }
+  };
+
+  const result = await runDriver(deps);
+
+  assert.deepEqual(exits, [143], "the second SIGTERM hard-exits with 128+SIGTERM, without waiting for the drain");
+  assert.equal(result.stoppedBy, "signal");
+  state.close();
 });
 
 test("runDriver: registerSignals teardown is invoked exactly once when the loop stops", async () => {
@@ -477,7 +569,7 @@ test("runDriver: a persistently-throwing tick keeps the daemon looping at normal
   let stop = () => {};
   const sleep = async (ms: number): Promise<void> => {
     calls.push(ms);
-    if (calls.length >= 3) stop(); // bound the test: signal after 3 failed rounds
+    if (calls.length === 3) stop(); // bound the test: ONE signal after 3 failed rounds (#380: a second would hard-exit)
   };
   const forge = new FakeForge();
   forge.getReadyIssues = async () => {
@@ -513,7 +605,9 @@ class ScriptedMergeGate implements MergeGate {
 }
 
 /** A bounded safety net so a driver bug (stop condition never detected / never idle) fails the
- *  test instead of hanging the suite — real correct behavior always returns well before this. */
+ *  test instead of hanging the suite — real correct behavior always returns well before this.
+ *  #380: LATCHED — a second requestStop call is a genuine second signal now (the immediate hard
+ *  exit), so a per-tick net must request the stop once, not on every tick after the bound. */
 function boundedStop(deps: DriverDeps, maxTicks: number): () => void {
   let stop = () => {};
   deps.registerSignals = (requestStop) => {
@@ -521,13 +615,19 @@ function boundedStop(deps: DriverDeps, maxTicks: number): () => void {
     return () => {};
   };
   let ticks = 0;
+  let stopped = false;
+  const stopOnce = (): void => {
+    if (stopped) return;
+    stopped = true;
+    stop();
+  };
   const prevOnTick = deps.onTick;
   deps.onTick = (r) => {
     prevOnTick?.(r);
     ticks++;
-    if (ticks >= maxTicks) stop();
+    if (ticks >= maxTicks) stopOnce();
   };
-  return () => stop();
+  return stopOnce;
 }
 
 test("runDriver stop.afterIssuesMerged: hitting it winds the run down (no kill) then exits, naming the condition — in default 'forever' mode, no --until-idle needed", async () => {

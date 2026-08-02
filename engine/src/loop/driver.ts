@@ -14,9 +14,17 @@
 // sleep) — an in-flight tick is a single already-started async call this driver never touches
 // mid-flight, so "stop after the in-flight tick completes" falls out of the loop shape rather
 // than needing its own cancellation machinery.
+//
+// #380 (F5): that flag is now also threaded INTO tick() (TickDeps.stopRequested), so a signal
+// takes the KILL_SWITCH drain path rather than merely ending the loop: from the first tick
+// after the signal, dispatch is frozen and every running/fixing lane is asked to hand off
+// gracefully. The loop therefore keeps ticking on cadence until those lanes are gone — bounded,
+// like the switch's own drain, by cfg.cost.drainWindowSec, past which tick() hard-kills and
+// escalates them. A SECOND signal exits immediately without draining (stop-signal.ts).
 import { type TickDeps, type TickResult, tick } from "./conductor.js";
 import { reconcileEscalations } from "./escalation-reconcile.js";
 import { sweepResolvedHolds } from "./escalation-sweep.js";
+import { installStopSignal, type RegisterSignals } from "./stop-signal.js";
 import { startProgressWatchdog, systemWatchdogTimer } from "./watchdog.js";
 
 /** How the loop decides to stop ticking. Default ("forever") is the normal daemon mode — only a
@@ -76,8 +84,13 @@ export interface DriverDeps extends TickDeps {
   /** Registers the stop signal source; returns a teardown function. Default: real
    *  SIGINT/SIGTERM listeners on `process`. Injectable so tests can trigger a "signal" without
    *  touching the actual process signal handlers (and so multiple driver instances in one test
-   *  process don't fight over them). */
-  registerSignals?: (requestStop: () => void) => () => void;
+   *  process don't fight over them). Calling `requestStop` TWICE models a second signal — the
+   *  immediate hard exit (#380). */
+  registerSignals?: RegisterSignals;
+  /** #380: the second-signal hard exit, called with the POSIX 128+signum code for whichever
+   *  signal fired (stop-signal.ts's hardExitCodeFor). Default `process.exit`, which never
+   *  returns; tests inject a spy (same seam style as watchdogExit below). */
+  hardExit?: (code: number) => void;
   /** #395: the liveness watchdog's exit hook — fired (after the durable `engine-stalled` event
    *  is appended) once `state.maxEventId()` has gone unchanged for a full
    *  tickIntervalSec * cfg.liveness.watchdogTickMultiplier window (watchdog.ts's
@@ -141,16 +154,6 @@ export function prsOpenedThisTick(result: TickResult): number {
   return n;
 }
 
-function defaultRegisterSignals(requestStop: () => void): () => void {
-  const handler = (): void => requestStop();
-  process.once("SIGINT", handler);
-  process.once("SIGTERM", handler);
-  return () => {
-    process.removeListener("SIGINT", handler);
-    process.removeListener("SIGTERM", handler);
-  };
-}
-
 /** "Nothing left to do" for --until-idle: no running/driving lane occupies a slot, this tick's
  *  dispatch phase launched nothing new, AND RECLAIM did not just create a handoff that becomes
  *  eligible for RESUME on the next tick (#172). Any failure means another tick can progress.
@@ -187,18 +190,31 @@ function isIdle(deps: DriverDeps, result: TickResult): boolean {
  */
 export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
   const stopMode = deps.stopMode ?? "forever";
-  let signalled = false;
   // Wakes an in-progress inter-tick wait (see interTickWait below). Signal-abortable sleep
   // (Codex PR #50, driver.ts:126 thread): without this, a SIGINT/SIGTERM landing between
-  // ticks would only flip `signalled` and then wait out the FULL cadence before the loop
+  // ticks would only flip the stop flag and then wait out the FULL cadence before the loop
   // notices — up to tickIntervalSec of shutdown delay, enough to blow past a service
   // manager's stop timeout and get SIGKILLed instead of stopping cleanly after the
   // completed tick. The signal handler resolves the wait immediately instead.
   let wakeFromSleep: (() => void) | null = null;
-  const unregister = (deps.registerSignals ?? defaultRegisterSignals)(() => {
-    signalled = true;
-    wakeFromSleep?.();
+  const stopSignal = installStopSignal({
+    ...(deps.registerSignals !== undefined ? { registerSignals: deps.registerSignals } : {}),
+    ...(deps.hardExit !== undefined ? { hardExit: deps.hardExit } : {}),
+    ...(deps.log !== undefined ? { log: deps.log } : {}),
+    onStop: () => wakeFromSleep?.(),
   });
+  const signalled = (): boolean => stopSignal.requested();
+  // #380: has a tick already RUN under the stop request? The abortable sleep above exists to
+  // start the drain immediately; once it has started, the drain itself needs the ordinary
+  // cadence between ticks (each drain tick probes lanes and re-requests handoffs — spinning it
+  // as fast as the event loop allows would be a hot loop, not a faster shutdown).
+  let drainTicked = false;
+  /** #380: the drain is complete when no LIVE worker process is left. Deliberately not
+   *  `activeWorkers()` (running + driving + fixing): a `driving` lane has no process to hand
+   *  off — it is a PR waiting on CI/review — and DRIVE is frozen under this gate exactly as it
+   *  is under the switch, so waiting for one would wedge shutdown until tick()'s own bounded
+   *  terminal-for-drain escalation happened to pick it up, if ever. */
+  const liveLanesDrained = (): boolean => deps.state.runningWorkers().length === 0 && deps.state.fixingWorkers().length === 0;
   // #395: the liveness watchdog — an INDEPENDENT background timer for this call's whole
   // lifetime, covering every tick (not raced against any single one — see watchdog.ts's own
   // doc for why). Started before the loop below ever runs, stopped in this function's `finally`
@@ -237,8 +253,9 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
         };
       }
       // A signal that arrived after the pre-sleep check but before this wait was armed must
-      // not sleep at all — it already missed its wake call.
-      if (signalled) wakeFromSleep?.();
+      // not sleep at all — it already missed its wake call. Only until the drain is under way
+      // (`drainTicked`), after which the cadence is what paces the drain itself.
+      if (signalled() && !drainTicked) wakeFromSleep?.();
     });
   // #76: cumulative run-lifetime counters (process lifetime — a restarted engine starts these
   // back at 0) feeding the count-based stop conditions. Updated only from a SUCCESSFUL tick's
@@ -286,10 +303,13 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
                 deps.state.spentUsdAfterId(runSpendAnchorId) + unsettledUsd >= deps.stop!.afterSpendUsd!,
             }
           : {};
+      // #380: `stopRequested` is a THUNK read at tick()'s own gate — a signal landing mid-tick
+      // is seen by the NEXT tick's gate, never lost to a captured boolean.
       const tickDeps: TickDeps = stopConditionHit
-        ? { ...deps, ...spendStopThunk, processStartedAt, forceDispatchPause: true }
-        : { ...deps, ...spendStopThunk, processStartedAt };
+        ? { ...deps, ...spendStopThunk, processStartedAt, stopRequested: signalled, forceDispatchPause: true }
+        : { ...deps, ...spendStopThunk, processStartedAt, stopRequested: signalled };
       try {
+        if (signalled()) drainTicked = true;
         result = await tick(tickDeps);
         ticks++;
         deps.onTick?.(result);
@@ -350,7 +370,7 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
             threshold: stop.afterSpendUsd,
             detail: `spent $${runSpendUsd.toFixed(2)}`,
           };
-        } else if (stop?.onMilestoneComplete && !signalled) {
+        } else if (stop?.onMilestoneComplete && !signalled()) {
           // Evaluated at tick boundaries only (never mid-tick), per #76's scope — one extra
           // forge read per tick while configured, same cost class as the DISPATCH phase's own
           // getReadyIssues call. Skipped once `signalled` — a Ctrl-C shutdown must not wait on
@@ -381,7 +401,10 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
           }
         }
       }
-      if (signalled) return { ticks, tickErrors, stoppedBy: "signal" };
+      // #380: exit on a signal only once the drain this same tick just progressed has finished —
+      // otherwise keep ticking so it can (tick() is where the drain lives; a driver that
+      // returned here would abandon live workers mid-work, the pre-#380 behavior).
+      if (signalled() && liveLanesDrained()) return { ticks, tickErrors, stoppedBy: "signal" };
       // #76: --once still reports a condition that fired on its single tick (the exit line names
       // it) — stoppedBy stays "once" because once-mode never waits for wind-down.
       if (stopMode === "once") {
@@ -404,10 +427,12 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
         return { ticks, tickErrors, stoppedBy: "idle" };
       }
       await interTickWait(deps.tickIntervalSec * 1000);
-      if (signalled) return { ticks, tickErrors, stoppedBy: "signal" };
+      // Same drain-first rule as the post-tick check above: a signal that arrived during the
+      // sleep with live lanes still out there earns the next (drain) tick, not an exit.
+      if (signalled() && liveLanesDrained()) return { ticks, tickErrors, stoppedBy: "signal" };
     }
   } finally {
-    unregister();
+    stopSignal.dispose();
     watchdog.stop();
   }
 }

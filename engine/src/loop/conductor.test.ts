@@ -6514,6 +6514,83 @@ test("tick DRIVE: kill switch NOT active -> driveOne called normally (no regress
   }
 });
 
+// ── #380 (F5): a requested STOP SIGNAL (SIGTERM/SIGINT) takes the SAME global gate — the whole
+// point being that the two stop semantics share one code path and cannot fork. The only
+// difference is the recorded reason ("stop-signal", not "kill-switch"), so a human reading the
+// escalation trail afterward isn't sent hunting for a sentinel file nobody wrote. ──
+
+test("#380: stopRequested (SIGTERM/SIGINT) takes the KILL_SWITCH gate — drain-only tick, no dispatch/drive, reason `stop-signal`", async () => {
+  const st = new State(":memory:"); // no data dir at all: the kill switch is definitionally inactive
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-run", 2);
+  sup.probes["lane-run"] = { ...DEFAULT_PROBE }; // KEEP: alive, no terminal sentinel
+  st.upsertWorker({ name: "lane-drv", issue: 3, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 56 });
+  forge.ready = [{ number: 9, title: "", labels: ["prio:1-high"] }];
+  const gate = new FakeMergeGate();
+  gate.outcomes[56] = { kind: "merged", pr: 56, headOid: "H" };
+
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, stopRequested: () => true });
+
+  assert.equal(st.isKillSwitchActive(), false, "no sentinel anywhere — the signal alone drove this");
+  assert.equal(r.ceilingBreached, true);
+  assert.deepEqual(r.ceilingReasons, ["stop-signal"]);
+  assert.deepEqual(r.drainRequested, ["lane-run"]); // the live lane was asked to hand off gracefully
+  assert.deepEqual(sup.handoffRequested, ["lane-run"]);
+  assert.deepEqual(r.escalated, []); // drain window not elapsed — graceful first, never a mid-work kill
+  assert.deepEqual(r.dispatched, []); // dispatch frozen
+  assert.deepEqual(sup.dispatched, [] as Issue[]);
+  assert.deepEqual(r.driven, []); // drive frozen, exactly as under the switch
+  assert.equal(gate.calls.length, 0);
+  assert.equal(st.getWorker("lane-run")?.state, "running"); // draining, not abandoned
+  st.close();
+});
+
+test("#380: an ACTIVE kill switch still names itself when a signal arrives too — the durable fact wins the reason", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-stopsignal-both-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-run", 2);
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE };
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), stopRequested: () => true });
+
+    assert.deepEqual(r.ceilingReasons, ["kill-switch"]);
+    assert.deepEqual(r.drainRequested, ["lane-run"]);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#380: the stop-signal drain escalates past cfg.cost.drainWindowSec exactly like the switch's — bounded, never a permanent wait", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-run", 2);
+  sup.probes["lane-run"] = { ...DEFAULT_PROBE }; // never hands off — the worst case the window bounds
+  const cfg = mkCfg({ cost: { drainWindowSec: 60 } });
+  let clock = new Date("2026-07-24T00:00:00Z");
+  const now = () => clock;
+  const stopRequested = () => true;
+
+  const r1 = await tick({ now, forge, state: st, supervisor: sup, cfg, stopRequested });
+  assert.deepEqual(r1.drainRequested, ["lane-run"]);
+  assert.deepEqual(r1.escalated, []);
+
+  clock = new Date(clock.getTime() + 61_000);
+  const r2 = await tick({ now, forge, state: st, supervisor: sup, cfg, stopRequested });
+  assert.deepEqual(r2.escalated, ["lane-run"]);
+  assert.equal(st.getWorker("lane-run")?.state, "failed");
+  assert.equal(st.runningWorkers().length, 0, "the drain terminates — a driver waiting on it can exit");
+  const ev = st.latestEvent("ceiling-escalated") as { payload: { reasons: string[] } } | undefined;
+  assert.deepEqual(ev!.payload.reasons, ["stop-signal"], "the escalation trail names the signal, not a sentinel");
+  st.close();
+});
+
 test("tick: kill switch records a DONE+PR lane's terminal state under the switch (driving), then DRIVE merges it once cleared", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-gate-"));
   try {

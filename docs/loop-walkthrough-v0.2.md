@@ -66,7 +66,8 @@ Note the asymmetry: **milestone scoping** (`round.milestone`, or the
 
 1. **KILL_SWITCH gate** — active → this tick is terminal-reclaim + drain
    ONLY (handoff requests; hard kill past `cost.drainWindowSec`). Nothing
-   else runs.
+   else runs. A received SIGTERM/SIGINT takes this same gate (#380, §3) — one
+   drain path, two ways in.
 2. **PAUSE / wind-down read** — freezes DISPATCH only; reclaim, rollback
    retry, and DRIVE proceed. Fresh file check every tick, no restart needed.
 3. **Rollback retry** — pending board mutations from prior failures, before
@@ -106,14 +107,40 @@ Note the asymmetry: **milestone scoping** (`round.milestone`, or the
 | Path | Trigger | In-flight lanes | Rest of round | Exit code |
 |---|---|---|---|---|
 | Stop condition | `stop.*` / `--stop-*` hit | **finish fully** | harvest+retro run, round closes | 0 |
-| Signal | SIGINT/SIGTERM | **finish fully** | harvest+retro run, round closes | 0 |
+| Signal (1st) | SIGINT/SIGTERM | **drained**: dispatch freezes, live lanes asked to hand off, handoff window (`drainWindowSec`) → hard kill | harvest+retro run, round closes | 0 |
+| Signal (2nd) | SIGINT/SIGTERM while draining | abandoned — no drain, no reclaim | abandoned mid-phase | **128+signum** (143 TERM / 130 INT) |
 | Kill switch | `data/KILL_SWITCH` | handoff window (`drainWindowSec`, default 300 s) → hard kill | **skipped** — round left unclosed | **1** |
 | Crash | process death | orphaned; reclaimed by 4-signal logic on restart | round left unclosed | — |
 | (PAUSE) | `data/PAUSE` | not an exit: dispatch freezes, everything else continues | rounds keep cycling | — |
 
-Kill switch is the **only** non-zero exit and the only path that skips
-harvest/retro. On restart after kill/crash, the unclosed round resumes at its
-phase cursor and closes out *before* any new round opens.
+Kill switch is the only *sentinel* path that skips harvest/retro, and — apart
+from a second signal's hard exit — the only non-zero exit. On restart after
+kill/crash/hard exit, the unclosed round resumes at its phase cursor and closes
+out *before* any new round opens.
+
+**Signals are the third stop channel, beside the two sentinels** (#380).
+Operators and service managers (systemd, launchd, CI) reach for a signal
+first, so SIGTERM/SIGINT is wired to the *same* code as `data/KILL_SWITCH`:
+one flag threaded into `tick()`'s single top-of-tick gate, so the two can't
+drift apart. From the first tick after the signal, DISPATCH, DRIVE and new
+RESUME are frozen (an already-spawned resume child is adopted, then drained
+with everything else) and every `running`/`fixing` lane hands off gracefully
+(WIP commit+push, `.handoff`) — the same bounded `drainWindowSec` window,
+hard-killing and escalating whatever refuses. Three deliberate differences
+from the sentinel:
+
+- The reason recorded on the drain (events, `sapwood status`) is
+  `stop-signal`, never `kill-switch` — nobody should go hunting for a sentinel
+  file that was never written.
+- The *round* still closes properly (harvest+retro run, exit 0). A signal says
+  "stop taking on work", the sentinel says "stop, now, and stay stopped" —
+  only the sentinel is durable and survives a restart.
+- A **second** signal received while draining exits immediately, with the
+  POSIX `128+signum` code for whichever signal it was (143 for SIGTERM, 130
+  for SIGINT — so a systemd unit or CI wrapper reads the same convention it
+  does from any other daemon); in-flight lanes are left to the crash-reclaim
+  path. The drain is bounded but not instant, and an operator who asks twice
+  should never have to reach for SIGKILL.
 
 ## 4. Crash & resume semantics (rerun-not-resume)
 
@@ -137,6 +164,7 @@ phase cursor and closes out *before* any new round opens.
 | Engine day (hard) | `cost.dailyBudgetUsd` | freeze all dispatch + drain + escalate | after drain window |
 | Engine process (hard) | `cost.maxWallClockSec` (default **24 h**, #431: a per-process attention alarm — one clock per process life, fresh on every restart) | same freeze+drain | after drain window |
 | Human (hard) | `data/KILL_SWITCH` | freeze + drain + hard kill, exit 1 | after drain window |
+| Human (signal) | SIGTERM / SIGINT (#380) | the same freeze + drain, exit 0 once drained; a second signal exits at once with 128+signum | after drain window |
 
 Soft tiers preserve work (hard-killing a worker re-burns the same tokens on
 requeue, forever); hard tiers exist so the ceiling is actually a ceiling.
@@ -157,7 +185,7 @@ one job:
 | **Standby** (#125) | provably nothing to do; parked | `standby-wait` events (attempt n, waitSec) newer than any `dispatched`; open round: none | "Standby — nothing Ready; probing every X min (backoff n)". **Not** an error state |
 | **Paused** | human froze dispatch; in-flight work continues | `data/PAUSE` exists | "Paused by operator — in-flight lanes finishing; remove data/PAUSE to resume" |
 | **Ceiling-frozen** | hard tier breached; engine ticks but dispatches nothing | per-reason `ceiling-breach-entered` events (#431) + the `ceiling_breach` row's current reasons; spend ≥ `dailyBudgetUsd`, or process age ≥ `maxWallClockSec` (24 h per process life — a restart starts a fresh clock, so an overnight "hang" here means the process genuinely ran a full day) | "Frozen: daily budget — resumes at midnight" / "wall-clock attention alarm — restart renews". Rust-red, needs a person |
-| **Draining to kill** | KILL_SWITCH tripped; handoff window running | `data/KILL_SWITCH` exists; workers transitioning to handoff | countdown against `drainWindowSec`; "will exit 1" |
+| **Draining to kill** | KILL_SWITCH tripped, or a stop signal received (#380); handoff window running | `data/KILL_SWITCH` exists (sentinel path), else the `ceiling_breach` row reads `stop-signal`; workers transitioning to handoff. No sentinel is ever written for a signal — the request itself dies with the process, and the breach row lingers until the next run's first healthy tick clears it, so pair it with a live process before calling it "draining" | countdown against `drainWindowSec`; "will exit 1" (sentinel) / "stopping — will exit 0 once drained" (signal) |
 | **Winding down** | stop condition hit; finishing the round | `round-stop`/stop-condition events; dispatch skipped with reason | "Stop condition met (N issues merged) — finishing in-flight work" |
 | **Escalated dry** | board empty because everything needs a human | Ready empty + `needs-human`-labeled issues / `drive-needs-human`, `plan-review-escalated` events | pin the escalation list; "the loop is waiting on YOU, not broken" |
 | **Stalled PR** | lane parked in `driving` on a PR reporting no CI | `driving` lane age ≫ normal; (GitHub: PR mergeable=CONFLICTING builds **no merge ref → zero check-suites** — looks like CI never ran). Since #270 the engine senses CONFLICTING each tick and — in conductor-merge mode with `prFixCap > 0` and no hold — routes it into the conflict fix path, so this state self-heals; `prFixCap: 0` escalates instead (see Escalated), and `produce-pr-and-stop` reports without acting (stays `driving` by design). Persistence in the self-healing config means the fix lane itself is stuck | "PR #N conflicted — in the conflict fix path (round n/cap)", or the applicable held, escalation, or report-only state when the config routes there |

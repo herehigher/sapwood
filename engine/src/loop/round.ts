@@ -52,6 +52,7 @@ import {
 } from "./idle-churn.js";
 import { firstWorkSignal } from "./probe-signals.js";
 import { buildRoundArtifact, persistRoundArtifact, type RoundArtifact } from "./round-artifact.js";
+import { installStopSignal, type RegisterSignals } from "./stop-signal.js";
 import { startProgressWatchdog, systemWatchdogTimer } from "./watchdog.js";
 
 export type { RoundPhase, RoundRow } from "../state/state.js";
@@ -280,7 +281,13 @@ export interface RoundDeps {
   /** Injected sleep so tests can drive the loop without real wall-clock waits (same contract
    *  as driver.ts's DriverDeps.sleep). */
   sleep?: (ms: number) => Promise<void>;
-  registerSignals?: (requestStop: () => void) => () => void;
+  /** Same seam (and same two-stage semantics) as DriverDeps.registerSignals — calling
+   *  `requestStop` twice models a second signal, i.e. the immediate hard exit (#380). */
+  registerSignals?: RegisterSignals;
+  /** #380: the second-signal hard exit, called with the POSIX 128+signum code for whichever
+   *  signal fired (stop-signal.ts's hardExitCodeFor). Default `process.exit`; tests inject a
+   *  spy. */
+  hardExit?: (code: number) => void;
   onTick?: (result: TickResult) => void;
   log?: (message: string) => void;
   /** #395: the liveness watchdog's exit hook — same contract as driver.ts's
@@ -395,16 +402,6 @@ export interface RoundsResult {
    *  `runRounds` itself never returns (the nonzero exit is the operative signal). */
   stoppedBy: "signal" | "stop-condition" | "kill-switch";
   stopCondition?: StopConditionHit;
-}
-
-function defaultRegisterSignals(requestStop: () => void): () => void {
-  const handler = (): void => requestStop();
-  process.once("SIGINT", handler);
-  process.once("SIGTERM", handler);
-  return () => {
-    process.removeListener("SIGINT", handler);
-    process.removeListener("SIGTERM", handler);
-  };
 }
 
 /** Wraps an IForge so getReadyIssues() only returns issues in the configured round milestone
@@ -947,16 +944,29 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   const forge: IForge = cfg.round.milestone ? new RoundScopedForge(deps.forge, cfg.round.milestone) : deps.forge;
   const peripherals = deps.peripherals ?? {};
 
-  let signalled = false;
   let wakeFromSleep: (() => void) | null = null;
-  const unregister = (deps.registerSignals ?? defaultRegisterSignals)(() => {
-    signalled = true;
-    wakeFromSleep?.();
+  // #380 (F5): the same two-stage stop as driver.ts — first signal requests the KILL_SWITCH
+  // drain path (threaded into every tick() below as TickDeps.stopRequested: dispatch frozen,
+  // live lanes asked to hand off, hard kill past cfg.cost.drainWindowSec), second signal
+  // hard-exits without draining. See stop-signal.ts.
+  const stopSignal = installStopSignal({
+    ...(deps.registerSignals !== undefined ? { registerSignals: deps.registerSignals } : {}),
+    ...(deps.hardExit !== undefined ? { hardExit: deps.hardExit } : {}),
+    ...(deps.log !== undefined ? { log: deps.log } : {}),
+    onStop: () => wakeFromSleep?.(),
   });
+  const signalledNow = (): boolean => stopSignal.requested();
+  // #380 x #381 (F6): this loop needs NO drain-pacing flag of its own — the one wait that runs
+  // past the signal (the executing phase's drain loop) uses `drainWait` below, which is
+  // deliberately not signal-abortable; every interTickWait caller here stops looping the moment
+  // the signal flips. driver.ts, which has no such split, carries the flag instead.
+  /** #380: no LIVE worker process left to drain (running + fixing; a `driving` lane has no
+   *  process to hand off — see driver.ts's identical predicate for the full rationale). */
+  const liveLanesDrained = (): boolean => deps.state.runningWorkers().length === 0 && deps.state.fixingWorkers().length === 0;
   // #395: the liveness watchdog — an INDEPENDENT background timer for this call's whole
   // lifetime (every round-phase: aligning/architecting/plan_review/executing/harvesting/retro,
   // not just tick()'s own dispatch/reclaim/drive), stopped in this function's `finally`
-  // alongside `unregister()`. Same contract as driver.ts's runDriver — see watchdog.ts's own
+  // alongside `stopSignal.dispose()`. Same contract as driver.ts's runDriver — see watchdog.ts's own
   // doc for why this is progress-based, never raced against any single tick() call.
   const watchdog = startProgressWatchdog({
     timer: systemWatchdogTimer,
@@ -989,7 +999,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           finish();
         };
       }
-      if (signalled) wakeFromSleep?.();
+      if (signalledNow()) wakeFromSleep?.();
     });
   /** #381 (F6): the DRAIN path's wait — the same cadence as interTickWait above, deliberately
    *  NOT signal-abortable. Every OTHER caller of interTickWait stops looping the moment
@@ -1119,7 +1129,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  executes, both names are long past their TDZ. */
   const waitForDispatchClear = async (): Promise<void> => {
     for (;;) {
-      if (signalled || deps.state.isKillSwitchActive()) return;
+      if (signalledNow() || deps.state.isKillSwitchActive()) return;
       const nowDate = now();
       // #431 (F29): elapsed measures THIS process's life (the in-memory anchor above), so this
       // wait loop can no longer extend — or inherit — a wall-clock budget across restarts, and
@@ -1224,7 +1234,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       await checkFinalMilestone();
       if (finalStopHit) return;
 
-      if (signalled) return;
+      if (signalledNow()) return;
       await interTickWait(deps.tickIntervalSec * 1000);
       if (deps.state.isKillSwitchActive()) return;
       // #395 (gate② round 3): a per-iteration heartbeat — this loop's own probe cadence
@@ -1385,6 +1395,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     ...(deps.mergeGate !== undefined ? { mergeGate: deps.mergeGate } : {}),
     ...(deps.engineAgentDriveDeps !== undefined ? { engineAgentDriveDeps: deps.engineAgentDriveDeps } : {}),
     now: deps.now,
+    // #380 (F5): every tick this loop makes takes the KILL_SWITCH drain path once a stop signal
+    // has been requested — a thunk, read at tick()'s own gate (see TickDeps.stopRequested).
+    stopRequested: signalledNow,
     ...(deps.log !== undefined ? { log: deps.log } : {}),
     ...(over.forceDispatchPause !== undefined ? { forceDispatchPause: over.forceDispatchPause } : {}),
     ...(over.roundSpendUsd !== undefined ? { roundSpendUsd: over.roundSpendUsd } : {}),
@@ -1563,6 +1576,13 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         emitRoundStop(round, stopHit);
         return false;
       }
+      // #380 (F5): a requested stop freezes new waves too — tick()'s own gate has already
+      // decided that, so this only stops the loop paying a countOpenIssuesInMilestone
+      // round-trip per drain tick to re-derive it. Deliberately BELOW the quota check above,
+      // not above it: the round-dispatch-cap hit is a durable fact about the round (the quota
+      // really is spent) that the ledger records identically drain or no drain — skipping it
+      // would silently drop `round-stop` bookkeeping the moment an operator hits Ctrl-C.
+      if (signalledNow()) return false;
       if (cfg.round.milestone) {
         try {
           const openLeft = await deps.forge.countOpenIssuesInMilestone(cfg.round.milestone);
@@ -1629,8 +1649,18 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // in-flight work) — only opening a NEW round afterward is withheld. Which is exactly why the
     // wait here is drainWait, not interTickWait (#381/F6): a loop that keeps ticking past the
     // signal must keep PACING past it too — see drainWait's own doc.
+    //
+    /** #380 (F5): this loop's exit. Ordinarily "nothing in flight" — but once a stop signal has
+     *  been requested every tick is the KILL_SWITCH drain path, which freezes DRIVE and RESUME
+     *  as well as DISPATCH: a `driving` lane can no longer progress and a `handoff` lane can no
+     *  longer be resumed, so waiting on either (as `activeWorkers()`/`recoveryBeatPending` do)
+     *  would wedge shutdown behind work this loop has itself frozen. What the drain still owes
+     *  is the LIVE processes — running/fixing lanes — and those it is actively draining, hard
+     *  kill included past cfg.cost.drainWindowSec. */
+    const drainedEnoughToExit = (): boolean =>
+      signalledNow() ? liveLanesDrained() : deps.state.activeWorkers().length === 0 && !recoveryBeatPending;
     for (;;) {
-      if (deps.state.activeWorkers().length === 0 && !recoveryBeatPending) break;
+      if (drainedEnoughToExit()) break;
       await drainWait(deps.tickIntervalSec * 1000);
       const attempt = await tryDispatchWave();
       const remaining = Math.max(0, cfg.lanes.roundDispatchCap - dispatchedThisRound());
@@ -1655,7 +1685,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           tickResult.reclaimed.some((r) => r.kind === "handoff") || tickResult.fixingReclaimed.some((r) => r.kind === "handoff");
       }
       recordBudgetStop();
-      if (deps.state.activeWorkers().length === 0 && !recoveryBeatPending) break;
+      if (drainedEnoughToExit()) break;
     }
     // stopHit has already been externalized (emitRoundStop) — the caller only needs the
     // in-flight count for the idle throttle.
@@ -1664,7 +1694,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
   try {
     for (;;) {
-      if (signalled) {
+      if (signalledNow()) {
         return finalStopHit
           ? { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "stop-condition", stopCondition: finalStopHit }
           : { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "signal" };
@@ -1704,7 +1734,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         // round 1 always opens unconditionally, matching the pre-existing #168 contract).
         if (roundsClosed > 0) {
           await waitForDispatchClear();
-          if (signalled) {
+          if (signalledNow()) {
             return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "signal" };
           }
           // #374 review (Codex sol-high verify-pass finding 2, P2): UNCONDITIONALLY refresh the
@@ -1759,7 +1789,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
             // re-checking the sentinel between slices (one standby-wait event per backoff step
             // above, NOT per slice — the schedule and total wait are unchanged).
             let remainingSec = waitSec;
-            while (remainingSec > 0 && !signalled && !deps.state.isKillSwitchActive()) {
+            while (remainingSec > 0 && !signalledNow() && !deps.state.isKillSwitchActive()) {
               const sliceSec = Math.min(remainingSec, deps.tickIntervalSec);
               await interTickWait(sliceSec * 1000);
               remainingSec -= sliceSec;
@@ -1776,7 +1806,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
               loopHeartbeatGate.tick("standby-heartbeat", { attempt: standbyAttempts, remainingSec });
             }
             if (deps.state.isKillSwitchActive()) break; // let the round open & block normally
-            if (signalled) break;
+            if (signalledNow()) break;
             // Codex P2 (PR #150): re-check the FINAL stop condition on every standby wake —
             // checkFinalMilestone only ran once, before this block, so a stop.onMilestoneComplete
             // milestone completed EXTERNALLY while the board is otherwise idle (exactly the
@@ -1789,7 +1819,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           }
           // finalStopHit can't be set here (both checks above already returned if it were) —
           // a signal breaking the wait is always a plain "signal" stop, unlike the loop-top check.
-          if (signalled) {
+          if (signalledNow()) {
             return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "signal" };
           }
           if (standbyAttempts > 0) {
@@ -1812,7 +1842,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           // blocks at its first peripheral, the standby loop's own documented kill-switch
           // contract — unchanged).
           await waitForDispatchClear();
-          if (signalled) {
+          if (signalledNow()) {
             return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "signal" };
           }
           // Same unconditional final-stop refresh as the pre-standby gate (see its comment):
@@ -2094,13 +2124,13 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // loop uses: a SIGINT during this wait resolves it immediately (never delays shutdown —
       // the loop top's `signalled` check runs right after). A round that dispatched work is NOT
       // additionally throttled: its drain loop already paced it on the tick cadence.
-      if (workersThisRound === 0 && !signalled) {
+      if (workersThisRound === 0 && !signalledNow()) {
         await interTickWait(deps.tickIntervalSec * 1000);
       }
       // Loop back to the top: re-check signal / final-stop before opening the NEXT round.
     }
   } finally {
-    unregister();
+    stopSignal.dispose();
     watchdog.stop();
   }
 }
