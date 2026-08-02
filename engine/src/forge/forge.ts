@@ -660,8 +660,39 @@ function isExactCompareRange(status: unknown): boolean {
   return status === "ahead" || status === "identical";
 }
 
+/** #438: the two channels GithubForge announces a hit paging ceiling on. Structural (not an
+ *  import of State) so the forge seam keeps its one-way dependency on config only. An engine
+ *  session passes both; a stateless CLI path (`sapwood --dry-run`) passes neither and degrades
+ *  to a stderr line, which is all that surface has. */
+export interface ForgeDeps {
+  log?: (message: string) => void;
+  state?: { appendEvent(kind: string, payload: unknown): void };
+}
+
 export class GithubForge implements IForge {
-  constructor(private readonly cfg: SapwoodConfig) {}
+  constructor(
+    private readonly cfg: SapwoodConfig,
+    private readonly deps: ForgeDeps = {},
+  ) {}
+
+  /** #438: a paging loop stopped at its safety ceiling, so the read it returned is INCOMPLETE —
+   *  and both call sites gate safety-relevant behaviour on it (gate②'s unresolved-finding count;
+   *  dispatch eligibility off the board). The ceiling itself is unchanged; what was missing was
+   *  any way to know it fired. Announced on the durable ledger (what `sapwood status` / the event
+   *  log read) AND the operator log, because the two consumers differ in whether state exists.
+   *  ponytail: no dedup — a board that stays over the ceiling re-announces on every read. That is
+   *  the intent: the condition is ongoing, not an edge, and going quiet is exactly the failure
+   *  #438 fixes. Never load-bearing: an append failure is logged, never propagated into a read
+   *  whose contract this issue explicitly does not change. */
+  private announcePageCeiling(message: string, payload: Record<string, unknown>): void {
+    const log = this.deps.log ?? console.error;
+    log(`[sapwood:forge] page ceiling hit — ${message}; the read below is PARTIAL`);
+    try {
+      this.deps.state?.appendEvent("forge-page-ceiling", payload);
+    } catch (e) {
+      log(`[sapwood:forge] page-ceiling event append failed (non-fatal): ${String(e)}`);
+    }
+  }
 
   /** Run `gh` via the shared (execFile, no-shell) helper. Returns stdout. #395: every call is
    *  bounded by cfg.liveness.forgeCallTimeoutMs — a dead socket/hung upstream must never wedge
@@ -715,6 +746,19 @@ export class GithubForge implements IForge {
     // page ceiling hit; return what we have rather than loop unbounded. #415 review: mark it
     // truncated so listIssuesAbsentFromBoard (the one consumer for which a partial view can
     // produce a FALSE "absent" report) can refuse to report instead of risking a wrong answer.
+    // #438: the OTHER three consumers (getReadyIssues, listUnplacedIssues, readStartupReconcileData)
+    // legitimately proceed on the partial view — so the truncation is announced here, once per
+    // read, rather than left to a flag only one caller ever looks at.
+    this.announcePageCeiling(
+      `project board ${this.cfg.board.owner}/#${this.cfg.board.projectNumber} items stopped at 50 pages with ${merged!.items.length} items read — Ready issues past it are invisible to dispatch`,
+      {
+        source: "project-items",
+        owner: this.cfg.board.owner,
+        projectNumber: this.cfg.board.projectNumber,
+        pages: 50,
+        items: merged!.items.length,
+      },
+    );
     return { ...merged!, truncated: true };
   }
 
@@ -1080,21 +1124,30 @@ export class GithubForge implements IForge {
     ]);
     // #378: ONE paged read now yields both gate②'s unresolved total and the per-thread spans
     // its adjudication filter needs — same query, same pass, no extra round trip.
-    const { unresolved: unresolvedThreads, threads } = await collectReviewThreads((after) =>
-      this.gh([
-        "api",
-        "graphql",
-        "-f",
-        `query=${REVIEW_THREADS_QUERY}`,
-        "-f",
-        `owner=${this.cfg.board.owner}`,
-        "-f",
-        `repo=${this.repo()}`,
-        "-F",
-        `number=${pr}`,
-        // Same -F null / -f cursor split as fetchProject: an opaque cursor must go raw.
-        ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
-      ]),
+    const { unresolved: unresolvedThreads, threads } = await collectReviewThreads(
+      (after) =>
+        this.gh([
+          "api",
+          "graphql",
+          "-f",
+          `query=${REVIEW_THREADS_QUERY}`,
+          "-f",
+          `owner=${this.cfg.board.owner}`,
+          "-f",
+          `repo=${this.repo()}`,
+          "-F",
+          `number=${pr}`,
+          // Same -F null / -f cursor split as fetchProject: an opaque cursor must go raw.
+          ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
+        ]),
+      // #438: gate②'s unresolved count comes from this read. A ceiling hit under-counts findings,
+      // which fails OPEN (a merge gate seeing fewer objections than exist) — announce it here,
+      // where the PR number is in scope.
+      (partial) =>
+        this.announcePageCeiling(
+          `PR #${pr} review threads stopped at 50 pages with ${partial.unresolved} unresolved of ${partial.threads} threads read — gate② is deciding on a PARTIAL finding count`,
+          { source: "review-threads", pr, pages: 50, ...partial },
+        ),
     );
     return assemblePRReviewData(viewJson, reactionsJson, unresolvedThreads, commentsJson, threads);
   }
@@ -2800,6 +2853,11 @@ export function parseReviewThreadsPage(json: string): {
  */
 export async function collectReviewThreads(
   fetchPage: (after: string | null) => Promise<string>,
+  // #438: fired exactly once, and only when the page ceiling below actually stopped the loop —
+  // an additive optional param because this function only ever sees a `fetchPage` closure and so
+  // has no PR context of its own to name. The one production caller (getPRReviewData) does, and
+  // announces from there. Existing callers pass nothing and are unaffected.
+  onPageCeiling?: (partial: { unresolved: number; threads: number }) => void,
 ): Promise<{ unresolved: number; threads: ReviewThreadSpan[] }> {
   let unresolved = 0;
   const threads: ReviewThreadSpan[] = [];
@@ -2812,7 +2870,10 @@ export async function collectReviewThreads(
     if (!p.hasNextPage || !p.endCursor) return { unresolved, threads };
     after = p.endCursor;
   }
-  return { unresolved, threads }; // page ceiling hit; return what we counted rather than loop unbounded
+  // page ceiling hit; return what we counted rather than loop unbounded — but say so first, since
+  // an under-count here reads to gate② as "fewer unresolved findings", i.e. fails OPEN.
+  onPageCeiling?.({ unresolved, threads: threads.length });
+  return { unresolved, threads };
 }
 
 /** The unresolved-count-only view of collectReviewThreads — gate②'s original (pre-#378) read. */
