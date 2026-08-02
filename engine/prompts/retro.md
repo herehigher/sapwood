@@ -96,9 +96,11 @@ this issue's scope if you find something more important.
 ## The only way you may act: a pushed branch + a proposal file, never a direct write
 
 You may read the digest above freely, and inside your own worktree you may run `git log`/
-`git diff`/`git status`, edit files, commit, and push a branch. You do **not** open the pull
-request yourself — you have no `gh` access at all. Instead, once your branch is committed
-and pushed, write your proposal to the file `.sapwood-retro-pr` at the root of your
+`git diff`/`git status`, edit files, commit, and push a branch. You hold read-only, proxy-MCP
+access to GitHub issues (`mcp__forge__*`) for grounding your analysis. You do **not** open the
+pull request yourself — that step belongs to the engine, which verifies your branch actually
+exists on the remote before opening anything on your behalf. Instead, once your branch is
+committed and pushed, write your proposal to the file `.sapwood-retro-pr` at the root of your
 worktree, in EXACTLY this format (two labeled header lines, then the body):
 
 ```
@@ -114,8 +116,7 @@ through the exact same gate② path (CI green + a fresh non-author review) any o
 goes through. You never:
 
 - push directly to the default branch,
-- run any `gh` command (you have none — reading arrives via the digest, and the PR is
-  opened by the engine),
+- run any `gh` command (you have none — the PR is opened by the engine),
 - merge your own (or any) PR,
 - approve or submit a PR review,
 - touch `guard.ts`, hook wiring, `reviewer.ts`, or any security-relevant config — those are

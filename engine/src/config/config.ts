@@ -669,14 +669,13 @@ const Roles = z
       // #215: hard bound on the engine-assembled {{backlog.digest}} injected into align mode.
       // capDigest marks every cut; the floor leaves room for its marker and for the explicit
       // zero/read-failure notes, which must never collapse into an indistinguishable blank.
-      // #212: also reused (unmodified) as the pool-selection candidate digest's cap. Pre-#533
-      // that digest was naturally far smaller (title-only lines, bounded by the pool cap — a
+      // #212: also reused (unmodified) as the pool-selection candidate digest's cap. With a
+      // title-only line that digest was naturally far smaller (bounded by the pool cap — a
       // handful of issues), so this shared knob was a safety valve there too, not a dedicated
-      // budget most deployments tune. #533 (PM ruling 2026-08-02) changed that: each pool
-      // candidate now carries its FULL body, giving this digest the same size profile as
-      // `roles.architect.poolDigestMaxChars` below — a REAL budget on that path now, not a
-      // knob most deployments can ignore (see `docs/configuration.md`'s row for the
-      // consequence when it bites).
+      // budget most deployments tune. Since each pool candidate now carries its FULL body, this
+      // digest has the same size profile as `roles.architect.poolDigestMaxChars` below — a REAL
+      // budget on that path now, not a knob most deployments can ignore (see
+      // `docs/configuration.md`'s row for the consequence when it bites).
       backlogDigestMaxChars: z.number().int().min(200).default(20_000),
       // #127: false -> round-defaults.ts omits the aligning stub; the phase no-ops via
       // round.ts's existing noopPeripheralStub default (see roles.planReviewer.enabled above
@@ -686,7 +685,7 @@ const Roles = z
       enabled: z.boolean().default(true),
       // #233: default `false` — the pool-selection SESSION is an opt-in experiment, decoupled
       // from `enabled` above (which still only gates align/triage). Controlled tiered testing
-      // — run against the THEN title-only session, before #533 gave it full candidate bodies —
+      // — run against the THEN title-only session, before it was given full candidate bodies —
       // found the session selects EVERY candidate at every model tier: it had no evidentiary
       // basis (a bare title/number digest) to narrow the reservoir, so paying for a session
       // every round just reproduced the deterministic fallback it would otherwise degrade to.
@@ -696,15 +695,14 @@ const Roles = z
       // to contaminated test context, not a real judgment the session made from candidate
       // titles alone. `true` restores the #212 session path unchanged (validation, retry-once,
       // degrade-open to the full candidate set, the durable `pool-selected` event, label
-      // reconcile) for deployments that want to keep experimenting with it. #533 (PM ruling
-      // 2026-08-02) later substituted each candidate's FULL body into that opt-in session's
-      // digest — the finding above was never re-run against that body-bearing input, so it
-      // remains the reason the default stays `false`, not a claim about what today's opt-in
-      // session is actually shown. Benchmark note: when evaluating the experimental selector,
-      // isolate worktree/code reads for that run — production sessions may read the repo, but
-      // that is an uncontrolled signal for this specific experiment (the pre-#533 session's
-      // intended input was titles/numbers alone; post-#533 it also includes each candidate's
-      // full body, deliberately).
+      // reconcile) for deployments that want to keep experimenting with it. Each candidate's
+      // FULL body was later substituted into that opt-in session's digest — the finding above
+      // was never re-run against that body-bearing input, so it remains the reason the default
+      // stays `false`, not a claim about what today's opt-in session is actually shown.
+      // Benchmark note: when evaluating the experimental selector, isolate worktree/code reads
+      // for that run — production sessions may read the repo, but that is an uncontrolled
+      // signal for this specific experiment (this session's intended input is each candidate's
+      // title/number/labels/body, not a repo read).
       poolSelection: z.boolean().default(false),
     })
       .strict()

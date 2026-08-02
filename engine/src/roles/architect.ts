@@ -306,12 +306,11 @@ export function loadArchitectureChapter(path: string): string {
  *  the same information density the plan-reviewer prompt gives a single issue, repeated per
  *  candidate here since the architect judges the whole batch at once.
  *
- *  #533 (PM ruling 2026-08-02): exported so `align.ts`'s `buildPoolCandidateDigest` can reuse
- *  this EXACT shape for the po-pool digest — the architect phase already substitutes every
- *  round-pool member's full body one phase later at this exact rendering, so po-pool substitutes
- *  the same shape instead of holding its own `issue_details` grant (the ruling's "engine
- *  substitution strictly dominates a conditional per-candidate lookup" finding). One renderer,
- *  no second one invented for the same information. */
+ *  Exported so `align.ts`'s `buildPoolCandidateDigest` can reuse this EXACT shape for the
+ *  po-pool digest — the architect phase already substitutes every round-pool member's full
+ *  body one phase later at this exact rendering, so po-pool's own digest substitutes the same
+ *  shape instead of a title-only line. One renderer, no second one invented for the same
+ *  information. */
 export function formatCandidate(issue: Issue): string {
   const labels = issue.labels.length > 0 ? issue.labels.join(", ") : "(none)";
   return `### #${issue.number} — ${issue.title}\nLabels: ${labels}\n\n${issue.body ?? ""}`;

@@ -2752,17 +2752,17 @@ test("runPoolSelection: roles.po.poolSelection=true — a fake runner's selectio
   assert.doesNotMatch(call.prompt, /#4 —/, "the candidate digest itself is already cap-bounded — #4 was never even shown");
 });
 
-// #533 (PM ruling 2026-08-02): po-pool's ISSUE_TOOLS grant is removed; buildPoolCandidateDigest
-// now substitutes each candidate's FULL formatCandidate-shaped body (number, title, labels,
-// body) instead of a title-only line, under the SAME EXISTING cap (roles.po.backlogDigestMaxChars
-// — no new cap, no new renderer). These two tests are the "reaches the rendered prompt, not just
-// the builder" + "the cap behaves" evidence the issue calls for, verified at the unit level only:
-// they assert against `runner.calls[0].prompt`, the exact string this engine process built and
-// would hand to the `claude` CLI's argv. A separate live-session check was attempted to confirm
-// the ACTUAL claude CLI stream-json transcript echoes that prompt verbatim too — that check came
-// back NEGATIVE (the stream-json transcript does not echo the initial user-turn prompt at all),
-// so no such confirmation exists and none is claimed here.
-test("runPoolSelection #533: the po-pool session's ACTUAL rendered prompt (not merely the digest builder's return value) carries each candidate's FULL body, in formatCandidate's number/title/labels/body shape — proof the substitution reaches the session, not just a local string", async () => {
+// buildPoolCandidateDigest substitutes each candidate's FULL formatCandidate-shaped body
+// (number, title, labels, body) instead of a title-only line, under the SAME EXISTING cap
+// (roles.po.backlogDigestMaxChars — no new cap, no new renderer) — independent of po-pool's own
+// forge-tool grant (unchanged, still ISSUE_TOOLS). These two tests are the "reaches the rendered
+// prompt, not just the builder" + "the cap behaves" evidence for that substitution, verified at
+// the unit level only: they assert against `runner.calls[0].prompt`, the exact string this
+// engine process built and would hand to the `claude` CLI's argv. A separate live-session check
+// was attempted to confirm the ACTUAL claude CLI stream-json transcript echoes that prompt
+// verbatim too — that check came back NEGATIVE (the stream-json transcript does not echo the
+// initial user-turn prompt at all), so no such confirmation exists and none is claimed here.
+test("runPoolSelection: the po-pool session's ACTUAL rendered prompt (not merely the digest builder's return value) carries each candidate's FULL body, in formatCandidate's number/title/labels/body shape — proof the substitution reaches the session, not just a local string", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2
   const distinctiveMarker = "ZQWERTY-ONLY-IN-THE-BODY-NEVER-THE-TITLE-77219";
@@ -2787,7 +2787,7 @@ test("runPoolSelection #533: the po-pool session's ACTUAL rendered prompt (not m
   assert.match(prompt, /### #2 — issue 2\nLabels: sapwood:prio:3\n\nFull body for #2, unrelated\./);
 });
 
-test("runPoolSelection #533: the SAME existing cap (roles.po.backlogDigestMaxChars) still behaves once candidates carry full bodies — a candidate past the cap is OMITTED WHOLE (never a partially-sliced body), and the omission is counted in the truncation marker", async () => {
+test("runPoolSelection: the SAME existing cap (roles.po.backlogDigestMaxChars) still behaves once candidates carry full bodies — a candidate past the cap is OMITTED WHOLE (never a partially-sliced body), and the omission is counted in the truncation marker", async () => {
   const forge = new FakeForge();
   // A tiny cap so two ~200-char bodies cannot both fit — forces real truncation behavior to
   // exercise, rather than trusting it never triggers with realistic-sized bodies.
@@ -2820,15 +2820,17 @@ test("runPoolSelection #533: the SAME existing cap (roles.po.backlogDigestMaxCha
   );
 });
 
-// #557 FIX 1 (PM ruling 2026-08-02): the test above proves OMISSION (a candidate past the char
-// cap never reaches the prompt) but never attempts to SELECT the omitted number — so it could
-// not have caught the bug the PM found: `runPoolSelection` validated against EVERY candidate
-// (`candidates.map(c => c.number)`), not the digest's own rendered subset, so a session naming
-// an omitted-but-real candidate PASSED validation. This test closes that gap: same truncation
-// setup as above, but the scripted session's output NAMES the omitted candidate (#2). It must
-// be rejected exactly like a number that was never a candidate at all — retried once, then
-// degraded OPEN to the full deterministic set (never silently accepted).
-test("runPoolSelection #557 FIX 1: selecting a candidate that packDigestRecords omitted under the cap is invalid — the session cannot select what it was never shown, even though #2 IS a real candidate", async () => {
+// The test above proves OMISSION (a candidate past the char cap never reaches the prompt) but
+// never attempts to SELECT the omitted number — so it could not have caught this bug:
+// `runPoolSelection` validated against EVERY candidate (`candidates.map(c => c.number)`), not
+// the digest's own rendered subset, so a session naming an omitted-but-real candidate PASSED
+// validation. This bug is latent on a title-only digest (a title-only line is short enough that
+// the cap essentially never bites), reachable once candidates carry full bodies — which is why
+// this fix ships together with the substitution above rather than separately. This test closes
+// that gap: same truncation setup as above, but the scripted session's output NAMES the omitted
+// candidate (#2). It must be rejected exactly like a number that was never a candidate at all —
+// retried once, then degraded OPEN to the full deterministic set (never silently accepted).
+test("runPoolSelection: selecting a candidate that packDigestRecords omitted under the cap is invalid — the session cannot select what it was never shown, even though #2 IS a real candidate", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({
     roles: { po: { poolSelection: true, backlogDigestMaxChars: 400 } },

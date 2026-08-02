@@ -185,7 +185,7 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
   // skipped — runPoolSelection still runs unconditionally. #233: runPoolSelection's OWN
   // behavior no longer depends on roles.po.enabled either — it depends on its own switch,
   // `roles.po.poolSelection` (default false): the pool-selection session is an opt-in
-  // experiment (controlled testing — against the then title-only session, before #533 gave it
+  // experiment (controlled testing — against the then title-only session, before it was given
   // each candidate's full body — found it selects every candidate at every tier, so the
   // deterministic engine-computed selection is the default MAIN path, not a fallback for
   // roles.po.enabled=false specifically). The rerun-not-resume marker check happens HERE (not
