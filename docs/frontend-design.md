@@ -236,7 +236,11 @@ existing issue-scoped clears below resolve the row), `gated-reentry-capped`,
 the lane failed — the preserved PR needs a manual drive),
 `ceiling-escalated`; plus two predicate kinds: `reclaim-failed` when
 `payload.next` is not an automatic continuation, and `reclaim-done` on its
-no-PR branch. (A lane whose PR keeps driving is not an open item; a clean
+no-PR branch — that condition is **code, not prose** (#404): the engine's
+`attentionProof(kind, payload)`
+(`engine/src/loop/escalation-reconcile.ts`) owns it, the reconciler and the
+label sweep both read it, and the strip's fold imports it rather than
+re-encoding the sentence above a third time. (A lane whose PR keeps driving is not an open item; a clean
 `reclaim-dead` requeue is not either — its human case arrives separately
 as `worktree-retained`.) The `stalled` / `disconnected` engine states add
 **entity-less** rows: the state word plus its §3 remedy direction, no
