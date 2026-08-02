@@ -52,7 +52,12 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #529 (gate② round 3, optional cleanup): even "no issue-API access at all" was still an
   // access CLAIM (WebFetch can reach api.github.com for a public repo too) — reworded to point
   // at the substituted context instead of asserting any "no X access" claim at all.
-  "po.md": "8d0e94e625da9984e5f5acddf4a98362d3e986307b872c0a2ede277768ea3332",
+  // #528: intentional edit — the digest now also carries the bounded RECENTLY CLOSED tail, so the
+  // prompt explains the `[recently closed — do not re-propose]` annotation and says the dedup
+  // check covers it. Same class of fix as #444 above, on the state axis instead of the milestone
+  // axis: the session could not see a fact that shipped and closed, so it re-proposed one (#525
+  // vs. #461, hours apart).
+  "po.md": "f22e6ceb4dbf4532c52de24b63994a1f60af4a1f9cab0be0ec830f4a7299725c",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —

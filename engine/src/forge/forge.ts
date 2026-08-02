@@ -16,6 +16,13 @@ import { createMissingLabels, type LabelSpec, labelsInclude } from "./labels.js"
 // instead of duplicating the literal 1000.
 export const OPEN_ISSUES_LIMIT = 1000;
 
+/** #528: the recently-closed dedup window, expressed as "the last N closed issues" rather than a
+ *  configured time window — no new config key for a backstop, and N is what the underlying `gh`
+ *  read bounds natively. 50 covers several dogfood rounds' worth of shipped facts at this repo's
+ *  cadence. ponytail: if a repo ever closes issues faster than the align cadence, raise this
+ *  literal (or make it a config key) — nothing else in the design changes. */
+export const RECENTLY_CLOSED_ISSUES_LIMIT = 50;
+
 /** #237 finding 2: appended to EVERY issue comment GithubForge.addIssueComment posts (see that
  *  method's own doc comment) — the single, unconditional "this engine wrote this" stamp,
  *  regardless of whatever call-site-specific marker (if any) the body already carries. dissent.ts
@@ -378,6 +385,14 @@ export interface IForge {
    *  was lost. Consumers apply any narrower milestone scope locally; reconciliation and title
    *  dedup deliberately operate on this full OPEN backlog. */
   listOpenIssues(): Promise<Issue[]>;
+  /** #528: the most recently updated CLOSED issues, capped at `RECENTLY_CLOSED_ISSUES_LIMIT`.
+   *  The sibling of listOpenIssues on the STATE axis: a shipped fact whose issue is closed was
+   *  invisible to both dedup layers (the align prompt's context and createIssueProposals'
+   *  mechanical marker/title checks), so it could be re-proposed indefinitely (the #525/#461
+   *  incident). Deliberately BOUNDED, not complete — hitting the cap is the normal case, so this
+   *  read never throws an incompleteness error the way listOpenIssues does; it is a backstop
+   *  whose absence degrades to the pre-#528 open-only surface, never a gate. */
+  listRecentlyClosedIssues(): Promise<Issue[]>;
   /** #89: OPEN issues in this repo that still lack a verification-plan section in their body —
    *  the PO/triage peripheral's candidate set. Broader than getIssuesNeedingPlanReview: every
    *  open issue regardless of board Status, not just the Ready lane, because triage runs
@@ -1245,6 +1260,45 @@ export class GithubForge implements IForge {
     if (issues.length === OPEN_ISSUES_LIMIT) {
       throw new Error(`listOpenIssues: backlog read is incomplete (limit ${OPEN_ISSUES_LIMIT})`);
     }
+    return issues.map((i) => ({
+      number: i.number,
+      title: i.title,
+      ...(i.body !== undefined ? { body: i.body } : {}),
+      labels: i.labels.map((label) => label.name),
+      ...(i.milestone ? { milestone: i.milestone.title } : {}),
+    }));
+  }
+
+  /** #528: see IForge.listRecentlyClosedIssues' doc. Same fields and mapping as listOpenIssues
+   *  above (so the same dedup code reads both), with two deliberate differences: `--state closed`
+   *  and a hard `--limit` that is the BOUND, not a truncation to detect — so no incompleteness
+   *  throw. `sort:updated-desc` (gh's own search qualifier) is what makes the bounded slice the
+   *  RECENT tail rather than the oldest N; GitHub's issue list has no closed-at sort, and an
+   *  issue's close is an update, so recently-updated is the available proxy for recently-closed.
+   *  It can drag in an old issue someone just commented on — a harmless extra dedup candidate,
+   *  the failure direction this read should favour. */
+  async listRecentlyClosedIssues(): Promise<Issue[]> {
+    const out = await this.gh([
+      "issue",
+      "list",
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--state",
+      "closed",
+      "--search",
+      "sort:updated-desc",
+      "--json",
+      "number,title,body,labels,milestone",
+      "--limit",
+      String(RECENTLY_CLOSED_ISSUES_LIMIT),
+    ]);
+    const issues = JSON.parse(out) as Array<{
+      number: number;
+      title: string;
+      body?: string;
+      labels: Array<{ name: string }>;
+      milestone: { title: string } | null;
+    }>;
     return issues.map((i) => ({
       number: i.number,
       title: i.title,

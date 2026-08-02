@@ -38,6 +38,12 @@ export interface IssueCreationBatchDeps {
   forge: Pick<IForge, "createIssue">;
   proposals: readonly IssueCreationProposal[];
   knownOpenIssues: Issue[];
+  /** #528: the bounded recently-CLOSED dedup surface (forge.listRecentlyClosedIssues). Joins
+   *  `knownOpenIssues` for both mechanical checks below, so a proposal that duplicates a shipped,
+   *  closed fact reconciles or skips instead of being filed again. Optional and never mutated:
+   *  omitted (or empty) is exactly the pre-#528 open-only behavior, and a created issue is pushed
+   *  onto `knownOpenIssues` alone — a fresh creation is open by construction. */
+  recentlyClosedIssues?: readonly Issue[];
   terminalIds: Set<string>;
   createdIssues: ReadonlyMap<string, number>;
   markerFor(id: string): string;
@@ -45,7 +51,9 @@ export interface IssueCreationBatchDeps {
   collisionPolicy?: "skip" | "reject";
   applyGovernance(result: IssueCreationResult): Promise<void>;
   onCreated(result: IssueCreationResult): void;
-  onSkipped(proposal: IssueCreationProposal, collision: Issue): void;
+  /** `collisionClosed` (#528): true iff the collision came from `recentlyClosedIssues` — so a
+   *  skip receipt can say WHICH surface matched. Always false on the pre-#528 open path. */
+  onSkipped(proposal: IssueCreationProposal, collision: Issue, collisionClosed: boolean): void;
 }
 
 export class ProposalTitleCollisionError extends Error {
@@ -61,7 +69,9 @@ export class ProposalTitleCollisionError extends Error {
  * #216/#310 shared per-issue create loop.
  *
  * A terminal receipt skips work. A lost receipt reconciles by the body marker. A normalized
- * title collision is skipped. Otherwise creation happens once, the marker becomes part of the
+ * title collision is skipped — #528: against the recently-CLOSED surface as well as the open one,
+ * since a shipped fact is a duplicate whether or not its issue is still open. Otherwise creation
+ * happens once, the marker becomes part of the
  * created body, governance completes, and only then may the caller write its terminal receipt.
  * Mutates knownOpenIssues so later siblings see earlier creations in the same batch.
  */
@@ -83,7 +93,11 @@ export async function createIssueProposals(deps: IssueCreationBatchDeps): Promis
 
     const marker = deps.markerFor(proposal.id);
     const normalizedTitle = deps.normalizeTitle(proposal.title);
-    const markerMatches = deps.knownOpenIssues.filter(
+    // #528: open first, then the bounded closed set — so an open match always wins and the open
+    // path's behavior (which issue is named, in what order) is unchanged. Rebuilt per proposal
+    // because knownOpenIssues grows as earlier siblings in this same batch get created.
+    const dedupSurface = [...deps.knownOpenIssues, ...(deps.recentlyClosedIssues ?? [])];
+    const markerMatches = dedupSurface.filter(
       (issue) => hasProposalMarkerTrailer(issue.body, marker) && deps.normalizeTitle(issue.title) === normalizedTitle,
     );
     if (markerMatches.length > 1) {
@@ -103,10 +117,10 @@ export async function createIssueProposals(deps: IssueCreationBatchDeps): Promis
       continue;
     }
 
-    const collision = deps.knownOpenIssues.find((issue) => deps.normalizeTitle(issue.title) === normalizedTitle);
+    const collision = dedupSurface.find((issue) => deps.normalizeTitle(issue.title) === normalizedTitle);
     if (collision) {
       if (deps.collisionPolicy === "reject") throw new ProposalTitleCollisionError(proposal, collision);
-      deps.onSkipped(proposal, collision);
+      deps.onSkipped(proposal, collision, !deps.knownOpenIssues.includes(collision));
       deps.terminalIds.add(proposal.id);
       continue;
     }

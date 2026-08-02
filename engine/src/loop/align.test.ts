@@ -28,6 +28,7 @@ import {
   type AlignDeps,
   alignMarker,
   buildBacklogDigest,
+  CLOSED_ANNOTATION,
   createAligningStub,
   defaultPoolPromptPath,
   defaultPoPromptPath,
@@ -199,6 +200,12 @@ class FakeForge extends UnstubbedForge implements IForge {
   }
   override async listOpenIssues(): Promise<Issue[]> {
     return this.backlogIssues;
+  }
+  // #528: the bounded recently-closed dedup surface. Empty by default, so every pre-#528 test in
+  // this file exercises the unchanged open-only path.
+  closedIssues: Issue[] = [];
+  override async listRecentlyClosedIssues(): Promise<Issue[]> {
+    return this.closedIssues;
   }
   override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     // #232: getIssueBody/updateIssueBody read/write `issueBodies`, a store independent of this
@@ -1137,6 +1144,74 @@ test("createAligningStub #216: normalized-title collision is skipped with a dura
   state.close();
 });
 
+test("createAligningStub #528: a normalized-title collision with a RECENTLY CLOSED issue is skipped, receipt naming it", async () => {
+  const forge = new FakeForge();
+  // The #525/#461 shape: the fact shipped and its issue closed, so the open-only surface was blind
+  // to it and the proposal could be filed again.
+  forge.closedIssues = [{ number: 461, title: "Reviewer path has no dispute channel", labels: [], body: "shipped" }];
+  const state = new State(":memory:");
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([{ title: "reviewer path has NO dispute channel!", body: PLAN_BODY }])),
+  ]);
+  await createAligningStub({ now: realClock, forge, state, cfg: mkCfg(), runner }).run({ roundId: 528, phase: "aligning", marker: null });
+  assert.equal(forge.createdIssues.length, 0, "a shipped, closed fact is never re-proposed");
+  const skipped = state.eventsAfterId(0, ["proposal-skipped"]);
+  assert.equal(skipped.length, 1);
+  assert.deepEqual(skipped[0]!.payload, {
+    round_id: 528,
+    proposalId: proposalId(528, 0, "reviewer path has NO dispute channel!"),
+    title: "reviewer path has NO dispute channel!",
+    reason: "normalized-title-collision",
+    existingIssue: 461,
+    existingIssueClosed: true,
+  });
+  state.close();
+});
+
+test("createAligningStub #528: the OPEN collision path is byte-identical — an open match wins, and its receipt carries no closed flag", async () => {
+  const forge = new FakeForge();
+  // Same normalized title present on BOTH surfaces: the open issue is the one named, and the
+  // receipt is exactly the pre-#528 payload (the regression half of the pair).
+  forge.backlogIssues = [{ number: 44, title: "Fix:  Payment   Retry!", labels: [], body: "existing" }];
+  forge.closedIssues = [{ number: 12, title: "fix payment retry", labels: [], body: "shipped" }];
+  const state = new State(":memory:");
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "FIX payment retry", body: PLAN_BODY }]))]);
+  await createAligningStub({ now: realClock, forge, state, cfg: mkCfg(), runner }).run({ roundId: 529, phase: "aligning", marker: null });
+  assert.equal(forge.createdIssues.length, 0);
+  const skipped = state.eventsAfterId(0, ["proposal-skipped"]);
+  assert.deepEqual(skipped[0]!.payload, {
+    round_id: 529,
+    proposalId: proposalId(529, 0, "FIX payment retry"),
+    title: "FIX payment retry",
+    reason: "normalized-title-collision",
+    existingIssue: 44,
+  });
+  state.close();
+});
+
+test("createAligningStub #528: a failing recently-closed read degrades OPEN — creation proceeds on the pre-#528 surface", async () => {
+  const forge = new FakeForge();
+  forge.listRecentlyClosedIssues = async () => {
+    throw new Error("closed read unavailable");
+  };
+  const state = new State(":memory:");
+  const logs: string[] = [];
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "A fresh gap", body: PLAN_BODY }]))]);
+  await createAligningStub({ now: realClock, forge, state, cfg: mkCfg(), runner, log: (line) => logs.push(line) }).run({
+    roundId: 530,
+    phase: "aligning",
+    marker: null,
+  });
+  // A backstop read failing must never suppress creation the way the (load-bearing) open-issue
+  // read does — the worst case is exactly today's blind spot, and it is logged rather than hidden.
+  assert.equal(forge.createdIssues.length, 1);
+  assert.ok(
+    logs.some((line) => /recently-closed dedup read failed/.test(line)),
+    "the degraded dedup surface is named in the log, never silent",
+  );
+  state.close();
+});
+
 test("createAligningStub #216: marker-null full-success rerun performs zero forge writes", async () => {
   const forge = new FakeForge();
   const state = new State(":memory:");
@@ -1947,6 +2022,16 @@ test("po.md #444: the digest is no longer claimed authoritative for open issues,
   assert.ok(/propose nothing/.test(template), "the existing 'if overlap is uncertain, propose nothing' rule stays");
 });
 
+test("po.md #528: the prompt explains the recently-closed half of the dedup surface", () => {
+  const template = loadRolePromptTemplate(undefined, defaultPoPromptPath());
+  // The annotation align.ts actually renders (CLOSED_ANNOTATION) must be the one the prompt
+  // names — a rendered marker the session was never told about is not dedup context.
+  // Whitespace-collapsed: the prose wraps, the rendered annotation does not.
+  const flattened = template.replace(/\s+/g, " ");
+  assert.ok(flattened.includes(CLOSED_ANNOTATION.trim()), "the prompt must name the closed annotation as align.ts renders it");
+  assert.ok(!/it holds only OPEN issues/.test(template), "#528: the digest is no longer open-only, so the claim that it is must be gone");
+});
+
 test("buildBacklogDigest: number-sorted titles + configured hold annotations are deterministic; a record too large to fit whole is OMITTED, never sliced (#231)", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({ roles: { po: { backlogDigestMaxChars: 200 } } });
@@ -2073,6 +2158,58 @@ test("buildBacklogDigest #444: the widened dedup surface still obeys packDigestR
   assert.deepEqual(digest.renderedIssueNumbers, [1]);
   assert.ok(!digest.text.includes("- #2"), "a record too large to fit whole is never partially rendered");
   assert.match(digest.text, /1 more issue\(s\) omitted/);
+});
+
+test("buildBacklogDigest #528: recently closed issues join the dedup surface, rendered distinctly and LAST", async () => {
+  const forge = new FakeForge();
+  forge.backlogIssues = [
+    { number: 430, title: "In-milestone work", labels: [], milestone: "v0.2.1" },
+    { number: 427, title: "Un-milestoned proposal", labels: [] },
+  ];
+  const closed: Issue[] = [
+    { number: 461, title: "Reviewer path has no dispute channel", labels: [], milestone: "v0.2.1" },
+    { number: 12, title: "Older shipped fact", labels: [] },
+  ];
+  const digest = await buildBacklogDigest(forge, mkCfg({ round: { milestone: "v0.2.1" } }), closed);
+  assert.equal(digest.ok, true);
+  assert.equal(digest.total, 4, "the closed set counts toward the digest's own bounded budget");
+  assert.equal(digest.truncated, false);
+  assert.equal(
+    digest.text,
+    "- #430 — In-milestone work\n" +
+      "- #427 — Un-milestoned proposal [no milestone — outside this round]\n" +
+      "- #12 — Older shipped fact [recently closed — do not re-propose]\n" +
+      "- #461 — Reviewer path has no dispute channel [recently closed — do not re-propose]",
+  );
+  // Closed issues are dedup context, never a concern target: the in-view bounds set stays the
+  // OPEN rendered subset, so #237's concern validation is unchanged.
+  assert.deepEqual(digest.renderedIssueNumbers, [430, 427]);
+});
+
+test("buildBacklogDigest #528: the closed tail is what a tight cap drops — counted, never silently cut", async () => {
+  const forge = new FakeForge();
+  forge.backlogIssues = [{ number: 1, title: "open work", labels: [] }];
+  const closed: Issue[] = [{ number: 2, title: "z".repeat(220), labels: [] }];
+  const digest = await buildBacklogDigest(forge, mkCfg({ roles: { po: { backlogDigestMaxChars: 200 } } }), closed);
+  assert.ok(digest.text.length <= 200);
+  assert.equal(digest.total, 2);
+  assert.equal(digest.rendered, 1);
+  assert.equal(digest.omitted, 1);
+  assert.equal(digest.truncated, true);
+  assert.ok(!digest.text.includes("- #2"), "an oversized closed record is omitted whole, never sliced");
+  assert.match(digest.text, /1 more issue\(s\) omitted/);
+  assert.deepEqual(digest.renderedIssueNumbers, [1]);
+});
+
+test("buildBacklogDigest #528: an empty backlog with recently closed issues still renders them (not the empty placeholder)", async () => {
+  const forge = new FakeForge();
+  const closed: Issue[] = [{ number: 12, title: "Shipped fact", labels: [] }];
+  const digest = await buildBacklogDigest(forge, mkCfg(), closed);
+  assert.equal(digest.ok, true);
+  assert.equal(digest.text, "- #12 — Shipped fact [recently closed — do not re-propose]");
+  assert.deepEqual(digest.renderedIssueNumbers, []);
+  // Zero on BOTH surfaces is still the pre-#528 placeholder.
+  assert.equal((await buildBacklogDigest(forge, mkCfg(), [])).text, "(no open issues yet)");
 });
 
 test("packDigestRecords: an absurdly tiny cap still never exceeds maxChars, even with zero rendered records", () => {

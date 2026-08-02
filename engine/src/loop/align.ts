@@ -187,6 +187,11 @@ function scopeAnnotation(issue: Issue, milestone: string | undefined): string {
   return issue.milestone === undefined ? " [no milestone — outside this round]" : ` [milestone: ${issue.milestone} — outside this round]`;
 }
 
+/** #528: how a recently-closed issue reads in the digest — deliberately NOT the milestone
+ *  annotation's vocabulary: a closed issue is not "outside this round", it is settled work that
+ *  must not be re-proposed at all. po.md explains the marker to the session. */
+export const CLOSED_ANNOTATION = " [recently closed — do not re-propose]";
+
 /** Engine-side PO context (#215): deterministic; milestone scope is applied here at the digest
  *  consumer.
  *  #231: a read failure is no longer swallowed into an indistinguishable placeholder string —
@@ -203,8 +208,21 @@ function scopeAnnotation(issue: Issue, milestone: string | undefined): string {
  *  the focus is what survives truncation) plus a per-record `scopeAnnotation` the prompt explains
  *  — never by hiding the rest. One packDigestRecords call over the whole list keeps the existing
  *  bounded-digest contract (single cap, exact counts, truncation marker) intact: no second
- *  budget, no second section, no new config key. */
-export async function buildBacklogDigest(forge: IForge, cfg: SapwoodConfig): Promise<BacklogDigestResult> {
+ *  budget, no second section, no new config key.
+ *
+ *  #528: `recentlyClosed` is the same widening on the STATE axis — a fact that shipped and was
+ *  closed is still a fact the session must not re-propose (#525 re-proposed #461 hours after it
+ *  shipped). Read by the CALLER (so one bounded read serves both this digest and the creation
+ *  loop's mechanical dedup, and so a failed backstop read degrades open there instead of turning
+ *  into an `ok: false` that suppresses creation). Rendered LAST — after the decomposition focus
+ *  and the open dedup context — so a tight cap drops closed records first, and annotated
+ *  distinctly (`CLOSED_ANNOTATION`). Same single packDigestRecords budget as #444: no second
+ *  section, no second cap. Default `[]` keeps every pre-#528 caller byte-identical. */
+export async function buildBacklogDigest(
+  forge: IForge,
+  cfg: SapwoodConfig,
+  recentlyClosed: readonly Issue[] = [],
+): Promise<BacklogDigestResult> {
   let issues: Issue[];
   try {
     const allIssues = await forge.listOpenIssues();
@@ -221,7 +239,7 @@ export async function buildBacklogDigest(forge: IForge, cfg: SapwoodConfig): Pro
       renderedIssueNumbers: [],
     };
   }
-  if (issues.length === 0) {
+  if (issues.length === 0 && recentlyClosed.length === 0) {
     return { text: NO_OPEN_ISSUES, ok: true, total: 0, rendered: 0, omitted: 0, truncated: false, renderedIssueNumbers: [] };
   }
   // #444: this round's milestone first (so the decomposition focus is what survives a truncated
@@ -230,16 +248,27 @@ export async function buildBacklogDigest(forge: IForge, cfg: SapwoodConfig): Pro
   const byNumber = (a: Issue, b: Issue): number => a.number - b.number;
   const inScope = (issue: Issue): boolean => cfg.round.milestone === undefined || issue.milestone === cfg.round.milestone;
   const ordered = [...issues.filter(inScope).sort(byNumber), ...issues.filter((issue) => !inScope(issue)).sort(byNumber)];
-  const lines = ordered.map((issue) => {
+  const openLines = ordered.map((issue) => {
     const holds = cfg.escalation.humanLabels.filter((label) => labelsInclude(issue.labels, label));
     const annotation = holds.length > 0 ? ` [hold: ${holds.join(", ")}]` : "";
     return `- #${issue.number} — ${issue.title}${scopeAnnotation(issue, cfg.round.milestone)}${annotation}`;
   });
-  const packed = packDigestRecords(lines, cfg.roles.po.backlogDigestMaxChars, NO_OPEN_ISSUES);
+  // #528: closed records carry neither the scope nor the hold annotation — both describe live
+  // routing state, meaningless for settled work. Number-ascending, same determinism rule.
+  const closedLines = [...recentlyClosed].sort(byNumber).map((issue) => `- #${issue.number} — ${issue.title}${CLOSED_ANNOTATION}`);
+  const packed = packDigestRecords([...openLines, ...closedLines], cfg.roles.po.backlogDigestMaxChars, NO_OPEN_ISSUES);
   // #237: packDigestRecords only ever drops a TRAILING run of whole records (its own doc
-  // comment) — so the first `rendered` entries of `ordered` (same order `lines` was built in)
+  // comment) — so the first `rendered` entries of `ordered` (same order the lines were built in)
   // are exactly what made it into `packed.text`.
-  return { ...packed, ok: true, renderedIssueNumbers: ordered.slice(0, packed.rendered).map((issue) => issue.number) };
+  // #528: the closed tail is deliberately NOT in this set. It bounds #237's concern validation
+  // ("was the session shown this issue?"), and a concern is a claim about LIVE work needing a
+  // decision — a settled, closed issue is dedup context only, so the concerns channel keeps
+  // exactly its pre-#528 bounds (closed lines sort last, so this is just the open prefix).
+  return {
+    ...packed,
+    ok: true,
+    renderedIssueNumbers: ordered.slice(0, packed.rendered).map((issue) => issue.number),
+  };
 }
 
 // Placeholder Issue for template rendering in "align" mode: there is no single issue in scope
@@ -1543,10 +1572,27 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         (deps.log ?? console.error)(`[sapwood:po] decomposition pass degraded open: ${String(error)}`);
       }
 
+      // #528: ONE bounded recently-closed read per aligning pass, feeding BOTH dedup layers below
+      // (the digest the align session sees, and createIssueProposals' mechanical marker/title
+      // checks). Deliberately best-effort, unlike the open-issue reads on either side of it: this
+      // is a backstop, so a failed read must degrade to the pre-#528 open-only surface — its worst
+      // case is today's known blind spot (a re-proposed shipped fact, closeable by hand) — rather
+      // than suppress ALL issue creation the way the load-bearing open read does. Named in the log
+      // so a round that filed a duplicate can be told apart from one that saw the closed set.
+      let recentlyClosedIssues: Issue[] = [];
+      try {
+        recentlyClosedIssues = await deps.forge.listRecentlyClosedIssues();
+      } catch (error) {
+        (deps.log ?? console.error)(
+          `[sapwood:po] round ${roundId}: recently-closed dedup read failed — closed issues are absent from ` +
+            `this pass's dedup surface (degraded to the open-only surface): ${String(error)}`,
+        );
+      }
+
       // Compute at align invocation time from the full injected forge backlog. Milestone scope
       // belongs only to the digest; reconciliation/title dedup below must see every open issue.
       // Reuse the same snapshot for triage prompt rendering later in this phase.
-      const backlogDigest = await buildBacklogDigest(deps.forge, deps.cfg);
+      const backlogDigest = await buildBacklogDigest(deps.forge, deps.cfg, recentlyClosedIssues);
       if (!backlogDigest.ok) {
         // #231: a failed open-issue read must SUPPRESS issue creation for this pass (see the
         // creation loop below, gated on `backlogDigest.ok`) rather than let the align session
@@ -1797,6 +1843,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         forge: deps.forge,
         proposals: createdIssues.map((proposal) => ({ id: proposal.proposalId, title: proposal.title, body: proposal.body })),
         knownOpenIssues,
+        recentlyClosedIssues,
         terminalIds,
         createdIssues: priorProgress.createdIssues,
         markerFor: proposalMarker,
@@ -1817,13 +1864,17 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             ...(reconciled ? { reconciled: true } : {}),
           });
         },
-        onSkipped: (proposal, collision) => {
+        onSkipped: (proposal, collision, collisionClosed) => {
           deps.state.appendEvent("proposal-skipped", {
             round_id: roundId,
             proposalId: proposal.id,
             title: proposal.title,
             reason: "normalized-title-collision",
             existingIssue: collision.number,
+            // #528: same skip POLICY on both surfaces, distinguishable receipts — a duplicate of a
+            // shipped fact reads differently in the log than a duplicate of live work. Absent
+            // (not `false`) on the open path, so pre-#528 receipts stay byte-identical.
+            ...(collisionClosed ? { existingIssueClosed: true } : {}),
           });
         },
       });

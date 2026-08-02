@@ -69,6 +69,7 @@ const IFORGE_MEMBERS = [
   "listMilestoneTitles",
   "listOpenIssueNumbers",
   "listOpenIssues",
+  "listRecentlyClosedIssues",
   "listUnplacedIssues",
   "mergePR",
   "openPR",
