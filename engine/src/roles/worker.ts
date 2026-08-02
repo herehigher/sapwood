@@ -283,10 +283,10 @@ export interface EgressSuspectScan {
  *    a Bash hit journals legitimate worker activity that happens to match the configured suspect
  *    list) is exactly the post-hoc-visible signal this scanner exists to surface. `executable`
  *    carries the literal tool name (`Agent` or `Task`); `snippet` is the spawn's `description`
- *    field when present (the short, human-readable summary a live #534 transcript showed the
- *    model supplies, e.g. `"Check if #485 already shipped"`), falling back to `prompt` when
- *    `description` is absent — never neither, so a hit is never recorded with an empty snippet
- *    when the block carries usable text.
+ *    field when it is a NON-EMPTY string (the short, human-readable summary a live #534
+ *    transcript showed the model supplies, e.g. `"Check if #485 already shipped"`), falling back
+ *    to `prompt` when `description` is empty or absent — never neither, so a hit is never
+ *    recorded with an empty snippet when the block carries usable text.
  *
  *  Same tolerance as the sibling parsers: malformed/partial lines and malformed blocks are
  *  skipped silently. Collection stops at the engine-owned per-leg cap, bounding both evidence and
@@ -338,7 +338,8 @@ export function scanEgressSuspects(jsonl: string, suspectCommands: readonly stri
         if (addHit(b.name, detail.slice(0, EGRESS_SNIPPET_MAX_CHARS))) return { hits, truncated: true };
       } else if (b.name === "Agent" || b.name === "Task") {
         // #534: same unconditional stance as WebFetch/WebSearch above — see this function's own
-        // doc. Prefer `description` (the short human-readable summary), fall back to `prompt`.
+        // doc. Prefer `description` (the short human-readable summary) when non-empty, else
+        // fall back to `prompt`.
         const rec = input as Record<string, unknown>;
         const detail = (typeof rec.description === "string" && rec.description) || (typeof rec.prompt === "string" && rec.prompt) || null;
         if (detail === null) continue;
