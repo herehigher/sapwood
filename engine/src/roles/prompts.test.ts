@@ -57,7 +57,12 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // check covers it. Same class of fix as #444 above, on the state axis instead of the milestone
   // axis: the session could not see a fact that shipped and closed, so it re-proposed one (#525
   // vs. #461, hours apart).
-  "po.md": "f22e6ceb4dbf4532c52de24b63994a1f60af4a1f9cab0be0ec830f4a7299725c",
+  // #442: intentional edit — align mode now requires a one-line `Origin:` evidence statement in
+  // every proposed body (event ids / lane / episode / parent issue, or the literal `static
+  // scan`), and says outright that the engine only checks the line EXISTS. Round provenance was
+  // already engine-stamped; EVIDENCE provenance had no carrier at all, so a run-observation
+  // finding and a repo-reading one were indistinguishable on the issue page.
+  "po.md": "6a6c6bbec284ce563a3e6b7277c9cfc3d8fe302eb41fa2241dabdfae071ad9c7",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
@@ -603,6 +608,14 @@ test("#409 po.md: align mode states reuse-before-build as a rule, including the 
   const body = readPrompt(defaultPoPromptPath());
   assert.match(body, /In align mode this is a rule, not an option/, "upgraded from the old discretionary half-sentence");
   assert.match(body, /propose nothing/, "the propose-nothing case is explicit");
+});
+
+test("#442 po.md: align mode requires an `Origin:` evidence line, names `static scan` as the honest literal for a repo-reading finding, and says the engine never reads what it says", () => {
+  const body = readPrompt(defaultPoPromptPath());
+  assert.match(body, /`Origin:`/, "the required line is named literally, the way the engine's presence check spells it");
+  assert.match(body, /static scan/, "the literal a purely repo-derived finding must use");
+  assert.match(body, /never reads what it says|never parses it|for human triage only/i, "stated as prose, not a machine anchor");
+  assert.match(body, /invalid output/, "a missing Origin line is an invalid session output, not a soft nudge");
 });
 
 test("#409 doctrine-template.md: the authoritative-signals invariant carries the ordering, the contract-format exemption, and the failure-direction requirement", () => {

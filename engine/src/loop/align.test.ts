@@ -10,7 +10,7 @@
 // performs every forge write itself — exactly what createAligningStub is being tested for here.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -381,8 +381,12 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
 
 // A body that satisfies extractVerificationPlan (the content check createAligningStub applies
 // per created/drafted issue — a business-logic outcome, never a session-validity gate).
-const PLAN_BODY = "Body.\n## Verification\n- run npm test";
-const NO_PLAN_BODY = "Just a title, no plan.";
+// Both carry the #442 `Origin:` line: it is a SESSION-validity gate (validateAlignOutput), so
+// every fixture body an align session is scripted to emit must have one — orthogonal to whether
+// the body also carries a plan, which is the per-issue business outcome these two constants are
+// actually about.
+const PLAN_BODY = "Body.\n## Verification\n- run npm test\n\n_Origin: static scan_";
+const NO_PLAN_BODY = "Just a title, no plan.\n\n_Origin: static scan_";
 
 test("createAligningStub: marker present -> returns it unchanged, no forge/session calls at all (idempotence)", async () => {
   const forge = new FakeForge();
@@ -790,8 +794,8 @@ test("createAligningStub: multiple declared issues are each processed independen
     doneResult(
       "po-align-1",
       alignResultText([
-        { title: "a", body: "## Acceptance criteria\n- x" },
-        { title: "b", body: "no plan here" },
+        { title: "a", body: "## Acceptance criteria\n- x\n\n_Origin: static scan_" },
+        { title: "b", body: "no plan here\n\n_Origin: static scan_" },
       ]),
     ),
   ]);
@@ -1477,7 +1481,7 @@ test("createAligningStub P2: a failed align session is retried once; a successfu
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
     failedResult("po-align-0"),
-    doneResult("po-align-0-retry", alignResultText([{ title: "t", body: "## Verification\n- x" }])),
+    doneResult("po-align-0-retry", alignResultText([{ title: "t", body: PLAN_BODY }])),
   ]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
@@ -1624,7 +1628,7 @@ test("createAligningStub #110: a malformed align block on the FIRST attempt is r
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
     doneResult("po-align-0", "not structured at all"),
-    doneResult("po-align-0-retry", alignResultText([{ title: "t", body: "## Verification\n- x" }])),
+    doneResult("po-align-0-retry", alignResultText([{ title: "t", body: PLAN_BODY }])),
   ]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
@@ -1972,7 +1976,7 @@ test("createAligningStub #110: an align block with a wrong number of <<<ISSUE>>>
   const runner = new ScriptedRunner([
     // Metadata declares 2 issues, but the BODY block only carries one segment.
     doneResult("po-align-0", sapwoodResult({ issues: [{ title: "a" }, { title: "b" }] }, issueSegment("only one body"))),
-    doneResult("po-align-0-retry", alignResultText([{ title: "a", body: "## Verification\n- x" }])),
+    doneResult("po-align-0-retry", alignResultText([{ title: "a", body: PLAN_BODY }])),
   ]);
   const state = new State(":memory:");
   const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
@@ -1988,7 +1992,7 @@ test("createAligningStub #110: an align block with a wrong number of <<<ISSUE>>>
 test("createAligningStub P3: a customized labels.originAgent value is what gets stamped — never a hardcoded 'origin:agent'", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({ labels: { ...LEGACY_LABEL_CONFIG.labels, originAgent: "bot:made" } });
-  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "t", body: "## Verification\n- x" }]))]);
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "t", body: PLAN_BODY }]))]);
   const state = new State(":memory:");
   const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
   const stub = createAligningStub(deps);
@@ -2459,17 +2463,56 @@ test("validateAlignOutput: well-formed empty declaration -> ok, empty array", ()
 test("validateAlignOutput: well-formed multi-issue declaration -> ok, titles and bodies paired in order", () => {
   const result = validateAlignOutput(
     alignResultText([
-      { title: "first", body: "Body one." },
-      { title: "second", body: "Body two." },
+      { title: "first", body: "Body one.\n\n_Origin: static scan_" },
+      { title: "second", body: "Body two.\n\n_Origin: static scan_" },
     ]),
   );
   assert.ok(result.ok);
   if (result.ok) {
     assert.deepEqual(result.issues, [
-      { title: "first", body: "Body one." },
-      { title: "second", body: "Body two." },
+      { title: "first", body: "Body one.\n\n_Origin: static scan_" },
+      { title: "second", body: "Body two.\n\n_Origin: static scan_" },
     ]);
   }
+});
+
+// ── #442: the Origin evidence line is required of every agent-filed body ─────────────────────
+
+test("#442 AC1: a proposal body with no `Origin:` line fails align's own output validation — the same channel that already rejects a malformed BODY segment", () => {
+  const result = validateAlignOutput(alignResultText([{ title: "Add X", body: "Body.\n## Verification\n- run npm test" }]));
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /Origin:/.test(result.reason), `reason names the missing line: ${!result.ok ? result.reason : ""}`);
+});
+
+test("#442 AC1: one Origin-less body among several rejects the WHOLE batch, and the reason names which segment", () => {
+  const result = validateAlignOutput(
+    alignResultText([
+      { title: "first", body: PLAN_BODY },
+      { title: "second", body: "Body two, no provenance." },
+    ]),
+  );
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /issue 2\b/.test(result.reason), `reason names the 1-based segment: ${!result.ok ? result.reason : ""}`);
+});
+
+test("#442 AC1: `Origin: static scan` — the literal the template names for a repo-reading finding — satisfies the requirement", () => {
+  const result = validateAlignOutput(alignResultText([{ title: "Add X", body: "Body.\n## Verification\n- x\n\n_Origin: static scan_" }]));
+  assert.ok(result.ok);
+});
+
+test("#442 AC1: an empty issues array carries no bodies, so the Origin requirement cannot make a zero-proposal round invalid", () => {
+  assert.ok(validateAlignOutput(alignResultText([])).ok);
+});
+
+test("#442 AC2 grep-invariant (engine-wide): `extractOrigin` has exactly ONE production call site — align.ts's output validator, which checks PRESENCE — and no other engine module reads the line at all. Origin is human triage prose (F15: a role's self-report is not a machine anchor); the day it becomes a dedupe/routing input, this test is what says so out loud", () => {
+  const srcDir = new URL("../", import.meta.url);
+  const files = readdirSync(srcDir, { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+  assert.ok(files.includes("loop/align.ts") && files.includes("forge/forge.ts"), "sanity: the two known modules are in the scan set");
+  const callers = files.filter((f) => f !== "forge/forge.ts" && /\bextractOrigin\(/.test(readFileSync(new URL(f, srcDir), "utf8")));
+  assert.deepEqual(callers.sort(), ["loop/align.ts"], "extractOrigin has no consumer beyond align's validator");
+  const alignSrc = readFileSync(new URL("loop/align.ts", srcDir), "utf8");
+  assert.equal((alignSrc.match(/\bextractOrigin\(/g) ?? []).length, 1, "one call, not a second one that reads the text");
+  assert.match(alignSrc, /extractOrigin\([^)]*\) == null/, "the single call is a null/presence check, never a read of what the line SAYS");
 });
 
 test("validateTriageOutput: missing body -> fail-closed", () => {

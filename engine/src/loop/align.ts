@@ -33,7 +33,7 @@ import { z } from "zod";
 import type { SapwoodConfig } from "../config/config.js";
 import { resolveRoundDirective } from "../config/directive.js";
 import type { IForge, Issue } from "../forge/forge.js";
-import { extractVerificationPlan } from "../forge/forge.js";
+import { extractOrigin, extractVerificationPlan } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 // po-pool's candidate digest now substitutes the SAME formatCandidate shape the architect
 // phase already substitutes for these same pool members one phase later — see
@@ -510,7 +510,9 @@ function proposalProgress(
  *  validateReviewerOutput/validateDrafterOutput): a planless created issue is not an INVALID
  *  session attempt here, it is a normal per-issue outcome the caller labels `needs-human` for
  *  (see createAligningStub below) — exactly the pre-#110 behavior, which never retried the
- *  session over a planless creation either. */
+ *  session over a planless creation either. #442 adds the ONE exception, at the bottom of this
+ *  function: the required `Origin:` evidence line, which unlike a plan has no downstream route
+ *  to supply it later. */
 /** #237: `inView` is the align session's ACTUAL injected view of existing issues (the rendered
  *  backlog-digest subset — buildBacklogDigest's `renderedIssueNumbers`), against which any
  *  `concerns` entry is bounds-checked. Omitted (undefined) skips that bounds check — every
@@ -554,6 +556,22 @@ export function validateAlignOutput(text: string, inView?: ReadonlySet<number>):
   const bodies = splitAlignIssueBodies(block.body, issues.length);
   if (!bodies) {
     return { ok: false, reason: `BODY block does not contain exactly ${issues.length} well-formed <<<ISSUE>>> segment(s)` };
+  }
+  // #442: the ONE content invariant this validator does enforce, and the exception that proves
+  // the rule above. A missing verification plan is a per-issue OUTCOME with a route (the
+  // `planless` label, a later triage pass) — a missing `Origin:` line has none: nothing
+  // downstream can reconstruct which evidence triggered a proposal once the session that knew
+  // is gone, so it is only ever recoverable by asking the session again. Hence a retryable
+  // invalid output, exactly like a malformed BODY segment. Rejected whole rather than per-issue,
+  // same fail-closed doctrine as the duplicate-title check above — a partial apply would file
+  // the compliant half and silently drop the rest. PRESENCE only; what the line SAYS is human
+  // triage prose the engine never reads (extractOrigin's own doc, F15).
+  const missingOrigin = bodies.findIndex((body) => extractOrigin(body) == null);
+  if (missingOrigin >= 0) {
+    return {
+      ok: false,
+      reason: `issue ${missingOrigin + 1} has no \`Origin:\` evidence line (use \`static scan\` when that is the honest answer)`,
+    };
   }
   return { ok: true, issues: issues.map((it, i) => ({ title: it.title, body: bodies[i]! })), concerns };
 }
