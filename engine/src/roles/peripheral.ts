@@ -9,11 +9,27 @@
 // Unlike WorkerSupervisor's dispatch-now/probe-later two-phase model (built for long-running,
 // resumable, PR-producing lanes), a role session's whole point is to run to completion as ONE
 // bounded `await` — round.ts's PeripheralStub.run() contract is exactly that shape. So
-// RoleRunner.run() spawns, waits out the process, and returns — no probe(), no resume(), no
-// dirty-worktree retention (a role session never writes code — allowedTools scoping AND the
-// unchanged guard hook both block it — so its worktree is always safe to delete afterward).
+// RoleRunner.run() spawns, waits out the process, and returns — no probe(), no resume(), and for
+// every ISSUES-ONLY role no dirty-worktree retention either (such a session never writes code —
+// allowedTools scoping AND the unchanged guard hook both block it — so its worktree is always
+// safe to delete afterward). #428: the one role that DOES hold a write grant (retro) gets a
+// narrow retention path — maybeRetainWorktree keeps its worktree when a non-"done" session left
+// uncommitted edits behind, and records a `role-worktree-retained` event so the draft's fate is
+// diagnosable instead of silent. Still no probe/resume/escalation machinery: keep + record, and
+// the next round's retro tries again.
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +44,7 @@ import {
   type ContextManifest,
   type RawContextSource,
   readAmbientSource,
+  resolveWorktreeGitDir,
   resolveWorktreeHead,
   type WorktreeGitState,
 } from "./context-manifest.js";
@@ -50,6 +67,7 @@ import {
   type SpawnedSession,
   scanEgressSuspects,
   spawnClaudeSession,
+  worktreeMaybeDirty,
 } from "./worker.js";
 
 /** #235 PR-B (owner ruling 2026-07-17): the allow/deny matrix for EVERY issues-only peripheral
@@ -164,7 +182,8 @@ export interface RoleSessionOpts {
    *  only ever narrows the base allow scope, never widens it. */
   disallowedTools?: string;
   /** #111 PR-B: an ENGINE-CHOSEN relative path inside the session's ephemeral worktree, read
-   *  by the runner RIGHT BEFORE the worktree's unconditional deletion and returned as
+   *  by the runner RIGHT BEFORE the worktree's deletion (#428: or its retention — the read
+   *  happens first either way, so this channel is unaffected by that branch) and returned as
    *  RoleSessionResult.scratchText. This is the return channel for a role whose deliverable is
    *  too session-lifecycle-coupled for the final-message structured block (retro writes its PR
    *  proposal to this file mid-session, after its git push — a file survives a truncated
@@ -178,6 +197,12 @@ export interface RoleSessionOpts {
    *  absolute) is refused with a stderr line and reads as absent (scratchText undefined),
    *  never a file read outside the root. */
   scratchFile?: string;
+  /** #428: DIAGNOSTIC ONLY — the round this session belongs to, carried solely so the
+   *  `role-worktree-retained` event a retained dirty worktree writes can name its round (the
+   *  runner has no other way to know it; every other round-scoped concern lives in the caller).
+   *  Nothing in run() branches on this value. Omitted -> the event simply carries no round id,
+   *  same "omitted = unchanged" contract as every other optional field here. */
+  roundId?: number;
   /** #234: optional read-only forge MCP proxy attached to this session. When present,
    *  RoleRunner.run() mints a fresh per-session server+token via `mint` (keyed by this exact
    *  session's generated lane name), widens the effective `--allowedTools` with the proxy's
@@ -246,8 +271,9 @@ export interface RoleSessionOpts {
    *     independent flag);
    *   - NEVER deletes this directory on exit — its lifecycle (creation, eventual cleanup) is
    *     OWNED by whoever materialized it and passed it in here, not by this runner (contrast the
-   *     default worktree path, which this runner both creates via `--worktree` and unconditionally
-   *     deletes afterward).
+   *     default worktree path, which this runner both creates via `--worktree` and deletes
+   *     afterward — unconditionally for an issues-only role, subject to #428's dirty-retention
+   *     check for a write-capable one).
    *  A missing/nonexistent directory at spawn time is a SETUP FAILURE — `run()` throws rather
    *  than spawning against a bad path (design #279 §6: "All setup failures ... map to
    *  `unavailable`" — the caller's job, e.g. a future review-session wrapper, is to catch this and
@@ -293,7 +319,7 @@ export interface RoleSessionResult {
    *  empty-string-not-undefined convention parseResultText itself already guarantees. */
   resultText?: string;
   /** #111 PR-B: the raw content of RoleSessionOpts.scratchFile, read from the session's
-   *  worktree immediately BEFORE its unconditional deletion. undefined when no scratchFile was
+   *  worktree immediately BEFORE its deletion (or #428 retention). undefined when no scratchFile was
    *  requested OR the file was absent/unreadable — the caller's validator decides what a
    *  missing file means (retro.ts treats it as an invalid attempt: fail closed, retry once,
    *  then the degrade path — never a silently skipped deliverable). */
@@ -1088,17 +1114,18 @@ export class RoleRunner {
         (this.deps.log ?? console.error)(`[sapwood:context-manifest] session ${name}: failed to assemble (non-fatal): ${String(e)}`);
       }
 
-      // Always delete the worktree — see the module doc: a role session never writes code
-      // (allowedTools scoping + the unchanged guard hook both block it), so unlike worker.ts's
-      // dirty-vs-clean retention there is no WIP that could ever need preserving here. Retro's
-      // one worktree deliverable (the scratch file) was already captured above; its actual code
-      // proposal lives on its PUSHED BRANCH, never in the worktree.
+      // Delete the worktree — for every ISSUES-ONLY role session that is unconditional, per the
+      // module doc: those sessions never write code (allowedTools scoping + the unchanged guard
+      // hook both block it), so unlike worker.ts's dirty-vs-clean retention there is no WIP that
+      // could ever need preserving. #428 narrows "unconditional" to exactly that class:
+      // maybeRetainWorktree keeps a WRITE-CAPABLE session's worktree (today only retro) when it
+      // ended non-"done" with uncommitted edits still in it — see that method's doc.
       //
       // #285: a review session's materialized directory is NEVER deleted here — this runner
       // didn't create it (no `--worktree` was ever passed, see above) and doesn't own its
       // lifecycle; deleting it out from under whoever materialized it and passed it in via
       // `reviewCwd` would be a correctness bug, not cleanup.
-      if (materializedCwd === undefined) {
+      if (materializedCwd === undefined && !this.maybeRetainWorktree(name, opts, outcome)) {
         try {
           rmSync(join(this.worktreeRoot, name), { recursive: true, force: true });
         } catch {
@@ -1134,6 +1161,79 @@ export class RoleRunner {
         }
       }
     }
+  }
+
+  /** #428: decide whether this session's ephemeral worktree must be KEPT instead of deleted, and
+   *  record the retention durably when it is. Returns true == retained (the caller skips its
+   *  rmSync), false == the unchanged delete path.
+   *
+   *  Three conditions, ALL required — deliberately the narrowest gate that closes the gap
+   *  retro.ts's module doc named:
+   *   1. the session holds a WRITE-CAPABLE grant (hasWriteCapableGrant — today only `retro`,
+   *      the one role NOT at tier 1, see docs/role-paradigm.md). Every issues-only role keeps
+   *      the pre-#428 unconditional delete: it structurally cannot have written anything, so a
+   *      dirty check there could only ever produce false positives and leaked worktrees.
+   *   2. the outcome is NOT "done". retro's normal path (edit -> commit -> push -> exit 0) must
+   *      still delete exactly as before — this only ever fires on a timeout/crash/failure, the
+   *      case where an attempt's draft is what would be lost.
+   *   3. the worktree still holds uncommitted edits, measured as a PURE-FILESYSTEM heuristic:
+   *      anything under it newer than the worktree's own git index (`<gitDir>/index`, resolved
+   *      through the linked worktree's `gitdir:` pointer). This engine execs `git` nowhere
+   *      outside worker.ts's claude-CLI spawn and gh.ts's `gh` calls (#69's grep invariant), and
+   *      `git status --porcelain` is REJECTED outright for a session-controlled worktree — it can
+   *      invoke a session-set `filter.<name>.clean` (the #65 RCE class; see worker.ts's
+   *      retainOrDeleteWorktree doc). The index is the right BASELINE because git rewrites it on
+   *      every checkout/add/commit: a fresh checkout leaves every file older than it (clean), an
+   *      edit after that leaves a file newer (dirty), and a commit rewrites it again (clean).
+   *      Reuses worker.ts's ONE scan (worktreeMaybeDirty) — only the baseline differs.
+   *
+   *  Failure directions, stated rather than implied. FALSE POSITIVE (retain a worktree that held
+   *  nothing worth keeping): costs disk, visible in the event — the direction this deliberately
+   *  favours, including the no-resolvable-index case (a crash so early git never wrote one), which
+   *  reads as dirty rather than guessing clean. FALSE NEGATIVE (delete real uncommitted work):
+   *  only reachable for a file whose timestamps predate the session's own last git write, i.e. a
+   *  state where that work was already committed — and a linked worktree's objects and branch ref
+   *  live in the PARENT repo's common `.git`, so a commit survives the worktree's deletion. The
+   *  thing deletion actually destroys is uncommitted work, which is exactly what this measures.
+   *
+   *  Deliberately NOT a #69-style needs-human escalation (this issue's own scope): retro has no
+   *  issue or PR to attach one to, and a lost draft is low-stakes (the next round's retro simply
+   *  tries again). "Record, don't seal" — the event makes the loss diagnosable instead of
+   *  silent. */
+  private maybeRetainWorktree(name: string, opts: RoleSessionOpts, outcome: "done" | "failed" | "timeout"): boolean {
+    if (outcome === "done") return false;
+    if (!hasWriteCapableGrant(opts.allowedTools ?? ROLE_ALLOWED_TOOLS)) return false;
+    const worktreePath = join(this.worktreeRoot, name);
+    if (!existsSync(worktreePath)) return false; // nothing on disk to keep
+    const gitDir = resolveWorktreeGitDir(worktreePath);
+    let indexMs = Number.NaN;
+    if (gitDir !== null) {
+      try {
+        indexMs = statSync(join(gitDir, "index")).mtimeMs;
+      } catch {
+        /* no index written yet -> NaN -> fail-safe dirty below */
+      }
+    }
+    if (!worktreeMaybeDirty(worktreePath, indexMs)) return false;
+    const basis = Number.isFinite(indexMs) ? "git-index-mtime" : "no-index-baseline";
+    try {
+      this.deps.state?.appendEvent("role-worktree-retained", {
+        name,
+        role_id: opts.roleId,
+        outcome,
+        worktree_path: worktreePath,
+        basis,
+        ...(opts.roundId !== undefined ? { round_id: opts.roundId } : {}),
+      });
+    } catch {
+      /* best-effort: a failed event write must never turn into a DELETED worktree */
+    }
+    (this.deps.log ?? console.error)(
+      `[sapwood:role] session ${name} (${opts.roleId}) ended ${outcome} with uncommitted changes ` +
+        `(${basis}) — RETAINING its worktree at ${worktreePath} instead of deleting it; ` +
+        `see the role-worktree-retained event`,
+    );
+    return true;
   }
 
   /** #236 (Codex F1/F2/F3, R1/R2 residual fixes): the FILESYSTEM-derived half of the context

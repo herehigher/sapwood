@@ -472,6 +472,176 @@ exit 0
   }
 });
 
+// ── #428: dirty-worktree retention for a WRITE-CAPABLE role session (retro) ────────────────────
+
+/** #428: a stub `claude` that fakes the linked worktree `git worktree add` would have produced —
+ *  a `gitdir:` pointer file plus the git index the retention check baselines on — so
+ *  maybeRetainWorktree's real pure-filesystem resolution path runs, not a stubbed-out shortcut.
+ *
+ *  Both shapes are decided by ORDERING INSIDE THIS SCRIPT, never by racing the engine, and
+ *  neither depends on filesystem timestamp granularity (docs/REVIEW-DOCTRINE.md, "No
+ *  timing-dependent assertions"):
+ *   - `dirty: true`  — write the index ("checkout"), THEN edit a file. The scan's comparison is
+ *     inclusive (`>=`), so the edit reads dirty even if both land in the same timestamp tick.
+ *   - `dirty: false` — write the file, THEN stamp the index at a fixed FAR-FUTURE date via POSIX
+ *     `touch -t`. Every entry is then unambiguously older than the baseline, with no sleep and
+ *     no dependence on how fine the filesystem's clock is. (Backdating the FILE instead would not
+ *     work: the scan compares ctime too, which `touch` always bumps to now — deliberately, since
+ *     unprivileged code must not be able to fake a clean tree.) */
+const mkWorktreeStub = (dir: string, opts: { dirty: boolean; exitCode: number }): string => {
+  const worktreeRoot = join(dir, "worktrees");
+  const gitDir = join(dir, "fake-gitdir");
+  const edits = opts.dirty
+    ? `: > "${gitDir}/index"\nprintf 'draft\\n' > "$d/proposal.md"\n`
+    : `printf 'committed\\n' > "$d/proposal.md"\ntouch -t 209901010000 "${gitDir}/index"\n`;
+  return mkStub(
+    dir,
+    `#!/usr/bin/env bash
+wt=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--worktree" ]; then wt="$arg"; fi
+  prev="$arg"
+done
+d="${worktreeRoot}/$wt"
+mkdir -p "$d" "${gitDir}"
+echo "gitdir: ${gitDir}" > "$d/.git"
+echo '{"type":"system","subtype":"init"}'
+${edits}echo '{"type":"result","subtype":"success","total_cost_usd":0.0005}'
+exit ${opts.exitCode}
+`,
+  );
+};
+
+const mkEventSink = (): {
+  events: Array<[string, unknown]>;
+  state: { appendEvent: (k: string, p: unknown) => void; maxEventId: () => number };
+} => {
+  const events: Array<[string, unknown]> = [];
+  return {
+    events,
+    state: {
+      appendEvent: (kind: string, payload: unknown): void => {
+        events.push([kind, payload]);
+      },
+      maxEventId: () => events.length,
+    },
+  };
+};
+
+const RETRO_TOOLS = "Read,Write,Edit,Bash(git *)";
+
+test("run (#428): a WRITE-CAPABLE (retro) session that dies non-'done' with uncommitted edits keeps its worktree and records role-worktree-retained naming the path + round id — the draft is no longer discarded silently", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const worktreeRoot = join(dir, "worktrees");
+  try {
+    const bin = mkWorktreeStub(dir, { dirty: true, exitCode: 3 });
+    const { events, state } = mkEventSink();
+    const runner = mkRunner(dir, bin, { state, preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
+    const result = await runner.run({
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      allowedTools: RETRO_TOOLS,
+      roundId: 7,
+    });
+    assert.equal(result.outcome, "failed");
+    const worktreePath = join(worktreeRoot, result.name);
+    assert.ok(existsSync(worktreePath), "the dirty worktree is RETAINED, not deleted");
+    assert.equal(readFileSync(join(worktreePath, "proposal.md"), "utf8"), "draft\n", "the session's uncommitted draft survived");
+    const retained = events.filter(([kind]) => kind === "role-worktree-retained");
+    assert.equal(retained.length, 1, "exactly one durable retention record");
+    const payload = retained[0]![1] as Record<string, unknown>;
+    assert.equal(payload.worktree_path, worktreePath);
+    assert.equal(payload.round_id, 7);
+    assert.equal(payload.role_id, "retro");
+    assert.equal(payload.outcome, "failed");
+    assert.equal(payload.basis, "git-index-mtime");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run (#428): the happy path is untouched — a retro session that exits 0 (its branch pushed) still has its worktree deleted, and records no retention event", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const worktreeRoot = join(dir, "worktrees");
+  try {
+    // Deliberately the DIRTY stub shape with a success exit: proves the outcome gate alone keeps
+    // the normal path on today's unconditional-delete behavior, independent of what the tree looks
+    // like when a successful session finishes.
+    const bin = mkWorktreeStub(dir, { dirty: true, exitCode: 0 });
+    const { events, state } = mkEventSink();
+    const runner = mkRunner(dir, bin, { state, preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
+    const result = await runner.run({
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      allowedTools: RETRO_TOOLS,
+      roundId: 7,
+    });
+    assert.equal(result.outcome, "done");
+    assert.ok(!existsSync(join(worktreeRoot, result.name)), "a successful session's worktree is still deleted");
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "role-worktree-retained"),
+      [],
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run (#428): the retention gate is a real dirty check, not a rename of the outcome check — a retro session that fails with a CLEAN worktree (nothing newer than its git index) is still deleted", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const worktreeRoot = join(dir, "worktrees");
+  try {
+    const bin = mkWorktreeStub(dir, { dirty: false, exitCode: 3 });
+    const { events, state } = mkEventSink();
+    const runner = mkRunner(dir, bin, { state, preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
+    const result = await runner.run({
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      allowedTools: RETRO_TOOLS,
+      roundId: 7,
+    });
+    assert.equal(result.outcome, "failed");
+    assert.ok(!existsSync(join(worktreeRoot, result.name)), "nothing uncommitted to preserve -> deleted, no leaked worktree");
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "role-worktree-retained"),
+      [],
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run (#428): an ISSUES-ONLY role (no write grant) is unaffected — even a failed session whose worktree looks dirty is deleted unconditionally, exactly as before", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const worktreeRoot = join(dir, "worktrees");
+  try {
+    const bin = mkWorktreeStub(dir, { dirty: true, exitCode: 3 });
+    const { events, state } = mkEventSink();
+    const runner = mkRunner(dir, bin, { state, preSpawnCaptureTimeoutMs: INIT_OBSERVED_GUARD_MS, preSpawnCapturePollMs: 5 });
+    // No allowedTools override -> the base ROLE_ALLOWED_TOOLS (Read,Grep,Glob): structurally
+    // incapable of writing, so the dirty check never even runs for this class of session.
+    const result = await runner.run({ roleId: "harvest", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(result.outcome, "failed");
+    assert.ok(!existsSync(join(worktreeRoot, result.name)), "issues-only role: unconditional delete, unchanged");
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "role-worktree-retained"),
+      [],
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: the init-line anchor is not fooled by the worktree DIRECTORY appearing before CLAUDE.md is written (Codex R1 deflake — the exact race a directory-existence anchor would have lost)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   const worktreeRoot = join(dir, "worktrees");
