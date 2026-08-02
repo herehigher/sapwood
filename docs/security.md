@@ -979,6 +979,42 @@ position-independently so a wrapper can't hide the write) — but the human-merg
 rule is also a process rule: even a PR that touches these files and somehow passes CI
 and review is not something the conductor should be configured to auto-merge.
 
+### `sapwood.config.*` is also the shipped starter config — a known consequence (#386)
+
+The denial above is path-based, not intent-based, and `sapwood.config.*` carries a second
+role that makes that worth stating explicitly: `sapwood init` ships **this repo's own
+root `sapwood.config.yaml`, verbatim**, as a new user's starter config
+(`engine/src/loop/init.ts`'s `sampleConfig()`/`ensureConfig()` — there is no separate
+template file). So the file a worker may not write and the commented example every new
+operator receives are the same object.
+
+The consequence: **a worker cannot land a change to the shipped config's own comments —
+even a purely editorial one carrying no security meaning at all.** The guard denies the
+write (`BLOCK [write-path] sapwood.config.* (engine/guard config) is human-merge-only`)
+without inspecting whether the edit touches `guard.mode` or a `#` comment, which is the
+correct fail-closed behaviour: an intent-aware exception is exactly the seam a worker
+could talk its way through.
+
+This is a deliberate trade, not a defect — but it means any issue whose acceptance
+criteria require the shipped YAML to change has a **human-applied step that no worker can
+discharge**. Such issues are best written to ask for a paste-ready patch (which a worker
+*can* produce, in the PR body or a plain file) rather than for the edit itself, so the
+work is dispatchable and the acceptance criteria are honestly satisfiable.
+
+#386 is the worked example, and it shows the shape such a handoff should take. Its
+calibration guidance landed in the docs directly; the matching `worker.budgetUsdSoft`
+comment could not, so it ships as a **checked-in, `git apply`-able patch** at
+`docs/patches/386-budget-calibration.patch`, whose header states what it changes, why it
+is a patch rather than a commit, and the two commands that apply and then delete it. As
+long as that file exists, the YAML-side change is **still pending** — the patch is the
+request, not the delivery. The guard constrains Claude tool calls, never a human's
+editor, so applying it takes an editor and no special ceremony.
+
+A patch file is the right carrier here precisely because it is verifiable from the tree:
+a reviewer (human or engine-agent) can confirm the pending change exists and applies,
+rather than taking a prose claim on trust. Prefer it over describing the edit only in a
+PR body, which the tree does not record and a diff-scoped reviewer cannot see.
+
 ### The `sapwood:human-merge-only` label (#397)
 
 The same phrase now also names a **label**, deliberately — one fact, one term. Where the

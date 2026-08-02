@@ -123,13 +123,56 @@ Per-worker execution.
 | `effort` | `high` | `low` \| `medium` \| `high`. |
 | `fallbackModel` | `sonnet` | Model passed to Claude's `--fallback-model` when the primary is unavailable. Set to literal `"none"` to omit the flag and fail loud rather than silently downgrade quality; the environment-failure handling path is documented in [#168](https://github.com/herehigher/sapwood/issues/168). |
 | `timeoutSec` | `3600` | Wall-clock hard cap per worker (enforced). |
-| `budgetUsdSoft` | `10` | **Soft** per-worker USD budget, auto-enforced via a live token-usage estimate (stream-json carries no in-progress real cost). Crossing it triggers a graceful handoff (commit + push WIP, progress note, `.handoff` sentinel, clean exit) — never a mid-work kill. The estimate is a per-model rate-table approximation (see `pricingFile` below), reconciled (logged, not enforced) against the real cost when the worker finishes; `timeoutSec` plus the engine's hard `cost` ceiling below remain the actual backstop. |
+| `budgetUsdSoft` | `10` | **Soft** per-worker USD budget, auto-enforced via a live token-usage estimate (stream-json carries no in-progress real cost). Crossing it triggers a graceful handoff (commit + push WIP, progress note, `.handoff` sentinel, clean exit) — never a mid-work kill. The estimate is a per-model rate-table approximation (see `pricingFile` below), reconciled (logged, not enforced) against the real cost when the worker finishes; `timeoutSec` plus the engine's hard `cost` ceiling below remain the actual backstop. **This default is calibrated for small-to-medium work and does not fit every model/effort profile** — see [Calibrating `budgetUsdSoft`](#calibrating-budgetusdsoft) below before running the shipped `opus`/`high` profile on substantive issues. |
 | `maxResumes` | `2` | Maximum fresh worker legs after the initial leg hands off. RESUME runs before DISPATCH, keeps the issue In Progress, and reuses the same session/worktree; each leg gets a fresh `budgetUsdSoft`. `0` disables automatic resume. Once exhausted, the handoff is latched and escalated once to `needs-human`. Total per-issue soft-budget exposure is bounded by `budgetUsdSoft × (1 + maxResumes)`, still under the engine-wide daily cap. |
 | `pricingFile` | unset | Override the model rate table the soft-budget estimator prices against. A relative path resolves against **the config file's own directory** (same rule as `promptFile`). Unset uses the engine's shipped `pricing.yaml` — a commented snapshot of per-model USD-per-million-token rates (`input` / `output` / `cacheWrite` / `cacheRead`) plus each model's `contextWindow` (tokens — the dashboard's context-usage gauge denominator). Your file **replaces** the shipped table entirely (no merging), so copy every model you use; you may add your own aliases. Aliases match case-insensitively as substrings of the model id (`opus` matches `claude-opus-4-8`); a model matching nothing is priced at the most expensive tier in the loaded table. A set-but-missing/unreadable/malformed file — including a model entry missing `contextWindow` — is a fail-fast startup error (`sapwood validate` catches it too) — never a silent fallback to the shipped rates. |
 | `heartbeatStaleSecs` | `180` | A worker heartbeat older than this is considered dead (stale-heartbeat reclaim). |
 | `egressSuspectCommands` | `[curl, wget, nc, ncat, netcat, socat, ssh, scp, sftp, rsync, ftp, telnet]` | Executable names recorded by the monitor-only worker-egress tripwire. Matching is lexical at executable position in completed Bash tool calls; each deduplicated match becomes an `egress-suspect` event and never blocks or changes the lane outcome. An override **replaces** the default array entirely (no merging); set `[]` to disable the tripwire. |
 | `promptFile` | unset | Override the worker's prompt template with your own file. A relative path resolves against **the config file's own directory**, not the CLI's cwd — so the same config behaves identically no matter where `sapwood` is invoked from. Unset uses the engine's shipped `prompts/worker.md` (TDD + two-gate method). |
 | `fixPromptFile` | unset | (#245) Override the **fix-leg** prompt — the instruction a `fixing`-state resume (same worker row/worktree/branch/session as the original leg, never a new dispatch) receives instead of the ordinary issue-rendered prompt above. Same resolution/fail-fast rules as `promptFile`. Unset uses the engine's shipped `prompts/fix.md` (fetch findings via the PR-facing proxy tools, address them, push to the same branch). |
+
+### Calibrating `budgetUsdSoft`
+
+`budgetUsdSoft` is the one worker knob whose right value depends on **your** model, effort,
+and issue size — a per-leg cost, not a safety boundary. The shipped `10` is deliberately
+conservative and is *not* the right number for every profile.
+
+**Observed cost, sapwood's own dogfood run (2026-07-24, [#386](https://github.com/herehigher/sapwood/issues/386)):** with the shipped
+`worker.model: opus` + `effort: high` defaults, one leg of a *substantive implementation*
+issue cost roughly **$8–20**. At `budgetUsdSoft: 10` every substantive first leg crossed the
+cap and handed off before opening a PR (3 of 3 observed); at `20` those legs carried through
+to a PR in one go. Nothing malfunctioned — the graceful handoff did exactly what it promises,
+and `maxResumes` picked the work back up. The cap was simply below the cost of the work.
+
+**A too-low cap is a tax, not a loss.** No work is lost: the leg commits and pushes WIP, and
+the next leg resumes the same worktree/branch/session. What it costs is *re-priming* — each
+resumed leg re-reads its way back into the task — plus one extra tick of wall-clock per
+handoff. So the failure mode of a cap that is too low is a slower, somewhat more expensive
+route to the same PR, and the failure mode of one that is too high is a bigger single-leg
+blast radius. Neither is a runaway: the hard `cost` ceilings below bound both.
+
+**It does not move alone.** Two products constrain the value:
+
+| Product | Compare against | What breaks if you ignore it |
+|---|---|---|
+| `budgetUsdSoft × lanes.max` | `cost.roundBudgetUsd` | Round spend throttles new dispatch. At the shipped defaults (`10 × 3`) this lands exactly on `roundBudgetUsd: 30`; raising `budgetUsdSoft` to `20` without raising `roundBudgetUsd` roughly doubles how often a round stops dispatching — you trade handoffs for dispatch stalls. |
+| `budgetUsdSoft × (1 + maxResumes)` | `cost.dailyBudgetUsd` | Worst-case spend on a **single** issue before the handoff latches and escalates to `needs-human` (`10 × 3 = $30` shipped, `20 × 3 = $60` at the raised value). |
+
+**Practical guidance:**
+
+- **`opus` / `high` on substantive implementation issues** (the shipped defaults): set
+  `budgetUsdSoft: 20`, and raise `cost.roundBudgetUsd` to at least
+  `budgetUsdSoft × lanes.max` so the round throttle doesn't become the new bottleneck.
+- **Cheaper model, lower effort, or small/narrow issues** (docs, chores, single-file fixes):
+  `10` is fine, and is why it remains the shipped default.
+- **Not sure?** Leave it at `10` and read the reconciliation line the engine logs when each
+  worker finishes (estimate vs. real `total_cost_usd`) — that is your own per-leg number, for
+  your own repo and rate table, and beats any default shipped here.
+
+There is no automatic per-model floor: the engine will not warn you that `budgetUsdSoft` is
+low for the model you configured. Deliberately — the *right* cap is a function of issue size,
+which the engine cannot know at startup, so the number stays an operator decision informed by
+the reconciliation logs above.
 
 The shipped `egressSuspectCommands` table deliberately omits `git`, `gh`, and package
 managers: those are loop-owned or governed worker flows and would make poor default signals.
