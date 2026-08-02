@@ -31,9 +31,9 @@ import {
 } from "./peripheral.js";
 import {
   createPlanReviewStub,
-  defaultPlanConfirmPromptPath,
-  defaultPlanDrafterPromptPath,
-  defaultPlanReviewerPromptPath,
+  defaultVerificationPlanConfirmPromptPath,
+  defaultVerificationPlanDrafterPromptPath,
+  defaultVerificationPlanReviewerPromptPath,
   loadRolePromptTemplate,
   type PlanReviewDeps,
   planReviewMarker,
@@ -321,7 +321,7 @@ test("createPlanReviewStub: outcome 1 (approve, no body revision) — engine app
   const stub = createPlanReviewStub(deps);
   const { ranSession } = await stub.run({ roundId: 1, phase: "plan_review", marker: null });
   assert.equal(runner.calls.length, 1);
-  assert.equal(runner.calls[0]!.roleId, "plan-reviewer");
+  assert.equal(runner.calls[0]!.roleId, "verification-plan-reviewer");
   assert.equal(ranSession, true, "#394 (F23): a real reviewer session dispatched -> ranSession true");
   assert.ok(forge.issueLabels[10]!.includes("plan:approved"));
   assert.equal(forge.updateIssueBodyCalls.length, 0, "no body revision in the decision -> no write");
@@ -376,7 +376,7 @@ test("createPlanReviewStub: outcome 3 (propose verify:n/a) — engine applies ve
   state.close();
 });
 
-test("createPlanReviewStub: outcome 2 (request draft) end-to-end self-heal — reviewer draft_request -> engine posts the brief + briefs a plan-drafter -> engine applies the drafted body via updateIssueBody -> re-review approves", async () => {
+test("createPlanReviewStub: outcome 2 (request draft) end-to-end self-heal — reviewer draft_request -> engine posts the brief + briefs a verification-plan-drafter -> engine applies the drafted body via updateIssueBody -> re-review approves", async () => {
   const forge = new FakeForge();
   forge.poolEligibleIssues = [{ number: 12, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[12] = NO_PLAN_BODY;
@@ -397,7 +397,7 @@ test("createPlanReviewStub: outcome 2 (request draft) end-to-end self-heal — r
   assert.equal(runner.calls.length, 3);
   assert.deepEqual(
     runner.calls.map((c) => c.roleId),
-    ["plan-reviewer", "plan-drafter", "plan-reviewer"],
+    ["verification-plan-reviewer", "verification-plan-drafter", "verification-plan-reviewer"],
   );
   // The drafter's prompt was briefed with the reviewer's BODY block verbatim.
   assert.ok(runner.calls[1]!.prompt.includes("missing acceptance criteria"));
@@ -440,9 +440,9 @@ test("createPlanReviewStub (#236): both the reviewer AND the drafter session's c
   assert.deepEqual(
     rows.map((r) => [r.role, r.session, r.attempt, r.phase]),
     [
-      ["plan-reviewer", "reviewer-0", 1, "plan_review"],
-      ["plan-drafter", "drafter-0", 1, "plan_review"],
-      ["plan-reviewer", "reviewer-1", 1, "plan_review"],
+      ["verification-plan-reviewer", "reviewer-0", 1, "plan_review"],
+      ["verification-plan-drafter", "drafter-0", 1, "plan_review"],
+      ["verification-plan-reviewer", "reviewer-1", 1, "plan_review"],
     ],
   );
   assert.deepEqual(JSON.parse(rows[0]?.json ?? "{}"), reviewerManifest0);
@@ -455,7 +455,7 @@ test("createPlanReviewStub P1: after the drafter's body is applied, the NEXT rev
   const forge = new FakeForge();
   forge.poolEligibleIssues = [{ number: 30, title: "t", labels: [ROUND_POOL_LABEL], body: "OLD PLAN — inadequate" }];
   forge.issueBodies[30] = "OLD PLAN — inadequate";
-  const cfg = mkCfg({ roles: { planReviewer: { maxDraftCycles: 1 } } });
+  const cfg = mkCfg({ roles: { verificationPlanReviewer: { maxDraftCycles: 1 } } });
   const NEW_BODY = "NEW PLAN — concrete criteria\n\n## Acceptance criteria\n\n- [ ] it works\n\n## Verification\n\nRun the new test suite.";
   const runner = new ScriptedRunner([
     { result: doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 30 }, "criteria too vague")) },
@@ -483,7 +483,7 @@ test("createPlanReviewStub P2: a reviewer SESSION failure is retried once; a sec
   await stub.run({ roundId: 2, phase: "plan_review", marker: null });
   assert.deepEqual(
     runner.calls.map((c) => c.roleId),
-    ["plan-reviewer", "plan-reviewer"],
+    ["verification-plan-reviewer", "verification-plan-reviewer"],
     "one retry, no drafter",
   );
   assert.ok((forge.issueLabels[31] ?? []).includes(cfg.labels.needsHuman));
@@ -528,7 +528,7 @@ test("createPlanReviewStub #110: reviewer output with no structured block at all
   await stub.run({ roundId: 3, phase: "plan_review", marker: null });
   assert.deepEqual(
     runner.calls.map((c) => c.roleId),
-    ["plan-reviewer", "plan-reviewer"],
+    ["verification-plan-reviewer", "verification-plan-reviewer"],
     "no drafter ever ran",
   );
   assert.ok((forge.issueLabels[33] ?? []).includes(cfg.labels.needsHuman));
@@ -561,7 +561,7 @@ test("createPlanReviewStub #110: reviewer 'draft_request' with NO BODY block, TW
   await stub.run({ roundId: 3, phase: "plan_review", marker: null });
   assert.deepEqual(
     runner.calls.map((c) => c.roleId),
-    ["plan-reviewer", "plan-reviewer"],
+    ["verification-plan-reviewer", "verification-plan-reviewer"],
   );
   assert.ok((forge.issueLabels[34] ?? []).includes(cfg.labels.needsHuman));
   const comment = lastComment(forge, 34);
@@ -589,7 +589,7 @@ test("createPlanReviewStub #110: an 'approve' whose body has no verification pla
   state.close();
 });
 
-test("createPlanReviewStub #110: a plan-drafter session that produces invalid output TWICE degrades — the (bad) draft is never applied", async () => {
+test("createPlanReviewStub #110: a verification-plan-drafter session that produces invalid output TWICE degrades — the (bad) draft is never applied", async () => {
   const forge = new FakeForge();
   forge.poolEligibleIssues = [{ number: 36, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[36] = NO_PLAN_BODY;
@@ -605,7 +605,7 @@ test("createPlanReviewStub #110: a plan-drafter session that produces invalid ou
   await stub.run({ roundId: 4, phase: "plan_review", marker: null });
   assert.deepEqual(
     runner.calls.map((c) => c.roleId),
-    ["plan-reviewer", "plan-drafter", "plan-drafter"],
+    ["verification-plan-reviewer", "verification-plan-drafter", "verification-plan-drafter"],
   );
   assert.equal(forge.updateIssueBodyCalls.length, 0, "an invalid draft is never applied");
   assert.ok((forge.issueLabels[36] ?? []).includes(cfg.labels.needsHuman));
@@ -633,7 +633,7 @@ test("createPlanReviewStub: exhausted after maxDraftCycles — applies needs-hum
   const forge = new FakeForge();
   forge.poolEligibleIssues = [{ number: 13, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[13] = NO_PLAN_BODY;
-  const cfg = mkCfg({ roles: { planReviewer: { maxDraftCycles: 1 } } });
+  const cfg = mkCfg({ roles: { verificationPlanReviewer: { maxDraftCycles: 1 } } });
   // Reviewer NEVER approves, NEVER escalates itself — always bounces. Drafter always drafts
   // (validly), but the reviewer keeps bouncing anyway.
   const runner = new ScriptedRunner([
@@ -660,7 +660,7 @@ test("createPlanReviewStub #104: escalate() (maxDraftCycles exhausted) appends a
   const forge = new FakeForge();
   forge.poolEligibleIssues = [{ number: 13, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[13] = NO_PLAN_BODY;
-  const cfg = mkCfg({ roles: { planReviewer: { maxDraftCycles: 1 } } });
+  const cfg = mkCfg({ roles: { verificationPlanReviewer: { maxDraftCycles: 1 } } });
   const runner = new ScriptedRunner([
     { result: doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 13 }, "still bad")) },
     { result: doneResult("drafter-0", sapwoodResult({ issue: 13 }, PLAN_BODY)) },
@@ -819,7 +819,7 @@ test("renderRolePrompt: substitutes issue + config + extra vars; fails closed on
   const cfg = mkCfg();
   const issue: Issue = { number: 9, title: "T", labels: ["a", "b"], body: "B" };
   const out = renderRolePrompt(
-    "#{{issue.number}} {{issue.title}} [{{issue.labels}}] {{labels.planApproved}} {{roles.planReviewer.maxDraftCycles}} {{reviewer.brief}}",
+    "#{{issue.number}} {{issue.title}} [{{issue.labels}}] {{labels.planApproved}} {{roles.verificationPlanReviewer.maxDraftCycles}} {{reviewer.brief}}",
     issue,
     cfg,
     { "reviewer.brief": "brief text" },
@@ -828,9 +828,9 @@ test("renderRolePrompt: substitutes issue + config + extra vars; fails closed on
   assert.throws(() => renderRolePrompt("{{nope}}", issue, cfg), /unknown variable/);
 });
 
-test("defaultPlanReviewerPromptPath / defaultPlanDrafterPromptPath: resolve to real shipped files that describe the structured-output contract, not a `gh` command", () => {
-  const reviewerTemplate = loadRolePromptTemplate(undefined, defaultPlanReviewerPromptPath());
-  const drafterTemplate = loadRolePromptTemplate(undefined, defaultPlanDrafterPromptPath());
+test("defaultVerificationPlanReviewerPromptPath / defaultVerificationPlanDrafterPromptPath: resolve to real shipped files that describe the structured-output contract, not a `gh` command", () => {
+  const reviewerTemplate = loadRolePromptTemplate(undefined, defaultVerificationPlanReviewerPromptPath());
+  const drafterTemplate = loadRolePromptTemplate(undefined, defaultVerificationPlanDrafterPromptPath());
   assert.ok(reviewerTemplate.includes("{{issue.number}}"));
   assert.ok(drafterTemplate.includes("{{reviewer.brief}}"));
   assert.ok(reviewerTemplate.includes(RESULT_BLOCK_START) && reviewerTemplate.includes(BODY_BLOCK_START));
@@ -845,7 +845,7 @@ test("loadRolePromptTemplate: configured-but-missing file throws, naming the pat
   try {
     const missing = join(dir, "nonexistent.md");
     assert.throws(
-      () => loadRolePromptTemplate(missing, defaultPlanReviewerPromptPath()),
+      () => loadRolePromptTemplate(missing, defaultVerificationPlanReviewerPromptPath()),
       new RegExp(missing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
     );
   } finally {
@@ -996,8 +996,8 @@ test("createPlanReviewStub (#214): a pool with all four member classes gets exac
   assert.deepEqual(
     runner.calls.map((c) => [c.roleId, /Number: #(\d+)/.exec(c.prompt)?.[1]]),
     [
-      ["plan-reviewer", "100"],
-      ["plan-reviewer-confirm", "101"],
+      ["verification-plan-reviewer", "100"],
+      ["verification-plan-reviewer-confirm", "101"],
     ],
   );
   // #214 gate② review (P1): the confirm session — and ONLY the confirm session — runs under the
@@ -1038,8 +1038,8 @@ test("createPlanReviewStub (#214 gate② review delta P2): an approved-but-planl
 
   assert.deepEqual(
     runner.calls.map((c) => c.roleId),
-    ["plan-drafter", "plan-reviewer"],
-    "NO plan-reviewer-confirm session at all — the engine skipped straight to the draft cycle, deterministically",
+    ["verification-plan-drafter", "verification-plan-reviewer"],
+    "NO verification-plan-reviewer-confirm session at all — the engine skipped straight to the draft cycle, deterministically",
   );
   assert.ok(
     runner.calls[0]!.prompt.includes("verification-plan section"),
@@ -1070,8 +1070,8 @@ test("createPlanReviewStub (#283/#301 review, P2 F6): an approved-but-AC-less or
 
   assert.deepEqual(
     runner.calls.map((c) => c.roleId),
-    ["plan-drafter", "plan-reviewer"],
-    "NO plan-reviewer-confirm session at all — the engine skipped straight to the draft cycle, deterministically",
+    ["verification-plan-drafter", "verification-plan-reviewer"],
+    "NO verification-plan-reviewer-confirm session at all — the engine skipped straight to the draft cycle, deterministically",
   );
   assert.ok(
     runner.calls[0]!.prompt.includes("checkbox"),
@@ -1108,7 +1108,7 @@ test("createPlanReviewStub (#214): confirm 'invalidate' feeds the SAME draft-cyc
 
   assert.deepEqual(
     runner.calls.map((c) => c.roleId),
-    ["plan-reviewer-confirm", "plan-drafter", "plan-reviewer"],
+    ["verification-plan-reviewer-confirm", "verification-plan-drafter", "verification-plan-reviewer"],
   );
   assert.ok(
     runner.calls[1]!.prompt.includes("references a file since renamed on main"),
@@ -1166,7 +1166,7 @@ test("createPlanReviewStub (#214 gate② review P2): confirm 'invalidate' -> see
 
   assert.deepEqual(
     runner.calls.map((c) => c.roleId),
-    ["plan-reviewer-confirm", "plan-drafter", "plan-reviewer"],
+    ["verification-plan-reviewer-confirm", "verification-plan-drafter", "verification-plan-reviewer"],
     "invalidate seeded the cycle into the ordinary brief -> drafter -> re-review shape; the re-review is where this test's verify_na verdict lands",
   );
   assert.ok(forge.issueLabels[201]!.includes(cfg.labels.needsHuman));
@@ -1355,7 +1355,7 @@ test("createPlanReviewStub (#214): a confirm session that fails TWICE escalates 
 
   assert.deepEqual(
     runner.calls.map((c) => c.roleId),
-    ["plan-reviewer-confirm", "plan-reviewer-confirm"],
+    ["verification-plan-reviewer-confirm", "verification-plan-reviewer-confirm"],
     "one retry, never a drafter",
   );
   assert.ok(forge.issueLabels[300]!.includes(cfg.labels.needsHuman));
@@ -1438,7 +1438,7 @@ test("createPlanReviewStub (#214) same-round detection: an issue approved in a P
   await stub.run({ roundId: round2.round_id, phase: "plan_review", marker: null });
   assert.deepEqual(
     runner.calls.map((c) => c.roleId),
-    ["plan-reviewer-confirm"],
+    ["verification-plan-reviewer-confirm"],
     "a confirm pass ran — the approval is from a PRIOR round",
   );
   state.close();
@@ -1458,7 +1458,7 @@ test("createPlanReviewStub (#214): a pre-#214 approval with NO plan-approved eve
   await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
   assert.deepEqual(
     runner.calls.map((c) => c.roleId),
-    ["plan-reviewer-confirm"],
+    ["verification-plan-reviewer-confirm"],
   );
   state.close();
 });
@@ -1497,8 +1497,8 @@ test("validateConfirmOutput: well-formed 'invalidate' -> ok, carries the body ve
   assert.ok(result.ok && result.decision === "invalidate" && result.body === "drifted: file renamed");
 });
 
-test("defaultPlanConfirmPromptPath: resolves to a real shipped file describing the confirm/invalidate contract, not a `gh` command", () => {
-  const confirmTemplate = loadRolePromptTemplate(undefined, defaultPlanConfirmPromptPath());
+test("defaultVerificationPlanConfirmPromptPath: resolves to a real shipped file describing the confirm/invalidate contract, not a `gh` command", () => {
+  const confirmTemplate = loadRolePromptTemplate(undefined, defaultVerificationPlanConfirmPromptPath());
   assert.ok(confirmTemplate.includes("{{issue.number}}"));
   assert.ok(confirmTemplate.includes(RESULT_BLOCK_START) && confirmTemplate.includes(BODY_BLOCK_START));
   assert.ok(!/`gh issue (comment|edit)/.test(confirmTemplate), "the confirm prompt never instructs a gh command");

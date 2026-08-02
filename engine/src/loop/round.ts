@@ -207,7 +207,7 @@ export function isRoundFullyDegraded(
   const requiredPhases: PeripheralPhase[] = [];
   if (cfg.roles.po.enabled || cfg.roles.po.poolSelection) requiredPhases.push("aligning");
   if (cfg.roles.architect.enabled) requiredPhases.push("architecting");
-  if (cfg.roles.planReviewer.enabled) requiredPhases.push("plan_review");
+  if (cfg.roles.verificationPlanReviewer.enabled) requiredPhases.push("plan_review");
   if (cfg.roles.harvest.enabled && artifact.escalations.needsHuman.length > 0) requiredPhases.push("harvesting");
   if (cfg.roles.retro.enabled && roundId % cfg.roles.retro.everyNRounds === 0) requiredPhases.push("retro");
 

@@ -922,7 +922,7 @@ test("worker.pricingFile: a RELATIVE path resolves against the CONFIG FILE's dir
   }
 });
 
-// ── #88 gate⓪: labels.planApproved + roles.planReviewer.promptFile ──────────────────────────
+// ── #88 gate⓪: labels.planApproved + roles.verificationPlanReviewer.promptFile ──────────────────────────
 // Session wiring (actually loading/rendering this prompt) lands with the peripheral-role-
 // runner issue; here the config surface is validated + path-resolved, same "accepted, not
 // yet wired" shape as lanes.reserveCap/frictionMin (prFixCap itself is wired as of #246 — see
@@ -942,111 +942,152 @@ test("labels.originAgent: defaults to sapwood:origin:agent, overridable (#89 —
   assert.equal(over.labels.originAgent, "bot:made");
 });
 
-test("roles.planReviewer.promptFile: unset by default, overridable, strict schema (same #74 pattern as worker.promptFile)", () => {
+test("roles.verificationPlanReviewer.promptFile: unset by default, overridable, strict schema (same #74 pattern as worker.promptFile)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.roles.planReviewer.promptFile, undefined);
+  assert.equal(cfg.roles.verificationPlanReviewer.promptFile, undefined);
   const over = parseConfig(
-    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { promptFile: prompts/custom-plan-reviewer.md } }",
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { verificationPlanReviewer: { promptFile: prompts/custom-verification-plan-reviewer.md } }",
   );
-  assert.equal(over.roles.planReviewer.promptFile, "prompts/custom-plan-reviewer.md");
+  assert.equal(over.roles.verificationPlanReviewer.promptFile, "prompts/custom-verification-plan-reviewer.md");
 });
 
-test("roles.planReviewer.promptFile: a typo'd key under roles.planReviewer.* is rejected, not silently dropped (.strict())", () => {
+test("roles.verificationPlanReviewer.promptFile: a typo'd key under roles.verificationPlanReviewer.* is rejected, not silently dropped (.strict())", () => {
   assert.throws(
-    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { promptFiel: x.md } }"),
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { verificationPlanReviewer: { promptFiel: x.md } }"),
     /promptFiel|[Uu]nrecognized/,
   );
 });
 
-test("roles.planReviewer.maxDraftCycles: defaults to 2, overridable (#77 Amendment 2 — gate⓪ self-heal bound)", () => {
+test("roles.verificationPlanReviewer.maxDraftCycles: defaults to 2, overridable (#77 Amendment 2 — gate⓪ self-heal bound)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.roles.planReviewer.maxDraftCycles, 2);
-  const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { maxDraftCycles: 5 } }");
-  assert.equal(over.roles.planReviewer.maxDraftCycles, 5);
+  assert.equal(cfg.roles.verificationPlanReviewer.maxDraftCycles, 2);
+  const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { verificationPlanReviewer: { maxDraftCycles: 5 } }");
+  assert.equal(over.roles.verificationPlanReviewer.maxDraftCycles, 5);
 });
 
-test("roles.planReviewer.maxDraftCycles: zero, negative, and non-integer are rejected (positive int only — 0 would make every bounce an instant needs-human)", () => {
+test("roles.verificationPlanReviewer.maxDraftCycles: zero, negative, and non-integer are rejected (positive int only — 0 would make every bounce an instant needs-human)", () => {
   for (const bad of [0, -1, 1.5]) {
     assert.throws(
-      () => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { maxDraftCycles: ${bad} } }`),
+      () => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nroles: { verificationPlanReviewer: { maxDraftCycles: ${bad} } }`),
       /maxDraftCycles/,
     );
   }
 });
 
-test("roles.planReviewer.maxDraftCycles: a typo'd key is rejected, not silently dropped (.strict())", () => {
+test("roles.verificationPlanReviewer.maxDraftCycles: a typo'd key is rejected, not silently dropped (.strict())", () => {
   assert.throws(
-    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { maxDraftCycle: 3 } }"),
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { verificationPlanReviewer: { maxDraftCycle: 3 } }"),
     /maxDraftCycle|[Uu]nrecognized/,
   );
 });
 
-test("roles.planReviewer.promptFile: a relative path resolves against the config file's directory, not cwd (same #74 pattern as worker.promptFile)", () => {
+test("roles.verificationPlanReviewer.promptFile: a relative path resolves against the config file's directory, not cwd (same #74 pattern as worker.promptFile)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
   try {
     const cfgPath = join(dir, "sapwood.config.yaml");
     writeFileSync(
       cfgPath,
-      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { promptFile: my-plan-reviewer.md } }\n",
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { verificationPlanReviewer: { promptFile: my-verification-plan-reviewer.md } }\n",
     );
     const cfg = loadConfig(cfgPath);
-    assert.equal(cfg.roles.planReviewer.promptFile, join(dir, "my-plan-reviewer.md"));
+    assert.equal(cfg.roles.verificationPlanReviewer.promptFile, join(dir, "my-verification-plan-reviewer.md"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-// ── #87: role runner — model/effort defaults + the plan-drafter role ────────────────────────
+// ── #87: role runner — model/effort defaults + the verification-plan-drafter role ────────────────────────
 
-test("roles.planReviewer.model/effort: default to a lighter model/effort than worker.model/effort, overridable", () => {
+test("roles.verificationPlanReviewer.model/effort: default to a lighter model/effort than worker.model/effort, overridable", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.roles.planReviewer.model, "sonnet");
-  assert.equal(cfg.roles.planReviewer.effort, "medium");
-  const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { model: opus, effort: high } }");
-  assert.equal(over.roles.planReviewer.model, "opus");
-  assert.equal(over.roles.planReviewer.effort, "high");
+  assert.equal(cfg.roles.verificationPlanReviewer.model, "sonnet");
+  assert.equal(cfg.roles.verificationPlanReviewer.effort, "medium");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { verificationPlanReviewer: { model: opus, effort: high } }",
+  );
+  assert.equal(over.roles.verificationPlanReviewer.model, "opus");
+  assert.equal(over.roles.verificationPlanReviewer.effort, "high");
 });
 
 test("worker/roles fallbackModel: default to sonnet, allow an override, and accept explicit none", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.worker.fallbackModel, "sonnet");
-  assert.equal(cfg.roles.planReviewer.fallbackModel, "sonnet");
+  assert.equal(cfg.roles.verificationPlanReviewer.fallbackModel, "sonnet");
   const over = parseConfig(
-    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { fallbackModel: haiku }\nroles: { planReviewer: { fallbackModel: none } }",
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { fallbackModel: haiku }\nroles: { verificationPlanReviewer: { fallbackModel: none } }",
   );
   assert.equal(over.worker.fallbackModel, "haiku");
-  assert.equal(over.roles.planReviewer.fallbackModel, "none");
+  assert.equal(over.roles.verificationPlanReviewer.fallbackModel, "none");
 });
 
-test("roles.planDrafter: promptFile unset by default, model/effort defaulted, strict schema (#74/#77 Amendment 2 pattern)", () => {
+test("roles.verificationPlanDrafter: promptFile unset by default, model/effort defaulted, strict schema (#74/#77 Amendment 2 pattern)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.roles.planDrafter.promptFile, undefined);
-  assert.equal(cfg.roles.planDrafter.model, "sonnet");
-  assert.equal(cfg.roles.planDrafter.effort, "medium");
+  assert.equal(cfg.roles.verificationPlanDrafter.promptFile, undefined);
+  assert.equal(cfg.roles.verificationPlanDrafter.model, "sonnet");
+  assert.equal(cfg.roles.verificationPlanDrafter.effort, "medium");
   const over = parseConfig(
-    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planDrafter: { promptFile: prompts/custom-drafter.md, model: opus } }",
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { verificationPlanDrafter: { promptFile: prompts/custom-drafter.md, model: opus } }",
   );
-  assert.equal(over.roles.planDrafter.promptFile, "prompts/custom-drafter.md");
-  assert.equal(over.roles.planDrafter.model, "opus");
+  assert.equal(over.roles.verificationPlanDrafter.promptFile, "prompts/custom-drafter.md");
+  assert.equal(over.roles.verificationPlanDrafter.model, "opus");
 });
 
-test("roles.planDrafter: a typo'd key is rejected, not silently dropped (.strict())", () => {
+test("roles.verificationPlanDrafter: a typo'd key is rejected, not silently dropped (.strict())", () => {
   assert.throws(
-    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planDrafter: { promptFiel: x.md } }"),
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { verificationPlanDrafter: { promptFiel: x.md } }"),
     /promptFiel|[Uu]nrecognized/,
   );
 });
 
-test("roles.planDrafter.promptFile: a relative path resolves against the config file's directory, not cwd", () => {
+test("roles.verificationPlanDrafter.promptFile: a relative path resolves against the config file's directory, not cwd", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
   try {
     const cfgPath = join(dir, "sapwood.config.yaml");
-    writeFileSync(cfgPath, "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planDrafter: { promptFile: my-plan-drafter.md } }\n");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { verificationPlanDrafter: { promptFile: my-verification-plan-drafter.md } }\n",
+    );
     const cfg = loadConfig(cfgPath);
-    assert.equal(cfg.roles.planDrafter.promptFile, join(dir, "my-plan-drafter.md"));
+    assert.equal(cfg.roles.verificationPlanDrafter.promptFile, join(dir, "my-verification-plan-drafter.md"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── #413: the pre-rename gate⓪ keys are gone, and say so by name ───────────────────────────
+// Hard rename, no dual-key shim — the owner's pre-v1 ruling (PR #555: 初版开发无需考虑迁移问题)
+// says a shipped-config compatibility path isn't owed here. `.strict()` alone would already
+// fail closed, but its bare unrecognized-key error names only the DEAD key; these tests pin the
+// added half — the error also names the LIVE one, so the fix is readable off the message.
+test("#413: roles.planReviewer is rejected with an error naming its replacement, roles.verificationPlanReviewer", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { maxDraftCycles: 3 } }"),
+    /planReviewer.*renamed.*verificationPlanReviewer/is,
+  );
+});
+
+test("#413: roles.planDrafter is rejected with an error naming its replacement, roles.verificationPlanDrafter", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planDrafter: { promptFile: x.md } }"),
+    /planDrafter.*renamed.*verificationPlanDrafter/is,
+  );
+});
+
+test("#413: the renamed keys carry the old ones' whole surface — every sub-key parses, and .strict() still rejects a typo under them", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\n" +
+      "roles: { verificationPlanReviewer: { promptFile: a.md, confirmPromptFile: b.md, maxDraftCycles: 5, enabled: false, model: opus }, verificationPlanDrafter: { promptFile: c.md } }",
+  );
+  assert.equal(cfg.roles.verificationPlanReviewer.promptFile, "a.md");
+  assert.equal(cfg.roles.verificationPlanReviewer.confirmPromptFile, "b.md");
+  assert.equal(cfg.roles.verificationPlanReviewer.maxDraftCycles, 5);
+  assert.equal(cfg.roles.verificationPlanReviewer.enabled, false);
+  assert.equal(cfg.roles.verificationPlanReviewer.model, "opus");
+  assert.equal(cfg.roles.verificationPlanDrafter.promptFile, "c.md");
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { verificationPlanReviewer: { promptFiel: x.md } }"),
+    /promptFiel|[Uu]nrecognized/,
+  );
 });
 
 // ── #90: roles.architect (round design/review peripheral) ──────────────────────────────────
@@ -1084,7 +1125,7 @@ test("roles.architect.promptFile: a relative path resolves against the config fi
 
 // ── #89: roles.po (the PO/product-owner peripheral) ─────────────────────────────────────────
 
-test("roles.po: promptFile unset by default, model/effort defaulted, strict schema (same #74 pattern as roles.planReviewer/planDrafter)", () => {
+test("roles.po: promptFile unset by default, model/effort defaulted, strict schema (same #74 pattern as roles.verificationPlanReviewer/verificationPlanDrafter)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.roles.po.promptFile, undefined);
   assert.equal(cfg.roles.po.model, "sonnet");
@@ -1571,17 +1612,17 @@ test("roles.retro.everyNRounds: a non-integer is rejected", () => {
 
 // ── #127: roles.<role>.enabled toggles — switch peripheral roles off per deployment ────────
 
-test("roles.*.enabled: defaults to true for every toggleable role (po/architect/planReviewer/harvest/retro)", () => {
+test("roles.*.enabled: defaults to true for every toggleable role (po/architect/verificationPlanReviewer/harvest/retro)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.roles.po.enabled, true);
   assert.equal(cfg.roles.architect.enabled, true);
-  assert.equal(cfg.roles.planReviewer.enabled, true);
+  assert.equal(cfg.roles.verificationPlanReviewer.enabled, true);
   assert.equal(cfg.roles.harvest.enabled, true);
   assert.equal(cfg.roles.retro.enabled, true);
 });
 
 test("roles.*.enabled: explicit false is honored for each toggleable role", () => {
-  for (const role of ["po", "architect", "planReviewer", "harvest", "retro"] as const) {
+  for (const role of ["po", "architect", "verificationPlanReviewer", "harvest", "retro"] as const) {
     const cfg = parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nroles: { ${role}: { enabled: false } }`);
     assert.equal(cfg.roles[role].enabled, false, `roles.${role}.enabled should be false`);
   }
@@ -1594,9 +1635,9 @@ test("roles.*.enabled: an unknown role key under roles is rejected, not silently
   );
 });
 
-test("roles.planReviewer.enabled: a typo'd key is rejected, not silently dropped (.strict())", () => {
+test("roles.verificationPlanReviewer.enabled: a typo'd key is rejected, not silently dropped (.strict())", () => {
   assert.throws(
-    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { enable: false } }"),
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { verificationPlanReviewer: { enable: false } }"),
     /enable\b|[Uu]nrecognized/,
   );
 });

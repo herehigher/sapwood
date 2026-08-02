@@ -73,7 +73,7 @@ import {
 } from "./worker.js";
 
 /** #235 PR-B (owner ruling 2026-07-17): the allow/deny matrix for EVERY issues-only peripheral
- *  role (plan-reviewer, plan-drafter, PO/align+triage+pool, harvest, architect) — the ONE place
+ *  role (verification-plan-reviewer, verification-plan-drafter, PO/align+triage+pool, harvest, architect) — the ONE place
  *  this matrix is defined, per-role exports below just naming which pair each session wires
  *  in. Two prior rulings combine here:
  *
@@ -98,12 +98,12 @@ import {
  *  name, not a pattern) closes command execution entirely — no `git`, no `gh`, no shell of any
  *  kind. This SUBSUMES the old per-pattern `Bash(gh ...)` denies (#101/#102's `--body-file`/
  *  `-F`/`-l`/`-p` bypass classes are moot when there is no Bash grant to bypass THROUGH at all)
- *  and the plan-drafter's/PO's extra label-mutation denies below — simplified accordingly.
+ *  and the verification-plan-drafter's/PO's extra label-mutation denies below — simplified accordingly.
  *  Read-only git (`git log` etc.) deliberately stays OUT: the blanket Bash deny already covers
  *  it, and the issue's own scope explicitly excludes adding it as a distinct grant.
  *
  *  #534 (PM ruling + fable architectural review, 2026-08-02): `Agent`/`Task` denied by name —
- *  a live plan-reviewer session, unable to get a shell, spawned three subagents attempting to
+ *  a live verification-plan-reviewer session, unable to get a shell, spawned three subagents attempting to
  *  get one indirectly. The shell/write leg is evidenced and contained: the children inherit this
  *  SAME `--disallowedTools` deny list, so they reached no shell either, and the fan-out itself was
  *  an undeclared cost/concurrency channel, not a shell/write escalation. The READ-containment leg
@@ -177,8 +177,8 @@ export const PO_DISALLOWED_TOOLS = ROLE_DISALLOWED_TOOLS;
  *  align.ts's po-align/po-triage sessions) chooses between its own granted export here and the
  *  ungranted base (ROLE_ALLOWED_TOOLS/PO_ALLOWED_TOOLS) depending on `cfg.webAccess.enabled` —
  *  the config key is read AT THE CALL SITE, never inside RoleRunner itself, so a role this
- *  module doesn't wire the ternary for (every review-family session: plan-reviewer,
- *  plan-drafter, plan-reviewer-confirm, and reviewCwd's hardcoded gate② profile) has NO config
+ *  module doesn't wire the ternary for (every review-family session: verification-plan-reviewer,
+ *  verification-plan-drafter, verification-plan-reviewer-confirm, and reviewCwd's hardcoded gate② profile) has NO config
  *  path that could ever reach WebSearch/WebFetch — refusal by construction, not by convention.
  *  `po-pool` (align.ts's third PO_ALLOWED_TOOLS caller) is deliberately excluded — it renders a
  *  DIFFERENT prompt (`po-pool.md`, never `po.md`) and stays on the ungranted base regardless of
@@ -189,7 +189,7 @@ export const PO_ALIGN_ALLOWED_TOOLS = `${ROLE_ALLOWED_TOOLS},${PERIPHERAL_WEB_TO
 export const PO_TRIAGE_ALLOWED_TOOLS = `${ROLE_ALLOWED_TOOLS},${PERIPHERAL_WEB_TOOLS}`;
 
 export interface RoleSessionOpts {
-  /** A short, log-friendly role identity ("plan-reviewer", "plan-drafter", ...) — becomes
+  /** A short, log-friendly role identity ("verification-plan-reviewer", "verification-plan-drafter", ...) — becomes
    *  part of the session's lane/sentinel name, never interpreted. */
   roleId: string;
   prompt: string;
@@ -1095,7 +1095,7 @@ export class RoleRunner {
       // content-driven, not role-gated — scanEgressSuspects hits on ANY WebFetch/WebSearch or
       // Agent/Task tool_use block in this jsonl regardless of whether opts.allowedTools actually
       // granted the tool (see scanEgressSuspects' own doc, worker.ts). For an UNGRANTED role
-      // (plan-reviewer, etc.) a hit here would mean the session attempted a tool call the CLI's
+      // (verification-plan-reviewer, etc.) a hit here would mean the session attempted a tool call the CLI's
       // permission layer then denied — evidence worth surfacing, not a case this scan silently
       // drops. Contained: best-effort, never throws, never affects the session's own outcome.
       this.recordEgressSuspects(name, jsonl);
@@ -1676,8 +1676,8 @@ export interface RetriedSession {
   /** #374 (dogfood F16/F17): OPTIONAL environment-failure classification — the role-session
    *  side of the SAME park/probe/canary paradigm conductor.ts's worker-leg reclaim path already
    *  uses (env-failure.ts's classifyEnvFailure). Wired uniformly through this ONE shared helper
-   *  covers every role-session call site at once (po-align/po-triage/architect/plan-reviewer/
-   *  plan-drafter/harvest/retro all call runSessionWithRetry). Kept as a SEPARATE field, never
+   *  covers every role-session call site at once (po-align/po-triage/architect/verification-plan-reviewer/
+   *  verification-plan-drafter/harvest/retro all call runSessionWithRetry). Kept as a SEPARATE field, never
    *  widening `state` above's Pick type, for the same "existing callers/test fakes keep
    *  compiling unchanged" reason contextManifest already documents — omitted here means zero
    *  behavior change from pre-#374.

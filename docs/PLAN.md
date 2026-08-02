@@ -77,7 +77,7 @@ bootstrap_github,session_start}.sh`. Guard: `backend/src/zeroday/loop/guard.py`
 | 5 | Default merge gate | **Autonomous-merge gated on a fresh, different-model PR review** — gate① CI green + gate② a fresh non-author review → the Conductor merges (producer≠merger). Reviewer is pluggable: the local **engine-agent** session (Decision #10 — **default**, #501), hosted different-model Codex, same-model-trusted, or human; **produce-PR-and-stop** remains selectable when a human must merge. **Amended 2026-08-01 (#501):** originally 0day-style hosted-Codex-by-default (matching 0day and the original security review's recommendation); flipped to the local engine-agent kind — production-validated (E4c, #434 retro trial) and runs on the Claude CLI every sapwood user already has, where hosted Codex required a separate `@codex review` GitHub App install most fresh users wouldn't have. Hosted Codex stays fully selectable (`reviewer.mode: different-model-codex`). |
 | 6 | Method | 0day's TDD + two-gate + taxonomy as overridable defaults |
 | 7 | Config format | **YAML default** — `sapwood.config.yaml`, hand-edited with inline comments (serves "易读易配置"). Zod-validated after parse. The YAML parser also reads JSON for free (YAML ⊃ JSON), so `.json` works with zero extra code; no separate `.ts` config. |
-| 8 | Dispatch readiness | **An issue is not `Ready` until it carries a verification plan** — acceptance criteria + how to prove them (tests to write/run, commands, observable outcomes). Authored by the issue author/triage *before* the producer starts (keeps producer≠author). Enforced at the `Ready` gate (`getReadyIssues` refuses issues without one) **and** re-checked by the reviewer at gate② (the PR must satisfy the stated plan). Inherently-unverifiable issues (docs/knowledge, chore) are labelled `verify:n/a` and use the round-close doc gate / a lighter definition-of-done instead, so the gate never blocks legitimate work. Cheap (plan written once, read by worker + reviewer who already read the diff); net-saves by killing wrong-direction PRs and rework. **Amended 2026-07-09 (gate⓪, lands in v0.2 — see the v0.2 chapter):** presence alone is no longer the bar — a **plan-reviewer peripheral (gate⓪)** reviews each plan's quality/feasibility post-`Ready`, pre-dispatch, and `getReadyIssues` requires the plan **and** its `plan:approved` label (fail-closed). `verify:n/a` is never self-declared: gate⓪ can only *propose* it, always paired with `needs-human`, and a human finalizes the adjudication by removing `needs-human` (→ doc-gate path). |
+| 8 | Dispatch readiness | **An issue is not `Ready` until it carries a verification plan** — acceptance criteria + how to prove them (tests to write/run, commands, observable outcomes). Authored by the issue author/triage *before* the producer starts (keeps producer≠author). Enforced at the `Ready` gate (`getReadyIssues` refuses issues without one) **and** re-checked by the reviewer at gate② (the PR must satisfy the stated plan). Inherently-unverifiable issues (docs/knowledge, chore) are labelled `verify:n/a` and use the round-close doc gate / a lighter definition-of-done instead, so the gate never blocks legitimate work. Cheap (plan written once, read by worker + reviewer who already read the diff); net-saves by killing wrong-direction PRs and rework. **Amended 2026-07-09 (gate⓪, lands in v0.2 — see the v0.2 chapter):** presence alone is no longer the bar — a **verification-plan-reviewer peripheral (gate⓪)** reviews each plan's quality/feasibility post-`Ready`, pre-dispatch, and `getReadyIssues` requires the plan **and** its `plan:approved` label (fail-closed). `verify:n/a` is never self-declared: gate⓪ can only *propose* it, always paired with `needs-human`, and a human finalizes the adjudication by removing `needs-human` (→ doc-gate path). |
 | 9 | Edge-case handling | **Rare edge cases degrade to `needs-human`, never to more machinery** (CTO, 2026-07-07, #69). Automation covers the common path only; when a low-probability edge would require new hardening/persistence/recovery code, the correct handling is: preserve the evidence, label `needs-human`, stop. First application: the drain path never runs git in worker worktrees (the whole #59–#68 issue family collapsed into sentinel-only handoff + dirty-worktree retention). |
 | 10 | Engine-agent reviewer | **Engine-composed, static, different-Claude-model gate② session** (#279): D1 no producer-code execution/Bash; D2 superseded by D6's engine-private, config-isolated checkout; D3 runs serially after trusted CI and reruns only when needed; D4 checkbox ACs receive engine IDs; D5 configured and actual reviewer models must differ from the producer's; D6 materializes the exact head from a private clone; D7 includes instruction context but changes to configured instruction paths escalate to human review. The dispatch-time full-body/AC snapshot is authoritative session input; code-verifiable confirmation requires app-slug-bound `ci.requiredChecks`; `engine-agent` is primary-only (never a fallback) and has no fallback model. |
 
@@ -893,7 +893,7 @@ public-repo hardening is additive, not a rewrite.** v1 requirements:
     dispatch cap 1–2).
 - **Issues-only peripheral role sessions carry no shell and no forge credential
   (#110; read grant widened to worktree-confined by #235, 2026-07-17):**
-  plan-reviewer, plan-drafter, PO/align+triage, harvest, and architect hold no
+  verification-plan-reviewer, verification-plan-drafter, PO/align+triage, harvest, and architect hold no
   `Bash` tool grant and no `gh`/forge credential of their own — decisions are
   computed from prompt-injected content plus a real, but worktree-confined,
   `Read`/`Grep`/`Glob` grant (#235), never a live `gh` call. Every role in this
@@ -952,15 +952,15 @@ write, and today's decision weight.
 | Role | Output fields → engine write | Validation (`engine/src/…`) | Decision weight |
 |------|------------------------------|-----------------------------|-----------------|
 | **PO / decompose (#310)** | `outcome:"decomposed"` + bounded child set + coverage mapping → fence parent (`decomposed`, Todo, no round-pool), then `createIssue`, child governance labels/comments, `addSubIssue`, and one parent coverage comment. `outcome:"unresolved"` → advisory parent comment only. | `DecomposeOutputMetadataSchema` (strict two-branch union) + `validateDecomposeOutput`: `maxChildren`, exact body cardinality, unique titles, complete/in-range coverage and dependency indices, ready-child acceptance criteria + verification section, and honest planless remainder metadata. The proposal set is journaled before child creation and reconciled by body marker and receipts. | **Medium, pre-Ready** — the session chooses backlog child boundaries, but cannot make any child dispatchable: every child starts outside Ready; planless remainders also receive `needs-human`. The parent fence is engine-computed from the human `split` signature, never session-selected. |
-| **plan-reviewer** | `decision`∈{approve, draft_request, verify_na} + `issue` + optional body → `updateIssueBody` + `addLabel(plan:approved)` (approve); `addLabel(needs-human)`+`addLabel(verify:n/a)`+`addIssueComment` (verify_na); routes to drafter **and posts the reviewer brief via `addIssueComment`** before the drafter runs (draft_request) — `plan-review.ts:352-384` | `validateReviewerOutput` (`plan-review.ts:164`): `PlanReviewerMetadataSchema` (strict zod) **+ content invariant** — `extractVerificationPlan` must find a plan in the approved body **+** issue-number match to the expected candidate | **High** — `plan:approved` is the gate⓪ dispatch key; a false approve dispatches an unverifiable issue. Deepest validation (schema + content + identity). |
-| **plan-drafter** | `issue` + body (revised issue body, required) → `updateIssueBody` only — `plan-review.ts:422` | `validateDrafterOutput` (`plan-review.ts:205`): `PlanDrafterMetadataSchema` (strict) + non-empty body + issue-number match **+ content invariant** — `extractVerificationPlan` must find a verification/acceptance section in the drafted body (`plan-review.ts:224-226`) | **Medium** — writes the body but **never** the `plan:approved` label (author ≠ approver, #77 Amendment 2); the reviewer must independently re-approve before dispatch, so the drafter's write is always re-gated. |
+| **verification-plan-reviewer** | `decision`∈{approve, draft_request, verify_na} + `issue` + optional body → `updateIssueBody` + `addLabel(plan:approved)` (approve); `addLabel(needs-human)`+`addLabel(verify:n/a)`+`addIssueComment` (verify_na); routes to drafter **and posts the reviewer brief via `addIssueComment`** before the drafter runs (draft_request) — `plan-review.ts:352-384` | `validateReviewerOutput` (`plan-review.ts:164`): `VerificationPlanReviewerMetadataSchema` (strict zod) **+ content invariant** — `extractVerificationPlan` must find a plan in the approved body **+** issue-number match to the expected candidate | **High** — `plan:approved` is the gate⓪ dispatch key; a false approve dispatches an unverifiable issue. Deepest validation (schema + content + identity). |
+| **verification-plan-drafter** | `issue` + body (revised issue body, required) → `updateIssueBody` only — `plan-review.ts:422` | `validateDrafterOutput` (`plan-review.ts:205`): `VerificationPlanDrafterMetadataSchema` (strict) + non-empty body + issue-number match **+ content invariant** — `extractVerificationPlan` must find a verification/acceptance section in the drafted body (`plan-review.ts:224-226`) | **Medium** — writes the body but **never** the `plan:approved` label (author ≠ approver, #77 Amendment 2); the reviewer must independently re-approve before dispatch, so the drafter's write is always re-gated. |
 | **PO / aligning** | *align mode:* `issues:[{title}]` + per-issue bodies → `createIssue` + `addLabel(origin:agent)` + `addLabel(needs-human)` when planless + `addIssueComment` — `align.ts:291-304`. *triage mode:* `issue` + drafted body → `updateIssueBody` + `addIssueComment` — `align.ts:351`. *both modes, #237:* optional `concerns:[{issue, reason}]` alongside the deliverable above → `addIssueComment` only, via `dissent.ts::postConcerns` (triage concerns dropped if their decision was itself discarded — stale-hash refusal / decision-lost — 2026-07-18 adjudication finding 6) | *align:* `validateAlignOutput` (`align.ts:138`): `AlignMetadataSchema` (strict) + per-issue body split; **post-write plan check** — a planless creation earns `needs-human` at creation time (`align.ts:297-304`). *triage:* `validateTriageOutput` (`align.ts:184`): `TriageMetadataSchema` (strict) + issue match + non-empty body — **deliberately no plan invariant** (pre-#110 semantics preserved): the drafted body is written via `updateIssueBody` first, then a plan-conditional success comment (`align.ts:351-356`); a still-planless draft records `triage-degraded` (no label, no success comment) and re-matches triage next round. *concerns (#237):* `dissent.ts::validateConcerns` — **set cross-check**, same doctrine as harvest's below: every `issue` must be inside the session's own injected view — the rendered backlog-digest subset for ALIGN mode; the target issue ONLY for TRIAGE mode (narrowed 2026-07-18, finding 7, to match the prompt's own contract) — or the whole batch is rejected; one concern per issue per session | **Low (pre-Ready)** — a created issue structurally cannot carry a dispatch label (engine applies labels, session has no channel); planless creations are fenced `needs-human`, planless triage drafts stay undispatchable via gate⓪'s `plan:approved` requirement; degrade proceeds (low stakes, next round retries). *concerns:* **lowest possible — comment-only, by construction.** No schema field a concern carries maps to any label/status/dispatch write path (there is none in `dissent.ts` to map to); delivery is idempotent by a deterministic marker (issue + a hash of the concern's wording **and** the concerned issue's body at post time, so a why/what edit re-arms the same worded concern — including an edit this SAME engine made, since the outcome, `body-changed`, deliberately carries no human-attribution claim). A missing durable receipt behind an already-live marker is reconciled in place rather than lost (finding 3), and `dissent.ts::reconcileDurableConcerns` (2026-07-19 round-2 adjudication, findings 1+2) durably sweeps the SAME thing across the whole ledger every round — the backstop for a concern whose decision reached its terminal receipt before `postConcerns` ever delivered it — always attributed to that decision's own original round, never the round the sweep runs in. Adjudication (`closed`/`external-reply`/`body-changed`) runs as its own round-level scan, unconditional on `roles.po.enabled` (finding 5); `closed` and `body-changed` are BOTH neutral/unattributed (2026-07-19, finding 3 — the conductor's own `Closes #N` merges can close an issue exactly like a human would), leaving `external-reply` as the only outcome with any actor claim at all (and even that is "not this engine," never "a human specifically"). |
 | **architect** | `contradictions:[{issue, severe}]` + design note + per-issue explanations → `addIssueComment(anchor, designNote)`; per contradiction `addIssueComment` + `addLabel(blocked)` when `severe` — `architect.ts:387-390` | `validateArchitectOutput` (`architect.ts:235`): `ArchitectMetadataSchema` (strict) + `parseArchitectBody` fail-closed sub-format parse (`architect.ts:190`; own-line `<<<CONTRADICTION #n>>>` markers, no embedded sub-delimiters) **+ set cross-check** — every flagged `issue` must be inside the engine-computed candidate set or the whole output is rejected before any write (`architect.ts:270-278`) | **Medium** — the `blocked` label gates dispatch of the flagged issue; the design-note comments are advisory. Validation matches: schema + structural body parse + candidate-set bound on the label target; the prose itself carries no truth check. |
 | **harvest** | `comments:[{issue, body}]` → `addIssueComment` only — `harvest.ts:347` | `validateHarvestOutput` (`harvest.ts:217`): `HarvestMetadataSchema` (strict) **+ set cross-check** — every `issue` must be in the engine's pre-computed `needsHumanIssues` set (`gatherRoundFacts`, fixed *before* the session); any out-of-set number fails the **whole** batch | **Low** — comment-only, and the session's target choice is **bounded** by the engine-computed set: it may brief any subset (including none — an empty `comments` array is valid) but can never add an out-of-set target. No labels, no dispatch effect — the set cross-check is the guard against write-target choice leaking beyond the engine's bound. |
 | **retro** | Scratch file (`.sapwood-retro-pr`), not the JSON block: `branch`/`title`/`body` or `none` → `openPR(branch, title, body)` — `retro.ts:377` | `parseRetroScratch` (`retro.ts:141`): fail-closed labeled-header parse + `invalidBranchReason` (no default-branch, no `..`, argv-safe) **+ engine-side `forge.branchExists`** push verification before `openPR` (a session's push claim is never trusted) | **Low at write, gate②-bound** — a proposal is *only* a PR; it changes nothing until gate② (CI green + fresh non-author review) merges it. The heavy validation here is authenticity (branch really pushed), not decision quality — correctly, since the merge gate owns the quality call. |
 
 Reading the weight column top-down is the whole point: the one **High**-weight output
-(plan-reviewer's `plan:approved`) carries the deepest validation (schema + content
+(verification-plan-reviewer's `plan:approved`) carries the deepest validation (schema + content
 invariant + identity), and weight falls in step with validation down the table. A
 future change that inverts that ordering — a heavier write behind lighter validation —
 is exactly what this principle exists to catch.
@@ -1216,12 +1216,12 @@ marker idempotency, output schema, escalation path) see
   v0.2 chapter below: the round ledger + round-loop skeleton — two-level termination,
   rerun-not-resume (#86); the peripheral role runner — issues+docs write scope,
   idempotent round markers (#87); gate⓪, the verification-plan quality gate —
-  `plan:approved` dispatch requirement + the plan-reviewer (#88); the PO role — goal
+  `plan:approved` dispatch requirement + the verification-plan-reviewer (#88); the PO role — goal
   alignment / decomposition + plan-drafting triage (#89); the architect role — round
   design/review (#90); and harvest + retrospective — self-evolution via PR + gate②
   only (#91). **#104 closed the wiring gap #100/#101/#103's gate② reviews deliberately
   deferred:** all four peripheral roles (PO/aligning, architect, harvest, retro —
-  gate⓪'s plan-reviewer already ran in `runRounds` since #87) are now constructed by
+  gate⓪'s verification-plan-reviewer already ran in `runRounds` since #87) are now constructed by
   one factory (`round-defaults.ts`'s `createDefaultPeripherals`) sharing a single
   `RoleRunner`/`State`/forge, feeding the architect stub the PO pass's own output where
   available; a shared `runSessionWithRetry` helper (`peripheral.ts`) replaced four
@@ -1398,7 +1398,7 @@ session output schema carries a label field — removing
 pool (#213) and pool-scoped gate⓪ with freshness re-confirm (#214).
 
 **Peripherals never review or merge.** The goal-alignment/PO, architect, gate⓪
-plan-reviewer, harvest, and retrospective roles read and write issues and docs only.
+verification-plan-reviewer, harvest, and retrospective roles read and write issues and docs only.
 `guard.ts`, `reviewer.ts`, and `merge-driver.ts` stay fixed and non-configurable
 regardless of orchestration config —
 producer≠reviewer≠merger holds no matter how the round loop is shaped. A graceful exit
@@ -1490,7 +1490,7 @@ reopens after close.
 #8).** Decision #8 enforced plan *presence* (dispatch refuses a plan-less issue) and
 gate② re-checks the finished PR against the plan — but nothing reviewed the plan's
 quality or feasibility before a producer spent budget on it, and `verify:n/a` was
-self-declared. gate⓪ closes both holes: a **plan-reviewer** peripheral runs
+self-declared. gate⓪ closes both holes: a **verification-plan-reviewer** peripheral runs
 post-`Ready`, pre-dispatch, in a session distinct from both the plan's author and the
 producer. The session itself holds no shell (#110) — it computes a decision only;
 approve → the engine applies `plan:approved` (and any body corrections) from that
@@ -1507,9 +1507,9 @@ dispatch.
 
 **gate⓪ is scoped to the round pool, with a freshness re-confirm at every pool entry
 (locked 2026-07-17, issue #214) — `plan:approved` semantic shift.** Pre-#214, the
-plan-reviewer swept *every* Ready-lane issue still awaiting gate⓪ each round — with a
+verification-plan-reviewer swept *every* Ready-lane issue still awaiting gate⓪ each round — with a
 large backlog, one phase could burn dozens of sessions on issues that wouldn't dispatch
-for rounds. Post-#214, the plan-reviewer's candidate set is the round pool itself
+for rounds. Post-#214, the verification-plan-reviewer's candidate set is the round pool itself
 (`labels.roundPool` members, read live at phase start — the phase runs after
 `architecting` in the round sequence, so a `drop` verdict's label removal has already
 landed), split into four classes: an unadjudicated pool member gets the unchanged
@@ -1542,13 +1542,13 @@ concretely — becomes the brief for a scoped **plan-drafting session** the loop
 dispatches. The drafter is an issues-only peripheral like PO/triage (no shell, no
 `gh`/forge credential, and no dedicated worker checkout — only the same
 worktree-confined `Read`/`Grep`/`Glob` grant every role in this class shares,
-#110 + #235), runs in a session distinct from the plan-reviewer (plan-author ≠
+#110 + #235), runs in a session distinct from the verification-plan-reviewer (plan-author ≠
 plan-approver holds; the
 reviewer never approves a plan it authored, its minor-correction latitude aside), and
 its structured output — the revised acceptance criteria + verification plan, which
 the engine writes into the issue body — never touches anything else; it never
 implements the issue itself. Bounded, never a livelock: at most
-`roles.planReviewer.maxDraftCycles` draft→re-review cycles per issue (default 2,
+`roles.verificationPlanReviewer.maxDraftCycles` draft→re-review cycles per issue (default 2,
 YAML-tunable); cycles exhausted → `needs-human` with the full attempt trail
 preserved (Decision #9). Accepted trade-off: for a thin why/what-only human-filed
 issue, the agent-drafted plan effectively defines "done" — mitigated by that visible
@@ -1564,7 +1564,7 @@ plan gets one drafted by the PO/triage peripheral; the loop never blocks waiting
 a human-written plan.
 
 **The separation chain extends: plan-author ≠ plan-approver ≠ producer.** The
-plan-reviewer computes a decision only (no shell of its own, #110) — the engine
+verification-plan-reviewer computes a decision only (no shell of its own, #110) — the engine
 performs every issue write from its validated output; it never reviews code and never
 merges. The safety invariant (producer≠reviewer≠merger, locked decision above) is
 untouched.

@@ -19,7 +19,7 @@
 // the align-mode metadata schema has no label field at all, and the engine is the only thing
 // that ever calls `forge.createIssue` (title + body only — see IForge) or `forge.addLabel`, so
 // a created issue simply cannot carry a dispatch-path label at creation. The behavior the old
-// post-check defended against is now structurally impossible, exactly like the plan-drafter's
+// post-check defended against is now structurally impossible, exactly like the verification-plan-drafter's
 // pre-#110 label post-check in plan-review.ts (see that module's doc).
 //
 // Locked decision 5 (only a human confirms `Ready`) remains enforced STRUCTURALLY: this module

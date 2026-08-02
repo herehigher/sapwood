@@ -26,7 +26,7 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
 const allOnCfg = (): SapwoodConfig =>
   ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" },
-    roles: { po: { enabled: true }, planReviewer: { enabled: true } },
+    roles: { po: { enabled: true }, verificationPlanReviewer: { enabled: true } },
     round: { milestone: "M-X" },
   });
 

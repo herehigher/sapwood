@@ -115,7 +115,7 @@ export function deriveEngineState(f: EngineFacts): EngineState {
 
 // ── config allowlist (§3 E) ────────────────────────────────────────────────────────────────
 
-const ROLE_KEYS = ["planReviewer", "planDrafter", "architect", "po", "harvest", "retro"] as const;
+const ROLE_KEYS = ["verificationPlanReviewer", "verificationPlanDrafter", "architect", "po", "harvest", "retro"] as const;
 
 /** The EXHAUSTIVE list of resolved-config leaves the server will serve, grouped the way §3 E's
  *  drawer groups them (Board · Lanes · Worker · Safety · Review & merge · Labels), plus the

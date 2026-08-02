@@ -485,7 +485,7 @@ const Labels = z
     reserve: z.string().optional(),
     verifyNa: z.string().optional(), // Decision #8: skips the verification-plan gate
     // #88 gate⓪ (amends Decision #8 per #77's 2026-07-09 comment): a verification plan must
-    // also pass the plan-reviewer peripheral's quality review before getReadyIssues dispatches
+    // also pass the verification-plan-reviewer peripheral's quality review before getReadyIssues dispatches
     // it — plan presence alone is no longer enough. Applied by that peripheral only (never by
     // the loop on a verify:n/a issue — the two dispatch paths are mutually exclusive).
     planApproved: z.string().optional(),
@@ -513,7 +513,7 @@ const Labels = z
   })
   .strict();
 
-// #87: peripheral role sessions (plan-reviewer, plan-drafter, ...) are cheap, issues-only,
+// #87: peripheral role sessions (verification-plan-reviewer, verification-plan-drafter, ...) are cheap, issues-only,
 // text-judgment tasks — no code, no forge credentials, no `gh`/git write capability (#110's
 // empty ROLE_ALLOWED_TOOLS + #218's credential-stripped spawn env). #236 (locked ruling,
 // 2026-07-17): they DO receive ambient repo context by design — `claude -p` in a repo worktree
@@ -540,21 +540,21 @@ const RoleSession = z
   })
   .strict();
 
-// #88/#87: gate⓪ plan-reviewer + plan-drafter peripheral config surface. #88 shipped the
+// #88/#87: gate⓪ verification-plan-reviewer + verification-plan-drafter peripheral config surface. #88 shipped the
 // validated config key + path resolution + the shipped default prompt file ("accepted, not
 // yet wired"); #87 (the role runner) is what actually loads/renders/dispatches these.
 const Roles = z
   .object({
-    planReviewer: RoleSession.extend({
+    verificationPlanReviewer: RoleSession.extend({
       // Same #74 promptFile pattern as worker.promptFile: unset -> the engine's shipped
-      // `prompts/plan-reviewer.md`; a relative path resolves against the CONFIG FILE's own
+      // `prompts/verification-plan-reviewer.md`; a relative path resolves against the CONFIG FILE's own
       // directory (see loadConfig below), not the CLI's cwd.
       promptFile: z.string().optional(),
       // #214: the LIGHTWEIGHT freshness re-confirm prompt — a pool member carrying plan:approved
       // from a PRIOR round gets this one-question pass ("does this plan still hold against
-      // current main?") instead of a full plan-reviewer pass, every time it re-enters the round
+      // current main?") instead of a full verification-plan-reviewer pass, every time it re-enters the round
       // pool (gate⓪ scoped to the pool, #214). Same #74 promptFile pattern as promptFile above:
-      // unset -> the engine's shipped `prompts/plan-reviewer-confirm.md`; a relative path
+      // unset -> the engine's shipped `prompts/verification-plan-reviewer-confirm.md`; a relative path
       // resolves against the CONFIG FILE's directory (see loadConfig below). Deliberately its own
       // key rather than reusing promptFile — the two prompts ask structurally different
       // questions (full quality review vs. a single confirm/invalidate judgment) and a deployment
@@ -567,7 +567,7 @@ const Roles = z
       // needs-human, silently disabling the self-heal path. Enforced by the #87 role
       // runner's plan_review phase.
       maxDraftCycles: z.number().int().positive().default(2),
-      // #127: switches the WHOLE gate⓪ unit off (plan-reviewer + its plan-drafter, which rides
+      // #127: switches the WHOLE gate⓪ unit off (verification-plan-reviewer + its verification-plan-drafter, which rides
       // along — the drafter has no toggle of its own, it only ever runs from inside the
       // plan_review phase). false -> round-defaults.ts's createDefaultPeripherals OMITS the
       // plan_review stub; round.ts's own existing default (an unset phase falls back to
@@ -577,12 +577,12 @@ const Roles = z
     })
       .strict()
       .default({}),
-    // #87 (#77 Amendment 2's self-heal): the plan-drafter peripheral — issues-only writes, a
-    // session distinct from the plan-reviewer, briefed by the reviewer's bounce comment to
+    // #87 (#77 Amendment 2's self-heal): the verification-plan-drafter peripheral — issues-only writes, a
+    // session distinct from the verification-plan-reviewer, briefed by the reviewer's bounce comment to
     // draft/repair an issue's acceptance criteria + verification plan. Never implements the
     // issue, never approves its own draft (plan-author != plan-approver).
-    planDrafter: RoleSession.extend({
-      // Same #74 promptFile pattern: unset -> the engine's shipped `prompts/plan-drafter.md`;
+    verificationPlanDrafter: RoleSession.extend({
+      // Same #74 promptFile pattern: unset -> the engine's shipped `prompts/verification-plan-drafter.md`;
       // relative resolves against the CONFIG FILE's directory.
       promptFile: z.string().optional(),
     })
@@ -628,7 +628,7 @@ const Roles = z
       // numbers-only render.
       poolDigestMaxChars: z.number().int().positive().default(20_000),
       // #127: false -> round-defaults.ts omits the architecting stub; the phase no-ops via
-      // round.ts's existing noopPeripheralStub default (see roles.planReviewer.enabled above
+      // round.ts's existing noopPeripheralStub default (see roles.verificationPlanReviewer.enabled above
       // for the shared rationale).
       enabled: z.boolean().default(true),
     })
@@ -656,7 +656,7 @@ const Roles = z
       // failures (a permanently unreadable/inaccessible issue — deleted, transferred, locked —
       // is the deterministic case; a transient blip retries and clears well under the cap) and
       // escalates needs-human instead, the same bound-a-retry-loop-then-degrade-to-human paradigm
-      // roles.planReviewer.maxDraftCycles/lanes.prFixCap already use. Positive int only: 0 would
+      // roles.verificationPlanReviewer.maxDraftCycles/lanes.prFixCap already use. Positive int only: 0 would
       // escalate on the very first transient failure, defeating the retry it's meant to bound.
       maxConcernPostAttempts: z.number().int().positive().default(5),
       // #212 (gate① F1): the round-pool SELECTION session's own prompt — a distinct file from
@@ -678,7 +678,7 @@ const Roles = z
       // `docs/configuration.md`'s row for the consequence when it bites).
       backlogDigestMaxChars: z.number().int().min(200).default(20_000),
       // #127: false -> round-defaults.ts omits the aligning stub; the phase no-ops via
-      // round.ts's existing noopPeripheralStub default (see roles.planReviewer.enabled above
+      // round.ts's existing noopPeripheralStub default (see roles.verificationPlanReviewer.enabled above
       // for the shared rationale). #212/#233: pool SELECTION is the one exception — it still
       // runs every round regardless of this flag; see align.ts's runPoolSelection and
       // `poolSelection` below, which is what actually gates the SESSION now.
@@ -709,7 +709,7 @@ const Roles = z
       .default({}),
     // #91: round-close peripheral roles (#77 decision 2's harvest / decision 6's retro). Config
     // key + path resolution + shipped default prompt only — same "accepted, not yet wired" shape
-    // #88 shipped for planReviewer before #87 wired it: harvest.ts/retro.ts implement the
+    // #88 shipped for verificationPlanReviewer before #87 wired it: harvest.ts/retro.ts implement the
     // PeripheralStub, but wiring either into runRounds's default `harvesting`/`retro` peripherals
     // (or the CLI) is a deliberate follow-up, not this issue's scope.
     harvest: RoleSession.extend({
@@ -722,7 +722,7 @@ const Roles = z
       // own dispatch cap), so this is a safety valve, not a knob most deployments touch.
       artifactMaxChars: z.number().int().positive().default(20_000),
       // #127: false -> round-defaults.ts omits the harvesting stub; the phase no-ops via
-      // round.ts's existing noopPeripheralStub default (see roles.planReviewer.enabled above
+      // round.ts's existing noopPeripheralStub default (see roles.verificationPlanReviewer.enabled above
       // for the shared rationale).
       enabled: z.boolean().default(true),
     })
@@ -740,7 +740,7 @@ const Roles = z
       // follow-up ("whether every round should pay for a retro pass"). Default 1 = every round
       // (unchanged behavior from #91). N>1 thins it: retro.ts skips every round whose id isn't a
       // multiple of N, still setting the phase marker (never wedges the round). Positive int
-      // only, same rationale as roles.planReviewer.maxDraftCycles above (0 has no sane meaning).
+      // only, same rationale as roles.verificationPlanReviewer.maxDraftCycles above (0 has no sane meaning).
       everyNRounds: z.number().int().positive().default(1),
       // #111 PR-A: the hard cap on the engine-built round-scoped read digest (retro-digest.ts's
       // buildRetroDigest) substituted into the prompt as `{{round.digest}}` — the user-tunable
@@ -763,7 +763,7 @@ const Roles = z
       // Fewer rounds in the ledger than K degrades to what exists, never an error.
       tendencyRounds: z.number().int().positive().default(3),
       // #127: false -> round-defaults.ts omits the retro stub; the phase no-ops via round.ts's
-      // existing noopPeripheralStub default (see roles.planReviewer.enabled above for the
+      // existing noopPeripheralStub default (see roles.verificationPlanReviewer.enabled above for the
       // shared rationale).
       enabled: z.boolean().default(true),
     })
@@ -880,7 +880,7 @@ const ProxyConfig = z
 // spot"), and every call is journalled through the SAME scanEgressSuspects path the worker's own
 // tripwire uses (worker.ts). `false` falls every one of those three sessions back to the base
 // ROLE_ALLOWED_TOOLS/PO_ALLOWED_TOOLS pair — no WebSearch/WebFetch reaches them at all. The
-// review family (plan-reviewer/plan-drafter/plan-reviewer-confirm, and every gate② reviewer
+// review family (verification-plan-reviewer/verification-plan-drafter/verification-plan-reviewer-confirm, and every gate② reviewer
 // form) never reads this key — their sessions never widen past ROLE_ALLOWED_TOOLS regardless of
 // this flag, by construction (no call site threads it in), not by convention.
 const WebAccess = z
@@ -1194,7 +1194,7 @@ const Round = z
     // removeRoundPoolLabel and record every failure as a `pool-reconcile-incomplete` event; this
     // many recorded failures for the SAME issue (a deterministically un-removable label, e.g. a
     // repo permission problem) escalates needs-human instead of retrying forever — same bound-
-    // then-degrade paradigm as roles.po.maxConcernPostAttempts/roles.planReviewer.maxDraftCycles.
+    // then-degrade paradigm as roles.po.maxConcernPostAttempts/roles.verificationPlanReviewer.maxDraftCycles.
     // Positive int only, same "0 defeats the retry it's meant to bound" rationale.
     maxPoolRemovalAttempts: z.number().int().positive().default(5),
   })
@@ -1787,9 +1787,36 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
   }
 });
 
+// #413: keys this rename retired, mapped to their replacement. NOT a compatibility shim — the
+// old key is dead, and a config carrying it still FAILS (the pre-v1 ruling on PR #555 is that a
+// dual-key migration path isn't owed). This table only improves the DIAGNOSTIC: `roles`'s
+// `.strict()` already rejects the dead key, but its stock message names only what's wrong, never
+// what to write instead, and "planReviewer" -> "verificationPlanReviewer" is not a guessable
+// edit. Deliberately a lookup of exact dead keys, not a fuzzy did-you-mean over the schema: a
+// rename we performed is a fact we know, so this binds to that fact rather than inferring one
+// from string distance.
+const RENAMED_ROLE_KEYS: Readonly<Record<string, string>> = Object.freeze({
+  planReviewer: "verificationPlanReviewer",
+  planDrafter: "verificationPlanDrafter",
+});
+
 /** Parse + validate raw YAML/JSON text. Exported for testing without disk I/O. */
 export function parseConfig(text: string): SapwoodConfig {
   const raw = parseYaml(text); // also accepts JSON (YAML ⊃ JSON)
+  // Runs BEFORE the schema parse purely so this specific message wins over `.strict()`'s generic
+  // unrecognized-key one; both reject, so the outcome is identical either way.
+  const roles: unknown = (raw as { roles?: unknown } | null | undefined)?.roles;
+  if (roles !== null && typeof roles === "object") {
+    for (const [dead, live] of Object.entries(RENAMED_ROLE_KEYS)) {
+      if (dead in (roles as Record<string, unknown>)) {
+        throw new Error(
+          `roles.${dead} was renamed to roles.${live} (#413): the gate⓪ role reviews an issue's ` +
+            `VERIFICATION PLAN — its acceptance criteria and proof method — not the plan of work. ` +
+            `Rename the key in your config; its sub-keys are unchanged.`,
+        );
+      }
+    }
+  }
   return ConfigSchema.parse(raw);
 }
 
@@ -1829,17 +1856,20 @@ export function loadConfig(path?: string): SapwoodConfig {
   if (cfg.worker.pricingFile !== undefined && !isAbsolute(cfg.worker.pricingFile)) {
     cfg.worker.pricingFile = resolve(dirname(file), cfg.worker.pricingFile);
   }
-  // #88/#87: same relative-to-config-file resolution for the plan-reviewer prompt.
-  if (cfg.roles.planReviewer.promptFile !== undefined && !isAbsolute(cfg.roles.planReviewer.promptFile)) {
-    cfg.roles.planReviewer.promptFile = resolve(dirname(file), cfg.roles.planReviewer.promptFile);
+  // #88/#87: same relative-to-config-file resolution for the verification-plan-reviewer prompt.
+  if (cfg.roles.verificationPlanReviewer.promptFile !== undefined && !isAbsolute(cfg.roles.verificationPlanReviewer.promptFile)) {
+    cfg.roles.verificationPlanReviewer.promptFile = resolve(dirname(file), cfg.roles.verificationPlanReviewer.promptFile);
   }
-  // #214: same rule for the plan-reviewer's freshness re-confirm prompt.
-  if (cfg.roles.planReviewer.confirmPromptFile !== undefined && !isAbsolute(cfg.roles.planReviewer.confirmPromptFile)) {
-    cfg.roles.planReviewer.confirmPromptFile = resolve(dirname(file), cfg.roles.planReviewer.confirmPromptFile);
+  // #214: same rule for the verification-plan-reviewer's freshness re-confirm prompt.
+  if (
+    cfg.roles.verificationPlanReviewer.confirmPromptFile !== undefined &&
+    !isAbsolute(cfg.roles.verificationPlanReviewer.confirmPromptFile)
+  ) {
+    cfg.roles.verificationPlanReviewer.confirmPromptFile = resolve(dirname(file), cfg.roles.verificationPlanReviewer.confirmPromptFile);
   }
-  // #87: same rule for the plan-drafter prompt.
-  if (cfg.roles.planDrafter.promptFile !== undefined && !isAbsolute(cfg.roles.planDrafter.promptFile)) {
-    cfg.roles.planDrafter.promptFile = resolve(dirname(file), cfg.roles.planDrafter.promptFile);
+  // #87: same rule for the verification-plan-drafter prompt.
+  if (cfg.roles.verificationPlanDrafter.promptFile !== undefined && !isAbsolute(cfg.roles.verificationPlanDrafter.promptFile)) {
+    cfg.roles.verificationPlanDrafter.promptFile = resolve(dirname(file), cfg.roles.verificationPlanDrafter.promptFile);
   }
   // #90: same rule for the architect prompt.
   if (cfg.roles.architect.promptFile !== undefined && !isAbsolute(cfg.roles.architect.promptFile)) {
@@ -1956,8 +1986,8 @@ export function dashboardConfigSubset(cfg: SapwoodConfig) {
     reviewer: { mode: cfg.reviewer.mode, deltaChainMax: cfg.reviewer.deltaChainMax },
     merge: { mode: cfg.merge.mode },
     roles: {
-      planReviewer: session(cfg.roles.planReviewer),
-      planDrafter: session(cfg.roles.planDrafter),
+      verificationPlanReviewer: session(cfg.roles.verificationPlanReviewer),
+      verificationPlanDrafter: session(cfg.roles.verificationPlanDrafter),
       architect: session(cfg.roles.architect),
       po: session(cfg.roles.po),
       harvest: session(cfg.roles.harvest),
