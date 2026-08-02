@@ -765,9 +765,11 @@ const Roles = z
   .strict();
 
 // #234: engine-hosted read-only forge MCP proxy for role sessions (supersedes #217's two-pass
-// needsDetails protocol). #244 EXTENSION: the tool algebra also carries 4 PR-facing tools
-// (pr_details/pr_reviews/pr_review_threads/pr_checks — proxy/tools.ts), and the proxy MECHANISM
-// extends to worker legs (worker.ts's WorkerSupervisor, mirroring RoleRunner's `proxy` opt)
+// needsDetails protocol). #244 EXTENSION: the tool algebra also carries 5 PR-facing tools
+// (pr_details/pr_reviews/pr_review_threads/pr_checks/getPRAuditComments — the last is
+// camelCase, the odd one out in the wire names; #556 tracks normalizing it — proxy/tools.ts),
+// and the proxy MECHANISM extends to worker legs (worker.ts's WorkerSupervisor, mirroring
+// RoleRunner's `proxy` opt)
 // alongside RoleRunner peripheral sessions. `caps.maxReviewThreadsPerCall`/
 // `caps.maxCommentsPerThread` are the PR-tool caps' user-tunable knobs, same convention as every
 // other cap in this section.

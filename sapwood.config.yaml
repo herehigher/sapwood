@@ -514,7 +514,8 @@ doctrine:
 # Credentials never leave the engine process: a session gets a role-scoped subset of a fixed tool
 # set over a bearer-token-authenticated local HTTP server, minted per session, revoked at
 # teardown — issue-oriented tools (issue_details/issue_comments/issue_relations/search_issues,
-# #234) for peripheral roles, PR-facing tools (pr_details/pr_reviews/pr_review_threads/pr_checks,
+# #234) for peripheral roles, PR-facing tools (pr_details/pr_reviews/pr_review_threads/pr_checks/
+# getPRAuditComments [camelCase wire name, the odd one out; #556 tracks normalizing it],
 # #244 — the fix-loop worker leg's PR-review evidence channel) for the `worker` role. No gate/
 # verdict logic lives in any tool; that stays in reviewer.ts/merge-driver.ts.
 # proxy:
@@ -548,9 +549,10 @@ doctrine:
 # #410: built-in WebSearch/WebFetch grant to architect/po-align/po-triage (no other role — the
 # review family, plan-reviewer/plan-drafter/plan-reviewer-confirm and every gate② reviewer
 # session, never reads this key at all, so no value here ever reaches them). Ships enabled BY
-# DEFAULT, unlike proxy above: the capability is read-only, carries no credential into any
-# project system, is strictly weaker than the worker's own unrestricted Bash egress, and every
-# call is journalled through the same egress-suspect ledger event the worker's own tripwire uses.
+# DEFAULT, same as proxy above (#551 flipped proxy.enabled to true too): the capability is
+# read-only, carries no credential into any project system, is strictly weaker than the worker's
+# own unrestricted Bash egress, and every call is journalled through the same egress-suspect
+# ledger event the worker's own tripwire uses.
 # webAccess:
 #   enabled: true   # false falls all three roles back to the base Read/Grep/Glob allow-list
 

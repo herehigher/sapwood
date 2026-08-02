@@ -758,17 +758,18 @@ an information request and still demands a definitive judgment is a shackle — 
 denial with first-class abstention is a guardrail). Credentials never leave the engine
 process: a role session gets a fixed, strictly-schema-validated tool algebra —
 `issue_details`, `issue_comments`, `issue_relations`, `search_issues` (#234), plus
-`pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks` (#244, the same raw-data
-contract, extended to PR review data — no gate/verdict logic in any tool; that stays in
-`reviewer.ts`/`merge-driver.ts`) — served over a minimal hand-rolled streamable-HTTP MCP
-server bound to `127.0.0.1` on an ephemeral port, authenticated by a random bearer token
-minted per session and revoked at teardown — never a file on disk, never an environment
-variable (the #218 credential-free spawn env is unaffected). Every call is journaled
-write-ahead (persist intent → fetch+cap → persist canonical response+hash → deliver)
-before the session ever sees a result, metered against a per-session call/byte budget,
-and — once accepted — bundled content-addressed as frozen evidence for later audit/replay.
-A session's role scopes it to a fixed subset of this algebra (deny-by-default for an
-unrecognized role) — see [`security.md`](security.md#the-forge-mcp-proxys-role-x-tool-matrix-234-244)'s
+`pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `getPRAuditComments` (#244,
+the same raw-data contract, extended to PR review data — no gate/verdict logic in any
+tool; that stays in `reviewer.ts`/`merge-driver.ts`) — served over a minimal hand-rolled
+streamable-HTTP MCP server bound to `127.0.0.1` on an ephemeral port, authenticated by a
+random bearer token minted per session and revoked at teardown — never a file on disk,
+never an environment variable (the #218 credential-free spawn env is unaffected). Every
+call is journaled write-ahead (persist intent → fetch+cap → persist canonical
+response+hash → deliver) before the session ever sees a result, metered against a
+per-session call/byte budget, and — once accepted — bundled content-addressed as frozen
+evidence for later audit/replay. A session's role scopes it to a fixed subset of this
+algebra (deny-by-default for an unrecognized role) — see
+[`security.md`](security.md#the-forge-mcp-proxys-role-x-tool-matrix-234-244)'s
 role x tool matrix table.
 
 **Ships ON by default — a two-state model (#551, deleting the earlier three-state
@@ -806,7 +807,8 @@ and `prFixCap: 0` are silent.
 4 extra tool schemas (`issue_details`, `issue_comments`, `issue_relations`,
 `search_issues`) in its context on every round it runs, whether or not it ever calls
 one — the fix-loop worker leg's own scope (`PR_TOOLS`) is 5 tools
-(`pr_details`/`pr_reviews`/`pr_review_threads`/`pr_checks`/`pr_audit_comments`). Each
+(`pr_details`/`pr_reviews`/`pr_review_threads`/`pr_checks`/`getPRAuditComments` — the
+last is camelCase, the odd one out in the wire names; #556 tracks normalizing it). Each
 attached session also spins up one ephemeral `127.0.0.1` HTTP listener authenticated by
 a bearer token minted fresh for that session and revoked at teardown — never written to
 disk or an environment variable, but a real local process resource for the session's
