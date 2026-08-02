@@ -389,6 +389,41 @@ Read-only git (`git log` etc.) deliberately stays **out** of the allow-list: the
 blanket `Bash` deny already covers it, and adding it back would be a live capability,
 not a trip-wire.
 
+**#534: `--disallowedTools` also carries a name-list deny of the subagent-spawn channel —
+`Agent`/`Task` — for every role session whose deny list derives from `ROLE_DISALLOWED_TOOLS`
+(po, architect, plan-reviewer, plan-drafter, harvest, and the plan-reviewer's confirm variant)
+and, because `RoleRunner.run()`'s `reviewMode` branch hardcodes `ROLE_ALLOWED_TOOLS`/
+`ROLE_DISALLOWED_TOOLS` directly, the `claude`-runner gate② reviewer too. `retro` gets the
+identical `Agent`/`Task` deny by a SEPARATE append to `RETRO_DISALLOWED_TOOLS` (`retro.ts`) —
+that constant is an independent literal, not derived from `ROLE_DISALLOWED_TOOLS`, so the
+addition above did not reach it automatically; see the retro row of `docs/role-paradigm.md`'s
+write-scope tier ladder for why retro's own deny matters most (it is the one peripheral role
+with a real write grant).** This is a name-list deny of the ONE known
+spawn channel over a CLI-defined, version-drifting tool surface — the engine denies the tool
+names `Agent`/`Task` because those are the names a live probe found in the current CLI's
+role-shaped tool list, never a claim that the session's capability set is closed: the same
+"authorization surface this engine does not control" caveat two paragraphs above applies
+here too — a future CLI version could rename, add, or remove a spawn-shaped tool, and only a
+live probe (not this document) can say what that surface currently contains. **Scoped to the
+`claude` executor**: the #443/#501 executor seam lets gate② run on the `codex-exec` runner
+instead (`reviewer.agent.runner: codex-exec`, see [Peripheral network egress](#peripheral-network-egress-websearchwebfetch-detected-not-pinned-410)
+above, "The exception, stated exactly"), where `--disallowedTools` does not exist as a concept
+at all — that runner's containment is its own, entirely different shape (a read-only sandbox,
+not a tool-name deny list), disclosed separately as `engine-review-containment-gap`. The gate②
+`claude`-runner reviewer's deny
+rests on the **declared-contract** argument alone, not a cost argument: that session already
+carries a hard, CLI-enforced `--max-budget-usd` ceiling (`RoleSessionOpts.maxBudgetUsd`), with
+any child's spend rolling into the parent's own record, so its fan-out was already bounded by
+construction before this deny — the deny closes an undeclared capability, not an unbounded
+cost. Escape hatch, named in the #534 decision record: if large-diff review quality ever
+measurably suffers from the loss of parallel sub-reads, split a `REVIEW_DISALLOWED_TOOLS`
+constant at the `reviewMode` branch in `peripheral.ts` — a one-constant change. **The
+code-producing worker deliberately retains spawn capability** — `WORKER_DISALLOWED_TOOLS`
+(`worker.ts::WORKER_DISALLOWED_TOOLS`) does not deny `Agent`/`Task` — so "role sessions cannot
+spawn subagents" names a peripheral-role-and-gate②-reviewer boundary, never a sapwood-wide one;
+the worker's own fan-out is tracked separately, its cost/concurrency model not yet decided
+(issue #552).
+
 Every `RoleRunner` session is additionally spawned without forge credentials:
 `peripheralSessionEnv()` in `peripheral.ts` strips inherited `GH_*`,
 `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GIT_ASKPASS`, and `GIT_CONFIG_*`

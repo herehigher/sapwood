@@ -276,6 +276,65 @@ test("scanEgressSuspects (#410): the per-session cap is shared across a long run
   assert.equal(scan.truncated, true);
 });
 
+// ── #534: the SAME scanner also recognizes Agent/Task tool_use blocks — unconditionally, the
+// SAME stance and SAME rationale as the WebFetch/WebSearch extension immediately above: a
+// peripheral role session's ROLE_DISALLOWED_TOOLS now name-denies subagent spawn, so an
+// attempted (or, for an ungated leg, a genuine) spawn is exactly the post-hoc-visible signal
+// this scanner exists to surface. No second scanner: this is scanEgressSuspects itself,
+// extended again. ──────────────────────────────────────────────────────────────────────────
+
+const agentToolUseLine = (name: "Agent" | "Task", input: Record<string, unknown>): string =>
+  JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name, input }] } });
+
+test("scanEgressSuspects (#534): Agent/Task tool_use blocks hit UNCONDITIONALLY — an EMPTY suspectCommands list (Bash detection fully disabled) still catches both, snippet prefers `description`", () => {
+  const jsonl = [
+    agentToolUseLine("Agent", { description: "Check if #485 already shipped", prompt: "run `git log --oneline -5 -- engine/...`" }),
+    agentToolUseLine("Task", { description: "Run git log queries on conductor.ts", prompt: "..." }),
+  ].join("\n");
+  assert.deepEqual(scanEgressSuspects(jsonl, []), {
+    hits: [
+      { executable: "Agent", snippet: "Check if #485 already shipped" },
+      { executable: "Task", snippet: "Run git log queries on conductor.ts" },
+    ],
+    truncated: false,
+  });
+});
+
+test("scanEgressSuspects (#534): a missing `description` falls back to `prompt`; a missing/non-string BOTH is a non-hit, never a throw", () => {
+  const jsonl = [
+    agentToolUseLine("Agent", { prompt: "no description field here" }),
+    agentToolUseLine("Task", { description: 42 }),
+    agentToolUseLine("Agent", {}),
+  ].join("\n");
+  assert.deepEqual(scanEgressSuspects(jsonl, []), {
+    hits: [{ executable: "Agent", snippet: "no description field here" }],
+    truncated: false,
+  });
+});
+
+test("scanEgressSuspects (#534): Bash, WebFetch/WebSearch, and Agent/Task hits all share ONE dedup set and ONE per-session cap", () => {
+  const jsonl = [
+    bashToolUseLine("curl https://example.invalid/a"),
+    webToolUseLine("WebFetch", "https://example.invalid/b"),
+    agentToolUseLine("Agent", { description: "spawn attempt" }),
+  ].join("\n");
+  const { hits, truncated } = scanEgressSuspects(jsonl, ["curl"]);
+  assert.deepEqual(hits, [
+    { executable: "curl", snippet: "curl https://example.invalid/a" },
+    { executable: "WebFetch", snippet: "https://example.invalid/b" },
+    { executable: "Agent", snippet: "spawn attempt" },
+  ]);
+  assert.equal(truncated, false);
+});
+
+test("scanEgressSuspects (#534): Agent/Task description snippets are capped at 200 characters, same bound as a Bash/WebFetch snippet", () => {
+  const longDescription = "x".repeat(240);
+  const { hits } = scanEgressSuspects(agentToolUseLine("Agent", { description: longDescription }), []);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.snippet.length, 200);
+  assert.equal(hits[0]?.snippet, longDescription.slice(0, 200));
+});
+
 // ── #110 PR0: parseResultText — the read side for a role session's structured final-message
 //    output. Mirrors parseCostUsd's own tolerance test shapes exactly (same fixture style). ──
 test("parseResultText: takes the last result line's `result` string", () => {

@@ -836,7 +836,11 @@ test("run: argv scopes the session to READ-ONLY, no Bash grant at all (#235 PR-B
       "#235 PR-B: explicit read-only allow, confined to the worktree by PR-A's guard containment",
     );
     assert.equal(at("--disallowedTools"), ROLE_DISALLOWED_TOOLS);
-    assert.equal(at("--disallowedTools"), "Write,Edit,MultiEdit,NotebookEdit,Bash", "#235 PR-B: blanket Bash deny, not a pattern list");
+    assert.equal(
+      at("--disallowedTools"),
+      "Write,Edit,MultiEdit,NotebookEdit,Bash,Agent,Task",
+      "#235 PR-B: blanket Bash deny, not a pattern list; #534: Agent/Task denied by name — no subagent spawn",
+    );
     assert.equal(at("--fallback-model"), "sonnet");
     assert.ok(!seen.includes("--add-dir"), "never mounts the engine's data dir");
     // No merge/review/PR capability anywhere in the tool-scoping strings (the acceptance
@@ -854,6 +858,12 @@ test("run: argv scopes the session to READ-ONLY, no Bash grant at all (#235 PR-B
     for (const writeTool of ["Write", "Edit", "MultiEdit", "NotebookEdit"]) {
       assert.ok(ROLE_DISALLOWED_TOOLS.split(",").includes(writeTool), `${writeTool} explicitly denied as a cross-source veto`);
     }
+    // #534: subagent spawn denied by name — a peripheral role session cannot spawn a child
+    // session (Agent/Task), the same cross-source veto stance as the write tools above.
+    for (const spawnTool of ["Agent", "Task"]) {
+      assert.ok(ROLE_DISALLOWED_TOOLS.split(",").includes(spawnTool), `${spawnTool} explicitly denied — no subagent spawn`);
+    }
+    assert.ok(!ROLE_DISALLOWED_TOOLS.split(",").includes("Workflow"), "#534: no such tool in the probed CLI surface — not denied");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2276,7 +2286,11 @@ test("run (#285): reviewCwd tool profile is Read/Grep/Glob only, Bash explicitly
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     const at = (flag: string): string => seen[seen.indexOf(flag) + 1] ?? "";
     assert.equal(at("--allowedTools"), "Read,Grep,Glob");
-    assert.equal(at("--disallowedTools"), "Write,Edit,MultiEdit,NotebookEdit,Bash");
+    assert.equal(
+      at("--disallowedTools"),
+      "Write,Edit,MultiEdit,NotebookEdit,Bash,Agent,Task",
+      "#534: the hardcoded review profile gets the same subagent-spawn deny as every other role",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(materializedDir, { recursive: true, force: true });

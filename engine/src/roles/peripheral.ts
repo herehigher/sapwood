@@ -100,12 +100,28 @@ import {
  *  Read-only git (`git log` etc.) deliberately stays OUT: the blanket Bash deny already covers
  *  it, and the issue's own scope explicitly excludes adding it as a distinct grant.
  *
+ *  #534 (PM ruling + fable architectural review, 2026-08-02): `Agent`/`Task` denied by name —
+ *  a live plan-reviewer session, unable to get a shell, spawned three subagents attempting to
+ *  get one indirectly (contained: the children inherit this SAME deny list, so they reached no
+ *  shell either — see this codebase's #235 PR-A read-containment note above; the fan-out was an
+ *  undeclared cost/concurrency channel, not a security escalation). Both names were confirmed
+ *  live in the current CLI's role-shaped tool surface by direct probe before being added here —
+ *  `Workflow` was considered and DROPPED: no such tool exists in that probed surface, and
+ *  denying-and-documenting an unverifiable name is exactly the defect class this round exists
+ *  to cure. This reaches the hardcoded review profile too (reviewMode below hardcodes
+ *  `ROLE_ALLOWED_TOOLS`/`ROLE_DISALLOWED_TOOLS` directly, never a caller override) — the gate②
+ *  reviewer's deny rests on the DECLARED-CONTRACT argument, not a cost argument: that session
+ *  already carries a hard CLI `--max-budget-usd` ceiling (RoleSessionOpts.maxBudgetUsd), so its
+ *  fan-out was already bounded by construction. Escape hatch, if large-diff review quality ever
+ *  measurably suffers from the loss of parallel sub-reads: split a `REVIEW_DISALLOWED_TOOLS`
+ *  constant at the `reviewMode` branch in run() below — a one-constant change, not a redesign.
+ *
  *  Kept as regression trip-wires (peripheral.test.ts pins these exact strings, and the derived
  *  per-role pairs below): a future PR that re-widens either list — an added allow entry, a
  *  removed deny entry — lands inside a failing test rather than silently reopening either the
  *  read-containment boundary or the write/exec boundary this pair enforces. */
 export const ROLE_ALLOWED_TOOLS = "Read,Grep,Glob";
-export const ROLE_DISALLOWED_TOOLS = "Write,Edit,MultiEdit,NotebookEdit,Bash";
+export const ROLE_DISALLOWED_TOOLS = "Write,Edit,MultiEdit,NotebookEdit,Bash,Agent,Task";
 
 /** The plan-DRAFTER's deny list (#77 Amendment 2's plan-author ≠ plan-approver chain): kept as
  *  its OWN named export — the same regression-trip-wire stance ROLE_DISALLOWED_TOOLS itself

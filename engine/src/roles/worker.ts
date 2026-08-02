@@ -275,6 +275,19 @@ export interface EgressSuspectScan {
  *    tool the leg was never granted is exactly what a post-hoc tripwire should surface, not
  *    suppress.
  *
+ *  - **Agent/Task** (#534): the SAME unconditional stance as WebFetch/WebSearch, for the same
+ *    reason and by the same PM ruling — a peripheral role session's `ROLE_DISALLOWED_TOOLS` now
+ *    name-denies subagent spawn (#534), so an `Agent`/`Task` `tool_use` block appearing in ANY
+ *    leg's jsonl (worker leg included — a worker leg is not denied these names, so a hit here is
+ *    a legitimate spawn, not an attempted circumvention; the tripwire still journals it, same as
+ *    a Bash hit journals legitimate worker activity that happens to match the configured suspect
+ *    list) is exactly the post-hoc-visible signal this scanner exists to surface. `executable`
+ *    carries the literal tool name (`Agent` or `Task`); `snippet` is the spawn's `description`
+ *    field when present (the short, human-readable summary a live #534 transcript showed the
+ *    model supplies, e.g. `"Check if #485 already shipped"`), falling back to `prompt` when
+ *    `description` is absent — never neither, so a hit is never recorded with an empty snippet
+ *    when the block carries usable text.
+ *
  *  Same tolerance as the sibling parsers: malformed/partial lines and malformed blocks are
  *  skipped silently. Collection stops at the engine-owned per-leg cap, bounding both evidence and
  *  its dedup set (shared across both signal kinds — one session emitting a mix of Bash suspects
@@ -322,6 +335,13 @@ export function scanEgressSuspects(jsonl: string, suspectCommands: readonly stri
       } else if (b.name === "WebFetch" || b.name === "WebSearch") {
         const detail = (input as Record<string, unknown>)[b.name === "WebFetch" ? "url" : "query"];
         if (typeof detail !== "string") continue;
+        if (addHit(b.name, detail.slice(0, EGRESS_SNIPPET_MAX_CHARS))) return { hits, truncated: true };
+      } else if (b.name === "Agent" || b.name === "Task") {
+        // #534: same unconditional stance as WebFetch/WebSearch above — see this function's own
+        // doc. Prefer `description` (the short human-readable summary), fall back to `prompt`.
+        const rec = input as Record<string, unknown>;
+        const detail = typeof rec.description === "string" ? rec.description : typeof rec.prompt === "string" ? rec.prompt : null;
+        if (detail === null) continue;
         if (addHit(b.name, detail.slice(0, EGRESS_SNIPPET_MAX_CHARS))) return { hits, truncated: true };
       }
     }
