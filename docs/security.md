@@ -528,19 +528,11 @@ tool at all** (deny-by-default, regression-tested):
 | `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `getPRAuditComments` (camelCase wire name; #556 tracks normalizing it) |
 | *(any other role id)* | none — deny-by-default |
 
-**#533 proposed narrowing this to two roles (`po-align`, `architect`); the owner reversed that
-direction (2026-08-02).** The grants are read-only, cost nothing when unused, and a role
-genuinely reaching for one is the common case a measured-zero-calls argument cannot distinguish
-from a role whose TASK never asked — #529's own conclusion. The table above is #234's original
-nine-role grant, unchanged. Two improvements from the #533 work survive on independent merit
-(neither depends on which roles hold a grant): `architect.md`'s "Cross-issue search" step is
-rewritten from a conditional ask to an unconditional-whenever-attached task-list item (search a
-candidate's key terms, `issue_details` the hits before judging, treat a locked decision found
-only in an issue — never the architecture chapter — as doc drift); and `align.ts
-::buildPoolCandidateDigest` now renders each `po-pool` candidate with `architect.ts
-::formatCandidate` (number, title, labels, full body) instead of a title-only line, under the
-existing `roles.po.backlogDigestMaxChars` cap — see that key's row in
-[`configuration.md`](configuration.md) for the capacity consequence.
+**This nine-role grant is deliberate, not an oversight to narrow.** Every one of these tools is
+read-only and costs nothing when a session never calls it, and a measured zero-call count is not
+evidence that a grant is unneeded: per #529, zero calls means the role's TASK never asked for a
+lookup, not that the capability itself has no use — the lever for changing that is the task step
+a prompt gives the role, not the grant it holds.
 
 **Scope, updated by #245: `WorkerSupervisor.resume()` now attaches a proxy too.** #244 shipped
 `dispatch()`-only attachment deliberately (the `resume()` crash-consistency machinery was already
