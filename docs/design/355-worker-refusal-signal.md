@@ -73,13 +73,32 @@ The candidate directions from the issue body, weighed:
 - **Adopted: surface `p.resultText` (already parsed, zero new capability) as the escalation's
   reason, engine-executed, on the SAME no-PR escalation paths that exist today.** Concretely: at
   the `ESCALATE_NOPR` site (and the mirror `FAILED`-no-PR site), when `p.resultText` is non-empty,
-  attach a capped excerpt as (a) a field on the `reclaim-done`/failed event payload (durable,
-  queryable — closes the "not machine-consumed" half) and (b) an engine-authored
-  `forge.addIssueComment` posted alongside the `needs-human` label add (visible where the human is
-  already looking — closes the "reason and escalation are decoupled" half). This is the exact
-  label+comment, engine-authored, both-durable-before-terminal-write pattern already proven at the
-  fix-rounds-cap escalation (`conductor.ts:~4392-4423`) — no new pattern, an existing one applied to
-  a path that never adopted it.
+  attach a capped excerpt as (a) a field on the `reclaim-done`/failed event payload — durable,
+  queryable, and free of any ordering question: it rides the SAME `state.appendEvent("reclaim-done",
+  ...)` call that already runs unconditionally right after `settleTerminalWorker`
+  (`conductor.ts:2413`), no reordering required — and (b) an engine-authored
+  `forge.addIssueComment` posted alongside the `needs-human` label add.
+
+  **Ordering correction (engine-agent review, run `8233abaf-251e-4c74-a518-e35c088377d5`, finding
+  `escalate-nopr-ordering-vs-223`):** an earlier draft of this section called the comment half "the
+  exact... both-durable-before-terminal-write pattern already proven at the fix-rounds-cap
+  escalation... no new pattern." That overstated it. The fix-rounds-cap site posts its label+comment
+  BEFORE the terminal upsert and, on a write failure, deliberately leaves the row `driving` to retry
+  the whole branch next tick — safe there because a `driving` lane has somewhere to wait.
+  `ESCALATE_NOPR` cannot borrow that shape: it carries an explicit #223 invariant
+  (`conductor.ts:2360-2363`) that `settleTerminalWorker`'s state+spend write must land BEFORE any
+  forge call, precisely because interleaving a forge write between them once caused spend to be
+  silently skipped on a lane already marked terminal. A DONE-no-PR lane has no `driving`-style
+  "stay put and retry" state to fall back into, so reordering the comment ahead of the terminal
+  write to chase the fix-rounds-cap site's durability would reopen exactly the #223 failure class.
+  **Implementer guidance for #601:** keep today's ordering (`settleTerminalWorker` first, then the
+  forge call — exactly how `forge.addLabel` already runs at this site), and give the new
+  `forge.addIssueComment` the SAME best-effort reliability contract `forge.addLabel` already has
+  here: unguarded, not retried on failure (a thrown error simply loses that one comment — the lane
+  is already terminal and won't be reclaimed again to retry it). The reliability the issue actually
+  needs — AC1's "does the reason reach a human" — is carried by the event-payload field, which is
+  fully durable by construction; the comment was already best-effort before this change and stays
+  best-effort after it. No new durability machinery, and no silent reopening of #223.
 
 **Naming the tradeoff (per this repo's own authoritative-signals-over-inferred-text doctrine):**
 this is deliberately raw text, not a validated signal — the engine is not classifying or acting on
