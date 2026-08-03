@@ -167,6 +167,17 @@ export async function reconcileStartup(
  *  would fire reentry at a lane nobody has looked at. Those surface as `gated-flag-unprovable` —
  *  one event per engine start, an honest standing alarm for a lane only a human can move.
  *
+ *  #593: BUT a no-hold reading is not automatically ambiguous — it is exactly the shape a hold
+ *  leaves once the human act it was waiting for has already happened OUTSIDE the engine (an
+ *  owner/PM merge, a hand-close). Before alarming, this audit checks the SAME two terminal
+ *  witnesses escalation-sweep.ts's `SWEEPABLE_VIA` already treats as authorizing (#441/F34):
+ *  `merged` (a merge is a reviewer/merger act by construction, guard.ts blocks producer merges)
+ *  and `issue-closed` (`gh issue close` is blocked for producers too, #353). Either one means a
+ *  human already moved this lane — retiring it with `gated-lane-retired` is not a new judgment,
+ *  it is recognizing a fact the ledger already trusts elsewhere. The genuinely ambiguous LIVE
+ *  case — no hold, no terminal witness, nothing to point to — still alarms, unchanged: that arm
+ *  is load-bearing and this issue does not widen it.
+ *
  *  #398 — BOTH CARRIERS, because the evidence can now live on either (this is the issue's own
  *  "make its audit carrier-agnostic" requirement, #391 already being in the tree). The residue
  *  class this function exists to recover is "the label write landed on GitHub but the local flag
@@ -182,7 +193,7 @@ export async function reconcileStartup(
  *  a PR-bearing candidate whose issue came back clean; the candidate set is the number of lanes
  *  stuck in this residue state, which is small by construction. */
 export async function auditGatedEscalationFlags(
-  forge: Pick<IForge, "getIssueMeta" | "getPRLabels">,
+  forge: Pick<IForge, "getIssueMeta" | "getPRLabels" | "getPRStatus">,
   state: Pick<State, "unlabeledGatedWorkers" | "upsertWorkerWithEvent" | "appendEvent">,
   cfg: { escalation: { humanLabels: string[] } },
   log: (message: string) => void = console.error,
@@ -197,8 +208,20 @@ export async function auditGatedEscalationFlags(
   for (const w of candidates) {
     try {
       const meta = await forge.getIssueMeta(w.issue);
+      if (meta.state === "CLOSED") {
+        retireGatedLane(state, w, "issue-closed");
+        continue;
+      }
       const carrier = await observeHoldCarrier(forge, cfg, w, meta.labels);
       if (carrier === null) {
+        // #593: one extra read, spent only here — the candidate set is already small, and this
+        // is the one place per candidate where the read-budget doc allows it (see this
+        // function's own doc). `unlabeledGatedWorkers()` guarantees `pr` is non-null; the guard
+        // is fail-safe defense, same stance as `reviveEnvFailedPrLanes`'s identical check.
+        if (w.pr != null && (await forge.getPRStatus(w.pr)).state === "MERGED") {
+          retireGatedLane(state, w, "merged");
+          continue;
+        }
         state.appendEvent("gated-flag-unprovable", { worker: w.name, issue: w.issue, pr: w.pr ?? null });
         continue;
       }
@@ -259,6 +282,24 @@ function handGatedLaneToReentry(state: Pick<State, "upsertWorkerWithEvent">, w: 
     // ledger to answer "what do I have to clear to release this lane?" gets the answer from the
     // heal itself, not by inferring it from the row's shape.
     carrier,
+  });
+}
+
+/** #593: retire a gated lane the audit has just PROVEN terminal by one of the two authorizing
+ *  witnesses escalation-sweep.ts already recognizes (#441/F34) — a merge or an issue close, both
+ *  acts a producer cannot perform itself. Sets the SAME one-way latch `gated_reentry_capped`
+ *  uses everywhere else in this file (conductor.ts's `gated-reentry-issue-closed` is the sibling
+ *  write): `unlabeledGatedWorkers()`'s query requires it at 0, so a retired row leaves this
+ *  audit's own candidate set for good and `gated-flag-unprovable` never fires for it again. This
+ *  is not gated reentry (`handGatedLaneToReentry` above) — that path exists for a LIVE hold a
+ *  human can still remove; a merged/closed lane has nothing left to reenter, so retiring here
+ *  never drives it. */
+function retireGatedLane(state: Pick<State, "upsertWorkerWithEvent">, w: WorkerRow, witness: "merged" | "issue-closed"): void {
+  state.upsertWorkerWithEvent({ ...w, gated_reentry_capped: 1 }, "gated-lane-retired", {
+    worker: w.name,
+    issue: w.issue,
+    pr: w.pr ?? null,
+    witness,
   });
 }
 

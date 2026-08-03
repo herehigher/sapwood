@@ -53,6 +53,7 @@ export const LANE_EVENT_KINDS = defineKinds({
   "orphan-pr-escalated": ["escalation-source:payload"],
   "gated-flag-unprovable": [],
   "gated-flag-healed": [],
+  "gated-lane-retired": [],
 
   // Worker + peripheral-role session telemetry.
   "worker-heartbeat": [],
