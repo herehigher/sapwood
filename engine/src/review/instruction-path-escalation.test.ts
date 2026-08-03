@@ -346,6 +346,41 @@ test("#549 escalation helper: with instructionPaths [] a repointed-prompt edit s
   assert.deepEqual(await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg }), { kind: "clear" });
 });
 
+test("#539: each newly-covered mechanism-carrier default path escalates a PR that touches it", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  for (const path of ["engine/src/review/instruction-path-escalation.ts", "engine/src/config/config.ts", "docs/security.md"]) {
+    const labels: string[] = [];
+    let comments = 0;
+    const forge = {
+      getPRChangedFiles: async () => ({ files: [{ filename: path }], complete: true }),
+      addPRLabel: async (_pr: number, label: string) => {
+        labels.push(label);
+      },
+      addPRComment: async () => {
+        comments++;
+      },
+    } satisfies Pick<IForge, "getPRChangedFiles" | "addPRLabel" | "addPRComment">;
+
+    assert.deepEqual(
+      await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg }),
+      { kind: "escalated", matchedPaths: [path], reason: "instruction-path-change" },
+      path,
+    );
+    assert.deepEqual(labels, [cfg.labels.humanMergeOnly], path);
+    assert.equal(comments, 1, path);
+  }
+});
+
+test("#539: a control path (unrelated source file) unaffected by the new mechanism-carrier defaults", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  const forge = {
+    getPRChangedFiles: async () => ({ files: [{ filename: "engine/src/loop/round.ts" }], complete: true }),
+    addPRLabel: async () => assert.fail("a non-matching control path writes no label"),
+    addPRComment: async () => assert.fail("a non-matching control path posts no comment"),
+  } satisfies Pick<IForge, "getPRChangedFiles" | "addPRLabel" | "addPRComment">;
+  assert.deepEqual(await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg }), { kind: "clear" });
+});
+
 test("#527 escalation helper: with instructionPaths [] a doctrine edit still reaches no forge call", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 }, escalation: { instructionPaths: [] } });
   const forge = new Proxy({}, { get: () => () => assert.fail("disabled escalation must not touch forge") }) as Pick<

@@ -1431,9 +1431,25 @@ const ConfigSchemaRaw = z
         // deployment. The reviewer's other carrier, the doctrine file, is NOT a literal here: it
         // is derived from `doctrine.file` at match time so a reconfigured path stays covered
         // (instruction-path-escalation.ts's effectiveInstructionPaths).
-        instructionPaths: z
-          .array(InstructionPath)
-          .default(["CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md", ".claude/rules/**", "AGENTS.md", "engine/prompts/**"]),
+        instructionPaths: z.array(InstructionPath).default([
+          "CLAUDE.md",
+          "CLAUDE.local.md",
+          ".claude/CLAUDE.md",
+          ".claude/rules/**",
+          "AGENTS.md",
+          "engine/prompts/**",
+          // #539: the mechanism's own carriers — the matcher/escalation implementation itself and
+          // the config file carrying this very schema block + defaults — join the escalation
+          // surface too (escalation, not the guard deny-list: the worker may still produce a
+          // change here, a human adjudicates the merge). See docs/security.md's "Instruction-path
+          // changes escalate to human review" section for the self-reference this creates and its
+          // one-bootstrap-PR exposure window.
+          "engine/src/review/instruction-path-escalation.ts",
+          "engine/src/config/config.ts",
+          // #539: docs/security.md carries the canonical human-merge-only list and documents this
+          // mechanism's own trust chain — the same self-reference class as the two paths above.
+          "docs/security.md",
+        ]),
         // #248: the WAIT-tier hold label list (three-tier escalation model) — a HUMAN-applied
         // "I'm actively reviewing this" signal, distinct from `humanLabels`' engine-written
         // ESCALATE tier. Optional here for the same "tell unset apart from explicitly set"
