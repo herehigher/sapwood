@@ -140,7 +140,12 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // no `gh` CLI, no shell beyond git (`RETRO_ALLOWED_TOOLS` is git-only Bash), but a real
   // read-only `mcp__forge__*` issue grant — as a single positive statement about that one named
   // channel, not a list of what retro lacks.
-  "retro.md": "76996f79411b5fa30c36c2e9f28b041e889fa7927f26ccca7b76cdc23c85a01d",
+  // #559: that single positive statement was flat — true under `proxy.enabled: true` (the default
+  // since #551), false under the operator opt-out, in a file with no template variable to tell the
+  // two apart. Reframed onto the same conditional shape every other peripheral prompt already
+  // uses, plus the not-attached branch (ground in the digest/worktree, say so). The #559 block test
+  // below is the standing guard; this is its only shipped subject.
+  "retro.md": "1e73242036f474f8d36f1ec8082bad867cf6d2f573740495c76acae0d2ae321e",
   // #529: same categorical→conditional GitHub-access fix as architect.md.
   // #533 proposed removing po-pool's ISSUE_TOOLS grant and substituting each candidate's full
   // body in its place; the owner reversed the grant-removal half only. po-pool KEEPS its
@@ -459,6 +464,81 @@ test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access d
   assert.ok(
     !NO_GITHUB_ACCESS_DENIAL.test("there is no high access door on this floor"),
     'false-positive guard: "high access" contains the literal substring "gh access" but must NOT match — the \\bgh\\b word boundary is what prevents it',
+  );
+});
+
+// ── #559: shipped prompts are STATIC with respect to `proxy.enabled` — the same file serves the
+// default (`true` since #551) AND the operator opt-out, with no template variable anywhere
+// expressing which one this session got. Ruling on #559: keep the static prompts (option 2, the
+// repo's default stance for a rare operator-deliberate configuration) rather than adding a
+// substitution point, and keep the phrasing that #529 measured as the only one that produces
+// calls — an ask that is IMPERATIVE whenever the tool is attached, carrying its own not-attached
+// branch. That combination is followable in BOTH deployments, so what has to be guarded is not a
+// wording rewrite (there is none) but the class returning: a flat possession claim or a flat
+// lookup step, true only under the default. This test is that guard. It costs nothing at runtime
+// and fires the moment a new (or edited) role prompt names a forge tool without saying what
+// governs whether it is there.
+//
+// Ceiling, stated rather than overclaimed (same stance as AC-2's blind-spot note above): this is
+// proximity text matching over a blank-line-delimited block, not semantics. A block whose
+// conditional belongs to an unrelated sentence passes. The realistic failure mode this exists to
+// catch — retro.md's own live "You hold read-only, proxy-MCP access ... (`mcp__forge__*`)", a flat
+// claim landed by #557 that is simply false under `proxy.enabled: false` — does not have that
+// shape.
+const PROXY_ATTACHMENT_FRAMING =
+  /\b(?:if|when|whenever|unless)\b[^.]{0,140}\b(?:attached|has|have|holds?|carries|no such tools?|isn't|is not|aren't|are not)\b/i;
+
+test("#559: every shipped prompt block naming an `mcp__forge__` tool frames it against proxy attachment — a static prompt must be true under `proxy.enabled: true` AND `false`", () => {
+  for (const [role, tools] of Object.entries(PROXY_ROLE_TOOL_MATRIX)) {
+    if (tools.length === 0) continue;
+    // worker is the one exempt role: its forge-naming prompt is fix.md, and a fix leg is only ever
+    // dispatched when a proxy handle exists — `proxy.enabled: false` degrades every FIXABLE gate to
+    // a `fix-loop-unwired:<reason>` needs-human escalation instead (cli.ts, conductor.ts), so no
+    // session ever renders fix.md without the tools it names. worker.md (the ordinary dispatch leg,
+    // still unwired for the proxy) names none at all.
+    if (role === "worker") continue;
+
+    const paths = ROLE_PROMPT_PATHS[role];
+    assert.ok(paths !== undefined && paths.length > 0, `role "${role}" holds a forge grant but has no ROLE_PROMPT_PATHS entry`);
+
+    for (const path of paths) {
+      for (const block of readPrompt(path).split(/\n[ \t]*\n/)) {
+        if (!block.includes("mcp__forge__")) continue;
+        const normalized = block.replace(/\s+/g, " ").trim();
+        assert.ok(
+          PROXY_ATTACHMENT_FRAMING.test(normalized),
+          `${path} (role "${role}") names an mcp__forge__ tool in a block that never says the ` +
+            `tools' presence is conditional on this deployment's \`proxy.enabled\`: the prompt is ` +
+            `static, so this block reads as false (a possession claim) or unfollowable (a lookup ` +
+            `step) under the opt-out. Frame it — "when your session has these tools, …", or an ` +
+            `imperative ask plus its own not-attached branch (po.md/architect.md are the shipped ` +
+            `examples). Block:\n${normalized}`,
+        );
+      }
+    }
+  }
+
+  // Self-checks on the regex itself, so a future prompt reusing either shape is caught even if
+  // today's wording drifts: the flat claim must NOT pass, the three shipped framings must.
+  assert.ok(
+    !PROXY_ATTACHMENT_FRAMING.test("You hold read-only, proxy-MCP access to GitHub issues (`mcp__forge__*`) for grounding your analysis."),
+    "a flat possession claim — the #557 shape this test was written against — must not pass",
+  );
+  assert.ok(
+    PROXY_ATTACHMENT_FRAMING.test("When your session holds `mcp__forge__*` tools, they are a read-only window onto GitHub issues"),
+    "the capability-paragraph framing every peripheral prompt uses must pass",
+  );
+  assert.ok(
+    PROXY_ATTACHMENT_FRAMING.test(
+      "**Cross-issue search (mandatory whenever the tool is attached — not conditional on whether it FEELS needed).**",
+    ),
+    "architect.md's imperative-when-attached ask — the #529-measured shape — must pass",
+  );
+  assert.ok(
+    PROXY_ATTACHMENT_FRAMING.test(
+      "If that tool isn't there, treat its absence like any other missing tool: say so in the issue body's rationale",
+    ),
+    "po.md's not-attached branch must pass on its own, without the ask's own condition nearby",
   );
 });
 

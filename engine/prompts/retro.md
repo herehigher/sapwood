@@ -96,8 +96,10 @@ this issue's scope if you find something more important.
 ## The only way you may act: a pushed branch + a proposal file, never a direct write
 
 You may read the digest above freely, and inside your own worktree you may run `git log`/
-`git diff`/`git status`, edit files, commit, and push a branch. You hold read-only, proxy-MCP
-access to GitHub issues (`mcp__forge__*`) for grounding your analysis. You do **not** open the
+`git diff`/`git status`, edit files, commit, and push a branch. When your session has
+`mcp__forge__*` tools, they are a read-only, proxy-MCP window onto GitHub issues for grounding
+your analysis; when it has none, the digest above and your worktree are the whole picture — say
+so in your proposal rather than writing as if you had looked. You do **not** open the
 pull request yourself — that step belongs to the engine, which verifies your branch actually
 exists on the remote before opening anything on your behalf. Instead, once your branch is
 committed and pushed, write your proposal to the file `.sapwood-retro-pr` at the root of your
