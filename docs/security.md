@@ -961,21 +961,16 @@ human-vetted" is stronger than what the second family's mechanism actually deliv
   settings, one flag changed — so the difference is the flag, not a local settings deny wearing
   platform clothes.
 - **The reviewer's own carriers** — the doctrine file (`doctrine.file`, default
-  `docs/REVIEW-DOCTRINE.md`, substituted verbatim into the reviewer prompt) and the shipped
-  reviewer prompt itself (`engine/prompts/**`). These are what a gate② review session actually
-  reads as standing instruction. The doctrine path is **derived from config**, not a literal, so
-  an operator who repoints `doctrine.file` stays covered; the prompt glob is a literal default,
-  inert in any target repo that is not the engine's own source tree.
-
-**Known gap in this family: a repointed `reviewer.agent.promptFile` is not covered.** The doctrine
-path can be derived because `loadConfig` captures `doctrine.fileRaw` before resolving it;
-`reviewer.agent.promptFile` keeps no such pre-resolution value, so there is nothing repo-relative
-to derive a pattern from and the literal `engine/prompts/**` glob is all that stands. An operator
-who points `reviewer.agent.promptFile` at a path outside that glob gets a reviewer prompt whose
-edits reach autonomous merge — the exact hole this section exists to close, for that one
-configuration. Closing it means capturing a `promptFileRaw` the same way `doctrine.fileRaw` is
-captured; tracked as #549. Until then, an operator who overrides
-`reviewer.agent.promptFile` should add that path to `escalation.instructionPaths` by hand.
+  `docs/REVIEW-DOCTRINE.md`, substituted verbatim into the reviewer prompt) and the reviewer prompt
+  itself (shipped as `engine/prompts/**`, repointable via `reviewer.agent.promptFile`). These are
+  what a gate② review session actually reads as standing instruction. **Both paths are derived from
+  config**, not literals, so an operator who repoints either one stays covered: `loadConfig`
+  captures the pre-resolution `doctrine.fileRaw` (#527) and `reviewer.agent.promptFileRaw` (#549)
+  before resolving each to an absolute local path, and the escalation matches those repo-relative
+  raw forms against the PR's changed files. The `engine/prompts/**` glob remains a literal default
+  covering the shipped prompt, inert in any target repo that is not the engine's own source tree.
+  A derived path that points outside the repo (absolute, or `..`-escaping) is skipped rather than
+  smuggled into the pattern list — it could never match a repo-relative changed-file path anyway.
 
 **The second family's protection is delayed by one round, not immediate — say so rather than
 overclaim.** Both the doctrine and the prompt are loaded by the ENGINE from its own
