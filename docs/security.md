@@ -145,14 +145,16 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
   precisely because the in-engine capability boundary was deliberately not built for producer
   legs.
 - **(b′) server-granularity MCP deny vs. `allowManagedPermissionRulesOnly` (#554).** The
-  planned server-granularity deny for producer legs (known forge-authority/github-class and
-  known write/exec/filesystem-class MCP servers appended to `WORKER_DISALLOWED_TOOLS`) lands
+  server-granularity deny for producer legs (known forge-authority/github-class and
+  known write/exec/filesystem-class MCP servers appended to `WORKER_DISALLOWED_TOOLS`,
+  shipped by #617) lands
   in `--disallowedTools`. As [documented above](#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry),
   a target repo whose managed settings set `allowManagedPermissionRulesOnly: true` causes the
   CLI to discard every CLI-argument permission rule — including this server deny, alongside
-  the rest of sapwood's `--disallowedTools` containment. #554 tracks whether the engine should
-  detect and refuse that managed mode; until then this is a named, not silently accepted,
-  interaction.
+  the rest of sapwood's `--disallowedTools` containment. #554's owner ruling (2026-08-03,
+  shipped by #622) is disclose + detect-and-WARN — one startup warning naming both operator
+  exits, no refusal; see the [managed-settings exception section](#managed-settings-allowmanagedpermissionrulesonly-exception-554)
+  below. The interaction stays named here, never silently accepted.
 
 ### Doctrine lines
 
