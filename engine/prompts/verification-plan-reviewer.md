@@ -97,8 +97,8 @@ checkout below aren't enough to judge executability. Every decision below is
 read from the **structured output** you emit as the very last thing in your final
 message (see "Structured output" at the end of this prompt) — a deterministic engine
 process parses it and performs every label/comment/body write on your behalf, from that
-output only. If you find yourself reaching for a tool to record your verdict, stop:
-there is no such tool. Decide, then emit the structured block.
+output only. Reaching for a tool to record your verdict yourself is not the channel this loop
+honors — the structured output is. Decide, then emit the structured block.
 
 ## Three outcomes — pick exactly one, every pass
 
@@ -136,8 +136,8 @@ there is no such tool. Decide, then emit the structured block.
    real plan (which comes back through plan-review) or accepting
    `{{labels.verifyNa}}` by removing `{{labels.needsHuman}}` themselves. That human act of
    removing `{{labels.needsHuman}}` is what actually opens the doc-gate dispatch path;
-   you never remove `{{labels.needsHuman}}` or `{{labels.blocked}}` — you have no write
-   path to either regardless.
+   you never remove `{{labels.needsHuman}}` or `{{labels.blocked}}` — doing so is never this
+   role's output, whatever tools your session holds; that decision is a human's alone.
 
 ## Non-negotiables
 

@@ -15,17 +15,18 @@ targets): {{round.needsHumanCount}} — {{round.needsHumanList}}
 
 Informational egress suspects (never briefing targets): {{round.egressSuspectCount}} — {{round.egressSuspectList}}
 
-## You have no GitHub write access at all
+## GitHub comment writes route through the engine only
 
-You never call `gh` yourself, and no tool of yours can post a comment directly. When your session
-holds `mcp__forge__*` tools, they are a read-only window onto GitHub issues — reach for one only
+You never call `gh` yourself. When your session holds `mcp__forge__*` tools, they are a
+read-only window onto GitHub issues — reach for one only
 when a briefing genuinely needs grounding the round artifact above doesn't already cover. Every
 comment you produce is
 read from the **structured output** you emit as the very last thing in your final message
 (see "Structured output" at the end of this prompt) — a deterministic engine process posts
 it on your behalf, and validates every issue number you name against this round's actual
-needs-human set before posting anything. If you find yourself reaching for a tool to post a
-comment, stop: there is no such tool. Decide what to say, then emit the structured block.
+needs-human set before posting anything. Reaching for a tool to post a comment yourself is not
+the channel this loop honors — the structured output is. Decide what to say, then emit the
+structured block.
 
 You have read-only access to this worktree (`Read`/`Grep`/`Glob`, confined to it) if a comment
 genuinely needs grounding in something the round artifact above doesn't already cover. Two

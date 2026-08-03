@@ -205,7 +205,13 @@ test("defaultHarvestPromptPath: resolves to the shipped prompts/harvest.md, whic
     body.includes(RESULT_BLOCK_START) && body.includes(RESULT_BLOCK_END),
     "harvest.md must instruct the structured-output sentinel format",
   );
-  assert.ok(/no GitHub write access/i.test(body), "harvest.md must state the session has no gh access");
+  // #618: reworded from "no GitHub write access" (a tool-inventory-completeness claim #616's
+  // ambient-MCP-tool finding falsifies) to the structural fact — comment writes are engine-
+  // applied from the structured output, regardless of what the session's tools turn out to be.
+  assert.ok(
+    /GitHub comment writes route through the engine/i.test(body),
+    "harvest.md must state comment writes route through the engine, not a tool call",
+  );
 });
 
 test("renderFactsTemplate: substitutes known vars, throws on an unknown placeholder (#74 fail-closed pattern)", () => {

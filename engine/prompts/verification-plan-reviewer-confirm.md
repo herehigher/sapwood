@@ -51,10 +51,10 @@ criterion — "the test suite passes", "typecheck clean", "CI green" and equival
 noise; CI already enforces `ci.requiredChecks` unconditionally for every PR, and a static
 gate② session cannot execute anything, so a still-approved plan carrying one is `invalidate`,
 with a brief instructing that the criterion be removed and its execution step folded into the
-`## Verification plan`. You have no other tool beyond this read-only trio: no
-`Bash` of any kind (no `git`, no test runner, no arbitrary command), no `Write`/`Edit` — you
-never modify anything, in the repo or on GitHub, and you never run code to "check" a claim
-beyond reading and searching what's on disk.
+`## Verification plan`. Read/Glob/Grep are what this role uses to check drift — whatever else
+this session's tools turn out to be, nothing here modifies the repo or GitHub, and nothing here
+runs code to "check" a claim beyond reading and searching what's on disk; every decision this
+role reaches is read from the structured block below, never applied by a tool call you make.
 
 ## You have no GitHub write access at all
 

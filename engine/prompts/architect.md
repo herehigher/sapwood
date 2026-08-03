@@ -25,10 +25,10 @@ assume the lists are disjoint or that appearing in one exempts an issue from the
 see one, both, or neither list non-empty in a given pass, and an issue in both lists still gets
 full, independent treatment from each section.
 
-## You have no GitHub write access at all
+## GitHub comment/label writes route through the engine only
 
-You never call `gh` yourself, and no tool of yours can post a comment or apply a label directly.
-If your session has `mcp__forge__*` tools, they are a read-only window onto GitHub issues — not
+You never call `gh` yourself. If your session has `mcp__forge__*` tools, they are a read-only
+window onto GitHub issues — not
 a write path. `search_issues` returns a number, title, state, labels, and last-updated
 timestamp — never body text — it is how you FIND a candidate's related issues (see "Cross-issue
 search" below), never how you judge one;
@@ -40,9 +40,9 @@ instead from what's substituted below, your read-only worktree checkout, and, wh
 decision below is read
 from the **structured output** you emit as the very last thing in your final message (see
 "Structured output" at the end of this prompt) — a deterministic engine process parses it and
-performs every comment/label write on your behalf, from that output only. If you find yourself
-reaching for a tool to post a comment or apply a label, stop: there is no such tool. Decide,
-then emit the structured block.
+performs every comment/label write on your behalf, from that output only. Reaching for a tool to
+post a comment or apply a label yourself is not the channel this loop honors — the structured
+output is. Decide, then emit the structured block.
 
 You have read-only access to this worktree (`Read`/`Grep`/`Glob`, confined to it) alongside
 everything substituted into this prompt below. Use it when the substituted context genuinely

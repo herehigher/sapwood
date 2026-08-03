@@ -69,7 +69,17 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // retro round #284: a criterion drafted against a human-merge-only path used to reach gate⓪
   // unresolved every time (caught only reactively by verification-plan-reviewer/-drafter,
   // costing a bounce round-trip) — po.md now resolves it at draft time, same pattern.
-  "po.md": "bb32ca8f481853421aa7bdfb1061e8c473db62a3458f46ee2f96d67ef07d3a34",
+  // #618: the capability DR (#616) showed ambient MCP tools survive official host inheritance —
+  // real, callable, and absent from the init inventory — so a categorical "no tool of yours can
+  // X" / "you have no capability to Y" / "it's a tool you were never given" claim is a
+  // tool-inventory-completeness assertion this session can no longer make truthfully, however
+  // true it happens to be against the matrix sapwood itself controls. Reworded four sites (the
+  // "no GitHub write access" header + its "no tool of yours can create/edit/label" line, the
+  // origin:agent/Ready paragraph, the concern-channel paragraph, and the board-status bullet) to
+  // state the engine-enforced structural fact instead — writes/moves happen only from this
+  // session's structured output, applied by the engine, regardless of what tools the session
+  // holds — never a claim about the session's full tool inventory.
+  "po.md": "b79d63b3a7f562e474f3580d93be9d4ca626b5ec3cf1764c89e20a0d5016c6dc",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
@@ -93,7 +103,13 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // attached) instead of asserting a closure over all of them.
   // #413: hash moved again for the gate⓪ rename — architect.md's single reference to the drafter
   // role by name follows the new name. No charter, grant, or instruction changed by the rename.
-  "architect.md": "4b028b293c378d4fb2b5d376e44c9c30afe2f0add05d4ba76cf48440f4c612e7",
+  // #618: same class of fix as po.md above — the "no GitHub write access" header and its "no tool
+  // of yours can post a comment or apply a label directly" line, plus the "there is no such tool"
+  // sentence guarding the structured-output ask, both asserted tool-inventory completeness that
+  // #616's ambient-MCP-tool finding falsifies. Reworded to the structural fact (comment/label
+  // writes are engine-applied from the structured output only) without claiming anything about
+  // what tools this session does or doesn't hold.
+  "architect.md": "77802e2a2ff0e6c9fbffcd69922a2f8a11fb91bf03f8edf0465abd6bfe66b943",
   // #457 (F36): intentional edits — execution-class ACs are plan noise (CI already enforces
   // ci.requiredChecks unconditionally): verification-plan-reviewer flags-and-strips them, the confirm pass
   // invalidates legacy plans carrying them, drafter/decompose never author them.
@@ -115,23 +131,47 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // budgetUsdSoft edit) slipped past gate⓪ on that reading and the resulting PR (#562) then
   // failed gate② for real, unfixably (the guard blocks the whole file by path, not by field).
   // Both bullets now say so explicitly.
-  "verification-plan-reviewer.md": "132d51eebdad5dd0edf1e746baa4c9d93ad306782be7d1fdcb8b8c74f544e403",
+  // #618: the "there is no such tool" sentence guarding the structured-verdict ask, and the
+  // "you have no write path to either regardless" claim about `needs-human`/`blocked`, both
+  // asserted tool-inventory completeness #616's ambient-MCP-tool finding falsifies. Reworded to
+  // the structural fact (this loop only ever applies these writes from the structured output;
+  // removing either label is never this role's output) without claiming anything about the
+  // session's actual tool inventory.
+  "verification-plan-reviewer.md": "1ec4577ae2752405d0de694db3514b9ba1489b56083bd0d7b1186db70e8bf0a9",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
   // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
   // either way.
-  "verification-plan-reviewer-confirm.md": "8be3f563358fb335803c0755f445c0c42ecdeb9804c853b3855a63a6e0a70d75",
+  // #618: "You have no other tool beyond this read-only trio" was the clearest banned instance in
+  // the whole set — a POSITIVE completeness claim over the session's entire tool inventory
+  // (exactly Read/Glob/Grep, explicitly no Bash, no Write/Edit), falsified in principle by #616's
+  // finding that ambient MCP tools survive official host inheritance outside this loop's own
+  // matrix. Reworded to describe what Read/Glob/Grep are actually used for (checking drift) and
+  // the structural fact that this role's decisions are read from the structured block, never
+  // applied by a tool call — dropping the "no other tool" closure claim entirely.
+  "verification-plan-reviewer-confirm.md": "be5972fddede09156f5fe1b7043567338d5c592d91ac7730cf799a3198e30da6",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — the
   // drafter's brief is still its primary instruction set; the forge grant (never removed) is a
   // read-only aid, never a write path, exactly as this file has always said.
   // retro round #281: same fix as verification-plan-reviewer.md above, mirrored into the
   // drafter's own "if the brief flags a human-merge-only conflict" bullet.
-  "verification-plan-drafter.md": "1be2278294a53e7702b1f860e0aafbfe4933495c928b218878434cae3e19cb9f",
+  // #618: "There is no comment channel and no label channel available to you", "that separation
+  // is now structural" (over "no path to apply plan:approved... even if you wanted to"), and "you
+  // have no write path to either" (needs-human/blocked) all asserted tool-inventory completeness
+  // #616's ambient-MCP-tool finding falsifies. Reworded to role-scope framing (posting a
+  // comment/label, or touching needs-human/blocked, is never this role's OUTPUT, whatever tools
+  // the session holds) instead of claiming the session has no channel that could do it.
+  "verification-plan-drafter.md": "514a946e1e661bbe0529e6c1942aa7dbe5f9dd74009745abe727695d8bd4ff45",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
   // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
   // grant was never removed, so the capability paragraph again names it (when attached) instead
   // of denying it.
-  "harvest.md": "657601c73250a9fd169d909779cddec8a23433936bf20a99533e827def2fd52e",
+  // #618: same class of fix as architect.md above — the "no GitHub write access" header, its "no
+  // tool of yours can post a comment directly" line, and the "there is no such tool" sentence
+  // guarding the structured-output ask all asserted tool-inventory completeness #616's
+  // ambient-MCP-tool finding falsifies. Reworded to the structural fact (comment writes are
+  // engine-applied from the structured output only) without a tool-inventory claim.
+  "harvest.md": "84a66fb8255eb5d2bb5e836d376ebc3663404623415d26134af0e6e20fe6a9e0",
   // #453 (design #402 R5): intentional edit — the digest's new finding-class tendency table is
   // pointed at, with the design-source rule and the stated blind spot. The FIRST deliberate
   // change to this file since #235 pinned it as "already code-aware, do not touch"; that ruling
@@ -148,7 +188,13 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // two apart. Reframed onto the same conditional shape every other peripheral prompt already
   // uses, plus the not-attached branch (ground in the digest/worktree, say so). The #559 block test
   // below is the standing guard; this is its only shipped subject.
-  "retro.md": "1e73242036f474f8d36f1ec8082bad867cf6d2f573740495c76acae0d2ae321e",
+  // #618: the "you have none" parenthetical on the "run any `gh` command" non-negotiable asserted
+  // total absence of that capability across the session's whole tool inventory (RETRO_ALLOWED_
+  // TOOLS carries no `gh` grant, but that constant doesn't bound what an ambient, host-inherited
+  // MCP tool could add — #616's finding). Reworded to name what actually opens the PR instead
+  // (the engine, from the pushed branch + `.sapwood-retro-pr`) rather than claiming the session
+  // lacks the capability outright.
+  "retro.md": "e88d4378313ef8bf1e6f9ffcb32add3f3f8058816471d9afb18e6e38891c6e5b",
   // #529: same categorical→conditional GitHub-access fix as architect.md.
   // #533 proposed removing po-pool's ISSUE_TOOLS grant and substituting each candidate's full
   // body in its place; the owner reversed the grant-removal half only. po-pool KEEPS its
@@ -167,10 +213,19 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #558: the omission marker now NAMES the omitted candidates instead of only counting them, so
   // the paragraph describing it says what a named-but-not-shown number means: cross-referenceable,
   // still not selectable, and degrading to the old bare count if the number list itself won't fit.
-  "po-pool.md": "d93bb9f0f314718df8465a06d7583fdfe45901efe94ef9c9a99275755184b1e6",
+  // #618: "nothing you do writes to GitHub directly" asserted a closure over the session's whole
+  // tool inventory, falsified in principle by #616's ambient-MCP-tool finding. Reworded to the
+  // structural fact — this session's entire deliverable is a list of issue numbers, and any write
+  // that results is the engine's, never a tool call the session makes.
+  "po-pool.md": "cc3232b2115fea765ff0e5d76c7d26ad69bdff295e6a07211962ddf78a456a78",
   // retro round #284: same fix as po.md above, mirrored for a `remainder` child instead of a
   // paste-ready-patch criterion.
-  "po-decompose.md": "f0b126a80576a7bbacde7370c1e3ad8cd5f90d08755df933e446708df782ef17",
+  // #618: "call GitHub" in the opening role-scope sentence's prohibition list asserted a closure
+  // over the session's whole tool inventory that the very next sentence already covers correctly
+  // ("the deterministic engine performs all validated issue, label, comment, board, and native
+  // sub-issue writes") — falsified in principle by #616's ambient-MCP-tool finding. Dropped the
+  // redundant closure claim rather than restating the structural fact a second way.
+  "po-decompose.md": "50e58472cae32c28f9aa46e599c71d3e03be72bfb718d083b2126fe541d3e32e",
 };
 
 test("prompt snapshot: po.md hash matches the pinned revision", () => {
