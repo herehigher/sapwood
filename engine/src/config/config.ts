@@ -107,6 +107,11 @@ const Lanes = z
 
 const Worker = z
   .object({
+    // #582 (owner ruling 2026-08-03, option (a)): worker default STAYS opus. The gate-above-
+    // producer ordering is satisfied by DEFAULT_REVIEWER_AGENT_MODEL moving to a THIRD tier
+    // ("fable", above opus) instead of swapping the pair — a swap made the repo's own explicit
+    // `worker.model: opus` collide with a defaulted opus reviewer under D5 (PR #590 round 1),
+    // and any validation that rejects the shipped default combination is self-contradictory.
     model: z.string().default("opus"),
     effort: z.enum(["low", "medium", "high"]).default("high"),
     fallbackModel: z.string().default("sonnet"),
@@ -200,7 +205,18 @@ const Cost = z
 // `.transform()` below) — deliberately different from worker.model's own default ("opus") so the
 // ordinary zero-config parse never trips D5 (ConfigSchema's top-level superRefine). Exported for
 // tests, same convention as DEFAULT_GOAL_FILE/DEFAULT_CONFIG_PATHS below.
-export const DEFAULT_REVIEWER_AGENT_MODEL = "sonnet";
+// #582 (owner ruling 2026-08-03, option (a)): moved sonnet -> "fable", a THIRD tier that sits
+// ABOVE opus (D5's gate-at-or-above-producer ordering) while differing from BOTH worker
+// defaults — so the zero-config parse AND a config that only sets `worker.model: opus` (this
+// repo's own sapwood.config.yaml) stay valid by construction. A pair-swap (worker sonnet /
+// reviewer opus) was rejected in PR #590 round 1: it made the shipped explicit worker: opus
+// collide with its own defaulted reviewer. An operator whose worker IS fable sets
+// reviewer.agent.model explicitly — the D5 error message names the one-line fix.
+// D5 is unchanged and still only enforces DIFFERENCE; the ordering is a defaults + docs
+// statement plus a `sapwood validate` warning (cli.ts), never a parse-time rejection — model
+// strings are free-form and the rate table is only a proxy for capability, so a hard fail would
+// reject legitimate setups (a cross-vendor reviewer whose rates aren't comparable at all).
+export const DEFAULT_REVIEWER_AGENT_MODEL = "fable";
 
 // #501: identity marker for a reviewer.agent block this module itself injected (Reviewer's
 // `.transform()` below) rather than one a user supplied — read only by ConfigSchema's top-level
@@ -448,9 +464,9 @@ const Reviewer = z
     //       which runs strictly after this whole `reviewer` field has finished parsing, always
     //       sees the FULLY RESOLVED agent block — a defaulted one is checked for the worker.model
     //       collision exactly like a user-supplied one, never silently exempted.
-    // DEFAULT_REVIEWER_AGENT_MODEL ("sonnet") differs from worker.model's own default ("opus"),
+    // DEFAULT_REVIEWER_AGENT_MODEL ("fable") differs from worker.model's own default ("opus"),
     // so the ordinary zero-config case never collides; an operator who sets ONLY worker.model to
-    // "sonnet" still hits the D5 rejection (see that check's own doc for the extended,
+    // "fable" still hits the D5 rejection (see that check's own doc for the extended,
     // defaulted-case error message). injectedReviewerAgents (below) marks the block so that
     // message can name it as defaulted rather than user-set.
     if (r.mode === "engine-agent" && r.agent === undefined) {

@@ -10,7 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import { configHash, DEFAULT_CONFIG_PATHS, dashboardConfigSubset, loadConfig, type SapwoodConfig } from "./config/config.js";
-import { loadPricingTable } from "./config/pricing.js";
+import { findRate, loadPricingTable, type PricingTable } from "./config/pricing.js";
 import {
   associateLanePr,
   GithubForge,
@@ -296,6 +296,38 @@ Flags:
   --help, -h       Print this help and exit
 `;
 
+/** #582: one line (or "") warning that the configured gate② reviewer is priced BELOW the worker
+ *  it gates. D5 (config.ts's top-level superRefine) enforces that the two models DIFFER but says
+ *  nothing about ORDERING, so a config can legitimately parse with the weaker model reviewing the
+ *  stronger one's output — which inverts gate②'s authority, since the conductor merges on its
+ *  verdict. The shipped defaults now state the rule (worker opus / reviewer fable); this catches
+ *  an override that re-inverts it.
+ *
+ *  A WARNING, never a rejection, and deliberately so: model strings are free-form and the rate
+ *  table is a hand-maintained COST proxy for capability, not a capability signal — a hard fail
+ *  would reject legitimate setups (a cross-vendor `runner: codex-exec` reviewer whose rates
+ *  aren't comparable to a Claude worker's at all). Silent whenever there is no comparison to
+ *  make: no engine-agent reviewer, or EITHER model absent from the loaded table — hence findRate
+ *  (no fallback) rather than resolveRate, whose most-expensive-tier fallback for an unknown model
+ *  would invent a comparison the operator never configured. Ordering matches
+ *  pricing.ts's own most-expensive rule: input rate, tie-broken by output rate. */
+function reviewerTierWarning(cfg: SapwoodConfig, pricing: PricingTable): string {
+  const reviewerModel = cfg.reviewer.agent?.model;
+  if (reviewerModel === undefined) return "";
+  const worker = findRate(cfg.worker.model, pricing);
+  const reviewer = findRate(reviewerModel, pricing);
+  if (worker === undefined || reviewer === undefined) return "";
+  const cheaper = reviewer.input < worker.input || (reviewer.input === worker.input && reviewer.output < worker.output);
+  if (!cheaper) return "";
+  return (
+    `sapwood validate: WARNING — reviewer is cheaper/weaker than worker: reviewer.agent.model ` +
+    `"${reviewerModel}" ($${reviewer.input}/$${reviewer.output} per MTok in/out) is priced below worker.model ` +
+    `"${cfg.worker.model}" ($${worker.input}/$${worker.output}) — gate quality expectation is inverted. ` +
+    `The reviewer's tier should sit AT OR ABOVE the producer's (docs/configuration.md, #582); rates are only a ` +
+    `proxy, so this is advice, not a rejection.\n`
+  );
+}
+
 /** `sapwood validate [path]`: reuses config.ts's own loader (no parsing duplicated here) —
  *  ZodError -> issues one per line, exit 1; anything else (missing/unreadable file, already
  *  naming the path per Node's own ENOENT message, or loadConfig's own "no config found"
@@ -318,10 +350,15 @@ export function runValidate(argv: string[]): { stdout: string; stderr: string; c
     buildRenderFixPrompt(cfg);
     // Same for the soft-budget rate table (#33 follow-up): a missing/malformed
     // worker.pricingFile aborts the real run at supervisor construction, so validate it here.
-    loadPricingTable(cfg);
+    const pricing = loadPricingTable(cfg);
     const resolvedPath = path ?? DEFAULT_CONFIG_PATHS.find(existsSync);
     return {
-      stdout: `sapwood validate: OK — ${resolvedPath} (lanes.max=${cfg.lanes.max}, guard.mode=${cfg.guard.mode}, merge.mode=${cfg.merge.mode})\n`,
+      // Warnings share stdout with the OK line: this function's stderr means "validation failed"
+      // (its only other writer is the catch below, always with code 1), and a warning must not
+      // blur that. Exit stays 0 — see reviewerTierWarning for why this can only ever advise.
+      stdout:
+        reviewerTierWarning(cfg, pricing) +
+        `sapwood validate: OK — ${resolvedPath} (lanes.max=${cfg.lanes.max}, guard.mode=${cfg.guard.mode}, merge.mode=${cfg.merge.mode})\n`,
       stderr: "",
       code: 0,
     };

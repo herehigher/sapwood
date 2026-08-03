@@ -505,7 +505,7 @@ test("#13: reviewer.mode accepts same-model-trusted and human", () => {
 test("#501: zero config resolves reviewer.mode to engine-agent with a valid injected agent block (model != worker.model's own default)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.reviewer.mode, "engine-agent");
-  assert.equal(cfg.worker.model, "opus");
+  assert.equal(cfg.worker.model, "opus"); // #582 option (a): worker default unchanged; reviewer default moved to fable
   assert.equal(cfg.reviewer.agent?.model, DEFAULT_REVIEWER_AGENT_MODEL);
   assert.notEqual(cfg.reviewer.agent?.model, cfg.worker.model);
 });
@@ -587,8 +587,8 @@ test("#54 R2: the same fallback parses fine once trustedReviewers is non-empty, 
 
 // ── #286 (E4a, design #279 §7): reviewer.mode: engine-agent + reviewer.agent strictness batch ──
 
-// worker.model defaults to "opus" — reviewer.agent.model must differ (D5), so every fixture
-// below that isn't SPECIFICALLY testing the D5 collision pins worker.model to "sonnet".
+// worker.model defaults to "sonnet" (#582) — reviewer.agent.model must differ (D5), so every
+// fixture below that isn't SPECIFICALLY testing the D5 collision pins worker.model explicitly.
 const BASE_ENGINE_AGENT =
   "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\nreviewer: { mode: engine-agent, agent: { model: opus } }\n";
 
@@ -685,7 +685,7 @@ test("#314: reviewer.agent.treeRetentionCap is configurable and must be a positi
 test("#501: reviewer.mode: engine-agent with reviewer.agent omitted ⇒ default-injected (sane defaults, model differs from worker.model's own default)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: engine-agent }");
   assert.equal(cfg.reviewer.mode, "engine-agent");
-  assert.equal(cfg.worker.model, "opus"); // worker.model's own default, unchanged
+  assert.equal(cfg.worker.model, "opus"); // worker.model's own default (unchanged by #582 option (a))
   assert.equal(cfg.reviewer.agent?.model, DEFAULT_REVIEWER_AGENT_MODEL);
   assert.equal(cfg.reviewer.agent?.effort, "high");
   assert.equal(cfg.reviewer.agent?.costCapUsd, 3);
@@ -747,6 +747,37 @@ test("#501 (D5 extended): worker.model = the INJECTED reviewer.agent default ⇒
   assert.throws(
     () => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: ${DEFAULT_REVIEWER_AGENT_MODEL} }`),
     /DEFAULTED.*collides with worker\.model.*set reviewer\.agent\.model to a different Claude model/s,
+  );
+});
+
+// #582 (owner ruling 2026-08-03): D5 only ever enforced that the two models DIFFER, so the
+// post-#501 shipped pair (worker opus / reviewer sonnet) had the WEAKER model gating the
+// stronger one's output. gate② is the loop's trust anchor (the conductor merges on its verdict),
+// so the shipped defaults must put the reviewer at or above the producer's tier. Owner ruling
+// (option (a), 2026-08-03): the reviewer default moves to a THIRD tier above opus ("fable")
+// instead of swapping the pair — a swap made a config that only sets `worker.model: opus`
+// (this repo's own sapwood.config.yaml) collide with its own defaulted reviewer under D5.
+test("#582: shipped defaults put the reviewer AT OR ABOVE the worker's tier (worker opus / reviewer fable), still D5-distinct", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.worker.model, "opus");
+  assert.equal(cfg.reviewer.agent?.model, "fable");
+  assert.equal(DEFAULT_REVIEWER_AGENT_MODEL, "fable");
+  assert.notEqual(cfg.reviewer.agent?.model, cfg.worker.model); // D5 satisfied by the defaults alone
+});
+
+test("#582 option (a): a config that sets ONLY worker.model: opus (this repo's own shape) stays valid — the defaulted fable reviewer neither collides nor downgrades", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: opus }");
+  assert.equal(cfg.worker.model, "opus");
+  assert.equal(cfg.reviewer.agent?.model, "fable");
+});
+
+test("#582: the tier flip does NOT soften D5 — an explicit same-model pair still fails loud at parse", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\nreviewer: { mode: engine-agent, agent: { model: sonnet } }",
+      ),
+    /must differ from worker\.model/,
   );
 });
 
@@ -1941,7 +1972,7 @@ test("dashboardConfigSubset: carries the drawer's groups + the per-role model/ef
   // §3 C/§6 captions read these — the allowlist "must include" them (frontend-design.md §3 E).
   assert.equal(subset.roles.architect.model, "sonnet");
   assert.equal(subset.roles.retro.effort, "medium");
-  assert.equal(subset.worker.model, "opus");
+  assert.equal(subset.worker.model, "opus"); // #582 option (a): unchanged
 });
 
 test("dashboardConfigSubset: unlisted keys never leave the engine — no local paths, no proxy block", () => {
