@@ -1,5 +1,9 @@
-// Fail-closed PreToolUse safety guard — the structural enforcement of
-// producer ≠ reviewer ≠ merger. Pure function: zero IO, zero deps, deterministic.
+// Fail-closed PreToolUse safety guard — engine-side enforcement of producer ≠ reviewer ≠
+// merger for the BUILT-IN Bash/file-tool family (exactly the tools worker.ts's guardSettings
+// matcher names; #619 reword). Ambient host MCP tools never reach this hook at all — that
+// residual, and branch protection as its mandatory backstop, are docs/security.md's
+// "Host-delegated capability management" section (DR #616). Pure function: zero IO, zero
+// deps, deterministic.
 //
 // Ported from 0day's guard.py (backend/src/zeroday/loop/guard.py). We port the *generic
 // safety mechanism* — command tokenizing, fragment splitting, exec-prefix stripping,
@@ -31,7 +35,7 @@ export interface GuardInput {
   command?: string; // Bash
   file_path?: string; // Write / Edit / MultiEdit / Read
   path?: string; // Grep / Glob search root (optional — Claude Code defaults it to cwd when absent)
-  notebook_path?: string; // NotebookRead
+  notebook_path?: string; // NotebookRead / NotebookEdit (#620)
 }
 
 // ── shlex-equivalent tokenizer ───────────────────────────────────────────────
@@ -850,19 +854,22 @@ function checkReadContainment(tool: string, input: GuardInput, cwd: string, work
 }
 
 // ── public API ───────────────────────────────────────────────────────────────
-const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit"]);
+// #620: NotebookEdit is write-family — its path field is `notebook_path`, not `file_path`
+// (see guardDecision's fp pick below); the matcher (worker.ts guardSettings) and
+// guard-hook.ts's GUARDED_TOOLS carry it too, or this entry would never be consulted.
+const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 
 /**
  * The PreToolUse safety decision. Pure & deterministic — worktreeRoot is a plain string
  * argument (never read from env inside this function; guard-hook.ts's IO layer reads
  * SAPWOOD_WORKTREE_ROOT and threads it in). Bash commands are guarded for opaque
- * constructs + gh overreach; Write/Edit are guarded for boundary files; Read/Grep/Glob/NotebookRead are
+ * constructs + gh overreach; Write/Edit/MultiEdit/NotebookEdit are guarded for boundary files; Read/Grep/Glob/NotebookRead are
  * guarded for worktree containment (#235 PR-A) when a worktreeRoot is known; every other
  * tool is allowed.
  */
 export function guardDecision(tool: string, input: GuardInput, cwd: string, worktreeRoot?: string): Decision {
   if (WRITE_TOOLS.has(tool)) {
-    const fp = input.file_path ?? "";
+    const fp = (tool === "NotebookEdit" ? input.notebook_path : input.file_path) ?? "";
     if (fp) {
       const r = checkWritePath(fp, cwd);
       if (r) return block(r);

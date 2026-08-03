@@ -454,6 +454,33 @@ test("NotebookRead: no worktreeRoot -> containment inactive, allowed regardless 
   assert.equal(guardDecision("NotebookRead", { notebook_path: "/etc/hosts" }, CWD).allow, true);
 });
 
+// ── NotebookEdit write-path protection (#620 — the matcher omitted NotebookEdit entirely, so
+//    notebook writes bypassed the hook; write-family semantics, path field is notebook_path). ──
+test("NotebookEdit BLOCK: notebook under a protected path (guard's own source)", () => {
+  const d = guardDecision("NotebookEdit", { notebook_path: "engine/src/guard/guard.ts" }, CWD);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("write-path"));
+});
+
+test("NotebookEdit BLOCK: notebook under .github/workflows", () => {
+  const d = guardDecision("NotebookEdit", { notebook_path: ".github/workflows/ci.ipynb" }, CWD);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("write-path"));
+});
+
+test("NotebookEdit ALLOW: an ordinary notebook (reverse test — the widening must not over-block)", () => {
+  assert.equal(guardDecision("NotebookEdit", { notebook_path: "analysis.ipynb" }, CWD).allow, true);
+});
+
+test("NotebookEdit reads notebook_path, not file_path — the field pick is load-bearing (#620)", () => {
+  // Claude Code's NotebookEdit schema carries notebook_path; file_path on a NotebookEdit input is
+  // not a real tool shape. Pin that the guard consults the real field, so a future refactor can't
+  // silently fall back to file_path and read every NotebookEdit as path-less.
+  const d = guardDecision("NotebookEdit", { notebook_path: "data/KILL_SWITCH", file_path: "src/ok.ts" }, CWD);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("write-path"));
+});
+
 test("Read containment is independent of Write/Edit boundary-file protection: an in-worktree read of the guard's OWN source is allowed", () => {
   const d = guardDecision("Read", { file_path: `${WORKTREE_ROOT}/engine/src/guard/guard.ts` }, WORKTREE_ROOT, WORKTREE_ROOT);
   assert.equal(d.allow, true, d.reason);

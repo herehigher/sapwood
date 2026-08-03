@@ -439,7 +439,7 @@ The asymmetry is compensated, but not erased, by several independent controls:
   inherited surface callable and including write/exec-class tools
   (`server-filesystem__write_file`/`edit_file`/`move_file`, `Google_Drive__create_file`),
   none reaching the guard hook (its PreToolUse matcher is
-  `Bash|Write|Edit|MultiEdit|Read|Grep|Glob|NotebookRead` — no `mcp__` pattern at all).
+  `Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|NotebookRead` — no `mcp__` pattern at all).
   This deny list is a COARSE, WHOLESALE, name-based accident fence — not a hostile-jail
   — covering exactly two named categories: forge-authority ("github-class") and
   write/exec-class ("filesystem-class") servers, by their KNOWN/common registration
