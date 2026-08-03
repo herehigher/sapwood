@@ -23,9 +23,9 @@ import {
   defaultPrivateCloneDir,
   defaultWorktreeRoot,
   MaterializerError,
-  MISSING_OBJECT_SIGNATURE,
   materialize,
   materializeWithExternalFetch,
+  objectPresentInClone,
 } from "./materializer.js";
 
 // ── fixture plumbing ────────────────────────────────────────────────────────────────────────
@@ -1253,11 +1253,29 @@ test("buildExternalHeadFetchInvocation (#499): pinned argv (hooks disabled, --no
   assert.equal(env.GIT_CONFIG_SYSTEM, "/dev/null");
 });
 
-test("MISSING_OBJECT_SIGNATURE (#499): matches the object-absence class only", () => {
-  assert.ok(MISSING_OBJECT_SIGNATURE.test("checkout of abc failed: fatal: unable to read tree (abc)"));
-  assert.ok(MISSING_OBJECT_SIGNATURE.test("fatal: bad object abc"));
-  assert.ok(!MISSING_OBJECT_SIGNATURE.test('treeDir "/x" already exists and is not empty'));
-  assert.ok(!MISSING_OBJECT_SIGNATURE.test("checkout of abc failed: Command failed: timeout"));
+// #499 originally classified object-absence by MATCHING GIT'S PROSE, which is not a contract:
+// git <= 2.43 says "reference is not a tree: <oid>" where git >= 2.47 says "unable to read tree
+// (<oid>)" for the identical condition (measured across 2.34.1 / 2.39.5 / 2.43.0 / 2.47.3 /
+// 2.50.1 / 2.54.0). The old regex knew only the newer wording, so on any older git the whole
+// #499 recovery silently never fired. `git cat-file -e` answers the same question with an EXIT
+// CODE — a structured signal, stable across every version above.
+test("objectPresentInClone (#499 follow-up): reads git's EXIT CODE, not its prose — present oid true, absent oid false", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "a.txt"), "a\n");
+    git(shared, ["add", "a.txt"]);
+    git(shared, ["commit", "-qm", "A"]);
+    const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir: join(cloneRoot, "clone.git"), worktreeRoot });
+    assert.equal(await objectPresentInClone(clone.dir, headOid(shared)), true, "the cloned head is present");
+    assert.equal(await objectPresentInClone(clone.dir, "0123456789012345678901234567890123456789"), false);
+    assert.equal(await objectPresentInClone(clone.dir, "not-a-sha"), false, "an unparseable rev is absent, never a throw");
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
 });
 
 test("materializeWithExternalFetch (#499): a head absent locally but reachable on the source repo's origin is fetched and materialized", async () => {
@@ -1284,7 +1302,10 @@ test("materializeWithExternalFetch (#499): a head absent locally but reachable o
     // Plain materialize cannot see B — the exact live wedge.
     const direct = await materialize({ clone, oid: oidB, treeDir: join(treeRoot, "direct") });
     assert.equal(direct.kind, "failure");
-    assert.ok(MISSING_OBJECT_SIGNATURE.test((direct as { reason: string }).reason), (direct as { reason: string }).reason);
+    // Asserted through the exit-code probe, not through git's wording: the wording of this exact
+    // failure differs across git versions (see objectPresentInClone's test above), so pinning it
+    // reddened CI on every runner whose git predates 2.47.
+    assert.equal(await objectPresentInClone(clone.dir, oidB), false, "B really is absent from the private clone");
 
     const logged: string[] = [];
     const result = await materializeWithExternalFetch({
