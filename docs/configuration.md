@@ -871,6 +871,23 @@ disk or an environment variable, but a real local process resource for the sessi
 lifetime. Set `enabled: false` to avoid both costs; that reintroduces the needs-human
 degradation documented above for any lane whose `prFixCap` is above `0`.
 
+**What `enabled: false` does to the role prompts (#559, ruling 2026-08-03).** Role prompts are
+static files with no template variable for proxy state — one file serves both settings, and by
+this ruling it stays that way rather than gaining a substitution point. What the opt-out costs is
+therefore a documented, bounded degradation, not a silent one: every prompt that names an
+`mcp__forge__` tool states the tools' presence as conditional, and the two roles with a real
+lookup STEP (`po-align`'s proposal dedup, `architect`'s cross-issue search) carry an explicit
+not-attached branch — judge from the substituted context, and say so instead of writing as if you
+had searched. So under `enabled: false` those two roles simply do less: `po-align` dedups against
+the (bounded, truncatable) backlog digest alone, `architect` judges candidates without the
+outside-the-pool search, and both are expected to disclose the gap in their own output. Nothing
+fails, no session is left holding an instruction it cannot follow, and no other role loses a step
+it had. The invariant is test-enforced (`prompts.test.ts`'s `#559` check), and the authoring rule
+behind it is in [`role-paradigm.md`](role-paradigm.md#cross-cutting-notes) — the phrasing is
+load-bearing, since [#529](https://github.com/herehigher/sapwood/issues/529)'s live 2×2 measured
+that a permissive "you may use one if it helps" capability paragraph produces zero calls even when
+the tools ARE attached.
+
 **Still unwired regardless of `enabled`:** ordinary (non-fix-loop) `WorkerSupervisor.
 dispatch()` for the main coding-worker leg has no production caller attaching a proxy —
 that would require touching `conductor.ts`'s DISPATCH call site, out of #253's/#551's
@@ -878,7 +895,7 @@ own scope.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` (#551; was `false`) | Master switch — off means the proxy is fully inert; nothing is ever constructed. On (the default) attaches a real handle to the fix-loop worker leg and every peripheral role session; review sessions are exempt regardless (see above). |
+| `enabled` | `true` (#551; was `false`) | Master switch — off means the proxy is fully inert; nothing is ever constructed. On (the default) attaches a real handle to the fix-loop worker leg and every peripheral role session; review sessions are exempt regardless (see above). **Off also degrades two peripheral roles (#559):** `po-align` dedups new proposals against the bounded backlog digest alone and `architect` skips its cross-issue search, each disclosing the gap in its own output — the role prompts are static, so they name the lookup as conditional and carry a not-attached branch rather than instructing a step the session cannot perform (see above; any lane with [`prFixCap`](#lanes) above `0` additionally folds to `needs-human`). |
 | `caps.maxIssuesPerCall` | `10` | `issue_details`: max issue numbers per call. A caller-requested batch above this cap is **rejected** (typed error), never silently truncated. |
 | `caps.defaultCommentsPerIssue` | `20` | `issue_details`' default view: how many of an issue's **most recent** comments to include (fail-toward-inclusion — the newest comments are the ones most likely to carry an amendment to a stale body). Bounded, not rejected: `comments_complete`/counts/an omitted-range name the cut. |
 | `caps.maxCommentsPerCall` | `100` | `issue_comments`: max `lastN` a caller may request explicitly. Also the default view's cap when `fullCommentStreamOptIn` is true. |
