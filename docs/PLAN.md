@@ -1597,6 +1597,16 @@ to when v0.2 implementation issues are cut, not locked here.
 - **Dashboard scope inflation (v0.2):** estimate as new frontend work, not a port.
 - **Naming:** "sapwood" communicates nothing to a stranger; revisit before public
   launch (minor, pre-launch).
+- **Duplicate `Ready` issues (accepted, #560, 2026-08-03):** no role checks whether a
+  human-authored `Ready` issue duplicates another open issue — align's dedup covers only
+  the PO's own proposals, gate⓪ is barred from judging *why/what*, and architect reads a
+  round's pool, not the backlog. Two duplicate `Ready` issues become two workers and two
+  conflicting PRs. **Ruled: accept and disclose**, per Decision #9 (rare edge → no new
+  machinery) and trusted-repos-first; a keyword-match dup warning at the gate would fire on
+  unrelated issues sharing vocabulary, and a warning humans learn to ignore costs more than
+  the duplicate. Stated for users in
+  [`getting-started.md`](getting-started.md#what-the-ready-gate-does-not-check-duplicates-560).
+  Revisit only if a real run is actually bitten.
 
 ## Verification (how we'll prove v1)
 
