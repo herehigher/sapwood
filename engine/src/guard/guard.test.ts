@@ -491,6 +491,10 @@ test("hook: Read/Grep/Glob/NotebookRead with malformed/non-object tool_input fai
   assert.equal(hookResponse({ tool_name: "Grep" })?.hookSpecificOutput.permissionDecision, "deny");
   assert.equal(hookResponse({ tool_name: "Glob", tool_input: null })?.hookSpecificOutput.permissionDecision, "deny");
   assert.equal(hookResponse({ tool_name: "NotebookRead" })?.hookSpecificOutput.permissionDecision, "deny");
+  // #620 (Codex review P3): pin NotebookEdit's GUARDED_TOOLS membership at the hook layer too —
+  // without this line, dropping it from GUARDED_TOOLS would let malformed NotebookEdit input fall
+  // through as {} and ALLOW while the whole suite stays green.
+  assert.equal(hookResponse({ tool_name: "NotebookEdit", tool_input: "oops" })?.hookSpecificOutput.permissionDecision, "deny");
 });
 
 test("hook: SAPWOOD_WORKTREE_ROOT threaded through responseFromText denies an outside Read and allows an inside one", () => {
