@@ -79,6 +79,10 @@ export const RoundArtifactSchema = z
             issue: z.number().int(),
             executable: z.string(),
             snippet: z.string(),
+            // #387 (F18): present only on a provably loopback-only hit (worker.ts's
+            // `classifyEgressTarget`); absence is the fail-closed "not proven loopback" default,
+            // so every pre-#387 artifact still parses unchanged.
+            target: z.literal("loopback").optional(),
           })
           .strict(),
       )
@@ -211,7 +215,7 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
   let reviewerFallbackReverts = 0;
   const needsHumanSet = new Set<number>();
   const needsHumanOrder: number[] = [];
-  const egressSuspects: Array<{ worker: string; issue: number; executable: string; snippet: string }> = [];
+  const egressSuspects: Array<{ worker: string; issue: number; executable: string; snippet: string; target?: "loopback" }> = [];
   let ceiling = 0;
   let driveNoPr = 0;
   let handoffs = 0;
@@ -298,6 +302,10 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
           issue: p.issue as number,
           executable: p.executable as string,
           snippet: p.snippet as string,
+          // #387: carried through so the artifact an operator actually reads can separate
+          // dev-server loopback noise from public egress. Any other/absent value stays absent —
+          // a hand-edited or older ledger row can never invent a downgrade.
+          ...(p.target === "loopback" ? { target: "loopback" as const } : {}),
         });
         break;
       case "handoff":
@@ -484,11 +492,14 @@ export function renderRoundArtifactMarkdown(artifact: RoundArtifact): string {
       // nonexistent issue reference; render these as a role-session line instead, keyed off
       // `worker` (the session's own lane/sentinel name, e.g. "role-architect-1a2b3c4d") rather
       // than a fabricated issue anchor. Worker-leg events (a real issue number) are unaffected.
-      artifact.egressSuspects.map((s) =>
-        s.issue === 0
-          ? `- role session ${s.worker}: ${s.executable} — ${s.snippet}`
-          : `- #${s.issue} (${s.worker}): ${s.executable} — ${s.snippet}`,
-      ),
+      // #387 (F18): a loopback-only hit is still listed in full — the decision was tag, not
+      // exclude — but carries a marker so an operator's eye lands on the public-egress lines.
+      artifact.egressSuspects.map((s) => {
+        const target = s.target === "loopback" ? " [loopback]" : "";
+        return s.issue === 0
+          ? `- role session ${s.worker}: ${s.executable}${target} — ${s.snippet}`
+          : `- #${s.issue} (${s.worker}): ${s.executable}${target} — ${s.snippet}`;
+      }),
     ),
     section("Handoffs", [`Soft-budget handoffs: ${artifact.handoffs}`]),
     section(

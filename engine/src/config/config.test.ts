@@ -849,6 +849,53 @@ test("#286: reviewer.agent.promptFile resolves relative to the config file's dir
   }
 });
 
+test("#549: reviewer.agent.promptFileRaw keeps the pre-resolution value loadConfig resolved away", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\n" +
+        "reviewer: { mode: engine-agent, agent: { model: sonnet, promptFile: prompts/my-reviewer.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    // Same contract as doctrine.fileRaw: raw for citing/matching, resolved for the engine's reads.
+    assert.equal(cfg.reviewer.agent?.promptFileRaw, "prompts/my-reviewer.md");
+    assert.equal(cfg.reviewer.agent?.promptFile, join(dir, "prompts", "my-reviewer.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#549: an ABSOLUTE reviewer.agent.promptFile is captured raw unchanged (nothing to resolve)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\n" +
+        "reviewer: { mode: engine-agent, agent: { model: sonnet, promptFile: /etc/sapwood/my-reviewer.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.reviewer.agent?.promptFileRaw, "/etc/sapwood/my-reviewer.md");
+    assert.equal(cfg.reviewer.agent?.promptFile, "/etc/sapwood/my-reviewer.md");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#549: an unset reviewer.agent.promptFile leaves promptFileRaw unset", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(cfgPath, "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: engine-agent, agent: { model: sonnet } }\n");
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.reviewer.agent?.promptFileRaw, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("overrides survive validation", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { max: 9 }\nworker: { effort: low }");
   assert.equal(cfg.lanes.max, 9);

@@ -76,6 +76,15 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
       color: "b60205",
       description: "Engine-applied on the PR: a human must merge it. The loop never removes or re-decides this.",
     },
+    // #399: the PR-side lane-state mirror. The description answers the same three questions every
+    // escalation-tier description does — WHO writes it / WHAT it means / WHAT removal does — and
+    // the answer to the third is "nothing you need to do": the engine removes it itself when the
+    // lane ends. Identical to the row in docs/configuration.md (the #397/#400 pairing check).
+    {
+      name: l.laneState,
+      color: "0e8a16",
+      description: "Engine-applied on the PR: a lane is actively working it. Removed automatically when the lane ends.",
+    },
     // #397 class 6 — explicitly NOT an escalation, so the description says so: nobody is on the
     // hook, it just keeps a plan-less issue off every queue until a plan exists.
     {

@@ -121,7 +121,13 @@ export function factVars(artifact: RoundArtifact, artifactMd: string): Record<st
     "round.egressSuspectList":
       egressSuspects.length > 0
         ? egressSuspects
-            .map((s) => (s.issue === 0 ? `role session ${s.worker}: ${s.executable}` : `issue #${s.issue}: ${s.executable}`))
+            .map((s) => {
+              // #387 (F18): loopback-only hits stay in the list (tag, not exclude) but say so,
+              // so a harvest prompt reading this line doesn't weigh dev-server smoke checks the
+              // same as real public egress.
+              const target = s.target === "loopback" ? " (loopback)" : "";
+              return s.issue === 0 ? `role session ${s.worker}: ${s.executable}${target}` : `issue #${s.issue}: ${s.executable}${target}`;
+            })
             .join(", ")
         : "(none)",
   };

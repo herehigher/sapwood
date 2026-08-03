@@ -642,6 +642,8 @@ checklist item**):
 | `reviewer-fallback-revert` | The usual reviewer is back — switched back |
 | `pr-held` | A person put PR #{pr} on hold — nothing moves until they lift it |
 | `pr-released` | Hold released — PR #{pr} resumes |
+| `lane-state-labeled` | Lane {worker} is now shown as working on PR #{pr} (#399). Bookkeeping, not an attention item: it records that the engine put its lane-state label on the PR so the PR list says someone is on it. One per lane per PR, never per tick |
+| `lane-state-cleared` | PR #{pr} no longer shows lane {worker} as working on it (#399) — the lane ended (merged, escalated or dead), or the label write failed and will be retried. Same bookkeeping tier as its twin above |
 | `resume-held` | Lane {worker}'s handoff can't resume — issue #{issue} still carries `{label}`. Deliberately **not** an attention item (§3): it is the *consequence* of a hold, not a new thing waiting on a person — whoever owns that label already has the strip row (an engine escalation) or applied it themselves (a human). Its job is to make an idle lane legible; one per suppression episode, never per tick (#441) |
 | `worktree-retained` | Kept lane {worker}'s working folder for inspection |
 | `worktree-released` | Lane {worker}'s retained folder was cleaned up |
