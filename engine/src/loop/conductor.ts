@@ -3969,6 +3969,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               );
             }
           }
+          // #570: the merge is the single most consequential thing the engine does (it writes to
+          // main), and until now it was DB-only — an operator tailing sapwood.log saw a PR get
+          // drive-queued and then nothing. Logged BEFORE the append for the same reason as the
+          // queued line above: a crash between the two costs a duplicate log line on the rerun,
+          // never a missing one. No dedupe needed — unlike "queued", this outcome is terminal
+          // (the lane goes `done`), so it is reported at most once per lane.
+          deps.log?.(`[sapwood:drive] lane ${w.name} pr #${pr} MERGED (${outcome.headOid})`);
           state.appendEvent("merged", { worker: w.name, issue: w.issue, pr, headOid: outcome.headOid });
           driven.push({ kind: "merged", worker: w.name, issue: w.issue, pr });
           break;

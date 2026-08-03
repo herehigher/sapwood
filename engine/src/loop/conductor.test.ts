@@ -1958,6 +1958,24 @@ test("tick DRIVE: merged -> worker done, board set to done, driven records it", 
   st.close();
 });
 
+test("tick DRIVE (#570): every merged event carries a same-tick log line naming lane, PR and head oid", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "deadbeef" };
+  const logged: string[] = [];
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, log: (m) => logged.push(m) });
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["merged"]).length, 1);
+  assert.deepEqual(
+    logged.filter((m) => m.includes("MERGED")),
+    ["[sapwood:drive] lane lane-a pr #55 MERGED (deadbeef)"],
+  );
+  st.close();
+});
+
 test("#250 merged Done write failure is durable and contained, then drains on the next healthy tick", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

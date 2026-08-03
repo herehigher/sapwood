@@ -503,10 +503,30 @@ export async function materialize(opts: MaterializeOptions): Promise<Materialize
 
 // ── #499: external-head fallback ────────────────────────────────────────────────────────────
 
-/** #499: failure signatures that mean "the object database does not have this oid" — as opposed
- *  to a timeout, a bad treeDir, or an OID-verification mismatch. Only this class is worth a
- *  remedial remote fetch; everything else fails exactly as before. */
-export const MISSING_OBJECT_SIGNATURE = /unable to read tree|bad object|not a valid object|missing object/i;
+/** #499: is `oid` in this clone's object database? The gate for the remedial fetch below — as
+ *  opposed to a timeout, a bad treeDir, or an OID-verification mismatch, none of which a fetch
+ *  can help.
+ *
+ *  Answered by `cat-file -e`'s EXIT CODE, which is git's documented interface for exactly this
+ *  question, rather than by matching the prose of the failed checkout (what #499 shipped). Git's
+ *  wording for this one condition is NOT stable across versions — measured on the same failing
+ *  checkout: 2.34.1 / 2.39.5 / 2.43.0 say `fatal: reference is not a tree: <oid>`, while
+ *  2.47.3 / 2.50.1 / 2.54.0 say `fatal: unable to read tree (<oid>)`. The old regex enumerated
+ *  only the newer wording, so on any git older than 2.47 the entire external-head recovery
+ *  silently never fired and the review leg stayed wedged — the exact live failure #499 exists to
+ *  clear. An exit code has no such dialects.
+ *
+ *  Never throws, and absence is the fail-safe answer: an unparseable rev, a missing clone, or a
+ *  timeout all resolve `false`, which at worst costs one bounded remedial fetch that then fails
+ *  the same way the first attempt did. */
+export async function objectPresentInClone(cloneDir: string, oid: string, timeoutMs: number = DEFAULT_GIT_TIMEOUT_MS): Promise<boolean> {
+  try {
+    await pexecFile("git", ["-C", cloneDir, "cat-file", "-e", oid], { env: gitIsolationEnv(), timeout: timeoutMs });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** #499: pure builder, pinned like its siblings above. Fetches every branch head and every PR
  *  head from `remoteUrl` into a private `refs/external/*` namespace — by REF, not by raw sha,
@@ -567,8 +587,12 @@ export async function materializeWithExternalFetch(
   opts: MaterializeOptions & { sourceRepoDir: string; log?: (message: string) => void },
 ): Promise<MaterializeResult> {
   const first = await materialize(opts);
-  if (first.kind !== "failure" || !MISSING_OBJECT_SIGNATURE.test(first.reason)) return first;
+  if (first.kind !== "failure") return first;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS;
+  // The gate: the object really is absent here (structured, see objectPresentInClone). A failure
+  // whose oid IS present locally — timeout, treeDir, oid-verification mismatch — is returned
+  // untouched, exactly as under the old signature match.
+  if (await objectPresentInClone(opts.clone.dir, opts.oid, timeoutMs)) return first;
   const remoteUrl = await sourceOriginUrl(opts.sourceRepoDir, timeoutMs);
   if (remoteUrl == null) return first;
   opts.log?.(`[sapwood:review] head ${opts.oid} is absent from the local object store — fetching external heads from origin (#499)`);
