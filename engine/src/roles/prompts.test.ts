@@ -156,7 +156,10 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // body" / "everything you need to decide is already here" claims were unconditional over code
   // that truncates whole records past the cap with no lookup fallback — now scoped to what's
   // actually rendered, and the session is told what the omission marker means.
-  "po-pool.md": "a3e2391424151767aa10ecd8fb3b1d2ec5f92fb77ff695e4961fd775d46c54f4",
+  // #558: the omission marker now NAMES the omitted candidates instead of only counting them, so
+  // the paragraph describing it says what a named-but-not-shown number means: cross-referenceable,
+  // still not selectable, and degrading to the old bare count if the number list itself won't fit.
+  "po-pool.md": "d93bb9f0f314718df8465a06d7583fdfe45901efe94ef9c9a99275755184b1e6",
   "po-decompose.md": "3289b0f37585b84fdce67319f9ae4b2e82c8873b13b2a292adef25b1bca79ae2",
 };
 
