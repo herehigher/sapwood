@@ -262,6 +262,11 @@ test("#391 F19: the gated-flag audit sets gated_escalation_labeled=1 for a lane 
       async getPRLabels(): Promise<string[]> {
         return [];
       },
+      // #593: lane-295's PR is still OPEN — the genuinely live case, unaffected by the new
+      // merged/issue-closed witness check.
+      async getPRStatus(pr: number): Promise<PRStatus> {
+        return { number: pr, headOid: "h", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+      },
     };
     await auditGatedEscalationFlags(forge, state, { escalation: { humanLabels: ["needs-human", "blocked"] } });
     assert.equal(state.getWorker("lane-294")?.gated_escalation_labeled, 1, "the hold is live — the flag is provably correctable");
@@ -305,6 +310,11 @@ test("#398 + #391: a residue lane whose hold landed on the PR is HEALED — the 
         prReads.push(pr);
         return pr === 372 ? ["needs-human"] : [];
       },
+      // #593: lane-295's PR is still OPEN — the genuinely live case, unaffected by the new
+      // merged/issue-closed witness check.
+      async getPRStatus(pr: number): Promise<PRStatus> {
+        return { number: pr, headOid: "h", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+      },
     };
     await auditGatedEscalationFlags(forge, state, { escalation: { humanLabels: ["needs-human", "blocked"] } });
     assert.equal(state.getWorker("lane-294")?.gated_escalation_labeled, 1, "the hold is live on the PR — provably correctable");
@@ -346,6 +356,10 @@ test("#398 + #391: an ISSUE hold still wins when BOTH objects carry one — the 
         prReads++;
         return ["needs-human"];
       },
+      // #593: never reached — the issue hold answers first — but required by the Pick<IForge>.
+      async getPRStatus(pr: number): Promise<PRStatus> {
+        return { number: pr, headOid: "h", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+      },
     };
     await auditGatedEscalationFlags(forge, state, { escalation: { humanLabels: ["needs-human", "blocked"] } });
     // Healing to "issue" means clearing the ISSUE reclaims the lane — and DRIVE's own deriveGate
@@ -373,6 +387,11 @@ test("#398 + #391: a PR-side read failure is contained exactly like the issue-si
       async getPRLabels(pr: number): Promise<string[]> {
         if (pr === 372) throw new Error("gh rate limited");
         return ["needs-human"];
+      },
+      // #593: never reached for either lane — 294's PR-label read throws first, 295's hold is
+      // found on the PR — but required by the Pick<IForge>.
+      async getPRStatus(pr: number): Promise<PRStatus> {
+        return { number: pr, headOid: "h", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
       },
     };
     await assert.doesNotReject(() =>
@@ -407,6 +426,11 @@ test("#391 F19: a per-issue read failure leaves that lane's flag untouched and n
       async getPRLabels(): Promise<string[]> {
         return [];
       },
+      // #593: never reached — 294's issue read throws first, 295's hold is found on the issue —
+      // but required by the Pick<IForge>.
+      async getPRStatus(pr: number): Promise<PRStatus> {
+        return { number: pr, headOid: "h", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+      },
     };
     await assert.doesNotReject(() =>
       auditGatedEscalationFlags(forge, state, { escalation: { humanLabels: ["needs-human"] } }, (m) => logs.push(m)),
@@ -414,6 +438,130 @@ test("#391 F19: a per-issue read failure leaves that lane's flag untouched and n
     assert.equal(state.getWorker("lane-294")?.gated_escalation_labeled, 0);
     assert.equal(state.getWorker("lane-295")?.gated_escalation_labeled, 1, "the second lane is still audited");
     assert.match(logs.join("\n"), /gh rate limited/);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── #593: retire a gated lane whose PR/issue a human already settled OUTSIDE the engine,
+// instead of alarming `gated-flag-unprovable` at every startup forever ─────────────────────────
+
+test("#593: a gated lane whose issue is CLOSED retires via 'issue-closed' — no PR read needed, no unprovable alarm", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-reconcile-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    state.upsertWorker({ ...worker(403, "failed", 501), gated_escalation_labeled: 0 });
+    let prStatusReads = 0;
+    const forge = {
+      async getIssueMeta(issue: number): Promise<IssueMeta> {
+        return { number: issue, title: `#${issue}`, state: "CLOSED", labels: [], updatedAt: "2026-08-03T00:00:00.000Z" };
+      },
+      async getPRLabels(): Promise<string[]> {
+        return [];
+      },
+      async getPRStatus(pr: number): Promise<PRStatus> {
+        prStatusReads++;
+        return { number: pr, headOid: "h", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+      },
+    };
+    await auditGatedEscalationFlags(forge, state, { escalation: { humanLabels: ["needs-human", "blocked"] } });
+    assert.equal(prStatusReads, 0, "the issue answered from the meta already fetched — no extra forge read");
+    assert.deepEqual(
+      state.eventsSince("1970-01-01T00:00:00.000Z", ["gated-flag-unprovable", "gated-lane-retired"]).map((e) => [e.kind, e.payload]),
+      [["gated-lane-retired", { worker: "lane-403", issue: 403, pr: 501, witness: "issue-closed" }]],
+    );
+    assert.equal(state.getWorker("lane-403")?.gated_reentry_capped, 1, "retired one-way — never a reentry candidate either");
+    assert.deepEqual(state.unlabeledGatedWorkers(), [], "retired lane leaves the audit's own candidate set for good");
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#593: a gated lane whose PR is MERGED (issue still open, no live hold) retires via 'merged'", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-reconcile-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    state.upsertWorker({ ...worker(413, "failed", 502), gated_escalation_labeled: 0 });
+    const forge = {
+      async getIssueMeta(issue: number): Promise<IssueMeta> {
+        return { number: issue, title: `#${issue}`, state: "OPEN", labels: [], updatedAt: "2026-08-03T00:00:00.000Z" };
+      },
+      async getPRLabels(): Promise<string[]> {
+        return [];
+      },
+      async getPRStatus(pr: number): Promise<PRStatus> {
+        return { number: pr, headOid: "h", state: "MERGED", mergeable: "MERGEABLE", ciGreen: true };
+      },
+    };
+    await auditGatedEscalationFlags(forge, state, { escalation: { humanLabels: ["needs-human", "blocked"] } });
+    assert.deepEqual(
+      state.eventsSince("1970-01-01T00:00:00.000Z", ["gated-flag-unprovable", "gated-lane-retired"]).map((e) => [e.kind, e.payload]),
+      [["gated-lane-retired", { worker: "lane-413", issue: 413, pr: 502, witness: "merged" }]],
+    );
+    assert.equal(state.getWorker("lane-413")?.gated_reentry_capped, 1);
+    assert.deepEqual(state.unlabeledGatedWorkers(), []);
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#593: a retired lane does not reappear as a candidate at the next startup", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-reconcile-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    state.upsertWorker({ ...worker(434, "failed", 503), gated_escalation_labeled: 0 });
+    const forge = {
+      async getIssueMeta(issue: number): Promise<IssueMeta> {
+        return { number: issue, title: `#${issue}`, state: "CLOSED", labels: [], updatedAt: "2026-08-03T00:00:00.000Z" };
+      },
+      async getPRLabels(): Promise<string[]> {
+        return [];
+      },
+      async getPRStatus(pr: number): Promise<PRStatus> {
+        return { number: pr, headOid: "h", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+      },
+    };
+    await auditGatedEscalationFlags(forge, state, { escalation: { humanLabels: ["needs-human", "blocked"] } });
+    await auditGatedEscalationFlags(forge, state, { escalation: { humanLabels: ["needs-human", "blocked"] } });
+    assert.deepEqual(
+      state.eventsSince("1970-01-01T00:00:00.000Z", ["gated-lane-retired"]).map((e) => e.payload),
+      [{ worker: "lane-434", issue: 434, pr: 503, witness: "issue-closed" }],
+      "one retire event, ever — the second startup finds no candidate left to look at",
+    );
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#593: a live gated lane with no provable hold and no terminal witness still alarms `gated-flag-unprovable`, exactly as before", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-reconcile-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    state.upsertWorker({ ...worker(442, "failed", 504), gated_escalation_labeled: 0 });
+    let prStatusReads = 0;
+    const forge = {
+      async getIssueMeta(issue: number): Promise<IssueMeta> {
+        return { number: issue, title: `#${issue}`, state: "OPEN", labels: [], updatedAt: "2026-08-03T00:00:00.000Z" };
+      },
+      async getPRLabels(): Promise<string[]> {
+        return [];
+      },
+      async getPRStatus(pr: number): Promise<PRStatus> {
+        prStatusReads++;
+        return { number: pr, headOid: "h", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+      },
+    };
+    await auditGatedEscalationFlags(forge, state, { escalation: { humanLabels: ["needs-human", "blocked"] } });
+    assert.equal(prStatusReads, 1, "the one extra read the budget allows — spent only once no hold is found");
+    assert.deepEqual(
+      state.eventsSince("1970-01-01T00:00:00.000Z", ["gated-flag-unprovable", "gated-lane-retired"]).map((e) => [e.kind, e.payload]),
+      [["gated-flag-unprovable", { worker: "lane-442", issue: 442, pr: 504 }]],
+    );
+    assert.equal(state.getWorker("lane-442")?.gated_reentry_capped, 0, "load-bearing arm — still eligible to re-audit next startup");
   } finally {
     state.close();
     rmSync(root, { recursive: true, force: true });
