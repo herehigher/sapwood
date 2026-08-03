@@ -2053,12 +2053,16 @@ test("buildBacklogDigest: number-sorted titles + configured hold annotations are
   // #231: #20's line alone (~228 chars) cannot fit whole in a 200-char budget — it is OMITTED
   // in full, never sliced mid-line. #3's short line fits and is rendered.
   assert.match(first.text, /^- #3 — Earlier gap \[hold: needs-human\]/);
-  assert.ok(!first.text.includes("- #20"), "a record too large to fit whole is never partially rendered");
+  assert.ok(!first.text.includes("- #20 —"), "a record too large to fit whole is never partially rendered");
   assert.equal(first.total, 2);
   assert.equal(first.rendered, 1);
   assert.equal(first.omitted, 1);
   assert.equal(first.truncated, true);
-  assert.match(first.text, /1 more issue\(s\) omitted/);
+  assert.match(
+    first.text,
+    /\[\.\.\. issues #20 omitted — exceeded the 200-char cap; 1\/2 rendered \.\.\.\]/,
+    "#558: named, not merely counted",
+  );
 });
 
 test("buildBacklogDigest #231: a 50-issue fixture proves the high-numbered tail is either rendered or counted as omitted, never silently gone", async () => {
@@ -2161,8 +2165,12 @@ test("buildBacklogDigest #444: the widened dedup surface still obeys packDigestR
   assert.equal(digest.omitted, 1);
   assert.equal(digest.truncated, true);
   assert.deepEqual(digest.renderedIssueNumbers, [1]);
-  assert.ok(!digest.text.includes("- #2"), "a record too large to fit whole is never partially rendered");
-  assert.match(digest.text, /1 more issue\(s\) omitted/);
+  assert.ok(!digest.text.includes("- #2 —"), "a record too large to fit whole is never partially rendered");
+  assert.match(
+    digest.text,
+    /\[\.\.\. issues #2 omitted — exceeded the 200-char cap; 1\/2 rendered \.\.\.\]/,
+    "#558: the marker NAMES the omitted issue",
+  );
 });
 
 test("buildBacklogDigest #528: recently closed issues join the dedup surface, rendered distinctly and LAST", async () => {
@@ -2201,8 +2209,8 @@ test("buildBacklogDigest #528: the closed tail is what a tight cap drops — cou
   assert.equal(digest.rendered, 1);
   assert.equal(digest.omitted, 1);
   assert.equal(digest.truncated, true);
-  assert.ok(!digest.text.includes("- #2"), "an oversized closed record is omitted whole, never sliced");
-  assert.match(digest.text, /1 more issue\(s\) omitted/);
+  assert.ok(!digest.text.includes("- #2 —"), "an oversized closed record is omitted whole, never sliced");
+  assert.match(digest.text, /\[\.\.\. issues #2 omitted — /, "#558: a dropped CLOSED record is named too — same shared marker");
   assert.deepEqual(digest.renderedIssueNumbers, [1]);
 });
 
@@ -2218,12 +2226,62 @@ test("buildBacklogDigest #528: an empty backlog with recently closed issues stil
 });
 
 test("packDigestRecords: an absurdly tiny cap still never exceeds maxChars, even with zero rendered records", () => {
-  const result = packDigestRecords(["- #1 — a", "- #2 — b"], 5, "(none)");
+  const result = packDigestRecords(
+    [
+      { number: 1, text: "- #1 — a" },
+      { number: 2, text: "- #2 — b" },
+    ],
+    5,
+    "(none)",
+  );
   assert.ok(result.text.length <= 5);
   assert.equal(result.total, 2);
   assert.equal(result.rendered, 0);
   assert.equal(result.omitted, 2);
   assert.equal(result.truncated, true);
+});
+
+test("packDigestRecords #558: the omission marker NAMES the omitted issue numbers, in the order the trailing records were dropped", () => {
+  const records = [33, 41, 57, 63].map((n) => ({ number: n, text: `- #${n} — ${"x".repeat(40)}` }));
+  const result = packDigestRecords(records, 140, "(none)");
+  assert.ok(result.text.length <= 140, "the cap is still never exceeded");
+  assert.equal(result.total, 4);
+  assert.equal(result.rendered, 1);
+  assert.equal(result.omitted, 3, "the count field keeps its pre-#558 meaning — naming is additive");
+  assert.equal(result.truncated, true);
+  assert.match(
+    result.text,
+    /\[\.\.\. issues #41, #57, #63 omitted — exceeded the 140-char cap; 1\/4 rendered \.\.\.\]$/,
+    "the omitted numbers are named, in trailing-slice order, complementary to the rendered prefix",
+  );
+});
+
+test("packDigestRecords #558: the noun carries into the named marker (the pool digest's `candidate issue`)", () => {
+  const records = [7, 8].map((n) => ({ number: n, text: `- #${n} — ${"y".repeat(143)}` }));
+  const result = packDigestRecords(records, 250, "(none)", "candidate issue");
+  assert.equal(result.rendered, 1);
+  assert.match(result.text, /\[\.\.\. candidate issues #8 omitted — exceeded the 250-char cap; 1\/2 rendered \.\.\.\]$/);
+});
+
+test("packDigestRecords #558: the no-truncation path is byte-identical to its pre-#558 output — no marker, plain newline join", () => {
+  const records = [1, 2].map((n) => ({ number: n, text: `- #${n} — a` }));
+  const result = packDigestRecords(records, 1000, "(none)");
+  assert.equal(result.text, "- #1 — a\n- #2 — a");
+  assert.equal(result.truncated, false);
+  assert.equal(result.omitted, 0);
+});
+
+test("packDigestRecords #558: when the NAMED marker itself doesn't fit, it degrades to the count-only marker rather than throwing or emitting nothing", () => {
+  // Six 7-digit numbers: the named marker alone (~126 chars) blows an 80-char cap that the
+  // count-only marker (~76 chars) still fits, and no record body fits either.
+  const records = [1000001, 1000002, 1000003, 1000004, 1000005, 1000006].map((n) => ({ number: n, text: "z".repeat(100) }));
+  const result = packDigestRecords(records, 80, "(none)");
+  assert.ok(result.text.length <= 80, "the cap is still never exceeded on the last-resort path");
+  assert.equal(result.rendered, 0);
+  assert.equal(result.omitted, 6);
+  assert.equal(result.truncated, true);
+  assert.match(result.text, /6 more issue\(s\) omitted/, "documented fallback: count-only, never a half-named list");
+  assert.ok(!result.text.includes("#1000001"), "a marker that cannot name them all names none — no misleading partial list");
 });
 
 test("createAligningStub #215/#444: the align prompt receives the whole open backlog — this round's milestone first, everything else annotated as dedup-only", async () => {
@@ -2859,8 +2917,8 @@ test("runPoolSelection: the SAME existing cap (roles.po.backlogDigestMaxChars) s
   );
   assert.match(
     prompt,
-    /\[\.\.\.\s*1\s*more candidate issue\(s\) omitted/,
-    "the truncation marker names the omission count, so the session isn't silently shown an incomplete-looking list",
+    /\[\.\.\. candidate issues #2 omitted — exceeded the 400-char cap; 1\/2 rendered \.\.\.\]/,
+    "#558: the truncation marker NAMES the omitted candidate, so a human (and the session) can cross-reference the number that dropped out of the round",
   );
 });
 

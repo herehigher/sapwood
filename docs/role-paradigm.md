@@ -396,6 +396,23 @@ bounds the loop — at the bound, the engine escalates rather than cycling forev
   structured output fails an `isValid` check is treated identically to a failed one.
   Only verification-plan-reviewer's escalation shape (needs-human, not a state-event degrade) is
   deliberately NOT folded into this shared helper — see `peripheral.ts`'s module doc.
+- **Prompts are static with respect to `proxy.enabled` (#559, ruling 2026-08-03).** A role prompt
+  is a file on disk with no template variable expressing whether the forge MCP proxy is attached,
+  and there deliberately isn't one: `enabled` defaults to `true` (#551), so the unattached case is
+  a rare operator opt-out, and the substitution machinery would have to be re-validated live on
+  every wording change (#529 measured that wording, not capability, decides whether a session ever
+  calls a forge tool). So one file has to be true in both deployments, and the shipped phrasing is
+  what makes that possible: an ask that is **imperative whenever the tool is attached** — never
+  the permissive "if you have such tools, you may…" form #529 measured at zero calls — carrying
+  its **own not-attached branch** naming what to do instead (judge from the substituted context,
+  and say so rather than writing as if you had searched). `po.md`'s dedup step and `architect.md`'s
+  cross-issue-search step are the two shipped examples; a capability paragraph that only describes
+  the window (`harvest.md`, `po-pool.md`, the three verification-plan prompts) needs only the
+  conditional framing, since there is no step to leave unfollowable. What is forbidden either way
+  is a FLAT statement — a possession claim or a lookup step true only under the default. That is a
+  standing test, not a convention: `prompts.test.ts`'s `#559` block check fails on any prompt block
+  naming an `mcp__forge__` tool without attachment framing. The operator-facing consequence of the
+  opt-out is in [`configuration.md`](configuration.md#proxy).
 - **What this doc is not.** It does not re-derive `docs/PLAN.md`'s structured-output
   write inventory (output field → `IForge` write → validation → decision weight); that
   table is the standing safety baseline every future write-widening change updates.

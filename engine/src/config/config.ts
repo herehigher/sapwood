@@ -510,6 +510,12 @@ const Labels = z
     // labels.prefix and use the same omitted-default pattern as every sibling label above.
     humanMergeOnly: z.string().optional(),
     planless: z.string().optional(),
+    // #399: the PR-side lane-state mirror — applied to a lane's PR while the lane is
+    // `driving`/`fixing`, removed the moment it reaches any terminal state (loop/lane-state-
+    // label.ts). Same omitted-default pattern as every sibling label above; unlike them it is
+    // ENGINE-REMOVED as well as engine-written, which is why the collision guard below treats it
+    // exactly like `roundPool` (an alias would let the engine strip the aliased label too).
+    laneState: z.string().optional(),
   })
   .strict();
 
@@ -774,8 +780,7 @@ const Roles = z
 
 // #234: engine-hosted read-only forge MCP proxy for role sessions (supersedes #217's two-pass
 // needsDetails protocol). #244 EXTENSION: the tool algebra also carries 5 PR-facing tools
-// (pr_details/pr_reviews/pr_review_threads/pr_checks/getPRAuditComments — the last is
-// camelCase, the odd one out in the wire names; #556 tracks normalizing it — proxy/tools.ts),
+// (pr_details/pr_reviews/pr_review_threads/pr_checks/pr_audit_comments — proxy/tools.ts),
 // and the proxy MECHANISM extends to worker legs (worker.ts's WorkerSupervisor, mirroring
 // RoleRunner's `proxy` opt)
 // alongside RoleRunner peripheral sessions. `caps.maxReviewThreadsPerCall`/
@@ -849,7 +854,7 @@ const ProxyConfig = z
         // `contexts(first: cap)`. Same no-lastN/completeness-not-rejection stance as
         // maxReviewsPerCall above. .max(100): fed straight into GraphQL's `first:`.
         maxChecksPerCall: z.number().int().positive().max(100).default(50),
-        // #288: getPRAuditComments' caller-visible return cap, applied AFTER marker filtering.
+        // #288: pr_audit_comments' caller-visible return cap, applied AFTER marker filtering.
         maxAuditCommentsPerCall: z.number().int().positive().max(100).default(20),
         // #288: independent top-level-comment scan window, fed to GraphQL `last:` before marker
         // filtering. Keeping this wider than the return cap prevents ordinary-comment spam from
@@ -1467,9 +1472,19 @@ const ConfigSchemaRaw = z
 // path (only loadConfig's relative-to-config-file resolution mutates it), so a reader falls
 // back to `cfg.doctrine.file` itself and still never sees a resolved absolute path it didn't
 // ask for.
-export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doctrine" | "labels" | "escalation" | "notify"> & {
+// #549: `reviewer.agent.promptFileRaw` is the same loadConfig-only annotation as `doctrine.fileRaw`
+// above, for the reviewer's OTHER instruction carrier — its prompt file. Captured for the same
+// reason and under the same contract: instruction-path-escalation.ts derives a repo-relative
+// escalation pattern from it, which the resolved ABSOLUTE path could never serve (a forge's
+// changed-file paths are repo-relative, and `InstructionPath` rejects a leading `/`). Unset unless
+// the operator set `promptFile` AND loadConfig ran; readers fall back to `promptFile`, which is
+// still the raw value when cfg came from `ConfigSchema.parse` directly.
+type RawReviewer = z.infer<typeof ConfigSchemaRaw>["reviewer"];
+
+export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doctrine" | "labels" | "escalation" | "notify" | "reviewer"> & {
   goal: { file: string };
   doctrine: { file: string; maxChars: number; fileRaw?: string };
+  reviewer: Omit<RawReviewer, "agent"> & { agent?: NonNullable<RawReviewer["agent"]> & { promptFileRaw?: string } };
   labels: ReturnType<typeof workflowLabelDefaults> & { prefix: string };
   escalation: { humanLabels: string[]; holdLabels: string[]; instructionPaths: string[] };
   notify: { mentions: string[] };
@@ -1542,6 +1557,7 @@ export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): Sapw
     roundPool: cfg.labels.roundPool ?? defaults.roundPool,
     humanMergeOnly: cfg.labels.humanMergeOnly ?? defaults.humanMergeOnly,
     planless: cfg.labels.planless ?? defaults.planless,
+    laneState: cfg.labels.laneState ?? defaults.laneState,
   };
   cfg.labels = resolvedLabels;
   cfg.escalation.humanLabels ??= [resolvedLabels.needsHuman, resolvedLabels.blocked];
@@ -1594,6 +1610,9 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
     // joins `escalation.humanLabels` — see each field's own doc in the Labels schema above.
     ["labels.humanMergeOnly", cfg.labels.humanMergeOnly],
     ["labels.planless", cfg.labels.planless],
+    // #399: the PR-side lane-state label joins the protected set from both directions — nothing
+    // may alias it (it is auto-removed, see its own guard below), and it may not alias anything.
+    ["labels.laneState", cfg.labels.laneState],
     ...cfg.escalation.humanLabels.map((label, i): [string, string] => [`escalation.humanLabels[${i}]`, label]),
   ];
   // #397: the protected pair must also be distinct from EACH OTHER and from every label above —
@@ -1626,6 +1645,30 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
           `close auto-removes labels.roundPool (round.ts's removeRoundPoolLabel), so aliasing it to ` +
           `a protected label would let the engine silently strip that label too; use a distinct ` +
           `value for labels.roundPool.`,
+      });
+    }
+  }
+  // #399: identical guard for the OTHER engine-removed label. `labels.laneState` is stripped from
+  // a PR the instant its lane goes terminal (lane-state-label.ts's removeLaneStateLabel), so an
+  // alias onto ANY protected label — including a hold label, which lives on the PR too and is the
+  // one tier the engine must never write or clear — would let that auto-removal forge a human
+  // release. Same case-insensitive comparison, and the hold list is included here (unlike the
+  // roundPool guard's targets) precisely because this label's carrier is the PR.
+  const laneStateCollisionTargets: Array<[string, string]> = [
+    ...otherLabels.filter(([key]) => key !== "labels.laneState"),
+    ["labels.roundPool", cfg.labels.roundPool],
+    ...cfg.escalation.holdLabels.map((label, i): [string, string] => [`escalation.holdLabels[${i}]`, label]),
+  ];
+  for (const [key, value] of laneStateCollisionTargets) {
+    if (labelsInclude([value], cfg.labels.laneState)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["labels", "laneState"],
+        message:
+          `labels.laneState ("${cfg.labels.laneState}") collides with ${key} ("${value}") — a lane's PR label ` +
+          `is auto-removed when the lane goes terminal (lane-state-label.ts's removeLaneStateLabel), so aliasing ` +
+          `it to a protected label would let the engine silently strip that label too; use a distinct value for ` +
+          `labels.laneState.`,
       });
     }
   }
@@ -1915,8 +1958,15 @@ export function loadConfig(path?: string): SapwoodConfig {
     cfg.roles.retro.promptFile = resolve(dirname(file), cfg.roles.retro.promptFile);
   }
   // #286 (E4a): same rule for the engine-agent reviewer's own prompt file.
-  if (cfg.reviewer.agent?.promptFile !== undefined && !isAbsolute(cfg.reviewer.agent.promptFile)) {
-    cfg.reviewer.agent.promptFile = resolve(dirname(file), cfg.reviewer.agent.promptFile);
+  // #549: capture the RAW pre-resolution value FIRST, exactly as `doctrine.fileRaw` above —
+  // instruction-path-escalation.ts matches a repointed reviewer prompt against a PR's
+  // repo-relative changed files, which the resolved absolute path below could never do. See
+  // `SapwoodConfig`'s `reviewer.agent.promptFileRaw` doc comment for the full contract.
+  if (cfg.reviewer.agent?.promptFile !== undefined) {
+    cfg.reviewer.agent.promptFileRaw = cfg.reviewer.agent.promptFile;
+    if (!isAbsolute(cfg.reviewer.agent.promptFile)) {
+      cfg.reviewer.agent.promptFile = resolve(dirname(file), cfg.reviewer.agent.promptFile);
+    }
   }
   return cfg;
 }

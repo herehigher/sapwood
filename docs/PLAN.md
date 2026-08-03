@@ -577,6 +577,30 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   passages now read the same way. A human still applies and removes it too; the asymmetry that
   matters is that `hold` is the one tier the engine NEVER writes.
 
+  **`blocked` on a PR is the human VETO channel (#399).** The merge gate matches the whole
+  `escalation.humanLabels` list — `needs-human` *and* `blocked` — against the **PR's own** labels
+  before it consults any review or CI signal, so a human applying `blocked` to a PR stops the
+  engine merging it, and removing it is the #147 go-ahead. That has always been true in the code
+  (`deriveGate`, `roles/merge-driver.ts`) and was documented nowhere, which made it a working but
+  invisible control: either a feature or dead weight, not both. #399 rules it a **feature** and
+  documents it here and in the configuration guide, rather than deleting the PR-side read. What it
+  is *not* is a fourth tier — it is the veto tier's PR carrier, and the two facts that keep it
+  distinct from `hold` are the ones already in the table above: a veto RELEASES the lane (a hold
+  keeps its slot), and `blocked` is engine-written too, so its presence never proves a human put
+  it there.
+
+  **Lane state is mirrored onto the PR (#399).** The merge decision is made on the PR, but until
+  this the only lane-state marker lived on the ISSUE (`in-progress`), so from the PR list a human
+  could not tell "a worker is mid-fix right now" from "this lane is dead and nobody is coming" —
+  a `fixing` lane can sit for hours between legs. A lane's PR now carries `labels.laneState` while
+  the lane is `driving`/`fixing`, and loses it at every terminal state. It is the mirror image of
+  the escalation tiers rather than one of them: engine-written *and* engine-removed, gating
+  nothing, and carrying one bit ("is anything working on this?") rather than a required human
+  action. Because it is engine-REMOVED, it gets the same fail-closed treatment `roundPool` has —
+  one guarded removal helper that refuses every other label, plus a config collision guard — so
+  the mirror can never become a second path capable of stripping `needs-human`, `blocked`, or a
+  hold from a PR.
+
   **The ESCALATE tier splits by required ACTION, not by carrier (#397).** `needs-human` used to
   carry six distinct meanings behind one description, so a human seeing it could not tell what
   was expected of them or what removing it would do. Splitting by carrier
@@ -1597,6 +1621,16 @@ to when v0.2 implementation issues are cut, not locked here.
 - **Dashboard scope inflation (v0.2):** estimate as new frontend work, not a port.
 - **Naming:** "sapwood" communicates nothing to a stranger; revisit before public
   launch (minor, pre-launch).
+- **Duplicate `Ready` issues (accepted, #560, 2026-08-03):** no role checks whether a
+  human-authored `Ready` issue duplicates another open issue — align's dedup covers only
+  the PO's own proposals, gate⓪ is barred from judging *why/what*, and architect reads a
+  round's pool, not the backlog. Two duplicate `Ready` issues become two workers and two
+  conflicting PRs. **Ruled: accept and disclose**, per Decision #9 (rare edge → no new
+  machinery) and trusted-repos-first; a keyword-match dup warning at the gate would fire on
+  unrelated issues sharing vocabulary, and a warning humans learn to ignore costs more than
+  the duplicate. Stated for users in
+  [`getting-started.md`](getting-started.md#what-the-ready-gate-does-not-check-duplicates-560).
+  Revisit only if a real run is actually bitten.
 
 ## Verification (how we'll prove v1)
 

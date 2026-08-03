@@ -63,6 +63,7 @@ import {
   type DisputeEscalation,
   type FixResponseWriteOutcome,
 } from "./fix-response.js";
+import { syncLaneStateLabels } from "./lane-state-label.js";
 import { reviveEnvFailedPrLanes, sweepMidRunOrphanPrs } from "./reconcile.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3968,6 +3969,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               );
             }
           }
+          // #570: the merge is the single most consequential thing the engine does (it writes to
+          // main), and until now it was DB-only — an operator tailing sapwood.log saw a PR get
+          // drive-queued and then nothing. Logged BEFORE the append for the same reason as the
+          // queued line above: a crash between the two costs a duplicate log line on the rerun,
+          // never a missing one. No dedupe needed — unlike "queued", this outcome is terminal
+          // (the lane goes `done`), so it is reported at most once per lane.
+          deps.log?.(`[sapwood:drive] lane ${w.name} pr #${pr} MERGED (${outcome.headOid})`);
           state.appendEvent("merged", { worker: w.name, issue: w.issue, pr, headOid: outcome.headOid });
           driven.push({ kind: "merged", worker: w.name, issue: w.issue, pr });
           break;
@@ -5001,6 +5009,21 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       dispatched.push({ kind: "dispatched", issue: issue.number, worker: name });
     }
   } // !paused (#75) / park canary (#168)
+
+  // ── LANE-STATE MIRROR (#399): reflect each lane's state onto its PR — the object where the
+  //   merge decision is made — so a human scanning the PR list can tell an actively-worked lane
+  //   from a dead one. LAST in the tick on purpose: every phase above can move a lane into or out
+  //   of `driving`/`fixing`, so running here means the label reflects the state this tick actually
+  //   settled on, in the same tick, rather than trailing it by one. Unconditional (not inside the
+  //   `if (gate)` DRIVE block, and not gated on pause/park): a `fixing` lane exists with no merge
+  //   gate configured at all, and a paused engine's PRs must still say whether anyone is on them —
+  //   this writes one visibility label, never a gate decision. Never throws: a visibility label
+  //   must not be able to take a tick down.
+  try {
+    await syncLaneStateLabels({ forge, state, cfg, ...(deps.log ? { log: deps.log } : {}) });
+  } catch (e) {
+    (deps.log ?? console.error)(`[sapwood:lane-state] mirror pass failed; retrying next tick: ${String(e)}`);
+  }
 
   return {
     reclaimed,

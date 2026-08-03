@@ -759,6 +759,50 @@ test("sapwood run --dry-run stays driver-agnostic: the preview path works with t
   }
 });
 
+// #561: the preview's contract is "the REAL dispatch eligibility filter" — and under the rounds
+// driver, round.milestone scoping IS part of real eligibility (round.ts wraps the forge in
+// RoundScopedForge). An unscoped preview both invents spend for an issue the run would never
+// dispatch AND hides the true in-scope pool.
+const captureDryRun = async (over: Record<string, unknown>, ready: Issue[]): Promise<string> => {
+  class ReadyForge extends FakeForge {
+    override async getReadyIssues(): Promise<Issue[]> {
+      return ready;
+    }
+  }
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  let stdout = "";
+  process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+    stdout += chunk.toString();
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    assert.equal(await runDryRun({ cfg: mkCfg(over), forge: new ReadyForge() }), 0);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+  return stdout;
+};
+
+const DRY_RUN_READY: Issue[] = [
+  { number: 145, title: "out of scope", labels: [], milestone: "v0.2 — Dashboard (dogfood)" },
+  { number: 561, title: "in scope", labels: [], milestone: "v0.2.2 — Dogfood hardening" },
+  { number: 900, title: "no milestone", labels: [] },
+];
+
+test("sapwood run --dry-run: round.milestone scopes the preview — out-of-milestone Ready issues are neither counted nor priced (#561)", async () => {
+  const stdout = await captureDryRun({ round: { milestone: "v0.2.2 — Dogfood hardening" } }, DRY_RUN_READY);
+  assert.match(stdout, /1 ready issue\(s\), 1 dispatchable, 1 candidate\(s\)/);
+  assert.match(stdout, /would dispatch: #561 in scope/);
+  assert.doesNotMatch(stdout, /#145/, "an issue the scoped run would never dispatch must not appear as spend");
+  assert.doesNotMatch(stdout, /#900/, "no milestone is out of scope too — same rule RoundScopedForge applies");
+});
+
+test("sapwood run --dry-run: round.milestone unset -> passthrough, every Ready issue previewed (#561)", async () => {
+  const stdout = await captureDryRun({}, DRY_RUN_READY);
+  assert.match(stdout, /3 ready issue\(s\), 3 dispatchable, 3 candidate\(s\)/);
+  for (const n of [145, 561, 900]) assert.match(stdout, new RegExp(`would dispatch: #${n}`));
+});
+
 test("sapwood run --config loads the named config and resolves worker.promptFile against that config's directory", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-run-config-"));
   const state = new State(":memory:");

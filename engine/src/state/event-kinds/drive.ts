@@ -24,6 +24,11 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   // PR custody + CI pins.
   "pr-held": [],
   "pr-released": [],
+  // #399: the engine's own BELIEF about the PR-side lane-state label — the dedup memory the
+  // per-tick mirror folds (lane-state-label.ts). Untagged like pr-held/pr-released above: pure
+  // visibility bookkeeping, no consumer surface beyond its own fold.
+  "lane-state-labeled": [],
+  "lane-state-cleared": [],
   "ci-pending-observed": [],
   "ci-pending-escalated": [],
   "ci-pending-cleared": [],

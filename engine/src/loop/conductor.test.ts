@@ -68,6 +68,12 @@ import {
 } from "./conductor.js";
 import { reconcileEscalations } from "./escalation-reconcile.js";
 import { sweepResolvedHolds } from "./escalation-sweep.js";
+import { LANE_STATE_CLEARED, LANE_STATE_LABELED } from "./lane-state-label.js";
+
+/** #399: the lane-state mirror's label under this file's LEGACY_LABEL_CONFIG (bare prefix). Every
+ *  `tick()` with a driving/fixing lane writes it, so the fake forge records it on its own channel
+ *  — see `FakeForge.laneStatePrLabels`. */
+const LANE_STATE_LABEL = "lane:active";
 
 /** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
  *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
@@ -183,12 +189,28 @@ class FakeForge extends UnstubbedForge implements IForge {
    *  simulate a human removing needs-human from the PR (the #147 reentry act, now on the carrier
    *  the escalation actually wrote). `addPRLabel` appends here, never removes. */
   prLabelsByPr: Record<number, string[]> = {};
+  /** #399: the lane-state mirror's writes, recorded on their OWN channel. Every `prLabelsAdded`
+   *  assertion in this file is about an ESCALATION landing (or not landing) on the PR carrier —
+   *  a channel the mirror has nothing to do with — and the mirror now writes a label on nearly
+   *  every tick with a driving/fixing lane, which would turn each of those assertions into a
+   *  count of an unrelated feature. The label still joins `prLabelsByPr`/`prReviewData.labels`
+   *  below, so gate reads see the PR exactly as GitHub would show it (which is what keeps this
+   *  split from hiding a regression: a mirror label that perturbed `deriveGate` would redden the
+   *  gate fixtures here, not be filtered out of them). */
+  laneStatePrLabels: Array<[number, string]> = [];
+  laneStatePrLabelsRemoved: Array<[number, string]> = [];
   override async addPRLabel(n: number, l: string): Promise<void> {
     if (this.throwOnAddPRLabel) throw new Error("simulated forge failure");
-    this.prLabelsAdded.push([n, l]);
+    if (l === LANE_STATE_LABEL) this.laneStatePrLabels.push([n, l]);
+    else this.prLabelsAdded.push([n, l]);
     const cur = this.prLabelsByPr[n] ?? [];
     if (!cur.includes(l)) this.prLabelsByPr[n] = [...cur, l];
     if (!this.prReviewData.labels.includes(l)) this.prReviewData = { ...this.prReviewData, labels: [...this.prReviewData.labels, l] };
+  }
+  override async removePRLabel(n: number, l: string): Promise<void> {
+    this.laneStatePrLabelsRemoved.push([n, l]);
+    this.prLabelsByPr[n] = (this.prLabelsByPr[n] ?? []).filter((have) => have !== l);
+    this.prReviewData = { ...this.prReviewData, labels: this.prReviewData.labels.filter((have) => have !== l) };
   }
   /** #398: mirrors `throwOnAddLabel` for the PR carrier — proves a failed PR-side label write is
    *  recorded as `labeled: 0` and leaves the lane fail-closed-invisible to GATED RECLAIM, exactly
@@ -1933,6 +1955,24 @@ test("tick DRIVE: merged -> worker done, board set to done, driven records it", 
   assert.equal(st.pendingRollbacks().length, 0);
   assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["merged"]).length, 1);
   assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
+  st.close();
+});
+
+test("tick DRIVE (#570): every merged event carries a same-tick log line naming lane, PR and head oid", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "deadbeef" };
+  const logged: string[] = [];
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, log: (m) => logged.push(m) });
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["merged"]).length, 1);
+  assert.deepEqual(
+    logged.filter((m) => m.includes("MERGED")),
+    ["[sapwood:drive] lane lane-a pr #55 MERGED (deadbeef)"],
+  );
   st.close();
 });
 
@@ -12452,5 +12492,58 @@ test("tick PARK (#431 round 5, codex P1): an open NON-LLM park (rapid-restart) b
   assert.equal(st.parkRow("llm")?.canaryWorker ?? null, null, "no canary armed while an independent non-llm park stands");
   assert.equal(r.dispatched.filter((d) => d.kind === "dispatched").length, 0);
   assert.ok(st.parkRow("rapid-restart") !== null, "the rapid-restart park stands throughout");
+  st.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #399: the PR-side lane-state mirror, END TO END through tick(). lane-state-label.test.ts owns
+// the unit-level transition/dedupe/heal/guard fixtures; this one proves the WIRING — that the
+// pass actually rides every tick, on the lane states the tick itself settled on.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("#399 tick: a driving lane's PR carries the lane-state label, an idle re-tick writes nothing more, and the merge that ends the lane strips it — all inside tick()", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate:WAIT_REVIEW" };
+  const tickOpts = { forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate, now: realClock };
+
+  await tick(tickOpts);
+  assert.deepEqual(forge.laneStatePrLabels, [[55, LANE_STATE_LABEL]], "the lane advertises itself on the PR");
+  assert.deepEqual(forge.prLabelsAdded, [], "and nothing else — the mirror is not an escalation");
+  assert.equal(st.eventsAfterId(0, [LANE_STATE_LABELED]).length, 1);
+
+  await tick(tickOpts); // still queued: an idle tick
+  assert.deepEqual(forge.laneStatePrLabels, [[55, LANE_STATE_LABEL]], "an idle tick re-derives the same answer and writes nothing");
+
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "abc123" };
+  await tick(tickOpts);
+  assert.equal(st.getWorker("lane-a")?.state, "done");
+  assert.deepEqual(forge.laneStatePrLabelsRemoved, [[55, LANE_STATE_LABEL]], "a merged PR must not keep advertising a driver");
+  assert.equal(st.eventsAfterId(0, [LANE_STATE_CLEARED]).length, 1);
+  assert.deepEqual(forge.prLabelsByPr[55] ?? [], [], "the label is gone from the PR itself, not just from the ledger");
+  st.close();
+});
+
+test("#399 tick: a FIXING lane — the state the dogfood run had no PR-side signal for at all — carries the same label, and loses it when the lane escalates to needs-human", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  st.upsertWorker({ name: "lane-f", issue: 3, session_id: "s-f", state: "fixing", started_at: "t", ended_at: null, pr: 73 });
+  const cfg = mkCfg();
+  // No mergeGate: a `fixing` lane is never scanned by DRIVE anyway (#245), which is exactly why
+  // the mirror pass sits outside that block.
+  const tickOpts = { forge, state: st, supervisor: sup, cfg, now: realClock, probe: { ...DEFAULT_PROBE, hasPr: true } };
+  await tick(tickOpts);
+  assert.deepEqual(forge.laneStatePrLabels, [[73, LANE_STATE_LABEL]]);
+
+  // The fix leg's lane ends escalated (the shape #147's gated reentry then owns): terminal is
+  // terminal — the PR stops advertising a driver regardless of WHICH terminal state it reached.
+  const row = st.getWorker("lane-f");
+  st.upsertWorker({ ...row!, state: "failed", ended_at: "t2" });
+  await tick(tickOpts);
+  assert.deepEqual(forge.laneStatePrLabelsRemoved, [[73, LANE_STATE_LABEL]]);
   st.close();
 });

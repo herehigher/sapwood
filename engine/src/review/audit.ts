@@ -87,7 +87,7 @@ function renderFindingsList(entries: readonly IndexedFinding[]): string {
  *  fix leg names in its `findingResponses` block (`loop/fix-response.ts`) to dispute or accept
  *  ONE finding. The index is rendered in the audit comment (`[N]` above) because that comment is
  *  the ONLY channel a credential-free fix leg reads engine-agent findings through
- *  (`getPRAuditComments`), and it must be able to copy the handle verbatim the same way the
+ *  (`pr_audit_comments`), and it must be able to copy the handle verbatim the same way the
  *  classic path copies a `threadId`. It is the ARTIFACT's own index, deliberately NOT a position
  *  within the blocking/advisory section a finding happens to render under — the engine validates
  *  a response against that same array, so the two must be the same number. */

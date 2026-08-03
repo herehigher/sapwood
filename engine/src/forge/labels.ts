@@ -30,6 +30,17 @@ export function workflowLabelDefaults(prefix: string) {
     // decision): a lane settling on this verdict terminates without `gated_escalation_labeled`,
     // so it is structurally invisible to gated reclaim rather than fenced out by a label check.
     humanMergeOnly: `${normalizedPrefix}human-merge-only`,
+    // #399: the PR-side lane-state mirror — "a worker lane is actively on this PR right now".
+    // ONE label for BOTH active lane states (`driving` and `fixing`), deliberately: the question
+    // a human scanning the PR list cannot answer today is "is anything still working on this, or
+    // is this lane dead?", and that is one bit. Which of the two active states a lane is in is an
+    // engine-internal distinction (it decides which supervision loop owns the lane, not whether a
+    // human should step in), and splitting it would cost a remove+add on every drive<->fix
+    // transition to carry a fact nobody reads from the PR list. Engine-written AND engine-removed
+    // on the PR — the second (and only other) auto-removal path in the engine besides
+    // `roundPool`, which is why it gets `removeRoundPoolLabel`'s fail-closed guard shape
+    // (lane-state-label.ts's `removeLaneStateLabel`) and the same config collision rejection.
+    laneState: `${normalizedPrefix}lane:active`,
     // #397 class 6: NOT an escalation at all — a routing fence for an issue that has no
     // verification plan yet (decompose's coarse remainder children, align's planless PO
     // creations). It used to borrow `needsHuman`, which put items a human never owed a decision

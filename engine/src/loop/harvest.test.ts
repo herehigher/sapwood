@@ -311,6 +311,28 @@ test("factVars (Codex sol-high PR #417 review, P2-a follow-up — delta re-revie
   state.close();
 });
 
+test("factVars (#387 F18): round.egressSuspectList marks a loopback hit and leaves a public hit's entry exactly as before — the harvest prompt can tell dev-server noise from real egress", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("egress-suspect", {
+    worker: "lane-144",
+    issue: 144,
+    executable: "curl",
+    snippet: "curl http://127.0.0.1:5173/",
+    target: "loopback",
+  });
+  state.appendEvent("egress-suspect", {
+    worker: "lane-144",
+    issue: 144,
+    executable: "curl",
+    snippet: "curl https://fonts.example.invalid/x",
+  });
+  const vars = factVars(buildRoundArtifact(state, round, 30, null), "THE-ARTIFACT-MD");
+  assert.equal(vars["round.egressSuspectCount"], "2"); // tagged, not excluded: both still counted
+  assert.equal(vars["round.egressSuspectList"], "issue #144: curl (loopback), issue #144: curl");
+  state.close();
+});
+
 test("createHarvestStub (#123): no needs-human issues this round -> no session run, and NO harvest-summary event — the persisted round artifact (round.ts's close) is the machine-readable record now", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
