@@ -48,7 +48,11 @@ is enforced structurally, not by asking the model nicely:
   repos/*/issues/<n>` state changes match `ISSUE_GOVERNANCE_PATH_RE`; GitHub has no REST
   transfer/delete endpoint, so those reach the guard only as `gh api graphql` mutations,
   already caught by the graphql-mutation check). `gh issue comment`/`view`/`list`/`status`/
-  `create` remain allowed — comment is the worker's refuse/hand-back channel.
+  `create` remain allowed — comment is the worker's refuse/hand-back channel. Since #601, a
+  no-PR escalation no longer depends on a human happening to read that comment: the engine
+  itself re-surfaces the worker's own final-message text (already parsed, never a new
+  capability) as a `reason` field on the escalation event and its own `needs-human` comment.
+  The worker's write path is unchanged — this is a READ-side addition, not a new grant.
   Opaque constructs a worker could hide anything inside —
   `eval`, `sh -c`, an interpreter's `-e`/`-c`, process substitution — are blocked
   outright, fail-closed, rather than inspected.
