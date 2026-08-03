@@ -264,6 +264,88 @@ test("#527 escalation helper: a target repo with no engine/prompts and an untouc
   assert.deepEqual(await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg }), { kind: "clear" });
 });
 
+test("#549 effectiveInstructionPaths: an unset reviewer.agent.promptFile changes nothing — no entry, no reordering", () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  assert.deepEqual(effectiveInstructionPaths(cfg), [...cfg.escalation.instructionPaths, "docs/REVIEW-DOCTRINE.md"]);
+});
+
+test("#549 effectiveInstructionPaths: a repointed reviewer.agent.promptFile is followed by its raw repo-relative form, never loadConfig's absolute path", () => {
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 1 },
+    reviewer: { mode: "engine-agent", agent: { model: "sonnet", promptFile: "prompts/my-reviewer.md" } },
+  });
+  // Mirrors loadConfig's annotation: promptFileRaw keeps the pre-resolution value, promptFile becomes absolute.
+  cfg.reviewer.agent!.promptFileRaw = "prompts/my-reviewer.md";
+  cfg.reviewer.agent!.promptFile = "/home/op/repo/prompts/my-reviewer.md";
+  const patterns = effectiveInstructionPaths(cfg);
+  assert.ok(patterns.includes("prompts/my-reviewer.md"));
+  assert.ok(
+    patterns.every((pattern) => !pattern.startsWith("/")),
+    "an absolute path could never match a repo-relative changed-file path (and InstructionPath rejects a leading /)",
+  );
+});
+
+test("#549 effectiveInstructionPaths: a prompt path outside the repo-relative shape is skipped, not smuggled in", () => {
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 1 },
+    reviewer: { mode: "engine-agent", agent: { model: "sonnet", promptFile: "prompts/my-reviewer.md" } },
+  });
+  const unchanged = [...cfg.escalation.instructionPaths, "docs/REVIEW-DOCTRINE.md"];
+  for (const outside of ["/etc/my-reviewer.md", "../sibling/my-reviewer.md"]) {
+    cfg.reviewer.agent!.promptFileRaw = outside;
+    assert.deepEqual(effectiveInstructionPaths(cfg), unchanged);
+  }
+});
+
+test("#549 effectiveInstructionPaths: the [] off-switch still disables everything, a repointed prompt included", () => {
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 1 },
+    escalation: { instructionPaths: [] },
+    reviewer: { mode: "engine-agent", agent: { model: "sonnet", promptFile: "prompts/my-reviewer.md" } },
+  });
+  assert.deepEqual(effectiveInstructionPaths(cfg), []);
+});
+
+test("#549 escalation helper: a PR editing a repointed reviewer prompt escalates through the existing #292 path", async () => {
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 1 },
+    reviewer: { mode: "engine-agent", agent: { model: "sonnet", promptFile: "prompts/my-reviewer.md" } },
+  });
+  const labels: string[] = [];
+  let comments = 0;
+  const forge = {
+    getPRChangedFiles: async () => ({ files: [{ filename: "prompts/my-reviewer.md" }], complete: true }),
+    addPRLabel: async (_pr: number, label: string) => {
+      labels.push(label);
+    },
+    addPRComment: async () => {
+      comments++;
+    },
+  } satisfies Pick<IForge, "getPRChangedFiles" | "addPRLabel" | "addPRComment">;
+
+  assert.deepEqual(await escalateInstructionPathChanges({ forge, pr: 7, labels, cfg }), {
+    kind: "escalated",
+    matchedPaths: ["prompts/my-reviewer.md"],
+    reason: "instruction-path-change",
+  });
+  assert.equal((await escalateInstructionPathChanges({ forge, pr: 7, labels, cfg })).kind, "latched");
+  assert.deepEqual(labels, [cfg.labels.humanMergeOnly]);
+  assert.equal(comments, 1);
+});
+
+test("#549 escalation helper: with instructionPaths [] a repointed-prompt edit still reaches no forge call", async () => {
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 1 },
+    escalation: { instructionPaths: [] },
+    reviewer: { mode: "engine-agent", agent: { model: "sonnet", promptFile: "prompts/my-reviewer.md" } },
+  });
+  const forge = new Proxy({}, { get: () => () => assert.fail("disabled escalation must not touch forge") }) as Pick<
+    IForge,
+    "getPRChangedFiles" | "addPRLabel" | "addPRComment"
+  >;
+  assert.deepEqual(await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg }), { kind: "clear" });
+});
+
 test("#527 escalation helper: with instructionPaths [] a doctrine edit still reaches no forge call", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 }, escalation: { instructionPaths: [] } });
   const forge = new Proxy({}, { get: () => () => assert.fail("disabled escalation must not touch forge") }) as Pick<
