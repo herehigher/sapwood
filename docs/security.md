@@ -465,9 +465,55 @@ measurably suffers from the loss of parallel sub-reads, split a `REVIEW_DISALLOW
 constant at the `reviewMode` branch in `peripheral.ts` — a one-constant change. **The
 code-producing worker deliberately retains spawn capability** — `WORKER_DISALLOWED_TOOLS`
 (`worker.ts::WORKER_DISALLOWED_TOOLS`) does not deny `Agent`/`Task` — so "role sessions cannot
-spawn subagents" names a peripheral-role-and-gate②-reviewer boundary, never a sapwood-wide one;
-the worker's own fan-out is tracked separately, its cost/concurrency model not yet decided
-(issue #552).
+spawn subagents" names a peripheral-role-and-gate②-reviewer boundary, never a sapwood-wide one.
+
+**#552: the worker's decision, and why it differs from #534's, honestly stated.** #534's deny
+cost nothing — a peripheral role's observed spawn was pure circumvention of its own deliberate
+lack of a shell, zero legitimate benefit. Subagent use is a mainline coding capability for the
+worker (parallel sub-reads on a large refactor), so denying it has a real cost, and the
+separation-of-duties boundary holds regardless of the answer: the guard hook rides in via
+`--settings` and its PreToolUse fires on a child's tool calls too, so `WORKER_DISALLOWED_TOOLS`'
+merge/approve/ready/label/project denies are inherited by anything a worker spawns. This was
+never a producer≠merger hole; it is a soft-budget accounting question, decided as follows:
+**keep spawn enabled, and accept the soft-budget overshoot it opens as a documented, unbounded
+blind spot** — no new poll-tightening or child-cost-accounting machinery, per this repo's
+marginal-complexity rule (`docs/PLAN.md`), because a live measurement (below) shows the overshoot
+is small relative to a worker leg's own budget, not because the blind spot is bounded by any code
+in this engine.
+
+The concrete mechanism: `checkSoftBudget()`/`liveTelemetry()` (`worker.ts`) re-derive the running
+spend estimate by re-parsing **one file**, `lane.jsonlPath` — the parent session's own
+stream-json transcript. Claude Code's CLI writes a spawned subagent's entire turn history
+(its own `assistant`/`user`/`tool_use` lines, token usage included) to a **separate** file —
+observed on disk as `<parent-session-dir>/subagents/agent-<id>.jsonl` — that neither
+`checkSoftBudget` nor `liveTelemetry` ever reads. The parent's own jsonl gains exactly one small
+`assistant` entry for the turn where it issues the `Agent`/`Task` tool call, and one more once the
+tool result returns; every token the child itself spent in between is structurally invisible to
+the live estimator for the child's entire lifetime — not a one-poll delay, a complete gap bounded
+only by how long the child runs.
+
+**Live measurement (this issue's own worker leg, 2026-08-03):** one real subagent call (`Explore`
+agent type, a research task comparable to ordinary worker sub-reads) spent 30 input + 1,268
+output + 125,616 cache-creation + 384,230 cache-read tokens over ~37.5 wall-clock seconds
+(15 of its own `assistant` turns) — roughly **$0.61** at this repo's shipped `sonnet` rate
+(`engine/pricing.yaml`). The parent's own jsonl recorded the dispatching tool_use at T+0 and the
+next line — the tool_result, once the child fully finished — 43 seconds later: zero new assistant
+lines from the parent in between, the entire 37.5s child run included.
+Against the dogfooded `opus`/`high` worker-leg soft budget of $8–20 (`docs/configuration.md`,
+#386), one subagent call is roughly 3–8% of the whole per-leg budget — small enough that
+accepting it unbounded, rather than building accounting for it, is the marginal-complexity call.
+
+**Stated honestly, not overclaimed:** this measurement covers ONE sequential subagent call. A
+worker that fans out several/many children concurrently (the CLI has no cap sapwood imposes) can
+accumulate a correspondingly larger invisible total — nothing in this engine bounds that other
+than the worker's own prompted behavior, which today does not direct large fan-outs. The existing
+`egress-suspect` event (`worker.ts`, #534) already logs every `Agent`/`Task` tool_use a worker
+leg makes, but for network-egress containment, not cost — it is not a cost-accounting signal and
+this decision does not lean on it as one. If a future dogfood round measures a worker leg whose
+subagent fan-out meaningfully erodes the soft budget's purpose (frequent late handoffs, or spend
+well past `budgetUsdSoft` before the next graceful SIGTERM), that is the trigger to revisit this
+as a bounding problem (tighter `heartbeatMs`, or summing `subagents/*.jsonl` into
+`liveTelemetry()`) — not a reason to have built that machinery pre-emptively today.
 
 Every `RoleRunner` session is additionally spawned without forge credentials:
 `peripheralSessionEnv()` in `peripheral.ts` strips inherited `GH_*`,
@@ -1198,7 +1244,10 @@ Two different things are both called "budget," and they behave differently on pu
   backstop. A handed-off lane re-enters before fresh dispatch when capacity and spend
   gates permit. Each resumed leg gets a fresh soft budget, bounded by
   `worker.maxResumes` (default 2); resumed `total_cost_usd` is per-leg and is ledgered
-  directly, so total recorded spend is the sum of the real legs.
+  directly, so total recorded spend is the sum of the real legs. The live estimate this
+  bullet describes is blind to a spawned subagent's own spend — see #552's paragraph
+  under [Worker denylist vs. peripheral allowlist](#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry)
+  above for the measured size of that gap and why it's accepted unbounded.
 - **`cost.dailyBudgetUsd` / `cost.maxWallClockSec`** are **hard** engine-wide ceilings.
   Breaching either freezes new dispatch/merges and starts draining in-flight workers
   (`cost.drainWindowSec`'s grace window), same "drain before kill" posture as the kill
