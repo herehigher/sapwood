@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import { estimateUsd, loadPricingTable } from "../config/pricing.js";
 import { classifyEnvFailure, DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
+import { mcpToolFullName, PR_TOOLS } from "../proxy/tools.js";
 import { State } from "../state/state.js";
 import {
   buildRenderFixPrompt,
@@ -4014,8 +4015,8 @@ test("defaultFixPromptPath: resolves to the shipped prompts/fix.md, which exists
   const content = readFileSync(p, "utf8");
   assert.match(content, /\{\{pr\.number\}\}/);
   assert.match(content, /\{\{issue\.number\}\}/);
-  assert.match(content, /mcp__forge__getPRAuditComments/);
-  assert.match(content, /findings are carried only by `getPRAuditComments`/);
+  assert.match(content, /mcp__forge__pr_audit_comments/);
+  assert.match(content, /findings are carried only by `pr_audit_comments`/);
 });
 
 test("loadFixPromptTemplate: unset fixPromptFile -> the shipped default (byte-identical)", () => {
@@ -4220,7 +4221,10 @@ function fakeWorkerProxyHandle(over: Partial<{ mcpConfigJson: string; toolNames:
     mcpConfigJson: JSON.stringify({
       mcpServers: { forge: { type: "http", url: "http://127.0.0.1:1/mcp", headers: { Authorization: "Bearer proxy-test-token" } } },
     }),
-    toolNames: ["mcp__forge__pr_details", "mcp__forge__pr_reviews", "mcp__forge__pr_review_threads", "mcp__forge__pr_checks"],
+    // #556: derived from PR_TOOLS, not a hand-copied list — this fake stands in for what
+    // createProxyMint actually grants a fix-loop worker leg (asserted in proxy/mint.test.ts), so
+    // a wire-name change has to reach the argv assertions below rather than drifting past them.
+    toolNames: PR_TOOLS.map(mcpToolFullName),
     ...over,
     stop: async () => {
       calls.stopped++;
@@ -4770,6 +4774,11 @@ test("resume: a proxy opt mints a handle, widens --allowedTools with the handle'
     await waitForFile(join(dir, "args.seen"), "proxy resume argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     assert.match(args, /mcp__forge__pr_details/);
+    // #556: the audit tool's wire name reaches --allowedTools verbatim — asserted from the
+    // CONSTRUCTED argv (the value the CLI actually receives), literal, not constant-derived.
+    const allowedIdx = args.trim().split("\n").indexOf("--allowedTools");
+    const allowed = args.trim().split("\n")[allowedIdx + 1]!;
+    assert.match(allowed, /mcp__forge__pr_audit_comments/);
     assert.match(args, /--mcp-config/);
     const idx = args.trim().split("\n").indexOf("--mcp-config");
     assert.equal(args.trim().split("\n")[idx + 1], handle.mcpConfigJson);

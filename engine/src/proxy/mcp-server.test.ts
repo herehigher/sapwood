@@ -213,7 +213,13 @@ test("tools/list returns the 9 fixed tools (including #288 audit transport) with
     const res = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const json = await readJson(res);
     assert.equal(json.result.tools.length, 9);
-    assert.deepEqual(json.result.tools.map((t: { name: string }) => t.name).sort(), [...TOOL_NAMES].sort());
+    const names = json.result.tools.map((t: { name: string }) => t.name);
+    assert.deepEqual([...names].sort(), [...TOOL_NAMES].sort());
+    // #556: literal, not TOOL_NAMES-derived — the registration and the allow-list strings must
+    // move together, so the wire name is asserted against a hardcoded expectation here. The
+    // shape check is what excludes the old camelCase spelling (pre-v1: renamed outright, no shim).
+    assert.ok(names.includes("pr_audit_comments"), "tools/list must advertise the snake_case audit tool");
+    for (const n of names) assert.match(n, /^[a-z][a-z0-9_]*$/, `advertised tool "${n}" is not snake_case`);
   });
 });
 
@@ -370,7 +376,7 @@ test("tools/call: every PR evidence tool, including #288 audit comments, succeed
         ["pr_reviews", { pr: 1 }],
         ["pr_review_threads", { pr: 1 }],
         ["pr_checks", { pr: 1 }],
-        ["getPRAuditComments", { pr: 1 }],
+        ["pr_audit_comments", { pr: 1 }],
       ] as const) {
         const { body } = await callTool(h.url, h.token, name, args);
         assert.equal(body.result.isError, false, `${name} should succeed`);
@@ -386,13 +392,7 @@ test("tools/call: every PR evidence tool, including #288 audit comments, succeed
         attempt: 1,
       });
       assert.equal(rows.length, 5);
-      assert.deepEqual(rows.map((r) => r.tool).sort(), [
-        "getPRAuditComments",
-        "pr_checks",
-        "pr_details",
-        "pr_review_threads",
-        "pr_reviews",
-      ]);
+      assert.deepEqual(rows.map((r) => r.tool).sort(), ["pr_audit_comments", "pr_checks", "pr_details", "pr_review_threads", "pr_reviews"]);
       assert.ok(rows.every((r) => r.status === "delivered" && r.responseCanonical && r.contentHash));
     },
   );
@@ -525,7 +525,7 @@ test("allowedTools = [] (an unlisted role's deny-by-default resolution, proxy/ac
       pr_reviews: { pr: 1 },
       pr_review_threads: { pr: 1 },
       pr_checks: { pr: 1 },
-      getPRAuditComments: { pr: 1 },
+      pr_audit_comments: { pr: 1 },
     };
     for (const name of TOOL_NAMES) {
       const { body } = await callTool(h.url, h.token, name, validArgsByTool[name]);

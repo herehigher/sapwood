@@ -344,7 +344,7 @@ exist there today. The chain, each link verified in source rather than inferred:
    `HANDLE_THREADS` for `rejected`, so the existing `finalizeVerdict`/`deriveGate` path
    can be reused unchanged.
 2. Findings reach the fix leg through the bounded audit channel only —
-   `getPRAuditComments` (`proxy/tools.ts:38`), a **top-level PR comment**, per design
+   `pr_audit_comments` (`proxy/tools.ts:38`), a **top-level PR comment**, per design
    #279 §1's findings-transport decision.
 3. **The engine has no thread-CREATING forge write.** `IForge` exposes
    `replyToReviewThread` and `resolveReviewThread` (both require an existing thread id)

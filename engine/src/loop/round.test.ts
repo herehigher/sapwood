@@ -4194,7 +4194,7 @@ test("buildFixLegResume (#253, #551): proxy.enabled: true (the DEFAULT — nothi
     try {
       assert.deepEqual(
         handle.toolNames.sort(),
-        ["pr_details", "pr_reviews", "pr_review_threads", "pr_checks", "getPRAuditComments"].map((t) => `mcp__forge__${t}`).sort(),
+        ["pr_details", "pr_reviews", "pr_review_threads", "pr_checks", "pr_audit_comments"].map((t) => `mcp__forge__${t}`).sort(),
         "the fix-loop worker role gets PR_TOOLS only",
       );
       const { isError, text } = await callProxyTool(handle.url, handle.token, "pr_review_threads", { pr: 5 });
@@ -4269,7 +4269,7 @@ test("runRounds (#253, #551): cfg.proxy.enabled: true wires a REAL fixLegResume 
     assert.ok(handle.token.length > 0);
     assert.deepEqual(
       handle.toolNames.sort(),
-      ["pr_details", "pr_reviews", "pr_review_threads", "pr_checks", "getPRAuditComments"].map((t) => `mcp__forge__${t}`).sort(),
+      ["pr_details", "pr_reviews", "pr_review_threads", "pr_checks", "pr_audit_comments"].map((t) => `mcp__forge__${t}`).sort(),
     );
   } finally {
     await handle.stop();
