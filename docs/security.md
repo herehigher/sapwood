@@ -341,6 +341,27 @@ The asymmetry is compensated, but not erased, by several independent controls:
   mutation, which is exactly the argv-shape judgement the guard's `checkGhApi` makes (REST
   label/milestone/state endpoints and GraphQL mutations, including ProjectV2 field writes).
   This closes design #279 §5a's deferred "standalone hardening issue".
+  Since #617 ((b′), capability DR #616), that same deny-list also carries
+  **server-granularity MCP denies** — `mcp__github__*`, `mcp__server-filesystem__*`,
+  `mcp__filesystem__*`, `mcp__Google_Drive__*` — the CLI's own documented
+  whole-server wildcard rule shape. DR #616's ruling has producer legs officially
+  inherit the operator's ENTIRE host MCP surface (no `capabilities.*` config surface
+  will ever be built to narrow it); the live probe backing that ruling found the
+  inherited surface callable and including write/exec-class tools
+  (`server-filesystem__write_file`/`edit_file`/`move_file`, `Google_Drive__create_file`),
+  none reaching the guard hook (its PreToolUse matcher is
+  `Bash|Write|Edit|MultiEdit|Read|Grep|Glob|NotebookRead` — no `mcp__` pattern at all).
+  This deny list is a COARSE, WHOLESALE, name-based accident fence — not a hostile-jail
+  — covering exactly two named categories: forge-authority ("github-class") and
+  write/exec-class ("filesystem-class") servers, by their KNOWN/common registration
+  name. **Residual unknown servers are the top-ranked accepted blind spot**: any MCP
+  server an operator's own config registers under a different name is simply not
+  covered, and this list makes no claim otherwise — **branch protection is the
+  mandatory platform backstop** regardless of what this list denies. **#554
+  interaction**: `allowManagedPermissionRulesOnly` discards `--disallowedTools`
+  wholesale (see the paragraph above) — a host with that managed-settings mode on
+  drops these MCP denies (and every other entry in `WORKER_DISALLOWED_TOOLS`) too,
+  which is exactly why branch protection, not this list, is the backstop of record.
 - `engine/src/roles/worker.ts` does not add the engine `data/` directory as a Claude tool
   root (there is no `--add-dir data`), so the tool layer does not offer a path into it.
   This is not Bash containment: worker Bash can reach `../../data`, exactly the residual
@@ -663,13 +684,14 @@ does **not** delete the jsonl file or the `.handoff` sentinel the way `dispatch(
 its fresh, empty jsonl — a resume's jsonl holds real prior-leg history, and a refused resume must
 leave the lane exactly as resumable as it was before the call, not destroy its record.
 
-**`credentialFree` severs the `gh`/git CREDENTIALED-TOOL reach — not a worker leg's forge reach in
-general.** That distinction matters and is stated precisely here after a round-2 delta review
-(P1) proved the broader claim false: env-VAR stripping by itself is NOT sufficient for a
-Bash-granted worker: `gh` falls back to on-disk stored credentials (`$HOME/.config/gh/hosts.yml`)
-when no token env var is present, and git can still reach a credential helper, a cached SSH agent,
-or an interactive prompt regardless of which env vars are absent. `worker.ts`'s
-`workerCredentialFreeEnv` (opt-in via `WorkerProxyOpts.credentialFree`) additionally:
+**`credentialFree` severs the `gh`/git CREDENTIALED-TOOL reach AND (#617) seals the MCP config
+surface — not a worker leg's forge reach in general.** That distinction matters and is stated
+precisely here after a round-2 delta review (P1) proved the broader claim false: env-VAR stripping
+by itself is NOT sufficient for a Bash-granted worker: `gh` falls back to on-disk stored
+credentials (`$HOME/.config/gh/hosts.yml`) when no token env var is present, and git can still
+reach a credential helper, a cached SSH agent, or an interactive prompt regardless of which env
+vars are absent. `worker.ts`'s `workerCredentialFreeEnv` (opt-in via
+`WorkerProxyOpts.credentialFree`) additionally:
 
 - points `GH_CONFIG_DIR` at a **fresh, empty, per-lane** scratch directory — `gh`'s own stored
   host/token config is read from there, never from the operator's real `$HOME/.config/gh`;
@@ -683,6 +705,19 @@ or an interactive prompt regardless of which env vars are absent. `worker.ts`'s
   git's OWN credential path is severed, same "read is not the boundary, doing is" stance this page
   takes everywhere else.
 
+**MCP seal, closed history (#617, capability DR #616's seam 1).** Until #617, the paragraph and
+list above were the WHOLE of `credentialFree`'s scope, and that was a real gap, not just an
+incomplete description: `--mcp-config` (the proxy's own server, set whenever a proxy attaches) was
+**additive**, so a `credentialFree` leg's ambient host MCP servers still loaded from settings
+sources and — per #616's live probe — stayed **callable regardless of `--allowedTools`**,
+write/exec-class tools included, none reaching the guard hook. That was WORSE than the
+`steal.mjs` disk-read residual below: a live network channel, not a local-disk read. `dispatch()`
+and `resume()` now pass `--strict-mcp-config` whenever `credentialFree` is set, alongside the
+already-inline `--mcp-config` — together these make the MCP config **exclusive**: the CLI loads
+ONLY the proxy's own server, ignoring every other config source (project `.mcp.json`, user
+settings, ambient host servers). Non-`credentialFree` paths (including an attached,
+non-`credentialFree` proxy) are unaffected — this flag is scoped to `credentialFree` alone.
+
 A mint failure is non-fatal for an ordinary (non-`credentialFree`) proxy attachment — the lane
 still dispatches, unattached, same posture as `peripheral.ts`'s `RoleRunner`. `credentialFree:
 true` is different: a leg dispatched that way has neither that credentialed-tool path nor (if
@@ -693,24 +728,24 @@ reason, via `WorkerDeps.state`) before deciding which way to go.
 **HONEST SCOPE — this is NOT full isolation (round-2 delta review, P1; PM ruling 2026-07-18, same
 "document the residual, don't chase it with more machinery" stance as the Sentinel isolation
 boundary section below).** `workerCredentialFreeEnv` closes `gh`'s and git's OWN credential-lookup
-paths. It structurally CANNOT confine what arbitrary code run under this lane's
-`Bash(node *)`/`Bash(npm *)` grant can read off disk — a fix leg genuinely needs those grants to
-run its own test suite, and it still executes with the operator's REAL `$HOME`. A live proof-of-
-concept (`node steal.mjs`, a script invoked through exactly that grant) read
-`~/.config/gh/hosts.yml` directly and reached GitHub with the credential found there, bypassing
-every env var `workerCredentialFreeEnv` touches entirely — filesystem access is orthogonal to
-environment-variable redirection, and no amount of env-var scrubbing closes it. Two mitigations
-this repo deliberately does NOT attempt: **HOME isolation** (redirecting `$HOME` would break the
-`claude` CLI's own config/auth, which the lane also needs merely to run) and **stripping
-`Bash(node *)`/`Bash(npm *)`** (a fix leg's whole job requires running tests). The upgrade path
-for a boundary that's actually closed is **OS-level sandboxing** (container/chroot/Landlock-style
-filesystem confinement) or running fix legs under a **dedicated, narrowly-scoped CI identity**
-whose credential store holds nothing worth stealing — neither is implemented here. One narrowing
-worth naming precisely: `hosts.yml` is `gh`'s plaintext-token storage path; on macOS, `gh auth
-login` by default stores the token in the OS **keychain** instead, which neither this mechanism
-nor the PoC exposes — the risk this note describes is sharpest wherever `gh` ends up with a
-plaintext on-disk token (Linux, CI images, an explicit non-keychain login), not a universal
-property of every `gh` installation.
+paths, and (#617) the MCP seal above closes the ambient-MCP gap — together they do NOT structurally
+confine what arbitrary code run under this lane's `Bash(node *)`/`Bash(npm *)` grant can read off
+disk — a fix leg genuinely needs those grants to run its own test suite, and it still executes with
+the operator's REAL `$HOME`. A live proof-of-concept (`node steal.mjs`, a script invoked through
+exactly that grant) read `~/.config/gh/hosts.yml` directly and reached GitHub with the credential
+found there, bypassing every env var `workerCredentialFreeEnv` touches entirely — filesystem
+access is orthogonal to environment-variable redirection AND to the MCP seal, and no amount of
+either closes it. Two mitigations this repo deliberately does NOT attempt: **HOME isolation**
+(redirecting `$HOME` would break the `claude` CLI's own config/auth, which the lane also needs
+merely to run) and **stripping `Bash(node *)`/`Bash(npm *)`** (a fix leg's whole job requires
+running tests). The upgrade path for a boundary that's actually closed is **OS-level sandboxing**
+(container/chroot/Landlock-style filesystem confinement) or running fix legs under a **dedicated,
+narrowly-scoped CI identity** whose credential store holds nothing worth stealing — neither is
+implemented here. One narrowing worth naming precisely: `hosts.yml` is `gh`'s plaintext-token
+storage path; on macOS, `gh auth login` by default stores the token in the OS **keychain**
+instead, which neither this mechanism nor the PoC exposes — the risk this note describes is
+sharpest wherever `gh` ends up with a plaintext on-disk token (Linux, CI images, an explicit
+non-keychain login), not a universal property of every `gh` installation.
 
 ### Fix-loop `fixing` lane state (#245)
 
@@ -779,10 +814,24 @@ actually saw, so ambient drift between retries (a `CLAUDE.md` edited between att
 and attempt 2, a dirty worktree, a config change) never makes two attempts of the same
 phase look comparable when they weren't.
 
-**Wired for all 9/9 `runSessionWithRetry` peripheral call sites today** — harvest,
+**Wired for all 9/9 `runSessionWithRetry` peripheral call sites** — harvest,
 architect, plan-review (the reviewer, drafter, and #214's confirm sessions), retro,
 and (as of [#251](https://github.com/herehigher/sapwood/issues/251)) `align.ts`'s
-three PO sessions (`po-align`, `po-triage`, `po-pool`).
+three PO sessions (`po-align`, `po-triage`, `po-pool`) — **plus, as of
+[#617](https://github.com/herehigher/sapwood/issues/617) (capability DR #616's seam
+3), `WorkerSupervisor`'s `dispatch()`/`resume()`**: every worker/producer leg now
+records the same host-environment fingerprint. The mechanism is the SAME
+`assembleContextManifest`/`capturePreSpawnManifestData` pair, factored out of
+`peripheral.ts` into `context-manifest.ts` so both callers share it rather than
+growing a second implementation — see `WorkerSupervisor.recordLaneContextManifest`'s
+own doc for the worker-specific key/scope choices (a sentinel `roundId: 0, phase:
+"worker"` row per lane name, most-recent-leg-wins on resume). One nuance #616's live
+probe surfaced: a session's stream-json init line reports ZERO `mcp__`-prefixed tool
+names even when ambient MCP servers are actually loaded (tool schemas arrive
+deferred, after init) — the manifest's `mcpTools` field reads the init report's
+SEPARATE `mcp_servers` field (name + connection status per server), which is NOT
+subject to that deferral, rather than naively deriving MCP presence from the tool
+name list.
 
 **The context manifest.** Every wired role session attempt (`RoleRunner.run()` in
 `peripheral.ts`) assembles a manifest in TWO PHASES, each with its own recorded

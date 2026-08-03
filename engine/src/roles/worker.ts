@@ -41,9 +41,15 @@ import type { Issue, LanePrOutcome } from "../forge/forge.js";
 import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor } from "../loop/conductor.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import { sanitizeUpstreamError } from "../proxy/tools.js";
-import type { CategorizedTokenUsage, ModelUsageEntry, State } from "../state/state.js";
+import type { CategorizedTokenUsage, ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
 import { createHeartbeatGate, type HeartbeatGate } from "../util/heartbeat.js";
 import { awaitSpawnConfirmation } from "../util/spawn-confirm.js";
+import {
+  assembleContextManifest,
+  capturePreSpawnManifestData,
+  KNOWN_UNPROBED_NOTE,
+  type PreSpawnManifestCapture,
+} from "./context-manifest.js";
 
 /** A durable resume intent exists, but the engine restarted before spawn confirmation made
  *  the outcome knowable. Retrying could create a second Claude process in the same worktree. */
@@ -341,10 +347,28 @@ export function classifyEgressTarget(text: string): "loopback" | undefined {
  *    to `prompt` when `description` is empty or absent — never neither, so a hit is never
  *    recorded with an empty snippet when the block carries usable text.
  *
+ *  - **`mcp__*`** (#617, seam 4 of capability DR #616): the SAME unconditional stance as
+ *    WebFetch/WebSearch/Agent/Task above, for a NEW reason those didn't have: DR #616's ruling has
+ *    producer legs officially inherit the operator's entire host MCP surface, and the #616 live
+ *    probe found that surface callable — including write/execution-class tools — with NONE of it
+ *    reaching the guard hook (its PreToolUse matcher is `Bash|Write|Edit|MultiEdit|Read|Grep|Glob|
+ *    NotebookRead`, no `mcp__` pattern). Under inheritance an MCP tool is an egress-capable channel
+ *    exactly like WebFetch/WebSearch — this scanner is the ONE place that channel becomes visible
+ *    post-hoc. Any `tool_use` block whose `name` starts with `mcp__` is a hit (`WORKER_DISALLOWED_TOOLS`'s
+ *    own (b′) deny only covers a few KNOWN server names — this scan deliberately covers every
+ *    `mcp__` name, including the engine's own `mcp__forge__*` evidence-channel calls: a legitimate
+ *    call being ALSO visible here costs nothing, since this is a post-hoc tripwire, never a deny
+ *    decision, and the scanner cannot distinguish "the engine's own sealed proxy" from "an ambient
+ *    host server" by name pattern alone). `executable` carries the literal tool name
+ *    (`"mcp__<server>__<tool>"`); `snippet` is the JSON-stringified `input` — no single fixed
+ *    field like WebFetch's `url` exists across every possible server's arbitrary tool schema —
+ *    truncated the same way every other family's snippet is, so `classifyEgressTarget` still
+ *    tags a loopback-only URL embedded anywhere in that stringified input.
+ *
  *  Same tolerance as the sibling parsers: malformed/partial lines and malformed blocks are
  *  skipped silently. Collection stops at the engine-owned per-leg cap, bounding both evidence and
- *  its dedup set (shared across all three signal families — Bash, WebFetch/WebSearch, and
- *  Agent/Task — one session emitting a mix of any of them is still bounded by ONE cap, not one
+ *  its dedup set (shared across all four signal families — Bash, WebFetch/WebSearch, Agent/Task,
+ *  and `mcp__*` — one session emitting a mix of any of them is still bounded by ONE cap, not one
  *  each). This is a post-hoc tripwire, never a deny decision. */
 export function scanEgressSuspects(jsonl: string, suspectCommands: readonly string[]): EgressSuspectScan {
   const suspects = new Set(suspectCommands);
@@ -401,6 +425,17 @@ export function scanEgressSuspects(jsonl: string, suspectCommands: readonly stri
         const rec = input as Record<string, unknown>;
         const detail = (typeof rec.description === "string" && rec.description) || (typeof rec.prompt === "string" && rec.prompt) || null;
         if (detail === null) continue;
+        if (addHit(b.name, detail)) return { hits, truncated: true };
+      } else if (typeof b.name === "string" && b.name.startsWith("mcp__")) {
+        // #617 (seam 4): same unconditional stance as WebFetch/WebSearch/Agent/Task above — see
+        // this function's own doc. No fixed field to prefer (arbitrary per-server input shape),
+        // so the whole input is the evidence.
+        let detail: string;
+        try {
+          detail = JSON.stringify(input);
+        } catch {
+          continue; // unreachable in practice (input is already-parsed JSON), but never throw here
+        }
         if (addHit(b.name, detail)) return { hits, truncated: true };
       }
     }
@@ -514,6 +549,36 @@ export function hasSessionInitLine(jsonl: string): boolean {
     } catch {}
   }
   return false;
+}
+
+/** Bounded poll of `jsonlPath` for the session's own init line — the synchronization primitive
+ *  #236's pre-spawn manifest capture uses (originally peripheral.ts-only; #617 moves it here,
+ *  exported, so WorkerSupervisor's own manifest wiring for worker/producer legs reuses the SAME
+ *  poll rather than a parallel implementation, and peripheral.ts imports it from here like every
+ *  other worker.ts-owned session-stream primitive it already depends on). Resolves `true` the
+ *  instant the line is observed, or `false` once `timeoutMs` elapses without it ever appearing (a
+ *  hung/crashed-before-init session) — never throws, never waits longer than the bound. Reads the
+ *  file fresh on every poll tick (the same tolerant, still-growing-file reader every other jsonl
+ *  consumer in this codebase uses); a file that doesn't exist yet reads as `""`, not an error. */
+export async function waitForInitLine(jsonlPath: string, timeoutMs: number, pollMs: number): Promise<boolean> {
+  // #403 (F25) per-site decision: DELIBERATE wall-clock read, kept. This is elapsed-time
+  // arithmetic over a REAL polling loop against a REAL file a REAL subprocess is writing —
+  // measuring how long that has actually taken is the whole job, and a seeded clock would either
+  // never expire or expire instantly. Nothing here is asserted against a seeded date; the only
+  // caller-visible output is a boolean whose timeout bound tests set explicitly.
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let content = "";
+    try {
+      content = readFileSync(jsonlPath, "utf8");
+    } catch {
+      /* not created / not flushed yet — keep polling */
+    }
+    if (hasSessionInitLine(content)) return true;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await sleep(Math.min(pollMs, remaining));
+  }
 }
 
 /** Per-model token usage from the last stream-json result line (#47). Mirrors parseCostUsd's
@@ -958,9 +1023,33 @@ export const WORKER_ALLOWED_TOOLS = "Read,Edit,Write,Bash(git *),Bash(gh *),Bash
  *  including the plain `--body` edit the guard's argv check still permits. `gh api` is
  *  deliberately absent — read-only `gh api` is ordinary worker usage and a prefix rule can't
  *  separate it from a mutation, which is precisely the argv-shape judgement checkGhApi makes.
- *  Comment channels (`gh pr comment`, `gh issue comment`) stay open in both layers. */
+ *  Comment channels (`gh pr comment`, `gh issue comment`) stay open in both layers.
+ *
+ *  #617 ((b′), capability DR #616): the `mcp__` entries below are a SEPARATE addition, appended
+ *  to the same string rather than a new constant, so every existing caller (claudeArgs' own
+ *  `?? WORKER_DISALLOWED_TOOLS` default) gets the widened deny automatically. DR #616's ruling
+ *  has producer legs officially inherit the operator's ENTIRE host MCP surface (settings sources,
+ *  servers, skills) — the live probe backing that DR found the inherited surface callable and
+ *  including write/execution-class tools (`server-filesystem__write_file`/`edit_file`/`move_file`,
+ *  `Google_Drive__create_file`), none of which reach the guard hook (its PreToolUse matcher is
+ *  `Bash|Write|Edit|MultiEdit|Read|Grep|Glob|NotebookRead` — see guardSettings below — carrying no
+ *  `mcp__` pattern at all). This is a COARSE, WHOLESALE, name-based accident fence, not a
+ *  hostile-jail (M12 positioning) — it denies by known/common SERVER NAME (`mcp__<server>__*`,
+ *  the CLI's own documented whole-server wildcard rule shape) for the two categories #616 scoped:
+ *  forge-authority ("github-class" — a server that could exercise GitHub write authority the
+ *  guard/permission layer otherwise reserves for `gh`) and write/execution-class ("filesystem-class" —
+ *  a server that can write to disk or a cloud drive on the operator's behalf). Residual UNKNOWN
+ *  servers — any name an operator's own MCP config doesn't match — are an ACCEPTED BLIND SPOT
+ *  (docs/security.md's blind-spot section), not a gap this list claims to close; branch
+ *  protection is the documented, mandatory backstop regardless of what this list denies.
+ *
+ *  #554 interaction (MUST read before relying on this list): `allowManagedPermissionRulesOnly`
+ *  discards `--disallowedTools` WHOLESALE — a host with that setting on drops this deny (and
+ *  every other entry in this constant) entirely, silently. This list is defense-in-depth on top
+ *  of branch protection, never a substitute for it. */
 export const WORKER_DISALLOWED_TOOLS =
-  "Bash(gh pr merge*),Bash(gh pr ready*),Bash(gh pr review*),Bash(gh release*),Bash(gh issue edit*),Bash(gh label*),Bash(gh project*)";
+  "Bash(gh pr merge*),Bash(gh pr ready*),Bash(gh pr review*),Bash(gh release*),Bash(gh issue edit*),Bash(gh label*),Bash(gh project*)," +
+  "mcp__github__*,mcp__server-filesystem__*,mcp__filesystem__*,mcp__Google_Drive__*";
 /** #244 (Codex sol-high PR #260 review, P1): the credential-free worker leg's own `--allowedTools`
  *  base — WORKER_ALLOWED_TOOLS with `Bash(gh *)` dropped. Once `workerCredentialFreeEnv` severs
  *  `gh`'s on-disk/env credential reach, the grant itself should stop offering `gh` at all — a
@@ -1379,8 +1468,18 @@ export interface WorkerDeps {
    *  other narrow-state-dependency field in this codebase (e.g. peripheral.ts's
    *  RetriedSession.state). Optional and additive: omitted -> both degrade to zero behavior
    *  change (mint-failure observability falls back to the existing stderr log line; the
-   *  heartbeat simply never fires) — never a hard requirement for ordinary dispatch. */
-  state?: Pick<State, "appendEvent" | "maxEventId">;
+   *  heartbeat simply never fires) — never a hard requirement for ordinary dispatch.
+   *
+   *  #617 (seam 3, capability DR #616): widened with `recordContextManifest` — the SAME narrow-
+   *  Pick contract, additive. Omitted -> a lane's context manifest is assembled (best-effort) but
+   *  never persisted; recordLaneContextManifest's own doc covers the zero-behavior-change case. */
+  state?: Pick<State, "appendEvent" | "maxEventId" | "recordContextManifest">;
+  /** #617 (seam 3): bounded poll of a lane's still-growing jsonl for its own init line, before
+   *  capturing the CLAUDE.md-family half of its context manifest — same rationale and same
+   *  defaults (100ms/30s) as peripheral.ts's RoleRunnerDeps fields of the same name; see
+   *  capturePreSpawnManifestForLane's own doc. */
+  preSpawnCaptureTimeoutMs?: number;
+  preSpawnCapturePollMs?: number;
 }
 
 /** #244: an optional, per-session revocable forge MCP proxy handle for a WORKER LEG (the fix-loop
@@ -1397,6 +1496,20 @@ export interface WorkerDeps {
  *  GitHub in an absolute sense, since arbitrary code under Bash(node/npm) can still read an
  *  ambient credential store directly off disk — docs/security.md's residuals note). Same
  *  worker-class posture retro.ts's session already uses for its own git-credential reach.
+ *
+ *  SEALED MCP SURFACE (#617, seam 1 of capability DR #616 — CLOSED HISTORY, not current risk):
+ *  the paragraph above and workerCredentialFreeEnv's own doc describe the CREDENTIAL reach only —
+ *  they were silent on the leg's MCP CONFIG, and until #617 that silence hid a real gap: a
+ *  credentialFree leg's `--mcp-config` (the proxy's own server, set whenever a proxy is attached)
+ *  was ADDITIVE, not exclusive, so every ambient host MCP server from settings sources ALSO
+ *  loaded and — per #616's live probe — stayed callable regardless of `--allowedTools`, including
+ *  write/execution-class tools, none reaching the guard hook. That was WORSE than the documented
+ *  `steal.mjs` disk-read residual this opt was built to bound: a live network channel, not a
+ *  local-disk read. dispatch()/resume() now pass `strictMcpConfig: true` whenever
+ *  `credentialFree` is set (see either call site's own doc), making `--mcp-config` EXCLUSIVE —
+ *  the CLI loads ONLY the proxy's server. The disk-read residual below (arbitrary code under
+ *  `Bash(node/npm)` reading an ambient credential store) is UNCHANGED by this seal — it is a
+ *  distinct channel (local files, not MCP) that `--strict-mcp-config` cannot and does not touch.
  *
  *  FAIL-CLOSED POLICY (Codex sol-high PR #260 review, P2): a proxy WITHOUT `credentialFree` is
  *  non-fatal on mint failure (the lane still dispatches, unattached — an optional read-side
@@ -1417,8 +1530,10 @@ export interface WorkerProxyOpts {
    *  has the operator's real `$HOME` and can read an ambient credential store directly off
    *  disk, bypassing env entirely; a live PoC read `~/.config/gh/hosts.yml` this way). See
    *  `dispatch()`'s own doc for the accompanying `--allowedTools` narrowing (drops
-   *  `Bash(gh *)`, keeps git for worktree-local ops). Omitted/false -> unchanged inheritance,
-   *  today's behavior. */
+   *  `Bash(gh *)`, keeps git for worktree-local ops) AND (#617) the `strictMcpConfig` MCP seal —
+   *  this flag now closes BOTH the credentialed-tool reach (this doc) and the MCP-config surface
+   *  (this interface's own header doc), not just the former. Omitted/false -> unchanged
+   *  inheritance, today's behavior. */
   credentialFree?: boolean;
 }
 
@@ -1458,7 +1573,12 @@ export interface WorkerProxyOpts {
  *  stores the token in the OS keychain instead, which this mechanism (and the PoC) does not
  *  expose — the concrete risk this note describes is sharpest wherever `gh` ends up with a
  *  plaintext-on-disk token (Linux, CI images, or an explicit `--insecure-storage` login), not a
- *  universal property of every `gh` installation. */
+ *  universal property of every `gh` installation.
+ *
+ *  SCOPE BOUNDARY (#617): this function is env-only — it never touched, and still never touches,
+ *  the leg's MCP config. The separate ambient-MCP gap #617 closed (see WorkerProxyOpts' own doc's
+ *  "SEALED MCP SURFACE" note) is closed by dispatch()/resume() passing `strictMcpConfig: true`,
+ *  not by anything here — keep that seam there, not folded into this function's env-only job. */
 export function workerCredentialFreeEnv(ghConfigDir: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -1517,6 +1637,22 @@ interface Lane {
    *  (best-effort) in onExit and in the spawn-failure cleanup path, alongside the lane's own
    *  jsonl/sentinels — never left behind as directory litter under stateDir. */
   ghConfigDir?: string;
+  /** #617 (seam 3): the rendered prompt this leg was dispatched/resumed with — carried so
+   *  recordLaneContextManifest can hash the ACTUAL prompt text (assembleContextManifest's
+   *  promptTemplateVersion field), same as peripheral.ts's manifest wiring does via opts.prompt,
+   *  rather than fabricating a version string or leaving the field null for every worker leg. */
+  prompt: string;
+  /** #617 (seam 3): the in-flight FILESYSTEM-derived half of this lane's context manifest,
+   *  kicked off fire-and-forget by capturePreSpawnManifestForLane right after spawn. A PROMISE,
+   *  not a settled value — onExit() (the one place a lane truly terminates) chains onto this
+   *  rather than reading a value that may not have landed yet: a fast-exiting lane's 'exit' event
+   *  can fire before the init-line poll's first tick even completes, and reading a synchronous
+   *  field at that instant would silently drop the manifest for exactly the sessions whose
+   *  ambient-context drift matters most to catch (a crash-fast worker leg). Undefined only when
+   *  the lane never reached the confirmed-alive gate at all (mirrors `lane.hb`'s own "only set up
+   *  once alive" contract) — see recordLaneContextManifest's own doc for the zero-behavior-change
+   *  case this degrades to. */
+  manifestPreSpawnPromise?: Promise<PreSpawnManifestCapture | undefined>;
 }
 
 /** #69: recursive `.git`-excluding mtime/ctime scan — "is anything under this worktree newer
@@ -1603,6 +1739,10 @@ export class WorkerSupervisor implements Supervisor {
   // budget MAX_INCONCLUSIVE_PR_PROBES bounds. Cleared by any conclusive outcome and by
   // reclaim(), so it can never outlive the lane it belongs to.
   private readonly inconclusivePrProbes = new Map<string, number>();
+  // #617 (seam 3, capability DR #616): same bound peripheral.ts's RoleRunner uses for its own
+  // init-line poll (100ms/30s default) — see capturePreSpawnManifestForLane's own doc.
+  private readonly preSpawnCaptureTimeoutMs: number;
+  private readonly preSpawnCapturePollMs: number;
 
   constructor(private readonly deps: WorkerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "state");
@@ -1614,6 +1754,8 @@ export class WorkerSupervisor implements Supervisor {
     // the file is absent in hard mode rather than running an unguarded worker.
     this.guardHookPath = deps.guardHookPath ?? fileURLToPath(new URL("../guard/guard-hook.js", import.meta.url));
     this.pricing = loadPricingTable(deps.cfg);
+    this.preSpawnCaptureTimeoutMs = deps.preSpawnCaptureTimeoutMs ?? 30_000;
+    this.preSpawnCapturePollMs = deps.preSpawnCapturePollMs ?? 100;
     mkdirSync(this.dir, { recursive: true });
   }
 
@@ -1791,6 +1933,22 @@ export class WorkerSupervisor implements Supervisor {
           }
         : {}),
       ...(proxyHandle ? { mcpConfig: proxyHandle.mcpConfigJson } : {}),
+      // #617 (seam 1, capability DR #616): credentialFree ⇒ SEALED MCP surface, not merely a
+      // narrowed --allowedTools grant. Before this, a credentialFree leg's --mcp-config (the
+      // proxy's own server, set unconditionally above whenever proxyHandle exists) was ADDITIVE —
+      // every ambient host MCP server from settings sources still loaded and, per #616's live
+      // probe, remained CALLABLE regardless of --allowedTools (write/execution-class tools included,
+      // none reaching the guard hook) — worse than the documented steal.mjs residual this leg's
+      // env-stripping was meant to close. --strict-mcp-config (worker.ts's own probeLlmPing
+      // already uses it; also #285's review-session seal) makes --mcp-config EXCLUSIVE: the CLI
+      // loads ONLY the proxy's server, ignoring every other config source. credentialFree implies
+      // proxyHandle is defined here (a credentialFree mint failure REFUSES the dispatch above,
+      // before this call) — never a caller widening its OWN --mcp-config unsealed, since this
+      // field is fixed to the engine-composed proxy config regardless. Non-credentialFree paths
+      // (including an attached, non-credentialFree proxy) are byte-identical to before this seam:
+      // `--setting-sources` stays untouched here too (#616 §5: action-side vs. content-side, same
+      // ambient-CLAUDE.md posture as every other worker leg).
+      ...(opts?.proxy?.credentialFree ? { strictMcpConfig: true } : {}),
     });
     // detached: child is its own process-group leader -> reclaim can SIGKILL the whole tree.
     // SAPWOOD_GUARD_MODE in the spawn env reaches the hook subprocess (inherited from claude)
@@ -1829,6 +1987,7 @@ export class WorkerSupervisor implements Supervisor {
       estimatedCostUsd: 0,
       estimateBaselineUsd: 0,
       jsonlLegOffset: 0,
+      prompt,
       ...(proxyHandle ? { proxyHandle } : {}),
       ...(opts?.proxy?.credentialFree ? { ghConfigDir } : {}),
     };
@@ -1922,6 +2081,14 @@ export class WorkerSupervisor implements Supervisor {
       });
       this.touchHeartbeat(laneName);
       lane.hb = setInterval(() => this.heartbeatTick(laneName), this.hbMs);
+      // #617 (seam 3): fire-and-forget — never awaited, never delays this method's own return.
+      // See capturePreSpawnManifestForLane's own doc for why this can't simply await the same
+      // init-line poll peripheral.ts's RoleRunner does inline: dispatch() has never blocked on
+      // session completion (or even session init), and doing so here would be a far bigger
+      // behavior change than a diagnostic manifest justifies. Assigned onto `lane` (a PROMISE,
+      // not awaited) so onExit can chain onto it later regardless of how fast this lane exits —
+      // see Lane.manifestPreSpawnPromise's own doc for why a synchronous field would race.
+      lane.manifestPreSpawnPromise = this.capturePreSpawnManifestForLane(laneName, jsonlPath, resolve(this.worktreeRoot, laneName));
     }
     return { name: laneName, sessionId };
   }
@@ -2118,6 +2285,11 @@ export class WorkerSupervisor implements Supervisor {
             }
           : {}),
         ...(proxyHandle ? { mcpConfig: proxyHandle.mcpConfigJson } : {}),
+        // #617 (seam 1, capability DR #616): same seal as dispatch() — see that call site's own
+        // doc for the full rationale (additive vs. exclusive --mcp-config, the #616 live-probe
+        // evidence, the credentialFree-implies-proxyHandle invariant here too since a
+        // credentialFree mint failure REFUSES the resume above, before this call).
+        ...(opts?.proxy?.credentialFree ? { strictMcpConfig: true } : {}),
       });
       startedMs = this.now().getTime();
       runningMarker = {
@@ -2197,6 +2369,7 @@ export class WorkerSupervisor implements Supervisor {
       estimatedCostUsd: 0,
       estimateBaselineUsd,
       jsonlLegOffset,
+      prompt,
       ...(proxyHandle ? { proxyHandle } : {}),
       ...(opts?.proxy?.credentialFree ? { ghConfigDir } : {}),
     };
@@ -2285,6 +2458,12 @@ export class WorkerSupervisor implements Supervisor {
     if (this.lanes.has(name) && child.exitCode === null && child.signalCode === null) {
       this.touchHeartbeat(name);
       lane.hb = setInterval(() => this.heartbeatTick(name), this.hbMs);
+      // #617 (seam 3): same fire-and-forget capture dispatch() kicks off, same promise-on-`lane`
+      // handoff to onExit (see Lane.manifestPreSpawnPromise's own doc). A resumed lane's manifest
+      // OVERWRITES the prior leg's under the same (lane-name-keyed) recordContextManifest row —
+      // recordLaneContextManifest's own doc names this as the deliberate "most-recent-leg" scope,
+      // not a full per-leg history.
+      lane.manifestPreSpawnPromise = this.capturePreSpawnManifestForLane(name, jsonlPath, resolve(this.worktreeRoot, name));
     }
     return { name, sessionId };
   }
@@ -2526,12 +2705,152 @@ export class WorkerSupervisor implements Supervisor {
         lane.jsonlLegOffset,
       );
     }
+    // #617 (seam 3): the SAME "one place a lane truly terminates" property this method's own doc
+    // already leans on for proxy teardown/GH_CONFIG_DIR cleanup above — schedule the context
+    // manifest recording here too, regardless of `lane.reclaiming` (the process really did exit
+    // either way; only the SENTINEL write above is reclaim()'s to own, not manifest bookkeeping).
+    // Captures `jsonlPath`/`prompt` in closure BEFORE the lane is deleted below — the chained
+    // `.then()` runs whenever the in-flight pre-spawn capture settles, which may be AFTER this
+    // synchronous method returns (see scheduleContextManifestRecording's own doc for why this
+    // can't simply read a value off `lane` here).
+    this.scheduleContextManifestRecording(name, lane.jsonlPath, lane.prompt, lane.manifestPreSpawnPromise);
     this.lanes.delete(name);
     // #395 (gate② round 3): drop this lane's heartbeat gate along with the lane itself — onExit
     // is the one place a lane truly terminates (this method's own doc), so this is the one
     // place its cursor ever needs clearing; never left to grow unboundedly over a long-running
     // engine process's lifetime.
     this.heartbeatGates.delete(name);
+  }
+
+  /** #617 (seam 3, capability DR #616): the FILESYSTEM-derived half of a worker/producer leg's
+   *  context manifest, captured fire-and-forget right after a confirmed spawn (dispatch()/
+   *  resume() both assign the returned promise onto `lane.manifestPreSpawnPromise`, never
+   *  awaited inline — a worker lane's caller has never awaited session completion, or even
+   *  session init, and blocking either method here would be a far bigger behavior change than a
+   *  diagnostic manifest justifies). Same anchor peripheral.ts's RoleRunner already uses for its
+   *  9 peripheral call sites (the session's OWN init line, polled from its still-growing jsonl
+   *  via worker.ts's own waitForInitLine) and for the SAME reason (#236: a worktree-directory-
+   *  existence poll races checkout; a write-capable session — every worker leg is one, unlike
+   *  most peripheral roles — could otherwise have its CLAUDE.md-family sources captured AFTER
+   *  its own edits landed, recording "what it left behind" instead of "what it saw").
+   *
+   *  Returns `undefined` (never throws) on any failure — the caller (scheduleContextManifestRecording)
+   *  treats that as "nothing to record", the same as a lane that never reached the confirmed-alive
+   *  gate at all. */
+  private async capturePreSpawnManifestForLane(
+    name: string,
+    jsonlPath: string,
+    worktreePath: string,
+  ): Promise<PreSpawnManifestCapture | undefined> {
+    try {
+      const initObserved = await waitForInitLine(jsonlPath, this.preSpawnCaptureTimeoutMs, this.preSpawnCapturePollMs);
+      const captureBasis: PreSpawnManifestCapture["captureBasis"] = initObserved ? "init-observed" : "timeout-fallback";
+      const worktreeAppeared = existsSync(worktreePath);
+      const head = worktreeAppeared ? resolveWorktreeHead(join(worktreePath, ".git")) : null;
+      return capturePreSpawnManifestData(worktreePath, worktreeAppeared, captureBasis, head, this.guardHookPath, this.now().toISOString());
+    } catch (e) {
+      this.log(`[sapwood:context-manifest] lane ${name}: pre-spawn capture failed (non-fatal): ${String(e)}`);
+      return undefined;
+    }
+  }
+
+  /** #617 (seam 3): chains onto a lane's in-flight pre-spawn capture (started at dispatch()/
+   *  resume() time) and records the resulting ContextManifest once it settles — called from
+   *  onExit(), the ONE place a lane truly terminates, but deliberately NOT synchronous with it:
+   *  a fast-exiting lane's 'exit' event can fire before capturePreSpawnManifestForLane's
+   *  init-line poll has even completed its first tick, so reading a value off `lane` (already
+   *  deleted from `this.lanes` by the time the poll would resolve) synchronously inside onExit
+   *  would silently drop the manifest for exactly the sessions whose ambient-context drift
+   *  matters most to catch (a crash-fast worker leg). Fire-and-forget from onExit's own
+   *  perspective — onExit stays synchronous; this method's own promise chain resolves whenever
+   *  it resolves, independent of the lane's continued presence in `this.lanes`. `jsonlPath`/
+   *  `prompt` are passed explicitly (captured by the caller BEFORE lane deletion) rather than
+   *  re-read off a `Lane` object this method never assumes still exists. */
+  private scheduleContextManifestRecording(
+    name: string,
+    jsonlPath: string,
+    prompt: string,
+    preSpawnPromise: Promise<PreSpawnManifestCapture | undefined> | undefined,
+  ): void {
+    if (!preSpawnPromise) return; // lane never reached the confirmed-alive gate — capture never started
+    preSpawnPromise
+      .then((pre) => this.recordLaneContextManifest(name, jsonlPath, prompt, pre))
+      .catch((e) => this.log(`[sapwood:context-manifest] lane ${name}: pre-spawn capture promise rejected (non-fatal): ${String(e)}`));
+  }
+
+  /** #617 (seam 3): record a ContextManifest fingerprint for this producer leg — the SAME
+   *  assembleContextManifest shape peripheral.ts's RoleRunner already uses for its 9 peripheral
+   *  call sites, extended here rather than reimplemented (this repo's "one scanner, not a second
+   *  one" doctrine, #410's scanEgressSuspects precedent). Best-effort: a manifest is diagnostic,
+   *  never load-bearing, so any failure here (a state-write failure) is logged and swallowed.
+   *  Skipped entirely when `WorkerDeps.state` (or its `recordContextManifest`) was never
+   *  supplied — the SAME optional-dependency contract `WorkerDeps.state`'s own doc already
+   *  establishes — or when `pre` is undefined (the pre-spawn capture never completed or itself
+   *  failed; see capturePreSpawnManifestForLane's own doc).
+   *
+   *  KEY (ForgeProxyIdentity precedent, state.ts's own doc): `roundId: 0, phase: "worker"` — a
+   *  worker lane has no round concept WorkerSupervisor itself is threaded with, same sentinel
+   *  reasoning ForgeProxyIdentity's tick-driver mint already uses (`roundId: 0, phase: "tick"`).
+   *  `session` is the lane name; `attempt` is always `1` — the lane name already disambiguates a
+   *  fresh dispatch from a later resume of the SAME lane, and `recordContextManifest`'s own
+   *  UNIQUE-upsert contract (schema v13->v14) means a resume's manifest simply OVERWRITES the
+   *  prior leg's under the identical key, so this row always reflects the MOST RECENT leg's
+   *  fingerprint — a deliberate scope narrowing (one row per lane, not a full per-leg history),
+   *  not an oversight. `dirtyBasis` is always `"unknown-write-capable-session"` (or
+   *  `"worktree-missing"`) — never `"structural-no-write-tools"` — because every worker leg's
+   *  `--allowedTools` grant (WORKER_ALLOWED_TOOLS or its NO_GH variant) always carries `Write`/
+   *  `Edit`/`Bash(...)`, unlike most peripheral roles: the "no write-capable tool" case this
+   *  engine's dirty-derivation enum also carries structurally cannot apply to a worker lane. */
+  private recordLaneContextManifest(name: string, jsonlPath: string, prompt: string, pre: PreSpawnManifestCapture | undefined): void {
+    if (!this.deps.state?.recordContextManifest) return;
+    if (!pre) return;
+    try {
+      const jsonl = this.readJsonl(jsonlPath);
+      const init = parseSessionInit(jsonl);
+      const worktreePath = join(this.worktreeRoot, name);
+      const { toolUsage, readPaths } = parseToolUsage(jsonl, worktreePath);
+      const capturedPostExit = this.now().toISOString();
+      const manifest = assembleContextManifest({
+        sources: pre.sources,
+        probedPaths: pre.probedPaths,
+        knownUnprobed: KNOWN_UNPROBED_NOTE,
+        capturedPreSpawn: pre.capturedAt,
+        capturedPostExit,
+        captureBasis: pre.captureBasis,
+        model: init.model ?? this.deps.cfg.worker.model,
+        modelSource: init.model ? "session-init" : "requested-fallback",
+        cliBin: this.bin,
+        cliVersion: init.cliVersion,
+        toolInventoryTools: init.tools,
+        promptTemplateSource: prompt,
+        // #616 probe nuance: MCP tools arrive DEFERRED — a session's init `tools` array reports
+        // ZERO mcp__-prefixed entries even with 10 ambient servers actually loaded (schemas load
+        // async, after init). Reading `init.mcpServers` (the init report's SEPARATE `mcp_servers`
+        // field, name+status per server) is the actual "loaded/available surface" the manifest
+        // needs — NOT a naive `init.tools.filter(t => t.startsWith("mcp__"))`, which would always
+        // read empty for a worker leg and silently misrecord "no MCP tools". Same field
+        // peripheral.ts's assembleManifest already reads for the identical reason.
+        mcpTools: init.mcpServers.map((s) => `${s.name}:${s.status}`),
+        worktree: !pre.worktreeAppeared
+          ? { path: worktreePath, head: null, headResolution: "unresolved", dirty: true, dirtyBasis: "worktree-missing" }
+          : {
+              path: worktreePath,
+              head: pre.head,
+              headResolution: pre.head ? "resolved" : "unresolved",
+              dirty: true,
+              dirtyBasis: "unknown-write-capable-session",
+            },
+        settingsJson: JSON.stringify(guardSettings(this.guardHookPath)),
+        hookContent: pre.hookContent,
+        toolUsage,
+        readPaths,
+        recordedAt: capturedPostExit,
+      });
+      const key: ContextManifestKey = { roundId: 0, phase: "worker", role: "worker", session: name, attempt: 1 };
+      this.deps.state.recordContextManifest(key, JSON.stringify(manifest), capturedPostExit);
+    } catch (e) {
+      this.log(`[sapwood:context-manifest] lane ${name}: failed to assemble/record (non-fatal): ${String(e)}`);
+    }
   }
 
   /** The ~10 lines every terminal-transition path (onExit here, and #63's detached-lane

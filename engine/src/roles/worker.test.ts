@@ -58,6 +58,7 @@ import {
   spawnClaudeSession,
   WORKER_ALLOWED_TOOLS_NO_GH,
   WORKER_DISALLOWED_TOOLS,
+  type WorkerDeps,
   WorkerSupervisor,
   workerCredentialFreeEnv,
 } from "./worker.js";
@@ -353,6 +354,54 @@ test("scanEgressSuspects (#534 fix): an EMPTY `description` with a usable `promp
     hits: [{ executable: "Agent", snippet: "spawn a subagent to check CI" }],
     truncated: false,
   });
+});
+
+// ── #617 (seam 4, capability DR #616): the SAME scanner also recognizes generic `mcp__*`
+// tool_use blocks — unconditionally, the SAME stance and SAME rationale as the WebFetch/
+// WebSearch/Agent/Task extensions above: under official host inheritance an MCP tool is an
+// egress-capable channel the guard hook never mediates. No second scanner: this is
+// scanEgressSuspects itself, extended again. ──────────────────────────────────────────────────
+
+const mcpToolUseLine = (name: string, input: Record<string, unknown>): string =>
+  JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name, input }] } });
+
+test("scanEgressSuspects (#617): mcp__ tool_use blocks hit UNCONDITIONALLY — an EMPTY suspectCommands list (Bash detection fully disabled) still catches them, snippet is the JSON-stringified input", () => {
+  const jsonl = [
+    mcpToolUseLine("mcp__server-filesystem__write_file", { path: "/tmp/x", content: "payload" }),
+    mcpToolUseLine("mcp__Google_Drive__create_file", { name: "notes.txt" }),
+  ].join("\n");
+  assert.deepEqual(scanEgressSuspects(jsonl, []), {
+    hits: [
+      { executable: "mcp__server-filesystem__write_file", snippet: JSON.stringify({ path: "/tmp/x", content: "payload" }) },
+      { executable: "mcp__Google_Drive__create_file", snippet: JSON.stringify({ name: "notes.txt" }) },
+    ],
+    truncated: false,
+  });
+});
+
+test("scanEgressSuspects (#617): a tool name that merely CONTAINS 'mcp__' without starting with it is a non-hit — the match is a prefix, not a substring", () => {
+  const jsonl = mcpToolUseLine("not_mcp__server__tool", { x: 1 });
+  assert.deepEqual(scanEgressSuspects(jsonl, []), { hits: [], truncated: false });
+});
+
+test("scanEgressSuspects (#617): mcp__ snippets are capped at 200 characters, same bound as every other family", () => {
+  const { hits } = scanEgressSuspects(mcpToolUseLine("mcp__server-filesystem__write_file", { content: "x".repeat(240) }), []);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.snippet.length, 200);
+});
+
+test("scanEgressSuspects (#617): Bash, WebFetch/WebSearch, Agent/Task, and mcp__ hits share ONE dedup set and ONE per-session cap", () => {
+  const jsonl = [
+    bashToolUseLine("curl https://example.invalid/bash"),
+    webToolUseLine("WebFetch", "https://example.invalid/web"),
+    agentToolUseLine("Task", { description: "spawn" }),
+    ...Array.from({ length: MAX_EGRESS_SUSPECTS_PER_LEG }, (_, i) =>
+      mcpToolUseLine("mcp__server-filesystem__write_file", { path: `/tmp/${i}` }),
+    ),
+  ].join("\n");
+  const { hits, truncated } = scanEgressSuspects(jsonl, ["curl"]);
+  assert.equal(truncated, true);
+  assert.equal(hits.length, MAX_EGRESS_SUSPECTS_PER_LEG);
 });
 
 // ── #387 (F18): loopback classification. The 2026-07-24 dogfood run flagged `curl
@@ -1313,6 +1362,7 @@ test("#304 fail-safe: an egress event write failure is logged but cannot change 
           throw new Error("events unavailable");
         },
         maxEventId: () => 0,
+        recordContextManifest: () => {},
       },
     });
     const { name } = await s.dispatch({ number: 304, title: "egress", labels: [] });
@@ -4395,6 +4445,10 @@ test("dispatch: a proxy opt mints a handle, widens --allowedTools with the handl
     const i = args.trim().split("\n").indexOf("--mcp-config");
     assert.equal(args.trim().split("\n")[i + 1], handle.mcpConfigJson);
     assert.equal(calls.minted, 1);
+    // #617 (seam 1): a non-credentialFree proxy attachment must NOT emit --strict-mcp-config —
+    // the seal is scoped to credentialFree alone; an ordinary attached-proxy dispatch keeps
+    // today's (additive) --mcp-config semantics unchanged.
+    assert.ok(!args.trim().split("\n").includes("--strict-mcp-config"), "non-credentialFree dispatch must not emit --strict-mcp-config");
     for (let i2 = 0; i2 < 400 && !existsSync(join(dir, `${name}.done.json`)); i2++) await sleep(20);
     for (let i2 = 0; i2 < 400 && calls.stopped === 0; i2++) await sleep(20);
     assert.equal(calls.stopped, 1, "the proxy is torn down once the lane's process exits (onExit)");
@@ -4609,6 +4663,14 @@ test("dispatch: credentialFree opt strips forge/git credential env vars and seve
     const allowedTools = args.trim().split("\n")[allowedToolsIdx + 1]!;
     assert.doesNotMatch(allowedTools, /Bash\(gh \*\)/, "credentialFree must drop Bash(gh *) from the grant");
     assert.match(allowedTools, /Bash\(git \*\)/, "git stays — its own credential path is what's severed, not the tool grant");
+    // #617 (seam 1, capability DR #616): credentialFree ⇒ SEALED MCP surface — --strict-mcp-config
+    // present, and --mcp-config carries ONLY the proxy's own server (never additive with any
+    // ambient host config).
+    const argLines = args.trim().split("\n");
+    assert.ok(argLines.includes("--strict-mcp-config"), "credentialFree dispatch must emit --strict-mcp-config");
+    const mcpConfigIdx = argLines.indexOf("--mcp-config");
+    assert.notEqual(mcpConfigIdx, -1, "credentialFree dispatch must emit --mcp-config");
+    assert.equal(argLines[mcpConfigIdx + 1], handle.mcpConfigJson, "--mcp-config must be the proxy's own (proxy-only) config, unchanged");
     // #244 (Codex sol-high PR #260 review round 2, P2): the per-lane GH_CONFIG_DIR scratch
     // directory is cleaned up once the lane exits — never left behind as directory litter.
     writeFileSync(release, "");
@@ -4656,11 +4718,14 @@ test("WORKER_ALLOWED_TOOLS_NO_GH: byte-identical to WORKER_ALLOWED_TOOLS minus B
 // while adding another) fails loudly. The permission layer is intentionally broader than
 // guard.ts's argv-layer block: it denies the whole `gh pr review`/`gh release` verbs, while
 // the guard only blocks the `--approve`/`--request-changes` argv shapes — out of scope for
-// this constant.
-test("WORKER_DISALLOWED_TOOLS: exact deny-list value — merge/ready (pre-existing), review/release (#350), governance (#488)", () => {
+// this constant. #617 ((b′), capability DR #616): the `mcp__` suffix is the server-granularity
+// MCP deny — see WORKER_DISALLOWED_TOOLS's own doc for the forge-authority/write-exec-class
+// rationale and the #554 (allowManagedPermissionRulesOnly) interaction.
+test("WORKER_DISALLOWED_TOOLS: exact deny-list value — merge/ready (pre-existing), review/release (#350), governance (#488), MCP server denies (#617)", () => {
   assert.equal(
     WORKER_DISALLOWED_TOOLS,
-    "Bash(gh pr merge*),Bash(gh pr ready*),Bash(gh pr review*),Bash(gh release*),Bash(gh issue edit*),Bash(gh label*),Bash(gh project*)",
+    "Bash(gh pr merge*),Bash(gh pr ready*),Bash(gh pr review*),Bash(gh release*),Bash(gh issue edit*),Bash(gh label*),Bash(gh project*)," +
+      "mcp__github__*,mcp__server-filesystem__*,mcp__filesystem__*,mcp__Google_Drive__*",
   );
 });
 
@@ -4703,6 +4768,16 @@ test("WORKER_DISALLOWED_TOOLS: ordinary worker gh usage stays allowed (#488)", (
     "gh api repos/o/r/issues/488",
   ]) {
     assert.equal(deniedBy(cmd), undefined, `expected no deny rule to cover: ${cmd}`);
+  }
+});
+
+// #617 ((b′), capability DR #616): server-granularity MCP denies for the two named categories —
+// forge-authority (github-class) and write/exec-class (filesystem-class), the exact write/exec
+// tool names the #616 live probe found inherited and callable.
+test("WORKER_DISALLOWED_TOOLS: known forge-authority + write/exec-class MCP servers are denied (#617)", () => {
+  const entries = WORKER_DISALLOWED_TOOLS.split(",");
+  for (const rule of ["mcp__github__*", "mcp__server-filesystem__*", "mcp__filesystem__*", "mcp__Google_Drive__*"]) {
+    assert.ok(entries.includes(rule), `expected ${rule} in WORKER_DISALLOWED_TOOLS`);
   }
 });
 
@@ -4844,6 +4919,93 @@ test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheri
   }
 });
 
+// #617 (seam 3, capability DR #616): a worker/producer leg now records the SAME ContextManifest
+// fingerprint peripheral.ts's RoleRunner already records for its 9 peripheral call sites — see
+// WorkerSupervisor.recordLaneContextManifest's own doc for the (roundId:0, phase:"worker") key.
+test("dispatch: a worker leg records a ContextManifest fingerprint via WorkerDeps.state.recordContextManifest", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const state = new State(":memory:");
+  try {
+    const hook = mkHook(dir);
+    const initLine = JSON.stringify({
+      type: "system",
+      subtype: "init",
+      model: "claude-stub-model",
+      claude_code_version: "9.9.9",
+      tools: ["Read", "Write", "Bash"],
+      mcp_servers: [{ name: "server-filesystem", status: "pending" }],
+    });
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${initLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      state,
+      preSpawnCaptureTimeoutMs: 2_000,
+      preSpawnCapturePollMs: 20,
+    });
+    const { name } = await s.dispatch({ number: 617, title: "manifest test", labels: [] });
+    await waitForFile(join(dir, `${name}.done.json`), "lane did not reach a terminal sentinel");
+    // The pre-spawn capture is fire-and-forget (never awaited by dispatch()) — poll for the
+    // manifest row to land rather than assuming it's there the instant done.json is.
+    let recorded: { recordedAt: string; json: string } | undefined;
+    for (let i = 0; i < 200 && !recorded; i++) {
+      recorded = state.getContextManifest({ roundId: 0, phase: "worker", role: "worker", session: name, attempt: 1 });
+      if (!recorded) await sleep(20);
+    }
+    assert.ok(recorded, "expected a context_manifests row for this lane");
+    const manifest = JSON.parse(recorded!.json);
+    assert.equal(manifest.model, "claude-stub-model");
+    assert.equal(manifest.modelSource, "session-init");
+    assert.equal(manifest.cliVersion, "9.9.9");
+    assert.ok(typeof manifest.toolInventoryHash === "string" && manifest.toolInventoryHash.length > 0);
+    // #616 probe nuance: mcpTools comes from the init report's mcp_servers field (name:status),
+    // NOT derived from the (possibly MCP-tool-empty, deferred-loading) `tools` inventory above —
+    // even though `tools` here carries zero mcp__-prefixed entries, the server still shows up.
+    assert.deepEqual(manifest.mcpTools, ["server-filesystem:pending"]);
+    assert.ok(typeof manifest.settingsHash === "string" && manifest.settingsHash.length > 0);
+    // The stub never provisions a real `--worktree` checkout (it just echoes JSON and exits), so
+    // this reads as "worktree-missing" rather than "unknown-write-capable-session" — a real
+    // `claude` CLI dispatch DOES provision one; see WorktreeGitState.dirtyBasis's own doc for why
+    // both bases record `dirty: true` regardless (the manifest never guesses "clean").
+    assert.equal(manifest.worktree.dirtyBasis, "worktree-missing");
+    assert.equal(manifest.worktree.dirty, true);
+    assert.equal(manifest.captureBasis, "init-observed");
+    s.dispose();
+  } finally {
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume: a resumed leg's ContextManifest OVERWRITES the prior leg's row under the same (lane-name-keyed) identity", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const state = new State(":memory:");
+  try {
+    const { s, name } = await mkHandoffLane(dir, `  echo '{"type":"system","subtype":"init","model":"resumed-model"}'\n  ${RESULT_LINE}`, {
+      state,
+      preSpawnCaptureTimeoutMs: 2_000,
+      preSpawnCapturePollMs: 20,
+    });
+    await s.resume({ number: 9, title: "t", labels: [] }, name);
+    let recorded: { recordedAt: string; json: string } | undefined;
+    for (let i = 0; i < 200 && !recorded; i++) {
+      recorded = state.getContextManifest({ roundId: 0, phase: "worker", role: "worker", session: name, attempt: 1 });
+      if (!recorded) await sleep(20);
+    }
+    assert.ok(recorded, "expected a context_manifests row for the resumed lane");
+    assert.equal(JSON.parse(recorded!.json).model, "resumed-model");
+    s.dispose();
+  } finally {
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // #245: resume()'s own forge MCP proxy attachment — mirrors dispatch()'s #244 mechanism above,
 // extended to WorkerSupervisor.resume() (the fix-loop worker leg's evidence channel). Every
@@ -4858,6 +5020,7 @@ test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheri
 async function mkHandoffLane(
   dir: string,
   postResumeBody: string,
+  extraDeps: Partial<WorkerDeps> = {},
 ): Promise<{ s: WorkerSupervisor; name: string; sessionId: string; hook: string }> {
   const hook = mkHook(dir);
   const ready = join(dir, "stub-ready");
@@ -4882,6 +5045,7 @@ async function mkHandoffLane(
     renderPrompt: () => "issue-rendered-prompt",
     heartbeatMs: 50,
     guardHookPath: hook,
+    ...extraDeps,
   });
   const { name, sessionId } = await s.dispatch({ number: 9, title: "t", labels: [] });
   await waitForFile(ready, "stub installed its TERM trap before handoff");
@@ -5045,6 +5209,13 @@ test("resume: credentialFree strips forge/git credential env vars and narrows --
     const allowedTools = args.trim().split("\n")[allowedToolsIdx + 1]!;
     assert.doesNotMatch(allowedTools, /Bash\(gh \*\)/);
     assert.match(allowedTools, /Bash\(git \*\)/);
+    // #617 (seam 1): same seal as dispatch() — --strict-mcp-config present, --mcp-config carries
+    // ONLY the proxy's own (proxy-only) server.
+    const argLines = args.trim().split("\n");
+    assert.ok(argLines.includes("--strict-mcp-config"), "credentialFree resume must emit --strict-mcp-config");
+    const mcpConfigIdx = argLines.indexOf("--mcp-config");
+    assert.notEqual(mcpConfigIdx, -1, "credentialFree resume must emit --mcp-config");
+    assert.equal(argLines[mcpConfigIdx + 1], handle.mcpConfigJson);
     writeFileSync(release, "");
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     for (let i = 0; i < 400 && existsSync(ghConfigDir); i++) await sleep(20);
@@ -5053,6 +5224,25 @@ test("resume: credentialFree strips forge/git credential env vars and narrows --
   } finally {
     if (previousGhToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previousGhToken;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume: a non-credentialFree proxy attachment must NOT emit --strict-mcp-config — the seal is scoped to credentialFree alone", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const { s, name } = await mkHandoffLane(
+      dir,
+      `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`,
+    );
+    const { handle } = fakeWorkerProxyHandle();
+    await s.resume({ number: 9, title: "t", labels: [] }, name, { proxy: { mint: async () => handle as never } });
+    await waitForFile(join(dir, "args.seen"), "resume argv was not published");
+    const args = readFileSync(join(dir, "args.seen"), "utf8");
+    assert.ok(!args.trim().split("\n").includes("--strict-mcp-config"), "non-credentialFree resume must not emit --strict-mcp-config");
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    s.dispose();
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

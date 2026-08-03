@@ -18,20 +18,8 @@
 // diagnosable instead of silent. Still no probe/resume/escalation machinery: keep + record, and
 // the next round's retro tries again.
 import { randomUUID } from "node:crypto";
-import {
-  closeSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { homedir } from "node:os";
-import { join, relative, resolve, sep } from "node:path";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import { classifyEnvFailure, type EnvFailurePatterns, type EnvFailureSource } from "../loop/env-failure.js";
@@ -44,7 +32,9 @@ import { awaitSpawnConfirmation } from "../util/spawn-confirm.js";
 import {
   assembleContextManifest,
   type ContextManifest,
-  type RawContextSource,
+  capturePreSpawnManifestData,
+  KNOWN_UNPROBED_NOTE,
+  type PreSpawnManifestCapture,
   readAmbientSource,
   resolveWorktreeGitDir,
   resolveWorktreeHead,
@@ -59,7 +49,6 @@ import {
   guardSettings,
   hasQuotaErrorStatus,
   hasRejectedRateLimitEvent,
-  hasSessionInitLine,
   MAX_EGRESS_SUSPECTS_PER_LEG,
   parseCostUsdOrNull,
   parseModelUsage,
@@ -69,6 +58,7 @@ import {
   type SpawnedSession,
   scanEgressSuspects,
   spawnClaudeSession,
+  waitForInitLine,
   worktreeMaybeDirty,
 } from "./worker.js";
 
@@ -485,88 +475,6 @@ export interface RoleRunnerDeps {
 
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "jsonl"];
 
-/** #236: the FILESYSTEM-derived half of one session attempt's context manifest, captured by
- *  RoleRunner.capturePreSpawnManifestData right after the init-line anchor fires (or the bound
- *  times out) — see that method's doc. Combined with the POST-EXIT self-report half in
- *  RoleRunner.assembleManifest. */
-interface PreSpawnManifestCapture {
-  sources: RawContextSource[];
-  probedPaths: string[];
-  head: string | null;
-  /** False when the init-line-anchored capture ran but the worktree still didn't exist on disk
-   *  at that instant — a distinct fact from "worktree present but every source happened to be
-   *  absent" (Codex F5d). Independent of `captureBasis` below: a timeout-fallback capture can
-   *  still find a worktree that eventually appeared just after the bound expired, and (in
-   *  principle, for a very slow/broken CLI) an init-observed capture could still race a
-   *  not-yet-flushed worktree — this is a direct `existsSync` check at capture time, not an
-   *  inference from which basis fired. */
-  worktreeAppeared: boolean;
-  hookContent: string | null;
-  capturedAt: string;
-  /** Codex F1 (R1): which anchor actually fired — never silently assumed. `"init-observed"`:
-   *  the session's own init line was seen in its jsonl before the bound expired (the honest,
-   *  intended case). `"timeout-fallback"`: the bound expired with no init line ever observed
-   *  (a hung/crashed-before-init session, or a CLI slower than the configured bound) — capture
-   *  still proceeds (best-effort, never blocks the session), but the manifest names the
-   *  ambiguity rather than silently presenting it as equally reliable. */
-  captureBasis: "init-observed" | "timeout-fallback";
-}
-
-/** Codex F2b: the fixed, honest note every manifest carries naming what this module deliberately
- *  does NOT enumerate — see context-manifest.ts's module doc and ContextManifest.knownUnprobed's
- *  own doc for the full rationale. A single shared constant (not per-call prose) keeps this
- *  claim consistent across every manifest this engine ever writes. */
-const KNOWN_UNPROBED_NOTE =
-  "Deliberately NOT enumerated: @import directives inside any probed file, ancestor-directory " +
-  "CLAUDE.md files above the worktree root, and any managed/enterprise policy layer — this " +
-  "engine records the standard sources it can cheaply probe (see probedPaths), not Claude " +
-  "Code's full CLAUDE.md resolution graph.";
-
-/** Sorted `*.md` file names under `dirPath`, RECURSIVELY (Codex F2 residual, R2b — the original
- *  scan took only direct children, missing e.g. `.claude/rules/sub/nested.md`) — tolerant of a
- *  missing/unreadable directory (returns `[]`, never throws). Each entry is a path RELATIVE to
- *  `dirPath` (so a nested file reads as `"sub/nested.md"`, joinable back onto `dirPath` by the
- *  caller) — used for the `.claude/rules/` scan. Node's `recursive: true` readdir option
- *  requires Node 20.17+/22.2+; this engine's floor is Node >=24 (root `package.json`), so it's
- *  always available. */
-function listMarkdownFileNames(dirPath: string): string[] {
-  try {
-    return readdirSync(dirPath, { withFileTypes: true, recursive: true })
-      .filter((d) => d.isFile() && d.name.endsWith(".md"))
-      .map((d) => relative(dirPath, join((d.parentPath as string | undefined) ?? dirPath, d.name)))
-      .sort();
-  } catch {
-    return [];
-  }
-}
-
-/** Bounded poll of `jsonlPath` for the session's own init line — the synchronization primitive
- *  #236's pre-spawn manifest capture uses (Codex F1, R1). Resolves `true` the instant the line
- *  is observed, or `false` once `timeoutMs` elapses without it ever appearing (a hung/crashed-
- *  before-init session) — never throws, never waits longer than the bound. Reads the file fresh
- *  on every poll tick (the same tolerant, still-growing-file reader every other jsonl consumer
- *  in this codebase uses); a file that doesn't exist yet reads as `""`, not an error. */
-async function waitForInitLine(jsonlPath: string, timeoutMs: number, pollMs: number): Promise<boolean> {
-  // #403 (F25) per-site decision: DELIBERATE wall-clock read, kept. This is elapsed-time
-  // arithmetic over a REAL polling loop against a REAL file a REAL subprocess is writing —
-  // measuring how long that has actually taken is the whole job, and a seeded clock would either
-  // never expire or expire instantly. Nothing here is asserted against a seeded date; the only
-  // caller-visible output is a boolean whose timeout bound tests set explicitly.
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    let content = "";
-    try {
-      content = readFileSync(jsonlPath, "utf8");
-    } catch {
-      /* not created / not flushed yet — keep polling */
-    }
-    if (hasSessionInitLine(content)) return true;
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return false;
-    await sleep(Math.min(pollMs, remaining));
-  }
-}
-
 /** Build a peripheral session environment without forge credentials or git credential
  *  injection vectors. This is deliberately a denylist rather than a small allowlist: the
  *  Claude CLI may authenticate through Anthropic environment variables or user config, and
@@ -954,7 +862,14 @@ export class RoleRunner {
       const initObserved = await waitForInitLine(jsonlPath, this.preSpawnCaptureTimeoutMs, this.preSpawnCapturePollMs);
       const captureBasis: PreSpawnManifestCapture["captureBasis"] = initObserved ? "init-observed" : "timeout-fallback";
       const worktreeAppeared = existsSync(worktreePath);
-      const preSpawn = this.capturePreSpawnManifestData(worktreePath, worktreeAppeared, captureBasis);
+      const preSpawn = capturePreSpawnManifestData(
+        worktreePath,
+        worktreeAppeared,
+        captureBasis,
+        resolveWorktreeHead(worktreePath),
+        this.guardHookPath,
+        this.now().toISOString(),
+      );
 
       // #395 (gate② round 3, P1): this heartbeat must PROVE liveness, not just that its own
       // timer fired — an unconditional append (round 2's shape) keeps advancing
@@ -1297,66 +1212,6 @@ export class RoleRunner {
     return true;
   }
 
-  /** #236 (Codex F1/F2/F3, R1/R2 residual fixes): the FILESYSTEM-derived half of the context
-   *  manifest — read once the init-line anchor fires (see run()'s call site doc). Probes a
-   *  deliberately bounded, ENUMERATED set of standard CLAUDE.md-family sources (F2 ruling —
-   *  never the full resolution graph): `<worktree>/CLAUDE.md`, `<worktree>/CLAUDE.local.md`,
-   *  `<worktree>/.claude/CLAUDE.md` (Codex R2a — an officially documented layer the original F2
-   *  fix missed), every `*.md` RECURSIVELY under `<worktree>/.claude/rules/` (Codex R2b — the
-   *  original scan took only direct children), and the user-global CLAUDE.md — from
-   *  `$CLAUDE_CONFIG_DIR/CLAUDE.md` when that env var is set, else `~/.claude/CLAUDE.md` (Codex
-   *  R2c — the original hardcoded `homedir()` unconditionally, which is simply wrong when the
-   *  operator has relocated Claude Code's config dir). Every source is captured INLINE (F3 —
-   *  content-addressed, never a bare git-commit pointer, even for worktree-rooted files: a
-   *  write-capable session could still modify/add/remove/untrack one before its own commit, so
-   *  `gitCommit` here is ADVISORY metadata only, never a recoverability claim). `worktreeAppeared`
-   *  false means the worktree still wasn't on disk at the moment of capture — every source
-   *  therefore reads as absent for a real reason (there was nothing to read), which the caller
-   *  folds into a `"worktree-missing"` dirtyBasis rather than a plain "clean" or "dirty" guess. */
-  private capturePreSpawnManifestData(
-    worktreePath: string,
-    worktreeAppeared: boolean,
-    captureBasis: PreSpawnManifestCapture["captureBasis"],
-  ): PreSpawnManifestCapture {
-    const capturedAt = this.now().toISOString();
-    const probedPaths: string[] = [];
-    const sources: RawContextSource[] = [];
-    const head = resolveWorktreeHead(worktreePath);
-
-    const addSource = (label: string, path: string): void => {
-      probedPaths.push(path);
-      const r = readAmbientSource(path);
-      sources.push({
-        label,
-        path,
-        content: r.content,
-        ...(r.reason !== undefined ? { reason: r.reason } : {}),
-        ...(r.content !== null && head ? { gitCommit: head } : {}),
-      });
-    };
-
-    addSource("repo CLAUDE.md", join(worktreePath, "CLAUDE.md"));
-    addSource("repo CLAUDE.local.md", join(worktreePath, "CLAUDE.local.md"));
-    addSource("repo .claude/CLAUDE.md", join(worktreePath, ".claude", "CLAUDE.md"));
-
-    const rulesDirPath = join(worktreePath, ".claude", "rules");
-    probedPaths.push(join(rulesDirPath, "**", "*.md")); // recorded even if the directory is absent
-    for (const fileName of listMarkdownFileNames(rulesDirPath)) {
-      addSource(`repo .claude/rules/${fileName}`, join(rulesDirPath, fileName));
-    }
-
-    // Mutable, global — path known upfront (no worktree dependency at all), never git-pinned.
-    // CLAUDE_CONFIG_DIR (Codex R2c), when set, IS the effective user-global config directory —
-    // honoring it here is the difference between probing the real ambient source and a path
-    // that's simply wrong on any machine that relocated it.
-    const userConfigDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), ".claude");
-    addSource("user-global CLAUDE.md", join(userConfigDir, "CLAUDE.md"));
-
-    const hookRead = readAmbientSource(this.guardHookPath);
-
-    return { sources, probedPaths, head, worktreeAppeared, hookContent: hookRead.content, capturedAt, captureBasis };
-  }
-
   /** #236: the POST-EXIT half — the session's own stream-json self-report (worker.ts's
    *  parseSessionInit) plus the auto-memory source (its path is only knowable from that same
    *  report) — combined with the pre-spawn capture into the final manifest. */
@@ -1513,11 +1368,7 @@ export class RoleRunner {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-/** Like `sleep`, but stops waiting (and CLEARS the timer, so it stops holding the process open)
+/** Like a plain sleep, but stops waiting (and CLEARS the timer, so it stops holding the process open)
  *  the moment `signal` aborts. Resolves either way — the caller distinguishes the two outcomes by
  *  reading `signal.aborted`, so there is no rejection path to handle at a site whose whole job is
  *  best-effort cleanup. */
