@@ -95,10 +95,17 @@ export function parseCostUsdOrNull(jsonl: string): number | null {
  *  tools), or a structured Agent/Task tool_use block (the #534 subagent-spawn channel).
  *  `executable` names the Bash executable OR the literal tool name (`"WebFetch"`/`"WebSearch"`/
  *  `"Agent"`/`"Task"`); `snippet` is evidence, not a command/query/description to replay, and is
- *  capped so a single tool call cannot inflate the events ledger without bound. */
+ *  capped so a single tool call cannot inflate the events ledger without bound.
+ *
+ *  #387 (F18): `target` is present ONLY on a provably loopback-only hit (see
+ *  `classifyEgressTarget`). Its ABSENCE is the fail-closed default — "not proven loopback", which
+ *  covers real public egress AND every hit carrying no URL at all (a WebSearch query, an Agent
+ *  spawn description) — so a public-egress hit's payload is byte-identical to its pre-#387 shape
+ *  and nothing an operator should look at first ever loses prominence through a classifier bug. */
 export interface EgressSuspect {
   executable: string;
   snippet: string;
+  target?: "loopback";
 }
 
 const EGRESS_SNIPPET_MAX_CHARS = 200;
@@ -248,6 +255,48 @@ export interface EgressSuspectScan {
   truncated: boolean;
 }
 
+/** Every `scheme://authority` occurrence in a free-text snippet. Deliberately scheme-anchored:
+ *  the alternative (a generic `host[:port][/path]` token match) cannot tell a URL path segment
+ *  (`/foo.json`) from a bare hostname, and a mis-parsed path segment would either fabricate a
+ *  public host or, worse, let a public one hide. */
+const URL_IN_TEXT = /\b[a-z][a-z0-9+.-]*:\/\/([^\s/?#'"]+)/gi;
+/** `localhost` (and RFC 6761 `*.localhost`), the whole 127/8 block, and `::1` — bracketed or
+ *  bare, with or without an IPv4-mapped prefix. Anchored: `localhost.example.invalid` is a
+ *  PUBLIC lookalike, not loopback. */
+const LOOPBACK_HOST = /^(localhost|[^\s]+\.localhost|127(\.\d{1,3}){3}|\[?(::1|::ffff:127(\.\d{1,3}){3})\]?)$/i;
+
+/** Strips userinfo and port from a URL authority, keeping an IPv6 literal's brackets intact. */
+function authorityHost(authority: string): string {
+  const hostPort = authority.split("@").at(-1) ?? authority;
+  if (hostPort.startsWith("[")) {
+    const close = hostPort.indexOf("]");
+    return close === -1 ? hostPort : hostPort.slice(0, close + 1);
+  }
+  return hostPort.split(":")[0] ?? hostPort;
+}
+
+/** #387 (F18): classifies an egress hit's target as loopback-only, or leaves it UNCLASSIFIED.
+ *
+ *  Dogfood run 2026-07-24 flagged `curl http://127.0.0.1:5173/...` dev-server smoke checks
+ *  identically to real public egress (which the same run also caught — including a spoofed-UA
+ *  font download). The decision recorded in docs/security.md is TAG, never exclude: a loopback
+ *  hit is still journalled with full evidence, it just carries a marker so the prominent line in
+ *  a round artifact stays the public one.
+ *
+ *  Returns `"loopback"` only when the text contains at least one URL and EVERY one of them
+ *  targets loopback; otherwise `undefined`. The input is uncontrolled free text (a shell
+ *  fragment, a WebFetch url), so per this repo's doctrine on inferred text the matching is
+ *  deliberately narrow and the favoured failure direction is stated: a MISSED loopback URL
+ *  (schemeless `curl 127.0.0.1:5173`, an unusual literal) merely leaves a benign hit at today's
+ *  full prominence — the pre-#387 status quo. The opposite error, tagging something that reaches
+ *  the network as loopback, would DOWNGRADE a real egress signal, so every ambiguity resolves
+ *  against the tag: a mixed snippet, an unparseable authority, and text with no URL at all are
+ *  all unclassified. */
+export function classifyEgressTarget(text: string): "loopback" | undefined {
+  const hosts = [...text.matchAll(URL_IN_TEXT)].map((m) => authorityHost(m[1] ?? ""));
+  return hosts.length > 0 && hosts.every((h) => LOOPBACK_HOST.test(h)) ? "loopback" : undefined;
+}
+
 /** #304 / #410 / #534: scans `tool_use` blocks from stream-json and returns deduplicated egress
  *  hits — the ONE scanner for all three egress-shaped signal families this codebase has (#410's
  *  decision record: "the audit reuses the existing scanner... no second scanner is introduced"):
@@ -301,11 +350,16 @@ export function scanEgressSuspects(jsonl: string, suspectCommands: readonly stri
   const suspects = new Set(suspectCommands);
   const hits: EgressSuspect[] = [];
   const seen = new Set<string>();
-  const addHit = (executable: string, snippet: string): boolean => {
+  // #387: `text` is the FULL observed text; the snippet cap is applied here so classification
+  // always reads what the session actually asked for, never a 200-char prefix a public URL may
+  // have fallen off the end of. Dedup still keys on the (capped) snippet, exactly as before.
+  const addHit = (executable: string, text: string): boolean => {
+    const snippet = text.slice(0, EGRESS_SNIPPET_MAX_CHARS);
     const key = `${executable}\0${snippet}`;
     if (seen.has(key)) return false;
     seen.add(key);
-    hits.push({ executable, snippet });
+    const target = classifyEgressTarget(text);
+    hits.push(target ? { executable, snippet, target } : { executable, snippet });
     return hits.length === MAX_EGRESS_SUSPECTS_PER_LEG;
   };
   for (const line of jsonl.split("\n")) {
@@ -334,12 +388,12 @@ export function scanEgressSuspects(jsonl: string, suspectCommands: readonly stri
         for (const fragment of shellFragments(command)) {
           const executable = fragmentExecutable(fragment);
           if (!executable || !suspects.has(executable)) continue;
-          if (addHit(executable, fragment.slice(0, EGRESS_SNIPPET_MAX_CHARS))) return { hits, truncated: true };
+          if (addHit(executable, fragment)) return { hits, truncated: true };
         }
       } else if (b.name === "WebFetch" || b.name === "WebSearch") {
         const detail = (input as Record<string, unknown>)[b.name === "WebFetch" ? "url" : "query"];
         if (typeof detail !== "string") continue;
-        if (addHit(b.name, detail.slice(0, EGRESS_SNIPPET_MAX_CHARS))) return { hits, truncated: true };
+        if (addHit(b.name, detail)) return { hits, truncated: true };
       } else if (b.name === "Agent" || b.name === "Task") {
         // #534: same unconditional stance as WebFetch/WebSearch above — see this function's own
         // doc. Prefer `description` (the short human-readable summary) when non-empty, else
@@ -347,7 +401,7 @@ export function scanEgressSuspects(jsonl: string, suspectCommands: readonly stri
         const rec = input as Record<string, unknown>;
         const detail = (typeof rec.description === "string" && rec.description) || (typeof rec.prompt === "string" && rec.prompt) || null;
         if (detail === null) continue;
-        if (addHit(b.name, detail.slice(0, EGRESS_SNIPPET_MAX_CHARS))) return { hits, truncated: true };
+        if (addHit(b.name, detail)) return { hits, truncated: true };
       }
     }
   }

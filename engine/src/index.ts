@@ -148,6 +148,7 @@ export {
 export {
   buildRenderPrompt,
   type ClaudeArgsOpts,
+  classifyEgressTarget,
   claudeArgs,
   defaultPromptPath,
   discoverClaudeBin,
