@@ -7212,6 +7212,112 @@ test("#75 tick: removing the PAUSE sentinel restores dispatch on the very next t
   }
 });
 
+// ── #595 (redo of #365 against the #425 event-kind registry): issue/PR titles persisted onto
+// event payloads. The dashboard renders number tooltips from the ledger alone (never a live
+// GitHub read), so titles must be carried by the events themselves — sourced only from data the
+// same code path already fetched (no new forge calls). ────────────────────────────────────────
+
+test("#595 tick DISPATCH: the dispatched event carries the board row's issueTitle", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  forge.ready = [{ number: 7, title: "feat(engine): persist issue/PR titles", labels: ["prio:3-feature"] }];
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["dispatched"]);
+  assert.equal(events.length, 1);
+  assert.equal((events[0]!.payload as { issueTitle?: string }).issueTitle, "feat(engine): persist issue/PR titles");
+  st.close();
+});
+
+test("#595 tick DISPATCH: an issue with an empty title omits issueTitle rather than writing an empty string as if meaningful", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"] }];
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["dispatched"]);
+  assert.equal(events.length, 1);
+  assert.equal((events[0]!.payload as { issueTitle?: string }).issueTitle, "");
+  st.close();
+});
+
+test("#595 tick RECLAIM: reclaim-done into DRIVING carries the probe's prTitle", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55, prTitle: "fix(loop): drain before kill" };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending" };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-done"]);
+  assert.equal(events.length, 1);
+  assert.equal((events[0]!.payload as { next?: string }).next, "DRIVING");
+  assert.equal((events[0]!.payload as { prTitle?: string }).prTitle, "fix(loop): drain before kill");
+  st.close();
+});
+
+test("#595 tick RECLAIM: a probe without a prTitle (pre-#595 wiring / no title from the forge) omits the field rather than writing null", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending" };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-done"]);
+  assert.equal(events.length, 1);
+  assert.ok(!Object.hasOwn(events[0]!.payload as Record<string, unknown>, "prTitle"));
+  st.close();
+});
+
+test("#595 tick RECLAIM: a rescued (reclaim-failed -> DRIVING, env-classified with a clean worktree) lane carries prTitle too", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = {
+    ...DEFAULT_PROBE,
+    failed: true,
+    hasPr: true,
+    prNumber: 55,
+    prTitle: "feat: rescued lane",
+    failureText: "usage limit reached for this billing period",
+  };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending" };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-failed"]);
+  assert.equal(events.length, 1);
+  assert.equal((events[0]!.payload as { next?: string }).next, "DRIVING");
+  assert.equal((events[0]!.payload as { prTitle?: string }).prTitle, "feat: rescued lane");
+  st.close();
+});
+
+test("#595 tick RECLAIM: reclaim-dead rescued to DRIVING carries prTitle", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-dead", 4);
+  sup.probes["lane-dead"] = {
+    ...DEFAULT_PROBE,
+    hbAge: 99999,
+    wrapperAlive: 0,
+    hasPr: true,
+    prNumber: 60,
+    prTitle: "chore: dead lane's PR",
+  };
+  const gate = new FakeMergeGate();
+  gate.outcomes[60] = { kind: "queued", pr: 60, reason: "gate-pending" };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-dead"]);
+  assert.equal(events.length, 1);
+  assert.equal((events[0]!.payload as { rescued?: boolean }).rescued, true);
+  assert.equal((events[0]!.payload as { prTitle?: string }).prTitle, "chore: dead lane's PR");
+  st.close();
+});
+
 test("tick reclaim: handoff sentinel -> resumable, not killed", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

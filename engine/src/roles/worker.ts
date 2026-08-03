@@ -2682,6 +2682,7 @@ export class WorkerSupervisor implements Supervisor {
     const issue = this.laneIssue(name);
     let hasPr = false;
     let prNumber: number | undefined;
+    let prTitle: string | undefined;
     let prAssociationInconclusive = false;
     if (issue != null && this.deps.lanePr) {
       // #377: the lane's PR is resolved from what THIS lane structurally produced — its own
@@ -2700,7 +2701,11 @@ export class WorkerSupervisor implements Supervisor {
       const sessionOver = done || failed || handoff || wrapperAlive === 0;
       const outcome = await this.deps.lanePr({ name, issue, branch: this.laneBranch(name), sessionOver });
       hasPr = outcome.pr != null;
-      if (outcome.pr != null) prNumber = outcome.pr;
+      if (outcome.pr != null) {
+        prNumber = outcome.pr;
+        // #595: rides the SAME association read outcome — no extra forge call.
+        prTitle = outcome.title;
+      }
       // Budget only counts once settlement is actually possible (gate② round 5): while the lane
       // is still running the conductor classifies it KEEP no matter what this says, so spending
       // retries here could leave none for the one probe that does settle it. No write can even
@@ -2758,6 +2763,7 @@ export class WorkerSupervisor implements Supervisor {
       costUsd,
       modelUsage,
       ...(prNumber != null ? { prNumber } : {}),
+      ...(prTitle != null ? { prTitle } : {}),
       ...(liveTelemetry ? { liveTelemetry } : {}),
       ...(failureText !== undefined ? { failureText } : {}),
       ...(resultText !== undefined ? { resultText } : {}),

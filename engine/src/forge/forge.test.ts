@@ -1390,6 +1390,54 @@ test("parsePRStatus (#287, E4b): baseRefOid becomes PRStatus.baseOid — additiv
   assert.ok(!Object.hasOwn(withoutBase, "baseOid"));
 });
 
+test("parsePRStatus (#595): title becomes PRStatus.title — additive, older fixtures without it keep parsing with no title key at all", () => {
+  const withTitle = parsePRStatus(
+    JSON.stringify({
+      number: 21,
+      headRefOid: "d0ce0a5",
+      title: "feat(engine): persist issue/PR titles in event payloads",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SUCCESS" }],
+    }),
+  );
+  assert.equal(withTitle.title, "feat(engine): persist issue/PR titles in event payloads");
+
+  // Older fixture: no title field at all — must parse unaffected, title absent (not null).
+  const withoutTitle = parsePRStatus(
+    JSON.stringify({
+      number: 21,
+      headRefOid: "d0ce0a5",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SUCCESS" }],
+    }),
+  );
+  assert.equal(withoutTitle.title, undefined);
+  assert.ok(!Object.hasOwn(withoutTitle, "title"));
+});
+
+test("getPRStatus (#595): the gh pr view --json field list includes title", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify({
+      number: 21,
+      headRefOid: "abc",
+      title: "some title",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [],
+    });
+  };
+  const status = await forge.getPRStatus(21);
+  const jsonFlagIdx = seen[0]!.indexOf("--json");
+  assert.ok(seen[0]![jsonFlagIdx + 1]!.includes("title"));
+  assert.equal(status.title, "some title");
+});
+
 test("getPRStatus (#287): the gh pr view --json field list includes baseRefOid", async () => {
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
@@ -3406,18 +3454,23 @@ test("findLaneOwnedPr: another lane's marker-bearing PR mentioning this issue in
 
 type FakeCall = { kind: string; args: unknown[] };
 
-function fakeLanePrForge(prs: { number: number; body: string; branch?: string }[], opts: { branches?: string[]; nextPr?: number } = {}) {
+function fakeLanePrForge(
+  prs: { number: number; body: string; branch?: string; title?: string }[],
+  opts: { branches?: string[]; nextPr?: number } = {},
+) {
   const calls: FakeCall[] = [];
   const forge = {
     calls,
     prs,
     async listOpenPrsForBranch(branch: string) {
       calls.push({ kind: "listOpenPrsForBranch", args: [branch] });
-      return prs.filter((pr) => pr.branch === branch).map((pr) => ({ number: pr.number, body: pr.body }));
+      return prs
+        .filter((pr) => pr.branch === branch)
+        .map((pr) => ({ number: pr.number, body: pr.body, ...(pr.title !== undefined ? { title: pr.title } : {}) }));
     },
     async listOpenPrBodies() {
       calls.push({ kind: "listOpenPrBodies", args: [] });
-      return prs.map((pr) => ({ number: pr.number, body: pr.body }));
+      return prs.map((pr) => ({ number: pr.number, body: pr.body, ...(pr.title !== undefined ? { title: pr.title } : {}) }));
     },
     async updatePRBody(pr: number, body: string) {
       calls.push({ kind: "updatePRBody", args: [pr, body] });
@@ -3589,6 +3642,51 @@ test("associateLanePr (gate② round 3, P1): a DEFINITIVE no-association is conc
   assert.deepEqual(found, { pr: 372, inconclusive: false });
 });
 
+// ── #595 (redo of #365 against the #425 registry): LanePrOutcome.title rides whichever open-PR
+// list read already resolved the association — never a new forge call. ─────────────────────────
+
+test("associateLanePr (#595, a): the branch's PR already carries this lane's marker -> title comes from that SAME listOpenPrsForBranch read", async () => {
+  const forge = fakeLanePrForge([
+    { number: 372, title: "feat: the lane's own PR", body: prOwnerMarker("lane-294-a1b2c3d4", 294), branch: "feat/294-hold" },
+  ]);
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.equal(out.pr, 372);
+  assert.equal(out.title, "feat: the lane's own PR");
+});
+
+test("associateLanePr (#595, b): stamp-and-adopt carries the sole candidate's title too", async () => {
+  const forge = fakeLanePrForge([{ number: 372, title: "fix: the lane's PR", body: "## Why\n\nCloses #294", branch: "feat/294-hold" }]);
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.equal(out.pr, 372);
+  assert.equal(out.title, "fix: the lane's PR");
+});
+
+test("associateLanePr (#595, c): the engine-opened PR's title is the issue title it opened with (getIssueMeta), not a forge re-read", async () => {
+  const forge = fakeLanePrForge([], { branches: ["feat/294-hold"], nextPr: 372 });
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.equal(out.pr, 372);
+  assert.equal(out.title, "issue 294 title");
+  assert.equal(forge.calls.filter((c) => c.kind === "listOpenPrsForBranch" || c.kind === "listOpenPrBodies").length, 1);
+});
+
+test("associateLanePr (#595): marker-scan fallback (no branch known) also carries the matched PR's title", async () => {
+  const forge = fakeLanePrForge([
+    { number: 368, body: "retro digest mentioning #294" },
+    { number: 372, title: "feat: reclaimed lane's PR", body: `Closes #294\n\n${prOwnerMarker("lane-294-a1b2c3d4", 294)}` },
+  ]);
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: null, sessionOver: true });
+  assert.equal(out.pr, 372);
+  assert.equal(out.title, "feat: reclaimed lane's PR");
+});
+
+test("associateLanePr (#595): a PR with no title in the forge's response omits `title` from the outcome, never null", async () => {
+  const forge = fakeLanePrForge([{ number: 372, body: prOwnerMarker("lane-294-a1b2c3d4", 294), branch: "feat/294-hold" }]);
+  const out = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
+  assert.equal(out.pr, 372);
+  assert.equal(out.title, undefined);
+  assert.ok(!Object.hasOwn(out, "title"));
+});
+
 test("associateLanePr: a failed engine-side write degrades visibly (logged) instead of throwing out of probe()", async () => {
   const forge = fakeLanePrForge([{ number: 372, body: "Closes #294", branch: "feat/294-hold" }]);
   forge.updatePRBody = async () => {
@@ -3614,7 +3712,34 @@ test("listOpenPrsForBranch: branch-keyed gh read (--head), never an issue-number
   const argv = seen[0]!;
   assert.equal(argv[argv.indexOf("--head") + 1], "feat/294-hold");
   assert.equal(argv[argv.indexOf("--state") + 1], "open");
-  assert.ok(argv.includes("number,body"));
+  assert.ok(argv.includes("number,title,body"));
+});
+
+test("listOpenPrsForBranch (#595): title rides the SAME list read — present when gh returns one, omitted (not null) otherwise", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () =>
+    JSON.stringify([{ number: 372, title: "feat: lane's own PR", body: "b" }]);
+  const prs = await forge.listOpenPrsForBranch("feat/294-hold");
+  assert.equal(prs[0]!.title, "feat: lane's own PR");
+
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => JSON.stringify([{ number: 372, body: "b" }]);
+  const untitled = await forge.listOpenPrsForBranch("feat/294-hold");
+  assert.equal(untitled[0]!.title, undefined);
+  assert.ok(!Object.hasOwn(untitled[0]!, "title"));
+});
+
+test("listOpenPrBodies (#595): the gh pr list --json field list includes title, and it rides the same read", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify([{ number: 200, title: "fix: bug", body: "Fixes #171" }]);
+  };
+  const prs = await forge.listOpenPrBodies();
+  assert.ok(seen[0]!.includes("number,title,body"));
+  assert.equal(prs[0]!.title, "fix: bug");
 });
 
 test("updatePRBody: writes through `gh pr edit --body` (a PR-scoped write, never `gh issue edit`)", async () => {

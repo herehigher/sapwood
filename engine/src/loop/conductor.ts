@@ -312,6 +312,16 @@ export function metaLaneAllowed(L: number, curNoncoding: number, codingWaiting: 
   return curNoncoding < cap || codingWaiting === 0;
 }
 
+/** #595: the `prTitle` fragment for a reclaim event's payload — present only when the probe
+ *  actually carried a title (LaneProbe.prTitle, sourced from forge.ts's LanePrOutcome.title, the
+ *  SAME open-PR list read that resolved the PR number — never an extra call). Omitted (not
+ *  null) otherwise, so a payload written before #595, or by a forge wiring whose PR read returns
+ *  no title, is byte-for-byte what it always was, and every reader that never asks for the key
+ *  is unaffected (no migration). */
+function prTitlePayload(p: Pick<LaneProbe, "prTitle">): { prTitle?: string } {
+  return p.prTitle != null ? { prTitle: p.prTitle } : {};
+}
+
 export type ReclaimDone = "DRIVING" | "ESCALATE_NOPR";
 /** Coding worker finished: has PR -> DRIVING (lane held, enter drive); else ESCALATE_NOPR (fail-safe). */
 export function laneOnReclaimDone(hasPr: boolean): ReclaimDone {
@@ -1159,6 +1169,13 @@ export interface LaneProbe {
    *  with hasPr=true but no prNumber known keeps hasPr's rescue behavior but can't be driven
    *  through gates until a number is available (tick's fail-safe below escalates it). */
   prNumber?: number;
+  /** #595: the open PR's title, when the forge association read that resolved `prNumber` also
+   *  carried one (forge.ts's `LanePrOutcome.title` — the SAME open-PR list read, never an extra
+   *  call). Persisted onto the lane's reclaim event so the dashboard can render a PR-number
+   *  tooltip straight from the ledger, offline and in replay (frontend-design §3 C / §11).
+   *  Optional: absent when the underlying forge response had no title, or for probe fixtures
+   *  that predate #595. */
+  prTitle?: string;
   /** #377 (gate② round 3): the lane's PR association is UNKNOWN — a forge WRITE it depended on
    *  failed (a 502 on `gh pr create`, a 403 on the marker stamp) — as opposed to a definitive
    *  "this lane has no PR". The reclaim loops DEFER a lane flagged this way instead of settling
@@ -2393,7 +2410,7 @@ async function reclaimTerminalLane(
       );
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
     }
-    state.appendEvent("reclaim-done", { worker: w.name, issue: w.issue, next });
+    state.appendEvent("reclaim-done", { worker: w.name, issue: w.issue, next, ...prTitlePayload(p) });
     return { kind: "done", worker: w.name, issue: w.issue, next, costUsd, modelUsage };
   }
   if (cls === "FAILED") {
@@ -2506,7 +2523,7 @@ async function reclaimTerminalLane(
         { ...w, state: "driving", ended_at: rescuedAt, pr: p.prNumber ?? w.pr ?? null, ...fixingPinClear },
         { worker: w.name, issue: w.issue, usd: costUsd, at: rescuedAt, models: modelUsage },
       );
-      state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next: "DRIVING" });
+      state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next: "DRIVING", ...prTitlePayload(p) });
       return { kind: "failed", worker: w.name, issue: w.issue, next: "DRIVING", costUsd, modelUsage };
     }
     let next = laneOnReclaimFailed(p.hasPr);
@@ -2546,7 +2563,7 @@ async function reclaimTerminalLane(
         { worker: w.name, issue: w.issue, usd: costUsd, at: failedAt, models: modelUsage },
       );
     }
-    state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next });
+    state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next, ...prTitlePayload(p) });
     return { kind: "failed", worker: w.name, issue: w.issue, next, costUsd, modelUsage };
   }
   return null; // KEEP or DEAD — not a terminal sentinel; caller handles it
@@ -3291,7 +3308,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         ),
       );
     }
-    state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
+    state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued, ...prTitlePayload(p) });
     reclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued, costUsd, modelUsage });
   }
 
@@ -3377,7 +3394,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       );
     }
     const rescued = p.hasPr && !r.worktreeRetained;
-    state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
+    state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued, ...prTitlePayload(p) });
     fixingReclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued, costUsd, modelUsage });
   }
 
@@ -4997,10 +5014,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // (state.registerCanaryDispatch) — a crash can no longer leave a live canary the
       // restarted engine doesn't know about (which would break "exactly one canary").
       if (parkActive) {
-        state.registerCanaryDispatch(workerRow, "llm");
+        state.registerCanaryDispatch(workerRow, "llm", issue.title);
       } else {
         state.upsertWorker(workerRow);
-        state.appendEvent("dispatched", { worker: name, issue: issue.number });
+        // #595: `issueTitle` comes from THIS tick's board row — the same `getReadyIssues` read
+        // that selected the issue, never a second query. The dashboard's issue-number tooltips
+        // (frontend-design §3 C) read it straight off the ledger, so they work offline/in replay.
+        state.appendEvent("dispatched", { worker: name, issue: issue.number, issueTitle: issue.title });
       }
       inFlightIssues.add(issue.number);
       lanesUsed++;

@@ -1562,6 +1562,29 @@ test("park (P2-A): registerCanaryDispatch is ATOMIC — worker row + canary assi
   s.close();
 });
 
+test("#595: registerCanaryDispatch's dispatched event carries issueTitle when the caller supplies one, and omits it (never null) when not", () => {
+  const s = mem();
+  s.enterPark("llm", "rate_limit_error", 42, "2026-07-14T00:00:00Z");
+  s.registerCanaryDispatch(
+    { name: "lane-1", issue: 42, session_id: "sess-1", state: "running", started_at: "2026-07-14T00:01:00Z", ended_at: null },
+    "llm",
+    "feat: canary lane's issue",
+  );
+  const withTitle = s.eventsSince("2020-01-01T00:00:00Z", ["dispatched"]);
+  assert.equal(withTitle.length, 1);
+  assert.equal((withTitle[0]!.payload as { issueTitle?: string }).issueTitle, "feat: canary lane's issue");
+
+  s.setParkCanary("llm", null);
+  s.registerCanaryDispatch(
+    { name: "lane-2", issue: 42, session_id: "sess-2", state: "running", started_at: "2026-07-14T00:02:00Z", ended_at: null },
+    "llm",
+  );
+  const events = s.eventsSince("2020-01-01T00:00:00Z", ["dispatched"]);
+  assert.equal(events.length, 2);
+  assert.ok(!Object.hasOwn(events[1]!.payload as Record<string, unknown>, "issueTitle"));
+  s.close();
+});
+
 test("#223: settleTerminalWorker is ATOMIC — the terminal worker row + its settled spend row land together; a failure inside the transaction rolls back BOTH (never terminal-without-spend)", () => {
   const s = mem();
   s.upsertWorker({ name: "lane-1", issue: 10, session_id: "s1", state: "running", started_at: "t0", ended_at: null });
