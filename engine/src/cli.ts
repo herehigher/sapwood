@@ -37,7 +37,7 @@ import {
   type StartupOrphan,
   sweepStaleRoleSessions,
 } from "./loop/reconcile.js";
-import { type PeripheralPhase, type RoundStopHit, type RoundsResult, runRounds } from "./loop/round.js";
+import { type PeripheralPhase, RoundScopedForge, type RoundStopHit, type RoundsResult, runRounds } from "./loop/round.js";
 import { createDefaultPeripherals } from "./loop/round-defaults.js";
 import { detectConsecutiveStalls } from "./loop/stall-breaker.js";
 import { createProxyMint } from "./proxy/mint.js";
@@ -347,7 +347,9 @@ export function runValidate(argv: string[]): { stdout: string; stderr: string; c
  *  round-5 P2). The preview assumes an empty lane set (a fresh round — the first-run
  *  trust-ramp context); it doesn't read live occupancy, in-flight dedup, or the meta-floor
  *  anti-starvation accounting, which need engine state a dry run deliberately doesn't touch,
- *  so it stays a rough upper bound, not a replay of the exact next tick. */
+ *  so it stays a rough upper bound, not a replay of the exact next tick. The other half of real
+ *  eligibility — cfg.round.milestone scoping — is applied by the CALLER's forge (runDryRun wraps
+ *  in RoundScopedForge, #561), so `ready` here is already the in-scope pool. */
 export interface DryRunPreview {
   readyCount: number;
   /** After orderForDispatch's eligibility filter — the pool candidates are drawn from. */
@@ -404,7 +406,12 @@ export async function runDryRun(overrides: Pick<EngineOverrides, "cfg" | "forge"
   // own comment.
   buildRenderFixPrompt(cfg);
   loadPricingTable(cfg); // #33 follow-up: a broken worker.pricingFile surfaces here too
-  const forge = overrides.forge ?? new GithubForge(cfg);
+  const inner = overrides.forge ?? new GithubForge(cfg);
+  // #561: milestone scoping is part of REAL dispatch eligibility — the rounds driver reads Ready
+  // through this same wrapper (round.ts), so an unscoped preview both prices issues the run would
+  // never dispatch and hides the actual in-scope pool. Reusing the wrapper (not the driver) keeps
+  // runDryRun driver-agnostic: undefined milestone stays plain passthrough.
+  const forge = cfg.round.milestone ? new RoundScopedForge(inner, cfg.round.milestone) : inner;
   const preview = computeDryRunPreview(await forge.getReadyIssues(), cfg);
   process.stdout.write(formatDryRunPreview(preview));
   return 0;
