@@ -121,7 +121,7 @@ Per-worker execution.
 |---|---|---|
 | `model` | `opus` | Model the headless worker runs as. `reviewer.agent.model` defaults one tier ABOVE it (`fable`, #582 option (a)) so the gate sits at or above the producer — see [Reviewer tier vs. worker tier](#reviewer-tier-vs-worker-tier). |
 | `effort` | `high` | `low` \| `medium` \| `high`. |
-| `fallbackModel` | `sonnet` | Model passed to Claude's `--fallback-model` when the primary is unavailable. **At the shipped defaults this equals `model`**, so out of the box there is no silent downgrade on an unavailable primary; raise `model` to `opus` and this becomes a real one-tier-down fallback again. Set to literal `"none"` to omit the flag and fail loud rather than silently downgrade quality; the environment-failure handling path is documented in [#168](https://github.com/herehigher/sapwood/issues/168). |
+| `fallbackModel` | `sonnet` | Model passed to Claude's `--fallback-model` when the primary is unavailable. **At the shipped defaults (`model: opus`, `fallbackModel: sonnet`) this is already a real one-tier-down fallback**, not a no-op — an unavailable primary silently downgrades to `sonnet` out of the box. Set to literal `"none"` to omit the flag and fail loud rather than silently downgrade quality; the environment-failure handling path is documented in [#168](https://github.com/herehigher/sapwood/issues/168). |
 | `timeoutSec` | `3600` | Wall-clock hard cap per worker (enforced). |
 | `budgetUsdSoft` | `10` | **Soft** per-worker USD budget, auto-enforced via a live token-usage estimate (stream-json carries no in-progress real cost). Crossing it triggers a graceful handoff (commit + push WIP, progress note, `.handoff` sentinel, clean exit) — never a mid-work kill. The estimate is a per-model rate-table approximation (see `pricingFile` below), reconciled (logged, not enforced) against the real cost when the worker finishes; `timeoutSec` plus the engine's hard `cost` ceiling below remain the actual backstop. **This default is calibrated for small-to-medium work and does not fit every model/effort profile** — see [Calibrating `budgetUsdSoft`](#calibrating-budgetusdsoft) below before running substantive issues, especially at the shipped `worker.model: opus` default, which is the profile this section's figures were measured on. |
 | `maxResumes` | `2` | Maximum fresh worker legs after the initial leg hands off. RESUME runs before DISPATCH, keeps the issue In Progress, and reuses the same session/worktree; each leg gets a fresh `budgetUsdSoft`. `0` disables automatic resume. Once exhausted, the handoff is latched and escalated once to `needs-human`. Total per-issue soft-budget exposure is bounded by `budgetUsdSoft × (1 + maxResumes)`, still under the engine-wide daily cap. |
@@ -152,7 +152,8 @@ and `maxResumes` picked the work back up. The cap was simply below the cost of t
 each leg's reconciled real `total_cost_usd` and found the estimate consistently OVER-predicts,
 by **+10% to +77% per leg**, worst on small legs (batch-2 mean +23%). Practical effect:
 `budgetUsdSoft` is denominated in *estimated* dollars, so a cap sized to a target *real*
-per-leg spend needs headroom for this bias — at the shipped `budgetUsdSoft: 20`,
+per-leg spend needs headroom for this bias — at the recommended `budgetUsdSoft: 20` (the
+raise this section's own guidance below suggests for the shipped `opus`/`high` profile),
 [#399](https://github.com/herehigher/sapwood/issues/399) saw the soft handoff fire at roughly
 **$15 real** spend, twice. **Translation:** size the nominal cap at roughly **target real
 per-leg spend × ~1.3** (the batch-2–4 mean) as a starting point, not a guarantee — the bias is
