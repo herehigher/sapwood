@@ -441,6 +441,9 @@ export class RoundScopedForge implements IForge {
   addPRLabel(pr: number, label: string) {
     return this.inner.addPRLabel(pr, label);
   }
+  removePRLabel(pr: number, label: string) {
+    return this.inner.removePRLabel(pr, label);
+  }
   openPR(branch: string, title: string, body: string) {
     return this.inner.openPR(branch, title, body);
   }
@@ -641,6 +644,9 @@ export class PoolScopedForge implements IForge {
   addPRLabel(pr: number, label: string) {
     return this.inner.addPRLabel(pr, label);
   }
+  removePRLabel(pr: number, label: string) {
+    return this.inner.removePRLabel(pr, label);
+  }
   openPR(branch: string, title: string, body: string) {
     return this.inner.openPR(branch, title, body);
   }
@@ -819,7 +825,14 @@ export class PoolScopedForge implements IForge {
  *     is that it accepts nothing but `roundPool`.
  *
  *  Everything else — `blocked`, `plan:approved`, `verify:n/a`, and `needs-human` outside the
- *  proven-and-authorized case above — remains removable by a human only. */
+ *  proven-and-authorized case above — remains removable by a human only.
+ *
+ *  THE PR-SIDE TWIN (#399). The three paths above are the complete list for `forge.removeLabel`,
+ *  which addresses ISSUES. The separate `forge.removePRLabel` has its own single authorized
+ *  caller — `lane-state-label.ts`'s `removeLaneStateLabel`, which fails closed for any label but
+ *  `cfg.labels.laneState` exactly as this function does for `roundPool`, because `deriveGate`
+ *  reads `needs-human`/`blocked`/the hold labels off a PR's OWN labels. Listed here rather than
+ *  merged into the numbering above so each method's list stays the whole truth about that method. */
 export async function removeRoundPoolLabel(forge: IForge, cfg: SapwoodConfig, issue: number, label: string): Promise<void> {
   if (!labelsInclude([label], cfg.labels.roundPool)) {
     throw new Error(

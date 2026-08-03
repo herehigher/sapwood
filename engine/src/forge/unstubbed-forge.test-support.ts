@@ -75,6 +75,7 @@ const IFORGE_MEMBERS = [
   "openPR",
   "readStartupReconcileData",
   "removeLabel",
+  "removePRLabel",
   "replyToReviewThread",
   "resolveReviewThread",
   "searchIssues",
