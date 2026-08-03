@@ -980,6 +980,34 @@ after it merges**. The escalation closes that: the edit cannot reach autonomous 
 un-vetted reviewer instruction ever becomes the authority for a later round. What it does not and
 cannot do is make an in-flight review notice the change.
 
+### The mechanism's own carriers join the escalation surface too (#539)
+
+Live evidence for why this matters: PR #538 (#527, P1 security) merged with zero human eyes,
+touching the #292 matcher itself (`engine/src/review/instruction-path-escalation.ts`), the
+`escalation.instructionPaths` defaults (`engine/src/config/config.ts`), and this file. None of the
+three were on any escalation or human-merge-only list, so the merge was compliant with the letter —
+a PR gutting the matcher or shrinking the defaults would have reached autonomous merge the same
+way. (That instance was benign; the finding is the reachable class.) The owner ruling (comment
+5160942433) put these three paths in the **escalation surface**, alongside the two carrier families
+above — not the guard deny-list: the worker may still produce a change here, a human adjudicates
+the merge.
+
+**Say the self-reference honestly (SAID — Self-Applies-Its-own-Defenses).** The escalation list now
+protects the file that implements it and the file that carries its own defaults. That is
+deliberate, not circular: `escalateInstructionPathChanges` evaluates every PR against the
+**deployed** config (the version the engine loaded at construction), never against the PR's own
+diff. A PR that edits these three paths is checked against the instruction-path list as it exists
+on `main` *before* that PR merges — so once this protection itself is deployed, an in-flight edit to
+the matcher or its defaults is caught by the very entries this PR adds.
+
+**The exposure window is exactly one bootstrap PR, not an ongoing gap.** Before these three paths
+were deployed in `escalation.instructionPaths`, nothing stopped an autonomous merge to any of them
+(the #538 evidence above). The PR that first adds them (this one, #539) is necessarily evaluated
+against the OLD deployed defaults — which do not yet cover its own diff — so it is the one PR that
+cannot be protected by its own change. Every PR after it merges is covered. This is why #539 is
+itself human-merge-expected: the engine has no config-side signal to escalate its own bootstrap PR,
+so the merge decision for this one PR is a human responsibility, not an engine one.
+
 ## Human-merge-only paths
 
 Some files are structurally off-limits to an autonomous worker because changing them

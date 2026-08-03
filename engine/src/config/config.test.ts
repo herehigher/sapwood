@@ -92,6 +92,14 @@ test("#292: escalation.instructionPaths has trust-chain defaults, is configurabl
     // #527: the reviewer's own prompt carrier. Inert for any target repo that isn't the engine's
     // own source tree; closes the carrier for a self-hosting deployment.
     "engine/prompts/**",
+    // #539: the mechanism's own carriers — the matcher/escalation implementation itself, and the
+    // config file carrying the `escalation.*` schema block + these very defaults. A PR gutting
+    // either would previously reach autonomous merge (#538 was the reachable, if benign, instance).
+    "engine/src/review/instruction-path-escalation.ts",
+    "engine/src/config/config.ts",
+    // #539: docs/security.md carries the canonical human-merge-only list and documents this
+    // mechanism's own trust chain — the same self-reference class as the two paths above.
+    "docs/security.md",
   ]);
   assert.deepEqual(
     parseConfig(`${base}escalation: { instructionPaths: ["**/AGENTS.md", instructions/*.md] }`).escalation.instructionPaths,
