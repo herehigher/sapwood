@@ -33,7 +33,7 @@ async function driveVerdictSeam(opts: {
   runId: string;
   acStatuses: ("confirmed" | "cannot-confirm" | "claim-accepted")[];
   findings: Record<string, unknown>[];
-}): Promise<{ state: State; cleanup: () => void }> {
+}): Promise<{ state: State; production: ReturnType<typeof makeProductionEngineAgent>; cleanup: () => void }> {
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 1 },
     worker: { model: "sonnet" },
@@ -126,6 +126,7 @@ async function driveVerdictSeam(opts: {
   );
   return {
     state,
+    production,
     cleanup: () => {
       state.close();
       rmSync(gcParent, { recursive: true, force: true });
@@ -181,6 +182,85 @@ test("#489 a decisive APPROVED engine-agent verdict emits the same event — the
       findingCount: 0,
       perAC: { confirmed: 2, "cannot-confirm": 0, "claim-accepted": 0 },
     });
+  } finally {
+    seam.cleanup();
+  }
+});
+
+// ── #612: engine-agent review-session spend must reach spend_ledger at verdict finalization ────
+// Before this, a review session's cost lived ONLY inside engine_review_wal.review_artifact_json
+// .sessionSpends — invisible to cost.roundBudgetUsd/dailyBudgetUsd (both plain SUM(usd) reads
+// over spend_ledger) and every ledger-based report.
+
+test("#612 a decisive engine-agent verdict records the review session's own spend to spend_ledger, model = reviewer identity", async () => {
+  const seam = await driveVerdictSeam({
+    tag: "verdict-spend",
+    runId: "run-612-spend",
+    acStatuses: ["confirmed", "confirmed"],
+    findings: [],
+  });
+  try {
+    assert.equal(seam.state.spentUsdForWorker("lane-12:engine-review"), 0.1);
+    const rows = seam.state.spendPage(0, 10).filter((r) => r.worker === "lane-12:engine-review");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.issue, 12);
+    assert.equal(rows[0]!.usd, 0.1);
+    // driveVerdictSeam's session runner reports modelUsage [{ model: "opus" }] — the ClaudeReview
+    // SessionExecutor turns that into the (provider, model) identity { anthropic, opus }.
+    assert.equal(rows[0]!.model, "anthropic/opus");
+  } finally {
+    seam.cleanup();
+  }
+});
+
+test("#612 review-session spend lands under a DIFFERENT ledger key than the lane's own name — never contaminates D5's getWorkerActualModels read", async () => {
+  const seam = await driveVerdictSeam({
+    tag: "verdict-spend-no-contaminate",
+    runId: "run-612-no-contaminate",
+    acStatuses: ["confirmed", "confirmed"],
+    findings: [],
+  });
+  try {
+    // Seeded by the harness (state.recordWorkerActualModel("lane-12", "sonnet")) as the
+    // PRODUCING worker's own actual model. The reviewer session ran as "opus" — if the review's
+    // spend had been recorded under the lane's own name, this read would incorrectly pick up
+    // "anthropic/opus" too, and engine-agent.ts's D5 pre-check would then see the reviewer's own
+    // configured model overlapping "the worker's own actual models" on this lane's NEXT review
+    // attempt (a fix-round re-review), fail-closed forever.
+    assert.deepEqual(seam.state.getWorkerActualModels(12), ["sonnet"]);
+  } finally {
+    seam.cleanup();
+  }
+});
+
+test("#612 cost ceilings (roundBudgetUsd/dailyBudgetUsd) see the review session's spend — both read spend_ledger as a global, worker-unfiltered sum", async () => {
+  const seam = await driveVerdictSeam({
+    tag: "verdict-spend-ceiling",
+    runId: "run-612-ceiling",
+    acStatuses: ["confirmed", "confirmed"],
+    findings: [],
+  });
+  try {
+    assert.equal(seam.state.spentUsdAfterId(0), 0.1);
+  } finally {
+    seam.cleanup();
+  }
+});
+
+test("#612 a replayed recordWalDecisiveOutcome call (same runId) never double-books the review session's spend", async () => {
+  const seam = await driveVerdictSeam({
+    tag: "verdict-spend-replay",
+    runId: "run-612-replay",
+    acStatuses: ["confirmed", "confirmed"],
+    findings: [],
+  });
+  try {
+    // driveOne already drove one real decisive verdict (recordWalDecisiveOutcome fired once).
+    // Simulate the SAME crash-replay shape #489's own dedup test exercises: the engine died
+    // between the event append and the WAL write, so this exact runId reaches the call again.
+    seam.production.driveDepsForLane(seam.state.getWorker("lane-12")!, 7).recordWalDecisiveOutcome("run-612-replay", "approved");
+    assert.equal(seam.state.spentUsdForWorker("lane-12:engine-review"), 0.1, "replay must not double the ledgered spend");
+    assert.equal(seam.state.spendPage(0, 10).filter((r) => r.worker === "lane-12:engine-review").length, 1);
   } finally {
     seam.cleanup();
   }
