@@ -1216,12 +1216,15 @@ export interface LaneProbe {
   /** #247: a DONE lane's own final-message text (worker.ts's parseResultText, the SAME
    *  stream-json `result` field read every peripheral role's structured-output validator
    *  already consumes via RoleSessionResult.resultText) — a fix leg's structured
-   *  threadResponses block lives here. undefined for a non-DONE lane, or for probe fixtures
-   *  that predate #247 — reclaimTerminalLane treats undefined/"" as "no structured output",
-   *  the harvest fails closed (validateFixResponseOutput's own "no block found" case), never a
-   *  guess. Populated unconditionally for every DONE lane (not just `fixing` ones) — same
-   *  "cheap, existing capture, just a new read" stance failureText already takes; an ordinary
-   *  worker's DONE result text is simply never consumed by anything. */
+   *  threadResponses block lives here. reclaimTerminalLane treats undefined/"" as "no
+   *  structured output", the harvest fails closed (validateFixResponseOutput's own "no block
+   *  found" case), never a guess. Populated unconditionally for every DONE lane (not just
+   *  `fixing` ones) — same "cheap, existing capture, just a new read" stance failureText
+   *  already takes.
+   *  #601: ALSO populated for a FAILED lane — the no-PR ESCALATE_NOPR/ESCALATE sites both read
+   *  this as the worker's own stated refusal/hand-back reason, surfaced verbatim (capped) on the
+   *  escalation event + comment. undefined only for a KEEP/handoff/DEAD lane, or for probe
+   *  fixtures that predate #247/#601. */
   resultText?: string;
   /** #490: the lane worktree's LOCAL commit sha for a DONE lane (worker.ts's laneWorktreeHead —
    *  pure file reads). Evidence of what a fix leg produced, not proof of a push; undefined for a
@@ -2095,6 +2098,20 @@ function summarizeFailureText(text: string): string {
   return trimmed.length > PARK_REASON_MAX_CHARS ? `${trimmed.slice(0, PARK_REASON_MAX_CHARS)}…` : trimmed;
 }
 
+/** #601 (design record: docs/design/355-worker-refusal-signal.md): a short excerpt of a no-PR
+ *  worker's own final-message text (LaneProbe.resultText) — attached to the ESCALATE_NOPR/
+ *  ESCALATE-no-PR escalation's event payload and engine-authored comment as the worker's stated
+ *  reason. Same cap discipline as summarizeFailureText/PARK_REASON_MAX_CHARS just above (a
+ *  short display excerpt, never a re-classification input). Per this repo's own
+ *  authoritative-signals-over-inferred-text doctrine, the free-text caution doesn't apply here:
+ *  nothing downstream branches on this string's shape — it's transport of a fact the worker
+ *  already stated and the engine already parsed, not detection or classification. */
+const WORKER_REASON_MAX_CHARS = 200;
+function summarizeResultText(text: string): string {
+  const trimmed = text.trim().replace(/\s+/g, " ");
+  return trimmed.length > WORKER_REASON_MAX_CHARS ? `${trimmed.slice(0, WORKER_REASON_MAX_CHARS)}…` : trimmed;
+}
+
 /** #168: the forge probe — a lightweight, ALREADY-EXISTING IForge read (no new forge method),
  *  wrapped so any throw (network/auth/5xx — exactly the conditions env-failure.ts's forge
  *  signatures describe) reads as "still unreachable" rather than propagating. Deterministic:
@@ -2362,6 +2379,10 @@ async function reclaimTerminalLane(
     // branch used to await forge.addLabel BETWEEN the terminal upsertWorker and recordSpend, so
     // a thrown label write skipped recordSpend with the worker already terminal.
     const doneAt = iso();
+    // #601: capped, only for the no-PR escalation this named branch is about to take — a
+    // `fixing` DONE lane's raw p.resultText is separately consumed (uncapped) by fixResponse's
+    // structured-output harvest just below, an unrelated reader of the same field.
+    const doneReason = next === "ESCALATE_NOPR" && p.resultText ? summarizeResultText(p.resultText) : undefined;
     if (next === "DRIVING") {
       // #247 D4 (Codex sol-high PR #265 review round 1, P1): a `fixing` lane's structured
       // threadResponses output is computed PURELY/READ-ONLY here — BEFORE the terminal state
@@ -2409,8 +2430,30 @@ async function reclaimTerminalLane(
         { worker: w.name, issue: w.issue, usd: costUsd, at: doneAt, models: modelUsage },
       );
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      // #601 (docs/design/355-worker-refusal-signal.md): the worker's own final-message text —
+      // already parsed onto the probe, previously read only by the `fixing` DRIVING branch above
+      // — named as the escalation's reason when it said one. Implementer guidance from that
+      // design record: give this comment the EXACT SAME best-effort reliability `addLabel` just
+      // above already has at this site (unguarded, not retried) rather than moving it ahead of
+      // `settleTerminalWorker` to chase the fix-rounds-cap site's before-terminal-write ordering
+      // — this branch carries the #223 invariant that state+spend must land BEFORE any forge
+      // call, and a DONE-no-PR lane has no `driving`-style "stay put and retry" fallback to
+      // reopen that failure class into. The durable half of this signal is the `reason` field on
+      // the reclaim-done event below, which lands unconditionally either way.
+      if (doneReason) {
+        await forge.addIssueComment(
+          w.issue,
+          `sapwood: escalating to \`${cfg.labels.needsHuman}\` — the worker finished with no PR. Its own stated reason:\n\n> ${doneReason}`,
+        );
+      }
     }
-    state.appendEvent("reclaim-done", { worker: w.name, issue: w.issue, next, ...prTitlePayload(p) });
+    state.appendEvent("reclaim-done", {
+      worker: w.name,
+      issue: w.issue,
+      next,
+      ...(doneReason ? { reason: doneReason } : {}),
+      ...prTitlePayload(p),
+    });
     return { kind: "done", worker: w.name, issue: w.issue, next, costUsd, modelUsage };
   }
   if (cls === "FAILED") {
@@ -2543,6 +2586,11 @@ async function reclaimTerminalLane(
     // worker just stays reclaimable next tick. No reordering needed on that side; only the
     // upsertWorker+recordSpend pair itself needed to become one transaction.
     const failedAt = iso();
+    // #601: mirror of the DONE/ESCALATE_NOPR site's doneReason — the no-PR case ONLY (`next ===
+    // "ESCALATE"` also covers the has-PR-but-dirty-worktree flip a few lines above, which is a
+    // DIFFERENT escalation reason — dirty WIP, not the worker's own stated refusal — and already
+    // gets its own comment via reportRetainedWorktree below).
+    const failedReason = next === "ESCALATE" && !p.hasPr && p.resultText ? summarizeResultText(p.resultText) : undefined;
     if (next === "DRIVING") {
       // Failed but a clean PR exists (e.g. budget-exhausted after opening it): rescue — hold
       // the lane driving for the review gate rather than escalating.
@@ -2554,6 +2602,17 @@ async function reclaimTerminalLane(
       // Forge work BEFORE the terminal upsert (parity with the DEAD path's ordering). needs-human
       // lands on the PR too, where the merge gate reads labels, when the escalation is dirty-WIP.
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      // #601: same "posted alongside the label, same best-effort reliability" treatment as the
+      // ESCALATE_NOPR site above — this branch's forge writes already run before the terminal
+      // upsert (unlike ESCALATE_NOPR's #223-constrained ordering), so a thrown comment write
+      // here aborts before any terminal write lands and the whole branch retries next tick,
+      // exactly like a thrown label write already does.
+      if (failedReason) {
+        await forge.addIssueComment(
+          w.issue,
+          `sapwood: escalating to \`${cfg.labels.needsHuman}\` — the worker finished with no PR. Its own stated reason:\n\n> ${failedReason}`,
+        );
+      }
       if (retained?.worktreeRetained) {
         if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
         await reportRetainedWorktree(forge, state, w.name, w.issue, retained.worktreePath, cfg.labels.needsHuman);
@@ -2563,7 +2622,13 @@ async function reclaimTerminalLane(
         { worker: w.name, issue: w.issue, usd: costUsd, at: failedAt, models: modelUsage },
       );
     }
-    state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next, ...prTitlePayload(p) });
+    state.appendEvent("reclaim-failed", {
+      worker: w.name,
+      issue: w.issue,
+      next,
+      ...(failedReason ? { reason: failedReason } : {}),
+      ...prTitlePayload(p),
+    });
     return { kind: "failed", worker: w.name, issue: w.issue, next, costUsd, modelUsage };
   }
   return null; // KEEP or DEAD — not a terminal sentinel; caller handles it

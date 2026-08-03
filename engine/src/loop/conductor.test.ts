@@ -1419,9 +1419,126 @@ test("tick reclaim: KEEP stays, DONE+PR -> done/DRIVING, DONE+noPR -> escalate+n
     modelUsage: [],
   });
   assert.deepEqual(forge.labelsAdded, [[3, "needs-human"]]); // only the no-PR done escalates
+  assert.deepEqual(forge.issueComments, [], "no resultText on the probe -> no escalation comment (#601)");
   assert.equal(st.getWorker("lane-keep")?.state, "running");
   assert.equal(st.getWorker("lane-donepr")?.state, "driving"); // PR -> lane held for the review gate
   assert.equal(st.getWorker("lane-donenopr")?.state, "done"); // no PR -> lane freed, escalated
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-done"]);
+  assert.ok(
+    !Object.hasOwn(events[0]!.payload as Record<string, unknown>, "reason"),
+    "empty/absent resultText -> byte-identical to before #601, no reason field",
+  );
+  st.close();
+});
+
+// ── #601 (docs/design/355-worker-refusal-signal.md): a no-PR escalation now surfaces the
+//   worker's OWN resultText (already parsed onto LaneProbe, previously unread by these two
+//   sites) as a capped `reason` on the durable event AND an engine-authored comment posted
+//   alongside the existing needs-human label — never a forge write ahead of ESCALATE_NOPR's
+//   settleTerminalWorker (that ordering is the #223 invariant; the design record's implementer
+//   guidance is explicit that the comment stays best-effort, unguarded, same as addLabel here).
+
+test("#601: ESCALATE_NOPR with a non-empty worker resultText attaches it as `reason` on reclaim-done AND posts an engine-authored comment naming it as the worker's own stated reason", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-nopr-reason", 40);
+  sup.probes["lane-nopr-reason"] = {
+    ...DEFAULT_PROBE,
+    done: true,
+    hasPr: false,
+    resultText: "This issue's acceptance criteria contradict each other — refusing to proceed without clarification.",
+  };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  assert.deepEqual(forge.labelsAdded, [[40, "needs-human"]]);
+  assert.equal(forge.issueComments.length, 1);
+  const [commentIssue, commentBody] = forge.issueComments[0]!;
+  assert.equal(commentIssue, 40);
+  assert.match(commentBody, /acceptance criteria contradict each other/);
+  assert.match(commentBody, /worker/i);
+
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-done"]);
+  assert.equal(events.length, 1);
+  const payload = events[0]!.payload as { reason?: string };
+  assert.equal(payload.reason, "This issue's acceptance criteria contradict each other — refusing to proceed without clarification.");
+  st.close();
+});
+
+test("#601: ESCALATE_NOPR caps a long worker resultText before it lands on the event/comment", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-nopr-long", 41);
+  const longText = "x".repeat(500);
+  sup.probes["lane-nopr-long"] = { ...DEFAULT_PROBE, done: true, hasPr: false, resultText: longText };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-done"]);
+  const payload = events[0]!.payload as { reason?: string };
+  assert.ok(payload.reason!.length < longText.length, "capped, not the full 500-char text");
+  assert.match(payload.reason!, /…$/);
+  assert.equal(forge.issueComments[0]![1].includes(longText), false, "the full uncapped text never reaches the comment either");
+  st.close();
+});
+
+test("#601: a forge.addIssueComment failure at ESCALATE_NOPR is best-effort — same as addLabel, the lane is still terminal with spend already ledgered", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-nopr-commentfail", 42);
+  sup.probes["lane-nopr-commentfail"] = { ...DEFAULT_PROBE, done: true, hasPr: false, resultText: "refusing, see comment", costUsd: 3 };
+  forge.throwOnAddIssueComment = true;
+  await assert.rejects(() => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }), /simulated forge failure/);
+  assert.equal(st.getWorker("lane-nopr-commentfail")?.state, "done");
+  assert.equal(st.spentUsdForWorker("lane-nopr-commentfail"), 3);
+  assert.deepEqual(forge.labelsAdded, [[42, "needs-human"]], "the label write still ran before the failed comment write");
+  st.close();
+});
+
+// ── #601 mirror: the FAILED (no PR, no env signature) ESCALATE path. Forge writes there already
+//   precede the terminal upsert (parity with the DEAD path, unrelated to #223 — see the ordinary
+//   `next === "ESCALATE"` branch's own comment) — the new comment slots in alongside the
+//   existing addLabel call at that same position.
+
+test("#601: FAILED-no-PR ESCALATE with a non-empty worker resultText attaches it as `reason` on reclaim-failed AND posts an engine-authored comment", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-failnopr-reason", 50);
+  sup.probes["lane-failnopr-reason"] = {
+    ...DEFAULT_PROBE,
+    failed: true,
+    hasPr: false,
+    resultText: "The referenced config file does not exist in this repo — cannot proceed.",
+  };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  assert.deepEqual(forge.labelsAdded, [[50, "needs-human"]]);
+  assert.equal(forge.issueComments.length, 1);
+  const [commentIssue, commentBody] = forge.issueComments[0]!;
+  assert.equal(commentIssue, 50);
+  assert.match(commentBody, /referenced config file does not exist/);
+
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-failed"]);
+  assert.equal(events.length, 1);
+  const payload = events[0]!.payload as { reason?: string };
+  assert.equal(payload.reason, "The referenced config file does not exist in this repo — cannot proceed.");
+  st.close();
+});
+
+test("#601: FAILED-no-PR ESCALATE with empty/absent resultText stays byte-identical to before — label only, no comment, no reason field", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-failnopr-empty", 51);
+  sup.probes["lane-failnopr-empty"] = { ...DEFAULT_PROBE, failed: true, hasPr: false };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  assert.deepEqual(forge.labelsAdded, [[51, "needs-human"]]);
+  assert.deepEqual(forge.issueComments, []);
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-failed"]);
+  assert.ok(!Object.hasOwn(events[0]!.payload as Record<string, unknown>, "reason"));
   st.close();
 });
 

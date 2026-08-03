@@ -2741,12 +2741,18 @@ export class WorkerSupervisor implements Supervisor {
     // rejected rate_limit_event OR an errored result with api_error_status:429 (see
     // terminalEnvSignalStructured's own doc for why both are needed).
     const envSignalStructured = failed ? this.terminalEnvSignalStructured(name) : false;
-    // #247: only for a DONE lane — same "compute it lazily, only where a consumer could ever
-    // use it" stance failureText already takes for FAILED lanes (conductor.ts's fix-leg harvest
-    // is the first reader; an ordinary worker's DONE result text is otherwise unconsumed).
-    const resultText = done ? this.terminalResultText(name) : undefined;
-    // #490: the lane worktree's local head — same "only for a DONE lane" gating as resultText
-    // (the fix-response receipt event is the one consumer). File reads only, no subprocess.
+    // #247: for a DONE lane — conductor.ts's fix-leg harvest is one reader; an ordinary
+    // worker's DONE result text is otherwise unconsumed there.
+    // #601: ALSO for a FAILED lane — a worker that posts a plain refusal comment and then exits
+    // non-zero (docs/security.md: "comment is the worker's refuse/hand-back channel") leaves its
+    // stated reason in the exact same final `result` line a DONE lane would; the no-PR FAILED
+    // escalation site needs it just as much as the no-PR DONE one does. Still gated (never
+    // unconditional) — same "compute lazily, only where a consumer could ever use it" stance
+    // failureText/rateLimitResetAtMs/envSignalStructured above already take.
+    const resultText = done || failed ? this.terminalResultText(name) : undefined;
+    // #490: the lane worktree's local head — only for a DONE lane (the fix-response receipt
+    // event is the one consumer, and only a DONE `fixing` lane ever produces one). File reads
+    // only, no subprocess.
     const worktreeHead = done ? this.laneWorktreeHead(name) : undefined;
     const running = this.readJson(this.path(name, "running.json"));
     if ((done || failed || handoff) && running?.resume_pending_db === true) {
@@ -2877,13 +2883,15 @@ export class WorkerSupervisor implements Supervisor {
     return hasRejectedRateLimitEvent(jsonl) || hasQuotaErrorStatus(jsonl);
   }
 
-  /** #247: a DONE lane's own final-message text — parseResultText over this lane's CURRENT LEG
-   *  jsonl slice (currentLegJsonl, the same per-leg offset terminalCostUsd/terminalModelUsage's
-   *  jsonl-fallback already reads), never the whole cumulative transcript across every resumed
-   *  leg. A resumed fix leg's OWN final message is what carries its structured threadResponses
-   *  block; an earlier leg's now-superseded result line must never leak through here. No tail
-   *  cap (unlike terminalFailureText): parseResultText already extracts only the LAST `result`
-   *  field value, an inherently bounded slice, not a raw transcript to cap. */
+  /** #247/#601: a DONE-or-FAILED lane's own final-message text — parseResultText over this
+   *  lane's CURRENT LEG jsonl slice (currentLegJsonl, the same per-leg offset
+   *  terminalCostUsd/terminalModelUsage's jsonl-fallback already reads), never the whole
+   *  cumulative transcript across every resumed leg. A resumed fix leg's OWN final message is
+   *  what carries its structured threadResponses block; an earlier leg's now-superseded result
+   *  line must never leak through here. A FAILED lane that never emitted a final `result` line
+   *  (crashed mid-run) simply gets "" — same as an ordinary DONE lane with no structured output.
+   *  No tail cap (unlike terminalFailureText): parseResultText already extracts only the LAST
+   *  `result` field value, an inherently bounded slice, not a raw transcript to cap. */
   private terminalResultText(name: string): string {
     return parseResultText(this.currentLegJsonl(name));
   }

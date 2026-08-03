@@ -2902,9 +2902,10 @@ test("#168: failureText is tail-capped for a large jsonl — the classifiable er
   }
 });
 
-// ── #247: a DONE lane's resultText capture — probe() reads the SAME per-leg jsonl slice
-//    terminalCostUsd/terminalModelUsage's jsonl-fallback already reads (currentLegJsonl), only
-//    for a DONE lane. A fix leg's structured threadResponses block lives here.
+// ── #247/#601: a DONE-or-FAILED lane's resultText capture — probe() reads the SAME per-leg
+//    jsonl slice terminalCostUsd/terminalModelUsage's jsonl-fallback already reads
+//    (currentLegJsonl). A fix leg's structured threadResponses block lives here for a DONE lane;
+//    a plain refusal/hand-back message lives here for either a DONE or a FAILED lane (#601).
 
 test("#247: probe() of a DONE lane surfaces resultText from the jsonl's final structured result line", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
@@ -2929,7 +2930,7 @@ test("#247: probe() of a DONE lane surfaces resultText from the jsonl's final st
   }
 });
 
-test("#247: probe() of a FAILED (non-DONE) lane never populates resultText", async () => {
+test("#601: probe() of a FAILED (non-DONE) lane ALSO populates resultText — the worker's own stated reason, same as a DONE lane", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
     const name = "lane-247-failed";
@@ -2938,7 +2939,7 @@ test("#247: probe() of a FAILED (non-DONE) lane never populates resultText", asy
     const s = sup(dir, "claude");
     const p = await s.probe(name);
     assert.equal(p.failed, true);
-    assert.equal(p.resultText, undefined);
+    assert.equal(p.resultText, "some text");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
