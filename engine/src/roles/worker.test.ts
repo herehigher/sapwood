@@ -1123,6 +1123,25 @@ test("probeLlmPing: a hang past probeTimeoutSec is hard-killed and resolves fail
   }
 });
 
+// #578: the verdict must be read once stdout has DRAINED, not the instant the process exits.
+// Node's 'exit' fires when the child terminates, with its stdio pipes possibly still holding
+// unread bytes; the probe used to read `stdout` there and could see "" for a child that had
+// already written "pong" — the exact 2026-08-03 main CI failure (`{ ok: false, detail: 'ping
+// exited 0 with no output' }` on the argv test, 28ms, green everywhere else). This stub makes
+// that ordering DETERMINISTIC instead of a load-dependent race: a backgrounded writer inherits
+// the stdout pipe and emits "pong" long after the direct child has exited 0, so reading at
+// 'exit' can only ever see empty output and reading at 'close' can only ever see "pong". No
+// wall-clock assertion — the 0.3s is the fake's controlled ordering, not a margin being raced.
+test("probeLlmPing (#578): output still in flight when the process exits is NOT read as 'exited 0 with no output' — the verdict waits for stdout to drain", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\n( sleep 0.3; echo pong ) &\nexit 0\n`);
+    assert.deepEqual(await probeLlmPing(bin, "haiku", 0.05, 30), { ok: true });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no-session-persistence, --system-prompt, --strict-mcp-config, --tools '', --max-budget-usd, --output-format text, prompt (and NO --max-tokens, which the CLI rejects)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
   const argsFile = join(dir, "args.txt");

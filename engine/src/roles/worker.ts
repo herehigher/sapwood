@@ -810,7 +810,14 @@ export function probeLlmPing(claudeBin: string, probeModel: string, probeMaxBudg
       clearTimeout(timer);
       finish({ ok: false, detail: `ping spawn error: ${e.message}` });
     });
-    child.on("exit", (code) => {
+    // #578: 'close', NOT 'exit'. 'exit' fires the moment the child terminates, while its stdio
+    // pipes may still hold bytes this process has not read — reading `stdout` there made a
+    // healthy "pong" ping resolve `{ ok: false, detail: 'ping exited 0 with no output' }` under
+    // load (2026-08-03, reddened main). 'close' fires only after every stdio stream is closed,
+    // so the buffers below are complete by construction rather than by luck. The hang cost is
+    // already bounded: a child whose pipe is held open by a surviving grandchild never emits
+    // 'close', and `timer` above hard-kills and resolves that case exactly as before.
+    child.on("close", (code) => {
       clearTimeout(timer);
       if (code === 0 && stdout.trim().toLowerCase() === "pong") {
         finish({ ok: true });
