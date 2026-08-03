@@ -1032,7 +1032,7 @@ export const WORKER_ALLOWED_TOOLS = "Read,Edit,Write,Bash(git *),Bash(gh *),Bash
  *  servers, skills) — the live probe backing that DR found the inherited surface callable and
  *  including write/execution-class tools (`server-filesystem__write_file`/`edit_file`/`move_file`,
  *  `Google_Drive__create_file`), none of which reach the guard hook (its PreToolUse matcher is
- *  `Bash|Write|Edit|MultiEdit|Read|Grep|Glob|NotebookRead` — see guardSettings below — carrying no
+ *  `Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|NotebookRead` — see guardSettings below — carrying no
  *  `mcp__` pattern at all). This is a COARSE, WHOLESALE, name-based accident fence, not a
  *  hostile-jail (M12 positioning) — it denies by known/common SERVER NAME (`mcp__<server>__*`,
  *  the CLI's own documented whole-server wildcard rule shape) for the two categories #616 scoped:
@@ -1339,7 +1339,9 @@ export function guardSettings(hookPath: string): object {
     // #26 R3 P1). Explicitly re-enabling here overrides that layer.
     disableAllHooks: false,
     hooks: {
-      PreToolUse: [{ matcher: "Bash|Write|Edit|MultiEdit|Read|Grep|Glob|NotebookRead", hooks: [{ type: "command", command }] }],
+      PreToolUse: [
+        { matcher: "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|NotebookRead", hooks: [{ type: "command", command }] },
+      ],
     },
   };
 }

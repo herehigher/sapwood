@@ -16,7 +16,7 @@ import { type GuardInput, guardDecision } from "./guard.js";
 // NotebookRead added in PM review of PR-A: it's a built-in read-family tool (reads an
 // arbitrary `.ipynb` path) that was left out of the first pass — same containment gap,
 // same fix.
-const GUARDED_TOOLS = new Set(["Bash", "Write", "Edit", "MultiEdit", "Read", "Grep", "Glob", "NotebookRead"]);
+const GUARDED_TOOLS = new Set(["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Read", "Grep", "Glob", "NotebookRead"]);
 
 export interface DenyOutput {
   hookSpecificOutput: {

@@ -2200,6 +2200,10 @@ test("guardSettings: PreToolUse hook runs `node <hookPath>` and fails closed (ex
   assert.equal(s.disableAllHooks, false); // force hooks on so a global disable can't silence the guard
   const entry = s.hooks.PreToolUse[0]!;
   assert.match(entry.matcher, /Bash/);
+  // #620: the matcher carries the WHOLE guarded family — NotebookEdit's omission was a silent
+  // write-path bypass (the hook only fires for tools the matcher names). Pin the exact string so
+  // any future tool addition/removal is a deliberate, reviewed edit here too.
+  assert.equal(entry.matcher, "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|NotebookRead");
   assert.equal(entry.hooks[0]!.type, "command");
   const cmd = entry.hooks[0]!.command;
   assert.match(cmd, /^node '\/x\/dist\/guard-hook\.js'/); // single-quoted hook path (no shell expansion)
