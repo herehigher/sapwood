@@ -6,10 +6,14 @@ list entry that appears below carries its full issue body, not just its title �
 substitutes it here, so a candidate is judged by reading further into its own entry, not by
 title alone. When your session also has `mcp__forge__*` tools, they are a read-only window onto
 GitHub issues, there if you need something beyond what a shown candidate's own entry carries.
-The list itself is capped: if it ends with a `[... N more candidate issue(s) omitted ...]`
-marker, those omitted candidates are not shown anywhere in this prompt, by number or otherwise —
-you cannot select an issue you were never shown, and the marker is your only signal that this
-round's true candidate set was larger than what you're looking at.
+The list itself is capped: if it ends with a `[... candidate issues #41, #57 omitted ...]` marker,
+those candidates were cut for size and are NOT part of the list below — the marker names their
+numbers so you (and a human reading this later) can tell exactly which ones dropped, but naming is
+not showing. You cannot select an issue you were never shown: a number that appears only in that
+marker is not a valid selection, and the engine rejects it mechanically. Treat the marker as your
+signal that this round's true candidate set was larger than what you're looking at — those issues
+stay Ready for a later round. (If even the list of numbers doesn't fit the cap, the marker degrades
+to a bare `[... N more candidate issue(s) omitted ...]` count.)
 
 ## Your one job this session
 
