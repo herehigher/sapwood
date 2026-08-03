@@ -418,6 +418,33 @@ day something tries to consume the line, it fails loudly rather than quietly.
 The line is shipped default prompt text, so it is overridable like any other role prompt —
 point `roles.po.promptFile` at your own copy to change it.
 
+### What the `Ready` gate does *not* check: duplicates (#560)
+
+**Nothing in the loop checks whether an issue you move to `Ready` duplicates another open
+issue.** That is a decision, not an oversight. Move two issues describing the same work to
+`Ready` and the loop dispatches two workers into two worktrees and produces two PRs that
+will conflict on merge. Keeping the backlog free of duplicates is the human's job, at the
+moment of moving an issue to `Ready`.
+
+Duplicate detection does exist in the loop, in exactly one place, and it covers a different
+case: the PO's align pass searches open and recently-closed issues before filing a proposal
+**of its own**, so the loop does not duplicate itself. That search is never run against an
+issue a human authored. The roles nearest the gate are out by charter, not by omission:
+
+- **gate⓪ (`verification-plan-reviewer`)** judges whether a plan is executable, explicitly
+  *not* whether the underlying work is a good idea — a human already decided that by moving
+  the issue to `Ready`. Duplicate-checking a human's `Ready` is second-guessing *why/what*,
+  the one decision this project reserves for the human.
+- **`architect`** looks for contradiction across a round's candidate pool. An open duplicate
+  *outside* that pool is, by construction, not what it is reading.
+
+Why no machinery: sapwood is trusted-repos-first — a small team that mostly knows its own
+backlog — and the cheap version has an expensive failure mode. A title/keyword search that
+labels near-matches at the `Ready` gate fires on unrelated issues sharing vocabulary, and a
+duplicate warning you learn to ignore costs more than the duplicate it was meant to catch.
+If your backlog outgrows this, the fix belongs where the decision already lives: search
+before you hit `Ready`, not a label after.
+
 ## Next steps
 
 - [`configuration.md`](configuration.md) — every config key.
