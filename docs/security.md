@@ -1262,6 +1262,21 @@ Two different things are both called "budget," and they behave differently on pu
   never the wall clock. Entering a breach emits a reason-bearing
   `ceiling-breach-entered` event once per episode.
 
+**Engine-agent review-session spend (#612).** Under `reviewer.mode: engine-agent`, gate②'s
+review session is itself a paid Claude session — its cost now reaches `spend_ledger` too,
+recorded once a verdict is decisive (`review/production.ts`'s `recordWalDecisiveOutcome`), so
+`dailyBudgetUsd`/`roundBudgetUsd` (both plain, worker-unfiltered `SUM(usd)` reads) count it like
+any other spend. It is ledgered under a key **distinct** from the reviewed lane's own worker
+name (`<lane>:engine-review`), deliberately: recording it under the lane's own name would make
+`State.getWorkerActualModels(issue)` — keyed on an exact `worker` match — pick up the reviewer's
+own model as one of "the producing lane's actual models," poisoning engine-agent.ts's D5
+same-model check on that lane's next review (a fix-round re-review would then see the reviewer
+overlapping itself and fail closed forever). A review attempt that never reaches a decisive
+verdict (all retries exhausted, a setup failure, a D5 same-model refusal) still records nothing
+to the ledger — its cost is real but stays visible only in that attempt's own WAL artifact; this
+mirrors the #286 whole-logical-review cap, which reads the WAL, never the ledger, for the exact
+same reason.
+
 **Supervisor prerequisite (#431):** operators running unattended under a supervisor
 MUST configure the supervisor's own crash-loop circuit-breaker — e.g. systemd's
 `StartLimitBurst=5` / `StartLimitIntervalSec=600` (or the equivalent restart-limit in

@@ -21,7 +21,7 @@ import {
   type MaterializeResult,
   materializeWithExternalFetch,
 } from "./materializer.js";
-import type { ReviewSessionExecutor } from "./review-session.js";
+import { formatIdentity, type ReviewSessionExecutor } from "./review-session.js";
 
 export interface ProductionEngineAgentOptions {
   sourceRepoDir?: string;
@@ -54,6 +54,19 @@ function gcWarning(log: (message: string) => void, action: string, err: unknown)
   } catch {
     // Cleanup observability is best-effort too; a broken logger cannot turn GC into a gate.
   }
+}
+
+/** #612: the spend_ledger `worker` key an engine-agent review SESSION's own cost is recorded
+ *  under — deliberately DIFFERENT from the reviewed lane's own `worker.name`. Recording it under
+ *  the lane's name would make `State.getWorkerActualModels(issue)` (its `WHERE worker = ?` read,
+ *  keyed on the exact lane name) pick up the REVIEWER's own model as one of "the producing lane's
+ *  actual models" — poisoning engine-agent.ts's D5 model-separation check, so a LATER review of
+ *  the SAME lane (a fix-round re-review, same worker name) would see the reviewer overlapping
+ *  itself and fail closed forever. A distinct key sidesteps that; `cost.roundBudgetUsd`/
+ *  `cost.dailyBudgetUsd` still see the spend either way (spentUsdAfterId/dailySpendUsd are plain
+ *  SUM(usd) reads over spend_ledger, never filtered by worker). */
+function reviewSpendWorkerKey(workerName: string): string {
+  return `${workerName}:engine-review`;
 }
 
 /** Best-effort crash backstop. The pending tree counts toward the cap before it exists, while
@@ -283,8 +296,37 @@ export function makeProductionEngineAgent(
       getWal: () => state.getEngineReviewWal(worker.name),
       recordWal: (wal) => state.recordEngineReviewWal(worker.name, wal),
       recordWalDecisiveOutcome: (runId, outcome) => {
+        // #612: read BEFORE appendVerdictEvent flips this same marker — a same-process replay of
+        // this exact runId (the crash shape appendVerdictEvent's own doc describes: the engine
+        // died between the event append and the WAL write) must record the review session's
+        // spend ONCE, not once per replay. spend_ledger has no runId column of its own to dedupe
+        // against directly, so this reuses the SAME durable dedup memory the verdict event
+        // already relies on.
+        const spendAlreadyRecorded = state.runEventRecorded(ENGINE_REVIEW_VERDICT, worker.name, runId);
         appendVerdictEvent(worker, pr, runId, outcome);
         state.recordEngineReviewWalDecisiveOutcome(worker.name, runId, outcome);
+        if (!spendAlreadyRecorded) {
+          // #612: fold the review session's own cost into spend_ledger here — the ONE call site
+          // where a WAL row becomes decisive, same rationale appendVerdictEvent's doc gives for
+          // being the one place a verdict is born. Previously this spend lived ONLY inside
+          // engine_review_wal.review_artifact_json.sessionSpends, invisible to
+          // cost.roundBudgetUsd/dailyBudgetUsd and every ledger-based report.
+          const walForSpend = state.getEngineReviewWal(worker.name);
+          const artifactForSpend = walForSpend?.runId === runId ? artifacts.get(walForSpend.head) : undefined;
+          if (artifactForSpend) {
+            const usd = artifactForSpend.sessionSpends.reduce((sum, s) => sum + (s.kind === "unknown" ? 0 : s.usd), 0);
+            const identity = artifactForSpend.sessionActualIdentities[0];
+            state.recordSpend(reviewSpendWorkerKey(worker.name), worker.issue, usd, now().toISOString(), [
+              {
+                model: identity ? formatIdentity(identity) : "unknown",
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheCreationTokens: 0,
+                cacheReadTokens: 0,
+              },
+            ]);
+          }
+        }
         try {
           const wal = state.getEngineReviewWal(worker.name);
           if (wal?.runId === runId && wal.decisiveOutcome === outcome && !state.getLiveEngineReviewHeads().includes(wal.head))
