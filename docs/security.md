@@ -116,6 +116,29 @@ It can catch naive or accidental exfiltration attempts and leave an audit trail,
 deliberate adversary can trivially evade lexical executable matching — for example with an
 interpreter one-liner or DNS exfiltration.
 
+### Loopback targets: tagged, never excluded (#387)
+
+A dogfood run flagged `curl http://127.0.0.1:5173/...` dev-server smoke checks with exactly the
+prominence of real public egress the same run caught, which trains an operator to skim the
+signal. The recorded decision is to **tag, not exclude**: a hit whose targets are all loopback is
+still scanned, still deduplicated against the same per-leg cap, and still journalled with full
+evidence — it simply carries `target: "loopback"` in the `egress-suspect` payload, and the round
+artifact and harvest facts mark it so the prominent lines stay the public ones. Nothing is
+suppressed, so the audit trail this tripwire exists to leave is unchanged.
+
+The classification covers `localhost` (including RFC 6761 `*.localhost`), the whole `127/8`
+block, and `::1`, matched only inside a `scheme://host` URL. Absence of the tag is the fail-closed
+default — "not proven loopback" — and every ambiguity resolves that way: a snippet mixing loopback
+and public URLs, an unparseable authority, a snippet with no URL at all (a `WebSearch` query, an
+`Agent` spawn description), and a schemeless `curl 127.0.0.1:5173` are all left untagged at full
+prominence. That direction is deliberate: a missed loopback URL only restores the pre-#387 status
+quo for a benign hit, whereas the opposite error would downgrade something that genuinely reached
+the network. Classification reads the full observed text, not the 200-character evidence snippet,
+so a public URL truncated out of the recorded evidence cannot leave a hit tagged loopback.
+
+Note that loopback is not "safe" in general — a local port can be a proxy onward — which is
+precisely why this is a prominence marker on a retained record, not an exclusion.
+
 ## Peripheral network egress: WebSearch/WebFetch, detected not pinned (#410)
 
 Three role sessions — `architect`, `po-align`, `po-triage` — are granted the CLI's built-in

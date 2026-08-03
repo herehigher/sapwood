@@ -379,6 +379,37 @@ test("renderRoundArtifactMarkdown (#410 amendment, Codex sol-high PR #417 review
   assert.ok(!md.includes("#0 ("), "never renders the nonexistent '#0' issue reference");
 });
 
+test("assemble+render (#387 F18): a loopback-tagged egress-suspect event carries `target` into the artifact and renders a [loopback] marker; a public hit is untouched, and any other target value is dropped", () => {
+  const artifact = assembleRoundArtifact(
+    [
+      {
+        kind: "egress-suspect",
+        payload: { worker: "lane-1", issue: 144, executable: "curl", snippet: "curl http://127.0.0.1:5173/", target: "loopback" },
+      },
+      {
+        kind: "egress-suspect",
+        payload: { worker: "lane-1", issue: 144, executable: "curl", snippet: "curl https://fonts.example.invalid/x" },
+      },
+      // A ledger row claiming an unrecognized target can never buy a prominence downgrade.
+      {
+        kind: "egress-suspect",
+        payload: { worker: "lane-2", issue: 9, executable: "curl", snippet: "curl https://example.invalid", target: "internal" },
+      },
+    ],
+    meta,
+    0,
+    30,
+  );
+  assert.deepEqual(artifact.egressSuspects, [
+    { worker: "lane-1", issue: 144, executable: "curl", snippet: "curl http://127.0.0.1:5173/", target: "loopback" },
+    { worker: "lane-1", issue: 144, executable: "curl", snippet: "curl https://fonts.example.invalid/x" },
+    { worker: "lane-2", issue: 9, executable: "curl", snippet: "curl https://example.invalid" },
+  ]);
+  const md = renderRoundArtifactMarkdown(artifact);
+  assert.ok(md.includes("- #144 (lane-1): curl [loopback] — curl http://127.0.0.1:5173/"), "loopback hit is listed in full, marked");
+  assert.ok(md.includes("- #144 (lane-1): curl — curl https://fonts.example.invalid/x"), "public hit renders exactly as before #387");
+});
+
 test("renderRoundArtifactMarkdown #237: an 'Objections raised' section lists every delivered concern; '(none)' when empty", () => {
   const empty = renderRoundArtifactMarkdown(assembleRoundArtifact([], meta, 0, 30));
   assert.match(empty, /## Objections raised\n\(none\)/);

@@ -27,6 +27,7 @@ import { State } from "../state/state.js";
 import {
   buildRenderFixPrompt,
   buildRenderPrompt,
+  classifyEgressTarget,
   claudeArgs,
   defaultFixPromptPath,
   defaultPromptPath,
@@ -351,6 +352,60 @@ test("scanEgressSuspects (#534 fix): an EMPTY `description` with a usable `promp
     hits: [{ executable: "Agent", snippet: "spawn a subagent to check CI" }],
     truncated: false,
   });
+});
+
+// ── #387 (F18): loopback classification. The 2026-07-24 dogfood run flagged `curl
+// http://127.0.0.1:...` dev-server smoke checks identically to real public egress; loopback
+// noise trains an operator to skim the signal. Decision: TAG, never exclude — every hit is still
+// journalled with the same evidence, it just carries `target: "loopback"` so the prominent line
+// stays the public one. The tag is present ONLY when the snippet is provably loopback-only; its
+// ABSENCE is the fail-closed default (full prominence), which is also why every public-egress
+// assertion above is byte-identical to its pre-#387 shape. ────────────────────────────────────
+
+test("classifyEgressTarget (#387): loopback URL matrix — localhost, 127/8, ::1 tag; public host, public IP literal, and lookalikes do not", () => {
+  // loopback
+  assert.equal(classifyEgressTarget("curl http://127.0.0.1:5173/health"), "loopback");
+  assert.equal(classifyEgressTarget("curl http://127.1.2.3/"), "loopback"); // whole 127/8, not just .0.0.1
+  assert.equal(classifyEgressTarget("curl -sf http://localhost:5173/"), "loopback");
+  assert.equal(classifyEgressTarget("curl http://[::1]:5173/"), "loopback");
+  assert.equal(classifyEgressTarget("http://dev.localhost:3000/api"), "loopback"); // RFC 6761 subdomain
+  assert.equal(classifyEgressTarget("curl http://user:pw@127.0.0.1:8080/x"), "loopback"); // userinfo stripped
+  // NOT loopback
+  assert.equal(classifyEgressTarget("curl https://example.invalid/x"), undefined);
+  assert.equal(classifyEgressTarget("curl http://93.184.216.34/x"), undefined); // public IP literal
+  assert.equal(classifyEgressTarget("curl https://notlocalhost.invalid/"), undefined);
+  assert.equal(classifyEgressTarget("curl https://localhost.example.invalid/"), undefined); // lookalike suffix
+  assert.equal(classifyEgressTarget("curl http://127.0.0.1:5173/ https://example.invalid/x"), undefined); // mixed -> public
+  // No URL at all (a WebSearch query, an Agent spawn description, a schemeless curl) is
+  // UNCLASSIFIED, never "loopback" — the deliberate false-negative direction.
+  assert.equal(classifyEgressTarget("does a mature library already cover this"), undefined);
+  assert.equal(classifyEgressTarget("curl 127.0.0.1:5173/health"), undefined); // schemeless: known blind spot
+});
+
+test("scanEgressSuspects (#387): a loopback hit carries target:'loopback' in the payload; a public hit's payload is unchanged (no field)", () => {
+  const jsonl = [
+    bashToolUseLine("curl http://127.0.0.1:5173/"),
+    bashToolUseLine("curl https://example.invalid/real"),
+    webToolUseLine("WebFetch", "http://localhost:8080/docs"),
+    webToolUseLine("WebSearch", "how do vite dev servers report readiness"),
+  ].join("\n");
+  assert.deepEqual(scanEgressSuspects(jsonl, ["curl"]), {
+    hits: [
+      { executable: "curl", snippet: "curl http://127.0.0.1:5173/", target: "loopback" },
+      { executable: "curl", snippet: "curl https://example.invalid/real" },
+      { executable: "WebFetch", snippet: "http://localhost:8080/docs", target: "loopback" },
+      { executable: "WebSearch", snippet: "how do vite dev servers report readiness" },
+    ],
+    truncated: false,
+  });
+});
+
+test("scanEgressSuspects (#387): classification reads the FULL text, not the 200-char snippet — a public URL truncated out of the evidence can never leave the hit tagged loopback", () => {
+  const command = `curl http://127.0.0.1:5173/${"x".repeat(200)} https://example.invalid/exfil`;
+  const { hits } = scanEgressSuspects(bashToolUseLine(command), ["curl"]);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.snippet, command.slice(0, 200)); // the public URL is beyond the cap
+  assert.equal(hits[0]?.target, undefined);
 });
 
 // ── #110 PR0: parseResultText — the read side for a role session's structured final-message
