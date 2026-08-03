@@ -1958,6 +1958,26 @@ test("tick DRIVE: merged -> worker done, board set to done, driven records it", 
   st.close();
 });
 
+test("tick DRIVE (#420): the merged event carries prTitle when the gate outcome has a title, omits it otherwise", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  seedRunning(st, "lane-b", 3);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  sup.probes["lane-b"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 56 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H", title: "feat(engine): merged.prTitle lands (#420)" };
+  gate.outcomes[56] = { kind: "merged", pr: 56, headOid: "H2" }; // no title from the driver
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["merged"]);
+  assert.equal(events.length, 2);
+  const byPr = new Map(events.map((e) => [(e.payload as { pr: number }).pr, e.payload as { prTitle?: string }]));
+  assert.equal(byPr.get(55)!.prTitle, "feat(engine): merged.prTitle lands (#420)");
+  assert.ok(!Object.hasOwn(byPr.get(56)!, "prTitle"));
+  st.close();
+});
+
 test("tick DRIVE (#570): every merged event carries a same-tick log line naming lane, PR and head oid", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

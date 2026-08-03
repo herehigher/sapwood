@@ -228,7 +228,8 @@ export interface EngineAgentDriveDeps {
 
 export type EngineAgentDriveOutcome =
   | { kind: "queued"; reason: string }
-  | { kind: "merged"; headOid: string }
+  // #420: `title` from the same PRStatus read that proved the merge (omitted when absent).
+  | { kind: "merged"; headOid: string; title?: string }
   | { kind: "needs-human"; reason: string }
   // #460 (F37): a structural merge conflict, not a transient preflight failure — see the
   // `checkPreflight` call site below for why this is distinguished from every other reason.
@@ -310,7 +311,7 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   // BOTH the decisive-pin-consume path and the fresh-attempt path share this ONE check against
   // the SAME status0/data0 pair (no separate terminal-state gap on either path).
   if (status0.state === "MERGED" || data0.state === "MERGED") {
-    return { kind: "merged", headOid: status0.headOid };
+    return { kind: "merged", headOid: status0.headOid, ...(status0.title !== undefined ? { title: status0.title } : {}) };
   }
   if (status0.state !== data0.state) {
     return { kind: "queued", reason: `engine-agent: gate-state-mismatch: ci-state=${status0.state} review-state=${data0.state}` };

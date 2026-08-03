@@ -187,61 +187,64 @@ export function mergeDecision(
   return "MERGE";
 }
 
-export type DriveOutcome = (
-  | { kind: "merged"; pr: number; headOid: string }
-  | { kind: "needs-human"; pr: number; reason: string }
-  | { kind: "queued"; pr: number; reason: string }
-  | { kind: "stopped"; pr: number; reason: string } // produce-pr-and-stop: gates report, never merges
-  // #246: gate === FIXABLE in conductor-merge mode — the caller (conductor.ts tick()'s DRIVE
-  // loop) owns the fix_rounds/cap/budget decision (driveDecision) this pure class never sees;
-  // `reason` carries enough of the underlying signal (unresolved-thread count / CI-red) for the
-  // caller's own escalation comment, without this class fetching review-finding TEXT itself.
-  // #457 (F36): `verdictRunId` is present ONLY when this fixable is CAUSED by an engine-agent
-  // rejected verdict's findings (HANDLE_THREADS with CI not red — see finalizeVerdict's own
-  // gating, #457 review round 1 P1) — the conductor's verdict-rerun circuit breaker keys on it.
-  // Classic-reviewer, conflict, fallback, and every CI-red repair fixable never carry one, so
-  // they sit structurally outside the breaker (a zero-push classic fix leg can still be real
-  // progress: thread replies/resolves are engine-executed writes that change unresolvedThreads
-  // without a commit — fix-response.ts; and CI can go green without the head moving).
-  | { kind: "fixable"; pr: number; reason: string; prescription?: "conflict" | "findings" | "ci-red"; verdictRunId?: string }
-) & {
-  /** The reviewer-failover audit signal for this tick (#54), when one applies. STATELESS —
-   *  reported on every tick the condition holds (see ReviewFailoverTransition); the caller
-   *  (conductor.ts tick()) dedups against the durable event log, then emits the structured
-   *  event and posts the PR comment. Announcement lives with the caller because dedup needs
-   *  the event log (State), which MergeDriver deliberately never touches. */
-  reviewerTransition?: ReviewFailoverTransition;
-  /** #170: stateless visibility signal for an aged, current-head non-decisive review. The
-   *  conductor applies the PR label + event; label presence suppresses this on later ticks. */
-  reviewSilenceEscalation?: { head: string; silenceSec: number };
-  /** #294: stateless hold observation for this pass — whether a configured hold label
-   *  (`escalation.holdLabels`, exact case-insensitive identity per #248 G3) currently gates
-   *  this PR, and the matching label in its on-PR casing. Reported on every pass that evaluates the
-   *  gate, same contract as reviewerTransition: the conductor derives the pr-held/pr-released
-   *  TRANSITION against the durable event log (dedup-the-event-not-the-signal), because
-   *  MergeDriver deliberately never touches State. Gate behavior is untouched — deriveGate's
-   *  own holdLabels WAIT check remains the sole scheduling effect of a hold. */
-  holdObservation?: { held: boolean; label?: string };
-  /** #426 (F26): stateless CI-pending observation for this pass — TWO independent facts, which is
-   *  what review round 3 (P2) separated:
-   *   - `head` — the live head this pass observed, known to EVERY return after the two reads agree
-   *     (the shared `observed()` wrapper attaches it, so a branch nobody remembers to update still
-   *     reports it). A head that differs from the open pin's ends the episode, full stop.
-   *   - `pending` — whether gate① is still pending behind a decisive gate② verdict
-   *     (`ciPendingOnDecisiveReview`). Only a pass that actually DERIVED a gate knows this;
-   *     `"unknown"` is what every earlier return says instead, and it is NEVER a cancel on the same
-   *     head. Reporting a bare `false` from a pass that never gated would wrongly cancel a live pin
-   *     the moment any transient (an instruction-path read failure, a conflict tick) happened to
-   *     land — the exact confusion this three-state field exists to prevent.
-   *  Same conductor contract as `holdObservation`: it owns the durable pin, because MergeDriver
-   *  deliberately never touches State. ABSENT means "this pass learned nothing at all" (a mixed-read
-   *  queue, a forge outage before either read landed) — a no-op at the conductor, never a cancel: a
-   *  loop-wide gh outage must not silently reset every lane's clock. */
-  ciPendingObservation?: { pending: boolean | "unknown"; head: string };
-  /** #426 (F26): stateless aging escalation for a lane held WAIT-on-CI past `ci.pendingEscalateAfterSec`
-   *  — the gate① twin of `reviewSilenceEscalation`, with the same PR-label latch closing it. */
-  ciPendingEscalation?: { head: string; pendingSec: number };
-};
+export type DriveOutcome =
+  // #420: `title` rides along when the driver's existing `gh pr view` projection returned one
+  // (PRStatus.title, #595) — optional, omitted-never-null, feeds the `merged` event's `prTitle`.
+  (
+    | { kind: "merged"; pr: number; headOid: string; title?: string }
+    | { kind: "needs-human"; pr: number; reason: string }
+    | { kind: "queued"; pr: number; reason: string }
+    | { kind: "stopped"; pr: number; reason: string } // produce-pr-and-stop: gates report, never merges
+    // #246: gate === FIXABLE in conductor-merge mode — the caller (conductor.ts tick()'s DRIVE
+    // loop) owns the fix_rounds/cap/budget decision (driveDecision) this pure class never sees;
+    // `reason` carries enough of the underlying signal (unresolved-thread count / CI-red) for the
+    // caller's own escalation comment, without this class fetching review-finding TEXT itself.
+    // #457 (F36): `verdictRunId` is present ONLY when this fixable is CAUSED by an engine-agent
+    // rejected verdict's findings (HANDLE_THREADS with CI not red — see finalizeVerdict's own
+    // gating, #457 review round 1 P1) — the conductor's verdict-rerun circuit breaker keys on it.
+    // Classic-reviewer, conflict, fallback, and every CI-red repair fixable never carry one, so
+    // they sit structurally outside the breaker (a zero-push classic fix leg can still be real
+    // progress: thread replies/resolves are engine-executed writes that change unresolvedThreads
+    // without a commit — fix-response.ts; and CI can go green without the head moving).
+    | { kind: "fixable"; pr: number; reason: string; prescription?: "conflict" | "findings" | "ci-red"; verdictRunId?: string }
+  ) & {
+    /** The reviewer-failover audit signal for this tick (#54), when one applies. STATELESS —
+     *  reported on every tick the condition holds (see ReviewFailoverTransition); the caller
+     *  (conductor.ts tick()) dedups against the durable event log, then emits the structured
+     *  event and posts the PR comment. Announcement lives with the caller because dedup needs
+     *  the event log (State), which MergeDriver deliberately never touches. */
+    reviewerTransition?: ReviewFailoverTransition;
+    /** #170: stateless visibility signal for an aged, current-head non-decisive review. The
+     *  conductor applies the PR label + event; label presence suppresses this on later ticks. */
+    reviewSilenceEscalation?: { head: string; silenceSec: number };
+    /** #294: stateless hold observation for this pass — whether a configured hold label
+     *  (`escalation.holdLabels`, exact case-insensitive identity per #248 G3) currently gates
+     *  this PR, and the matching label in its on-PR casing. Reported on every pass that evaluates the
+     *  gate, same contract as reviewerTransition: the conductor derives the pr-held/pr-released
+     *  TRANSITION against the durable event log (dedup-the-event-not-the-signal), because
+     *  MergeDriver deliberately never touches State. Gate behavior is untouched — deriveGate's
+     *  own holdLabels WAIT check remains the sole scheduling effect of a hold. */
+    holdObservation?: { held: boolean; label?: string };
+    /** #426 (F26): stateless CI-pending observation for this pass — TWO independent facts, which is
+     *  what review round 3 (P2) separated:
+     *   - `head` — the live head this pass observed, known to EVERY return after the two reads agree
+     *     (the shared `observed()` wrapper attaches it, so a branch nobody remembers to update still
+     *     reports it). A head that differs from the open pin's ends the episode, full stop.
+     *   - `pending` — whether gate① is still pending behind a decisive gate② verdict
+     *     (`ciPendingOnDecisiveReview`). Only a pass that actually DERIVED a gate knows this;
+     *     `"unknown"` is what every earlier return says instead, and it is NEVER a cancel on the same
+     *     head. Reporting a bare `false` from a pass that never gated would wrongly cancel a live pin
+     *     the moment any transient (an instruction-path read failure, a conflict tick) happened to
+     *     land — the exact confusion this three-state field exists to prevent.
+     *  Same conductor contract as `holdObservation`: it owns the durable pin, because MergeDriver
+     *  deliberately never touches State. ABSENT means "this pass learned nothing at all" (a mixed-read
+     *  queue, a forge outage before either read landed) — a no-op at the conductor, never a cancel: a
+     *  loop-wide gh outage must not silently reset every lane's clock. */
+    ciPendingObservation?: { pending: boolean | "unknown"; head: string };
+    /** #426 (F26): stateless aging escalation for a lane held WAIT-on-CI past `ci.pendingEscalateAfterSec`
+     *  — the gate① twin of `reviewSilenceEscalation`, with the same PR-label latch closing it. */
+    ciPendingEscalation?: { head: string; pendingSec: number };
+  };
 
 /** #170: pure aging decision. A configured failover gets its full evaluation window first;
  * afterward a still-non-decisive chain may call a human at its own (usually longer) bound.
@@ -501,7 +504,13 @@ export class MergeDriver {
       // the documented stale-data race above). Report NOT-held unconditionally instead: any
       // standing hold label on a merged PR is moot, and held:false lets the conductor close a
       // previously-announced episode with pr-released on this final pass.
-      return { kind: "merged", pr, headOid: status.headOid, holdObservation: { held: false } };
+      return {
+        kind: "merged",
+        pr,
+        headOid: status.headOid,
+        holdObservation: { held: false },
+        ...(status.title !== undefined ? { title: status.title } : {}),
+      };
     }
 
     // #246 review round 1 (C4, Codex sol-high PR #264 round 2): the two reads can disagree on
@@ -870,7 +879,7 @@ export class MergeDriver {
       }
       return { kind: "queued", pr, reason: `merge-failed-retry: ${msg}` };
     }
-    return { kind: "merged", pr, headOid: verdict.headOid };
+    return { kind: "merged", pr, headOid: verdict.headOid, ...(status.title !== undefined ? { title: status.title } : {}) };
   }
 
   /**
@@ -958,7 +967,8 @@ export class MergeDriver {
       }
       return { kind: "queued", pr, reason: outcome.reason };
     }
-    if (outcome.kind === "merged") return { kind: "merged", pr, headOid: outcome.headOid };
+    if (outcome.kind === "merged")
+      return { kind: "merged", pr, headOid: outcome.headOid, ...(outcome.title !== undefined ? { title: outcome.title } : {}) };
     if (outcome.kind === "needs-human") return { kind: "needs-human", pr, reason: outcome.reason };
     if (outcome.kind === "conflict") {
       // #460 (F37): mirror driveOne's own CONFLICTING block above BYTE-FOR-BYTE — same

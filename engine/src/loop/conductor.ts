@@ -3993,7 +3993,14 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           // never a missing one. No dedupe needed — unlike "queued", this outcome is terminal
           // (the lane goes `done`), so it is reported at most once per lane.
           deps.log?.(`[sapwood:drive] lane ${w.name} pr #${pr} MERGED (${outcome.headOid})`);
-          state.appendEvent("merged", { worker: w.name, issue: w.issue, pr, headOid: outcome.headOid });
+          state.appendEvent("merged", {
+            worker: w.name,
+            issue: w.issue,
+            pr,
+            headOid: outcome.headOid,
+            // #420: offline/replay tooltip source (frontend-design §11 #3) — omitted, never null.
+            ...(outcome.title !== undefined ? { prTitle: outcome.title } : {}),
+          });
           driven.push({ kind: "merged", worker: w.name, issue: w.issue, pr });
           break;
         case "needs-human":
