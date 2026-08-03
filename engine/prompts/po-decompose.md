@@ -58,6 +58,18 @@ Verification/Acceptance section: the engine routes them through the existing pla
 `needs-human` path. No child enters Ready automatically; a human moving each card to Ready is
 the why/what endorsement.
 
+## If a `ready` child's acceptance criterion would touch a human-merge-only path
+
+Check every acceptance criterion you write against `docs/security.md`'s "Human-merge-only
+paths" list (`guard.ts`/hook wiring, `reviewer.ts`/`merge-driver.ts`, `sapwood.config.yaml`/
+`.json` in full, `.claude/settings*.json`, `.github/workflows/**`). Never draft a criterion that
+asks a producer to edit one of those — the guard denies it regardless of wording, and a `ready`
+child that reaches gate⓪ this way only costs a bounce and a repair round-trip later. Resolve it
+now: make the criterion's deliverable a paste-ready patch/diff for a human to apply (the rest of
+the child's scope can still land in the same PR), or carve the protected-path work into its own
+`remainder` child instead of a `ready` one, with `unresolvedContext` naming the protected path
+and that a human must apply it directly.
+
 ## Structured output
 
 End with exactly one sentinel block. Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence.

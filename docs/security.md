@@ -1025,6 +1025,18 @@ discharge**. Such issues are best written to ask for a paste-ready patch (which 
 *can* produce, in the PR body or a plain file) rather than for the edit itself, so the
 work is dispatchable and the acceptance criteria are honestly satisfiable.
 
+**Resolved at issue-authoring time, not just caught at gate⓪ (retro round #284).**
+`verification-plan-reviewer.md`/`verification-plan-drafter.md` catch an acceptance criterion that
+still asks for a direct edit to one of these paths — but until #284 that was the *only* check,
+so an issue drafted with such a criterion reliably cost a gate⓪ bounce and a repair round-trip
+before it could dispatch (round #281's #386 and round #284's #399 both paid this cost, for two
+different specific gaps in the same mechanism). `po.md` (both `align` and `triage` modes) and
+`po-decompose.md` now carry the identical check at the point an issue or `ready` child is first
+drafted, resolving it into a paste-ready-patch criterion or a carved-out human-owned
+remainder/section immediately rather than leaving it for the reviewer to find. The gate⓪ check
+stays in place as the backstop for whatever this upstream pass misses — this narrows how often
+it fires, it does not replace it.
+
 #386 is the worked example, and it shows the shape such a handoff should take. Its
 calibration guidance landed in the docs directly; the matching `worker.budgetUsdSoft`
 comment could not, so it ships as a **checked-in, `git apply`-able patch** at

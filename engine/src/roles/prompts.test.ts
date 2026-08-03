@@ -66,7 +66,10 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // scan`), and says outright that the engine only checks the line EXISTS. Round provenance was
   // already engine-stamped; EVIDENCE provenance had no carrier at all, so a run-observation
   // finding and a repo-reading one were indistinguishable on the issue page.
-  "po.md": "6a6c6bbec284ce563a3e6b7277c9cfc3d8fe302eb41fa2241dabdfae071ad9c7",
+  // retro round #284: a criterion drafted against a human-merge-only path used to reach gate⓪
+  // unresolved every time (caught only reactively by verification-plan-reviewer/-drafter,
+  // costing a bounce round-trip) — po.md now resolves it at draft time, same pattern.
+  "po.md": "bb32ca8f481853421aa7bdfb1061e8c473db62a3458f46ee2f96d67ef07d3a34",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
@@ -165,7 +168,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // the paragraph describing it says what a named-but-not-shown number means: cross-referenceable,
   // still not selectable, and degrading to the old bare count if the number list itself won't fit.
   "po-pool.md": "d93bb9f0f314718df8465a06d7583fdfe45901efe94ef9c9a99275755184b1e6",
-  "po-decompose.md": "3289b0f37585b84fdce67319f9ae4b2e82c8873b13b2a292adef25b1bca79ae2",
+  // retro round #284: same fix as po.md above, mirrored for a `remainder` child instead of a
+  // paste-ready-patch criterion.
+  "po-decompose.md": "f0b126a80576a7bbacde7370c1e3ad8cd5f90d08755df933e446708df782ef17",
 };
 
 test("prompt snapshot: po.md hash matches the pinned revision", () => {
@@ -647,6 +652,23 @@ test("#457 verification-plan-reviewer-confirm.md: an execution-class AC on a leg
   assert.match(body, /A second standing check \(F36\): an execution-class acceptance\s+criterion/);
   assert.match(body, /a still-approved plan carrying one is `invalidate`/);
   assert.match(body, /folded into the\s+`## Verification plan`/);
+});
+
+test("retro round #284: po.md (both modes) and po-decompose.md resolve a human-merge-only acceptance criterion at draft time — paste-ready patch or a carved-out remainder/section — instead of leaving it for gate⓪ to bounce", () => {
+  const po = readPrompt(defaultPoPromptPath());
+  assert.ok(
+    po.includes("## If an acceptance criterion would touch a human-merge-only path"),
+    "po.md carries the check, shared across align/triage",
+  );
+  assert.match(po, /paste-ready patch\/diff for a human to apply/);
+  assert.match(po, /## Human-owned remainder\s*\(protected paths — not dispatched\)/);
+
+  const decompose = readPrompt(defaultPoDecomposePromptPath());
+  assert.ok(
+    decompose.includes("## If a `ready` child's acceptance criterion would touch a human-merge-only path"),
+    "po-decompose.md carries the check",
+  );
+  assert.match(decompose, /carve the protected-path work into its own\s+`remainder` child/);
 });
 
 test("#457 verification-plan-drafter.md + po-decompose.md: AC-authoring guidance forbids CI/suite/typecheck status as a criterion — the Verification plan owns execution steps", () => {
