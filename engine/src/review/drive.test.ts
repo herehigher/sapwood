@@ -958,6 +958,62 @@ test("driveEngineAgentReview (#503): a required check CONCLUDED FAILURE -> {kind
   assert.equal(recorded.pin, null);
 });
 
+// ── #608: the ci-red route must consult the #502 base-red pin before dispatching a fix leg the
+// producer cannot fix — a fix leg only helps when the PR has red evidence the pin doesn't cover ──
+
+test("driveEngineAgentReview (#608): standing base-red pin + PR's failing set IDENTICAL to the pin's -> NO ci-red, queued with base-inherited reason", async () => {
+  let evaluated = false;
+  const { deps } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+    getBaseRedPin: () => ({ sha: "a1c0ffee", at: "2026-01-01T00:00:00.000Z", failing: ["test@github-actions"] }),
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued", "the base's own red, not this lane's — no producer push can fix it");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /base-inherited/);
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /a1c0ffee/);
+  assert.equal(evaluated, false, "no paid session either way");
+});
+
+test("driveEngineAgentReview (#608): pin absent -> ci-red unchanged (regression, same shape as pre-#608)", async () => {
+  const { deps } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, {
+    kind: "ci-red",
+    status: status({ ciGreen: false, ciRed: true }),
+    data: data(),
+    failing: ["test@github-actions"],
+  });
+});
+
+test("driveEngineAgentReview (#608): PR's failing set EXCEEDS the pin's set (own red, not just base-inherited) -> ci-red still dispatched", async () => {
+  const { deps } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ ciGreen: false, ciRed: true }),
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+    getBaseRedPin: () => ({ sha: "a1c0ffee", at: "2026-01-01T00:00:00.000Z", failing: ["other@github-actions"] }),
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, {
+    kind: "ci-red",
+    status: status({ ciGreen: false, ciRed: true }),
+    data: data(),
+    failing: ["test@github-actions"],
+  });
+});
+
 test("driveEngineAgentReview (#503): PENDING required CI (null conclusion) keeps the exact pre-#503 queued wait — red is not pending, and neither is the reverse", async () => {
   const { deps } = makeDeps({
     forge: {

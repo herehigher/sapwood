@@ -437,6 +437,19 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     }
     const failing = requiredChecksRed(checksPage0.checks, deps.cfg.ci.requiredChecks);
     if (failing.length > 0) {
+      // #608: a standing #502 base-red pin means the DEFAULT BRANCH is red, and every open PR's
+      // merge-ref CI inherits that failure verbatim — a fix-leg push cannot fix the base, and
+      // rerolling CI against a still-red base only self-perpetuates (batch-4's probeLlmPing
+      // incident: ~$28 across 3 lanes). Only route to the wait when the PR's ENTIRE failing set is
+      // already covered by the pin's (same run names, the evidence the pin already carries) — a
+      // failing run NOT in the pin's set is this lane's own red, still a legitimate fix leg.
+      const basePin = deps.getBaseRedPin?.() ?? null;
+      if (basePin && failing.every((f) => basePin.failing.includes(f))) {
+        return {
+          kind: "queued",
+          reason: `engine-agent: CI-red is base-inherited (the default branch is CI-red at ${basePin.sha} — ${basePin.failing.join(", ")}): ${failing.join(", ")}`,
+        };
+      }
       return { kind: "ci-red", status: status0, data: data0, failing };
     }
   }
