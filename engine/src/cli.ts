@@ -300,7 +300,7 @@ Flags:
  *  it gates. D5 (config.ts's top-level superRefine) enforces that the two models DIFFER but says
  *  nothing about ORDERING, so a config can legitimately parse with the weaker model reviewing the
  *  stronger one's output — which inverts gate②'s authority, since the conductor merges on its
- *  verdict. The shipped defaults now state the rule (worker sonnet / reviewer opus); this catches
+ *  verdict. The shipped defaults now state the rule (worker opus / reviewer fable); this catches
  *  an override that re-inverts it.
  *
  *  A WARNING, never a rejection, and deliberately so: model strings are free-form and the rate

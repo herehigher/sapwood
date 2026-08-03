@@ -34,6 +34,15 @@
 # missing contextWindow fails the whole file's load, exactly like one missing a rate field.
 
 models:
+  # Mythos-class tier above opus — DEFAULT_REVIEWER_AGENT_MODEL since #582 (option (a)):
+  # the gate②-above-producer ordering needs a priced row so `sapwood validate`'s tier
+  # warning can compare it. Rates: Anthropic first-party API, snapshot 2026-08-03.
+  fable:
+    input: 10
+    output: 50
+    cacheWrite: 12.5
+    cacheRead: 1
+    contextWindow: 1000000
   opus:
     input: 5 # USD per million input tokens
     output: 25 # USD per million output tokens

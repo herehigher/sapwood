@@ -2694,13 +2694,13 @@ test("tick DRIVE (#460, real engine-agent path): CONFLICTING PR -> fixable/presc
   const sup = new FakeSupervisor();
   seedDriving(st, "lane-a", 2, 55);
   const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "x" }) };
-  const gate = new MergeDriver({ forge, reviewer, cfg: mkCfg({ reviewer: { mode: "engine-agent", agent: { model: "opus" } } }) });
+  const gate = new MergeDriver({ forge, reviewer, cfg: mkCfg({ reviewer: { mode: "engine-agent", agent: { model: "sonnet" } } }) });
   const r = await tick({
     now: realClock,
     forge,
     state: st,
     supervisor: sup,
-    cfg: mkCfg({ reviewer: { mode: "engine-agent", agent: { model: "opus" } } }),
+    cfg: mkCfg({ reviewer: { mode: "engine-agent", agent: { model: "sonnet" } } }),
     mergeGate: gate,
     engineAgentDriveDeps: mkEngineAgentDriveDeps,
     fixLegResume: { renderFixPrompt: () => "base fix prompt", mintProxy: async () => ({}) as never },
@@ -2722,7 +2722,7 @@ test("tick DRIVE (#460, real engine-agent path): CONFLICTING at the shared fix-r
   const sup = new FakeSupervisor();
   seedDriving(st, "lane-a", 2, 55, { fix_rounds: 4 }); // == default prFixCap (#450: 2 -> 4)
   const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "x" }) };
-  const cfg = mkCfg({ reviewer: { mode: "engine-agent", agent: { model: "opus" } } });
+  const cfg = mkCfg({ reviewer: { mode: "engine-agent", agent: { model: "sonnet" } } });
   const gate = new MergeDriver({ forge, reviewer, cfg });
   const r = await tick({
     now: realClock,
@@ -2748,7 +2748,7 @@ test("tick DRIVE (#457 x #460, breaker cause isolation on the REAL conflict rout
   const sup = new FakeSupervisor();
   seedDriving(st, "lane-a", 2, 55);
   const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "x" }) };
-  const cfg = mkCfg({ reviewer: { mode: "engine-agent", agent: { model: "opus" } } });
+  const cfg = mkCfg({ reviewer: { mode: "engine-agent", agent: { model: "sonnet" } } });
   const gate = new MergeDriver({ forge, reviewer, cfg });
   const deps = {
     now: realClock,

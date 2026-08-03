@@ -119,7 +119,7 @@ Per-worker execution.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `model` | `sonnet` (#582; was `opus` before 2026-08-03) | Model the headless worker runs as. Paired with `reviewer.agent.model`'s opposite default so the gate sits at or above the producer — see [Reviewer tier vs. worker tier](#reviewer-tier-vs-worker-tier). |
+| `model` | `opus` | Model the headless worker runs as. `reviewer.agent.model` defaults one tier ABOVE it (`fable`, #582 option (a)) so the gate sits at or above the producer — see [Reviewer tier vs. worker tier](#reviewer-tier-vs-worker-tier). |
 | `effort` | `high` | `low` \| `medium` \| `high`. |
 | `fallbackModel` | `sonnet` | Model passed to Claude's `--fallback-model` when the primary is unavailable. **At the shipped defaults this equals `model`**, so out of the box there is no silent downgrade on an unavailable primary; raise `model` to `opus` and this becomes a real one-tier-down fallback again. Set to literal `"none"` to omit the flag and fail loud rather than silently downgrade quality; the environment-failure handling path is documented in [#168](https://github.com/herehigher/sapwood/issues/168). |
 | `timeoutSec` | `3600` | Wall-clock hard cap per worker (enforced). |
@@ -139,12 +139,8 @@ conservative and is *not* the right number for every profile.
 
 **Observed cost, sapwood's own dogfood run (2026-07-24, [#386](https://github.com/herehigher/sapwood/issues/386)):** with the
 then-shipped `worker.model: opus` + `effort: high` defaults, one leg of a *substantive
-implementation* issue cost roughly **$8–20**. That measurement predates
-[#582](https://github.com/herehigher/sapwood/issues/582)'s flip of the `worker.model` default to
-`sonnet`, and it has **not** been re-measured on the new default — scaling by the shipped rate
-table (sonnet is `$3`/`$15` per Mtok in/out against opus's `$5`/`$25`, i.e. 0.6×) projects roughly
-**$5–12** per leg for the same work, but that is arithmetic on the rate table, not an observation.
-Take your own number from the reconciliation line described under "Not sure?" below.
+implementation* issue cost roughly **$8–20**. [#582](https://github.com/herehigher/sapwood/issues/582)'s option-(a) ruling left the
+`worker.model` default at `opus`, so that measurement still describes the shipped profile.
 At `budgetUsdSoft: 10` every substantive first leg crossed the
 cap and handed off before opening a PR (3 of 3 observed); at `20` those legs carried through
 to a PR in one go. Nothing malfunctioned — the graceful handoff did exactly what it promises,
@@ -166,14 +162,12 @@ blast radius. Neither is a runaway: the hard `cost` ceilings below bound both.
 
 **Practical guidance:**
 
-- **`opus` / `high` on substantive implementation issues** (an override since #582, and the
-  profile the $8–20 figure was measured on): set `budgetUsdSoft: 20`, and raise
+- **The shipped `opus` / `high` profile on substantive implementation issues** (the profile
+  the $8–20 figure was measured on): set `budgetUsdSoft: 20`, and raise
   `cost.roundBudgetUsd` to at least `budgetUsdSoft × lanes.max` so the round throttle doesn't
-  become the new bottleneck. Overriding `worker.model` up to `opus` also requires setting
-  `reviewer.agent.model` to something other than `opus`, or the parse fails on D5 — see
-  [Reviewer tier vs. worker tier](#reviewer-tier-vs-worker-tier).
-- **The shipped `sonnet` / `high` profile, lower effort, or small/narrow issues** (docs,
-  chores, single-file fixes): `10` is fine, and is why it remains the shipped default.
+  become the new bottleneck.
+- **A downgraded `sonnet` worker, lower effort, or small/narrow issues** (docs, chores,
+  single-file fixes): `10` is fine, and is why it remains the shipped default.
 - **Not sure?** Leave it at `10` and read the reconciliation line the engine logs when each
   worker finishes (estimate vs. real `total_cost_usd`) — that is your own per-leg number, for
   your own repo and rate table, and beats any default shipped here.
@@ -413,7 +407,7 @@ Gate② — who reviews a PR before it can merge.
 | `fallback` | `[]` | Ordered, opt-in list of reviewer modes to fail over to when the primary is unavailable past `failoverAfterSec`. Entries may be `different-model-codex`, `same-model-trusted`, or `human`; `engine-agent` is deliberately primary-only and is rejected here. Each entry keeps its own mode semantics (identity allowlist for hosted-bot modes, any-non-author approval for `human`). Empty (the default) is byte-for-byte pre-failover behavior: an unavailable primary queues the PR forever, no silent degradation. `same-model-trusted` in `fallback` with an empty `trustedReviewers` is rejected at parse — it could never produce a verdict, so the failover would be silently inert. |
 | `failoverAfterSec` | `1200` (20min) | How long the primary reviewer may stay non-decisive before gate② hands off to the first fallback entry that itself reaches a decisive verdict. Irrelevant when `fallback` is empty. |
 | `escalateAfterSec` | `86400` (24h) | How long a current-head review may stay non-decisive before sapwood applies `needs-human` to the PR and emits `review-silence-escalated`. This adds visibility only: the lane stays driving, polling continues, and gate② is never softened. A configured failover receives its full `failoverAfterSec` evaluation window first. |
-| `agent.model` | `opus` when `mode: engine-agent` and `agent` is omitted (#501 default injection; `sonnet` before #582, 2026-08-03); required (non-empty) if `agent` is set at all | Claude model for the `engine-agent` review session. Must differ from `worker.model` — enforced identically whether `agent` was default-injected or hand-written (D5 is never silently defeated by the default); runtime checks also require the worker's and review session's recorded actual models to be distinguishable. Its tier should also sit **at or above** `worker.model`'s — see [Reviewer tier vs. worker tier](#reviewer-tier-vs-worker-tier) for why, and for the `sapwood validate` warning that flags an inversion. |
+| `agent.model` | `fable` when `mode: engine-agent` and `agent` is omitted (#501 default injection; `sonnet` before #582, 2026-08-03); required (non-empty) if `agent` is set at all | Claude model for the `engine-agent` review session. Must differ from `worker.model` — enforced identically whether `agent` was default-injected or hand-written (D5 is never silently defeated by the default); runtime checks also require the worker's and review session's recorded actual models to be distinguishable. Its tier should also sit **at or above** `worker.model`'s — see [Reviewer tier vs. worker tier](#reviewer-tier-vs-worker-tier) for why, and for the `sapwood validate` warning that flags an inversion. |
 | `agent.runner` | `claude` | Which locally-invoked CLI executes the review session (#443). `claude` runs it on the same Claude CLI sapwood already needs — unset is byte-for-byte the pre-#443 behavior. `codex-exec` runs it as a local `codex exec` process instead, making gate② **cross-vendor**: the reviewer's provider differs from the worker's, which is the strongest form of "different model". **Not the same thing as `reviewer.mode: different-model-codex`** — that asks a *hosted* GitHub App to review through a PR comment and spawns nothing locally; this spawns a local process and posts no trigger comment. Requires the `codex` CLI on `PATH` (or `CODEX_BIN`) and a working codex login. Honest-recording semantics for this runner: `agent.costCapUsd` degrades to **advisory** (the CLI has no hard cap — a warning event is emitted before each attempt), post-run spend is a **flagged estimate** from token telemetry (or recorded as *unknown*, never as `$0`), and the containment gaps the CLI cannot close are recorded as a named blind-spot warning event at every spawn. **Read [docs/security.md's `#443` exception](security.md) before enabling this**: a read-only sandbox restricts writes, not execution, and *not the read scope* — a prompt-injected review session can read host-wide files, operator credentials included, and return them through provider-visible output. sapwood strips the well-known credential families from the session's environment (forge/SSH/cloud/registry tokens plus a `*_TOKEN`/`*_SECRET`/`*_API_KEY`/`*_PASSWORD`/`*_CREDENTIALS` sweep) and redirects the `gh`/git config handles — but that list cannot be exhaustive, the rest of the environment is inherited, reads are not confined, and by owner ruling no outer sandbox ships. The wall-clock session timeout (`worker.timeoutSec`) stays hard, and terminates the session's whole process group. |
 | `agent.codexPricing` | unset (shipped list price: `$1.25`/`$10` per M tokens in/out) | `{ inputUsdPerMTok, outputUsdPerMTok }` used to turn the codex-exec runner's token telemetry into the `estimated` USD figure. Dead config with `agent.runner: claude` (rejected at parse — that runner reports real dollars). Cached-input and reasoning tokens are deliberately not priced separately: this is a bounded estimate by design, which is why every figure derived from it is flagged. |
 | `agent.effort` | `high` | Review-session effort: `low`, `medium`, or `high`. Threaded to the Claude CLI's effort setting, or to codex's `model_reasoning_effort` under `agent.runner: codex-exec`. |
@@ -456,14 +450,14 @@ warning, never by a parse rejection.
 
 | | Shipped default | Cost expectation |
 |---|---|---|
-| `worker.model` | `sonnet` | Bounded by `worker.budgetUsdSoft × (1 + worker.maxResumes)` = **$30/issue** worst case at the shipped values. That bound is in dollars and did not move with #582; what moved is the *expected* spend inside it — see [Calibrating `budgetUsdSoft`](#calibrating-budgetusdsoft). |
-| `reviewer.agent.model` | `opus` | Bounded by `reviewer.agent.costCapUsd` = **≤$3/PR** per logical review. Also unmoved by #582: the cap is dollars, so a review still costs at most $3 — it simply buys fewer tokens at opus rates than it did at sonnet rates. |
+| `worker.model` | `opus` | Bounded by `worker.budgetUsdSoft × (1 + worker.maxResumes)` = **$30/issue** worst case at the shipped values (the bound is in dollars — see [Calibrating `budgetUsdSoft`](#calibrating-budgetusdsoft)). |
+| `reviewer.agent.model` | `fable` (#582 option (a); `sonnet` before 2026-08-03) | Bounded by `reviewer.agent.costCapUsd` = **≤$3/PR** per logical review. The cap is dollars, so a review still costs at most $3 — it simply buys fewer tokens at fable rates ($10/$50 per MTok) than it did at sonnet rates. |
 
-Flipping the pair this way (rather than raising the reviewer *above* opus) keeps the expected
-total **lower**, not higher: workers dominate spend and reviews are capped an order of magnitude
-below them, so #582 downgraded the big spender and upgraded the small one. The compensating risk
-— a weaker producer needing more fix rounds — is bounded by `lanes.prFixCap` and caught by the
-two-gate/TDD structure.
+Raising the reviewer *above* opus (rather than swapping the pair) keeps the expected total nearly
+unchanged: workers dominate spend and are untouched, while reviews are capped an order of
+magnitude below them — the dollar-capped review just buys fewer, stronger tokens. The rejected
+alternative (worker→sonnet / reviewer→opus) made a config that sets only `worker.model: opus` —
+including this repo's own — collide with its defaulted reviewer under D5.
 
 **`sapwood validate` warns on an inversion.** When the configured `reviewer.agent.model` is
 priced *below* `worker.model` in the loaded rate table (`worker.pricingFile`, or the shipped
@@ -474,11 +468,11 @@ strings are free-form and the rate table is a hand-maintained *cost* proxy for c
 hard failure would reject legitimate setups — a cross-vendor `agent.runner: codex-exec` reviewer
 has no rate comparable to a Claude worker's at all.
 
-**Raising `worker.model` back to `opus`** (the pre-#582 default) therefore takes two edits, not
-one: set `reviewer.agent.model` to something other than `opus` in the same change, or the parse
-fails on D5 with both sides reading `opus`. To keep the ordering intact while doing so, point the
-reviewer at a stronger-than-opus model if your account has one; that is a supported *upgrade*, but
-deliberately not a shipped default, since its availability varies by account.
+**Raising `worker.model` to `fable`** therefore takes two edits, not one: set
+`reviewer.agent.model` to something other than `fable` in the same change, or the parse fails on
+D5 with both sides reading `fable`. There is no shipped tier above fable, so at that point the
+ordering rule and D5 pull in opposite directions — pick a distinct reviewer and accept the
+validate-time inversion warning, or keep the worker at or below `opus`.
 
 **Which CLI runs the review (`agent.runner`, #443)** is a separate question from `reviewer.mode`,
 and the two codex-shaped options are easy to confuse:

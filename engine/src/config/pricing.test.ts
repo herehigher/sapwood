@@ -145,8 +145,8 @@ test("resolveRate: case-insensitive — both the model id AND the table's alias 
 });
 
 test("resolveRate: unrecognized model falls back to the most expensive tier of the LOADED table (never silently under-estimates)", () => {
-  assert.deepEqual(resolveRate("some-future-model-xyz", table), resolveRate("opus", table));
-  assert.deepEqual(resolveRate("unknown", table), resolveRate("opus", table));
+  assert.deepEqual(resolveRate("some-future-model-xyz", table), resolveRate("fable", table)); // fable is the shipped table's priciest tier since #582 (a)
+  assert.deepEqual(resolveRate("unknown", table), resolveRate("fable", table));
   // And with a USER table where a custom alias is the priciest, THAT tier is the fallback —
   // "most expensive" is a property of the loaded table, not a hardcoded "opus".
   const dir = mkdtempSync(join(tmpdir(), "sapwood-pricing-"));
