@@ -598,7 +598,7 @@ test("guard-hook: invoked via a symlink still enforces (realpath direct-invocati
       child.stdout.on("data", (d) => (stdout += d.toString()));
       child.stderr.on("data", (d) => (stderr += d.toString()));
       child.on("error", reject);
-      child.on("exit", (code) => resolve({ stdout, code }));
+      child.on("close", (code) => resolve({ stdout, code })); // #578: 'close' (stdio drained), not 'exit'
       child.stdin.write(forbidden);
       child.stdin.end();
       void stderr;

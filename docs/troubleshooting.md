@@ -366,8 +366,11 @@ disagree.
 ## Where to look after an unattended run
 
 The run log (`logging.path`, default `data/logs/sapwood.log`) is the disposable human/LLM
-narrative: startup, tick and round lifecycle summaries, degradations, and park notices. Start
-here to understand the shape of a run; the previous rotation, when present, is `<path>.1`.
+narrative: startup, tick and round lifecycle summaries, degradations, and park notices. Merges
+announce themselves here too — one `[sapwood:drive] lane <lane> pr #<n> MERGED (<headOid>)` line
+per merged PR (#570), so the engine's most consequential act is visible to a live `tail -f`
+without querying SQLite. Start here to understand the shape of a run; the previous rotation, when
+present, is `<path>.1`.
 
 The SQLite events ledger is the structured source of truth for transitions needed by
 correctness, audit, replay, and dashboards. Query it when you need durable facts; event payloads
