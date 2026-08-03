@@ -399,7 +399,7 @@ async function invokeGuardHookLive(
     let out = "";
     child.stdout.on("data", (d) => (out += d.toString()));
     child.on("error", reject);
-    child.on("exit", (code) => resolvePromise({ stdout: out, code }));
+    child.on("close", (code) => resolvePromise({ stdout: out, code })); // #578: 'close' (stdio drained), not 'exit'
     child.stdin.write(JSON.stringify(payload));
     child.stdin.end();
   });
