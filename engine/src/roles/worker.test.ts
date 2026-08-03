@@ -4705,6 +4705,21 @@ test("WORKER_DISALLOWED_TOOLS: ordinary worker gh usage stays allowed (#488)", (
   }
 });
 
+// #552 decision (docs/security.md, "the code-producing worker deliberately retains spawn
+// capability"): unlike #534's peripheral-role/gate②-reviewer deny (ROLE_DISALLOWED_TOOLS names
+// Agent/Task explicitly, peripheral.test.ts), the coding worker's OWN deny list stays a gh-verb
+// pattern list only — no name-list entry for either subagent-spawn tool. Pins the DECISION, not
+// just WORKER_DISALLOWED_TOOLS' string value (already pinned above): a future edit that adds
+// Agent/Task here would silently reverse #552's ruling without ever touching this test's name.
+test("WORKER_DISALLOWED_TOOLS: Agent/Task are NOT denied — the coding worker keeps subagent spawn (#552 decision)", () => {
+  for (const spawnTool of ["Agent", "Task"]) {
+    assert.ok(
+      !WORKER_DISALLOWED_TOOLS.split(",").includes(spawnTool),
+      `${spawnTool} must stay unlisted — #552 decided to keep worker subagent spawn, accepting the soft-budget blind spot as documented in docs/security.md`,
+    );
+  }
+});
+
 // #244 (Codex sol-high PR #260 review, P2): fail-closed policy — credentialFree + a failed mint
 // leaves a leg with NEITHER the gh/git credentialed-tool path (severed by workerCredentialFreeEnv)
 // NOR a working evidence channel, so dispatch() must REFUSE outright rather than silently run
