@@ -107,8 +107,24 @@ const Lanes = z
 
 const Worker = z
   .object({
-    model: z.string().default("opus"),
+    // #582 (owner ruling 2026-08-03): default flipped opus -> sonnet, paired with
+    // DEFAULT_REVIEWER_AGENT_MODEL's opposite flip. D5 only ever required the reviewer's model to
+    // DIFFER from this one; nothing stated an ORDERING, so the post-#501 shipped pair (worker
+    // opus / reviewer sonnet) had the weaker model gating the stronger one's output. gate② is the
+    // loop's trust anchor — the conductor merges on its verdict — so the shipped defaults put the
+    // reviewer AT OR ABOVE the producer's tier. It also lowers expected total spend: workers
+    // dominate it (budgetUsdSoft x maxResumes, up to ~$30/issue) while a review is capped at
+    // reviewer.agent.costCapUsd (~$3/PR), so this downgrades the big spender and upgrades the
+    // small one. The compensating risk — a weaker producer needing more fix-loop rounds — is what
+    // prFixCap + the two-gate/TDD structure already bound.
+    model: z.string().default("sonnet"),
     effort: z.enum(["low", "medium", "high"]).default("high"),
+    // #582 consequence, deliberately left alone: worker.model's default is now this same value,
+    // so the shipped pair no longer downgrades on an unavailable primary — which is the
+    // no-silent-degradation direction this repo already defaults to elsewhere (reviewer.fallback
+    // is `[]`, and every roles.* block has shipped model === fallbackModel since #77). An
+    // operator who raises worker.model to opus gets the sonnet fallback back automatically;
+    // "none" omits --fallback-model entirely and fails loud (#168's environment-failure path).
     fallbackModel: z.string().default("sonnet"),
     timeoutSec: z.number().int().positive().default(3600),
     // SOFT per-worker budget -> graceful handoff (never a mid-work kill). Auto-enforced (#33) via
@@ -197,10 +213,16 @@ const Cost = z
   .strict();
 
 // #501: the default Claude model assigned to an INJECTED reviewer.agent block (Reviewer's own
-// `.transform()` below) — deliberately different from worker.model's own default ("opus") so the
+// `.transform()` below) — deliberately different from worker.model's own default ("sonnet") so the
 // ordinary zero-config parse never trips D5 (ConfigSchema's top-level superRefine). Exported for
 // tests, same convention as DEFAULT_GOAL_FILE/DEFAULT_CONFIG_PATHS below.
-export const DEFAULT_REVIEWER_AGENT_MODEL = "sonnet";
+// #582 (owner ruling 2026-08-03): flipped sonnet -> opus, the other half of worker.model's
+// opus -> sonnet flip (see that field's own note for the ordering rule and the cost reasoning).
+// D5 is unchanged and still only enforces DIFFERENCE; the ordering is a defaults + docs
+// statement plus a `sapwood validate` warning (cli.ts), never a parse-time rejection — model
+// strings are free-form and the rate table is only a proxy for capability, so a hard fail would
+// reject legitimate setups (a cross-vendor reviewer whose rates aren't comparable at all).
+export const DEFAULT_REVIEWER_AGENT_MODEL = "opus";
 
 // #501: identity marker for a reviewer.agent block this module itself injected (Reviewer's
 // `.transform()` below) rather than one a user supplied — read only by ConfigSchema's top-level
@@ -448,9 +470,9 @@ const Reviewer = z
     //       which runs strictly after this whole `reviewer` field has finished parsing, always
     //       sees the FULLY RESOLVED agent block — a defaulted one is checked for the worker.model
     //       collision exactly like a user-supplied one, never silently exempted.
-    // DEFAULT_REVIEWER_AGENT_MODEL ("sonnet") differs from worker.model's own default ("opus"),
+    // DEFAULT_REVIEWER_AGENT_MODEL ("opus") differs from worker.model's own default ("sonnet"),
     // so the ordinary zero-config case never collides; an operator who sets ONLY worker.model to
-    // "sonnet" still hits the D5 rejection (see that check's own doc for the extended,
+    // "opus" still hits the D5 rejection (see that check's own doc for the extended,
     // defaulted-case error message). injectedReviewerAgents (below) marks the block so that
     // message can name it as defaulted rather than user-set.
     if (r.mode === "engine-agent" && r.agent === undefined) {

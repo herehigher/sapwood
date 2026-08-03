@@ -105,17 +105,26 @@ export function loadPricingTable(cfg: SapwoodConfig): PricingTable {
 }
 
 /** Case-insensitive alias match: exact, or the alias as a SUBSTRING of the model id (so the
- *  table's "opus" row prices "claude-opus-4-8"). A model that matches nothing is priced at
- *  the MOST EXPENSIVE tier in the loaded table — over-estimating only ever costs an
- *  earlier-than-ideal graceful handoff; under-estimating a budget check is the actually
- *  dangerous direction (a soft budget that never fires). */
-export function resolveRate(model: string, table: PricingTable): ModelRateUsdPerMTok {
+ *  table's "opus" row prices "claude-opus-4-8"). `undefined` when the model matches no row —
+ *  the lookup WITHOUT resolveRate's most-expensive fallback, for callers that must tell
+ *  "absent from the table" apart from "priced" (#582's `sapwood validate` tier-inversion
+ *  warning: an unpriced model has no comparable rate, and silently substituting the
+ *  most-expensive tier would invent a comparison the operator never configured). */
+export function findRate(model: string, table: PricingTable): ModelRateUsdPerMTok | undefined {
   const m = model.toLowerCase();
   for (const [alias, rate] of Object.entries(table)) {
     const a = alias.toLowerCase();
     if (m === a || m.includes(a)) return rate;
   }
-  return mostExpensiveRate(table);
+  return undefined;
+}
+
+/** Same match as findRate, but a model that matches nothing is priced at the MOST EXPENSIVE
+ *  tier in the loaded table — over-estimating only ever costs an earlier-than-ideal graceful
+ *  handoff; under-estimating a budget check is the actually dangerous direction (a soft budget
+ *  that never fires). */
+export function resolveRate(model: string, table: PricingTable): ModelRateUsdPerMTok {
+  return findRate(model, table) ?? mostExpensiveRate(table);
 }
 
 /** "Most expensive" = highest input rate, tie-broken by output rate — the conservative

@@ -272,7 +272,7 @@ test("#549 effectiveInstructionPaths: an unset reviewer.agent.promptFile changes
 test("#549 effectiveInstructionPaths: a repointed reviewer.agent.promptFile is followed by its raw repo-relative form, never loadConfig's absolute path", () => {
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 1 },
-    reviewer: { mode: "engine-agent", agent: { model: "sonnet", promptFile: "prompts/my-reviewer.md" } },
+    reviewer: { mode: "engine-agent", agent: { model: "opus", promptFile: "prompts/my-reviewer.md" } },
   });
   // Mirrors loadConfig's annotation: promptFileRaw keeps the pre-resolution value, promptFile becomes absolute.
   cfg.reviewer.agent!.promptFileRaw = "prompts/my-reviewer.md";
@@ -288,7 +288,7 @@ test("#549 effectiveInstructionPaths: a repointed reviewer.agent.promptFile is f
 test("#549 effectiveInstructionPaths: a prompt path outside the repo-relative shape is skipped, not smuggled in", () => {
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 1 },
-    reviewer: { mode: "engine-agent", agent: { model: "sonnet", promptFile: "prompts/my-reviewer.md" } },
+    reviewer: { mode: "engine-agent", agent: { model: "opus", promptFile: "prompts/my-reviewer.md" } },
   });
   const unchanged = [...cfg.escalation.instructionPaths, "docs/REVIEW-DOCTRINE.md"];
   for (const outside of ["/etc/my-reviewer.md", "../sibling/my-reviewer.md"]) {
@@ -301,7 +301,7 @@ test("#549 effectiveInstructionPaths: the [] off-switch still disables everythin
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 1 },
     escalation: { instructionPaths: [] },
-    reviewer: { mode: "engine-agent", agent: { model: "sonnet", promptFile: "prompts/my-reviewer.md" } },
+    reviewer: { mode: "engine-agent", agent: { model: "opus", promptFile: "prompts/my-reviewer.md" } },
   });
   assert.deepEqual(effectiveInstructionPaths(cfg), []);
 });
@@ -309,7 +309,7 @@ test("#549 effectiveInstructionPaths: the [] off-switch still disables everythin
 test("#549 escalation helper: a PR editing a repointed reviewer prompt escalates through the existing #292 path", async () => {
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 1 },
-    reviewer: { mode: "engine-agent", agent: { model: "sonnet", promptFile: "prompts/my-reviewer.md" } },
+    reviewer: { mode: "engine-agent", agent: { model: "opus", promptFile: "prompts/my-reviewer.md" } },
   });
   const labels: string[] = [];
   let comments = 0;
@@ -337,7 +337,7 @@ test("#549 escalation helper: with instructionPaths [] a repointed-prompt edit s
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 1 },
     escalation: { instructionPaths: [] },
-    reviewer: { mode: "engine-agent", agent: { model: "sonnet", promptFile: "prompts/my-reviewer.md" } },
+    reviewer: { mode: "engine-agent", agent: { model: "opus", promptFile: "prompts/my-reviewer.md" } },
   });
   const forge = new Proxy({}, { get: () => () => assert.fail("disabled escalation must not touch forge") }) as Pick<
     IForge,

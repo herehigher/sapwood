@@ -1,0 +1,77 @@
+# Pending human-applied patch — issue #582, PR (this branch)
+#
+# WHAT: retires this repo's explicit `worker: model: opus` override (line 84) so it tracks
+#       worker.model's NEW shipped default (sonnet), and refreshes the two comment blocks
+#       that name the old default pair. Post-patch this repo resolves to the shipped pair:
+#         worker.model = sonnet (default)   reviewer.agent.model = opus (default)
+#       — distinct (D5 satisfied) and correctly ORDERED (reviewer tier >= worker tier, #582).
+#
+# WHY IT MUST BE APPLIED — this is not optional cleanup, it UNBLOCKS CI ON THIS PR:
+#       unpatched, this repo's config sets worker.model: opus explicitly while leaving
+#       reviewer.agent commented out. Post-#582 the omitted reviewer block defaults to
+#       "opus" too, so the pair COLLIDES and the D5 superRefine rejects the parse:
+#         reviewer.agent.model was DEFAULTED to "opus" ... and collides with worker.model
+#         ("opus") — a same-model review can never gate its own producer (D5, design #279)
+#       Six tests in engine/src/config/doctrine.test.ts load this repo's real
+#       sapwood.config.yaml end-to-end and therefore fail until this patch lands. Apply it
+#       to THIS BRANCH (not at merge time) if you want gate① green before merging.
+#
+# WHY IT IS A PATCH AND NOT A COMMIT: sapwood.config.* is a guard-enforced human-merge-only
+#       path (engine/src/guard/guard.ts protectedPathLabel) — the WHOLE file, comments
+#       included. An autonomous worker's write is denied at the tool level:
+#         BLOCK [write-path] sapwood.config.* (engine/guard config) is human-merge-only
+#       The guard constrains Claude tool calls, never a human's editor. See
+#       docs/security.md "sapwood.config.* is also the shipped starter config".
+#
+# APPLY (from the repo root), then delete this file:
+#       git apply docs/patches/582-reviewer-tier-flip.patch
+#       git rm docs/patches/582-reviewer-tier-flip.patch
+#
+# VERIFIED before shipping (against a scratch copy, the protected file untouched):
+#       `sapwood validate` on the patched copy exits 0 with no D5 error and no tier-inversion
+#       warning, resolving worker.model=sonnet / reviewer.agent.model=opus; the same command
+#       on the unpatched copy fails with the D5 DEFAULTED-collision message quoted above.
+#
+# Generated against sapwood.config.yaml at blob 839a1a9. If the file has since moved, the
+# hunks still locate by context (offset-tolerant); re-check the result.
+--- a/sapwood.config.yaml
++++ b/sapwood.config.yaml
+@@ -81,9 +81,16 @@
+   #                    capped (manual merge required). 0 disables automatic reentry outright.
+ 
+ worker:
+-  model: opus
++  # model: sonnet  # #582: unset, so this repo tracks worker.model's shipped default (sonnet).
++  #                  The default pair is deliberately worker sonnet / reviewer opus — the gate's
++  #                  tier sits AT OR ABOVE the producer's. Re-pinning `model: opus` here without
++  #                  also setting reviewer.agent.model re-creates the D5 same-model collision the
++  #                  parse rejects (both sides would be opus).
+   effort: high # low | medium | high
+-  # fallbackModel: sonnet # Default fallback when the primary model is unavailable. Set to
++  # fallbackModel: sonnet # Default fallback when the primary model is unavailable — with
++  #                       # worker.model at its own default (sonnet) this is the SAME model, i.e.
++  #                       # no silent downgrade out of the box; raising worker.model to opus
++  #                       # restores a real one-tier-down fallback. Set to
+   #                       # "none" to omit --fallback-model and fail loud instead of silently
+   #                       # downgrading quality; see #168 for the environment-failure path.
+   timeoutSec: 3600 # wall-clock hard cap (safety bound)
+@@ -181,13 +188,17 @@
+   escalateAfterSec: 86400
+   # engine-agent only: this block is rejected with every other reviewer mode (dead config).
+   # With mode: engine-agent, it is OPTIONAL — omitted (as here) resolves a default for you at
+-  # config-load time: model: sonnet (differs from worker.model's own "opus" default, D5's
++  # config-load time: model: opus (differs from worker.model's own "sonnet" default, D5's
+   # model-separation rule), effort/costCapUsd/retryAfterSec/treeRetentionCap at the values shown
+   # below. Set it explicitly to override any of those; a set model must still differ from
+   # worker.model — actual session/worker model usage is checked again at runtime. There is
+   # deliberately no fallbackModel.
++  # #582: the pair is ORDERED, not just distinct — the reviewer's tier should sit at or above
++  # worker.model's, since the conductor merges on gate②'s verdict. D5 enforces only the
++  # difference; `sapwood validate` WARNS (never fails) when the reviewer's rate-table entry is
++  # priced below the worker's. See docs/configuration.md "Reviewer tier vs. worker tier".
+   # agent:
+-  #   model: sonnet     # if set, must differ from worker.model (D5); unset -> defaulted to this
++  #   model: opus       # if set, must differ from worker.model (D5); unset -> defaulted to this
+   #   effort: high      # low | medium | high
+   #   promptFile: prompts/engine-reviewer.md
+   #                     # optional; unset uses engine/prompts/engine-reviewer.md. Relative paths

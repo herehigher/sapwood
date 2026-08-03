@@ -1103,6 +1103,75 @@ test("validate --help / -h prints validate usage and exits 0", () => {
   }
 });
 
+// ── #582: `sapwood validate` reviewer-tier inversion warning ──────────────────────────────
+// D5 enforces that the two models DIFFER but says nothing about ORDERING, so a config can
+// legitimately parse with the reviewer weaker than the producer it gates. WARNING, never a
+// failure: model strings are free-form and the rate table is only a proxy for capability, so a
+// hard fail would fight legitimate setups (cross-vendor reviewers whose rates aren't comparable).
+const REVIEWER_INVERSION = /reviewer is cheaper\/weaker than worker/;
+
+/** Writes a config pinning both models (plus an optional custom rate table) into a fresh tmpdir
+ *  and validates it. Omitted models fall through to their schema defaults. */
+function validateWith(o: { worker?: string; reviewer?: string; pricing?: string } = {}): { stdout: string; stderr: string; code: number } {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
+  try {
+    const path = join(dir, "sapwood.config.yaml");
+    let pricingLine = "";
+    if (o.pricing !== undefined) {
+      const pricingPath = join(dir, "rates.yaml");
+      writeFileSync(pricingPath, o.pricing);
+      pricingLine = `  pricingFile: ${pricingPath}\n`;
+    }
+    const worker = o.worker !== undefined || pricingLine !== "" ? `worker:\n${o.worker ? `  model: ${o.worker}\n` : ""}${pricingLine}` : "";
+    const reviewer = o.reviewer !== undefined ? `reviewer:\n  mode: engine-agent\n  agent:\n    model: ${o.reviewer}\n` : "";
+    writeFileSync(path, `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n${worker}${reviewer}`);
+    return runCli(["node", "sapwood", "validate", path]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const RATE = (input: number, output: number) =>
+  `    input: ${input}\n    output: ${output}\n    cacheWrite: ${input}\n    cacheRead: ${input / 10}\n    contextWindow: 200000\n`;
+
+test("#582 validate: reviewer priced BELOW the worker ⇒ inversion warning, exit 0 (warning, never a failure)", () => {
+  const r = validateWith({ worker: "opus", reviewer: "sonnet" });
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, REVIEWER_INVERSION);
+  assert.match(r.stdout, /opus/); // names both sides so the operator can act on it
+  assert.match(r.stdout, /sonnet/);
+  assert.match(r.stdout, /sapwood validate: OK/); // still reports success
+});
+
+test("#582 validate: reviewer priced ABOVE the worker (the shipped default pair) ⇒ silent", () => {
+  const r = validateWith();
+  assert.equal(r.code, 0);
+  assert.doesNotMatch(r.stdout, REVIEWER_INVERSION);
+  assert.equal(r.stderr, "");
+});
+
+test("#582 validate: EQUAL rates ⇒ silent (the ordering is 'at or above', not 'strictly above')", () => {
+  const r = validateWith({
+    worker: "alpha",
+    reviewer: "beta",
+    pricing: `models:\n  alpha:\n${RATE(5, 25)}  beta:\n${RATE(5, 25)}`,
+  });
+  assert.equal(r.code, 0);
+  assert.doesNotMatch(r.stdout, REVIEWER_INVERSION);
+});
+
+test("#582 validate: either model ABSENT from the rate table ⇒ silent (no comparison to make — never the unknown-model most-expensive fallback)", () => {
+  // Reviewer absent. resolveRate() would price it at the table's most expensive tier; the warning
+  // deliberately uses a no-fallback lookup instead, so an unpriced model produces no verdict.
+  const absentReviewer = validateWith({ worker: "opus", reviewer: "mythos-x" });
+  assert.equal(absentReviewer.code, 0);
+  assert.doesNotMatch(absentReviewer.stdout, REVIEWER_INVERSION);
+  // Worker absent, reviewer priced — same silence, from the other side.
+  const absentWorker = validateWith({ worker: "mythos-x", reviewer: "haiku" });
+  assert.equal(absentWorker.code, 0);
+  assert.doesNotMatch(absentWorker.stdout, REVIEWER_INVERSION);
+});
+
 // ── #15: `sapwood run --dry-run` ──────────────────────────────────────────────────────────
 
 const baseCfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }");

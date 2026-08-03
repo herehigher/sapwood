@@ -505,7 +505,7 @@ test("#13: reviewer.mode accepts same-model-trusted and human", () => {
 test("#501: zero config resolves reviewer.mode to engine-agent with a valid injected agent block (model != worker.model's own default)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.reviewer.mode, "engine-agent");
-  assert.equal(cfg.worker.model, "opus");
+  assert.equal(cfg.worker.model, "sonnet"); // #582: flipped from opus, see the #582 pair test below
   assert.equal(cfg.reviewer.agent?.model, DEFAULT_REVIEWER_AGENT_MODEL);
   assert.notEqual(cfg.reviewer.agent?.model, cfg.worker.model);
 });
@@ -587,8 +587,8 @@ test("#54 R2: the same fallback parses fine once trustedReviewers is non-empty, 
 
 // ── #286 (E4a, design #279 §7): reviewer.mode: engine-agent + reviewer.agent strictness batch ──
 
-// worker.model defaults to "opus" — reviewer.agent.model must differ (D5), so every fixture
-// below that isn't SPECIFICALLY testing the D5 collision pins worker.model to "sonnet".
+// worker.model defaults to "sonnet" (#582) — reviewer.agent.model must differ (D5), so every
+// fixture below that isn't SPECIFICALLY testing the D5 collision pins worker.model explicitly.
 const BASE_ENGINE_AGENT =
   "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\nreviewer: { mode: engine-agent, agent: { model: opus } }\n";
 
@@ -685,7 +685,7 @@ test("#314: reviewer.agent.treeRetentionCap is configurable and must be a positi
 test("#501: reviewer.mode: engine-agent with reviewer.agent omitted ⇒ default-injected (sane defaults, model differs from worker.model's own default)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: engine-agent }");
   assert.equal(cfg.reviewer.mode, "engine-agent");
-  assert.equal(cfg.worker.model, "opus"); // worker.model's own default, unchanged
+  assert.equal(cfg.worker.model, "sonnet"); // worker.model's own default (#582 flipped it from opus)
   assert.equal(cfg.reviewer.agent?.model, DEFAULT_REVIEWER_AGENT_MODEL);
   assert.equal(cfg.reviewer.agent?.effort, "high");
   assert.equal(cfg.reviewer.agent?.costCapUsd, 3);
@@ -747,6 +747,30 @@ test("#501 (D5 extended): worker.model = the INJECTED reviewer.agent default ⇒
   assert.throws(
     () => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: ${DEFAULT_REVIEWER_AGENT_MODEL} }`),
     /DEFAULTED.*collides with worker\.model.*set reviewer\.agent\.model to a different Claude model/s,
+  );
+});
+
+// #582 (owner ruling 2026-08-03): D5 only ever enforced that the two models DIFFER, so the
+// post-#501 shipped pair (worker opus / reviewer sonnet) had the WEAKER model gating the
+// stronger one's output. gate② is the loop's trust anchor (the conductor merges on its verdict),
+// so the shipped defaults must put the reviewer at or above the producer's tier. Option (a): flip
+// the pair rather than raise the reviewer above opus — same D5 compliance, and it downgrades the
+// big spender (workers, up to $30/issue) while upgrading the small one (review, capped ~$3/PR).
+test("#582: shipped defaults put the reviewer AT OR ABOVE the worker's tier (worker sonnet / reviewer opus), still D5-distinct", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.worker.model, "sonnet");
+  assert.equal(cfg.reviewer.agent?.model, "opus");
+  assert.equal(DEFAULT_REVIEWER_AGENT_MODEL, "opus");
+  assert.notEqual(cfg.reviewer.agent?.model, cfg.worker.model); // D5 satisfied by the defaults alone
+});
+
+test("#582: the tier flip does NOT soften D5 — an explicit same-model pair still fails loud at parse", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\nreviewer: { mode: engine-agent, agent: { model: sonnet } }",
+      ),
+    /must differ from worker\.model/,
   );
 });
 
@@ -856,7 +880,7 @@ test("#549: reviewer.agent.promptFileRaw keeps the pre-resolution value loadConf
     writeFileSync(
       cfgPath,
       "board: { owner: a, repo: r, projectNumber: 1 }\n" +
-        "reviewer: { mode: engine-agent, agent: { model: sonnet, promptFile: prompts/my-reviewer.md } }\n",
+        "reviewer: { mode: engine-agent, agent: { model: opus, promptFile: prompts/my-reviewer.md } }\n",
     );
     const cfg = loadConfig(cfgPath);
     // Same contract as doctrine.fileRaw: raw for citing/matching, resolved for the engine's reads.
@@ -874,7 +898,7 @@ test("#549: an ABSOLUTE reviewer.agent.promptFile is captured raw unchanged (not
     writeFileSync(
       cfgPath,
       "board: { owner: a, repo: r, projectNumber: 1 }\n" +
-        "reviewer: { mode: engine-agent, agent: { model: sonnet, promptFile: /etc/sapwood/my-reviewer.md } }\n",
+        "reviewer: { mode: engine-agent, agent: { model: opus, promptFile: /etc/sapwood/my-reviewer.md } }\n",
     );
     const cfg = loadConfig(cfgPath);
     assert.equal(cfg.reviewer.agent?.promptFileRaw, "/etc/sapwood/my-reviewer.md");
@@ -888,7 +912,7 @@ test("#549: an unset reviewer.agent.promptFile leaves promptFileRaw unset", () =
   const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
   try {
     const cfgPath = join(dir, "sapwood.config.yaml");
-    writeFileSync(cfgPath, "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: engine-agent, agent: { model: sonnet } }\n");
+    writeFileSync(cfgPath, "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: engine-agent, agent: { model: opus } }\n");
     const cfg = loadConfig(cfgPath);
     assert.equal(cfg.reviewer.agent?.promptFileRaw, undefined);
   } finally {
@@ -1941,7 +1965,7 @@ test("dashboardConfigSubset: carries the drawer's groups + the per-role model/ef
   // §3 C/§6 captions read these — the allowlist "must include" them (frontend-design.md §3 E).
   assert.equal(subset.roles.architect.model, "sonnet");
   assert.equal(subset.roles.retro.effort, "medium");
-  assert.equal(subset.worker.model, "opus");
+  assert.equal(subset.worker.model, "sonnet"); // #582
 });
 
 test("dashboardConfigSubset: unlisted keys never leave the engine — no local paths, no proxy block", () => {
