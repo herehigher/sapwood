@@ -1352,6 +1352,58 @@ test("probe: #377 lanePr supplies prNumber and derives hasPr from it (the lane's
   }
 });
 
+test("probe: #595 lanePr's outcome.title rides onto LaneProbe.prTitle (the SAME association read, no extra call)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      lanePr: async (lane) =>
+        lane.issue === 8 ? { pr: 42, inconclusive: false, title: "feat: the lane's PR" } : { pr: null, inconclusive: false },
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+    });
+    const { name } = await s.dispatch({ number: 8, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    const probe = await s.probe(name);
+    assert.equal(probe.prNumber, 42);
+    assert.equal(probe.prTitle, "feat: the lane's PR");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probe: #595 lanePr's outcome without a title omits LaneProbe.prTitle rather than writing undefined/null", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      lanePr: async () => ({ pr: 42, inconclusive: false }),
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+    });
+    const { name } = await s.dispatch({ number: 8, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    const probe = await s.probe(name);
+    assert.equal(probe.prNumber, 42);
+    assert.equal(probe.prTitle, undefined);
+    assert.ok(!Object.hasOwn(probe, "prTitle"));
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("probe: #377 lanePr returning null -> hasPr false, prNumber undefined (fail closed, never a guessed PR)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

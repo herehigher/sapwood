@@ -113,6 +113,12 @@ export interface PRStatus {
    *  every other PRStatus consumer (deriveGate, mergeDecision, the classic Reviewer kinds) never
    *  reads it. */
   baseOid?: string;
+  /** #595 (redo of #365 against the #425 event-kind registry): the PR's own title, from a
+   *  `--json title` field added to this SAME `gh pr view` read — never an extra call. ADDITIVE
+   *  and OPTIONAL, same convention as `ciRed`/`baseOid` above: absent on any pre-#595
+   *  fixture/fake. Consumed by #420 (merge-driver.ts, human-merge-only) to stamp the `merged`
+   *  event's `prTitle` — that wiring is explicitly out of scope here. */
+  title?: string;
 }
 
 /** #292: one rename-aware entry from GitHub's pull-request files API. The old path is retained
@@ -847,10 +853,11 @@ export class GithubForge implements IForge {
       "--limit",
       "200",
       "--json",
-      "number,body",
+      // #595: `title` added to this SAME list read (not a new call) — see OpenPrBody.title.
+      "number,title,body",
     ]);
-    const prs = JSON.parse(out) as { number: number; body?: string }[];
-    return prs.map((pr) => ({ number: pr.number, body: pr.body ?? "" }));
+    const prs = JSON.parse(out) as { number: number; title?: string; body?: string }[];
+    return prs.map((pr) => ({ number: pr.number, body: pr.body ?? "", ...(pr.title !== undefined ? { title: pr.title } : {}) }));
   }
 
   async claimIssue(issue: number): Promise<void> {
@@ -935,7 +942,8 @@ export class GithubForge implements IForge {
       "--json",
       // #287 (E4b): baseRefOid added — a real `gh pr view --json` field (verified against a live
       // `gh` binary), giving PRStatus.baseOid without switching this call to raw GraphQL.
-      "number,headRefOid,baseRefOid,state,mergeable,statusCheckRollup",
+      // #595: title added to this SAME read (not a new call) — see PRStatus.title's own doc.
+      "number,title,headRefOid,baseRefOid,state,mergeable,statusCheckRollup",
     ]);
     return parsePRStatus(out);
   }
@@ -1112,10 +1120,11 @@ export class GithubForge implements IForge {
       "--limit",
       "20",
       "--json",
-      "number,body",
+      // #595: `title` added to this SAME list read (not a new call) — see OpenPrBody.title.
+      "number,title,body",
     ]);
-    const prs = JSON.parse(out) as { number: number; body?: string }[];
-    return prs.map((pr) => ({ number: pr.number, body: pr.body ?? "" }));
+    const prs = JSON.parse(out) as { number: number; title?: string; body?: string }[];
+    return prs.map((pr) => ({ number: pr.number, body: pr.body ?? "", ...(pr.title !== undefined ? { title: pr.title } : {}) }));
   }
 
   /** #377: overwrite a PR's body — the WRITE half of the marker contract (the engine stamps the
@@ -1748,6 +1757,11 @@ export interface BoardPlacement {
 export interface OpenPrBody {
   number: number;
   body: string;
+  /** #595: the PR's title, from a `--json title` field added to the SAME `gh pr list` read this
+   *  shape already comes from — never an extra call. Optional: absent on any pre-#595
+   *  fixture/fake, and every consumer (associateLanePr -> a lane's reclaim-* payload) treats a
+   *  missing title as "no tooltip" rather than an error. */
+  title?: string;
 }
 
 export interface StartupReconcileData {
@@ -2332,6 +2346,12 @@ export interface LanePrRequest {
 export interface LanePrOutcome {
   pr: number | null;
   inconclusive: boolean;
+  /** #595: the resolved PR's title, when the read that found it (listOpenPrsForBranch,
+   *  listOpenPrBodies, or the title the engine itself opened the PR with) carried one. Never a
+   *  new forge call — see OpenPrBody.title. Optional: absent when `pr` is null, or when the
+   *  underlying forge response had no title. worker.ts's probe() carries this onto
+   *  LaneProbe.prTitle, which conductor.ts's reclaim events persist. */
+  title?: string;
 }
 
 /**
@@ -2376,7 +2396,11 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
   if (lane.branch) {
     const candidates = await forge.listOpenPrsForBranch(lane.branch);
     const owned = findLaneOwnedPr(candidates, lane.name, lane.issue);
-    if (owned != null) return { pr: owned, inconclusive: false };
+    if (owned != null) {
+      // #595: the title rides this SAME candidates list — no extra lookup.
+      const title = candidates.find((c) => c.number === owned)?.title;
+      return { pr: owned, inconclusive: false, ...(title !== undefined ? { title } : {}) };
+    }
     // Stamp-and-adopt is eligible ONLY for a branch with exactly ONE open PR that carries no
     // marker at all. Both halves of that are load-bearing (gate② P1s on PR #423):
     //  - ONE candidate: an unmarked PR sitting alongside a marker-bearing one used to qualify by
@@ -2398,7 +2422,8 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
       } catch (e) {
         return unknown(`could not stamp the owner marker on PR #${pr.number} (${String(e)}) — association UNKNOWN, retried later`);
       }
-      return { pr: pr.number, inconclusive: false };
+      // #595: `pr` (== `sole`) already carries its own title from the SAME candidates list.
+      return { pr: pr.number, inconclusive: false, ...(pr.title !== undefined ? { title: pr.title } : {}) };
     }
     if (candidates.length > 0) {
       return refuse(
@@ -2418,14 +2443,19 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
         try {
           const title = await forge.getIssueMeta(lane.issue).then((m) => m.title);
           const opened = await forge.openPR(lane.branch, title, engineAuthoredPrBody(lane.name, lane.issue, lane.branch));
-          return { pr: opened, inconclusive: false };
+          // #595: the PR the engine just opened carries the title it opened WITH — no re-read.
+          return { pr: opened, inconclusive: false, title };
         } catch (e) {
           return unknown(`could not open a PR for pushed branch ${lane.branch} (${String(e)}) — branch preserved, retried later`);
         }
       }
     }
   }
-  return { pr: findLaneOwnedPr(await forge.listOpenPrBodies(), lane.name, lane.issue), inconclusive: false };
+  // #595: the marker-scan fallback's title rides this SAME listOpenPrBodies read.
+  const bodies = await forge.listOpenPrBodies();
+  const marked = findLaneOwnedPr(bodies, lane.name, lane.issue);
+  const markedTitle = marked != null ? bodies.find((b) => b.number === marked)?.title : undefined;
+  return { pr: marked, inconclusive: false, ...(markedTitle !== undefined ? { title: markedTitle } : {}) };
 }
 
 /** The body the engine writes when IT opens a lane's PR. Carries the human-facing closing keyword
@@ -2675,6 +2705,8 @@ export function parsePRStatus(json: string): PRStatus {
   const d = JSON.parse(json) as {
     number: number;
     headRefOid: string;
+    // #595: additive — absent on any pre-#595 fixture (see PRStatus.title's own doc).
+    title?: string;
     // #287 (E4b): additive — absent on any pre-#287 fixture (see PRStatus.baseOid's own doc).
     baseRefOid?: string;
     state: string;
@@ -2743,6 +2775,7 @@ export function parsePRStatus(json: string): PRStatus {
     ciGreen,
     ciRed,
     ...(d.baseRefOid !== undefined ? { baseOid: d.baseRefOid } : {}),
+    ...(d.title !== undefined ? { title: d.title } : {}),
   };
 }
 

@@ -70,6 +70,25 @@ test("assembleRoundArtifact: prsOpened counts reclaim-done/failed->DRIVING and r
   assert.equal(artifact.prsOpened, 3);
 });
 
+test("#595: dispatched/reclaim-* payloads mixed pre- and post-#595 (issueTitle/prTitle present or absent) fold identically — the additive fields are never read here, their absence never throws", () => {
+  const events = [
+    // Pre-#595 shapes (no titles anywhere) — must still fold exactly as before.
+    { kind: "dispatched", payload: { worker: "lane-old", issue: 1 } },
+    { kind: "reclaim-done", payload: { worker: "lane-old", issue: 1, next: "DRIVING" } },
+    // Post-#595 shapes, same events plus the additive title fields.
+    { kind: "dispatched", payload: { worker: "lane-new", issue: 2, issueTitle: "feat: titles in payloads" } },
+    { kind: "reclaim-done", payload: { worker: "lane-new", issue: 2, next: "DRIVING", prTitle: "feat: titles in payloads" } },
+  ];
+  const artifact = assembleRoundArtifact(events, meta, 4, 30);
+  // The artifact contract is unchanged by #595 (titles live in events, not here): numbers-only
+  // rows, both halves folding the same way regardless of the extra keys.
+  assert.deepEqual(artifact.dispatches, [
+    { issue: 1, worker: "lane-old" },
+    { issue: 2, worker: "lane-new" },
+  ]);
+  assert.equal(artifact.prsOpened, 2);
+});
+
 test("assembleRoundArtifact: needs-human dedupes across drive-needs-human and plan-review-escalated, preserving first-seen order", () => {
   const events = [
     { kind: "drive-needs-human", payload: { worker: "lane-a", issue: 6, pr: 1, reason: "x" } },
