@@ -1467,9 +1467,19 @@ const ConfigSchemaRaw = z
 // path (only loadConfig's relative-to-config-file resolution mutates it), so a reader falls
 // back to `cfg.doctrine.file` itself and still never sees a resolved absolute path it didn't
 // ask for.
-export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doctrine" | "labels" | "escalation" | "notify"> & {
+// #549: `reviewer.agent.promptFileRaw` is the same loadConfig-only annotation as `doctrine.fileRaw`
+// above, for the reviewer's OTHER instruction carrier — its prompt file. Captured for the same
+// reason and under the same contract: instruction-path-escalation.ts derives a repo-relative
+// escalation pattern from it, which the resolved ABSOLUTE path could never serve (a forge's
+// changed-file paths are repo-relative, and `InstructionPath` rejects a leading `/`). Unset unless
+// the operator set `promptFile` AND loadConfig ran; readers fall back to `promptFile`, which is
+// still the raw value when cfg came from `ConfigSchema.parse` directly.
+type RawReviewer = z.infer<typeof ConfigSchemaRaw>["reviewer"];
+
+export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doctrine" | "labels" | "escalation" | "notify" | "reviewer"> & {
   goal: { file: string };
   doctrine: { file: string; maxChars: number; fileRaw?: string };
+  reviewer: Omit<RawReviewer, "agent"> & { agent?: NonNullable<RawReviewer["agent"]> & { promptFileRaw?: string } };
   labels: ReturnType<typeof workflowLabelDefaults> & { prefix: string };
   escalation: { humanLabels: string[]; holdLabels: string[]; instructionPaths: string[] };
   notify: { mentions: string[] };
@@ -1915,8 +1925,15 @@ export function loadConfig(path?: string): SapwoodConfig {
     cfg.roles.retro.promptFile = resolve(dirname(file), cfg.roles.retro.promptFile);
   }
   // #286 (E4a): same rule for the engine-agent reviewer's own prompt file.
-  if (cfg.reviewer.agent?.promptFile !== undefined && !isAbsolute(cfg.reviewer.agent.promptFile)) {
-    cfg.reviewer.agent.promptFile = resolve(dirname(file), cfg.reviewer.agent.promptFile);
+  // #549: capture the RAW pre-resolution value FIRST, exactly as `doctrine.fileRaw` above —
+  // instruction-path-escalation.ts matches a repointed reviewer prompt against a PR's
+  // repo-relative changed files, which the resolved absolute path below could never do. See
+  // `SapwoodConfig`'s `reviewer.agent.promptFileRaw` doc comment for the full contract.
+  if (cfg.reviewer.agent?.promptFile !== undefined) {
+    cfg.reviewer.agent.promptFileRaw = cfg.reviewer.agent.promptFile;
+    if (!isAbsolute(cfg.reviewer.agent.promptFile)) {
+      cfg.reviewer.agent.promptFile = resolve(dirname(file), cfg.reviewer.agent.promptFile);
+    }
   }
   return cfg;
 }

@@ -60,19 +60,20 @@ export function matchedInstructionPaths(files: readonly PRChangedFile[], pattern
  * the reviewer's own doctrine carrier, which is a target-repo file in EVERY deployment and whose
  * text is substituted verbatim into every engine-agent review prompt. A literal default entry
  * would not do: an operator who repoints `doctrine.file` must stay covered, so the path is
- * DERIVED from config rather than hardcoded. The reviewer's other carrier, the shipped prompt
- * (`engine/prompts/**`), is a plain default-list entry instead — it only exists in a
- * self-hosting target repo, and `reviewer.agent.promptFile` keeps no pre-resolution raw value to
- * derive one from.
+ * DERIVED from config rather than hardcoded. #549: the reviewer's OTHER carrier, its prompt file,
+ * is derived the same way now that `loadConfig` captures a `reviewer.agent.promptFileRaw` — the
+ * literal `engine/prompts/**` default entry still covers the SHIPPED prompt (inert outside a
+ * self-hosting target repo), but a repointed `reviewer.agent.promptFile` no longer falls outside
+ * every pattern. It is unset in every default deployment, so nothing is added there.
  *
- * Repo-relative by construction: `cfg.doctrine.file` is resolved to an ABSOLUTE local path by
- * loadConfig for the engine's own reads, which would both fail `InstructionPath` validation and
- * never match a forge's repo-relative changed-file paths — so the pre-resolution `fileRaw` is
- * what's matched (falling back to `file`, which is still raw when cfg came from ConfigSchema.parse
- * directly). A value that isn't repo-relative-shaped (absolute, or escaping via `..`) is skipped
- * rather than smuggled in: it can never correspond to a changed-file path anyway. Assumes the
- * config file sits at the repo root, the same assumption every other repo-relative config path
- * already makes.
+ * Repo-relative by construction: both `cfg.doctrine.file` and `cfg.reviewer.agent.promptFile` are
+ * resolved to ABSOLUTE local paths by loadConfig for the engine's own reads, which would both fail
+ * `InstructionPath` validation and never match a forge's repo-relative changed-file paths — so the
+ * pre-resolution raw value is what's matched (falling back to the resolved key, which is still raw
+ * when cfg came from ConfigSchema.parse directly). A value that isn't repo-relative-shaped
+ * (absolute, or escaping via `..`) is skipped rather than smuggled in: it can never correspond to a
+ * changed-file path anyway. Assumes the config file sits at the repo root, the same assumption
+ * every other repo-relative config path already makes.
  *
  * An empty configured list stays the documented off-switch — nothing is unioned onto it, so no
  * forge read happens. Duplicates are harmless: matching de-duplicates by matched PATH, not by
@@ -81,11 +82,17 @@ export function matchedInstructionPaths(files: readonly PRChangedFile[], pattern
 export function effectiveInstructionPaths(cfg: SapwoodConfig): string[] {
   const configured = cfg.escalation.instructionPaths;
   if (configured.length === 0) return [];
-  const doctrine = cfg.doctrine.fileRaw ?? cfg.doctrine.file;
-  const repoRelative = doctrine.startsWith("./") ? doctrine.slice(2) : doctrine;
-  const outsideRepo =
-    repoRelative.length === 0 || isAbsolute(repoRelative) || repoRelative.startsWith("/") || repoRelative.split("/").includes("..");
-  return outsideRepo ? [...configured] : [...configured, repoRelative];
+  const carriers = [cfg.doctrine.fileRaw ?? cfg.doctrine.file, cfg.reviewer.agent?.promptFileRaw ?? cfg.reviewer.agent?.promptFile];
+  return [...configured, ...carriers.map(repoRelativeCarrier).filter((path) => path !== undefined)];
+}
+
+/** #527/#549: a configured carrier path in the repo-relative form a changed-file list can match,
+ *  or undefined when it points outside the repo (absolute or `..`-escaping) and so never can. */
+function repoRelativeCarrier(configured: string | undefined): string | undefined {
+  if (configured === undefined) return undefined;
+  const path = configured.startsWith("./") ? configured.slice(2) : configured;
+  const outsideRepo = path.length === 0 || isAbsolute(path) || path.startsWith("/") || path.split("/").includes("..");
+  return outsideRepo ? undefined : path;
 }
 
 /** #292: shared result used by both reviewer kinds so instruction-authority escalation cannot
