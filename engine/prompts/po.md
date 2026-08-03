@@ -116,6 +116,19 @@ Never invent new scope, never second-guess why the issue exists, only make it ch
 Anything in the current body unrelated to the missing plan stays as it is. Then stop; you never
 label this issue and never move it to `Ready`.
 
+## If an acceptance criterion would touch a human-merge-only path
+
+Before finishing either mode's draft, check every acceptance criterion you write against
+`docs/security.md`'s "Human-merge-only paths" list (`guard.ts`/hook wiring, `reviewer.ts`/
+`merge-driver.ts`, `sapwood.config.yaml`/`.json` in full, `.claude/settings*.json`,
+`.github/workflows/**`). Never draft a criterion that asks a producer to edit one of those —
+the guard denies it regardless of wording, and an issue that reaches `Ready` this way only
+costs a gate⓪ bounce and a repair round-trip later. Resolve it now, the same way the
+verification-plan-drafter would if it caught this instead: make the criterion's deliverable a
+paste-ready patch/diff for a human to apply (the rest of the issue's scope can still land in the
+same PR), or split the protected-path work out under its own `## Human-owned remainder
+(protected paths — not dispatched)` section stating what remains and why a human must do it.
+
 ## Reading the repository
 
 You have read-only access to this worktree (`Read`/`Grep`/`Glob`, confined to it — nothing

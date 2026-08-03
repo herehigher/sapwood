@@ -66,7 +66,10 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // scan`), and says outright that the engine only checks the line EXISTS. Round provenance was
   // already engine-stamped; EVIDENCE provenance had no carrier at all, so a run-observation
   // finding and a repo-reading one were indistinguishable on the issue page.
-  "po.md": "6a6c6bbec284ce563a3e6b7277c9cfc3d8fe302eb41fa2241dabdfae071ad9c7",
+  // retro round #284: a criterion drafted against a human-merge-only path used to reach gate⓪
+  // unresolved every time (caught only reactively by verification-plan-reviewer/-drafter,
+  // costing a bounce round-trip) — po.md now resolves it at draft time, same pattern.
+  "po.md": "bb32ca8f481853421aa7bdfb1061e8c473db62a3458f46ee2f96d67ef07d3a34",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
@@ -140,7 +143,12 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // no `gh` CLI, no shell beyond git (`RETRO_ALLOWED_TOOLS` is git-only Bash), but a real
   // read-only `mcp__forge__*` issue grant — as a single positive statement about that one named
   // channel, not a list of what retro lacks.
-  "retro.md": "76996f79411b5fa30c36c2e9f28b041e889fa7927f26ccca7b76cdc23c85a01d",
+  // #559: that single positive statement was flat — true under `proxy.enabled: true` (the default
+  // since #551), false under the operator opt-out, in a file with no template variable to tell the
+  // two apart. Reframed onto the same conditional shape every other peripheral prompt already
+  // uses, plus the not-attached branch (ground in the digest/worktree, say so). The #559 block test
+  // below is the standing guard; this is its only shipped subject.
+  "retro.md": "1e73242036f474f8d36f1ec8082bad867cf6d2f573740495c76acae0d2ae321e",
   // #529: same categorical→conditional GitHub-access fix as architect.md.
   // #533 proposed removing po-pool's ISSUE_TOOLS grant and substituting each candidate's full
   // body in its place; the owner reversed the grant-removal half only. po-pool KEEPS its
@@ -156,8 +164,13 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // body" / "everything you need to decide is already here" claims were unconditional over code
   // that truncates whole records past the cap with no lookup fallback — now scoped to what's
   // actually rendered, and the session is told what the omission marker means.
-  "po-pool.md": "a3e2391424151767aa10ecd8fb3b1d2ec5f92fb77ff695e4961fd775d46c54f4",
-  "po-decompose.md": "3289b0f37585b84fdce67319f9ae4b2e82c8873b13b2a292adef25b1bca79ae2",
+  // #558: the omission marker now NAMES the omitted candidates instead of only counting them, so
+  // the paragraph describing it says what a named-but-not-shown number means: cross-referenceable,
+  // still not selectable, and degrading to the old bare count if the number list itself won't fit.
+  "po-pool.md": "d93bb9f0f314718df8465a06d7583fdfe45901efe94ef9c9a99275755184b1e6",
+  // retro round #284: same fix as po.md above, mirrored for a `remainder` child instead of a
+  // paste-ready-patch criterion.
+  "po-decompose.md": "f0b126a80576a7bbacde7370c1e3ad8cd5f90d08755df933e446708df782ef17",
 };
 
 test("prompt snapshot: po.md hash matches the pinned revision", () => {
@@ -462,6 +475,81 @@ test("#529 AC-2: no shipped role prompt asserts a categorical no-GitHub-access d
   );
 });
 
+// ── #559: shipped prompts are STATIC with respect to `proxy.enabled` — the same file serves the
+// default (`true` since #551) AND the operator opt-out, with no template variable anywhere
+// expressing which one this session got. Ruling on #559: keep the static prompts (option 2, the
+// repo's default stance for a rare operator-deliberate configuration) rather than adding a
+// substitution point, and keep the phrasing that #529 measured as the only one that produces
+// calls — an ask that is IMPERATIVE whenever the tool is attached, carrying its own not-attached
+// branch. That combination is followable in BOTH deployments, so what has to be guarded is not a
+// wording rewrite (there is none) but the class returning: a flat possession claim or a flat
+// lookup step, true only under the default. This test is that guard. It costs nothing at runtime
+// and fires the moment a new (or edited) role prompt names a forge tool without saying what
+// governs whether it is there.
+//
+// Ceiling, stated rather than overclaimed (same stance as AC-2's blind-spot note above): this is
+// proximity text matching over a blank-line-delimited block, not semantics. A block whose
+// conditional belongs to an unrelated sentence passes. The realistic failure mode this exists to
+// catch — retro.md's own live "You hold read-only, proxy-MCP access ... (`mcp__forge__*`)", a flat
+// claim landed by #557 that is simply false under `proxy.enabled: false` — does not have that
+// shape.
+const PROXY_ATTACHMENT_FRAMING =
+  /\b(?:if|when|whenever|unless)\b[^.]{0,140}\b(?:attached|has|have|holds?|carries|no such tools?|isn't|is not|aren't|are not)\b/i;
+
+test("#559: every shipped prompt block naming an `mcp__forge__` tool frames it against proxy attachment — a static prompt must be true under `proxy.enabled: true` AND `false`", () => {
+  for (const [role, tools] of Object.entries(PROXY_ROLE_TOOL_MATRIX)) {
+    if (tools.length === 0) continue;
+    // worker is the one exempt role: its forge-naming prompt is fix.md, and a fix leg is only ever
+    // dispatched when a proxy handle exists — `proxy.enabled: false` degrades every FIXABLE gate to
+    // a `fix-loop-unwired:<reason>` needs-human escalation instead (cli.ts, conductor.ts), so no
+    // session ever renders fix.md without the tools it names. worker.md (the ordinary dispatch leg,
+    // still unwired for the proxy) names none at all.
+    if (role === "worker") continue;
+
+    const paths = ROLE_PROMPT_PATHS[role];
+    assert.ok(paths !== undefined && paths.length > 0, `role "${role}" holds a forge grant but has no ROLE_PROMPT_PATHS entry`);
+
+    for (const path of paths) {
+      for (const block of readPrompt(path).split(/\n[ \t]*\n/)) {
+        if (!block.includes("mcp__forge__")) continue;
+        const normalized = block.replace(/\s+/g, " ").trim();
+        assert.ok(
+          PROXY_ATTACHMENT_FRAMING.test(normalized),
+          `${path} (role "${role}") names an mcp__forge__ tool in a block that never says the ` +
+            `tools' presence is conditional on this deployment's \`proxy.enabled\`: the prompt is ` +
+            `static, so this block reads as false (a possession claim) or unfollowable (a lookup ` +
+            `step) under the opt-out. Frame it — "when your session has these tools, …", or an ` +
+            `imperative ask plus its own not-attached branch (po.md/architect.md are the shipped ` +
+            `examples). Block:\n${normalized}`,
+        );
+      }
+    }
+  }
+
+  // Self-checks on the regex itself, so a future prompt reusing either shape is caught even if
+  // today's wording drifts: the flat claim must NOT pass, the three shipped framings must.
+  assert.ok(
+    !PROXY_ATTACHMENT_FRAMING.test("You hold read-only, proxy-MCP access to GitHub issues (`mcp__forge__*`) for grounding your analysis."),
+    "a flat possession claim — the #557 shape this test was written against — must not pass",
+  );
+  assert.ok(
+    PROXY_ATTACHMENT_FRAMING.test("When your session holds `mcp__forge__*` tools, they are a read-only window onto GitHub issues"),
+    "the capability-paragraph framing every peripheral prompt uses must pass",
+  );
+  assert.ok(
+    PROXY_ATTACHMENT_FRAMING.test(
+      "**Cross-issue search (mandatory whenever the tool is attached — not conditional on whether it FEELS needed).**",
+    ),
+    "architect.md's imperative-when-attached ask — the #529-measured shape — must pass",
+  );
+  assert.ok(
+    PROXY_ATTACHMENT_FRAMING.test(
+      "If that tool isn't there, treat its absence like any other missing tool: say so in the issue body's rationale",
+    ),
+    "po.md's not-attached branch must pass on its own, without the ask's own condition nearby",
+  );
+});
+
 test("shipped role prompts (#321): sentinel examples are plain text with no adjacent markdown fences", () => {
   const prompts: ReadonlyArray<readonly [name: string, path: string, sentinelCount: number]> = [
     ["verification-plan-reviewer.md", defaultVerificationPlanReviewerPromptPath(), 2],
@@ -564,6 +652,23 @@ test("#457 verification-plan-reviewer-confirm.md: an execution-class AC on a leg
   assert.match(body, /A second standing check \(F36\): an execution-class acceptance\s+criterion/);
   assert.match(body, /a still-approved plan carrying one is `invalidate`/);
   assert.match(body, /folded into the\s+`## Verification plan`/);
+});
+
+test("retro round #284: po.md (both modes) and po-decompose.md resolve a human-merge-only acceptance criterion at draft time — paste-ready patch or a carved-out remainder/section — instead of leaving it for gate⓪ to bounce", () => {
+  const po = readPrompt(defaultPoPromptPath());
+  assert.ok(
+    po.includes("## If an acceptance criterion would touch a human-merge-only path"),
+    "po.md carries the check, shared across align/triage",
+  );
+  assert.match(po, /paste-ready patch\/diff for a human to apply/);
+  assert.match(po, /## Human-owned remainder\s*\(protected paths — not dispatched\)/);
+
+  const decompose = readPrompt(defaultPoDecomposePromptPath());
+  assert.ok(
+    decompose.includes("## If a `ready` child's acceptance criterion would touch a human-merge-only path"),
+    "po-decompose.md carries the check",
+  );
+  assert.match(decompose, /carve the protected-path work into its own\s+`remainder` child/);
 });
 
 test("#457 verification-plan-drafter.md + po-decompose.md: AC-authoring guidance forbids CI/suite/typecheck status as a criterion — the Verification plan owns execution steps", () => {

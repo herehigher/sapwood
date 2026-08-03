@@ -802,8 +802,7 @@ const Roles = z
 
 // #234: engine-hosted read-only forge MCP proxy for role sessions (supersedes #217's two-pass
 // needsDetails protocol). #244 EXTENSION: the tool algebra also carries 5 PR-facing tools
-// (pr_details/pr_reviews/pr_review_threads/pr_checks/getPRAuditComments — the last is
-// camelCase, the odd one out in the wire names; #556 tracks normalizing it — proxy/tools.ts),
+// (pr_details/pr_reviews/pr_review_threads/pr_checks/pr_audit_comments — proxy/tools.ts),
 // and the proxy MECHANISM extends to worker legs (worker.ts's WorkerSupervisor, mirroring
 // RoleRunner's `proxy` opt)
 // alongside RoleRunner peripheral sessions. `caps.maxReviewThreadsPerCall`/
@@ -877,7 +876,7 @@ const ProxyConfig = z
         // `contexts(first: cap)`. Same no-lastN/completeness-not-rejection stance as
         // maxReviewsPerCall above. .max(100): fed straight into GraphQL's `first:`.
         maxChecksPerCall: z.number().int().positive().max(100).default(50),
-        // #288: getPRAuditComments' caller-visible return cap, applied AFTER marker filtering.
+        // #288: pr_audit_comments' caller-visible return cap, applied AFTER marker filtering.
         maxAuditCommentsPerCall: z.number().int().positive().max(100).default(20),
         // #288: independent top-level-comment scan window, fed to GraphQL `last:` before marker
         // filtering. Keeping this wider than the return cap prevents ordinary-comment spam from

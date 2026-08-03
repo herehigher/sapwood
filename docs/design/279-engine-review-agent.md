@@ -71,7 +71,7 @@ interface ReviewerAdapter {
   entries GitHub/human kinds); engine-agent in `fallback` rejected at parse.
 - **Findings transport to the fix leg** [R2-1]: the fix-leg forge proxy gains ONE
   bounded read tool for top-level PR comments filtered to engine audit markers
-  (`getPRAuditComments(pr, lastN)`), same read-only containment as the existing
+  (`pr_audit_comments(pr, lastN)`), same read-only containment as the existing
   #244 tools. fix.md's proxy-evidence doctrine is preserved (no prompt-injected
   findings); the audit comment remains non-authoritative for verdicts.
 
@@ -321,7 +321,7 @@ guard blocking (snapshot+drift makes it unnecessary for this design).
 6. **E4b — drive ordering**: attempt pin + backoff, preflight, identity resolution
    (PRStatus baseOid), WAL, refetch composition into driveOne.
 7. **E4c — audit + fix transport + crash recovery**: audit comment + marker dedup +
-   delivery receipt, `getPRAuditComments` proxy tool, restart reconciliation.
+   delivery receipt, `pr_audit_comments` proxy tool, restart reconciliation.
 8. **E5 — docs + round close** (same round as behavior change): configuration.md,
    role-paradigm.md, security.md (private-clone materialization, instruction-path
    escalation + content-channel accepted residual, single-identity

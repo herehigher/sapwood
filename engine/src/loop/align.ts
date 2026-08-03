@@ -128,39 +128,73 @@ export interface BoundedDigest {
   truncated: boolean;
 }
 
-export function packDigestRecords(lines: readonly string[], maxChars: number, emptyText: string, noun = "issue"): BoundedDigest {
-  const total = lines.length;
+/** #558: one packable record — its rendered `text` plus the issue `number` that text is ABOUT.
+ *  The number exists purely so the omission marker can NAME what it dropped: pre-#558 this
+ *  function took bare strings, so the marker had nothing to name and could only count. Both
+ *  callers already had the ordered `Issue[]` in scope at the call site, so carrying the id
+ *  alongside the line is strictly cheaper than the alternative (having each caller re-derive its
+ *  own trailing slice and splice numbers into the marker text after the fact — which would also
+ *  put the marker's length outside this function's cap accounting, the one thing it exists to
+ *  guarantee). */
+export interface DigestRecord {
+  number: number;
+  text: string;
+}
+
+export function packDigestRecords(records: readonly DigestRecord[], maxChars: number, emptyText: string, noun = "issue"): BoundedDigest {
+  const total = records.length;
   if (total === 0) return { text: emptyText, total: 0, rendered: 0, omitted: 0, truncated: false };
 
-  const rendered: string[] = [];
+  const rendered: DigestRecord[] = [];
   let used = 0;
-  for (const line of lines) {
-    const added = (rendered.length > 0 ? 1 : 0) + line.length; // +1 for the join newline
+  for (const record of records) {
+    const added = (rendered.length > 0 ? 1 : 0) + record.text.length; // +1 for the join newline
     if (used + added > maxChars) break;
-    rendered.push(line);
+    rendered.push(record);
     used += added;
   }
   if (rendered.length === total) {
-    return { text: rendered.join("\n"), total, rendered: total, omitted: 0, truncated: false };
+    return { text: rendered.map((r) => r.text).join("\n"), total, rendered: total, omitted: 0, truncated: false };
   }
 
-  const marker = (renderedCount: number): string =>
-    `\n\n[... ${total - renderedCount} more ${noun}(s) omitted — exceeded the ${maxChars}-char cap; ${renderedCount}/${total} rendered ...]`;
+  // #558: two marker shapes, in preference order. NAMED is the point of this issue — a count
+  // alone made an omitted record invisible to the session reading the digest (fatal for the pool
+  // digest, which IS the selection surface: a candidate nobody can name cannot be selected and
+  // drops out of the round with nothing in the prompt pointing at it). COUNT-ONLY is the
+  // pre-#558 wording, kept as the documented degradation for when the named list itself is what
+  // blows the cap. Both share the same tail: cap, rendered/total — unchanged from pre-#558, as
+  // are `omitted` and `truncated` (naming is ADDITIVE, not a contract change).
+  const suffix = (n: number): string => ` omitted — exceeded the ${maxChars}-char cap; ${n}/${total} rendered ...]`;
+  const named = (n: number): string =>
+    `\n\n[... ${noun}s ${records
+      .slice(n)
+      .map((r) => `#${r.number}`)
+      .join(", ")}${suffix(n)}`;
+  const counted = (n: number): string => `\n\n[... ${total - n} more ${noun}(s)${suffix(n)}`;
   // Never slices a record: drop whole trailing lines (bounded — at most `rendered.length`
-  // iterations, and these lists are small: backlog/pool candidate counts) until the marker fits
+  // iterations, and these lists are small: backlog/pool candidate counts) until a marker fits
   // alongside what's kept. Same "the cap is never exceeded either way" contract as capDigest.
+  // Preference order inside one level is named-then-counted, but the LEVEL is chosen by whichever
+  // of the two fits first: keeping one more record RENDERED (selectable) beats naming it (merely
+  // visible), so a long named list never costs a record that the shorter count-only marker would
+  // have kept.
   while (rendered.length > 0) {
-    const body = rendered.join("\n");
-    const m = marker(rendered.length);
-    if (body.length + m.length <= maxChars) {
-      return { text: body + m, total, rendered: rendered.length, omitted: total - rendered.length, truncated: true };
+    const body = rendered.map((r) => r.text).join("\n");
+    for (const marker of [named(rendered.length), counted(rendered.length)]) {
+      if (body.length + marker.length <= maxChars) {
+        return { text: body + marker, total, rendered: rendered.length, omitted: total - rendered.length, truncated: true };
+      }
     }
     rendered.pop();
   }
-  // Nothing fits even with zero rendered lines (a pathologically tiny cap) — last-resort hard
-  // truncation of the marker itself, same fallback shape as capDigest's own.
-  const m = marker(0);
-  return { text: m.length <= maxChars ? m : m.slice(0, maxChars), total, rendered: 0, omitted: total, truncated: true };
+  // Nothing fits even with zero rendered records (a pathologically tiny cap) — same last-resort
+  // ladder: the named marker, else the count-only one, else a hard truncation of it (capDigest's
+  // own fallback shape). A partially-named list is deliberately NOT a rung: half a list of
+  // numbers reads as "these are the omitted ones" and would be a lie.
+  for (const marker of [named(0), counted(0)]) {
+    if (marker.length <= maxChars) return { text: marker, total, rendered: 0, omitted: total, truncated: true };
+  }
+  return { text: counted(0).slice(0, maxChars), total, rendered: 0, omitted: total, truncated: true };
 }
 
 export interface BacklogDigestResult extends BoundedDigest {
@@ -252,15 +286,17 @@ export async function buildBacklogDigest(
   const byNumber = (a: Issue, b: Issue): number => a.number - b.number;
   const inScope = (issue: Issue): boolean => cfg.round.milestone === undefined || issue.milestone === cfg.round.milestone;
   const ordered = [...issues.filter(inScope).sort(byNumber), ...issues.filter((issue) => !inScope(issue)).sort(byNumber)];
-  const openLines = ordered.map((issue) => {
+  const openRecords = ordered.map((issue) => {
     const holds = cfg.escalation.humanLabels.filter((label) => labelsInclude(issue.labels, label));
     const annotation = holds.length > 0 ? ` [hold: ${holds.join(", ")}]` : "";
-    return `- #${issue.number} — ${issue.title}${scopeAnnotation(issue, cfg.round.milestone)}${annotation}`;
+    return { number: issue.number, text: `- #${issue.number} — ${issue.title}${scopeAnnotation(issue, cfg.round.milestone)}${annotation}` };
   });
   // #528: closed records carry neither the scope nor the hold annotation — both describe live
   // routing state, meaningless for settled work. Number-ascending, same determinism rule.
-  const closedLines = [...recentlyClosed].sort(byNumber).map((issue) => `- #${issue.number} — ${issue.title}${CLOSED_ANNOTATION}`);
-  const packed = packDigestRecords([...openLines, ...closedLines], cfg.roles.po.backlogDigestMaxChars, NO_OPEN_ISSUES);
+  const closedRecords = [...recentlyClosed]
+    .sort(byNumber)
+    .map((issue) => ({ number: issue.number, text: `- #${issue.number} — ${issue.title}${CLOSED_ANNOTATION}` }));
+  const packed = packDigestRecords([...openRecords, ...closedRecords], cfg.roles.po.backlogDigestMaxChars, NO_OPEN_ISSUES);
   // #237: packDigestRecords only ever drops a TRAILING run of whole records (its own doc
   // comment) — so the first `rendered` entries of `ordered` (same order the lines were built in)
   // are exactly what made it into `packed.text`.
@@ -1267,8 +1303,8 @@ interface PoolCandidateDigest extends BoundedDigest {
 }
 
 function buildPoolCandidateDigest(candidates: readonly Issue[], cfg: SapwoodConfig): PoolCandidateDigest {
-  const lines = candidates.map((issue) => formatCandidate(issue));
-  const packed = packDigestRecords(lines, cfg.roles.po.backlogDigestMaxChars, "(no Ready candidates this round)", "candidate issue");
+  const records = candidates.map((issue) => ({ number: issue.number, text: formatCandidate(issue) }));
+  const packed = packDigestRecords(records, cfg.roles.po.backlogDigestMaxChars, "(no Ready candidates this round)", "candidate issue");
   // packDigestRecords only ever drops a TRAILING run of whole records (its own doc comment) —
   // so the first `packed.rendered` entries of `candidates` (the same order `lines` was built in)
   // are exactly what made it into `packed.text`. Same technique buildBacklogDigest already uses
