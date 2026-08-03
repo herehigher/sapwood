@@ -403,17 +403,18 @@ was closed, never before.
 over allow from ANY source, including a target repo's own checked-out
 `.claude/settings.json`, an authorization surface this engine does not control — so
 this is the real boundary, not a convention a repo's own config could quietly
-override, **with one known exception this engine does not detect**: a target's
-managed settings can set `allowManagedPermissionRulesOnly: true`, and the shipped
-CLI's own contract for that mode (verified directly against the binary) reads "only
-permission rules (allow/deny/ask) from managed settings are respected. User, project,
-local, and CLI argument permission rules are ignored." `--disallowedTools` IS a
-CLI-argument permission rule, so under that mode sapwood's ENTIRE `--disallowedTools`
+override, **with one honest exception (#554), disclosed here and detected, not
+refused**: a target's managed settings can set `allowManagedPermissionRulesOnly: true`,
+and the shipped CLI's own contract for that mode (verified directly against the binary)
+reads "only permission rules (allow/deny/ask) from managed settings are respected.
+User, project, local, and CLI argument permission rules are ignored." `--disallowedTools`
+IS a CLI-argument permission rule, so under that mode sapwood's ENTIRE `--disallowedTools`
 containment layer is discarded wholesale — not just the `Agent`/`Task` deny below, the
 blanket `Bash` and write denies too — and the guard hook is no backstop for the loss,
 since `guardDecision()` only inspects write/read/Bash-shaped calls and passes
-everything else through. Whether the engine should detect and refuse that managed
-mode is an open decision, not resolved here — tracked in issue #554. Because no shell
+everything else through. The owner ruling (2026-08-03) is disclose + detect-and-WARN,
+not startup refusal and not a `needs-human` escalation: see the exception section right
+below for the detection contract and both operator exits. Because no shell
 exists for these sessions to reach `gh` (or anything else)
 through at all, the pattern-layer bypass classes earlier hardening closed one glob at
 a time (#102's short `-F`/`-l`/`-p` flag aliases, #108's quoted/escaped `-F`
@@ -428,6 +429,41 @@ lands inside a failing test rather than silently reopening a closed bypass class
 Read-only git (`git log` etc.) deliberately stays **out** of the allow-list: the
 blanket `Bash` deny already covers it, and adding it back would be a live capability,
 not a trip-wire.
+
+### Managed-settings `allowManagedPermissionRulesOnly` exception (#554)
+
+Found by the codex re-review on PR #553 (#534): every containment a peripheral role
+session (or the worker) gets from `--disallowedTools`/`--allowedTools` — the blanket
+`Bash` deny, the `Write`/`Edit`/`MultiEdit`/`NotebookEdit` deny, the `Agent`/`Task`
+spawn deny above — is a **CLI-argument permission rule**. On a host whose managed
+settings set `allowManagedPermissionRulesOnly: true`, the shipped CLI ignores CLI-argument
+permission rules entirely, so this whole list is void — silently, from sapwood's point of
+view, since `guardDecision()` (`guard.ts`) only inspects write/read/Bash-shaped calls and
+is no backstop for a permission mode it never sees.
+
+The owner ruling (2026-08-03) is **disclose + detect-and-WARN**, not refusal:
+
+- **Detection.** At every engine start, the engine reads the platform's fixed managed-settings
+  path (`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS,
+  `/etc/claude-code/managed-settings.json` on Linux/WSL,
+  `C:\Program Files\ClaudeCode\managed-settings.json` on Windows —
+  `managed-permission-warning.ts`'s `managedSettingsPath`). If `allowManagedPermissionRulesOnly`
+  is `true`, it emits exactly ONE engine-log warning for that start. No startup refusal, no
+  `needs-human` escalation. Absent or unreadable managed settings (the normal, unmanaged host)
+  fails open silently — zero behavior change, the same as before #554.
+- **Operator exit 1 — mirror the deny rules into managed settings.** Add sapwood's own deny
+  set to the managed-settings `permissions.deny` list yourself, so the SAME containment is
+  enforced by the layer that mode actually respects: `Bash`, `Write`, `Edit`, `MultiEdit`,
+  `NotebookEdit`, `Agent`, `Task` (peripheral roles' `ROLE_DISALLOWED_TOOLS`/`RETRO_DISALLOWED_TOOLS`
+  above) plus the worker's narrower `gh` subcommand denies (`WORKER_DISALLOWED_TOOLS`:
+  `gh pr merge`/`gh pr ready`/`gh pr review`/`gh release`/`gh issue edit`/`gh label`/`gh project`)
+  if the worker also runs on this host.
+- **Operator exit 2 — consciously accept the posture.** Do nothing, knowing that on this host
+  sapwood's CLI-argument containment is void and the guard hook's argv-shaped checks are the
+  only defense left standing.
+
+The warning text itself names both exits and this anchor, so an operator seeing it in the
+engine log never has to come find this section from memory.
 
 **#534: `--disallowedTools` also carries a name-list deny of the subagent-spawn channel —
 `Agent`/`Task` — for every role session whose deny list derives from `ROLE_DISALLOWED_TOOLS`
