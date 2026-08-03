@@ -123,7 +123,7 @@ Per-worker execution.
 | `effort` | `high` | `low` \| `medium` \| `high`. |
 | `fallbackModel` | `sonnet` | Model passed to Claude's `--fallback-model` when the primary is unavailable. **At the shipped defaults this equals `model`**, so out of the box there is no silent downgrade on an unavailable primary; raise `model` to `opus` and this becomes a real one-tier-down fallback again. Set to literal `"none"` to omit the flag and fail loud rather than silently downgrade quality; the environment-failure handling path is documented in [#168](https://github.com/herehigher/sapwood/issues/168). |
 | `timeoutSec` | `3600` | Wall-clock hard cap per worker (enforced). |
-| `budgetUsdSoft` | `10` | **Soft** per-worker USD budget, auto-enforced via a live token-usage estimate (stream-json carries no in-progress real cost). Crossing it triggers a graceful handoff (commit + push WIP, progress note, `.handoff` sentinel, clean exit) — never a mid-work kill. The estimate is a per-model rate-table approximation (see `pricingFile` below), reconciled (logged, not enforced) against the real cost when the worker finishes; `timeoutSec` plus the engine's hard `cost` ceiling below remain the actual backstop. **This default is calibrated for small-to-medium work and does not fit every model/effort profile** — see [Calibrating `budgetUsdSoft`](#calibrating-budgetusdsoft) below before running substantive issues, and especially before overriding `worker.model` back up to `opus`. |
+| `budgetUsdSoft` | `10` | **Soft** per-worker USD budget, auto-enforced via a live token-usage estimate (stream-json carries no in-progress real cost). Crossing it triggers a graceful handoff (commit + push WIP, progress note, `.handoff` sentinel, clean exit) — never a mid-work kill. The estimate is a per-model rate-table approximation (see `pricingFile` below), reconciled (logged, not enforced) against the real cost when the worker finishes; `timeoutSec` plus the engine's hard `cost` ceiling below remain the actual backstop. **This default is calibrated for small-to-medium work and does not fit every model/effort profile** — see [Calibrating `budgetUsdSoft`](#calibrating-budgetusdsoft) below before running substantive issues, especially at the shipped `worker.model: opus` default, which is the profile this section's figures were measured on. |
 | `maxResumes` | `2` | Maximum fresh worker legs after the initial leg hands off. RESUME runs before DISPATCH, keeps the issue In Progress, and reuses the same session/worktree; each leg gets a fresh `budgetUsdSoft`. `0` disables automatic resume. Once exhausted, the handoff is latched and escalated once to `needs-human`. Total per-issue soft-budget exposure is bounded by `budgetUsdSoft × (1 + maxResumes)`, still under the engine-wide daily cap. |
 | `pricingFile` | unset | Override the model rate table the soft-budget estimator prices against. A relative path resolves against **the config file's own directory** (same rule as `promptFile`). Unset uses the engine's shipped `pricing.yaml` — a commented snapshot of per-model USD-per-million-token rates (`input` / `output` / `cacheWrite` / `cacheRead`) plus each model's `contextWindow` (tokens — the dashboard's context-usage gauge denominator). Your file **replaces** the shipped table entirely (no merging), so copy every model you use; you may add your own aliases. Aliases match case-insensitively as substrings of the model id (`opus` matches `claude-opus-4-8`); a model matching nothing is priced at the most expensive tier in the loaded table. A set-but-missing/unreadable/malformed file — including a model entry missing `contextWindow` — is a fail-fast startup error (`sapwood validate` catches it too) — never a silent fallback to the shipped rates. |
 | `heartbeatStaleSecs` | `180` | A worker heartbeat older than this is considered dead (stale-heartbeat reclaim). |
@@ -145,6 +145,21 @@ At `budgetUsdSoft: 10` every substantive first leg crossed the
 cap and handed off before opening a PR (3 of 3 observed); at `20` those legs carried through
 to a PR in one go. Nothing malfunctioned — the graceful handoff did exactly what it promises,
 and `maxResumes` picked the work back up. The cap was simply below the cost of the work.
+
+**The live estimate runs high, not exact — denominate the cap accordingly.**
+[#594](https://github.com/herehigher/sapwood/issues/594): three consecutive supervised dogfood runs
+(2026-08-01–03, batches 2–4) measured the live estimate that enforces `budgetUsdSoft` against
+each leg's reconciled real `total_cost_usd` and found the estimate consistently OVER-predicts,
+by **+10% to +77% per leg**, worst on small legs (batch-2 mean +23%). Practical effect:
+`budgetUsdSoft` is denominated in *estimated* dollars, so a cap sized to a target *real*
+per-leg spend needs headroom for this bias — at the shipped `budgetUsdSoft: 20`,
+[#399](https://github.com/herehigher/sapwood/issues/399) saw the soft handoff fire at roughly
+**$15 real** spend, twice. **Translation:** size the nominal cap at roughly **target real
+per-leg spend × ~1.3** (the batch-2–4 mean) as a starting point, not a guarantee — the bias is
+a hand-maintained-rate-table artifact (see `pricing.yaml`'s header for the known divergence
+sources), not a fixed constant. The per-leg reconciliation log line (estimate vs. real
+`total_cost_usd`, logged whenever a worker finishes) is your own repo's actual figure and
+beats this one.
 
 **A too-low cap is a tax, not a loss.** No work is lost: the leg commits and pushes WIP, and
 the next leg resumes the same worktree/branch/session. What it costs is *re-priming* — each
