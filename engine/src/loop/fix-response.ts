@@ -164,7 +164,7 @@ export function validateFixResponseOutput(
     if (count === undefined) {
       return {
         ok: false,
-        reason: `runId ${r.runId} was not present in the journaled getPRAuditComments response(s) served to this leg for this PR/round`,
+        reason: `runId ${r.runId} was not present in the journaled pr_audit_comments response(s) served to this leg for this PR/round`,
       };
     }
     if (r.findingIndex >= count) {

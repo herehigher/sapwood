@@ -190,7 +190,7 @@ means "skip the test-driven gate and make the doc change instead."
 `worker.promptFile`'s):** `{{issue.number}}`, `{{pr.number}}`, `{{labels.verifyNa}}` only —
 never `{{issue.title}}`/`{{issue.body}}`/`{{issue.labels}}`. A fix leg's evidence channel is
 the PR-facing proxy tools (`pr_review_threads`/`pr_reviews`/`pr_checks`/`pr_details`, plus
-`getPRAuditComments` for engine-agent findings), not issue prose, so the render function never
+`pr_audit_comments` for engine-agent findings), not issue prose, so the render function never
 needs a full issue object — just the issue and PR numbers (`{{pr.number}}` is required because
 a PR-facing tool call takes a PR number, not an issue number, and `{{issue.number}}` alone
 doesn't name it).
@@ -815,7 +815,7 @@ an information request and still demands a definitive judgment is a shackle — 
 denial with first-class abstention is a guardrail). Credentials never leave the engine
 process: a role session gets a fixed, strictly-schema-validated tool algebra —
 `issue_details`, `issue_comments`, `issue_relations`, `search_issues` (#234), plus
-`pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `getPRAuditComments` (#244,
+`pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `pr_audit_comments` (#244,
 the same raw-data contract, extended to PR review data — no gate/verdict logic in any
 tool; that stays in `reviewer.ts`/`merge-driver.ts`) — served over a minimal hand-rolled
 streamable-HTTP MCP server bound to `127.0.0.1` on an ephemeral port, authenticated by a
@@ -864,8 +864,7 @@ and `prFixCap: 0` are silent.
 4 extra tool schemas (`issue_details`, `issue_comments`, `issue_relations`,
 `search_issues`) in its context on every round it runs, whether or not it ever calls
 one — the fix-loop worker leg's own scope (`PR_TOOLS`) is 5 tools
-(`pr_details`/`pr_reviews`/`pr_review_threads`/`pr_checks`/`getPRAuditComments` — the
-last is camelCase, the odd one out in the wire names; #556 tracks normalizing it). Each
+(`pr_details`/`pr_reviews`/`pr_review_threads`/`pr_checks`/`pr_audit_comments`). Each
 attached session also spins up one ephemeral `127.0.0.1` HTTP listener authenticated by
 a bearer token minted fresh for that session and revoked at teardown — never written to
 disk or an environment variable, but a real local process resource for the session's

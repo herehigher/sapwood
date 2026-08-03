@@ -35,7 +35,7 @@ export const TOOL_PR_DETAILS = "pr_details";
 export const TOOL_PR_REVIEWS = "pr_reviews";
 export const TOOL_PR_REVIEW_THREADS = "pr_review_threads";
 export const TOOL_PR_CHECKS = "pr_checks";
-export const TOOL_PR_AUDIT_COMMENTS = "getPRAuditComments";
+export const TOOL_PR_AUDIT_COMMENTS = "pr_audit_comments";
 
 export const FORGE_MCP_SERVER_NAME = "forge";
 
@@ -112,7 +112,7 @@ export interface ProxyCaps {
    *  `contexts(first: cap)`. Same no-lastN/completeness-not-rejection stance as
    *  maxReviewsPerCall above. */
   maxChecksPerCall: number;
-  /** #288: max marker-filtered audit comments returned by getPRAuditComments. */
+  /** #288: max marker-filtered audit comments returned by pr_audit_comments. */
   maxAuditCommentsPerCall: number;
   /** #288: max top-level comments scanned before marker filtering. Independent of the return
    *  cap so newer ordinary-comment spam cannot displace an audit comment prematurely. */

@@ -56,7 +56,7 @@ test("#288 audit body carries per-AC/findings/provenance but never matches appro
     assert.equal(REVIEWED_HEAD_OID_RE.test(line), false);
   }
   const reviewerSource = readFileSync(new URL("../roles/reviewer.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(reviewerSource, /sapwood-audit|parseAuditMarker|getPRAuditComments/);
+  assert.doesNotMatch(reviewerSource, /sapwood-audit|parseAuditMarker|pr_audit_comments/);
 });
 
 test("#288 hostile finding bodies cannot inject approval-parseable lines into the audit comment", () => {

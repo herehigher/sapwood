@@ -1200,7 +1200,7 @@ test("computeDisputeEscalation: an unreadable live read (getPRStatus or getPRRev
 
 const auditJournalRow = (overrides: Record<string, unknown> = {}, pr = 30, runIds: string[] = ["run-1"]) => ({
   ...journalRow(overrides, pr),
-  tool: "getPRAuditComments",
+  tool: "pr_audit_comments",
   responseCanonical: JSON.stringify({
     pr,
     comments: runIds.map((runId) => ({ id: `IC_${runId}`, kind: "engine-agent", head: "head-x", diff: "d", runId, body: "…" })),
@@ -1211,7 +1211,7 @@ const auditJournalRow = (overrides: Record<string, unknown> = {}, pr = 30, runId
 });
 
 /** A `fixing` lane's world at settle time: the leg's journal cursor, ONE journaled
- *  getPRAuditComments row it was served, and the WAL row carrying the reviewed artifact whose
+ *  pr_audit_comments row it was served, and the WAL row carrying the reviewed artifact whose
  *  finding COUNT bounds every findingIndex. */
 function seedAuditServedLeg(st: State, opts: { runId?: string; findings?: number; pr?: number; walRunId?: string } = {}): void {
   const runId = opts.runId ?? "run-1";
@@ -1221,7 +1221,7 @@ function seedAuditServedLeg(st: State, opts: { runId?: string; findings?: number
   const id = st.appendForgeProxyJournalIntent({
     identity: { roundId: 1, phase: "fixing", role: "worker", session: "lane-fix", attempt: 1 },
     seq: 1,
-    tool: "getPRAuditComments",
+    tool: "pr_audit_comments",
     proxyVersion: "1",
     argsCanonical: JSON.stringify({ pr }),
     scopeCanonical: "{}",
@@ -1362,7 +1362,7 @@ test("#461 AC3: an output with NO findingResponses block validates exactly as be
   st.close();
 });
 
-test("#461: findingResponses are rejected when the leg never called getPRAuditComments at all (no journaled audit row -> nothing known)", () => {
+test("#461: findingResponses are rejected when the leg never called pr_audit_comments at all (no journaled audit row -> nothing known)", () => {
   const st = new State(":memory:");
   st.appendEvent("fix-leg-started", { worker: "lane-fix", issue: 9, pr: 30, fixRounds: 1, journalCursor: 0 });
   st.recordEngineReviewWal("lane-fix", { runId: "run-1", head: "head-x", base: "b", diffHash: "d", attemptStart: "t" });
@@ -1397,7 +1397,7 @@ test("#461: a WAL that has moved on to a DIFFERENT run than the one journaled to
   st.close();
 });
 
-test("#461: journaledAuditRunIds — collects run ids from a served getPRAuditComments row, PR-bound on BOTH request args and response", () => {
+test("#461: journaledAuditRunIds — collects run ids from a served pr_audit_comments row, PR-bound on BOTH request args and response", () => {
   assert.deepEqual([...journaledAuditRunIds([auditJournalRow({}, 30, ["run-a", "run-b"])] as never, 30)].sort(), ["run-a", "run-b"]);
   // cross-PR confused-deputy closure, same shape journaledReviewThreadIds already takes
   assert.deepEqual([...journaledAuditRunIds([auditJournalRow({}, 999, ["run-a"])] as never, 30)], []);

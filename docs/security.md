@@ -553,7 +553,7 @@ tool at all** (deny-by-default, regression-tested):
 | `architect` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `verification-plan-reviewer` / `verification-plan-drafter` / `verification-plan-reviewer-confirm` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `retro` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
-| `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `getPRAuditComments` (camelCase wire name; #556 tracks normalizing it) |
+| `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `pr_audit_comments` |
 | *(any other role id)* | none — deny-by-default |
 
 **This nine-role grant is deliberate, not an oversight to narrow.** Every one of these tools is
