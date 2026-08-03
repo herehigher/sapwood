@@ -57,6 +57,17 @@ test("mcpToolFullName: namespaces under mcp__forge__", () => {
   assert.equal(mcpToolFullName(TOOL_ISSUE_DETAILS), "mcp__forge__issue_details");
 });
 
+// #556: a constraint over the WHOLE set, not a per-name sample — the point is that the NEXT
+// tool added cannot reintroduce a camelCase exception the way the audit tool once was. These names
+// are not internal: they reach a session's --allowedTools verbatim as mcp__forge__<name>, so a
+// reader who reconstructs one from the others must get it right.
+test("#556: every TOOL_NAMES entry is snake_case — the wire names are a convention, enforced set-wide", () => {
+  for (const name of TOOL_NAMES) {
+    assert.match(name, /^[a-z][a-z0-9_]*$/, `tool name "${name}" breaks the snake_case wire convention`);
+  }
+  assert.equal(TOOL_PR_AUDIT_COMMENTS, "pr_audit_comments");
+});
+
 test("TOOL_DEFINITIONS: one entry per fixed tool, in TOOL_NAMES order, each a strict object schema", () => {
   assert.deepEqual(
     TOOL_DEFINITIONS.map((t) => t.name),

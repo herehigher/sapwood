@@ -116,6 +116,29 @@ It can catch naive or accidental exfiltration attempts and leave an audit trail,
 deliberate adversary can trivially evade lexical executable matching — for example with an
 interpreter one-liner or DNS exfiltration.
 
+### Loopback targets: tagged, never excluded (#387)
+
+A dogfood run flagged `curl http://127.0.0.1:5173/...` dev-server smoke checks with exactly the
+prominence of real public egress the same run caught, which trains an operator to skim the
+signal. The recorded decision is to **tag, not exclude**: a hit whose targets are all loopback is
+still scanned, still deduplicated against the same per-leg cap, and still journalled with full
+evidence — it simply carries `target: "loopback"` in the `egress-suspect` payload, and the round
+artifact and harvest facts mark it so the prominent lines stay the public ones. Nothing is
+suppressed, so the audit trail this tripwire exists to leave is unchanged.
+
+The classification covers `localhost` (including RFC 6761 `*.localhost`), the whole `127/8`
+block, and `::1`, matched only inside a `scheme://host` URL. Absence of the tag is the fail-closed
+default — "not proven loopback" — and every ambiguity resolves that way: a snippet mixing loopback
+and public URLs, an unparseable authority, a snippet with no URL at all (a `WebSearch` query, an
+`Agent` spawn description), and a schemeless `curl 127.0.0.1:5173` are all left untagged at full
+prominence. That direction is deliberate: a missed loopback URL only restores the pre-#387 status
+quo for a benign hit, whereas the opposite error would downgrade something that genuinely reached
+the network. Classification reads the full observed text, not the 200-character evidence snippet,
+so a public URL truncated out of the recorded evidence cannot leave a hit tagged loopback.
+
+Note that loopback is not "safe" in general — a local port can be a proxy onward — which is
+precisely why this is a prominence marker on a retained record, not an exclusion.
+
 ## Peripheral network egress: WebSearch/WebFetch, detected not pinned (#410)
 
 Three role sessions — `architect`, `po-align`, `po-triage` — are granted the CLI's built-in
@@ -530,7 +553,7 @@ tool at all** (deny-by-default, regression-tested):
 | `architect` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `verification-plan-reviewer` / `verification-plan-drafter` / `verification-plan-reviewer-confirm` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `retro` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
-| `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `getPRAuditComments` (camelCase wire name; #556 tracks normalizing it) |
+| `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `pr_audit_comments` |
 | *(any other role id)* | none — deny-by-default |
 
 **This nine-role grant is deliberate, not an oversight to narrow.** Every one of these tools is
@@ -938,21 +961,16 @@ human-vetted" is stronger than what the second family's mechanism actually deliv
   settings, one flag changed — so the difference is the flag, not a local settings deny wearing
   platform clothes.
 - **The reviewer's own carriers** — the doctrine file (`doctrine.file`, default
-  `docs/REVIEW-DOCTRINE.md`, substituted verbatim into the reviewer prompt) and the shipped
-  reviewer prompt itself (`engine/prompts/**`). These are what a gate② review session actually
-  reads as standing instruction. The doctrine path is **derived from config**, not a literal, so
-  an operator who repoints `doctrine.file` stays covered; the prompt glob is a literal default,
-  inert in any target repo that is not the engine's own source tree.
-
-**Known gap in this family: a repointed `reviewer.agent.promptFile` is not covered.** The doctrine
-path can be derived because `loadConfig` captures `doctrine.fileRaw` before resolving it;
-`reviewer.agent.promptFile` keeps no such pre-resolution value, so there is nothing repo-relative
-to derive a pattern from and the literal `engine/prompts/**` glob is all that stands. An operator
-who points `reviewer.agent.promptFile` at a path outside that glob gets a reviewer prompt whose
-edits reach autonomous merge — the exact hole this section exists to close, for that one
-configuration. Closing it means capturing a `promptFileRaw` the same way `doctrine.fileRaw` is
-captured; tracked as #549. Until then, an operator who overrides
-`reviewer.agent.promptFile` should add that path to `escalation.instructionPaths` by hand.
+  `docs/REVIEW-DOCTRINE.md`, substituted verbatim into the reviewer prompt) and the reviewer prompt
+  itself (shipped as `engine/prompts/**`, repointable via `reviewer.agent.promptFile`). These are
+  what a gate② review session actually reads as standing instruction. **Both paths are derived from
+  config**, not literals, so an operator who repoints either one stays covered: `loadConfig`
+  captures the pre-resolution `doctrine.fileRaw` (#527) and `reviewer.agent.promptFileRaw` (#549)
+  before resolving each to an absolute local path, and the escalation matches those repo-relative
+  raw forms against the PR's changed files. The `engine/prompts/**` glob remains a literal default
+  covering the shipped prompt, inert in any target repo that is not the engine's own source tree.
+  A derived path that points outside the repo (absolute, or `..`-escaping) is skipped rather than
+  smuggled into the pattern list — it could never match a repo-relative changed-file path anyway.
 
 **The second family's protection is delayed by one round, not immediate — say so rather than
 overclaim.** Both the doctrine and the prompt are loaded by the ENGINE from its own

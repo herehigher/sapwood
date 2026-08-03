@@ -23,10 +23,12 @@ import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import { estimateUsd, loadPricingTable } from "../config/pricing.js";
 import { classifyEnvFailure, DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
+import { mcpToolFullName, PR_TOOLS } from "../proxy/tools.js";
 import { State } from "../state/state.js";
 import {
   buildRenderFixPrompt,
   buildRenderPrompt,
+  classifyEgressTarget,
   claudeArgs,
   defaultFixPromptPath,
   defaultPromptPath,
@@ -351,6 +353,60 @@ test("scanEgressSuspects (#534 fix): an EMPTY `description` with a usable `promp
     hits: [{ executable: "Agent", snippet: "spawn a subagent to check CI" }],
     truncated: false,
   });
+});
+
+// ── #387 (F18): loopback classification. The 2026-07-24 dogfood run flagged `curl
+// http://127.0.0.1:...` dev-server smoke checks identically to real public egress; loopback
+// noise trains an operator to skim the signal. Decision: TAG, never exclude — every hit is still
+// journalled with the same evidence, it just carries `target: "loopback"` so the prominent line
+// stays the public one. The tag is present ONLY when the snippet is provably loopback-only; its
+// ABSENCE is the fail-closed default (full prominence), which is also why every public-egress
+// assertion above is byte-identical to its pre-#387 shape. ────────────────────────────────────
+
+test("classifyEgressTarget (#387): loopback URL matrix — localhost, 127/8, ::1 tag; public host, public IP literal, and lookalikes do not", () => {
+  // loopback
+  assert.equal(classifyEgressTarget("curl http://127.0.0.1:5173/health"), "loopback");
+  assert.equal(classifyEgressTarget("curl http://127.1.2.3/"), "loopback"); // whole 127/8, not just .0.0.1
+  assert.equal(classifyEgressTarget("curl -sf http://localhost:5173/"), "loopback");
+  assert.equal(classifyEgressTarget("curl http://[::1]:5173/"), "loopback");
+  assert.equal(classifyEgressTarget("http://dev.localhost:3000/api"), "loopback"); // RFC 6761 subdomain
+  assert.equal(classifyEgressTarget("curl http://user:pw@127.0.0.1:8080/x"), "loopback"); // userinfo stripped
+  // NOT loopback
+  assert.equal(classifyEgressTarget("curl https://example.invalid/x"), undefined);
+  assert.equal(classifyEgressTarget("curl http://93.184.216.34/x"), undefined); // public IP literal
+  assert.equal(classifyEgressTarget("curl https://notlocalhost.invalid/"), undefined);
+  assert.equal(classifyEgressTarget("curl https://localhost.example.invalid/"), undefined); // lookalike suffix
+  assert.equal(classifyEgressTarget("curl http://127.0.0.1:5173/ https://example.invalid/x"), undefined); // mixed -> public
+  // No URL at all (a WebSearch query, an Agent spawn description, a schemeless curl) is
+  // UNCLASSIFIED, never "loopback" — the deliberate false-negative direction.
+  assert.equal(classifyEgressTarget("does a mature library already cover this"), undefined);
+  assert.equal(classifyEgressTarget("curl 127.0.0.1:5173/health"), undefined); // schemeless: known blind spot
+});
+
+test("scanEgressSuspects (#387): a loopback hit carries target:'loopback' in the payload; a public hit's payload is unchanged (no field)", () => {
+  const jsonl = [
+    bashToolUseLine("curl http://127.0.0.1:5173/"),
+    bashToolUseLine("curl https://example.invalid/real"),
+    webToolUseLine("WebFetch", "http://localhost:8080/docs"),
+    webToolUseLine("WebSearch", "how do vite dev servers report readiness"),
+  ].join("\n");
+  assert.deepEqual(scanEgressSuspects(jsonl, ["curl"]), {
+    hits: [
+      { executable: "curl", snippet: "curl http://127.0.0.1:5173/", target: "loopback" },
+      { executable: "curl", snippet: "curl https://example.invalid/real" },
+      { executable: "WebFetch", snippet: "http://localhost:8080/docs", target: "loopback" },
+      { executable: "WebSearch", snippet: "how do vite dev servers report readiness" },
+    ],
+    truncated: false,
+  });
+});
+
+test("scanEgressSuspects (#387): classification reads the FULL text, not the 200-char snippet — a public URL truncated out of the evidence can never leave the hit tagged loopback", () => {
+  const command = `curl http://127.0.0.1:5173/${"x".repeat(200)} https://example.invalid/exfil`;
+  const { hits } = scanEgressSuspects(bashToolUseLine(command), ["curl"]);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.snippet, command.slice(0, 200)); // the public URL is beyond the cap
+  assert.equal(hits[0]?.target, undefined);
 });
 
 // ── #110 PR0: parseResultText — the read side for a role session's structured final-message
@@ -1063,6 +1119,25 @@ test("probeLlmPing: a hang past probeTimeoutSec is hard-killed and resolves fail
     // orders of magnitude, not by tuning: probe timeout 1s < this bound 10s < stub sleep 30s. A
     // run 9x slower than expected still passes; a regression that drops the kill cannot pass.
     assert.ok(Date.now() - start < 10_000, "resolved via the timeout kill, not by waiting out the 30s sleep");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #578: the verdict must be read once stdout has DRAINED, not the instant the process exits.
+// Node's 'exit' fires when the child terminates, with its stdio pipes possibly still holding
+// unread bytes; the probe used to read `stdout` there and could see "" for a child that had
+// already written "pong" — the exact 2026-08-03 main CI failure (`{ ok: false, detail: 'ping
+// exited 0 with no output' }` on the argv test, 28ms, green everywhere else). This stub makes
+// that ordering DETERMINISTIC instead of a load-dependent race: a backgrounded writer inherits
+// the stdout pipe and emits "pong" long after the direct child has exited 0, so reading at
+// 'exit' can only ever see empty output and reading at 'close' can only ever see "pong". No
+// wall-clock assertion — the 0.3s is the fake's controlled ordering, not a margin being raced.
+test("probeLlmPing (#578): output still in flight when the process exits is NOT read as 'exited 0 with no output' — the verdict waits for stdout to drain", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\n( sleep 0.3; echo pong ) &\nexit 0\n`);
+    assert.deepEqual(await probeLlmPing(bin, "haiku", 0.05, 30), { ok: true });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -4014,8 +4089,8 @@ test("defaultFixPromptPath: resolves to the shipped prompts/fix.md, which exists
   const content = readFileSync(p, "utf8");
   assert.match(content, /\{\{pr\.number\}\}/);
   assert.match(content, /\{\{issue\.number\}\}/);
-  assert.match(content, /mcp__forge__getPRAuditComments/);
-  assert.match(content, /findings are carried only by `getPRAuditComments`/);
+  assert.match(content, /mcp__forge__pr_audit_comments/);
+  assert.match(content, /findings are carried only by `pr_audit_comments`/);
 });
 
 test("loadFixPromptTemplate: unset fixPromptFile -> the shipped default (byte-identical)", () => {
@@ -4220,7 +4295,10 @@ function fakeWorkerProxyHandle(over: Partial<{ mcpConfigJson: string; toolNames:
     mcpConfigJson: JSON.stringify({
       mcpServers: { forge: { type: "http", url: "http://127.0.0.1:1/mcp", headers: { Authorization: "Bearer proxy-test-token" } } },
     }),
-    toolNames: ["mcp__forge__pr_details", "mcp__forge__pr_reviews", "mcp__forge__pr_review_threads", "mcp__forge__pr_checks"],
+    // #556: derived from PR_TOOLS, not a hand-copied list — this fake stands in for what
+    // createProxyMint actually grants a fix-loop worker leg (asserted in proxy/mint.test.ts), so
+    // a wire-name change has to reach the argv assertions below rather than drifting past them.
+    toolNames: PR_TOOLS.map(mcpToolFullName),
     ...over,
     stop: async () => {
       calls.stopped++;
@@ -4770,6 +4848,11 @@ test("resume: a proxy opt mints a handle, widens --allowedTools with the handle'
     await waitForFile(join(dir, "args.seen"), "proxy resume argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     assert.match(args, /mcp__forge__pr_details/);
+    // #556: the audit tool's wire name reaches --allowedTools verbatim — asserted from the
+    // CONSTRUCTED argv (the value the CLI actually receives), literal, not constant-derived.
+    const allowedIdx = args.trim().split("\n").indexOf("--allowedTools");
+    const allowed = args.trim().split("\n")[allowedIdx + 1]!;
+    assert.match(allowed, /mcp__forge__pr_audit_comments/);
     assert.match(args, /--mcp-config/);
     const idx = args.trim().split("\n").indexOf("--mcp-config");
     assert.equal(args.trim().split("\n")[idx + 1], handle.mcpConfigJson);
