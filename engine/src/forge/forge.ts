@@ -247,6 +247,19 @@ export interface IForge {
    *  (getPRReviewData → deriveGate's humanLabels check), not the source issue's, so escalating
    *  a crashed-with-WIP lane to `needs-human` must land here to actually gate the PR. */
   addPRLabel(pr: number, label: string): Promise<void>;
+  /** #399: remove a label from a PULL REQUEST — the WRITE counterpart to `addPRLabel`, and the
+   *  PR-side twin of `removeLabel`. Idempotent (removing an absent label is a no-op on GitHub's
+   *  side, never an error), same as its issue-side sibling.
+   *
+   *  GOVERNANCE: label removal on a PR is at least as significant as on an issue — `deriveGate`
+   *  vetoes a merge on `needs-human`/`blocked` and WAITs on a hold label, all read off the PR's
+   *  OWN labels. So this method has exactly ONE production caller, `lane-state-label.ts`'s
+   *  `removeLaneStateLabel`, which fails closed for any label but the configured
+   *  `labels.laneState` — the same shape (and for the same reason) as `removeRoundPoolLabel`
+   *  guarding the issue-side `removeLabel`. A second call site is a defect until it arrives with
+   *  a provenance check of its own; see `round.ts`'s `removeRoundPoolLabel` doc for the canonical
+   *  list of authorized engine removals. */
+  removePRLabel(pr: number, label: string): Promise<void>;
   openPR(branch: string, title: string, body: string): Promise<number>;
   getPRStatus(pr: number): Promise<PRStatus>;
   mergePR(pr: number, headOid: string): Promise<void>;
@@ -1063,6 +1076,11 @@ export class GithubForge implements IForge {
     // `gh pr edit` (not `gh issue edit`) so a PR number is never mis-resolved to a same-number
     // issue on repos where the two namespaces overlap.
     await this.gh(["pr", "edit", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--add-label", label]);
+  }
+
+  async removePRLabel(pr: number, label: string): Promise<void> {
+    // `gh pr edit`, never `gh issue edit`, for the same number-namespace reason addPRLabel gives.
+    await this.gh(["pr", "edit", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--remove-label", label]);
   }
 
   async getIssueBody(issue: number): Promise<string> {

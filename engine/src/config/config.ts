@@ -510,6 +510,12 @@ const Labels = z
     // labels.prefix and use the same omitted-default pattern as every sibling label above.
     humanMergeOnly: z.string().optional(),
     planless: z.string().optional(),
+    // #399: the PR-side lane-state mirror — applied to a lane's PR while the lane is
+    // `driving`/`fixing`, removed the moment it reaches any terminal state (loop/lane-state-
+    // label.ts). Same omitted-default pattern as every sibling label above; unlike them it is
+    // ENGINE-REMOVED as well as engine-written, which is why the collision guard below treats it
+    // exactly like `roundPool` (an alias would let the engine strip the aliased label too).
+    laneState: z.string().optional(),
   })
   .strict();
 
@@ -1542,6 +1548,7 @@ export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): Sapw
     roundPool: cfg.labels.roundPool ?? defaults.roundPool,
     humanMergeOnly: cfg.labels.humanMergeOnly ?? defaults.humanMergeOnly,
     planless: cfg.labels.planless ?? defaults.planless,
+    laneState: cfg.labels.laneState ?? defaults.laneState,
   };
   cfg.labels = resolvedLabels;
   cfg.escalation.humanLabels ??= [resolvedLabels.needsHuman, resolvedLabels.blocked];
@@ -1594,6 +1601,9 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
     // joins `escalation.humanLabels` — see each field's own doc in the Labels schema above.
     ["labels.humanMergeOnly", cfg.labels.humanMergeOnly],
     ["labels.planless", cfg.labels.planless],
+    // #399: the PR-side lane-state label joins the protected set from both directions — nothing
+    // may alias it (it is auto-removed, see its own guard below), and it may not alias anything.
+    ["labels.laneState", cfg.labels.laneState],
     ...cfg.escalation.humanLabels.map((label, i): [string, string] => [`escalation.humanLabels[${i}]`, label]),
   ];
   // #397: the protected pair must also be distinct from EACH OTHER and from every label above —
@@ -1626,6 +1636,30 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
           `close auto-removes labels.roundPool (round.ts's removeRoundPoolLabel), so aliasing it to ` +
           `a protected label would let the engine silently strip that label too; use a distinct ` +
           `value for labels.roundPool.`,
+      });
+    }
+  }
+  // #399: identical guard for the OTHER engine-removed label. `labels.laneState` is stripped from
+  // a PR the instant its lane goes terminal (lane-state-label.ts's removeLaneStateLabel), so an
+  // alias onto ANY protected label — including a hold label, which lives on the PR too and is the
+  // one tier the engine must never write or clear — would let that auto-removal forge a human
+  // release. Same case-insensitive comparison, and the hold list is included here (unlike the
+  // roundPool guard's targets) precisely because this label's carrier is the PR.
+  const laneStateCollisionTargets: Array<[string, string]> = [
+    ...otherLabels.filter(([key]) => key !== "labels.laneState"),
+    ["labels.roundPool", cfg.labels.roundPool],
+    ...cfg.escalation.holdLabels.map((label, i): [string, string] => [`escalation.holdLabels[${i}]`, label]),
+  ];
+  for (const [key, value] of laneStateCollisionTargets) {
+    if (labelsInclude([value], cfg.labels.laneState)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["labels", "laneState"],
+        message:
+          `labels.laneState ("${cfg.labels.laneState}") collides with ${key} ("${value}") — a lane's PR label ` +
+          `is auto-removed when the lane goes terminal (lane-state-label.ts's removeLaneStateLabel), so aliasing ` +
+          `it to a protected label would let the engine silently strip that label too; use a distinct value for ` +
+          `labels.laneState.`,
       });
     }
   }
