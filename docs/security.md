@@ -91,6 +91,93 @@ The mode reaches the guard hook via a spawn-time environment variable
 worker-writable settings file — so a worker cannot weaken its own guard mode by editing
 config mid-run.
 
+## Host-delegated capability management (DR #616, 2026-08-03)
+
+sapwood adopts **host-delegated capability management: it abandons in-engine
+tool-permission/capability management for producer (worker) legs.** Producer legs officially inherit the operator's host Claude Code environment —
+settings sources, MCP servers, skills — as documented behavior, not an accident of unset
+flags. **No `capabilities.*` config surface will ever be built**; PLAN.md's locked-decisions
+table (Decision #11) records the accepted rationale. Scope is **producer legs only** — the
+reviewer/peripheral sealing floor below is untouched and stays non-negotiable (standing
+#285/#410/#236 rulings).
+
+A live probe (worker's exact dispatch argv: `--permission-mode auto`,
+`WORKER_ALLOWED_TOOLS`/`WORKER_DISALLOWED_TOOLS` verbatim) confirmed the premise this
+decision rests on: an ambient, user-scope MCP server tool not on the worker's allowlist was
+still callable, and the inherited MCP surface included write/exec-class tools (filesystem
+write/edit/move, Drive file creation, the full Playwright set, `codex`) — none of which the
+guard hook's Bash/file-tool matcher mediates. Inherited MCP tools arrive **deferred, not in
+the session's init inventory**, so a prompt or scanner that reads the init tool list and
+concludes "no MCP tools available" is wrong; `--allowedTools` does not gate an inherited MCP
+tool either (consistent with the Agent/Task-spawning finding below).
+
+### What stays engine-owned (the governance core)
+
+Everything a producer leg's write path actually depends on stays engine-enforced; only
+in-engine *tool-permission* management for producer legs is abandoned. Five mechanisms:
+
+1. **The guard hook**, injected as inline `--settings` JSON (self-disable-proof, see
+   [producer ≠ reviewer ≠ merger](#producer--reviewer--merger) above) — unchanged.
+2. **Gate② review-session seal** (`--strict-mcp-config` + an empty `--mcp-config`, and
+   `--setting-sources ""`) — the **only** sealing floor; see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard-285)
+   below. Non-review peripherals stay unsealed (standing #410/#236 rulings).
+3. **Human-merge-only write-path enforcement** — the guard's `checkWritePath` — see
+   [Human-merge-only paths](#human-merge-only-paths) below.
+4. **Role routing, merge-driver identity/CI binding (the TOCTOU pin), the state ledger, and
+   the audit trail** — `merge-driver.ts`'s `driveOne` remains the only caller of
+   `IForge.mergePR`, pinned with `--match-head-commit`.
+5. **`credentialFree` legs additionally force a sealed MCP surface**: `strictMcpConfig: true`
+   plus an engine-composed, proxy-only `mcpConfig`, so a credential-free fix leg cannot reach
+   an ambient forge-authority MCP server even though it keeps an open `--setting-sources`
+   (the action-side/content-side split from #219: stripping forge credentials is the
+   action-side control, sealing MCP is the content-side complement). Implemented by #617.
+
+### Accepted blind spots
+
+- **Residual unknown MCP servers are the top-ranked accepted blind spot.** Server-granularity
+  denial (below) only covers *known* forge-authority and filesystem/write/exec-class server
+  names; an unrecognized server added to the operator's host environment is not caught by
+  this mechanism. Branch protection (next bullet) is the backstop for exactly this gap.
+- **Branch protection is the mandatory platform backstop.** Because producer legs inherit the
+  full host tool surface, sapwood does not claim the engine alone prevents an inherited tool
+  from writing to the repository outside the reviewed PR path; a protected default branch
+  (no direct pushes, required reviews/checks) is documented as mandatory, not optional,
+  precisely because the in-engine capability boundary was deliberately not built for producer
+  legs.
+- **(b′) server-granularity MCP deny vs. `allowManagedPermissionRulesOnly` (#554).** The
+  planned server-granularity deny for producer legs (known forge-authority/github-class and
+  known write/exec/filesystem-class MCP servers appended to `WORKER_DISALLOWED_TOOLS`) lands
+  in `--disallowedTools`. As [documented above](#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry),
+  a target repo whose managed settings set `allowManagedPermissionRulesOnly: true` causes the
+  CLI to discard every CLI-argument permission rule — including this server deny, alongside
+  the rest of sapwood's `--disallowedTools` containment. #554 tracks whether the engine should
+  detect and refuse that managed mode; until then this is a named, not silently accepted,
+  interaction.
+
+### Doctrine lines
+
+- **AC evidence must be CI-reproducible.** A verification plan's acceptance-criteria evidence
+  is never producer-side browser output or any other unreproducible artifact from the worker's
+  inherited host surface — it must be reproducible in CI, the same trusted, sealed environment
+  gate② and a human reviewer both see. Host-delegated capability means the producer leg's own
+  session output cannot be treated as evidence of anything the engine did not independently
+  verify.
+- **Hosts lacking a veto-hook + sealed-session primitive run `produce-PR-and-stop` only.**
+  Autonomous merge (Decision #5) depends on the guard hook and the gate② seal existing and
+  being wired; a host environment that cannot provide an equivalent PreToolUse veto hook and a
+  sealed, closed-MCP/settings review session must not run autonomous-merge mode — the safe
+  degrade is `produce-PR-and-stop`, where a human merges.
+
+**Rewording principle.** Because producer legs inherit the host environment, no prompt,
+source comment, or doc may assert tool-inventory completeness — "no tool of yours", "no way
+other than", "there is no such tool", "structural" (in the sense of *the model structurally
+cannot reach X*) — about a producer leg's own session. State the engine-enforced structural
+fact instead: all forge writes are applied by deterministic engine code from validated
+structured output, never by the session itself. (A closed, sealed gate② review session, per
+the seal above, is the one place "read-only" can still be asserted truthfully — its `--strict-
+mcp-config`/`--setting-sources ""` seal is the mechanism, not a description of the producer
+leg's session.)
+
 ## Worker network egress: accepted blind spot
 
 sapwood's containment is action-side. The guard prevents a producer from approving or
