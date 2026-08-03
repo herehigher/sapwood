@@ -35,8 +35,9 @@
 // SAME shared key — this module never builds or depends on that linkage; it only guarantees the
 // key it writes under is stable and reconstructable independently of #231's schema.
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 // #235 PR-B: a TYPE-ONLY import (see this module's header doc — PURE, no filesystem/subprocess
 // of its own). worker.ts owns parseToolUsage (the jsonl-scan that PRODUCES this shape, the same
 // "read side" home parseModelUsage/ModelUsageEntry already establish for spend); this module
@@ -432,4 +433,105 @@ export function resolveWorktreeHead(worktreePath: string): string | null {
   } catch {
     return null;
   }
+}
+
+// ── Shared pre-spawn CLAUDE.md-family probe (#617: factored out of peripheral.ts so worker.ts's
+// producer-leg manifest wiring reuses the SAME probe list instead of growing a parallel one — this
+// repo's "one scanner, not a second one" doctrine, #410's scanEgressSuspects precedent) ─────────
+
+/** Codex F2b: the fixed, honest note every manifest carries naming what this module deliberately
+ *  does NOT enumerate. A single shared constant (not per-call prose) keeps this claim consistent
+ *  across every manifest this engine ever writes — peripheral role sessions and, as of #617,
+ *  worker/producer legs too. */
+export const KNOWN_UNPROBED_NOTE =
+  "Deliberately NOT enumerated: @import directives inside any probed file, ancestor-directory " +
+  "CLAUDE.md files above the worktree root, and any managed/enterprise policy layer — this " +
+  "engine records the standard sources it can cheaply probe (see probedPaths), not Claude " +
+  "Code's full CLAUDE.md resolution graph.";
+
+/** Sorted `*.md` file names under `dirPath`, RECURSIVELY — tolerant of a missing/unreadable
+ *  directory (returns `[]`, never throws). Each entry is a path RELATIVE to `dirPath` (so a
+ *  nested file reads as `"sub/nested.md"`, joinable back onto `dirPath` by the caller) — used for
+ *  the `.claude/rules/` scan. Node's `recursive: true` readdir option requires Node 20.17+/22.2+;
+ *  this engine's floor is Node >=24 (root `package.json`), so it's always available. */
+export function listMarkdownFileNames(dirPath: string): string[] {
+  try {
+    return readdirSync(dirPath, { withFileTypes: true, recursive: true })
+      .filter((d) => d.isFile() && d.name.endsWith(".md"))
+      .map((d) => relative(dirPath, join((d.parentPath as string | undefined) ?? dirPath, d.name)))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+/** The CLAUDE.md-family half of a pre-spawn manifest capture: `<worktreePath>/CLAUDE.md`,
+ *  `CLAUDE.local.md`, `.claude/CLAUDE.md`, every `*.md` recursively under `.claude/rules/`, and
+ *  the user-global CLAUDE.md (`$CLAUDE_CONFIG_DIR/CLAUDE.md` when set, else `~/.claude/CLAUDE.md`).
+ *  `head` is a plain argument, never resolved here — callers already have their OWN
+ *  resolveWorktreeHead (this module's, or worker.ts's #490 `.git`-path variant), and this
+ *  function stays agnostic to which one produced it. */
+export function captureClaudeMdSources(worktreePath: string, head: string | null): { sources: RawContextSource[]; probedPaths: string[] } {
+  const probedPaths: string[] = [];
+  const sources: RawContextSource[] = [];
+  const addSource = (label: string, path: string): void => {
+    probedPaths.push(path);
+    const r = readAmbientSource(path);
+    sources.push({
+      label,
+      path,
+      content: r.content,
+      ...(r.reason !== undefined ? { reason: r.reason } : {}),
+      ...(r.content !== null && head ? { gitCommit: head } : {}),
+    });
+  };
+
+  addSource("repo CLAUDE.md", join(worktreePath, "CLAUDE.md"));
+  addSource("repo CLAUDE.local.md", join(worktreePath, "CLAUDE.local.md"));
+  addSource("repo .claude/CLAUDE.md", join(worktreePath, ".claude", "CLAUDE.md"));
+
+  const rulesDirPath = join(worktreePath, ".claude", "rules");
+  probedPaths.push(join(rulesDirPath, "**", "*.md")); // recorded even if the directory is absent
+  for (const fileName of listMarkdownFileNames(rulesDirPath)) {
+    addSource(`repo .claude/rules/${fileName}`, join(rulesDirPath, fileName));
+  }
+
+  const userConfigDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), ".claude");
+  addSource("user-global CLAUDE.md", join(userConfigDir, "CLAUDE.md"));
+
+  return { sources, probedPaths };
+}
+
+/** The FILESYSTEM-derived half of one session attempt's context manifest — CLAUDE.md-family
+ *  sources plus the guard hook's own content, captured together so a caller (peripheral.ts's
+ *  RoleRunner, worker.ts's WorkerSupervisor) has one function to call right after its own
+ *  init-line anchor fires (or times out) rather than assembling this shape by hand. */
+export interface PreSpawnManifestCapture {
+  sources: RawContextSource[];
+  probedPaths: string[];
+  head: string | null;
+  /** False when the init-line-anchored capture ran but the worktree still didn't exist on disk
+   *  at that instant — a distinct fact from "worktree present but every source happened to be
+   *  absent". */
+  worktreeAppeared: boolean;
+  hookContent: string | null;
+  capturedAt: string;
+  /** `"init-observed"`: the session's own init line was seen before the bound expired.
+   *  `"timeout-fallback"`: the bound expired with no init line ever observed — capture still
+   *  proceeds (best-effort, never blocks the session), but the manifest names the ambiguity
+   *  rather than silently presenting it as equally reliable. */
+  captureBasis: "init-observed" | "timeout-fallback";
+}
+
+export function capturePreSpawnManifestData(
+  worktreePath: string,
+  worktreeAppeared: boolean,
+  captureBasis: PreSpawnManifestCapture["captureBasis"],
+  head: string | null,
+  guardHookPath: string,
+  capturedAt: string,
+): PreSpawnManifestCapture {
+  const { sources, probedPaths } = captureClaudeMdSources(worktreePath, head);
+  const hookRead = readAmbientSource(guardHookPath);
+  return { sources, probedPaths, head, worktreeAppeared, hookContent: hookRead.content, capturedAt, captureBasis };
 }
