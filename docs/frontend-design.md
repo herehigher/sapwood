@@ -1123,13 +1123,14 @@ the overlay is the named boundary.
    — sourced from the lane's PR-association read (forge.ts's
    `associateLanePr`/`LanePrOutcome.title`), which now selects `title` in
    the `gh pr list` reads it already made. Every field is **omitted, never
-   null**, when the source has no title. **Residual:** `merged.prTitle` is
-   *not* wired. Its only in-path source is `PRStatus.title` (added here,
-   selected by `getPRStatus`'s existing `gh pr view`), but plumbing it onto
-   the `merged` event means editing `merge-driver.ts`'s `DriveOutcome` — a
-   **human-merge-only** path the guard denies to workers at the write layer
-   (security.md). That wiring is #420. Until it lands, a merged PR's
-   tooltip falls back to the `prTitle` on that lane's earlier PR-opened
+   null**, when the source has no title. The `merged.prTitle` residual
+   **LANDED as #420** (human-authored: `merge-driver.ts` is a
+   human-merge-only path the guard denies to workers at the write layer,
+   security.md): both merged-outcome sites and the engine-agent
+   already-merged observation thread `PRStatus.title` through
+   `DriveOutcome`, and the conductor writes it onto the `merged` event as
+   `prTitle` — same omitted-never-null contract. Only pre-#420 `merged`
+   events fall back to the `prTitle` on that lane's earlier PR-opened
    event.
 4. **`worktree-released` event** (#210, round-2 amendment) — **LANDED** —
    payload `{ worker, issue, worktreePath }`, mirroring `worktree-retained`'s.

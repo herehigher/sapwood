@@ -968,6 +968,33 @@ test("MergeDriver.driveOne (#294, Codex P2 round 2): a manually-merged PR still 
   assert.deepEqual(outcome.holdObservation, { held: false });
 });
 
+test("MergeDriver.driveOne (#420): a MERGE-gate merged outcome threads PRStatus.title as title", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, title: "feat(engine): persist issue/PR titles" };
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "merged");
+  assert.equal((outcome as { title?: string }).title, "feat(engine): persist issue/PR titles");
+});
+
+test("MergeDriver.driveOne (#420): a merged outcome whose PRStatus has no title omits the key entirely", async () => {
+  const forge = new FakeForge(); // default status has no title
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "merged");
+  assert.ok(!Object.hasOwn(outcome, "title"));
+});
+
+test("MergeDriver.driveOne (#420): the already-merged observation path (state MERGED) threads title too", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, state: "MERGED", title: "fix(loop): drain before kill" };
+  forge.reviewData = { ...forge.reviewData, state: "MERGED" };
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "merged");
+  assert.equal((outcome as { title?: string }).title, "fix(loop): drain before kill");
+});
+
 test("MergeDriver.driveOne: merge raced — only ONE read saw MERGED yet -> still merged, wins over head-mismatch queue", async () => {
   const forge = new FakeForge();
   // Status read landed after the human merge (MERGED, head moved to the merge result);
