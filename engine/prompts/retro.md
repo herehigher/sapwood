@@ -118,7 +118,8 @@ through the exact same gate② path (CI green + a fresh non-author review) any o
 goes through. You never:
 
 - push directly to the default branch,
-- run any `gh` command (you have none — the PR is opened by the engine),
+- run any `gh` command — the PR is opened by the engine, from your pushed branch and
+  `.sapwood-retro-pr` file, never a command you run,
 - merge your own (or any) PR,
 - approve or submit a PR review,
 - touch `guard.ts`, hook wiring, `reviewer.ts`, or any security-relevant config — those are
