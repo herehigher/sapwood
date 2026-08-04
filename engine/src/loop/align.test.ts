@@ -80,7 +80,12 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
-  ready: Issue[] = [];
+  // #621: non-empty by default — createAligningStub's align-creation session now short-circuits
+  // on an empty Ready pool with no carried lane (align.ts's alignCreationHasNothingToDo), and the
+  // vast majority of this file's fixtures are about decompose/triage mechanics, unrelated to pool
+  // state. A single always-present candidate keeps every one of those dispatching exactly as
+  // before; the #621-specific tests override this to `[]` explicitly.
+  ready: Issue[] = [{ number: 999_001, title: "#621 fixture: a Ready issue keeping the pool non-empty by default", labels: [] }];
   override async getReadyIssues(): Promise<Issue[]> {
     return this.ready;
   }
@@ -585,6 +590,106 @@ test("createAligningStub (#394 F23 gate② fix): an unreadable goal file (persis
   }
 });
 
+// ── #621: skip the align-creation session on an empty pool with no carried lane ────────────────
+
+test("createAligningStub #621: empty Ready pool + no carried lane -> the po-align session is skipped, an align-skipped{reason:'empty-pool'} event is recorded, triage/creation are unaffected (empty)", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // this round's milestone-scoped Ready pool is empty
+  // default state: no planTriageCandidates either -> nothing for triage to iterate
+  const runner = new ScriptedRunner([doneResult("must-not-run", alignResultText([]))]);
+  const state = new State(":memory:");
+  const logs: string[] = [];
+  const deps: AlignDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, log: (line) => logs.push(line) };
+  const stub = createAligningStub(deps);
+  const { marker, ranSession } = await stub.run({ roundId: 21, phase: "aligning", marker: null });
+
+  assert.equal(marker, alignMarker(21));
+  assert.equal(runner.calls.length, 0, "no po-align session (and no triage candidates to iterate) dispatched");
+  assert.equal(ranSession, false, "no session ran this pass");
+  assert.equal(forge.createdIssues.length, 0);
+
+  const skipped = state.eventsAfterId(0, ["align-skipped"]);
+  assert.equal(skipped.length, 1);
+  const payload = skipped[0]!.payload as { round_id: number; reason: string };
+  assert.equal(payload.round_id, 21);
+  assert.equal(payload.reason, "empty-pool");
+  assert.ok(logs.some((l) => /skipping the po-align session/.test(l)));
+
+  // #621 AC: "no WAL/ledger entry fabricated" — the skip never dispatches a session, so no spend
+  // is ever ledgered for it.
+  assert.equal(state.spentUsdForWorker("po-align-1"), 0, "no spend ledgered for a session that never ran");
+  state.close();
+});
+
+test("createAligningStub #621 (reverse): a NON-EMPTY Ready pool still dispatches the align session — the skip must not fire when there IS work", async () => {
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "some Ready work", labels: [] }];
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createAligningStub(deps);
+  const { marker, ranSession } = await stub.run({ roundId: 22, phase: "aligning", marker: null });
+
+  assert.equal(marker, alignMarker(22));
+  assert.equal(runner.calls.length, 1, "the align-creation session still dispatches — byte-identical to pre-#621 behavior");
+  assert.equal(runner.calls[0]!.roleId, "po-align");
+  assert.equal(ranSession, true);
+  assert.equal(state.eventsAfterId(0, ["align-skipped"]).length, 0);
+  state.close();
+});
+
+test("createAligningStub #621 (reverse): an EMPTY Ready pool with a CARRIED lane (active/handoff/gated-reentry) still dispatches the align session", async () => {
+  const carriedLaneStates: Array<{
+    state: "running" | "driving" | "fixing" | "handoff" | "failed";
+    pr?: number;
+    extra?: Record<string, unknown>;
+  }> = [
+    { state: "running" },
+    { state: "handoff" },
+    { state: "failed", pr: 55, extra: { gated_reentry_capped: 0, gated_escalation_labeled: 1 } },
+  ];
+  for (const carried of carriedLaneStates) {
+    const forge = new FakeForge();
+    forge.ready = []; // Ready pool is empty — only the carried lane keeps this round "not idle"
+    const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+    const state = new State(":memory:");
+    state.upsertWorker({
+      name: `lane-${carried.state}`,
+      issue: 900,
+      session_id: "s",
+      state: carried.state,
+      started_at: "2026-08-01T00:00:00.000Z",
+      ended_at: null,
+      ...(carried.pr !== undefined ? { pr: carried.pr } : {}),
+      ...(carried.extra ?? {}),
+    });
+    const deps: AlignDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+    const stub = createAligningStub(deps);
+    const { ranSession } = await stub.run({ roundId: 23, phase: "aligning", marker: null });
+
+    assert.equal(runner.calls.length, 1, `a carried '${carried.state}' lane must still dispatch the align session`);
+    assert.equal(ranSession, true);
+    assert.equal(state.eventsAfterId(0, ["align-skipped"]).length, 0);
+    state.close();
+  }
+});
+
+test("createAligningStub #621: round 1 with an empty Ready pool and no carried lane STILL dispatches the align session — round 1 always gets its decomposition shot (round.ts's own standby doc)", async () => {
+  const forge = new FakeForge();
+  forge.ready = [];
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createAligningStub(deps);
+  const { ranSession } = await stub.run({ roundId: 1, phase: "aligning", marker: null });
+
+  assert.equal(runner.calls.length, 1, "round 1's align-creation session dispatches even with an empty pool and no carried lane");
+  assert.equal(runner.calls[0]!.roleId, "po-align");
+  assert.equal(ranSession, true);
+  assert.equal(state.eventsAfterId(0, ["align-skipped"]).length, 0);
+  state.close();
+});
+
 test("createAligningStub #231: a backlog read failure SUPPRESSES issue creation (zero createIssue calls) but does not block the po-align session itself or triage", async () => {
   const forge = new FakeForge();
   forge.planTriageCandidates = [{ number: 9, title: "planless idea", labels: [], body: NO_PLAN_BODY }];
@@ -936,6 +1041,10 @@ test("createAligningStub #216: lost creation receipt reconciles by body marker a
 
 test("createAligningStub #216: milestone-scoped lost receipt sees an unassigned marker and does not recreate", async () => {
   const innerForge = new FakeForge();
+  // #621: the default fixture Ready issue carries no milestone, so RoundScopedForge's exact-match
+  // filter drops it — an explicit M4-scoped one keeps this round's align-creation session
+  // dispatching (this test is about the reconcile-vs-recreate mechanics, not pool state).
+  innerForge.ready = [{ number: 900, title: "M4 ready anchor", labels: [], milestone: "M4" }];
   const forge = new RoundScopedForge(innerForge, "M4");
   const state = new State(":memory:");
   const cfg = mkCfg({ round: { milestone: "M4" } });
@@ -2290,6 +2399,9 @@ test("createAligningStub #215/#444: the align prompt receives the whole open bac
     { number: 42, title: "Existing bounded work", labels: ["blocked"], milestone: "M4" },
     { number: 43, title: "Other milestone work", labels: [], milestone: "M5" },
   ];
+  // #621: RoundScopedForge exact-matches milestone, so the default fixture Ready issue (no
+  // milestone) is filtered out here — an explicit M4-scoped one keeps align-creation dispatching.
+  innerForge.ready = [{ number: 900, title: "M4 ready anchor", labels: [], milestone: "M4" }];
   const forge = new RoundScopedForge(innerForge, "M4");
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
   const state = new State(":memory:");

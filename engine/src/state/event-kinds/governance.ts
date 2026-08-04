@@ -8,6 +8,7 @@ import { defineKinds } from "./types.js";
 export const GOVERNANCE_EVENT_KINDS = defineKinds({
   // Align.
   "align-summary": ["round-artifact"],
+  "align-skipped": [],
   "backlog-read-failed": [],
   "goal-file-unreadable": [],
 
