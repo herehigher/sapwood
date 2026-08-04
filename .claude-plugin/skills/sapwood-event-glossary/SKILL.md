@@ -104,7 +104,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 
 - `drive-queued` — **routine** [pr-touched, round-artifact]: a PR was checked against gate② and left queued (not yet mergeable, no action taken).
 - `drive-stopped` — **routine** [pr-touched, round-artifact]: driving a PR stopped this tick (breaker/budget/cap reached), to be retried a later tick.
-- `drive-needs-human` — **intervene** [retro, pr-touched, round-artifact, escalation-source:payload]: gate② returned a needs-human verdict for a PR ("the machine is stuck"); proof of the needs-human label write rides in the payload.
+- `drive-needs-human` — **intervene** [retro, pr-touched, round-artifact, escalation-source:payload]: a DRIVING lane was moved to needs-human ("the machine is stuck" / "a human owes the next decision"); the payload's `reason` identifies the cause — a gate② verdict OR a drain-* budget/kill-switch drain (conductor.ts's ceiling/kill-switch driving-lane drain path also writes this kind, not gate② alone) — and `labeled` records whether the label write itself landed.
 - `drive-no-pr` — **intervene** [round-artifact, escalation-source:always]: a driving lane has no PR to drive (ESCALATE_NOPR) — done but no PR was ever opened; always proven by presence.
 - `drive-fixup` — **routine**: gate② returned FIXUP — a fix leg was dispatched against the PR's outstanding findings.
 - `drive-human-merge-only` — **intervene**: gate② classified the PR as human-merge-only (bucket 2, #397/#292 instruction-path trust chain) — the PR is fine, but its merge decision is a human's, one-way and never re-decided. (see #292)

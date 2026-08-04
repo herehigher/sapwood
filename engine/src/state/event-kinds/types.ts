@@ -70,10 +70,18 @@ export type Actionability = "routine" | "expected-noise" | "investigate" | "inte
 
 /** The required per-kind (and, by the same shape, per-`ParkSource`/per-`EscalationBucket`)
  *  glossary entry. `meaning` is ONE factual line transcribed from the kind's own doc comment or
- *  emit site — never invented — and `actionability` is judged from how the engine/docs already
- *  treat the kind (an `escalation-source:*` tag is `intervene` by construction; a pure lifecycle
- *  event is `routine`). `see` is an optional anchor (an issue number or a doc path) for a reader
- *  who wants the full story instead of the one-line summary. */
+ *  emit site — never invented. `actionability` is a SEPARATE judgment from `tags`: the
+ *  `escalation-source:*` tags say a kind FEEDS escalation reconciliation (event-kinds.test.ts's
+ *  own cross-check enforces that half); they do not by themselves say the kind demands immediate
+ *  human action. Usually the two agree (a fresh, unconditional escalation is `intervene`), but not
+ *  always — a payload-PREDICATED source (`reclaim-done`/`reclaim-failed`, #404: attention only for
+ *  the payloads escalation-reconcile.ts's own predicate admits), a self-retrying companion write
+ *  (`gated-reentry-capped-label-failed`: the failure retries next tick, `never` a label proof), or
+ *  a source that routes attention through the park path instead of a label
+ *  (`env-failure-preserved`) are all legitimately `investigate`. Judge `actionability` from the
+ *  emit site's own behavior, never from the tag alone; a pure lifecycle event with no
+ *  `escalation-source:*` tag is `routine`. `see` is an optional anchor (an issue number or a doc
+ *  path) for a reader who wants the full story instead of the one-line summary. */
 export interface KindGlossary {
   readonly meaning: string;
   readonly actionability: Actionability;

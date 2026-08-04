@@ -20,7 +20,7 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   "drive-needs-human": {
     tags: ["retro", "pr-touched", "round-artifact", "escalation-source:payload"],
     meaning:
-      'gate② returned a needs-human verdict for a PR ("the machine is stuck"); proof of the needs-human label write rides in the payload.',
+      'a DRIVING lane was moved to needs-human ("the machine is stuck" / "a human owes the next decision"); the payload\'s `reason` identifies the cause — a gate② verdict OR a drain-* budget/kill-switch drain (conductor.ts\'s ceiling/kill-switch driving-lane drain path also writes this kind, not gate② alone) — and `labeled` records whether the label write itself landed.',
     actionability: "intervene",
   },
   "drive-no-pr": {
