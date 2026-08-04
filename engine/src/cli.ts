@@ -1161,6 +1161,24 @@ export function runPark(argv: string[]): { stdout: string; stderr: string; code:
   }
 }
 
+// ── #638: `sapwood init` — same synchronous fail-closed argument boundary as every other
+// subcommand, before the async engine-wiring fallthrough ──────────────────────────────────
+
+const INIT_USAGE = `\
+usage: sapwood init
+
+Scaffold .sapwood config and verify GitHub auth: creates labels/milestones, the
+project board, the starter config + goal/doctrine/issue templates, and (per #351)
+provisions the worker's write deploy key and related gh-side resources — credentialed
+network writes, so a bare \`--help\` must never trigger them (#638).
+
+init takes no options today; any flag or extra argument is rejected rather than
+silently ignored.
+
+Flags:
+  --help, -h     Print this help and exit
+`;
+
 /** Parsed run inputs produced by the synchronous validation boundary. Passing this token into
  *  runEngine/runDryRun prevents the async entry path from interpreting raw argv a second time. */
 export interface ValidatedRunArgs {
@@ -1268,7 +1286,18 @@ export function runCli(argv: string[]): CliResult {
       validatedRun: configPath !== undefined ? { configPath } : {},
     };
   }
-  // "init" falls through to the async path — signal caller to proceed.
+  // #638: give "init" the same synchronous fail-closed argument boundary as run/status/park —
+  // a help request must never fall through toward init()'s credentialed gh-side writes (#351).
+  const initFlags = argv.slice(3);
+  if (initFlags.includes("--help") || initFlags.includes("-h")) {
+    return { stdout: INIT_USAGE, stderr: "", code: 0 };
+  }
+  if (initFlags.length > 0) {
+    // init takes no options — the empty whitelist IS the spec (widening it later is a one-line
+    // change); any flag or operand here is rejected rather than silently swallowed.
+    return { stdout: "", stderr: `sapwood init: unexpected argument(s): ${initFlags.join(" ")}\n\n${INIT_USAGE}`, code: 1 };
+  }
+  // Bare "init" falls through to the async path — signal caller to proceed.
   return { stdout: "", stderr: "", code: -1 };
 }
 
