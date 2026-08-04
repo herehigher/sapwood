@@ -727,9 +727,11 @@ are exactly what a role session should absorb. Sealing this channel (a clean,
 runs only — see [`security.md`](security.md#ambient-repo-context-record-dont-seal-236)
 for the full rationale, the isolation recipe (which MUST use `--bare`), and why that
 recipe is never acceptable for production dispatch (`--bare` also disables hooks, and
-the guard hook must stay live). Recorded for **all 9/9** `runSessionWithRetry`
+the guard hook must stay live). Recorded for **all 10/10** `runSessionWithRetry`
 peripheral call sites — harvest, architect, plan-review (reviewer, drafter, and
-#214's confirm session), retro, and (as of
+#214's confirm session), retro,
+[#310](https://github.com/herehigher/sapwood/issues/310)'s `decompose.ts` PO
+decompose sub-mode (`po-decompose`), and (as of
 [#251](https://github.com/herehigher/sapwood/issues/251)) `align.ts`'s three PO
 sessions (`po-align`, `po-triage`, `po-pool`) — **plus, as of
 [#617](https://github.com/herehigher/sapwood/issues/617), every worker/producer leg**

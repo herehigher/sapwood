@@ -84,9 +84,12 @@ import {
  *  ROLE_DISALLOWED_TOOLS is the cross-source veto half: `--disallowedTools` is a HARD deny that
  *  wins over allow from ANY source, including a target repo's own checked-out
  *  `.claude/settings.json` — an authorization surface this engine does not control. `Write`/
- *  `Edit`/`MultiEdit`/`NotebookEdit` close every write channel; a blanket `Bash` (the bare tool
- *  name, not a pattern) closes command execution entirely — no `git`, no `gh`, no shell of any
- *  kind. This SUBSUMES the old per-pattern `Bash(gh ...)` denies (#101/#102's `--body-file`/
+ *  `Edit`/`MultiEdit`/`NotebookEdit` close every NAMED write channel; a blanket `Bash` (the bare
+ *  tool name, not a pattern) closes command execution entirely for `git`/`gh`/shell — no
+ *  `mcp__` pattern is denied here, so this is a name-based denial, not tool-inventory
+ *  completeness: an ambient host MCP server this role's session inherits (capability DR #616;
+ *  peripheral roles are not sealed off unless they run gate②'s `reviewCwd` review-session mode,
+ *  see below) can still carry write- or exec-capable tools this list never names. This SUBSUMES the old per-pattern `Bash(gh ...)` denies (#101/#102's `--body-file`/
  *  `-F`/`-l`/`-p` bypass classes are moot when there is no Bash grant to bypass THROUGH at all)
  *  and the verification-plan-drafter's/PO's extra label-mutation denies below — simplified accordingly.
  *  Read-only git (`git log` etc.) deliberately stays OUT: the blanket Bash deny already covers
@@ -231,7 +234,11 @@ export interface RoleSessionOpts {
    *  proceeds without the proxy attached) — an optional capability's setup failure must never
    *  wedge a role session that would otherwise run fine unaugmented. peripheralSessionEnv's
    *  credential-stripping is unaffected either way: the proxy's bearer token travels via the
-   *  `--mcp-config` header, never the spawn env — the proxy is the session's only forge reach. */
+   *  `--mcp-config` header, never the spawn env — the proxy is the session's only
+   *  ENGINE-GRANTED forge reach. It is not a claim about the session's total reach: capability
+   *  DR #616's inheritance applies to any unsealed session (this role included, when it isn't
+   *  running gate②'s `reviewCwd` mode), so an ambient host MCP server with its own forge-shaped
+   *  tools is a separate, unsealed channel this proxy attachment does not close. */
   proxy?: {
     mint: (session: { role: string; session: string }) => Promise<ForgeProxyHandle>;
   };
@@ -510,14 +517,16 @@ function peripheralSessionEnv(guardMode: SapwoodConfig["guard"]["mode"], worktre
   return env;
 }
 
-/** #235 PR-B: does this `--allowedTools` string grant any WRITE-capable tool — the exact set
+/** #235 PR-B: does this `--allowedTools` string NAME any WRITE-capable tool — the exact set
  *  assembleManifest's worktree.dirty derivation needs to distinguish from a read-only grant
  *  (Read/Grep/Glob, now the universal peripheral baseline, ROLE_ALLOWED_TOOLS above). Checked as
  *  discrete comma-separated tokens, not a bare substring test — `Bash(...)` entries carry
  *  arbitrary suffixes (e.g. retro's `Bash(git branch*)`), so a token is write-capable when it
  *  IS one of the fixed write-tool names or STARTS WITH `Bash` (any Bash grant is write-capable
  *  by definition: shell access can always mutate the worktree, regardless of which command
- *  pattern it's scoped to). */
+ *  pattern it's scoped to). Name-based, not tool-inventory-complete: an ambient host `mcp__*`
+ *  tool a session inherits under capability DR #616 is invisible to this check either way — see
+ *  `WorktreeGitState.dirtyBasis`'s doc for what that means for `dirty: false`. */
 function hasWriteCapableGrant(allowedTools: string): boolean {
   return allowedTools
     .split(",")

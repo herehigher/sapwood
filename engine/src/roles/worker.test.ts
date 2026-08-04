@@ -4924,7 +4924,7 @@ test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheri
 });
 
 // #617 (seam 3, capability DR #616): a worker/producer leg now records the SAME ContextManifest
-// fingerprint peripheral.ts's RoleRunner already records for its 9 peripheral call sites — see
+// fingerprint peripheral.ts's RoleRunner already records for its 10 peripheral call sites — see
 // WorkerSupervisor.recordLaneContextManifest's own doc for the (roundId:0, phase:"worker") key.
 test("dispatch: a worker leg records a ContextManifest fingerprint via WorkerDeps.state.recordContextManifest", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
