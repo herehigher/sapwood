@@ -7,7 +7,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runPark } from "../cli.js";
+import { parseParkArgs, runPark } from "../cli.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { INSTANCE_LOCK_FILENAME, type ParkSource, State } from "../state/state.js";
 import { clearParksReceiptFirst } from "./park-clear.js";
@@ -55,6 +55,34 @@ test("receipt-first: the park-resumed receipt is appended BEFORE the row is dele
     enteredAt: "2026-07-31T00:00:00.000Z",
     via: "operator-clear",
   });
+  s.close();
+});
+
+// ── #644: `--reason` on the operator clear — recorded verbatim in the receipt, never on the
+// legacy no-reason path (reverse test: an omitted clearReason must not even add a null/undefined
+// key, so an existing reader of this payload shape sees byte-identical JSON to before #644).
+test("#644: clearReason, when given, lands verbatim in the SAME park-resumed receipt payload — sits alongside via/source/enteredAt, never replaces them", () => {
+  const s = new State(":memory:");
+  park(s, "consecutive-stalls");
+  const cleared = clearParksReceiptFirst(s, "consecutive-stalls", "owner ruling #644, PM session 2026-08-04");
+  assert.equal(cleared.length, 1);
+  const resumed = s.eventsAfterId(0, ["park-resumed"]);
+  assert.equal(resumed.length, 1);
+  assert.deepEqual(resumed[0]!.payload, {
+    source: "consecutive-stalls",
+    enteredAt: "2026-07-31T00:00:00.000Z",
+    via: "operator-clear",
+    clearReason: "owner ruling #644, PM session 2026-08-04",
+  });
+  s.close();
+});
+
+test("#644 reverse test: omitting clearReason leaves the receipt payload byte-identical to pre-#644 — no clearReason key at all, not even null/undefined", () => {
+  const s = new State(":memory:");
+  park(s, "consecutive-stalls");
+  clearParksReceiptFirst(s, "consecutive-stalls");
+  const resumed = s.eventsAfterId(0, ["park-resumed"]);
+  assert.deepEqual(Object.keys(resumed[0]!.payload as object).sort(), ["enteredAt", "source", "via"], "no clearReason key present at all");
   s.close();
 });
 
@@ -119,6 +147,83 @@ test("sapwood park clear: clears the episode, takes down the ESCALATION marker, 
     assert.equal((resumed[0]!.payload as { via: string }).via, "operator-clear");
     after.close();
   });
+});
+
+test("#644: sapwood park clear --reason lands the text in the receipt payload (read back from the event row) and echoes it in stdout", () => {
+  withDataDir((_dir, dbPath) => {
+    const s = new State(dbPath);
+    park(s, "idle-churn");
+    s.close();
+
+    const res = runPark(["node", "sapwood", "park", "clear", dbPath, "--reason", "confirmed with owner in #604 thread"]);
+    assert.equal(res.code, 0, res.stderr);
+    assert.match(res.stdout, /confirmed with owner in #604 thread/, "the reason text is echoed in stdout");
+
+    const after = new State(dbPath);
+    const resumed = after.eventsAfterId(0, ["park-resumed"]);
+    assert.equal(resumed.length, 1);
+    assert.equal((resumed[0]!.payload as { clearReason?: string }).clearReason, "confirmed with owner in #604 thread");
+    after.close();
+  });
+});
+
+test("#644 reverse test: sapwood park clear WITHOUT --reason is byte-identical to pre-#644 behavior — same stdout shape, no clearReason in the payload", () => {
+  withDataDir((dir, dbPath) => {
+    const s = new State(dbPath);
+    park(s, "consecutive-stalls");
+    s.writeEscalationMarker({ source: "consecutive-stalls", reason: "wedged", message: "m", at: "2026-07-31T00:00:00.000Z" });
+    s.close();
+
+    const res = runPark(["node", "sapwood", "park", "clear", dbPath]);
+    assert.equal(res.code, 0, res.stderr);
+    assert.equal(
+      res.stdout,
+      "sapwood park clear: 1 park episode(s) cleared, receipt-first\n  cleared consecutive-stalls (parked since 2026-07-31T00:00:00.000Z) — reason: consecutive-stalls reason\n",
+    );
+    assert.equal(existsSync(join(dir, "ESCALATION")), false);
+
+    const after = new State(dbPath);
+    const resumed = after.eventsAfterId(0, ["park-resumed"]);
+    assert.deepEqual(Object.keys(resumed[0]!.payload as object).sort(), ["enteredAt", "source", "via"]);
+    after.close();
+  });
+});
+
+test("#644: sapwood park clear --reason with empty or whitespace-only text is REJECTED fail-closed", () => {
+  withDataDir((_dir, dbPath) => {
+    new State(dbPath).close();
+    const empty = runPark(["node", "sapwood", "park", "clear", dbPath, "--reason", ""]);
+    assert.equal(empty.code, 1);
+    assert.match(empty.stderr, /--reason/);
+
+    const whitespace = runPark(["node", "sapwood", "park", "clear", dbPath, "--reason", "   "]);
+    assert.equal(whitespace.code, 1);
+    assert.match(whitespace.stderr, /--reason/);
+  });
+});
+
+test("#644: sapwood park clear --reason with a missing value fails closed, same stance as --source", () => {
+  withDataDir((_dir, dbPath) => {
+    new State(dbPath).close();
+    const missing = runPark(["node", "sapwood", "park", "clear", dbPath, "--reason"]);
+    assert.equal(missing.code, 1);
+    assert.match(missing.stderr, /--reason requires/);
+
+    const flagShaped = runPark(["node", "sapwood", "park", "clear", dbPath, "--reason", "--source"]);
+    assert.equal(flagShaped.code, 1);
+    assert.match(flagShaped.stderr, /--reason requires/);
+  });
+});
+
+test("#644: parseParkArgs — --reason parses to ParkArgs.reason, and the unknown-flag stance is unchanged", () => {
+  const ok = parseParkArgs(["node", "sapwood", "park", "clear", "--reason", "text here"]);
+  assert.equal(ok.help, false);
+  assert.equal(ok.error, undefined);
+  assert.equal(ok.reason, "text here");
+
+  const unknown = parseParkArgs(["node", "sapwood", "park", "clear", "--bogus"]);
+  assert.equal(unknown.help, false);
+  assert.match(unknown.error ?? "", /unknown flag: --bogus/);
 });
 
 test("sapwood park clear REFUSES against a data dir held by a live engine — never a silent racy clear", () => {
