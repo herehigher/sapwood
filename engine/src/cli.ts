@@ -41,6 +41,7 @@ import {
 import { type PeripheralPhase, RoundScopedForge, type RoundStopHit, type RoundsResult, runRounds } from "./loop/round.js";
 import { createDefaultPeripherals } from "./loop/round-defaults.js";
 import { detectConsecutiveStalls } from "./loop/stall-breaker.js";
+import { createUserSettingsWatch } from "./loop/user-settings-watch.js";
 import { createProxyMint } from "./proxy/mint.js";
 import { makeProductionEngineAgent } from "./review/production.js";
 import { MergeDriver } from "./roles/merge-driver.js";
@@ -1476,6 +1477,10 @@ async function runTickEngine(
     // the run boundary, startup continues either way), but no park/escalation: disclose + WARN
     // only, per the owner ruling. See managed-permission-warning.ts's own doc.
     detectManagedPermissionMode(log);
+    // #615: snapshot/hash the operator's user-level settings ONCE, here, at startup — this IS the
+    // "engine startup" moment the acceptance criteria describe. The returned closure is called
+    // every tick below (onTick) to flag a later divergence; see user-settings-watch.ts's own doc.
+    const checkUserSettingsDrift = createUserSettingsWatch(state, log);
     // #438: an engine session has both announcement channels, so a paging ceiling in the board or
     // review-thread reads lands in the durable event log, not only on stderr.
     const forge = overrides.forge ?? new GithubForge(cfg, { log, state });
@@ -1579,6 +1584,8 @@ async function runTickEngine(
       ...(engineAgent !== null ? { engineAgentDriveDeps: engineAgent.driveDepsForLane } : {}),
       onTick: (result) => {
         log(formatTickSummary(result));
+        // #615: rides the existing per-tick hook — no new driver plumbing needed.
+        checkUserSettingsDrift();
         overrides.onTick?.(result);
       },
     });
@@ -1654,6 +1661,10 @@ async function runRoundsEngine(
     detectConsecutiveStalls(state, cfg, systemClock, log);
     // #554: same placement/rationale as runTickEngine above — see managed-permission-warning.ts.
     detectManagedPermissionMode(log);
+    // #615: same placement/rationale as runTickEngine above — see user-settings-watch.ts's own
+    // doc. The rounds driver's onTick (below) fires every raw tick exactly like the tick driver's
+    // does, so the same closure works unchanged here.
+    const checkUserSettingsDrift = createUserSettingsWatch(state, log);
     // #438: same both-channel wiring as runTickEngine above.
     const forge = overrides.forge ?? new GithubForge(cfg, { log, state });
     const engineReviewRunner =
@@ -1769,6 +1780,8 @@ async function runRoundsEngine(
       renderFixPrompt,
       onTick: (tickResult) => {
         log(formatTickSummary(tickResult));
+        // #615: rides the existing per-tick hook — no new round-loop plumbing needed.
+        checkUserSettingsDrift();
         overrides.onTick?.(tickResult);
       },
       ...(overrides.sleep !== undefined ? { sleep: overrides.sleep } : {}),
