@@ -1083,6 +1083,87 @@ test("clearDeployKeyConfigFromYaml (R3-4): a deployKeyPath:/deployKeyId:-shaped 
   }
 });
 
+// #606 gate② round 3 (item 2): a block scalar NESTED INSIDE the worker: block itself — e.g.
+// worker.promptFile: | — sits at a DEEPER indent than the block's own direct children
+// (deployKeyPath:/deployKeyId: at 2 spaces; the block-scalar body at 4+). The round-2 fix scoped
+// matching to "inside the worker: block", but not to "at the block's own direct-child indent",
+// so a schema-valid worker.promptFile whose CONTENT happens to contain the literal text
+// "deployKeyPath: ..."/"deployKeyId: ..." was still silently emptied by both write and clear.
+const NESTED_PROMPT_DECOY =
+  "  promptFile: |\n    deployKeyPath: this is prose INSIDE the prompt file text, not a real config key\n    deployKeyId: 4242 (also prose)\n";
+
+test("writeDeployKeyConfigIntoYaml (gate② round 3, item 2a): a block scalar under worker.promptFile containing deployKeyPath:/deployKeyId:-shaped text survives write byte-for-byte; only the REAL direct-child anchor lines are inserted", () => {
+  const dir = tmpCwd();
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    const original = `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n${NESTED_PROMPT_DECOY}  model: opus\n`;
+    writeFileSync(cfgPath, original);
+    writeDeployKeyConfigIntoYaml(cfgPath, "data/worker-deploy-key", 1);
+    const after = readFileSync(cfgPath, "utf8");
+    // the nested block-scalar prose survives byte-for-byte, untouched
+    assert.ok(
+      after.includes("    deployKeyPath: this is prose INSIDE the prompt file text, not a real config key"),
+      "the nested promptFile block-scalar line must survive",
+    );
+    assert.ok(after.includes("    deployKeyId: 4242 (also prose)"), "the nested promptFile block-scalar line must survive");
+    // the REAL anchor landed as a direct child of worker: (2-space indent)
+    assert.match(after, /^worker:\n {2}deployKeyPath: data\/worker-deploy-key/m);
+    const parsed = parseConfig(after);
+    assert.equal(parsed.worker.deployKeyPath, "data/worker-deploy-key");
+    assert.equal(parsed.worker.deployKeyId, 1);
+    assert.ok(parsed.worker.promptFile?.includes("deployKeyPath: this is prose"), "worker.promptFile's own content is preserved verbatim");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("clearDeployKeyConfigFromYaml (gate② round 3, item 2a): a block scalar under worker.promptFile containing deployKeyPath:/deployKeyId:-shaped text survives clear byte-for-byte; only the REAL direct-child anchor lines are removed", () => {
+  const dir = tmpCwd();
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    const original = `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  deployKeyPath: data/worker-deploy-key\n  deployKeyId: 42\n${NESTED_PROMPT_DECOY}  model: opus\n`;
+    writeFileSync(cfgPath, original);
+    const actions = clearDeployKeyConfigFromYaml(cfgPath);
+    assert.ok(actions.some((a) => /cleared/.test(a)));
+    const after = readFileSync(cfgPath, "utf8");
+    assert.ok(
+      after.includes("    deployKeyPath: this is prose INSIDE the prompt file text, not a real config key"),
+      "the nested promptFile block-scalar line must survive the clear",
+    );
+    assert.ok(after.includes("    deployKeyId: 4242 (also prose)"), "the nested promptFile block-scalar line must survive the clear");
+    assert.ok(after.includes("  model: opus"), "sibling direct-child content survives");
+    const parsed = parseConfig(after);
+    assert.equal(parsed.worker.deployKeyPath, undefined);
+    assert.equal(parsed.worker.deployKeyId, undefined);
+    assert.ok(parsed.worker.promptFile?.includes("deployKeyPath: this is prose"), "worker.promptFile's own content is preserved verbatim");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("clearDeployKeyConfigFromYaml (gate② round 3, item 2b): a BLANK LINE between deployKeyId: and the next direct child (e.g. model:) does not cause a false 'nothing left' — the block's own header survives and the sibling child is preserved", () => {
+  const dir = tmpCwd();
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    const original =
+      "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  deployKeyPath: data/worker-deploy-key\n  deployKeyId: 42\n\n  model: opus\n";
+    writeFileSync(cfgPath, original);
+    const actions = clearDeployKeyConfigFromYaml(cfgPath);
+    assert.ok(actions.some((a) => /cleared/.test(a)));
+    const after = readFileSync(cfgPath, "utf8");
+    assert.doesNotMatch(after, /deployKeyPath:/);
+    assert.doesNotMatch(after, /deployKeyId:/);
+    assert.match(after, /^worker:/m, "the worker: header must survive — model: opus is a real remaining child");
+    assert.match(after, /model: opus/);
+    const parsed = parseConfig(after);
+    assert.equal(parsed.worker.deployKeyPath, undefined);
+    assert.equal(parsed.worker.deployKeyId, undefined);
+    assert.equal(parsed.worker.model, "opus");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("pickFreshArmAKeySlot: the bare hostComponent slot when both the local path and the title are free", () => {
   const dir = tmpCwd();
   try {
@@ -1127,6 +1208,18 @@ test("pickFreshArmAKeySlot (R3-1): path AND title suffixes always move together 
     const slot = pickFreshArmAKeySlot(dir, "myhost", new Set(["sapwood-worker-myhost", "sapwood-worker-myhost-2"]));
     assert.equal(slot.path, join(dir, "data", "worker-deploy-key-myhost-3"));
     assert.equal(slot.title, "sapwood-worker-myhost-3");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pickFreshArmAKeySlot (gate② round 3, item 3): every candidate title already taken -> THROWS (no Date.now()-derived fallback that could silently collide with an unchecked slot)", () => {
+  const dir = tmpCwd();
+  try {
+    const allTaken = new Set(
+      Array.from({ length: 1000 }, (_, i) => (i === 0 ? "sapwood-worker-myhost" : `sapwood-worker-myhost-${i + 1}`)),
+    );
+    assert.throws(() => pickFreshArmAKeySlot(dir, "myhost", allTaken), /could not find a free per-machine deploy-key slot/i);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1592,6 +1685,45 @@ test("init (arm (a), interactive, R3-1 non-reuse): a PRE-EXISTING sapwood-worker
   }
 });
 
+test("init (gate② round 3, item 3): EVERY per-machine slot already occupied remotely -> the SAME provisioning-failure WARN path, no add call — no Date.now()-derived fallback that could silently collide", async () => {
+  // One remote entry per candidate slot pickFreshArmAKeySlot would ever try for hostComponent
+  // "test-host" (1..MAX_ARM_A_SLOT_ATTEMPTS, matching init.ts's own constant) — exhausts the walk.
+  const blockingTitles = Array.from({ length: 1000 }, (_, i) => {
+    const n = i + 1;
+    const candidateHost = n === 1 ? "test-host" : `test-host-${n}`;
+    return { id: n, title: `sapwood-worker-${candidateHost}` };
+  });
+  const { run, calls } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyEntries: blockingTitles,
+  });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      isInteractive: () => true,
+      promptOperator: async () => "a",
+      hostname: () => "test-host",
+      sshKeygen: failSshKeygen,
+      probeSshAuth: failProbeSshAuth,
+    });
+    assert.ok(
+      !calls.some((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add"),
+      "no add call — exhaustion is caught before any registration is attempted",
+    );
+    const warn = actions.find((a) => a.startsWith("deploy key: WARN"));
+    assert.ok(warn, "expected the ordinary provisioning-failure WARN");
+    assert.match(warn!, /could not find a free per-machine deploy-key slot/i);
+    assert.match(warn!, /1000 numeric-suffixed attempts/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("init (R3-1): a post-add id diff yielding ZERO new ids is treated as an ordinary provisioning failure (degrade (b)-style) — never silently adopts a wrong id", async () => {
   const { run } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
@@ -1920,6 +2052,46 @@ test("init (P1-6/R3-7): .gitignore already ending with the exact rooted rule as 
     });
     assert.equal(readFileSync(join(dir, ".gitignore"), "utf8"), original, "byte-for-byte untouched — the exact rule already sits last");
     assert.ok(!actions.some((a) => a.includes("appended") && a.includes("worker-deploy-key")), "no append action reported");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init (gate② round 3, item 1): a .gitignore whose last line is the rule WITH LEADING WHITESPACE is NOT treated as already covered — git treats leading spaces as part of the pattern itself, so that line does not actually ignore the key; the exact rule must still be appended", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyEntries: [],
+  });
+  const dir = tmpCwd();
+  try {
+    // Leading spaces before the pattern — a DIFFERENT, non-matching gitignore pattern to git,
+    // even though `.trim()` would make it look identical to the required rule.
+    const original = "node_modules/\n  /data/worker-deploy-key*\n";
+    writeFileSync(join(dir, ".gitignore"), original);
+    const { actions } = await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      ...nonInteractive,
+      sshKeygen: async (path) => {
+        writeFileSync(path, "k");
+        writeFileSync(`${path}.pub`, "p");
+      },
+      probeSshAuth: async () => ({ ok: true }),
+    });
+    const lines = readFileSync(join(dir, ".gitignore"), "utf8").split("\n");
+    const lastNonBlank = [...lines].reverse().find((l) => l.trim().length > 0);
+    assert.equal(lastNonBlank, "/data/worker-deploy-key*", "the EXACT rule (no leading whitespace) is now the file's last effective line");
+    assert.ok(
+      lines.some((l) => l === "  /data/worker-deploy-key*"),
+      "the pre-existing indented (non-matching) line is left in place, untouched",
+    );
+    assert.ok(
+      actions.some((a) => a.includes("appended") && a.includes("worker-deploy-key")),
+      "the append action is reported — the indented line must never be read as 'already covered'",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

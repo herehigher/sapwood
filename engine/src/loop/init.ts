@@ -416,14 +416,24 @@ export function sanitizeHostnameForKeyTitle(hostname: string): string {
 
 const MAX_ARM_A_SLOT_ATTEMPTS = 1000;
 
-/** #606 gate② round 2 (R3-1): arm (a) mints a FRESH keypair, always — it must never reuse
- *  whatever happens to already be sitting at the per-host path (a previous interrupted run) or
- *  register under a per-host title already claimed on the repo (foreign — same never-touch rule
- *  as any other unrecognized remote key). Walks `<hostComponent>`, `<hostComponent>-2`,
- *  `<hostComponent>-3`, ... and returns the first suffix where BOTH the local key path is free
- *  AND the title isn't among `knownRemoteTitles`; path and title always share the same suffix.
- *  `knownRemoteTitles` should be as fresh as practical (see its caller) since an interactive
- *  prompt can leave an arbitrary gap between the last remote read and this call. */
+/** #606 gate② round 2 (R3-1), round 3 (item 3): arm (a) mints a FRESH keypair, always — it must
+ *  never reuse whatever happens to already be sitting at the per-host path (a previous
+ *  interrupted run) or register under a per-host title already claimed on the repo (foreign —
+ *  same never-touch rule as any other unrecognized remote key). Walks `<hostComponent>`,
+ *  `<hostComponent>-2`, `<hostComponent>-3`, ... and returns the first suffix where BOTH the
+ *  local key path is free AND the title isn't among `knownRemoteTitles`; path and title always
+ *  share the same suffix. `knownRemoteTitles` should be as fresh as practical (see its caller)
+ *  since an interactive prompt can leave an arbitrary gap between the last remote read and this
+ *  call.
+ *
+ *  Round 3 fix: exhaustion (every one of MAX_ARM_A_SLOT_ATTEMPTS candidates already taken) now
+ *  THROWS rather than falling back to a synthesized candidate — a round-2 fallback re-derived a
+ *  "fresh" path/title from `Date.now()` WITHOUT re-checking either the local-path-free or the
+ *  remote-title-free condition (so it could silently collide with exactly the thing this
+ *  function exists to avoid), and depended on wall-clock time besides. The caller catches this
+ *  the same way it catches every other provisioning failure (deployKeyProvisioningFailedAction —
+ *  WARN, degrade to L0), so exhaustion is reported honestly instead of risking a silent
+ *  collision. */
 export function pickFreshArmAKeySlot(
   cwd: string,
   hostComponent: string,
@@ -435,10 +445,9 @@ export function pickFreshArmAKeySlot(
     const title = `${DEPLOY_KEY_TITLE}-${candidateHost}`;
     if (!existsSync(path) && !knownRemoteTitles.has(title)) return { path, title };
   }
-  // Practically unreachable (MAX_ARM_A_SLOT_ATTEMPTS collisions in a row) — a timestamp-suffixed
-  // fallback rather than looping forever or throwing.
-  const fallback = `${hostComponent}-${Date.now()}`;
-  return { path: join(cwd, "data", `worker-deploy-key-${fallback}`), title: `${DEPLOY_KEY_TITLE}-${fallback}` };
+  throw new Error(
+    `could not find a free per-machine deploy-key slot for "${hostComponent}" after ${MAX_ARM_A_SLOT_ATTEMPTS} numeric-suffixed attempts — every candidate path/title is already taken`,
+  );
 }
 
 /** #606 gate② round 1 guidance-carrying WARN (#554 pattern): fired whenever ssh-keygen/`gh repo
@@ -502,29 +511,37 @@ async function addDeployKeyCapturingNewId(run: GhRunner, repo: string, keyPath: 
 
 const WORKER_BLOCK_LINE = /^worker:\s*(#.*)?$/;
 const WORKER_FLOW_LINE = /^worker:\s*\{/;
-// Anchored per-LINE regexes (block-style YAML: `  deployKeyPath: ...` at the start of a line's
-// own content, after any indent). Applied ONLY within a `worker:` block's own child-line range
-// (findWorkerBlockRange, R3-4) — never scanned across the whole file, which would also match an
-// unrelated same-shaped line sitting inside e.g. a `notes: |` block scalar elsewhere in the doc.
-const DEPLOY_KEY_PATH_LINE = /^[ \t]*deployKeyPath:/;
-const DEPLOY_KEY_ID_LINE = /^[ \t]*deployKeyId:/;
+// Content-only regexes (matched against a line's text AFTER its exact direct-child indent has
+// already been stripped by isDirectChildAnchorLine — see that function's own doc for why this
+// is indent-EXACT, not "any indent"). Never matched against a whole raw line, and never scanned
+// across the whole file — only within a `worker:` block's own direct-child lines (R3-4).
+const DEPLOY_KEY_PATH_LINE = /^deployKeyPath:/;
+const DEPLOY_KEY_ID_LINE = /^deployKeyId:/;
 // Loose, UNANCHORED substring checks — deliberately used ONLY against a single already-matched
 // flow-style `worker: { ... }` line (never scanned across the whole file), since
 // `deployKeyPath:`/`deployKeyId:` inside a flow mapping is not at the start of that line.
 const DEPLOY_KEY_PATH_TOKEN = /deployKeyPath\s*:/;
 const DEPLOY_KEY_ID_TOKEN = /deployKeyId\s*:/;
 
-/** #606 gate② round 2 (R3-4): the top-level `worker:` block's OWN body — the run of lines
- *  strictly indented deeper than `worker:` itself, stopping at the first non-blank line that
- *  ISN'T indented (a sibling top-level key) or at EOF. `start` is the index of the `worker:`
- *  line; body lines are the half-open range `(start, end)`. Returns null when no top-level
- *  (block-style) `worker:` line exists at all. Scoping every deployKeyPath:/deployKeyId: match
- *  to JUST this range is what stops a same-shaped line inside an UNRELATED block scalar (e.g.
- *  `notes: |\n  deployKeyPath: not real\n`) from being read as this repo's own config key. */
-function findWorkerBlockRange(lines: string[]): { start: number; end: number } | null {
+/** #606 gate② round 2 (R3-4), round 3: the top-level `worker:` block's OWN body — the run of
+ *  lines strictly indented deeper than `worker:` itself, stopping at the first non-blank line
+ *  that ISN'T indented (a sibling top-level key) or at EOF. `start` is the index of the
+ *  `worker:` line; body lines are the half-open range `(start, end)`. `childIndent` is the
+ *  leading-whitespace CHARACTER COUNT of the block's first non-blank child line (normally 2) —
+ *  undefined when the block has no non-blank child line at all. Returns null when no top-level
+ *  (block-style) `worker:` line exists.
+ *
+ *  Round 3 fix: knowing `childIndent` is what lets isDirectChildAnchorLine require EXACT indent
+ *  equality rather than "any indent at all" — a round-2 gap where a MORE deeply indented line
+ *  (e.g. the body of a `worker.promptFile: |` block scalar that happens to contain the literal
+ *  text "deployKeyPath: ..." as prose, at 4+ spaces under a 2-space `promptFile:` child) was
+ *  wrongly treated as this repo's own anchor line and silently stripped by both write and
+ *  clear. */
+function findWorkerBlockRange(lines: string[]): { start: number; end: number; childIndent: number | undefined } | null {
   const start = lines.findIndex((l) => WORKER_BLOCK_LINE.test(l));
   if (start === -1) return null;
   let end = lines.length;
+  let childIndent: number | undefined;
   for (let i = start + 1; i < lines.length; i++) {
     const line = lines[i]!;
     if (line.trim().length === 0) continue; // a blank line doesn't end the block
@@ -532,8 +549,43 @@ function findWorkerBlockRange(lines: string[]): { start: number; end: number } |
       end = i;
       break;
     }
+    if (childIndent === undefined) childIndent = /^[ \t]*/.exec(line)![0].length;
   }
-  return { start, end };
+  return { start, end, childIndent };
+}
+
+/** #606 gate② round 3 (item 2): true when `line` is a DIRECT CHILD of the worker: block —
+ *  EXACTLY `childIndent` leading whitespace characters, no more, no less — whose content (after
+ *  that exact indent is stripped) is a `deployKeyPath:`/`deployKeyId:` anchor. A line indented
+ *  DEEPER than `childIndent` is nested content (e.g. a block scalar's own body) and must never
+ *  match, however coincidentally its text resembles an anchor line. */
+function directChildContent(line: string, childIndent: number): string | null {
+  const indent = /^[ \t]*/.exec(line)![0].length;
+  return indent === childIndent ? line.slice(indent) : null;
+}
+
+function isDirectChildAnchorLine(line: string, childIndent: number): boolean {
+  const content = directChildContent(line, childIndent);
+  return content !== null && (DEPLOY_KEY_PATH_LINE.test(content) || DEPLOY_KEY_ID_LINE.test(content));
+}
+
+/** #606 gate② round 3 (item 2): true when the worker: block (lines strictly after `start`, up
+ *  to the first sibling top-level key or EOF) still has ANY remaining direct-child content once
+ *  the anchor lines have already been filtered out of `lines` — blank lines and comment-only
+ *  lines are skipped (neither is a real YAML mapping entry, so neither justifies keeping the
+ *  `worker:` header on its own), and the scan covers the WHOLE remaining block range, not just
+ *  the line immediately after `start` (round 2's gap: a blank line — or a comment — between
+ *  `worker:` and its next real child, e.g. `model:`, made this probe false-negative and restore
+ *  a stale anchor that should have cleared). */
+function blockHasRemainingChild(lines: string[], start: number): boolean {
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.trim().length === 0) continue; // blank — not a child, keep scanning
+    if (!/^[ \t]/.test(line)) return false; // a sibling top-level key — the block ended with nothing left
+    if (line.trim().startsWith("#")) continue; // comment-only — not a mapping entry, keep scanning
+    return true; // real content remains
+  }
+  return false;
 }
 
 /** #606 gate② round 1 (P1-2/P2-8), round 2 (R3-4): writes BOTH `worker.deployKeyPath` and
@@ -573,13 +625,17 @@ export function writeDeployKeyConfigIntoYaml(configFilePath: string, relativeKey
     const trimmed = original.replace(/\n+$/, "");
     edited = `${trimmed}\n\nworker:\n${newLines.join("\n")}\n`;
   } else {
-    // Strip any EXISTING deployKeyPath:/deployKeyId: lines, but ONLY inside the worker: block's
-    // own body (R3-4) — nothing outside [start+1, end) is ever inspected or removed, so
-    // `range.start`'s own index is unchanged by this filter (every removal happens strictly
-    // after it) and remains valid as the insertion point below.
+    // Strip any EXISTING deployKeyPath:/deployKeyId: lines, but ONLY the block's own DIRECT
+    // CHILDREN (exact childIndent — round 3) inside its body (R3-4) — nothing outside
+    // [start+1, end) is ever inspected or removed, and nothing MORE deeply indented than
+    // childIndent (nested content, e.g. a block scalar's own body) is ever mistaken for an
+    // anchor line. `range.start`'s own index is unchanged by this filter (every removal happens
+    // strictly after it) and remains valid as the insertion point below.
+    const childIndent = range.childIndent;
     const withoutOldKeysInBlock = lines.filter((l, i) => {
       if (i <= range.start || i >= range.end) return true;
-      return !DEPLOY_KEY_PATH_LINE.test(l) && !DEPLOY_KEY_ID_LINE.test(l);
+      if (childIndent === undefined) return true;
+      return !isDirectChildAnchorLine(l, childIndent);
     });
     const out = [...withoutOldKeysInBlock];
     out.splice(range.start + 1, 0, ...newLines);
@@ -634,15 +690,22 @@ export function clearDeployKeyConfigFromYaml(configFilePath: string): string[] {
     return []; // flow-style worker:, but no deploy-key anchor inside it — nothing to clear
   }
   const range = findWorkerBlockRange(lines);
-  const body = range ? lines.slice(range.start + 1, range.end) : [];
-  const hasPath = body.some((l) => DEPLOY_KEY_PATH_LINE.test(l));
-  const hasId = body.some((l) => DEPLOY_KEY_ID_LINE.test(l));
+  const childIndent = range?.childIndent;
+  const directChildContents =
+    range !== null && childIndent !== undefined
+      ? lines
+          .slice(range.start + 1, range.end)
+          .map((l) => directChildContent(l, childIndent))
+          .filter((c): c is string => c !== null)
+      : [];
+  const hasPath = directChildContents.some((c) => DEPLOY_KEY_PATH_LINE.test(c));
+  const hasId = directChildContents.some((c) => DEPLOY_KEY_ID_LINE.test(c));
   if (!hasPath && !hasId) return [];
   const start = range!.start;
   const end = range!.end;
   const withoutKeys = lines.filter((l, i) => {
     if (i <= start || i >= end) return true;
-    return !DEPLOY_KEY_PATH_LINE.test(l) && !DEPLOY_KEY_ID_LINE.test(l);
+    return !isDirectChildAnchorLine(l, childIndent!);
   });
   // If deployKeyPath/deployKeyId were the ONLY children under worker:, stripping them leaves a
   // bare `worker:` with an implicit YAML null value — which FAILS z.object()'s validation
@@ -650,8 +713,11 @@ export function clearDeployKeyConfigFromYaml(configFilePath: string): string[] {
   // would always trip the read-back check below. Prune the now-empty `worker:` line itself in
   // that case (its index, `start`, is unchanged by the filter above — every removal happens
   // strictly after it), so the key is genuinely ABSENT (parses as undefined -> the schema
-  // default).
-  const hasChild = /^[ \t]+\S/.test(withoutKeys[start + 1] ?? "");
+  // default). Round 3 fix: scans the WHOLE remaining block range for any real (non-blank,
+  // non-comment) direct child, not just the single line immediately after `start` — a blank
+  // line (or a comment) between `worker:` and its next real child no longer causes a false
+  // "nothing left" negative that would restore a stale anchor.
+  const hasChild = blockHasRemainingChild(withoutKeys, start);
   const edited = (!hasChild ? withoutKeys.filter((_, i) => i !== start) : withoutKeys).join("\n");
   writeFileSync(configFilePath, edited);
   try {
@@ -739,10 +805,17 @@ const GITIGNORE_DEPLOY_KEY_COMMENT = "# sapwood: worker deploy key(s) — kept o
  *  single pattern covering every key this file ever provisions — the base path and every
  *  per-host/numeric-suffixed sibling arm (a) can mint, plus each key's `.pub` counterpart) is
  *  the file's LAST effective non-blank line; append it (with its own comment) at EOF if it
- *  isn't already there. Appending at EOF always wins over anything earlier in the file,
+ *  isn't already there EXACTLY. Appending at EOF always wins over anything earlier in the file,
  *  including a negation — the simple mechanism this repo's doctrine prefers over a bespoke
  *  evaluator. Idempotent: a repeat run whose last line already IS the exact rule is a true
- *  no-op. Best-effort: a failure here is a WARN, never a reason to fail init. */
+ *  no-op. Best-effort: a failure here is a WARN, never a reason to fail init.
+ *
+ *  Round 3 fix (item 1): the equality check against the last non-blank line is RAW byte
+ *  equality, never `.trim()`ed — gitignore treats leading whitespace on a pattern line as part
+ *  of the pattern itself (not decorative indentation the way YAML/most config formats treat
+ *  it), so a line reading `  /data/worker-deploy-key*` (leading spaces) is a DIFFERENT,
+ *  non-matching pattern to git and does NOT actually ignore the key — trimming before comparing
+ *  would have falsely treated that as "already covered" and left the key unignored. */
 function ensureGitignoreCoversDeployKeyAction(cwd: string): string[] {
   const gitignorePath = join(cwd, ".gitignore");
   try {
@@ -750,12 +823,14 @@ function ensureGitignoreCoversDeployKeyAction(cwd: string): string[] {
     const lines = existing.split("\n");
     let lastNonBlankIdx = -1;
     for (let i = lines.length - 1; i >= 0; i--) {
+      // `.trim()` here is ONLY to detect whether the line is blank (decides which line is
+      // "last"), never used for the equality check below.
       if (lines[i]!.trim().length > 0) {
         lastNonBlankIdx = i;
         break;
       }
     }
-    if (lastNonBlankIdx !== -1 && lines[lastNonBlankIdx]!.trim() === GITIGNORE_DEPLOY_KEY_RULE) {
+    if (lastNonBlankIdx !== -1 && lines[lastNonBlankIdx] === GITIGNORE_DEPLOY_KEY_RULE) {
       return [];
     }
     const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
@@ -909,20 +984,28 @@ async function armAuthFailsStaleOrMismatch(
     knownRemoteTitles = new Set(staleForeignKeys.map((k) => k.title));
   }
   const hostComponent = sanitizeHostnameForKeyTitle(deps.hostname());
-  const { path: keyPath, title } = pickFreshArmAKeySlot(cwd, hostComponent, knownRemoteTitles);
-  actions.push(
-    `deploy key: operator chose (a) — registering a NEW per-machine deploy key titled "${title}"; every existing ` +
-      `remote key is left untouched.`,
-  );
-
+  // Round 3 fix (item 3): pickFreshArmAKeySlot now THROWS on exhaustion (no more Date.now()
+  // fallback) — folded into the SAME try/catch as keygen/gitignore/add below so that failure
+  // degrades exactly like any other provisioning failure. `fallbackKeyPath`/`fallbackTitle` (the
+  // UN-suffixed base candidate) name the WARN's manual steps when slot-picking itself is what
+  // failed, since `keyPath`/`title` never get assigned in that case.
+  const fallbackKeyPath = join(cwd, "data", `worker-deploy-key-${hostComponent}`);
+  const fallbackTitle = `${DEPLOY_KEY_TITLE}-${hostComponent}`;
+  let keyPath: string;
+  let title: string;
   let newId: number;
   try {
+    ({ path: keyPath, title } = pickFreshArmAKeySlot(cwd, hostComponent, knownRemoteTitles));
+    actions.push(
+      `deploy key: operator chose (a) — registering a NEW per-machine deploy key titled "${title}"; every ` +
+        `existing remote key is left untouched.`,
+    );
     mkdirSync(dirname(keyPath), { recursive: true });
     await deps.sshKeygen(keyPath);
     actions.push(...ensureGitignoreCoversDeployKeyAction(cwd));
     newId = await addDeployKeyCapturingNewId(run, repo, keyPath, title);
   } catch (e) {
-    actions.push(deployKeyProvisioningFailedAction(repo, keyPath, title, e));
+    actions.push(deployKeyProvisioningFailedAction(repo, fallbackKeyPath, fallbackTitle, e));
     return actions;
   }
   actions.push(`deploy key: added write deploy key "${title}" to ${repo}`);
