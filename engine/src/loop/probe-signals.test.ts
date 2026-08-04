@@ -55,6 +55,7 @@ const baseCtx = (): ProbeCtx => ({
     getPoolEligibleIssues: async () => [],
     countOpenIssuesInMilestone: async () => 0,
     listOpenIssues: async () => [],
+    getIssueMeta: async (issue) => ({ number: issue, title: "t", state: "OPEN", labels: [], updatedAt: "2026-01-01T00:00:00Z" }),
   },
 });
 
@@ -74,7 +75,13 @@ const FIXTURES: Record<string, () => ProbeCtx> = {
   }),
   "active-lanes": () => ({ ...baseCtx(), state: { ...baseCtx().state, activeWorkers: oneWorker } }),
   "handoff-resume-candidates": () => ({ ...baseCtx(), state: { ...baseCtx().state, handoffWorkers: oneWorker } }),
-  "gated-reentry-candidates": () => ({ ...baseCtx(), state: { ...baseCtx().state, gatedFailedWorkers: oneWorker } }),
+  "gated-reentry-candidates": () => ({
+    ...baseCtx(),
+    state: { ...baseCtx().state, gatedFailedWorkers: oneWorker },
+    // allOnCfg() scopes this run to milestone "M-X" (#630) — the candidate's own issue must be
+    // IN that milestone for the fixture to fire; the off-milestone case is its own reverse test.
+    forge: { ...baseCtx().forge, getIssueMeta: async (issue) => ({ ...(await baseCtx().forge.getIssueMeta(issue)), milestone: "M-X" }) },
+  }),
   "ready-issues": () => ({ ...baseCtx(), forge: { ...baseCtx().forge, getReadyIssues: async () => [mkIssue()] } }),
   "plan-review-candidates": () => ({
     ...baseCtx(),
@@ -207,4 +214,55 @@ test("#469: an eligible-but-UNPOOLED issue still counts as nothing — the round
   const ctx = baseCtx();
   ctx.forge.getPoolEligibleIssues = async () => [mkIssue({ labels: ["something-else"] })];
   assert.equal(await firstWorkSignal(ctx), null, "a valid PO `selected: []` judgment must not pin the probe true");
+});
+
+// ── #630 (F32 follow-through, live park batch-7 round 312): gated-reentry-candidates must be
+// ── milestone-scoped like the dispatch path already is — an off-milestone needs-human carrier is
+// ── not work this run can ever consume, and must not hold the standby probe open over it. ──────
+
+test("#630 AC1/AC2: an off-milestone gated-reentry candidate no longer holds the probe open; an IN-milestone one still does (reverse test)", async () => {
+  const cfg = allOnCfg(); // round.milestone = "M-X"
+  const mkCandidateCtx = (candidateMilestone: string | undefined): ProbeCtx => ({
+    ...baseCtx(),
+    cfg,
+    state: { ...baseCtx().state, gatedFailedWorkers: () => [{ issue: 144 } as WorkerRow] },
+    forge: {
+      ...baseCtx().forge,
+      getIssueMeta: async (issue) => ({
+        number: issue,
+        title: "t",
+        state: "OPEN",
+        labels: [],
+        updatedAt: "2026-01-01T00:00:00Z",
+        ...(candidateMilestone !== undefined ? { milestone: candidateMilestone } : {}),
+      }),
+    },
+  });
+  // Red-pinned-today shape: #144 sits in "v0.2.3", this run is scoped to "M-X" — nothing enabled
+  // (align.ts/plan-review.ts, both gated on cfg.round.milestone) can ever consume it this run.
+  assert.equal(
+    await firstWorkSignal(mkCandidateCtx("v0.2.3")),
+    null,
+    "a needs-human carrier outside the run's milestone must not hold standby open — nothing this run can consume",
+  );
+  // Reverse: the same shape, in-scope, must still report — gated reclaim's own consumable set
+  // (conductor.ts's per-lane GATED RECLAIM, unchanged by this signal) is unaffected.
+  assert.equal(
+    await firstWorkSignal(mkCandidateCtx("M-X")),
+    "gated-reentry-candidates",
+    "an IN-milestone gated candidate still reports — reclaim/dispatch for in-scope candidates is unchanged",
+  );
+});
+
+test("#630: an unset round.milestone keeps gated-reentry-candidates unscoped — no behavior change for a run that never sets it (RoundScopedForge's own 'unset = no scoping' convention)", async () => {
+  const ctx: ProbeCtx = {
+    ...baseCtx(),
+    cfg: ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" } }),
+    state: { ...baseCtx().state, gatedFailedWorkers: () => [{ issue: 144 } as WorkerRow] },
+  };
+  assert.equal(
+    await firstWorkSignal(ctx),
+    "gated-reentry-candidates",
+    "no milestone configured means no scoping question can be asked — same stance as every other milestone-gated signal in this registry",
+  );
 });
