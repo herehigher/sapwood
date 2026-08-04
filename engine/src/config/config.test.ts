@@ -1008,6 +1008,39 @@ test("worker.pricingFile: a RELATIVE path resolves against the CONFIG FILE's dir
   }
 });
 
+// ── #606 (#351 final ruling): worker.deployKeyPath ──
+test("worker.deployKeyPath: unset by default, overridable, follows the #74 promptFile shape", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.worker.deployKeyPath, undefined);
+  const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key }");
+  assert.equal(over.worker.deployKeyPath, "data/worker-deploy-key");
+});
+
+test("worker.deployKeyPath: a RELATIVE path resolves against the CONFIG FILE's directory, exactly like promptFile (#74)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(cfgPath, "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key }");
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.worker.deployKeyPath, join(dir, "data", "worker-deploy-key"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worker.deployKeyPath: an ABSOLUTE path is left untouched by loadConfig's relative-resolution step", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    const abs = join(dir, "elsewhere", "worker-deploy-key");
+    writeFileSync(cfgPath, `board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: ${abs} }`);
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.worker.deployKeyPath, abs);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #88 gate⓪: labels.planApproved + roles.verificationPlanReviewer.promptFile ──────────────────────────
 // Session wiring (actually loading/rendering this prompt) lands with the peripheral-role-
 // runner issue; here the config surface is validated + path-resolved, same "accepted, not

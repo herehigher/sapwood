@@ -68,9 +68,22 @@ sapwood init
    (`Ready` / `In Progress` / `Done` by default) — if the board doesn't exist at the
    configured `board.projectNumber`, init reports what to create rather than guessing.
 6. **Writes a starter `sapwood.config.yaml`** (with inline comments) if none exists yet.
-7. **Scaffolds starter goal and review-doctrine files** at their configured paths
+7. **Provisions the L1 worker deploy key (#606) — the default onboarding path for the worker's
+   write capability.** `init` generates a per-repo ed25519 SSH key (`ssh-keygen`, idempotent by
+   title probe against `gh repo deploy-key list`), registers it as a **write** deploy key
+   (`gh repo deploy-key add --allow-write --title sapwood-worker`) under your own logged-in `gh`
+   credential (requires repo admin), runs a preflight SSH auth check, and — once green — writes
+   `worker.deployKeyPath` into your config. From then on, every worker leg pushes over git
+   transport ONLY, through this key, with **no forge API credential in its environment at all**:
+   it structurally cannot open a PR, approve a review, label an issue, or touch the board — the
+   engine does all of that from its own, separately-held credential (see
+   [Worker credential tiers](security.md#worker-credential-tiers-351-606) for the full L0/L1
+   picture and honest residuals). If you don't have repo admin, `init` logs exactly what to do by
+   hand (or skip — the engine runs fully functional either way, at L0, today's fuller-credentialed
+   default) and moves on; it never fails `init` over this.
+8. **Scaffolds starter goal and review-doctrine files** at their configured paths
    (`goal.file`, `doctrine.file`) if missing — never overwrites an existing file.
-8. **Scaffolds `.github/ISSUE_TEMPLATE/`** (feature / fix / docs / chore, matching the
+9. **Scaffolds `.github/ISSUE_TEMPLATE/`** (feature / fix / docs / chore, matching the
    structure the gate⓪ verification-plan-drafter normalizes toward) — each template is written only
    if that file is missing, so repos with their own templates are untouched.
 

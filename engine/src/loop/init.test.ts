@@ -15,11 +15,13 @@ import {
   init,
   missing,
   parseAuthScopes,
+  parseDeployKeyTitles,
   preflight,
   requiredLabels,
   resolveDoctrineFilePath,
   resolveGoalFilePath,
   setStatusOptionsArgs,
+  writeDeployKeyPathIntoYamlConfig,
 } from "./init.js";
 
 const cfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }");
@@ -154,6 +156,15 @@ function fakeRun(opts: {
   boardOptions?: (string | { name: string; id: string })[];
   ownerType?: string;
   labelCreateErrors?: Record<string, string | { message: string; stderr: string }>;
+  // #606: `gh repo deploy-key list --jq '.[].title'` response. DEFAULTS to already registered
+  // ("sapwood-worker") — every test that doesn't care about deploy-key provisioning takes
+  // ensureDeployKey's fast "already registered, no local key file -> WARN and return" path,
+  // never reaching sshKeygen/probeSshAuth (so ordinary init tests never shell out to a real
+  // `ssh-keygen`/`ssh`, or touch the network). Tests exercising provisioning itself pass `[]`.
+  deployKeyTitles?: string[];
+  deployKeyAddError?: string;
+  defaultBranch?: string; // "api repos/<owner>/<repo> --jq .default_branch"; unset -> "" -> branch-protection check is skipped entirely
+  branchProtected?: boolean; // "api repos/<owner>/<repo>/branches/<branch>/protection"
 }) {
   const calls: string[][] = [];
   const run: GhRunner = async (args) => {
@@ -186,10 +197,36 @@ function fakeRun(opts: {
       const projectV2 = opts.boardExists ? { id: "P", field: { id: "F", options } } : null;
       return JSON.stringify({ data: { user: { projectV2 } } });
     }
+    if (args[0] === "repo" && args[1] === "deploy-key" && args[2] === "list") {
+      return (opts.deployKeyTitles ?? ["sapwood-worker"]).join("\n");
+    }
+    if (args[0] === "repo" && args[1] === "deploy-key" && args[2] === "add") {
+      if (opts.deployKeyAddError) throw new Error(opts.deployKeyAddError);
+      return "";
+    }
+    if (args[0] === "api" && args.includes("--jq") && args.includes(".default_branch")) {
+      return opts.defaultBranch ?? "";
+    }
+    if (args[0] === "api" && /\/branches\/[^/]+\/protection$/.test(args[1] ?? "")) {
+      if (!opts.branchProtected) throw new Error("Branch not protected");
+      return "{}";
+    }
     return "";
   };
   return { run, calls };
 }
+
+// #606: fast, non-shelling-out, non-networked defaults for InitDeps' new sshKeygen/probeSshAuth
+// seams — every test in this file that doesn't explicitly exercise deploy-key provisioning
+// passes these implicitly via fakeRun's own "already registered, no local key" default path
+// (see fakeRun's deployKeyTitles doc), so these two are only ever invoked by this file's OWN
+// #606 tests below, which override them deliberately.
+const failSshKeygen = async (): Promise<void> => {
+  throw new Error("sshKeygen must not be called in this test");
+};
+const failProbeSshAuth = async (): Promise<{ ok: boolean; detail?: string }> => {
+  throw new Error("probeSshAuth must not be called in this test");
+};
 
 const tmpCwd = () => mkdtempSync(join(tmpdir(), "sapwood-init-"));
 
@@ -733,6 +770,286 @@ test("init (#492): the guard-hook action line reports the hook as built and wire
     assert.match(guardLine!, /built/);
     assert.match(guardLine!, /worker\.ts/); // names who wires it, since init itself does not
     assert.match(guardLine!, /human-merge-only/); // still true, still stated
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #606 (#351 final ruling): L1 scoped-worker-identity deploy-key provisioning ──────────────
+
+test("parseDeployKeyTitles: one title per line (same idiom as ensureMilestones' own --jq '.[].title' parse), blank lines dropped", () => {
+  assert.deepEqual(parseDeployKeyTitles("sapwood-worker\nother-key\n"), ["sapwood-worker", "other-key"]);
+  assert.deepEqual(parseDeployKeyTitles(""), []);
+  assert.deepEqual(parseDeployKeyTitles("\n\n  \n"), []);
+});
+
+test("writeDeployKeyPathIntoYamlConfig: inserts deployKeyPath right after the top-level worker: key, preserving every existing line/comment byte-for-byte", () => {
+  const dir = tmpCwd();
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    const original =
+      "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n\nworker:\n  model: opus # a real comment\n  effort: high\n";
+    writeFileSync(cfgPath, original);
+    const wrote = writeDeployKeyPathIntoYamlConfig(cfgPath, "data/worker-deploy-key");
+    assert.equal(wrote, true);
+    const after = readFileSync(cfgPath, "utf8");
+    assert.match(after, /^worker:\n {2}deployKeyPath: data\/worker-deploy-key/m);
+    // every original line survives untouched — comment included
+    for (const line of original.split("\n")) {
+      if (line.length > 0) assert.ok(after.includes(line), `original line lost: ${line}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDeployKeyPathIntoYamlConfig: no top-level worker: key -> appends a fresh worker: block at EOF", () => {
+  const dir = tmpCwd();
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(cfgPath, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
+    writeDeployKeyPathIntoYamlConfig(cfgPath, "data/worker-deploy-key");
+    const after = readFileSync(cfgPath, "utf8");
+    assert.match(after, /\nworker:\n {2}deployKeyPath: data\/worker-deploy-key/);
+    // still parses as valid config with the key set
+    const parsed = parseConfig(after);
+    assert.equal(parsed.worker.deployKeyPath, "data/worker-deploy-key");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDeployKeyPathIntoYamlConfig: idempotent — a file that already has a deployKeyPath: line (however indented) is left untouched, returns false", () => {
+  const dir = tmpCwd();
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    const original = "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  deployKeyPath: some/existing/path\n";
+    writeFileSync(cfgPath, original);
+    const wrote = writeDeployKeyPathIntoYamlConfig(cfgPath, "data/worker-deploy-key");
+    assert.equal(wrote, false);
+    assert.equal(readFileSync(cfgPath, "utf8"), original, "byte-for-byte untouched");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init: repo where the operator has admin — provisions the deploy key end-to-end (ssh-keygen + gh repo deploy-key add --allow-write --title sapwood-worker), preflight green, worker.deployKeyPath written into the config file", async () => {
+  const { run, calls } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyTitles: [], // not yet registered -> provisioning runs
+  });
+  const dir = tmpCwd();
+  try {
+    let keygenCalledWith: string | undefined;
+    let probeCalledWith: string | undefined;
+    const { actions } = await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      sshKeygen: async (path) => {
+        keygenCalledWith = path;
+        writeFileSync(path, "fake-private-key");
+        writeFileSync(`${path}.pub`, "ssh-ed25519 AAAA fake");
+      },
+      probeSshAuth: async (path) => {
+        probeCalledWith = path;
+        return { ok: true };
+      },
+    });
+    const expectedKeyPath = join(dir, "data", "worker-deploy-key");
+    assert.equal(keygenCalledWith, expectedKeyPath);
+    assert.equal(probeCalledWith, expectedKeyPath);
+    const addCall = calls.find((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add");
+    assert.ok(addCall, "gh repo deploy-key add must be called");
+    assert.ok(addCall!.includes("--allow-write"));
+    assert.ok(addCall!.includes("--title"));
+    assert.equal(addCall![addCall!.indexOf("--title") + 1], "sapwood-worker");
+    assert.equal(addCall![3], `${expectedKeyPath}.pub`);
+    assert.ok(actions.some((a) => /added write deploy key/.test(a)));
+    assert.ok(actions.some((a) => /preflight OK/.test(a)));
+    assert.ok(actions.some((a) => /wrote worker\.deployKeyPath/.test(a)));
+    const configPath = join(dir, "sapwood.config.yaml");
+    const configText = readFileSync(configPath, "utf8");
+    assert.match(configText, /deployKeyPath: data[/\\]worker-deploy-key/);
+    const reparsed = parseConfig(configText);
+    assert.equal(reparsed.worker.deployKeyPath, join("data", "worker-deploy-key"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init: idempotent on re-run — a repo where the deploy key title is ALREADY registered and a local key exists skips ssh-keygen/deploy-key-add entirely (no duplicate key)", async () => {
+  const { run, calls } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyTitles: ["sapwood-worker"], // already registered
+  });
+  const dir = tmpCwd();
+  try {
+    mkdirSync(join(dir, "data"), { recursive: true });
+    writeFileSync(join(dir, "data", "worker-deploy-key"), "existing-private-key");
+    const { actions } = await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      sshKeygen: failSshKeygen,
+      probeSshAuth: async () => ({ ok: true }),
+    });
+    assert.ok(!calls.some((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add"), "no duplicate deploy-key add");
+    assert.ok(actions.some((a) => /already registered/.test(a)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init: a SECOND run against a config that already has worker.deployKeyPath set skips provisioning entirely — no gh deploy-key calls at all, not even a list probe", async () => {
+  const provisioned = parseConfig(
+    "board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: data/worker-deploy-key }",
+  );
+  const { run, calls } = fakeRun({
+    labels: requiredLabels(provisioned).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+  });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(provisioned, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      sshKeygen: failSshKeygen,
+      probeSshAuth: failProbeSshAuth,
+    });
+    assert.ok(!calls.some((c) => c[0] === "repo" && c[1] === "deploy-key"), "provisioning must be skipped entirely once configured");
+    assert.ok(actions.some((a) => /already configured/.test(a)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init: without repo-admin (gh repo deploy-key add fails) -> L0 fallback guidance WARN naming the manual ssh-keygen command, the repo Settings -> Deploy keys step, the config key, and a docs anchor; engine stays fully functional", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyTitles: [],
+    deployKeyAddError: "HTTP 403: Must have admin rights to Repository.",
+  });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      sshKeygen: async (path) => {
+        writeFileSync(path, "k");
+        writeFileSync(`${path}.pub`, "p");
+      },
+      probeSshAuth: failProbeSshAuth,
+    });
+    const warn = actions.find((a) => a.startsWith("deploy key: WARN"));
+    assert.ok(warn, "expected a guidance-carrying WARN action line");
+    assert.match(warn!, /ssh-keygen -t ed25519/, "names the exact manual ssh-keygen command");
+    assert.match(warn!, /Deploy keys/, "names the manual repo Settings -> Deploy keys step");
+    assert.match(warn!, /write access/i, "names the allow-write step");
+    assert.match(warn!, /worker\.deployKeyPath/, "names the config key");
+    assert.match(warn!, /docs\/security\.md/, "carries a docs anchor");
+    assert.match(warn!, /L0/, "states the engine stays functional at L0");
+    // init itself never throws/fails over this — every other action (labels/board/etc) still ran.
+    assert.ok(actions.some((a) => /labels already present|created \d+ label/.test(a)));
+    const configText = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
+    assert.doesNotMatch(configText, /deployKeyPath:/, "no deployKeyPath written when provisioning failed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init (#554 pattern): worker.deployKeyPath set but the SSH auth preflight fails -> guidance WARN naming the re-provision instruction; config is NOT written", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyTitles: [],
+  });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      sshKeygen: async (path) => {
+        writeFileSync(path, "k");
+        writeFileSync(`${path}.pub`, "p");
+      },
+      probeSshAuth: async () => ({ ok: false, detail: "ssh: connect to host github.com port 22: Network is unreachable" }),
+    });
+    const warn = actions.find((a) => a.startsWith("deploy key: WARN") && /preflight failed/.test(a));
+    assert.ok(warn, "expected a preflight-fail WARN action line");
+    assert.match(warn!, /Network is unreachable/);
+    assert.match(warn!, /sapwood init/i, "names the re-provision instruction (re-run sapwood init)");
+    const configText = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
+    assert.doesNotMatch(configText, /deployKeyPath:/, "no deployKeyPath written when the preflight fails");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init (#554 pattern): L1 active + default branch UNPROTECTED -> WARN naming branch protection as the fix", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyTitles: [],
+    defaultBranch: "main",
+    branchProtected: false,
+  });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      sshKeygen: async (path) => {
+        writeFileSync(path, "k");
+        writeFileSync(`${path}.pub`, "p");
+      },
+      probeSshAuth: async () => ({ ok: true }),
+    });
+    const warn = actions.find((a) => a.startsWith("deploy key: WARN") && /branch protection|NO branch protection/i.test(a));
+    assert.ok(warn, "expected an unprotected-default-branch WARN action line");
+    assert.match(warn!, /main/);
+    assert.match(warn!, /branch protection/i, "names branch protection as the fix");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init: L1 active + default branch IS protected -> a positive confirmation action, no WARN", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyTitles: [],
+    defaultBranch: "main",
+    branchProtected: true,
+  });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      sshKeygen: async (path) => {
+        writeFileSync(path, "k");
+        writeFileSync(`${path}.pub`, "p");
+      },
+      probeSshAuth: async () => ({ ok: true }),
+    });
+    assert.ok(!actions.some((a) => a.startsWith("deploy key: WARN") && /branch protection/i.test(a)));
+    assert.ok(actions.some((a) => /default branch "main".*is protected/.test(a)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

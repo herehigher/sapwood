@@ -156,6 +156,18 @@ const Worker = z
     // unreadable/malformed is a fail-fast startup error (loadPricingTable, loaded once at
     // supervisor construction) — never a silent fallback to the shipped default.
     pricingFile: z.string().optional(),
+    // #606 (#351 final ruling): the L1 scoped-worker-identity per-repo SSH deploy key —
+    // `sapwood init` provisions it (ssh-keygen + `gh repo deploy-key add --allow-write`) and
+    // writes this key back into the config file. Same #74 promptFile shape: a relative path
+    // resolves against the CONFIG FILE's directory (see loadConfig). Unset (default) -> L0,
+    // today's behavior unchanged (a worker leg inherits the operator's full credentialed env).
+    // Set -> worker.ts probes SSH auth once per engine life; success activates L1 (git-transport-
+    // only env, `Bash(gh *)` dropped from the leg's tool grant) on every dispatch/resume/fix leg;
+    // failure WARNs with a re-provision instruction and dispatch stays at L0 (never wedges). A
+    // set-but-missing file is a probe failure, not a startup error — unlike promptFile/pricingFile,
+    // an operator without repo-admin legitimately has no key to point at yet (see init.ts's
+    // guidance-carrying WARN for that path).
+    deployKeyPath: z.string().optional(),
   })
   .strict();
 
@@ -1935,6 +1947,10 @@ export function loadConfig(path?: string): SapwoodConfig {
   // Same rule for worker.pricingFile (#33 follow-up, PR #85 review).
   if (cfg.worker.pricingFile !== undefined && !isAbsolute(cfg.worker.pricingFile)) {
     cfg.worker.pricingFile = resolve(dirname(file), cfg.worker.pricingFile);
+  }
+  // Same rule for worker.deployKeyPath (#606).
+  if (cfg.worker.deployKeyPath !== undefined && !isAbsolute(cfg.worker.deployKeyPath)) {
+    cfg.worker.deployKeyPath = resolve(dirname(file), cfg.worker.deployKeyPath);
   }
   // #88/#87: same relative-to-config-file resolution for the verification-plan-reviewer prompt.
   if (cfg.roles.verificationPlanReviewer.promptFile !== undefined && !isAbsolute(cfg.roles.verificationPlanReviewer.promptFile)) {

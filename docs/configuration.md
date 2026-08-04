@@ -17,10 +17,10 @@ sapwood validate [path]
 The loader probes, in order: `sapwood.config.yaml`, `sapwood.config.yml`,
 `sapwood.config.json`. An explicit path from `sapwood run --config <path>` (including
 `--dry-run`), `sapwood status --config <path>`, or `sapwood validate [path]` bypasses
-the probe. Relative `logging.path`, `promptFile`, `goal.file`, and `doctrine.file` keys
-resolve from the selected config's directory, so an alternate config's default log lands
-beside it; the DB (`data/sapwood.sqlite`), `KILL_SWITCH`/`PAUSE`, sessions, and worktree
-roots stay cwd-relative.
+the probe. Relative `logging.path`, `promptFile`, `goal.file`, `doctrine.file`, and
+`worker.deployKeyPath` keys resolve from the selected config's directory, so an alternate
+config's default log lands beside it; the DB (`data/sapwood.sqlite`), `KILL_SWITCH`/`PAUSE`,
+sessions, and worktree roots stay cwd-relative.
 Only `board.owner`, `board.repo`, and `board.projectNumber` are
 required; every other key has a default.
 
@@ -130,6 +130,7 @@ Per-worker execution.
 | `egressSuspectCommands` | `[curl, wget, nc, ncat, netcat, socat, ssh, scp, sftp, rsync, ftp, telnet]` | Executable names recorded by the monitor-only worker-egress tripwire. Matching is lexical at executable position in completed Bash tool calls; each deduplicated match becomes an `egress-suspect` event and never blocks or changes the lane outcome. An override **replaces** the default array entirely (no merging); set `[]` to disable the tripwire. |
 | `promptFile` | unset | Override the worker's prompt template with your own file. A relative path resolves against **the config file's own directory**, not the CLI's cwd — so the same config behaves identically no matter where `sapwood` is invoked from. Unset uses the engine's shipped `prompts/worker.md` (TDD + two-gate method). |
 | `fixPromptFile` | unset | (#245) Override the **fix-leg** prompt — the instruction a `fixing`-state resume (same worker row/worktree/branch/session as the original leg, never a new dispatch) receives instead of the ordinary issue-rendered prompt above. Same resolution/fail-fast rules as `promptFile`. Unset uses the engine's shipped `prompts/fix.md` (fetch findings via the PR-facing proxy tools, address them, push to the same branch). |
+| `deployKeyPath` | unset | (#606, [#351 final ruling](security.md#worker-credential-tiers-351-606)) Path to the per-repo SSH **write deploy key** `sapwood init` provisions — setting it activates **L1**: every worker leg (dispatch/resume/fix) runs with `GIT_SSH_COMMAND` pinned to this key and no forge API credential in its env at all (`Bash(gh *)` drops out of the leg's tool grant too). Same relative-path resolution as `promptFile`. Unset (the default) is **L0** — today's full credentialed env, unchanged. A configured-but-unreachable key (missing file, SSH auth failure) never blocks dispatch: the engine logs a guidance-carrying WARN naming the fix (typically re-running `sapwood init`) and every leg proceeds at L0 until the preflight passes again. See [Security & trust model](security.md#worker-credential-tiers-351-606) for the full tier table and residuals. |
 
 ### Calibrating `budgetUsdSoft`
 

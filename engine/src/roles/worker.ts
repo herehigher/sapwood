@@ -1464,6 +1464,11 @@ export interface WorkerDeps {
   renderPrompt?: (issue: Issue) => string;
   /** Path to the compiled guard hook (node <path>). Default: the dist sibling of this module. */
   guardHookPath?: string;
+  /** #606: injected SSH-auth preflight for `cfg.worker.deployKeyPath` — a test double so
+   *  L1-activation tests never shell out to a real `ssh`. Default: probeDeployKeySsh. Probed at
+   *  most once per WorkerSupervisor life (see resolveDeployKeyEnv), so this is called at most
+   *  once even across many dispatch()/resume() calls. */
+  probeDeployKeySsh?: (deployKeyPath: string) => Promise<LlmPingResult>;
   heartbeatMs?: number; // default 30_000
   now: () => Date;
   /** #395: injected timer so a test can deterministically win the spawn-confirmation watchdog
@@ -1589,7 +1594,12 @@ export interface WorkerProxyOpts {
  *  the leg's MCP config. The separate ambient-MCP gap #617 closed (see WorkerProxyOpts' own doc's
  *  "SEALED MCP SURFACE" note) is closed by dispatch()/resume() passing `strictMcpConfig: true`,
  *  not by anything here — keep that seam there, not folded into this function's env-only job. */
-export function workerCredentialFreeEnv(ghConfigDir: string): NodeJS.ProcessEnv {
+/** Shared by workerCredentialFreeEnv and workerDeployKeyEnv (#606): every `gh`/git
+ *  CREDENTIAL-lookup env var, stripped from `process.env` case-insensitively — the exact
+ *  denylist workerCredentialFreeEnv's own doc describes (peripheral.ts's peripheralSessionEnv
+ *  denylist). Extracted so the two env-builders can't silently drift apart on what "no ambient
+ *  credential" means. */
+function stripGhGitCredentialEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     const normalized = key.toUpperCase();
@@ -1605,11 +1615,147 @@ export function workerCredentialFreeEnv(ghConfigDir: string): NodeJS.ProcessEnv 
     }
     env[key] = value;
   }
+  return env;
+}
+
+export function workerCredentialFreeEnv(ghConfigDir: string): NodeJS.ProcessEnv {
+  const env = stripGhGitCredentialEnv();
   env.GH_CONFIG_DIR = ghConfigDir;
   env.GIT_CONFIG_GLOBAL = "/dev/null";
   env.GIT_CONFIG_SYSTEM = "/dev/null";
   env.GIT_TERMINAL_PROMPT = "0";
   return env;
+}
+
+/** #606 (#351 final ruling): the L1 scoped-worker-identity env — a worker leg's write capability
+ *  reduces to git TRANSPORT ONLY, via a per-repo SSH deploy key `sapwood init` provisioned. Unlike
+ *  workerCredentialFreeEnv (which severs `gh`/git's credentialed path so a fix leg's ONLY forge
+ *  reach is its attached read-only proxy), this env doesn't just remove credentials — it ADDS one
+ *  back, scoped: `GIT_SSH_COMMAND` pins git to the deploy key alone (`IdentitiesOnly=yes` refuses
+ *  every other identity an inherited SSH agent might offer; `StrictHostKeyChecking=accept-new`
+ *  keeps a fresh host free of an interactive prompt without disabling host-key checking
+ *  altogether). No forge API credential exists in this env at all — a stolen key's capability
+ *  equals the granted capability (git push to this one repo), never an escalation to API writes.
+ *
+ *  `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` (git's own env-based config
+ *  injection — no file touched, so this rewrite is scoped to THIS spawn's env alone, never the
+ *  engine's shared repo checkout) rewrite the origin's HTTPS URL to the SSH form the deploy key
+ *  authenticates against. Two `insteadOf` entries cover the origin URL with and without a
+ *  trailing `.git` (ponytail: covers the two conventional clone-URL forms this codebase's own gh-
+ *  provisioned clones and a manual `git clone` respectively produce; an origin configured to a
+ *  third, unconventional HTTPS spelling is a known gap — `git remote get-url origin` per dispatch
+ *  would close it but costs a spawn on every leg for a case `sapwood init`'s own repo/owner
+ *  config already pins in the overwhelmingly common case). */
+export function workerDeployKeyEnv(deployKeyPath: string, owner: string, repo: string): NodeJS.ProcessEnv {
+  const env = stripGhGitCredentialEnv();
+  env.GIT_TERMINAL_PROMPT = "0";
+  env.GIT_SSH_COMMAND = `ssh -i ${deployKeyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`;
+  const sshBase = `git@github.com:${owner}/${repo}.git`;
+  const httpsWithGit = `https://github.com/${owner}/${repo}.git`;
+  const httpsNoGit = `https://github.com/${owner}/${repo}`;
+  env.GIT_CONFIG_COUNT = "2";
+  env.GIT_CONFIG_KEY_0 = `url.${sshBase}.insteadOf`;
+  env.GIT_CONFIG_VALUE_0 = httpsWithGit;
+  env.GIT_CONFIG_KEY_1 = `url.${sshBase}.insteadOf`;
+  env.GIT_CONFIG_VALUE_1 = httpsNoGit;
+  return env;
+}
+
+/** #606: `sapwood init`'s ed25519 keypair generation for the L1 deploy key — `spawn` only (this
+ *  module's own #69 invariant, enforced by worker.test.ts's grep-invariant test: no other child-
+ *  process launcher API is permitted anywhere in worker.ts, and worker.ts is one of only four
+ *  modules in the whole engine allowed to import `node:child_process` at all), so this lives here
+ *  rather than pulling `node:child_process` into `loop/init.ts` (init.ts imports it as its
+ *  `sshKeygen` dep's default). `-N ""` -> no passphrase (the engine must read the key
+ *  unattended); `-C` names the key for a human browsing the repo's deploy-key list. Rejects on a
+ *  non-zero exit or spawn error — a one-shot init-time operation, never on a worker leg's own
+ *  spawn path, so unlike probeLlmPing/probeDeployKeySsh it has no need for their never-throw
+ *  contract. */
+export function spawnSshKeygen(path: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let child: ChildProcess;
+    try {
+      child = spawn("ssh-keygen", ["-t", "ed25519", "-N", "", "-f", path, "-C", "sapwood-worker"], { stdio: "ignore" });
+    } catch (e) {
+      reject(e instanceof Error ? e : new Error(String(e)));
+      return;
+    }
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ssh-keygen exited ${code}`));
+    });
+  });
+}
+
+/** #606: the L1 preflight — proves the deploy key at `deployKeyPath` actually authenticates
+ *  against GitHub over SSH, the same signal `sapwood init`'s own preflight checks at provisioning
+ *  time. GitHub's SSH endpoint never grants shell access even to a valid key: a successful auth
+ *  is `ssh -T git@github.com` exiting 1 with stderr containing "successfully authenticated" — NOT
+ *  exit 0 (that shape, per GitHub's documented behavior, means the connection never reached
+ *  authentication at all). Authoritative-signal doctrine: this checks that exact documented
+ *  success text, not a bare "did ssh exit nonzero" — a network error or an unrelated ssh failure
+ *  also exits nonzero and must not be misread as a working key. Never throws: a spawn error, a
+ *  timeout (hard-killed), or any output not matching the success shape all resolve `{ok:false}`
+ *  with a detail string — the caller's job (WARN + fall back to L0), never this function's.
+ *  `sshBin` (default `"ssh"`, resolved off PATH) mirrors probeLlmPing's own `claudeBin` param —
+ *  an explicit override so tests can point this at a stub script instead of a real network call. */
+export function probeDeployKeySsh(deployKeyPath: string, timeoutSec = 15, sshBin = "ssh"): Promise<LlmPingResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (r: LlmPingResult): void => {
+      if (settled) return;
+      settled = true;
+      resolve(r);
+    };
+    let child: ChildProcess;
+    try {
+      child = spawn(
+        sshBin,
+        [
+          "-T",
+          "-i",
+          deployKeyPath,
+          "-o",
+          "IdentitiesOnly=yes",
+          "-o",
+          "StrictHostKeyChecking=accept-new",
+          "-o",
+          "BatchMode=yes",
+          "git@github.com",
+        ],
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
+    } catch (e) {
+      finish({ ok: false, detail: `ssh spawn failed: ${e instanceof Error ? e.message : String(e)}` });
+      return;
+    }
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      finish({ ok: false, detail: `ssh auth probe timed out after ${timeoutSec}s (hard-killed)` });
+    }, timeoutSec * 1000);
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      finish({ ok: false, detail: `ssh spawn error: ${e.message}` });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 1 && stderr.toLowerCase().includes("successfully authenticated")) {
+        finish({ ok: true });
+        return;
+      }
+      const firstLine = stderr.trim().split("\n")[0]?.trim() ?? "";
+      finish({ ok: false, detail: firstLine || `ssh exited ${code} with no recognizable auth response` });
+    });
+  });
 }
 
 interface Lane {
@@ -1753,6 +1899,13 @@ export class WorkerSupervisor implements Supervisor {
   // init-line poll (100ms/30s default) — see capturePreSpawnManifestForLane's own doc.
   private readonly preSpawnCaptureTimeoutMs: number;
   private readonly preSpawnCapturePollMs: number;
+  // #606: memoized SSH-auth preflight for cfg.worker.deployKeyPath — probed at most once per
+  // supervisor life (mirrors detectManagedPermissionMode/detectRapidRestart's "once per engine
+  // start" stance for a degrade WARN). undefined = not yet probed; a settled Promise thereafter,
+  // so every dispatch()/resume() after the first awaits the SAME probe rather than re-shelling
+  // to `ssh` per lane. The WARN-on-failure log fires exactly once, inside the Promise's own
+  // `.then` (see resolveDeployKeyEnv), never re-logged on a later dispatch that just re-awaits it.
+  private deployKeyProbe?: Promise<LlmPingResult>;
 
   constructor(private readonly deps: WorkerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "state");
@@ -1777,6 +1930,35 @@ export class WorkerSupervisor implements Supervisor {
   }
   private log(message: string): void {
     (this.deps.log ?? console.error)(message);
+  }
+
+  /** #606 (#351 final ruling): resolves the L1 scoped-worker-identity env for an ORDINARY
+   *  dispatch/resume/fix leg (never called when `opts.proxy.credentialFree` already applies its
+   *  own, stricter env — see both call sites). Returns `undefined` (⇒ caller falls back to L0,
+   *  `process.env` verbatim, today's unchanged default) when `cfg.worker.deployKeyPath` is unset,
+   *  or when the memoized SSH-auth preflight against it has failed — never throws, never blocks a
+   *  dispatch. The preflight itself runs at most once per supervisor life (`this.deployKeyProbe`);
+   *  a failure logs the guidance-carrying WARN exactly once, inside the memoized promise's own
+   *  `.then`, so replaying this method on a later dispatch re-awaits the SAME settled promise
+   *  without re-logging or re-shelling to `ssh`. */
+  private async resolveDeployKeyEnv(): Promise<NodeJS.ProcessEnv | undefined> {
+    const path = this.deps.cfg.worker.deployKeyPath;
+    if (!path) return undefined;
+    if (this.deployKeyProbe === undefined) {
+      this.deployKeyProbe = (this.deps.probeDeployKeySsh ?? probeDeployKeySsh)(path).then((r) => {
+        if (!r.ok) {
+          this.log(
+            `[sapwood:deploy-key] L1 preflight failed for ${path}${r.detail ? `: ${r.detail}` : ""} — ` +
+              `re-run "sapwood init" to re-provision the deploy key (see docs/security.md's worker ` +
+              `credential tiers). Dispatch continues at L0 (full credentialed env) until then; nothing wedges.`,
+          );
+        }
+        return r;
+      });
+    }
+    const result = await this.deployKeyProbe;
+    if (!result.ok) return undefined;
+    return workerDeployKeyEnv(path, this.deps.cfg.board.owner, this.deps.cfg.board.repo);
   }
 
   /** #244 (Codex sol-high PR #260 review, P2): durable mint-failure observability — a
@@ -1919,6 +2101,11 @@ export class WorkerSupervisor implements Supervisor {
     // pointed at by the spawn env when credentialFree is set (workerCredentialFreeEnv below).
     const ghConfigDir = this.path(laneName, "gh-config-empty");
     if (opts?.proxy?.credentialFree) mkdirSync(ghConfigDir, { recursive: true });
+    // #606: L1 scoped-worker-identity env — resolved BEFORE argv (same ordering rule as the
+    // proxy mint above: --allowedTools needs to know NOW whether this leg's `gh` grant should
+    // narrow). Never attempted when credentialFree already applies its own, stricter env/tool
+    // narrowing — the two are mutually exclusive per-lane postures, not stacked.
+    const deployKeyEnv = opts?.proxy?.credentialFree ? undefined : await this.resolveDeployKeyEnv();
     // NB: NO --add-dir for the engine `data/` tree — mounting it would let the worker write its
     // own .done/.failed or mutate state, defeating wrapper-signaled completion (Codex R3 P1).
     const args = claudeArgs({
@@ -1935,11 +2122,14 @@ export class WorkerSupervisor implements Supervisor {
       // (today's default) passes neither flag, byte-identical to pre-#244 behavior. A
       // credentialFree leg's BASE list drops `Bash(gh *)` (Codex sol-high PR #260 review, P1) —
       // its env can no longer authenticate `gh` at all, so the grant itself narrows to match.
-      ...(proxyHandle
+      // #606: an L1 leg (deployKeyEnv resolved, no proxy involved) gets the SAME NO_GH narrowing
+      // — its env carries no forge API credential at all, so the `gh` grant is equally unusable.
+      ...(proxyHandle || deployKeyEnv
         ? {
-            allowedTools: [opts?.proxy?.credentialFree ? WORKER_ALLOWED_TOOLS_NO_GH : WORKER_ALLOWED_TOOLS, ...proxyHandle.toolNames].join(
-              ",",
-            ),
+            allowedTools: [
+              opts?.proxy?.credentialFree || deployKeyEnv ? WORKER_ALLOWED_TOOLS_NO_GH : WORKER_ALLOWED_TOOLS,
+              ...(proxyHandle?.toolNames ?? []),
+            ].join(","),
           }
         : {}),
       ...(proxyHandle ? { mcpConfig: proxyHandle.mcpConfigJson } : {}),
@@ -1972,8 +2162,9 @@ export class WorkerSupervisor implements Supervisor {
     // when opts.proxy.credentialFree is explicitly set — every other caller (today's entire
     // production dispatch path) keeps inheriting process.env verbatim, unchanged from pre-#244
     // behavior (worker.test.ts's own regression: "unlike peripherals, workers legitimately [need
-    // GH_TOKEN]").
-    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv(ghConfigDir) : process.env;
+    // GH_TOKEN]"), UNLESS #606's L1 env resolved above — deployKeyEnv already carries no forge
+    // API credential either, just a scoped git-transport identity instead of a bare-stripped one.
+    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv(ghConfigDir) : (deployKeyEnv ?? process.env);
     const child = spawn(this.bin, args, {
       detached: true,
       stdio: ["ignore", jsonlFd, jsonlFd],
@@ -2246,6 +2437,8 @@ export class WorkerSupervisor implements Supervisor {
     let args: string[];
     let startedMs: number;
     let runningMarker: Record<string, unknown>;
+    // #606: resolved outside the try block's scope so baseEnv (below, after the try) can read it.
+    let deployKeyEnv: NodeJS.ProcessEnv | undefined;
     try {
       // #245: mint BEFORE argv — same ordering as dispatch() (WorkerProxyOpts' doc): the handle's
       // tool names / --mcp-config are needed before claudeArgs runs.
@@ -2272,6 +2465,9 @@ export class WorkerSupervisor implements Supervisor {
       // created regardless of whether credentialFree ends up true (cheap; lifecycle tied to this
       // lane's own stateDir). Only actually pointed at by the spawn env when credentialFree is set.
       if (opts?.proxy?.credentialFree) mkdirSync(ghConfigDir, { recursive: true });
+      // #606: same L1 resolution + mutual-exclusion-with-credentialFree rule as dispatch() — see
+      // that call site's own comment.
+      deployKeyEnv = opts?.proxy?.credentialFree ? undefined : await this.resolveDeployKeyEnv();
       const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
       args = claudeArgs({
         prompt,
@@ -2285,12 +2481,13 @@ export class WorkerSupervisor implements Supervisor {
         settings: settingsJson,
         // #245: widen --allowedTools with the proxy's own tool names — same pattern as dispatch().
         // Unattached resume (today's entire #172 handoff path) passes neither flag, byte-identical
-        // to pre-#245 behavior.
-        ...(proxyHandle
+        // to pre-#245 behavior. #606: an L1 leg (deployKeyEnv resolved) gets the same NO_GH
+        // narrowing as credentialFree — see dispatch()'s own comment.
+        ...(proxyHandle || deployKeyEnv
           ? {
               allowedTools: [
-                opts?.proxy?.credentialFree ? WORKER_ALLOWED_TOOLS_NO_GH : WORKER_ALLOWED_TOOLS,
-                ...proxyHandle.toolNames,
+                opts?.proxy?.credentialFree || deployKeyEnv ? WORKER_ALLOWED_TOOLS_NO_GH : WORKER_ALLOWED_TOOLS,
+                ...(proxyHandle?.toolNames ?? []),
               ].join(","),
             }
           : {}),
@@ -2338,8 +2535,9 @@ export class WorkerSupervisor implements Supervisor {
     let child: ChildProcess;
     // #245: baseEnv is credential-stripped (workerCredentialFreeEnv) ONLY when
     // opts.proxy.credentialFree is explicitly set — every other resume() caller keeps inheriting
-    // process.env verbatim, unchanged from pre-#245 behavior.
-    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv(ghConfigDir) : process.env;
+    // process.env verbatim, unchanged from pre-#245 behavior. #606: unless the L1 env resolved
+    // above — see dispatch()'s own comment for why that's not a further exception to this rule.
+    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv(ghConfigDir) : (deployKeyEnv ?? process.env);
     try {
       // SAPWOOD_WORKTREE_ROOT (#235 PR-A): same lane/worktree as the original dispatch — a
       // resumed leg must keep Read/Grep/Glob confined too, not just the fresh-dispatch path.
