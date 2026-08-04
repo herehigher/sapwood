@@ -86,6 +86,40 @@ test("run: falls through to the async engine-wiring path (code -1), same as init
   assert.equal(r.stderr, "");
 });
 
+// ── #638: `init` gets the same synchronous fail-closed argument boundary as run/status/park ──
+
+test("init --help / -h prints init usage and exits 0 — NEVER falls through toward init()'s credentialed writes (#638)", () => {
+  for (const flag of ["--help", "-h"]) {
+    const r = runCli(["node", "sapwood", "init", flag]);
+    assert.equal(r.code, 0, flag);
+    assert.match(r.stdout, /usage: sapwood init/);
+    assert.equal(r.stderr, "");
+    // code !== -1 means main() returns immediately after this — init() is never reached.
+    assert.notEqual(r.code, -1);
+  }
+});
+
+test("init with an unknown flag or a stray operand errors + usage, exit 1 — fail closed, never silently swallowed (#638)", () => {
+  const bogus = runCli(["node", "sapwood", "init", "--bogus"]);
+  assert.equal(bogus.code, 1);
+  assert.match(bogus.stderr, /--bogus/);
+  assert.match(bogus.stderr, /usage: sapwood init/);
+  assert.equal(bogus.stdout, "");
+
+  const operand = runCli(["node", "sapwood", "init", "stray-operand"]);
+  assert.equal(operand.code, 1);
+  assert.match(operand.stderr, /stray-operand/);
+  assert.match(operand.stderr, /usage: sapwood init/);
+  assert.equal(operand.stdout, "");
+});
+
+test("init: bare invocation still falls through to the async path unchanged (code -1) — hardening must not break the feature (#638)", () => {
+  const r = runCli(["node", "sapwood", "init"]);
+  assert.equal(r.code, -1);
+  assert.equal(r.stdout, "");
+  assert.equal(r.stderr, "");
+});
+
 test("run: --once and --until-idle appear in --help usage", () => {
   const r = runCli(["node", "sapwood", "--help"]);
   assert.match(r.stdout, /--once/);
