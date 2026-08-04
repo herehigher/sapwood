@@ -13,9 +13,35 @@
 //
 // This module owns the runtime half: telling a bucket-2 gate verdict apart from a bucket-1 one at
 // the single place the conductor acts on `driveOne`'s `needs-human` outcome.
+import type { KindGlossary } from "../state/event-kinds/index.js";
 
 /** #397: the three action-buckets every escalation write site is classified into. */
 export type EscalationBucket = "human-merge-only" | "needs-human" | "planless";
+
+/** #643: the same required-per-kind glossary treatment event-kinds/*.ts gives every `EventKind`
+ *  (and state.ts's `PARK_SOURCE_GLOSSARY` gives every `ParkSource`), for the three escalation
+ *  buckets above — `satisfies Record<EscalationBucket, ...>` means a fourth bucket added without
+ *  a glossary row is a compile error here too. `generate-glossary.ts` renders this into the
+ *  sapwood-event-glossary skill alongside the event-kind and park-source glossaries. */
+export const ESCALATION_BUCKET_GLOSSARY: Record<EscalationBucket, KindGlossary> = {
+  "needs-human": {
+    meaning: "the machine stopped; a human owes the next decision. Removal is the #147 reentry handshake, unchanged.",
+    actionability: "intervene",
+    see: "#397",
+  },
+  "human-merge-only": {
+    meaning:
+      "a human must MERGE this PR. One-way: written on the PR exactly once (the #292 instruction-path trust chain), never removed or re-decided by the loop.",
+    actionability: "intervene",
+    see: "#292",
+  },
+  planless: {
+    meaning:
+      "not an escalation at all — a routing fence for a plan-less issue. Nobody owes a decision; the issue is simply off every queue until a plan exists.",
+    actionability: "routine",
+    see: "#397",
+  },
+} satisfies Record<EscalationBucket, KindGlossary>;
 
 /**
  * #397 bucket 2: does this `DriveOutcome`/`needs-human` reason mean "a human must merge this PR"

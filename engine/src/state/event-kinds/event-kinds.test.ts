@@ -16,6 +16,7 @@ import { ROUND_ARTIFACT_EVENT_KINDS } from "../../loop/round-artifact.js";
 import { RETRO_EVENT_KINDS } from "../../retro/retro.js";
 import { PR_TOUCHED_EVENT_KINDS } from "../../retro/retro-digest.js";
 import { ESCALATION_SOURCE_TAGS, EVENT_KIND_DOMAINS, EVENT_KINDS, type EventKind, type EventTag, kindsTagged } from "./index.js";
+import { type Actionability, defineKinds } from "./types.js";
 
 /** The bidirectional assertion, written once: `list` must be exactly the set of kinds tagged
  *  `tag` — no member missing (the cross-list-omission class), no extra (a consumer re-spelling a
@@ -41,8 +42,8 @@ test("registry: every declared kind appears in exactly one domain file", () => {
 });
 
 test("registry: no kind carries more than one escalation-source proof mode", () => {
-  for (const [kind, tags] of Object.entries(EVENT_KINDS)) {
-    const proofs = (tags as readonly EventTag[]).filter((t): t is (typeof ESCALATION_SOURCE_TAGS)[number] =>
+  for (const [kind, entry] of Object.entries(EVENT_KINDS)) {
+    const proofs = (entry.tags as readonly EventTag[]).filter((t): t is (typeof ESCALATION_SOURCE_TAGS)[number] =>
       (ESCALATION_SOURCE_TAGS as readonly string[]).includes(t),
     );
     assert.ok(
@@ -53,8 +54,8 @@ test("registry: no kind carries more than one escalation-source proof mode", () 
 });
 
 test("registry: no kind declares the same tag twice", () => {
-  for (const [kind, tags] of Object.entries(EVENT_KINDS)) {
-    assert.equal(new Set(tags).size, tags.length, `"${kind}" repeats a tag`);
+  for (const [kind, entry] of Object.entries(EVENT_KINDS)) {
+    assert.equal(new Set(entry.tags).size, entry.tags.length, `"${kind}" repeats a tag`);
   }
 });
 
@@ -149,6 +150,37 @@ test("completeness: the historical fix-rounds-capped omission stays impossible",
   // machinery exists for: valid kind, written correctly, absent from ESCALATION_SOURCES, and no
   // external merge/close/label-removal could ever resolve it.
   const kind: EventKind = "fix-rounds-capped";
-  assert.ok((EVENT_KINDS[kind] as readonly EventTag[]).includes("escalation-source:always"));
+  assert.ok(EVENT_KINDS[kind].tags.includes("escalation-source:always"));
   assert.equal(ESCALATION_SOURCES[kind], "always");
 });
+
+// ── #643: required per-kind glossary fields ──────────────────────────────────────────────────
+//
+// Event-kind MEANINGS were tribal knowledge — code comments no role session ever reads, and the
+// documented failure mode is a supervisor guessing an event's significance from its name alone
+// (dogfood batch 6). This is the runtime half of the guarantee: every declared kind carries a
+// non-empty `meaning` and a valid `actionability`. The COMPILE-TIME half — a kind declared
+// without them must not compile at all — is the `@ts-expect-error` fixture below it.
+
+const VALID_ACTIONABILITY: readonly Actionability[] = ["routine", "expected-noise", "investigate", "intervene"];
+
+test("registry: every declared kind carries a non-empty glossary meaning and a valid actionability", () => {
+  for (const [kind, entry] of Object.entries(EVENT_KINDS)) {
+    assert.equal(typeof entry.meaning, "string", `"${kind}" is missing a glossary meaning`);
+    assert.ok(entry.meaning.trim().length > 0, `"${kind}"'s glossary meaning must not be empty`);
+    assert.ok(
+      (VALID_ACTIONABILITY as readonly string[]).includes(entry.actionability),
+      `"${kind}" has an invalid actionability "${entry.actionability}"`,
+    );
+  }
+});
+
+// #643 AC: "adding an event kind without glossary fields is a COMPILE error (type-level test
+// fixture)". Checked by `npm run typecheck` (tsconfig.typecheck.json, #403 — NO exclusions, so a
+// `@ts-expect-error` directive inside a `.test.ts` file is REAL, CI-visible enforcement: `npm
+// test` runs this file through tsx, which strips types without checking them, so the runtime
+// suite never sees this line fail either way, but `npm run typecheck` does, and CI runs both).
+// `defineKinds`'s `EventKindTable` constraint requires `meaning`/`actionability` on every kind,
+// not just `tags` — a kind object carrying `tags` alone must fail to compile.
+// @ts-expect-error — missing `meaning`/`actionability`: a bare `{ tags: [] }` kind must not compile.
+defineKinds({ "fixture-kind-missing-glossary": { tags: [] } });

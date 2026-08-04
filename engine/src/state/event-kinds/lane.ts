@@ -7,59 +7,218 @@ import { defineKinds } from "./types.js";
 
 export const LANE_EVENT_KINDS = defineKinds({
   // Dispatch.
-  dispatched: ["round-artifact", "escalation-clear"],
-  "dispatch-failed": [],
+  dispatched: {
+    tags: ["round-artifact", "escalation-clear"],
+    meaning: "a worker lane was dispatched for a Ready issue, in its own worktree.",
+    actionability: "routine",
+  },
+  "dispatch-failed": {
+    tags: [],
+    meaning: "dispatching a lane for a Ready issue failed (worktree/spawn/write error).",
+    actionability: "investigate",
+  },
 
   // Reclaim. Both reclaim terminals are PREDICATED escalation sources (#404): attention items
   // only for the payloads escalation-reconcile.ts's `reclaimNeedsAttention` admits — the tag
   // carries the proof mode, the predicate stays with the reader that owns the semantics.
-  "reclaim-done": ["round-artifact", "escalation-source:always"],
-  "reclaim-failed": ["round-artifact", "escalation-source:always"],
-  "reclaim-dead": ["round-artifact"],
+  "reclaim-done": {
+    tags: ["round-artifact", "escalation-source:always"],
+    meaning:
+      "a finished worker lane was reclaimed cleanly; whether it needs attention is a predicate over the payload (#404), not the kind alone.",
+    actionability: "investigate",
+    see: "#404",
+  },
+  "reclaim-failed": {
+    tags: ["round-artifact", "escalation-source:always"],
+    meaning:
+      "reclaiming a finished worker lane failed; whether it needs attention is a predicate over the payload (#404), not the kind alone.",
+    actionability: "investigate",
+    see: "#404",
+  },
+  "reclaim-dead": {
+    tags: ["round-artifact"],
+    meaning: "a worker lane was reclaimed as DEAD (crashed/unresponsive process).",
+    actionability: "investigate",
+  },
 
   // Handoff / resume.
-  handoff: ["retro", "round-artifact"],
-  resumed: [],
-  "resume-failed": [],
-  "resume-capped": ["escalation-source:always"],
-  "resume-capped-label-failed": [],
-  "resume-undecidable": ["escalation-source:always"],
-  "resume-undecidable-label-failed": [],
+  handoff: {
+    tags: ["retro", "round-artifact"],
+    meaning:
+      "a worker lane handed off gracefully (soft cost-limit reached): WIP committed+pushed, progress note left, `.handoff` sentinel written.",
+    actionability: "routine",
+  },
+  resumed: { tags: [], meaning: "a handed-off lane was resumed by a fresh worker session.", actionability: "routine" },
+  "resume-failed": {
+    tags: [],
+    meaning: "resuming a handed-off lane failed this attempt; eligible for a further retry.",
+    actionability: "expected-noise",
+  },
+  "resume-capped": {
+    tags: ["escalation-source:always"],
+    meaning: "a handed-off lane exhausted its resume-attempt budget (#172); needs-human, always proven by presence.",
+    actionability: "intervene",
+    see: "#172",
+  },
+  "resume-capped-label-failed": {
+    tags: [],
+    meaning: "the needs-human label write for a resume-capped lane failed; the lane may be escalated with no visible label.",
+    actionability: "investigate",
+  },
+  "resume-undecidable": {
+    tags: ["escalation-source:always"],
+    meaning: "a handoff lane's resume outcome could not be determined (#172); needs-human, always proven by presence.",
+    actionability: "intervene",
+    see: "#172",
+  },
+  "resume-undecidable-label-failed": {
+    tags: [],
+    meaning: "the needs-human label write for a resume-undecidable lane failed; the lane may be escalated with no visible label.",
+    actionability: "investigate",
+  },
   // `resume-held` is DELIBERATELY not an escalation source (#441) — it observes somebody else's
   // hold label rather than creating an attention item, and a row here would block the sweep of
   // the very stale label that produced it.
-  "resume-held": [],
+  "resume-held": {
+    tags: [],
+    meaning:
+      "a handoff lane's resume was skipped because the issue already carries a human hold label (#441) — an observation, not a new escalation.",
+    actionability: "routine",
+    see: "#441",
+  },
 
   // Environment failure / lane revival.
-  "env-failure": [],
-  "env-failure-preserved": ["escalation-source:never"],
-  "lane-adopted": [],
-  "lane-pr-unknown": [],
-  "lane-revived": ["escalation-clear"],
-  "lane-revival-terminal": [],
+  "env-failure": {
+    tags: [],
+    meaning: "a lane hit an LLM/forge environment failure mid-work (the source that can enter an env-failure park episode).",
+    actionability: "investigate",
+  },
+  "env-failure-preserved": {
+    tags: ["escalation-source:never"],
+    meaning:
+      "an env-failed lane's state was preserved with zero forge writes (the forge may itself be down); `never` a proof of the needs-human label.",
+    actionability: "investigate",
+  },
+  "lane-adopted": {
+    tags: [],
+    meaning: "the engine adopted a lane it found already running/pushed at startup rather than treating it as orphaned.",
+    actionability: "routine",
+  },
+  "lane-pr-unknown": {
+    tags: [],
+    meaning: "a lane's PR association came back UNKNOWN (transient forge write failure); the lane is deferred rather than settled (#377).",
+    actionability: "expected-noise",
+    see: "#377",
+  },
+  "lane-revived": {
+    tags: ["escalation-clear"],
+    meaning: "an env-failed lane holding an OPEN PR was revived back to `driving` rather than left stranded between owners (#447).",
+    actionability: "routine",
+    see: "#447",
+  },
+  "lane-revival-terminal": {
+    tags: [],
+    meaning:
+      "the revival pass found the lane's PR already MERGED (recorded for the merged case only) and closed it out instead of reviving it (#447).",
+    actionability: "routine",
+    see: "#447",
+  },
 
   // Cost ceiling, per lane (the run-level breach state lives in run.ts).
-  "ceiling-escalated": ["retro", "round-artifact", "escalation-source:never"],
+  "ceiling-escalated": {
+    tags: ["retro", "round-artifact", "escalation-source:never"],
+    meaning:
+      "a lane was drained for a cost/wall-clock ceiling breach; `never` a proof of the needs-human label (the drain's own label write is best-effort).",
+    actionability: "intervene",
+  },
 
   // Worktree custody.
-  "worktree-retained": [],
-  "worktree-released": [],
+  "worktree-retained": {
+    tags: [],
+    meaning: "a lane's worktree was kept on disk (dirty/uncommitted state) instead of being deleted on reclaim, for a human to salvage.",
+    actionability: "investigate",
+  },
+  "worktree-released": {
+    tags: [],
+    meaning: "a lane's worktree was deleted after reclaim (clean, nothing to salvage).",
+    actionability: "routine",
+  },
 
   // Orphan detection + the mid-run orphan sweep (#384).
-  "orphan-detected": [],
-  "orphan-healed": [],
-  "orphan-heal-failed": [],
-  "orphan-sweep-checked": [],
-  "orphan-pr-escalated": ["escalation-source:payload"],
-  "gated-flag-unprovable": [],
-  "gated-flag-healed": [],
-  "gated-lane-retired": [],
+  "orphan-detected": {
+    tags: [],
+    meaning: "a worktree/branch with no matching worker row was found (#384 mid-run sweep or startup reconcile).",
+    actionability: "investigate",
+    see: "#384",
+  },
+  "orphan-healed": { tags: [], meaning: "a detected orphan was reconciled back into a tracked lane.", actionability: "routine" },
+  "orphan-heal-failed": {
+    tags: [],
+    meaning: "healing a detected orphan failed; it remains untracked for the next sweep.",
+    actionability: "investigate",
+  },
+  "orphan-sweep-checked": {
+    tags: [],
+    meaning: "the mid-run orphan sweep (#384) ran and found nothing new to heal.",
+    actionability: "routine",
+    see: "#384",
+  },
+  "orphan-pr-escalated": {
+    tags: ["escalation-source:payload"],
+    meaning: "an orphaned lane's PR was escalated to needs-human; proof of the label write rides in the payload.",
+    actionability: "intervene",
+  },
+  "gated-flag-unprovable": {
+    tags: [],
+    meaning:
+      "a gated-reentry lane's escalation label could not be found on either carrier (#391/#398) — a standing alarm, one per engine start, for a lane only a human can move.",
+    actionability: "intervene",
+    see: "#391",
+  },
+  "gated-flag-healed": {
+    tags: [],
+    meaning: "a gated-reentry lane's escalation label was found on one carrier and the local flag was corrected to match (#391/#398).",
+    actionability: "routine",
+    see: "#391",
+  },
+  "gated-lane-retired": {
+    tags: [],
+    meaning:
+      "a gated-reentry lane was retired (not reentered) because the audit proved it terminal by merge or issue-close (#593) — nothing left to reenter.",
+    actionability: "routine",
+    see: "#593",
+  },
 
   // Worker + peripheral-role session telemetry.
-  "worker-heartbeat": [],
-  "role-session-heartbeat": [],
-  "role-env-failure": [],
-  "role-session-exit-lost": [],
-  "role-session-spawn-timeout": [],
-  "role-worktree-retained": [],
+  "worker-heartbeat": {
+    tags: [],
+    meaning: "a per-cadence heartbeat proving an in-flight worker lane is still alive.",
+    actionability: "routine",
+  },
+  "role-session-heartbeat": {
+    tags: [],
+    meaning: "a per-cadence heartbeat proving an in-flight peripheral role session is still alive.",
+    actionability: "routine",
+  },
+  "role-env-failure": {
+    tags: [],
+    meaning:
+      "a peripheral role session hit an LLM/forge environment failure; the durable record IS this event (no companion -degraded event).",
+    actionability: "investigate",
+  },
+  "role-session-exit-lost": {
+    tags: [],
+    meaning: "a peripheral role session's process exited without the engine observing its outcome (result lost).",
+    actionability: "investigate",
+  },
+  "role-session-spawn-timeout": {
+    tags: [],
+    meaning: "spawning a peripheral role session timed out before it could start doing work.",
+    actionability: "investigate",
+  },
+  "role-worktree-retained": {
+    tags: [],
+    meaning: "a peripheral role session's worktree was kept on disk (uncommitted edits behind) instead of being deleted.",
+    actionability: "investigate",
+  },
 });
