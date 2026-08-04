@@ -1041,6 +1041,23 @@ test("worker.deployKeyPath: an ABSOLUTE path is left untouched by loadConfig's r
   }
 });
 
+// ── #606 gate② round 1 (owner ruling): worker.deployKeyId — the (path, id) LOCAL anchor pair ──
+test("worker.deployKeyId: unset by default, overridable to a positive integer, no path-resolution applied (it's not a file path)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.worker.deployKeyId, undefined);
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 159210179 }",
+  );
+  assert.equal(over.worker.deployKeyId, 159210179);
+  assert.equal(over.worker.deployKeyPath, "data/worker-deploy-key");
+});
+
+test("worker.deployKeyId: rejects zero/negative/non-integer values — a GitHub deploy-key id is always a positive integer", () => {
+  for (const bad of [0, -1, 1.5]) {
+    assert.throws(() => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyId: ${bad} }`));
+  }
+});
+
 // ── #88 gate⓪: labels.planApproved + roles.verificationPlanReviewer.promptFile ──────────────────────────
 // Session wiring (actually loading/rendering this prompt) lands with the peripheral-role-
 // runner issue; here the config surface is validated + path-resolved, same "accepted, not

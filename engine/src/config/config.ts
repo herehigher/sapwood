@@ -168,6 +168,15 @@ const Worker = z
     // an operator without repo-admin legitimately has no key to point at yet (see init.ts's
     // guidance-carrying WARN for that path).
     deployKeyPath: z.string().optional(),
+    // #606 gate② round 1 (owner ruling, supersedes the title-only design): the deploy key's
+    // GitHub-assigned numeric id, paired with deployKeyPath as the LOCAL anchor init.ts's
+    // ensureDeployKey reconciles against. The remote key TITLE is never authoritative for "is
+    // this mine" — a `sapwood-worker` title on the repo may validly belong to a different
+    // machine/operator, so idempotence and reconciliation key on this (path, id) pair instead.
+    // Written by init.ts alongside deployKeyPath; unset means no local key has ever been
+    // recorded (fresh provisioning runs). Both fields are set/cleared together — never one
+    // without the other — see init.ts's writeDeployKeyConfigIntoYaml/clearDeployKeyConfigFromYaml.
+    deployKeyId: z.number().int().positive().optional(),
   })
   .strict();
 

@@ -8,9 +8,11 @@
 // worker.ts at dispatch time, not by init — init only reports that, and that guard.ts/hook
 // wiring/security config are human-merge-only per CLAUDE.md.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { hostname as osHostname } from "node:os";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
-import { ConfigSchema, DEFAULT_CONFIG_PATHS, type SapwoodConfig } from "../config/config.js";
+import { ConfigSchema, DEFAULT_CONFIG_PATHS, parseConfig, type SapwoodConfig } from "../config/config.js";
 import type { OwnerKind } from "../forge/forge.js";
 import { type GhRunner, gh, ghText } from "../forge/gh.js";
 import { createMissingLabels, describeLabelDrift, type LabelSpec, normalizeLabel, taxonomyLabels } from "../forge/labels.js";
@@ -29,6 +31,20 @@ export interface InitDeps {
   // reused here (not re-implemented) so init's "preflight green" report and the engine's own
   // runtime preflight can never silently diverge on what "the key works" means.
   probeSshAuth: (path: string) => Promise<LlmPingResult>;
+  // #606 gate② round 1 (owner ruling): true when init can prompt a human right now — the
+  // auth-fails/stale/mismatch arm's (a)/(b) choice is only ever OFFERED when true; false (no
+  // TTY — the ordinary autonomous/CI init invocation) silently defaults to (b), the no-write,
+  // never-wedge path, while the WARN still names (a)'s manual steps. Default:
+  // `process.stdin.isTTY`. Injectable so tests drive both arms without a real TTY.
+  isInteractive: () => boolean;
+  // #606 gate② round 1: prompts the operator with `question` (node:readline/promises) and
+  // resolves the trimmed answer. Only ever called when isInteractive() is true. Injectable so
+  // tests drive the (a)/(b) choice deterministically without a real terminal.
+  promptOperator: (question: string) => Promise<string>;
+  // #606 gate② round 1 (arm (a)): the local machine's hostname, used to mint a per-machine
+  // deploy-key title (`sapwood-worker-<hostname>`) that stays collision-free across machines
+  // sharing one repo. Default: node:os's hostname(). Injectable for deterministic tests.
+  hostname: () => string;
 }
 
 const defaultDeps = (): InitDeps => ({
@@ -37,6 +53,16 @@ const defaultDeps = (): InitDeps => ({
   cwd: process.cwd(),
   sshKeygen: spawnSshKeygen,
   probeSshAuth: probeDeployKeySsh,
+  isInteractive: () => process.stdin.isTTY === true,
+  promptOperator: async (question: string) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      return (await rl.question(question)).trim();
+    } finally {
+      rl.close();
+    }
+  },
+  hostname: () => osHostname(),
 });
 
 // ---- pure helpers (unit-tested) -------------------------------------------------
@@ -308,42 +334,90 @@ function resolveActiveConfigPath(cwd: string, justWritten: string | null): strin
   return DEFAULT_CONFIG_PATHS.map((c) => join(cwd, c)).find(existsSync) ?? null;
 }
 
-// ---- #606 (#351 final ruling): L1 scoped-worker-identity deploy-key provisioning --------------
+// ---- #606 gate② round 1 (#351 final ruling; OWNER RULING supersedes the title-only design):
+// L1 scoped-worker-identity deploy-key provisioning, anchored on the LOCAL (deployKeyPath,
+// deployKeyId) pair — NEVER on the bare remote title, which may validly belong to a different
+// machine/operator and is never engine-deleted. ------------------------------------------------
 
 const DEPLOY_KEY_TITLE = "sapwood-worker";
 
-/** Pure: `gh repo deploy-key list --json title --jq '.[].title'` — one title per line, same
- *  idiom as ensureMilestones' own `--jq '.[].title'` parse above. */
-export function parseDeployKeyTitles(text: string): string[] {
-  return text
-    .split("\n")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+export interface DeployKeyListEntry {
+  id: number;
+  title: string;
 }
 
-/** #606 guidance-carrying WARN (#554 pattern): fired whenever provisioning can't complete for
- *  ANY reason — no repo-admin scope is the expected cause, but this deliberately doesn't try to
- *  classify the gh error text to confirm that specifically (doctrine: gh's own exit failure is
- *  already an authoritative signal that provisioning didn't happen; guessing WHY from free text
- *  would be the inferred-text case this repo's doctrine treats as a last resort, not a first
- *  one). Every branch names the exact manual steps + a docs anchor, and the engine stays fully
- *  functional at L0 either way — never a startup failure. */
-function deployKeyProvisioningFailedAction(repo: string, keyPath: string, e: unknown): string {
+/** #606 gate② round 1 (P1-1): `gh repo deploy-key list --json id,title` — REQUIRES `--json`
+ *  first (confirmed by a live probe on this repo: `--jq` without it fails "cannot use --jq
+ *  without specifying --json"). This is DIFFERENT from `gh api ...--jq`'s own idiom (this file's
+ *  ensureMilestones/checkDefaultBranchProtectionAction both use `gh api --jq` with no `--json` —
+ *  legal there because `gh api`'s whole HTTP response already IS the JSON payload being
+ *  filtered; `gh repo deploy-key list` is a table-output "list" command whose `--jq` needs an
+ *  explicit `--json <fields>` selection first). Parses `id` alongside `title` now — the owner
+ *  ruling's local (path, id) anchor needs ids to reconcile against, which the superseded
+ *  title-only `--jq '.[].title'` parse could never supply. */
+export function parseDeployKeys(text: string): DeployKeyListEntry[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out: DeployKeyListEntry[] = [];
+  for (const entry of parsed) {
+    const id = (entry as { id?: unknown } | null)?.id;
+    const title = (entry as { title?: unknown } | null)?.title;
+    if (typeof id === "number" && typeof title === "string") out.push({ id, title });
+  }
+  return out;
+}
+
+/** #606 gate② round 1: true for the base title OR any per-machine title the auth-fails/stale/
+ *  mismatch arm's choice (a) mints (`sapwood-worker-<hostname>`) — used ONLY to detect "is there
+ *  ANY sapwood-provisioned deploy key already on this repo" so fresh provisioning doesn't
+ *  register a colliding second base-titled key. This is explicitly NOT an ownership check —
+ *  ownership is decided by the LOCAL (path, id) anchor alone, per the owner ruling (a title is
+ *  never authoritative for "mine"). */
+function isSapwoodWorkerTitle(title: string): boolean {
+  return title === DEPLOY_KEY_TITLE || title.startsWith(`${DEPLOY_KEY_TITLE}-`);
+}
+
+/** #606 gate② round 1 (arm (a)): sanitizes a hostname into the suffix of a per-machine deploy-key
+ *  title/filename — lowercase alnum/dash only, collapsed, trimmed of leading/trailing dashes, so
+ *  the result is safe both as a GitHub deploy-key title and as isSapwoodWorkerTitle's own prefix
+ *  match. Falls back to "host" for a hostname that sanitizes to nothing (e.g. an all-symbol
+ *  name) — the title must never collapse back to the bare, collision-prone `sapwood-worker`. */
+export function sanitizeHostnameForKeyTitle(hostname: string): string {
+  const cleaned = hostname
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return cleaned || "host";
+}
+
+/** #606 gate② round 1 guidance-carrying WARN (#554 pattern): fired whenever ssh-keygen/`gh repo
+ *  deploy-key add` fails for ANY reason — no repo-admin scope is the expected cause, but this
+ *  deliberately doesn't try to classify the gh error text to confirm that specifically (doctrine:
+ *  gh's own exit failure is already an authoritative signal that provisioning didn't happen;
+ *  guessing WHY from free text would be the inferred-text case this repo's doctrine treats as a
+ *  last resort, not a first one). Names the exact manual steps + a docs anchor; the engine stays
+ *  fully functional at L0 either way — never a startup failure. */
+function deployKeyProvisioningFailedAction(repo: string, keyPath: string, title: string, e: unknown): string {
   const reason = (e instanceof Error ? e.message : String(e)).split("\n")[0]?.trim() || "unknown error";
   return (
     `deploy key: WARN — could not provision a write deploy key for ${repo} (${reason}). This usually means the ` +
     `operator's gh token lacks repo admin. Engine stays fully functional at L0 (today's full credentialed ` +
     `worker env) — no action required. To enable L1 by hand: (1) run ` +
     `\`ssh-keygen -t ed25519 -N "" -f ${keyPath}\`; (2) in the repo's Settings -> Deploy keys, add ` +
-    `${keyPath}.pub with write access allowed, title "${DEPLOY_KEY_TITLE}"; (3) set ` +
-    `\`worker.deployKeyPath: ${keyPath}\` in your config; (4) re-run "sapwood init" to confirm the preflight. ` +
-    `See docs/security.md's worker credential tiers.`
+    `${keyPath}.pub with write access allowed, title "${title}"; (3) set worker.deployKeyPath/` +
+    `worker.deployKeyId in your config (the id shown in that Settings page's key list); (4) re-run ` +
+    `"sapwood init" to confirm the preflight. See docs/security.md's worker credential tiers.`
   );
 }
 
-/** #606 guidance-carrying WARN: the preflight-fail arm — the key IS registered (or was just
- *  added) but SSH auth against it didn't succeed (host-key/network/local key-material issue).
- *  Same "never wedge, name the fix" contract as every other #554-pattern WARN in this repo. */
+/** #606 gate② round 1 guidance-carrying WARN: the preflight-fail arm — the key IS registered (or
+ *  was just added) but SSH auth against it didn't succeed (host-key/network/local key-material
+ *  issue). Same "never wedge, name the fix" contract as every other #554-pattern WARN here. */
 function deployKeyPreflightFailedAction(keyPath: string, detail: string | undefined): string {
   return (
     `deploy key: WARN — SSH auth preflight failed for ${keyPath}${detail ? `: ${detail}` : ""}. Engine stays at ` +
@@ -353,38 +427,158 @@ function deployKeyPreflightFailedAction(keyPath: string, detail: string | undefi
   );
 }
 
-/** #606: surgical text edit, NOT a parse->stringify round trip — this repo's own config is
- *  hand-edited, heavily commented YAML (CLAUDE.md's locked decision), and a full re-serialize
- *  would destroy every comment in it. Inserts a `deployKeyPath:` line right after the top-level
- *  `worker:` key when one exists in this exact block-style shape (what `ensureConfig`'s own
- *  shipped starter always produces); appends a fresh `worker:` block at EOF otherwise. Idempotent
- *  on its own: a file that already has ANY `deployKeyPath:` line (however indented) is left
- *  untouched, returning false — a caller normally never reaches this once `cfg.worker.
- *  deployKeyPath` is set (config load itself is the primary idempotency gate), but this function
- *  stays safe to call blind. ponytail: doesn't parse a flow-style (`worker: { ... }`) or
- *  differently-indented block — a known, narrow gap; the shipped starter and every documented
- *  example use plain block style, so the append-at-EOF fallback (safe, if inelegant — a repeated
- *  `worker:` mapping key) only bites a hand-reformatted config, and even then only once. */
-export function writeDeployKeyPathIntoYamlConfig(configFilePath: string, relativeKeyPath: string): boolean {
-  const text = readFileSync(configFilePath, "utf8");
-  if (/^[ \t]*deployKeyPath:/m.test(text)) return false;
-  const comment = "# #606: L1 write deploy key — git transport only, no forge API credential";
-  const newLine = `  deployKeyPath: ${relativeKeyPath} ${comment}`;
-  const lines = text.split("\n");
-  const workerLineIdx = lines.findIndex((l) => /^worker:\s*$/.test(l));
-  if (workerLineIdx === -1) {
-    const trimmed = text.replace(/\n+$/, "");
-    writeFileSync(configFilePath, `${trimmed}\n\nworker:\n${newLine}\n`);
-  } else {
-    lines.splice(workerLineIdx + 1, 0, newLine);
-    writeFileSync(configFilePath, lines.join("\n"));
+const WORKER_BLOCK_LINE = /^worker:\s*(#.*)?$/;
+const WORKER_FLOW_LINE = /^worker:\s*\{/;
+// `m` (multiline) so `^` matches the start of EVERY line, not just the start of the whole file —
+// both regexes are also used per-line (a single-line string, where `m` changes nothing), but
+// clearDeployKeyConfigFromYaml's own no-op check tests them against the FULL multi-line file
+// text, where a missing `m` flag would only ever match a deployKeyPath:/deployKeyId: line that
+// happens to sit at byte offset 0 of the file — silently false-no-op every ordinary case.
+const DEPLOY_KEY_PATH_LINE = /^[ \t]*deployKeyPath:/m;
+const DEPLOY_KEY_ID_LINE = /^[ \t]*deployKeyId:/m;
+
+/** #606 gate② round 1 (P1-2/P2-8): writes BOTH `worker.deployKeyPath` and `worker.deployKeyId` —
+ *  the local (path, id) anchor pair the owner ruling's reconcile/idempotence logic keys on, never
+ *  the bare title. Surgical text edit, NOT a parse->stringify round trip — this repo's own config
+ *  is hand-edited, heavily commented YAML (CLAUDE.md's locked decision), and a full re-serialize
+ *  would destroy every comment in it.
+ *
+ *  P2-8 hardening (gate② round 1 findings): (i) a top-level `worker:` line MAY carry a trailing
+ *  comment (`worker: # a note`) — matched now (WORKER_BLOCK_LINE), not just the bare `worker:`
+ *  the superseded version required exactly. (ii) a FLOW-style `worker: { ... }` mapping is never
+ *  edited — inserting a block-style child under it risks invalid YAML this function cannot
+ *  verify by regex alone, so it returns a hand-edit WARN instead of guessing. (iii) after
+ *  writing, the file is RE-READ and re-parsed with parseConfig(); if that fails, or the keys
+ *  didn't actually land as written, the ORIGINAL bytes are restored and a hand-edit WARN is
+ *  returned — an honest fallback, never a corrupted config file left behind. Any prior
+ *  `deployKeyPath:`/`deployKeyId:` lines (however indented) are stripped first, so this is also
+ *  the "replace" path for a fresh key superseding a cleared stale one — never a stale second
+ *  copy alongside the new one. */
+export function writeDeployKeyConfigIntoYaml(configFilePath: string, relativeKeyPath: string, keyId: number): string[] {
+  const original = readFileSync(configFilePath, "utf8");
+  if (original.split("\n").some((l) => WORKER_FLOW_LINE.test(l))) {
+    return [
+      `deploy key: worker.deployKeyPath/worker.deployKeyId NOT written — ${configFilePath} uses a flow-style ` +
+        `"worker: { ... }" mapping this tool won't safely edit; add "deployKeyPath: ${relativeKeyPath}" and ` +
+        `"deployKeyId: ${keyId}" inside it by hand.`,
+    ];
   }
-  return true;
+  const comment = "# #606 gate② round 1: L1 write deploy key (path, id) — the local anchor; git transport only, no forge API credential";
+  const withoutOldKeys = original.split("\n").filter((l) => !DEPLOY_KEY_PATH_LINE.test(l) && !DEPLOY_KEY_ID_LINE.test(l));
+  const newLines = [`  deployKeyPath: ${relativeKeyPath} ${comment}`, `  deployKeyId: ${keyId}`];
+  const workerLineIdx = withoutOldKeys.findIndex((l) => WORKER_BLOCK_LINE.test(l));
+  let edited: string;
+  if (workerLineIdx === -1) {
+    const trimmed = withoutOldKeys.join("\n").replace(/\n+$/, "");
+    edited = `${trimmed}\n\nworker:\n${newLines.join("\n")}\n`;
+  } else {
+    const out = [...withoutOldKeys];
+    out.splice(workerLineIdx + 1, 0, ...newLines);
+    edited = out.join("\n");
+  }
+  writeFileSync(configFilePath, edited);
+  try {
+    const reparsed = parseConfig(readFileSync(configFilePath, "utf8"));
+    if (reparsed.worker.deployKeyPath !== relativeKeyPath || reparsed.worker.deployKeyId !== keyId) {
+      throw new Error("deployKeyPath/deployKeyId did not land as written");
+    }
+  } catch {
+    writeFileSync(configFilePath, original);
+    return [
+      `deploy key: worker.deployKeyPath/worker.deployKeyId NOT written — an automated edit of ${configFilePath} ` +
+        `did not parse back cleanly, so the ORIGINAL file was restored untouched. Add "deployKeyPath: ` +
+        `${relativeKeyPath}" and "deployKeyId: ${keyId}" under worker: by hand.`,
+    ];
+  }
+  return [`deploy key: wrote worker.deployKeyPath/worker.deployKeyId into ${configFilePath} — L1 active on the next engine start`];
 }
 
-/** #606: best-effort — an unprotected default branch is a WARN, never a block, and any failure
- *  determining it (repo API hiccup, unexpected shape) silently reports nothing rather than
- *  interrupting init over an orthogonal check. */
+/** #606 gate② round 1 (owner ruling): removes `worker.deployKeyPath`/`worker.deployKeyId` from
+ *  the config file. Called BEFORE either sub-choice of the auth-fails/stale/mismatch arm — a
+ *  reconcile failure proves the recorded anchor is stale/wrong, and the ruling requires clearing
+ *  it in BOTH outcomes: choice (a) replaces it with a freshly-provisioned pair; choice (b) leaves
+ *  the config with NO anchor at all, so the NEXT `sapwood init` run takes the fresh-provisioning
+ *  path instead of re-reconciling the same broken values forever (this is what makes "re-run
+ *  sapwood init" an honest instruction — P1-5). A no-op (returns no actions) when the file
+ *  already carries neither key. Same P2-8 flow-style-refusal + read-back-and-restore safety net
+ *  as writeDeployKeyConfigIntoYaml. */
+export function clearDeployKeyConfigFromYaml(configFilePath: string): string[] {
+  const original = readFileSync(configFilePath, "utf8");
+  if (!DEPLOY_KEY_PATH_LINE.test(original) && !DEPLOY_KEY_ID_LINE.test(original)) return [];
+  const lines = original.split("\n");
+  if (lines.some((l) => WORKER_FLOW_LINE.test(l))) {
+    return [
+      `deploy key: worker.deployKeyPath/worker.deployKeyId NOT cleared — ${configFilePath} uses a flow-style ` +
+        `"worker: { ... }" mapping this tool won't safely edit; remove deployKeyPath/deployKeyId from it by hand.`,
+    ];
+  }
+  const withoutKeys = lines.filter((l) => !DEPLOY_KEY_PATH_LINE.test(l) && !DEPLOY_KEY_ID_LINE.test(l));
+  // If deployKeyPath/deployKeyId were the ONLY children under worker:, stripping them leaves a
+  // bare `worker:` with an implicit YAML null value — which FAILS z.object()'s validation
+  // (`.default({})` only substitutes for an ABSENT/undefined key, never an explicit null) and
+  // would always trip the read-back check below. Prune the now-empty `worker:` line itself in
+  // that case, so the key is genuinely ABSENT (parses as undefined -> the schema default).
+  const workerLineIdx = withoutKeys.findIndex((l) => WORKER_BLOCK_LINE.test(l));
+  const hasChild = workerLineIdx !== -1 && /^[ \t]+\S/.test(withoutKeys[workerLineIdx + 1] ?? "");
+  const edited = (workerLineIdx !== -1 && !hasChild ? withoutKeys.filter((_, i) => i !== workerLineIdx) : withoutKeys).join("\n");
+  writeFileSync(configFilePath, edited);
+  try {
+    const reparsed = parseConfig(readFileSync(configFilePath, "utf8"));
+    if (reparsed.worker.deployKeyPath !== undefined || reparsed.worker.deployKeyId !== undefined) {
+      throw new Error("deployKeyPath/deployKeyId still present after clearing");
+    }
+  } catch {
+    writeFileSync(configFilePath, original);
+    return [
+      `deploy key: worker.deployKeyPath/worker.deployKeyId NOT cleared — an automated edit of ${configFilePath} ` +
+        `did not parse back cleanly, so the ORIGINAL file was restored untouched. Remove deployKeyPath/` +
+        `deployKeyId under worker: by hand.`,
+    ];
+  }
+  return [`deploy key: cleared the stale worker.deployKeyPath/worker.deployKeyId anchor from ${configFilePath}`];
+}
+
+/** #606 gate② round 1 (P1-6): private key material must never land inside a `git add -A` sweep.
+ *  Checks the repo's `.gitignore` (created if missing) for a line covering the key's location —
+ *  an exact match on the key's own repo-relative path, or a `data/` (or `data`) prefix rule (the
+ *  location every provisioning/reconcile path in this file uses) — and appends a `data/` rule
+ *  with an explanatory comment when neither is present. Best-effort: a failure here is a WARN,
+ *  never a reason to fail init — the key was already provisioned; leaving it uncovered is a real
+ *  risk but not a reason to abort an otherwise-successful run. */
+function ensureGitignoreCoversDeployKeyAction(cwd: string, keyPath: string): string[] {
+  const gitignorePath = join(cwd, ".gitignore");
+  const relKeyPath = relative(cwd, keyPath).split(sep).join("/");
+  try {
+    const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
+    const covered = existing
+      .split("\n")
+      .map((l) => l.trim())
+      .some((l) => {
+        if (!l || l.startsWith("#")) return false;
+        const pattern = l.replace(/\/$/, "");
+        return pattern === "data" || pattern === relKeyPath || relKeyPath === pattern || relKeyPath.startsWith(`${pattern}/`);
+      });
+    if (covered) return [];
+    const addition = "# sapwood: engine state + worker deploy key — never commit\ndata/\n";
+    const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
+    writeFileSync(gitignorePath, `${existing}${needsLeadingNewline ? "\n" : ""}${addition}`);
+    return [`deploy key: added "data/" to ${gitignorePath} — the private key must never be committed`];
+  } catch (e) {
+    return [
+      `deploy key: WARN — could not update ${gitignorePath} to ignore the private key at ${relKeyPath} (${
+        e instanceof Error ? e.message : String(e)
+      }). Add a "data/" line to .gitignore by hand — the private key must never be committed.`,
+    ];
+  }
+}
+
+/** #606 gate② round 1 (P2-7): distinguishes protected / confirmed-unprotected / cannot-verify —
+ *  the fix-carrying WARN below only fires for a CONFIRMED-unprotected repo (gh's own 404 "Branch
+ *  not protected" response); anything else (403/plan-limit/network/an unclassifiable error) gets
+ *  a DISTINCT cannot-verify WARN rather than being read as "confirmed unprotected". Parses the
+ *  gh error text MINIMALLY (does a 3-digit HTTP status code appear at all) — no deeper
+ *  classification, per this file's doctrine of trusting gh's own authoritative signal over
+ *  inferred text. */
 async function checkDefaultBranchProtectionAction(run: GhRunner, repo: string): Promise<string[]> {
   let branch: string;
   try {
@@ -396,68 +590,127 @@ async function checkDefaultBranchProtectionAction(run: GhRunner, repo: string): 
   try {
     await run(["api", `repos/${repo}/branches/${branch}/protection`]);
     return [`deploy key: default branch "${branch}" on ${repo} is protected`];
-  } catch {
+  } catch (e) {
+    const message = (e instanceof Error ? e.message : String(e)).split("\n")[0]?.trim() || "unknown error";
+    const status = message.match(/\b(\d{3})\b/)?.[1];
+    if (status === "404") {
+      return [
+        `deploy key: WARN — default branch "${branch}" on ${repo} has NO branch protection rule. An L1 deploy ` +
+          `key can push directly to it (a stolen key's capability equals the granted capability — git push to ` +
+          `this repo — but branch protection is still the backstop against the WORKER itself pushing straight ` +
+          `to ${branch}). Fix: add a branch protection rule for "${branch}" (repo Settings -> Branches) requiring ` +
+          `the merge gate this engine already drives PRs through.`,
+      ];
+    }
     return [
-      `deploy key: WARN — default branch "${branch}" on ${repo} has NO branch protection rule. An L1 deploy ` +
-        `key can push directly to it (a stolen key's capability equals the granted capability — git push to ` +
-        `this repo — but branch protection is still the backstop against the WORKER itself pushing straight ` +
-        `to ${branch}). Fix: add a branch protection rule for "${branch}" (repo Settings -> Branches) requiring ` +
-        `the merge gate this engine already drives PRs through.`,
+      `deploy key: WARN — cannot verify branch protection for "${branch}" on ${repo} (${message}). If this repo's ` +
+        `plan cannot expose branch-protection status via the API, treat the default branch as UNPROTECTED and add ` +
+        `a protection rule for "${branch}" (repo Settings -> Branches) requiring the merge gate this engine ` +
+        `already drives PRs through.`,
     ];
   }
 }
 
-/** #606 (#351 final ruling) orchestrator: ssh-keygen -> `gh repo deploy-key add --allow-write` ->
- *  preflight SSH probe -> write `worker.deployKeyPath` into the config file -> default-branch-
- *  protection check. Idempotent (re-run-safe) at every step: config already carrying
- *  `deployKeyPath` skips provisioning entirely; a title already registered on the repo skips
- *  ssh-keygen/deploy-key-add; every failure degrades to an L0 guidance-carrying WARN (never a
- *  thrown error) — `init()` itself never fails because L1 provisioning didn't complete. */
-async function ensureDeployKey(
-  cfg: SapwoodConfig,
+/** #606 gate② round 1 (OWNER RULING — supersedes the previous title-only-idempotence amendment):
+ *  the reconcile failure / no-recorded-anchor state. NEVER deletes or modifies any remote key
+ *  (`gh repo deploy-key delete` never appears here, including in guidance text) — the remote
+ *  inventory is never authoritative for "mine"; a `sapwood-worker`-titled key may validly belong
+ *  to a different machine/operator, so this machine can only ever ADD a new key of its own, never
+ *  remove someone else's. Any prior local (deployKeyPath, deployKeyId) anchor is cleared FIRST
+ *  (clearDeployKeyConfigFromYaml) in both sub-choices, so a later `sapwood init` re-run never
+ *  keeps reconciling against a value already proven stale — the WARN's "re-run sapwood init"
+ *  advice actually converges (P1-5).
+ *
+ *  WARN + operator choice when `deps.isInteractive()`:
+ *  (a) leave remote untouched; clear local key config; generate a FRESH keypair; register it as
+ *      an ADDITIONAL deploy key titled `sapwood-worker-<hostname>` (collision-free per machine);
+ *      record the new (path, id); preflight; write config.
+ *  (b) leave remote untouched; clear local config; proceed degraded at L0.
+ *  No TTY -> default (b), the no-write, never-wedge path — the WARN still names (a)'s manual
+ *  steps. Stale foreign keys are named in the WARN for HUMAN cleanup, never engine-deleted. */
+async function armAuthFailsStaleOrMismatch(
   run: GhRunner,
   repo: string,
   cwd: string,
   configFilePath: string | null,
-  deps: Pick<InitDeps, "sshKeygen" | "probeSshAuth">,
+  staleForeignKeys: DeployKeyListEntry[],
+  reasons: string[],
+  deps: Pick<InitDeps, "sshKeygen" | "probeSshAuth" | "isInteractive" | "promptOperator" | "hostname">,
 ): Promise<string[]> {
   const actions: string[] = [];
-  if (cfg.worker.deployKeyPath !== undefined) {
-    actions.push(`deploy key: worker.deployKeyPath already configured (${cfg.worker.deployKeyPath}) — provisioning skipped`);
+  if (configFilePath !== null && !configFilePath.endsWith(".json")) {
+    actions.push(...clearDeployKeyConfigFromYaml(configFilePath));
+  }
+
+  const reasonText = reasons.length > 0 ? reasons.join("; ") : "no local (path, id) anchor recorded for this machine";
+  const staleNote =
+    staleForeignKeys.length > 0
+      ? ` Existing sapwood-titled key(s) already on ${repo} (left untouched — never engine-deleted; verify/clean up ` +
+        `by hand if any are stale): ${staleForeignKeys.map((k) => `"${k.title}" (id ${k.id})`).join(", ")}.`
+      : "";
+  const manualSteps =
+    `To register an additional per-machine key by hand: (1) run \`ssh-keygen -t ed25519 -N "" -f <path>\`; ` +
+    `(2) \`gh repo deploy-key add <path>.pub -R ${repo} --allow-write --title sapwood-worker-<hostname>\`; ` +
+    `(3) set worker.deployKeyPath/worker.deployKeyId in your config; (4) re-run "sapwood init" to confirm the ` +
+    `preflight — or re-run "sapwood init" from an interactive terminal to be offered this automatically.`;
+
+  let choice: "a" | "b" = "b";
+  if (deps.isInteractive()) {
+    const answer = await deps.promptOperator(
+      `deploy key: ${reasonText}.${staleNote}\n` +
+        `(a) register a NEW per-machine deploy key (every existing remote key is left untouched)\n` +
+        `(b) skip — proceed at L0 (full credentialed worker env)\n` +
+        `Choice [a/b]: `,
+    );
+    choice = answer.trim().toLowerCase().startsWith("a") ? "a" : "b";
+  }
+
+  if (choice === "b") {
+    actions.push(
+      `deploy key: WARN — ${reasonText}.${staleNote} Proceeding at L0 (full credentialed worker env); every ` +
+        `remote key is left untouched. ${manualSteps} See docs/security.md's worker credential tiers.`,
+    );
     return actions;
   }
-  const keyPath = join(cwd, "data", "worker-deploy-key");
 
-  let existingTitles: string[];
+  // choice === "a"
+  const hostComponent = sanitizeHostnameForKeyTitle(deps.hostname());
+  const title = `${DEPLOY_KEY_TITLE}-${hostComponent}`;
+  const keyPath = join(cwd, "data", `worker-deploy-key-${hostComponent}`);
+  actions.push(
+    `deploy key: operator chose (a) — registering a NEW per-machine deploy key titled "${title}"; every existing ` +
+      `remote key is left untouched (never engine-deleted).`,
+  );
   try {
-    existingTitles = parseDeployKeyTitles(await run(["repo", "deploy-key", "list", "-R", repo, "--jq", ".[].title"]));
+    if (!existsSync(keyPath)) {
+      mkdirSync(dirname(keyPath), { recursive: true });
+      await deps.sshKeygen(keyPath);
+    }
+    actions.push(...ensureGitignoreCoversDeployKeyAction(cwd, keyPath));
+    await run(["repo", "deploy-key", "add", `${keyPath}.pub`, "-R", repo, "--allow-write", "--title", title]);
   } catch (e) {
-    actions.push(deployKeyProvisioningFailedAction(repo, keyPath, e));
+    actions.push(deployKeyProvisioningFailedAction(repo, keyPath, title, e));
     return actions;
   }
+  actions.push(`deploy key: added write deploy key "${title}" to ${repo}`);
 
-  if (!existingTitles.includes(DEPLOY_KEY_TITLE)) {
-    try {
-      if (!existsSync(keyPath)) {
-        mkdirSync(dirname(keyPath), { recursive: true });
-        await deps.sshKeygen(keyPath);
-      }
-      await run(["repo", "deploy-key", "add", `${keyPath}.pub`, "-R", repo, "--allow-write", "--title", DEPLOY_KEY_TITLE]);
-      actions.push(`deploy key: added write deploy key "${DEPLOY_KEY_TITLE}" to ${repo}`);
-    } catch (e) {
-      actions.push(deployKeyProvisioningFailedAction(repo, keyPath, e));
-      return actions;
-    }
-  } else {
-    actions.push(`deploy key: "${DEPLOY_KEY_TITLE}" already registered on ${repo} (idempotent)`);
-    if (!existsSync(keyPath)) {
-      actions.push(
-        `deploy key: WARN — "${DEPLOY_KEY_TITLE}" is registered on ${repo} but no private key was found at ` +
-          `${keyPath}. Delete the stale registration (\`gh repo deploy-key delete\`) and re-run "sapwood init" ` +
-          `to provision a fresh matching pair.`,
-      );
-      return actions;
-    }
+  let newId: number | undefined;
+  try {
+    const listed = parseDeployKeys(await run(["repo", "deploy-key", "list", "-R", repo, "--json", "id,title"]));
+    // Match by title AND public-key content when available; title match alone is acceptable for
+    // the key just added above (this call's own add is the only thing that could have just
+    // created a NEW entry with this exact per-machine title).
+    newId = listed.find((k) => k.title === title)?.id;
+  } catch {
+    /* fall through to the "id unresolved" WARN below */
+  }
+  if (newId === undefined) {
+    actions.push(
+      `deploy key: WARN — registered "${title}" on ${repo} but could not read back its id from ` +
+        `\`gh repo deploy-key list\`; worker.deployKeyId was NOT written. Find the id in the repo's Settings -> ` +
+        `Deploy keys page and set worker.deployKeyId by hand, alongside worker.deployKeyPath: ${keyPath}.`,
+    );
+    return actions;
   }
 
   const probe = await deps.probeSshAuth(keyPath);
@@ -468,19 +721,151 @@ async function ensureDeployKey(
   actions.push(`deploy key: SSH auth preflight OK for ${keyPath}`);
 
   if (configFilePath === null) {
-    actions.push("deploy key: WARN — no config file found to write worker.deployKeyPath into; set it by hand.");
+    actions.push("deploy key: WARN — no config file found to write worker.deployKeyPath/worker.deployKeyId into; set them by hand.");
   } else if (configFilePath.endsWith(".json")) {
     actions.push(
-      `deploy key: worker.deployKeyPath NOT written — ${configFilePath} is JSON, not YAML; add ` +
-        `"worker": { "deployKeyPath": "${relative(dirname(configFilePath), keyPath)}" } by hand.`,
+      `deploy key: worker.deployKeyPath/worker.deployKeyId NOT written — ${configFilePath} is JSON, not YAML; add ` +
+        `"worker": { "deployKeyPath": "${relative(dirname(configFilePath), keyPath)}", "deployKeyId": ${newId} } by hand.`,
     );
   } else {
-    const wrote = writeDeployKeyPathIntoYamlConfig(configFilePath, relative(dirname(configFilePath), keyPath));
+    actions.push(...writeDeployKeyConfigIntoYaml(configFilePath, relative(dirname(configFilePath), keyPath), newId));
+  }
+
+  actions.push(...(await checkDefaultBranchProtectionAction(run, repo)));
+  return actions;
+}
+
+/** #606 gate② round 1 (OWNER RULING): both `worker.deployKeyPath` AND `worker.deployKeyId`
+ *  configured — RECONCILE (never skip, unlike the superseded version, which returned immediately
+ *  once `deployKeyPath` was set and so could never actually detect or recover from a stale/
+ *  rotated/mismatched key — P1-5). Three checks, ALL must be green: the local key file exists;
+ *  the recorded id is present in `gh repo deploy-key list --json id,title`; the SSH preflight
+ *  succeeds. All green -> a positive confirmation action line (+ branch-protection check). Any
+ *  failure -> the auth-fails/stale/mismatch arm (armAuthFailsStaleOrMismatch). */
+async function reconcileDeployKey(
+  run: GhRunner,
+  repo: string,
+  cwd: string,
+  configFilePath: string | null,
+  deployKeyPath: string,
+  deployKeyId: number,
+  deps: Pick<InitDeps, "sshKeygen" | "probeSshAuth" | "isInteractive" | "promptOperator" | "hostname">,
+): Promise<string[]> {
+  const localFileOk = existsSync(deployKeyPath);
+  let listedKeys: DeployKeyListEntry[] = [];
+  let idListed = false;
+  try {
+    listedKeys = parseDeployKeys(await run(["repo", "deploy-key", "list", "-R", repo, "--json", "id,title"]));
+    idListed = listedKeys.some((k) => k.id === deployKeyId);
+  } catch {
+    idListed = false;
+  }
+  const probe = localFileOk ? await deps.probeSshAuth(deployKeyPath) : { ok: false, detail: "local key file missing" };
+
+  if (localFileOk && idListed && probe.ok) {
+    const actions = [
+      `deploy key: reconciled — ${deployKeyPath} (id ${deployKeyId}) is registered on ${repo} and the SSH auth ` +
+        `preflight is green — L1 active`,
+    ];
+    actions.push(...(await checkDefaultBranchProtectionAction(run, repo)));
+    return actions;
+  }
+
+  const reasons: string[] = [];
+  if (!localFileOk) reasons.push(`local key file missing at ${deployKeyPath}`);
+  if (!idListed) reasons.push(`recorded id ${deployKeyId} not found on ${repo}'s registered deploy keys`);
+  if (localFileOk && !probe.ok) reasons.push(`SSH auth preflight failed${probe.detail ? `: ${probe.detail}` : ""}`);
+  const staleForeign = listedKeys.filter((k) => isSapwoodWorkerTitle(k.title) && k.id !== deployKeyId);
+  return armAuthFailsStaleOrMismatch(run, repo, cwd, configFilePath, staleForeign, reasons, deps);
+}
+
+/** #606 gate② round 1 (OWNER RULING) orchestrator: (deployKeyPath, deployKeyId) BOTH configured
+ *  -> reconcile; NEITHER configured with no sapwood-titled remote key -> fresh provisioning
+ *  (ssh-keygen -> `gh repo deploy-key add --allow-write --title sapwood-worker` -> read back the
+ *  new key's id -> preflight -> write BOTH deployKeyPath/deployKeyId -> gitignore guarantee ->
+ *  branch-protection check); NEITHER configured but a sapwood-titled key already exists remotely
+ *  (this machine has no recorded anchor for it) -> the auth-fails/stale/mismatch arm, same as a
+ *  reconcile failure (never assume ownership from a title alone). Every failure degrades to an
+ *  L0 guidance-carrying WARN (never a thrown error) — `init()` itself never fails because L1
+ *  provisioning didn't complete. */
+async function ensureDeployKey(
+  cfg: SapwoodConfig,
+  run: GhRunner,
+  repo: string,
+  cwd: string,
+  configFilePath: string | null,
+  deps: Pick<InitDeps, "sshKeygen" | "probeSshAuth" | "isInteractive" | "promptOperator" | "hostname">,
+): Promise<string[]> {
+  const { deployKeyPath, deployKeyId } = cfg.worker;
+
+  if (deployKeyPath !== undefined && deployKeyId !== undefined) {
+    return reconcileDeployKey(run, repo, cwd, configFilePath, deployKeyPath, deployKeyId, deps);
+  }
+
+  const keyPath = join(cwd, "data", "worker-deploy-key");
+  let existingKeys: DeployKeyListEntry[];
+  try {
+    existingKeys = parseDeployKeys(await run(["repo", "deploy-key", "list", "-R", repo, "--json", "id,title"]));
+  } catch (e) {
+    return [deployKeyProvisioningFailedAction(repo, keyPath, DEPLOY_KEY_TITLE, e)];
+  }
+  const priorSapwoodKeys = existingKeys.filter((k) => isSapwoodWorkerTitle(k.title));
+  if (priorSapwoodKeys.length > 0) {
+    // A sapwood-titled key exists remotely, but THIS machine has no recorded (path, id) anchor
+    // for it — per the owner ruling, a title is never authoritative for "mine": it may validly
+    // belong to a different machine/operator. Never assume ownership, never touch it.
+    return armAuthFailsStaleOrMismatch(run, repo, cwd, configFilePath, priorSapwoodKeys, [], deps);
+  }
+
+  // Fresh provisioning: nothing configured locally, nothing sapwood-titled remotely.
+  const actions: string[] = [];
+  try {
+    if (!existsSync(keyPath)) {
+      mkdirSync(dirname(keyPath), { recursive: true });
+      await deps.sshKeygen(keyPath);
+    }
+    actions.push(...ensureGitignoreCoversDeployKeyAction(cwd, keyPath));
+    await run(["repo", "deploy-key", "add", `${keyPath}.pub`, "-R", repo, "--allow-write", "--title", DEPLOY_KEY_TITLE]);
+  } catch (e) {
+    actions.push(deployKeyProvisioningFailedAction(repo, keyPath, DEPLOY_KEY_TITLE, e));
+    return actions;
+  }
+  actions.push(`deploy key: added write deploy key "${DEPLOY_KEY_TITLE}" to ${repo}`);
+
+  let newId: number | undefined;
+  try {
+    const listed = parseDeployKeys(await run(["repo", "deploy-key", "list", "-R", repo, "--json", "id,title"]));
+    // Match by title AND public-key content when available; title match alone is acceptable for
+    // the key just added above.
+    newId = listed.find((k) => k.title === DEPLOY_KEY_TITLE)?.id;
+  } catch {
+    /* fall through to the "id unresolved" WARN below */
+  }
+  if (newId === undefined) {
     actions.push(
-      wrote
-        ? `deploy key: wrote worker.deployKeyPath into ${configFilePath} — L1 active on the next engine start`
-        : `deploy key: worker.deployKeyPath line already present in ${configFilePath}`,
+      `deploy key: WARN — registered "${DEPLOY_KEY_TITLE}" on ${repo} but could not read back its id from ` +
+        `\`gh repo deploy-key list\`; worker.deployKeyId was NOT written. Find the id in the repo's Settings -> ` +
+        `Deploy keys page and set worker.deployKeyId by hand, alongside worker.deployKeyPath: ${keyPath}.`,
     );
+    return actions;
+  }
+
+  const probe = await deps.probeSshAuth(keyPath);
+  if (!probe.ok) {
+    actions.push(deployKeyPreflightFailedAction(keyPath, probe.detail));
+    return actions;
+  }
+  actions.push(`deploy key: SSH auth preflight OK for ${keyPath}`);
+
+  if (configFilePath === null) {
+    actions.push("deploy key: WARN — no config file found to write worker.deployKeyPath/worker.deployKeyId into; set them by hand.");
+  } else if (configFilePath.endsWith(".json")) {
+    actions.push(
+      `deploy key: worker.deployKeyPath/worker.deployKeyId NOT written — ${configFilePath} is JSON, not YAML; add ` +
+        `"worker": { "deployKeyPath": "${relative(dirname(configFilePath), keyPath)}", "deployKeyId": ${newId} } by hand.`,
+    );
+  } else {
+    actions.push(...writeDeployKeyConfigIntoYaml(configFilePath, relative(dirname(configFilePath), keyPath), newId));
   }
 
   actions.push(...(await checkDefaultBranchProtectionAction(run, repo)));
@@ -594,7 +979,7 @@ export interface InitResult {
 
 /** Run the full init flow. Idempotent: a second run reports zero create actions. */
 export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Promise<InitResult> {
-  const { run, getAuthStatus, cwd, sshKeygen, probeSshAuth } = { ...defaultDeps(), ...deps };
+  const { run, getAuthStatus, cwd, sshKeygen, probeSshAuth, isInteractive, promptOperator, hostname } = { ...defaultDeps(), ...deps };
   // #187: fileRaw is a loadConfig-only, non-schema annotation; validate a schema-owned copy.
   const { fileRaw: _fileRaw, ...doctrineSchemaFields } = cfg.doctrine;
   ConfigSchema.parse({ ...cfg, doctrine: doctrineSchemaFields });
@@ -631,7 +1016,15 @@ export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Pr
   // config file exists (ensureConfig above), since a fresh onboarding needs somewhere to write
   // worker.deployKeyPath into. Every failure degrades to a guidance-carrying WARN; init() itself
   // never fails because L1 provisioning didn't complete (engine stays fully functional at L0).
-  actions.push(...(await ensureDeployKey(cfg, run, repo, cwd, resolveActiveConfigPath(cwd, written), { sshKeygen, probeSshAuth })));
+  actions.push(
+    ...(await ensureDeployKey(cfg, run, repo, cwd, resolveActiveConfigPath(cwd, written), {
+      sshKeygen,
+      probeSshAuth,
+      isInteractive,
+      promptOperator,
+      hostname,
+    })),
+  );
 
   // #128: the north-star goal file — scaffolded iff missing, never overwriting a user's doc.
   const goalWritten = ensureGoalFile(cfg, cwd);

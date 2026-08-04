@@ -1627,38 +1627,65 @@ export function workerCredentialFreeEnv(ghConfigDir: string): NodeJS.ProcessEnv 
   return env;
 }
 
-/** #606 (#351 final ruling): the L1 scoped-worker-identity env — a worker leg's write capability
- *  reduces to git TRANSPORT ONLY, via a per-repo SSH deploy key `sapwood init` provisioned. Unlike
- *  workerCredentialFreeEnv (which severs `gh`/git's credentialed path so a fix leg's ONLY forge
- *  reach is its attached read-only proxy), this env doesn't just remove credentials — it ADDS one
- *  back, scoped: `GIT_SSH_COMMAND` pins git to the deploy key alone (`IdentitiesOnly=yes` refuses
- *  every other identity an inherited SSH agent might offer; `StrictHostKeyChecking=accept-new`
- *  keeps a fresh host free of an interactive prompt without disabling host-key checking
- *  altogether). No forge API credential exists in this env at all — a stolen key's capability
- *  equals the granted capability (git push to this one repo), never an escalation to API writes.
+/** #606 gate② round 1: the deploy-key TRANSPORT overlay ALONE — `GIT_SSH_COMMAND` pins git to
+ *  the deploy key (`IdentitiesOnly=yes` refuses every other identity an inherited SSH agent
+ *  might offer; `StrictHostKeyChecking=accept-new` keeps a fresh host free of an interactive
+ *  prompt without disabling host-key checking altogether), plus `GIT_CONFIG_COUNT`/
+ *  `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` (git's own env-based config injection — no file
+ *  touched, so this rewrite is scoped to THIS spawn's env alone, never the engine's shared repo
+ *  checkout) rewriting the origin's HTTPS URL to the SSH form the deploy key authenticates
+ *  against. Two `insteadOf` entries cover the origin URL with and without a trailing `.git`
+ *  (ponytail: covers the two conventional clone-URL forms this codebase's own gh-provisioned
+ *  clones and a manual `git clone` respectively produce; an origin configured to a third,
+ *  unconventional HTTPS spelling is a known gap — `git remote get-url origin` per dispatch would
+ *  close it but costs a spawn on every leg for a case `sapwood init`'s own repo/owner config
+ *  already pins in the overwhelmingly common case).
  *
- *  `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` (git's own env-based config
- *  injection — no file touched, so this rewrite is scoped to THIS spawn's env alone, never the
- *  engine's shared repo checkout) rewrite the origin's HTTPS URL to the SSH form the deploy key
- *  authenticates against. Two `insteadOf` entries cover the origin URL with and without a
- *  trailing `.git` (ponytail: covers the two conventional clone-URL forms this codebase's own gh-
- *  provisioned clones and a manual `git clone` respectively produce; an origin configured to a
- *  third, unconventional HTTPS spelling is a known gap — `git remote get-url origin` per dispatch
- *  would close it but costs a spawn on every leg for a case `sapwood init`'s own repo/owner
- *  config already pins in the overwhelmingly common case). */
-export function workerDeployKeyEnv(deployKeyPath: string, owner: string, repo: string): NodeJS.ProcessEnv {
-  const env = stripGhGitCredentialEnv();
-  env.GIT_TERMINAL_PROMPT = "0";
-  env.GIT_SSH_COMMAND = `ssh -i ${deployKeyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`;
+ *  Extracted out of workerDeployKeyEnv (below) so a `credentialFree` fix leg (P1-4: fix legs
+ *  MUST get L1 too, per the issue AC's "every worker leg: dispatch/resume/fix") can COMPOSE this
+ *  SAME overlay onto workerCredentialFreeEnv's stricter base, rather than inheriting
+ *  workerDeployKeyEnv's own base (which would fight workerCredentialFreeEnv's GH_CONFIG_DIR/
+ *  GIT_CONFIG_GLOBAL/SYSTEM choices instead of composing with them — the two base envs strip
+ *  the SAME credential family, but a fix leg's base must be workerCredentialFreeEnv's, the
+ *  stricter of the two, per that finding). `deployKeyPath` is shell-quoted (P2-9,
+ *  shellSingleQuote) — GIT_SSH_COMMAND is shell-PARSED by git, so an unquoted path containing a
+ *  space or shell metacharacter would break or mutate the command. */
+export function deployKeyTransportOverlay(deployKeyPath: string, owner: string, repo: string): NodeJS.ProcessEnv {
   const sshBase = `git@github.com:${owner}/${repo}.git`;
   const httpsWithGit = `https://github.com/${owner}/${repo}.git`;
   const httpsNoGit = `https://github.com/${owner}/${repo}`;
-  env.GIT_CONFIG_COUNT = "2";
-  env.GIT_CONFIG_KEY_0 = `url.${sshBase}.insteadOf`;
-  env.GIT_CONFIG_VALUE_0 = httpsWithGit;
-  env.GIT_CONFIG_KEY_1 = `url.${sshBase}.insteadOf`;
-  env.GIT_CONFIG_VALUE_1 = httpsNoGit;
-  return env;
+  return {
+    GIT_SSH_COMMAND: `ssh -i ${shellSingleQuote(deployKeyPath)} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`,
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: `url.${sshBase}.insteadOf`,
+    GIT_CONFIG_VALUE_0: httpsWithGit,
+    GIT_CONFIG_KEY_1: `url.${sshBase}.insteadOf`,
+    GIT_CONFIG_VALUE_1: httpsNoGit,
+  };
+}
+
+/** #606 (#351 final ruling; P1-3 gate② round 1 fix): the L1 scoped-worker-identity env for an
+ *  ORDINARY (non-`credentialFree`) leg — a worker leg's write capability reduces to git TRANSPORT
+ *  ONLY, via a per-repo SSH deploy key `sapwood init` provisioned. No forge API credential exists
+ *  in this env at all — a stolen key's capability equals the granted capability (git push to
+ *  this one repo), never an escalation to API writes.
+ *
+ *  P1-3 (gate② round 1): env-var stripping alone left `HOME` reachable with no `GH_CONFIG_DIR`
+ *  repoint and no `GIT_CONFIG_GLOBAL`/`SYSTEM=/dev/null` — `gh` (via a self-constructed path) and
+ *  git credential helpers could still resolve `~/.config/gh/hosts.yml`/keychain even with every
+ *  GH_-, GITHUB_-, GIT_CONFIG_-prefixed env var stripped. This now composes the SAME full severing
+ *  workerCredentialFreeEnv demonstrates (GH_CONFIG_DIR repointed at a fresh, empty, per-lane
+ *  directory the caller creates; GIT_CONFIG_GLOBAL/SYSTEM=/dev/null; GIT_TERMINAL_PROMPT=0) with
+ *  deployKeyTransportOverlay's git-transport identity — "transport-only" now means what the docs
+ *  claim. NOTE: GIT_CONFIG_GLOBAL=/dev/null nulls git's FILE-based global config, while
+ *  GIT_CONFIG_COUNT/KEY_n/VALUE_n injects config via env vars — a DIFFERENT mechanism entirely,
+ *  so the two are not in tension: the env-injected url.insteadOf rewrite still applies even
+ *  though the (irrelevant, now-nulled) global config file is never read. */
+export function workerDeployKeyEnv(deployKeyPath: string, ghConfigDir: string, owner: string, repo: string): NodeJS.ProcessEnv {
+  return {
+    ...workerCredentialFreeEnv(ghConfigDir),
+    ...deployKeyTransportOverlay(deployKeyPath, owner, repo),
+  };
 }
 
 /** #606: `sapwood init`'s ed25519 keypair generation for the L1 deploy key — `spawn` only (this
@@ -1932,16 +1959,18 @@ export class WorkerSupervisor implements Supervisor {
     (this.deps.log ?? console.error)(message);
   }
 
-  /** #606 (#351 final ruling): resolves the L1 scoped-worker-identity env for an ORDINARY
-   *  dispatch/resume/fix leg (never called when `opts.proxy.credentialFree` already applies its
-   *  own, stricter env — see both call sites). Returns `undefined` (⇒ caller falls back to L0,
-   *  `process.env` verbatim, today's unchanged default) when `cfg.worker.deployKeyPath` is unset,
-   *  or when the memoized SSH-auth preflight against it has failed — never throws, never blocks a
-   *  dispatch. The preflight itself runs at most once per supervisor life (`this.deployKeyProbe`);
-   *  a failure logs the guidance-carrying WARN exactly once, inside the memoized promise's own
-   *  `.then`, so replaying this method on a later dispatch re-awaits the SAME settled promise
-   *  without re-logging or re-shelling to `ssh`. */
-  private async resolveDeployKeyEnv(): Promise<NodeJS.ProcessEnv | undefined> {
+  /** #606 gate② round 1 (P1-4): resolves whether the L1 scoped-worker-identity deploy key is
+   *  usable for THIS dispatch/resume/fix leg — called UNCONDITIONALLY now (both by an ordinary
+   *  leg building its own workerDeployKeyEnv, and by a `credentialFree` leg deciding whether to
+   *  compose deployKeyTransportOverlay onto its stricter base), since a fix leg needs to know
+   *  this too. Returns `undefined` (⇒ caller falls back to whatever its OWN base env already is)
+   *  when `cfg.worker.deployKeyPath` is unset, or when the memoized SSH-auth preflight against it
+   *  has failed — never throws, never blocks a dispatch. The preflight itself runs at most once
+   *  per supervisor life (`this.deployKeyProbe`); a failure logs the guidance-carrying WARN
+   *  exactly once, inside the memoized promise's own `.then`, so replaying this method on a
+   *  later dispatch re-awaits the SAME settled promise without re-logging or re-shelling to
+   *  `ssh`. */
+  private async resolveDeployKeyPath(): Promise<string | undefined> {
     const path = this.deps.cfg.worker.deployKeyPath;
     if (!path) return undefined;
     if (this.deployKeyProbe === undefined) {
@@ -1957,8 +1986,7 @@ export class WorkerSupervisor implements Supervisor {
       });
     }
     const result = await this.deployKeyProbe;
-    if (!result.ok) return undefined;
-    return workerDeployKeyEnv(path, this.deps.cfg.board.owner, this.deps.cfg.board.repo);
+    return result.ok ? path : undefined;
   }
 
   /** #244 (Codex sol-high PR #260 review, P2): durable mint-failure observability — a
@@ -2095,17 +2123,26 @@ export class WorkerSupervisor implements Supervisor {
         this.log(`[sapwood:forge-proxy] lane ${laneName}: mint failed (non-fatal, proxy unattached): ${reason}`);
       }
     }
-    // #244 (Codex sol-high PR #260 review, P1): a fresh, empty, per-lane GH_CONFIG_DIR — created
-    // regardless of whether credentialFree ends up true (cheap, and keeps the directory's
-    // lifecycle tied to the lane's own stateDir rather than conditioned on opts). Only actually
-    // pointed at by the spawn env when credentialFree is set (workerCredentialFreeEnv below).
+    // #606 gate② round 1 (P1-4): resolved BEFORE argv/mkdir (same ordering rule as the proxy mint
+    // above: --allowedTools needs to know NOW whether this leg's `gh` grant should narrow), and
+    // UNCONDITIONALLY — a credentialFree fix leg needs to know this too, to COMPOSE the deploy
+    // key's transport overlay onto its own stricter base env (see baseEnv below). No longer
+    // "mutually exclusive" with credentialFree — the two postures COMPOSE.
+    const deployKeyPath = await this.resolveDeployKeyPath();
+    // #244 (Codex sol-high PR #260 review, P1) + #606 gate② round 1 (P1-3): a fresh, empty,
+    // per-lane GH_CONFIG_DIR — created whenever EITHER credentialFree OR an L1 deploy key is in
+    // play (cheap, and keeps the directory's lifecycle tied to the lane's own stateDir rather
+    // than conditioned on opts). Only actually pointed at by the spawn env in either of those
+    // cases (workerCredentialFreeEnv/workerDeployKeyEnv below).
     const ghConfigDir = this.path(laneName, "gh-config-empty");
-    if (opts?.proxy?.credentialFree) mkdirSync(ghConfigDir, { recursive: true });
-    // #606: L1 scoped-worker-identity env — resolved BEFORE argv (same ordering rule as the
-    // proxy mint above: --allowedTools needs to know NOW whether this leg's `gh` grant should
-    // narrow). Never attempted when credentialFree already applies its own, stricter env/tool
-    // narrowing — the two are mutually exclusive per-lane postures, not stacked.
-    const deployKeyEnv = opts?.proxy?.credentialFree ? undefined : await this.resolveDeployKeyEnv();
+    if (opts?.proxy?.credentialFree || deployKeyPath) mkdirSync(ghConfigDir, { recursive: true });
+    // Non-credentialFree L1: build the full workerDeployKeyEnv here (used as baseEnv below).
+    // credentialFree legs compose deployKeyTransportOverlay onto workerCredentialFreeEnv instead
+    // (see baseEnv) — deployKeyEnv here stays undefined for them, on purpose.
+    const deployKeyEnv =
+      !opts?.proxy?.credentialFree && deployKeyPath
+        ? workerDeployKeyEnv(deployKeyPath, ghConfigDir, this.deps.cfg.board.owner, this.deps.cfg.board.repo)
+        : undefined;
     // NB: NO --add-dir for the engine `data/` tree — mounting it would let the worker write its
     // own .done/.failed or mutate state, defeating wrapper-signaled completion (Codex R3 P1).
     const args = claudeArgs({
@@ -2158,13 +2195,28 @@ export class WorkerSupervisor implements Supervisor {
     // resolve()'d because this.worktreeRoot may be a relative deps override — the guard
     // needs an absolute root to compare against Claude Code's absolute tool_input paths.
     // #244: baseEnv is credential-stripped (workerCredentialFreeEnv, #260 review: env vars +
-    // GH_CONFIG_DIR + GIT_CONFIG_GLOBAL/SYSTEM + GIT_TERMINAL_PROMPT + no SSH_AUTH_SOCK) ONLY
-    // when opts.proxy.credentialFree is explicitly set — every other caller (today's entire
-    // production dispatch path) keeps inheriting process.env verbatim, unchanged from pre-#244
-    // behavior (worker.test.ts's own regression: "unlike peripherals, workers legitimately [need
-    // GH_TOKEN]"), UNLESS #606's L1 env resolved above — deployKeyEnv already carries no forge
-    // API credential either, just a scoped git-transport identity instead of a bare-stripped one.
-    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv(ghConfigDir) : (deployKeyEnv ?? process.env);
+    // GH_CONFIG_DIR + GIT_CONFIG_GLOBAL/SYSTEM + GIT_TERMINAL_PROMPT + no SSH_AUTH_SOCK) when
+    // opts.proxy.credentialFree is set — every other caller (today's entire production dispatch
+    // path) keeps inheriting process.env verbatim, unchanged from pre-#244 behavior (worker.
+    // test.ts's own regression: "unlike peripherals, workers legitimately [need GH_TOKEN]"),
+    // UNLESS #606's L1 env resolved above — deployKeyEnv already carries no forge API credential
+    // either, just a scoped git-transport identity instead of a bare-stripped one.
+    //
+    // #606 gate② round 1 (P1-4): a credentialFree leg with a preflight-green deploy key COMPOSES
+    // deployKeyTransportOverlay onto workerCredentialFreeEnv's stricter base — so a fix leg (which
+    // ALWAYS dispatches with credentialFree:true, conductor.ts's startFixLeg) can push its fix via
+    // the deploy key while keeping every bit of credential-free isolation (GH_CONFIG_DIR/
+    // GIT_CONFIG_GLOBAL/SYSTEM/GIT_TERMINAL_PROMPT stay workerCredentialFreeEnv's, not
+    // workerDeployKeyEnv's own — GH_CONFIG_DIR in particular stays the empty per-lane dir, never
+    // re-pointed by the overlay, which only ever adds GIT_SSH_COMMAND/GIT_CONFIG_*). When
+    // credentialFree is set but no deploy key resolved, this is byte-identical to before (today's
+    // credentialFree behavior, untouched).
+    const baseEnv = opts?.proxy?.credentialFree
+      ? {
+          ...workerCredentialFreeEnv(ghConfigDir),
+          ...(deployKeyPath ? deployKeyTransportOverlay(deployKeyPath, this.deps.cfg.board.owner, this.deps.cfg.board.repo) : {}),
+        }
+      : (deployKeyEnv ?? process.env);
     const child = spawn(this.bin, args, {
       detached: true,
       stdio: ["ignore", jsonlFd, jsonlFd],
@@ -2190,7 +2242,11 @@ export class WorkerSupervisor implements Supervisor {
       jsonlLegOffset: 0,
       prompt,
       ...(proxyHandle ? { proxyHandle } : {}),
-      ...(opts?.proxy?.credentialFree ? { ghConfigDir } : {}),
+      // #606 gate② round 1 (P1-3): the GH_CONFIG_DIR scratch dir now exists whenever EITHER
+      // credentialFree OR an L1 deploy key is in play — cleanup (removeGhConfigDir via
+      // lane.ghConfigDir) must track the same condition, or an ordinary L1-only leg's directory
+      // is never removed on exit.
+      ...(opts?.proxy?.credentialFree || deployKeyPath ? { ghConfigDir } : {}),
     };
     this.lanes.set(laneName, lane);
     child.on("exit", (code) => this.onExit(laneName, code));
@@ -2437,7 +2493,9 @@ export class WorkerSupervisor implements Supervisor {
     let args: string[];
     let startedMs: number;
     let runningMarker: Record<string, unknown>;
-    // #606: resolved outside the try block's scope so baseEnv (below, after the try) can read it.
+    // #606 gate② round 1: resolved outside the try block's scope so baseEnv (below, after the
+    // try) and the catch's own cleanup can read them.
+    let deployKeyPath: string | undefined;
     let deployKeyEnv: NodeJS.ProcessEnv | undefined;
     try {
       // #245: mint BEFORE argv — same ordering as dispatch() (WorkerProxyOpts' doc): the handle's
@@ -2461,13 +2519,23 @@ export class WorkerSupervisor implements Supervisor {
           this.log(`[sapwood:forge-proxy] lane ${name}: mint failed (non-fatal, proxy unattached): ${reason}`);
         }
       }
+      // #606 gate② round 1 (P1-4): resolved BEFORE the GH_CONFIG_DIR mkdir below — same
+      // unconditional resolution + composition rule as dispatch(), see that call site's own
+      // comment. A fix leg (resume()'s ONLY production credentialFree caller, conductor.ts's
+      // startFixLeg) needs this to compose the deploy key onto its stricter base env.
+      deployKeyPath = await this.resolveDeployKeyPath();
       // #245: same fresh/empty per-lane GH_CONFIG_DIR scratch directory dispatch() creates —
-      // created regardless of whether credentialFree ends up true (cheap; lifecycle tied to this
-      // lane's own stateDir). Only actually pointed at by the spawn env when credentialFree is set.
-      if (opts?.proxy?.credentialFree) mkdirSync(ghConfigDir, { recursive: true });
-      // #606: same L1 resolution + mutual-exclusion-with-credentialFree rule as dispatch() — see
-      // that call site's own comment.
-      deployKeyEnv = opts?.proxy?.credentialFree ? undefined : await this.resolveDeployKeyEnv();
+      // created whenever EITHER credentialFree OR an L1 deploy key is in play (cheap; lifecycle
+      // tied to this lane's own stateDir). Only actually pointed at by the spawn env in either
+      // of those cases.
+      if (opts?.proxy?.credentialFree || deployKeyPath) mkdirSync(ghConfigDir, { recursive: true });
+      // Non-credentialFree L1: build the full workerDeployKeyEnv here (used as baseEnv below).
+      // credentialFree legs compose deployKeyTransportOverlay onto workerCredentialFreeEnv
+      // instead (see baseEnv) — deployKeyEnv here stays undefined for them, on purpose.
+      deployKeyEnv =
+        !opts?.proxy?.credentialFree && deployKeyPath
+          ? workerDeployKeyEnv(deployKeyPath, ghConfigDir, this.deps.cfg.board.owner, this.deps.cfg.board.repo)
+          : undefined;
       const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
       args = claudeArgs({
         prompt,
@@ -2529,15 +2597,21 @@ export class WorkerSupervisor implements Supervisor {
           );
         }
       }
-      this.removeGhConfigDir(opts?.proxy?.credentialFree ? ghConfigDir : undefined, name);
+      this.removeGhConfigDir(opts?.proxy?.credentialFree || deployKeyPath ? ghConfigDir : undefined, name);
       throw e;
     }
     let child: ChildProcess;
-    // #245: baseEnv is credential-stripped (workerCredentialFreeEnv) ONLY when
-    // opts.proxy.credentialFree is explicitly set — every other resume() caller keeps inheriting
-    // process.env verbatim, unchanged from pre-#245 behavior. #606: unless the L1 env resolved
-    // above — see dispatch()'s own comment for why that's not a further exception to this rule.
-    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv(ghConfigDir) : (deployKeyEnv ?? process.env);
+    // #245: baseEnv is credential-stripped (workerCredentialFreeEnv) when opts.proxy.credentialFree
+    // is set — every other resume() caller keeps inheriting process.env verbatim, unchanged from
+    // pre-#245 behavior. #606 gate② round 1 (P1-4): unless the L1 env resolved above, in which case
+    // a credentialFree leg COMPOSES deployKeyTransportOverlay onto workerCredentialFreeEnv's base —
+    // see dispatch()'s own comment for the full rationale (the fix-leg case this closes).
+    const baseEnv = opts?.proxy?.credentialFree
+      ? {
+          ...workerCredentialFreeEnv(ghConfigDir),
+          ...(deployKeyPath ? deployKeyTransportOverlay(deployKeyPath, this.deps.cfg.board.owner, this.deps.cfg.board.repo) : {}),
+        }
+      : (deployKeyEnv ?? process.env);
     try {
       // SAPWOOD_WORKTREE_ROOT (#235 PR-A): same lane/worktree as the original dispatch — a
       // resumed leg must keep Read/Grep/Glob confined too, not just the fresh-dispatch path.
@@ -2560,7 +2634,7 @@ export class WorkerSupervisor implements Supervisor {
           );
         }
       }
-      this.removeGhConfigDir(opts?.proxy?.credentialFree ? ghConfigDir : undefined, name);
+      this.removeGhConfigDir(opts?.proxy?.credentialFree || deployKeyPath ? ghConfigDir : undefined, name);
       throw new Error(`worker resume-spawn failed (${this.bin}): ${String(e)}`);
     }
     const lane: Lane = {
@@ -2579,7 +2653,9 @@ export class WorkerSupervisor implements Supervisor {
       jsonlLegOffset,
       prompt,
       ...(proxyHandle ? { proxyHandle } : {}),
-      ...(opts?.proxy?.credentialFree ? { ghConfigDir } : {}),
+      // #606 gate② round 1 (P1-3): same "GH_CONFIG_DIR exists whenever credentialFree OR an L1
+      // deploy key is in play" condition as dispatch() — cleanup must track the same condition.
+      ...(opts?.proxy?.credentialFree || deployKeyPath ? { ghConfigDir } : {}),
     };
     this.lanes.set(name, lane);
     child.on("exit", (code) => this.onExit(name, code));
@@ -2644,7 +2720,7 @@ export class WorkerSupervisor implements Supervisor {
           );
         }
       }
-      this.removeGhConfigDir(opts?.proxy?.credentialFree ? ghConfigDir : undefined, name);
+      this.removeGhConfigDir(opts?.proxy?.credentialFree || deployKeyPath ? ghConfigDir : undefined, name);
       throw new Error(`worker resume-spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
     child.on("error", () => this.onExit(name, 1));

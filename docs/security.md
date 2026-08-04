@@ -430,26 +430,54 @@ independently be at autonomy-L3 and credential-L0, or autonomy-L1 and credential
 
 | Tier | What the worker leg's env holds | Push mechanism | PR-open mechanism | Theft blast radius |
 | --- | --- | --- | --- | --- |
-| **L0** (today's default, unset `worker.deployKeyPath`) | The operator's REAL, unrestricted environment — `GH_TOKEN`/`gh`'s stored host config/git credential helpers, all inherited verbatim (`process.env`, unchanged) | `git push` over whatever transport the engine's own checkout uses (typically HTTPS via `gh`'s credential helper) | The worker CAN reach `gh pr create` (the `Bash(gh *)` grant is present); in practice the prompt no longer instructs it (#605) and `associateLanePr` opens the PR itself once the branch is confirmed pushed, adopting a worker-opened one via the `sapwood:pr-owner` marker rather than duplicating it | The operator's FULL forge credential — every repo it can reach, every write scope the token carries. Not scoped to this one repo. |
-| **L1** (`worker.deployKeyPath` set + SSH preflight green, #606) | `workerDeployKeyEnv()` — every `gh`/git credential-lookup env var stripped (same denylist as `workerCredentialFreeEnv`'s #244 family: `GH_*`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GIT_ASKPASS`, `GIT_CONFIG_*`, `SSH_AUTH_SOCK`), PLUS `GIT_SSH_COMMAND` pinned to the per-repo write deploy key (`-o IdentitiesOnly=yes`) and an env-only `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` rewrite of the origin's HTTPS URL to the matching `git@github.com:` SSH form — no file touched, scoped to this one spawn's env. `Bash(gh *)` drops out of the leg's `--allowedTools` grant (`WORKER_ALLOWED_TOOLS_NO_GH`, same narrowing #244 already uses for credential-free fix legs) — a grant the env can no longer authenticate through is not offered either. | `git push` over SSH, authenticated ONLY by the deploy key | STRUCTURALLY UNREACHABLE — no forge API credential exists in the env at all, so there is no channel to attempt `gh pr create` through even if the prompt or a producer's own initiative tried. `associateLanePr` (engine-side, the operator's own credential) is the ONLY PR-open channel on this tier, not merely the preferred one. | The deploy key's own scope ONLY: git-transport write to this ONE repo, nothing else. A stolen key opens no other repo, carries no API write capability (label/milestone/board mutation, review approval, merge) in the FIRST place — theft is non-escalating BY CONSTRUCTION, not by a policy that could be bypassed. |
+| **L0** (today's default, unset `worker.deployKeyPath`/`worker.deployKeyId`) | The operator's REAL, unrestricted environment — `GH_TOKEN`/`gh`'s stored host config/git credential helpers, all inherited verbatim (`process.env`, unchanged) | `git push` over whatever transport the engine's own checkout uses (typically HTTPS via `gh`'s credential helper) | The worker CAN reach `gh pr create` (the `Bash(gh *)` grant is present); in practice the prompt no longer instructs it (#605) and `associateLanePr` opens the PR itself once the branch is confirmed pushed, adopting a worker-opened one via the `sapwood:pr-owner` marker rather than duplicating it | The operator's FULL forge credential — every repo it can reach, every write scope the token carries. Not scoped to this one repo. |
+| **L1** (`worker.deployKeyPath`+`worker.deployKeyId` reconciled green, #606) | `workerDeployKeyEnv()` COMPOSES the exact severing `workerCredentialFreeEnv()` does — `GH_CONFIG_DIR` repointed at a fresh, empty, per-lane directory, `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null`, `GIT_TERMINAL_PROMPT=0`, every `gh`/git credential-lookup env var stripped (`GH_*`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GIT_ASKPASS`, `GIT_CONFIG_*`, `SSH_AUTH_SOCK`) — PLUS `GIT_SSH_COMMAND` pinned to the per-repo write deploy key (`-o IdentitiesOnly=yes`, path shell-quoted) and an env-only `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` rewrite of the origin's HTTPS URL to the matching `git@github.com:` SSH form — no file touched, scoped to this one spawn's env. **A fix leg composes the SAME transport overlay onto its own `credentialFree` base** (the leg ALWAYS dispatches with `proxy.credentialFree: true` — `conductor.ts`'s `startFixLeg`) rather than losing L1, so every leg kind — dispatch, resume, fix — gets the deploy key when one is configured and preflight-green. `Bash(gh *)` drops out of the leg's `--allowedTools` grant (`WORKER_ALLOWED_TOOLS_NO_GH`) either way — a grant the env can no longer authenticate through is not offered either. | `git push` over SSH, authenticated ONLY by the deploy key | STRUCTURALLY UNREACHABLE — no forge API credential exists in the env at all, so there is no channel to attempt `gh pr create` through even if the prompt or a producer's own initiative tried. `associateLanePr` (engine-side, the operator's own credential) is the ONLY PR-open channel on this tier, not merely the preferred one. | The deploy key's own scope ONLY: git-transport write to this ONE repo, nothing else. A stolen key opens no other repo, carries no API write capability (label/milestone/board mutation, review approval, merge) in the FIRST place — theft is non-escalating BY CONSTRUCTION, not by a policy that could be bypassed. |
 | **L2** (enterprise checklist — NOT implemented by #606) | Tracked separately at [#339](https://github.com/herehigher/sapwood/issues/339); out of scope here. | — | — | — |
 
-**Activation is opt-in, not default-on.** `worker.deployKeyPath` unset (the shipped default,
-including this repo's own `sapwood.config.yaml` as of #606) is L0 — today's behavior, byte-for-
-byte unchanged (`worker.test.ts`'s own reverse test pins this). `sapwood init` provisions L1
-autonomously WHEN the operator running it has repo-admin (`ssh-keygen -t ed25519 -N ""`,
-idempotent by title probe against `gh repo deploy-key list`; `gh repo deploy-key add --allow-write
---title sapwood-worker`; the resolved key path written into `worker.deployKeyPath` in the config
-file) — every failure along that path (no admin, a preflight SSH auth failure, an already-
-registered title with no matching local key) degrades to a guidance-carrying WARN naming the
-exact fix (the `#554` pattern this repo already uses for `allowManagedPermissionRulesOnly`, see
-below) and leaves the engine fully functional at L0, never a startup failure. Once
-`worker.deployKeyPath` IS set, activation still isn't unconditional: `worker.ts` memoizes ONE SSH
-auth preflight per engine process life (`ssh -T git@github.com`, matched against GitHub's own
-documented success shape — exit 1, stderr containing "successfully authenticated"; exit 0 or any
-other exit/stderr shape is a FAILURE, never a false positive) before ever activating L1 on a
-dispatch/resume/fix leg; a failed preflight WARNs once and every leg for the rest of that process
-life runs at L0 instead of wedging.
+**Activation is opt-in, not default-on.** `worker.deployKeyPath`/`worker.deployKeyId` unset (the
+shipped default, including this repo's own `sapwood.config.yaml` as of #606) is L0 — today's
+behavior, byte-for-byte unchanged (`worker.test.ts`'s own reverse test pins this). `sapwood init`
+provisions L1 autonomously WHEN the operator running it has repo-admin (`ssh-keygen -t ed25519 -N
+""`; `gh repo deploy-key add --allow-write --title sapwood-worker`; the resolved key path AND the
+key's GitHub-assigned id written into `worker.deployKeyPath`/`worker.deployKeyId` in the config
+file) — every failure along that path degrades to a guidance-carrying WARN naming the exact fix
+(the `#554` pattern this repo already uses for `allowManagedPermissionRulesOnly`, see below) and
+leaves the engine fully functional at L0, never a startup failure.
+
+**OWNER RULING (gate② round 1, supersedes an earlier title-only-idempotence draft): the LOCAL
+`(deployKeyPath, deployKeyId)` pair is the anchor — a remote key's TITLE is never authoritative
+for "mine".** A `sapwood-worker`-titled key on the repo may validly belong to a DIFFERENT
+machine/operator; `sapwood init` never deletes or modifies a remote key it cannot prove it owns
+(`gh repo deploy-key delete` appears nowhere in this codebase, including guidance text). Once
+`worker.deployKeyPath`/`worker.deployKeyId` ARE both set, every `sapwood init` run RECONCILES
+rather than skipping: the local key file must exist, the recorded id must still be listed on the
+repo, and the SSH preflight (`ssh -T git@github.com`, matched against GitHub's own documented
+success shape — exit 1, stderr containing "successfully authenticated") must pass. All three
+green → a positive confirmation and L1 stays active. Any ONE of them failing (a wiped data dir, a
+second machine, a remotely rotated/foreign key, a rotated preflight) routes to a **WARN +
+operator choice**, offered only when `sapwood init` is running interactively (a real TTY):
+**(a)** leave every remote key untouched, clear the stale local anchor, generate a FRESH keypair,
+and register it as an ADDITIONAL deploy key titled `sapwood-worker-<hostname>` (collision-free
+per machine) — the new `(path, id)` becomes this machine's own anchor; or **(b)** leave every
+remote key untouched, clear the stale local anchor, and proceed degraded at L0. A non-interactive
+`sapwood init` (no TTY — the ordinary autonomous/CI invocation) defaults to **(b)**, the no-write,
+never-wedge path, and the WARN still names (a)'s manual steps. Because the stale anchor is
+CLEARED either way, "re-run `sapwood init`" is now an honest instruction: the next run either
+reconciles cleanly (choice (a) already happened) or re-diagnoses the SAME state truthfully,
+never silently skipping the check the way the superseded title-only design did. Any other
+sapwood-titled key still on the repo is named in the WARN for HUMAN cleanup — the engine never
+removes it.
+
+**The private key never lands in the repo's git history.** After provisioning (and on every
+reconcile pass that touches a freshly-created key), `sapwood init` checks the repo's
+`.gitignore` for a rule covering the key's location and appends a `data/` line (with an
+explanatory comment, creating `.gitignore` if it doesn't exist yet) when none is found — the
+shipped default key location (`data/worker-deploy-key[-<hostname>]`) sits under the SAME `data/`
+tree the engine's own state/sessions already live under and that a fresh repo has no reason to
+commit. This closes the "one `git add -A` publishes a live write-capable deploy key" gap: the
+guarantee is best-effort (a WARN, never a reason to fail init, if `.gitignore` itself can't be
+written), but it runs on every path that can leave a private key on disk, not just the happiest
+one.
 
 **Honest residuals — what L1 does NOT close:**
 
@@ -493,21 +521,37 @@ line, never a bare "something's wrong"):**
 1. **`sapwood init` without repo-admin.** `gh repo deploy-key add` fails (typically a 403) →
    one WARN action line naming the exact manual steps (the `ssh-keygen -t ed25519` command, the
    repo's Settings → Deploy keys → paste the `.pub` + enable write access, the `title:
-   sapwood-worker` to keep idempotency working, and the `worker.deployKeyPath` config key to set
-   once it's added) plus this section as the docs anchor. The engine is fully functional at L0
+   sapwood-worker` to keep idempotency working, and the `worker.deployKeyPath`/
+   `worker.deployKeyId` config keys to set once it's added — the id is shown on that same
+   Settings page) plus this section as the docs anchor. The engine is fully functional at L0
    either way — init itself never fails over this.
-2. **`worker.deployKeyPath` set but the SSH preflight fails.** A WARN naming the failure detail
-   (GitHub's own stderr line when available) and the re-provision instruction (re-run
-   `sapwood init`, which re-checks the registration and re-probes) — dispatch continues at L0,
-   never wedges, and the check is memoized so this WARN fires once per engine process life, not
-   once per lane.
-3. **L1 active but the default branch is unprotected.** `sapwood init` checks branch protection
-   on the repo's default branch once provisioning succeeds; an unprotected default branch WARNs
-   naming branch protection (repo Settings → Branches → add a rule requiring the merge gate this
-   engine already drives PRs through) as the fix — because even though the deploy key structurally
+2. **Reconcile fails — auth-fails/stale/mismatch.** Any of "local key file exists" / "recorded
+   id still listed" / "SSH preflight green" failing (rotated key, wiped data dir, second
+   machine, a foreign key sharing the `sapwood-worker` title) → a WARN naming the specific
+   reason(s), any other sapwood-titled key already on the repo (for HUMAN cleanup, never
+   engine-deleted), and — on an interactive `sapwood init` — the (a)/(b) choice above; a
+   non-interactive run defaults to (b) and still names (a)'s manual steps. Dispatch continues at
+   L0, never wedges, and the underlying SSH-auth probe is memoized so this WARN fires once per
+   engine process life, not once per lane. Because the stale local anchor is CLEARED as part of
+   this WARN, re-running `sapwood init` genuinely re-diagnoses the state rather than replaying
+   the same skip forever.
+3. **L1 active but the default branch is unprotected — CONFIRMED (a 404 from the branch-
+   protection endpoint).** `sapwood init` checks branch protection on the repo's default branch
+   once provisioning/reconcile succeeds; a confirmed-unprotected default branch WARNs naming
+   branch protection (repo Settings → Branches → add a rule requiring the merge gate this engine
+   already drives PRs through) as the fix — because even though the deploy key structurally
    cannot open a PR or merge, it CAN still `git push` directly to an unprotected default branch,
    bypassing the review gate entirely via raw git transport. Branch protection is the mandatory
    backstop this whole tier depends on, not an optional hardening step.
+4. **Branch-protection status CANNOT be verified — a DISTINCT WARN from #3.** A 403/plan-limit/
+   network/any other error that isn't a parseable 404 (e.g. a private-repo plan that can't
+   expose protection status via the API at all — the live probe #606's own issue recorded) is
+   NOT read as "confirmed unprotected": it gets its own WARN naming the underlying error and the
+   same advice ("if this repo's plan cannot expose protection, treat the default branch as
+   unprotected and add a rule by hand") without CLAIMING the API confirmed anything.
+5. **`.gitignore` could not be updated to cover the private key.** A best-effort WARN naming the
+   exact path that needs a manual `data/` line — fires only when the automated append itself
+   fails (an unwritable `.gitignore`), never blocks provisioning.
 
 ## Worker denylist vs. peripheral allowlist: deliberate asymmetry
 
@@ -544,9 +588,14 @@ The asymmetry is compensated, but not erased, by several independent controls:
   (`WORKER_ALLOWED_TOOLS_NO_GH`) and use `workerCredentialFreeEnv()` to strip token/config
   variables, point `GH_CONFIG_DIR` at an empty per-lane directory, disable global/system git
   config and terminal prompting, and drop `SSH_AUTH_SOCK`; an L1-active leg (`worker.
-  deployKeyPath` configured, #606) gets the SAME `Bash(gh *)` narrowing on EVERY leg — dispatch,
-  resume, and fix alike — not just the fix-loop's opt-in credential-free path. Even that
-  environment is not a
+  deployKeyPath`/`worker.deployKeyId` reconciled green, #606) gets the SAME `Bash(gh *)`
+  narrowing on EVERY leg — dispatch, resume, and fix alike — not just the fix-loop's opt-in
+  credential-free path. Gate② round 1 fix: a fix leg's env COMPOSES the deploy-key transport
+  overlay (`GIT_SSH_COMMAND`, `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`) onto its OWN
+  `workerCredentialFreeEnv()` base rather than the two postures being mutually exclusive — a
+  fix leg with a preflight-green deploy key can push its own fix over SSH while every bit of the
+  credential-free severing (`GH_CONFIG_DIR` still the empty per-lane directory,
+  `GIT_CONFIG_GLOBAL`/`SYSTEM` still nulled) stays intact. Even that environment is not a
   filesystem sandbox: arbitrary Node/npm code still runs with the operator's real home
   directory and can read credentials stored there.
 - `engine/src/guard/guard.ts` judges the worker's actual Bash argv independently of the CLI
