@@ -224,7 +224,7 @@ A park episode suspends dispatch for the named source (`sapwood park clear --sou
 - `llm` — **intervene**: the LLM session environment (Claude Code) is failing; carries probe/canary machinery and auto-resumes once the probe or canary succeeds.
 - `forge` — **intervene**: the forge (GitHub) environment is failing; carries probe machinery and auto-resumes once the probe succeeds.
 - `rapid-restart` — **intervene**: the crash-loop breaker tripped on restart cadence; no probe — clears only when a later engine start observes the birth window drained, or a human clears it. (see #431)
-- `consecutive-stalls` — **intervene**: the stall breaker (#407) tripped on a run of consecutive stalls; no probe — clears only when a later engine start observes the streak broken, or a human clears it. (see #407)
+- `consecutive-stalls` — **intervene**: the stall breaker (#407) tripped on a run of consecutive stalls; no probe — clears only when a human clears it. (see #407)
 - `idle-churn` — **intervene**: the idle-churn breaker (#470) tripped: rounds close cleanly but nothing consumable exists upstream; no probe (nothing downstream is broken to re-test) — clears only when a human clears it. (see #470)
 
 ## Escalation buckets

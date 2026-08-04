@@ -81,10 +81,15 @@ gap), work through these in order:
    file that was actually loaded (an explicit `--config` or the default probe order) —
    confirm it's the profile you intend to run under before dispatching against it,
    especially when more than one config file exists in the tree.
-4. **Dry-run pool sanity.** `sapwood run --dry-run` resolves config and lists exactly
-   what this round would dispatch — ready count, dispatchable count (after the real
-   eligibility filter), the effective per-round lane limit, and a cost preview — with no
-   worker spawned and no state written. Run it before every batch open, not just the
+4. **Dry-run pool sanity.** `sapwood run --dry-run` resolves config and previews an
+   **empty-lane-set candidate/upper bound** — ready count, dispatchable count (after the
+   real eligibility filter), the effective per-round lane limit, and a cost preview —
+   with no worker spawned and no state written. It assumes a fresh round starting from
+   zero occupied lanes; it does **not** read live lane occupancy, in-flight dedup, or the
+   meta-floor anti-starvation accounting, so treat it as a rough upper bound on what
+   *could* dispatch, never a replay of the exact next tick (`computeDryRunPreview`'s own
+   doc, `engine/src/cli.ts`; see also [Est-vs-real cost method](#est-vs-real-cost-method)
+   below, which leans on this same caveat). Run it before every batch open, not just the
    first one: it catches a config that would starve dispatch (0 dispatchable) or a pool
    that's unexpectedly large/small for what you intended, before any spend happens.
 
@@ -166,9 +171,9 @@ The gated (awaiting review gate) and human-merge-only/needs-human queues live on
 GitHub, not in the state DB — `status`/`events` are deliberately DB-only (see
 [Supervising a run](#supervising-a-run)). Query them with `gh` directly. Label names
 below are the shipped defaults (`labels.prefix: sapwood:`); a repo running a different
-prefix or a fully custom label set needs the equivalent substitution — see
-`docs/configuration.md`'s `labels`/`escalation` tables, never re-derive the semantics
-here.
+prefix or a fully custom label set needs the equivalent substitution. `blocked`/`hold`
+meaning (and how each differs from `needs-human`) lives in `docs/configuration.md`'s
+`escalation.humanLabels`/`holdLabels` tables — read there, never re-derived here.
 
 ```bash
 # Issues/PRs a human owes the next decision on:
@@ -178,11 +183,11 @@ gh pr list    --repo OWNER/REPO --label "sapwood:needs-human" --state open
 # PRs a human must merge (one-way verdict — never re-decided by the loop):
 gh pr list    --repo OWNER/REPO --label "sapwood:human-merge-only" --state open
 
-# An external wait nobody owes a decision on yet (vetoes merge/reclaim, unlike hold):
+# blocked:
 gh issue list --repo OWNER/REPO --label "sapwood:blocked" --state open
 gh pr list    --repo OWNER/REPO --label "sapwood:blocked" --state open
 
-# "A human is actively looking at this" (pauses driving, holds the lane's slot):
+# hold:
 gh pr list    --repo OWNER/REPO --label "sapwood:hold" --state open
 ```
 
@@ -226,8 +231,11 @@ be `driving` in the DB and simultaneously carry a human hold label on GitHub.
 prices what actually happened (`todayUsd`, `settledByWorker`, plus `unclassifiedUsd` +
 an `incomplete` flag so a client can never mistake attribution gaps for zero spend). The
 engine itself already reconciles ITS OWN per-lane estimate against the real terminal
-`total_cost_usd` at handoff time and logs any divergence (see `docs/PLAN.md`'s Security
-model) — that is a per-lane mechanism, not a supervision one.
+`total_cost_usd` at terminal settlement (done/failed/handoff alike, not just a clean
+finish), when a positive terminal cost is actually available — logging the divergence
+when it is, and logging the estimate as the recorded spend (never a fabricated $0) when
+it isn't (`writeTerminalSentinel`'s own doc, `engine/src/roles/worker.ts`; see
+`docs/PLAN.md`'s Security model) — that is a per-lane mechanism, not a supervision one.
 
 The supervision-side practice is a coarser, session-scoped series: note the dry-run
 preview at batch open, note the settled spend at batch close, and track the two numbers

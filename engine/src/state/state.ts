@@ -1468,8 +1468,12 @@ export const PARK_SOURCE_GLOSSARY: Record<ParkSource, KindGlossary> = {
     see: "#431",
   },
   "consecutive-stalls": {
-    meaning:
-      "the stall breaker (#407) tripped on a run of consecutive stalls; no probe — clears only when a later engine start observes the streak broken, or a human clears it.",
+    // #648 gate② P2 (Codex): an OPEN episode never auto-clears (PR #473 round 3 adjudicated
+    // this as the deliberate difference from rapid-restart — stall-breaker.ts's own doc). The
+    // streak fold is consulted only to decide whether to open a NEW episode after a later
+    // start; it is never itself the clearing signal for an episode already open. Same
+    // human-only clearing story as idle-churn below, not rapid-restart above.
+    meaning: "the stall breaker (#407) tripped on a run of consecutive stalls; no probe — clears only when a human clears it.",
     actionability: "intervene",
     see: "#407",
   },
