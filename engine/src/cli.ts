@@ -1802,6 +1802,16 @@ async function runTickEngine(
   // (default false, so this is a no-op call for every deployment until flipped) renders the v1
   // skills plugin dir NOW, so a missing/duplicated docs/security.md marker aborts startup with
   // zero dispatch rather than failing lazily on a worker's first `--plugin-dir` spawn.
+  // #639 gate② round 1: this composition (resolveSkillsPluginDir(cfg) threaded into
+  // WorkerSupervisor's skillsPluginDir and RoleRunner's defaultSkillsPluginDir below) is NOT
+  // itself under a unit test — driving runTickEngine/runRoundsEngine end-to-end would need a
+  // live engine boot, too heavy a harness for this seam. The wiring is pinned indirectly by
+  // three narrower tests instead: worker.test.ts's WorkerDeps.skillsPluginDir argv tests,
+  // peripheral.test.ts's RoleRunnerDeps.defaultSkillsPluginDir argv tests (both prove the field
+  // reaches `--plugin-dir` once supplied), and skills-plugin.test.ts's own "production
+  // composition" test (resolveSkillsPluginDir returns the exact dir renderSkillsPlugin
+  // published, path-identical). A regression here would have to break one of THOSE, or this
+  // three-line composition itself, to go unnoticed.
   const skillsPluginDir = resolveSkillsPluginDir(cfg);
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg);
@@ -2004,7 +2014,9 @@ async function runRoundsEngine(
   // round-0 identity (buildTickFixLegResume) — see round.ts's own doc for why this can't be
   // built once here the way the tick driver's fixLegResume is.
   const renderFixPrompt = buildRenderFixPrompt(cfg);
-  // #639: same fail-fast stance as runTickEngine's own comment above.
+  // #639: same fail-fast stance as runTickEngine's own comment above. #639 gate② round 1: same
+  // "pinned indirectly, not by a live-engine-boot test" posture — see runTickEngine's own
+  // comment above for the three tests that cover this composition.
   const skillsPluginDir = resolveSkillsPluginDir(cfg);
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg);

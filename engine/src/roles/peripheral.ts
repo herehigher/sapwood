@@ -308,15 +308,6 @@ export interface RoleSessionOpts {
    *  CLAUDE.md-family probe, `.claude/rules/**`, etc.) is the EXISTING mechanism, entirely
    *  unchanged — it simply reads from this directory instead of the default worktree path. */
   reviewCwd?: string;
-  /** #639: per-call override of RoleRunnerDeps.defaultSkillsPluginDir — mirrors `proxy`'s own
-   *  per-call-wins-over-instance-default convention. No shipped caller sets this today (every
-   *  peripheral stub relies on the RoleRunnerDeps-wide default, same as `proxy`); it exists for
-   *  a future caller that wants a DIFFERENT rendered plugin dir than this RoleRunner instance's
-   *  own. Refused together with `reviewCwd` for the same caller-bug reason `proxy`/
-   *  `allowedTools`/`disallowedTools` are: a review session's `--plugin-dir` exclusion is
-   *  structural (shouldInjectSkillsPlugin("review") === false), never something a caller could
-   *  quietly re-enable by supplying this alongside reviewCwd. */
-  pluginDir?: string;
   /** #286 (E4a, design #279 §6): threaded straight through to worker.ts's
    *  `ClaudeArgsOpts.maxBudgetUsd` (`--max-budget-usd`) — see that field's own doc for the
    *  rationale (a review session's HARD per-session cost ceiling, distinct from a worker leg's
@@ -490,10 +481,16 @@ export interface RoleRunnerDeps {
   defaultProxy?: RoleSessionOpts["proxy"];
   /** #639: the engine-rendered skills plugin directory (skills-plugin.ts's
    *  resolveSkillsPluginDir — undefined when `roles.skills.enabled` is false, the default),
-   *  applied to every NON-review peripheral role session this RoleRunner instance runs (a
-   *  per-call `opts.pluginDir` still wins when supplied — same fallback convention as
-   *  `defaultProxy`). NEVER applied in review session mode (reviewCwd) — enforced structurally
-   *  in run() itself, not by this field being conditionally omitted by a caller. */
+   *  applied to every NON-review peripheral role session this RoleRunner instance runs. #639
+   *  gate② round 1: an earlier version also accepted a per-call `RoleSessionOpts.pluginDir`
+   *  override (mirroring `defaultProxy`'s per-call-wins convention) — removed. Unlike the forge
+   *  proxy, a plugin dir can carry hooks/MCP servers/commands (the #639 design ruling that
+   *  removed arbitrary `--plugin-dir` values in the first place), so an ad hoc per-call
+   *  override on TOP of the one engine-rendered, content-hashed directory would have reopened
+   *  exactly the surface that ruling closed — and it had zero shipped callers regardless. This
+   *  RoleRunnerDeps-wide default is now the ONLY source `run()` reads. NEVER applied in review
+   *  session mode (reviewCwd) — enforced structurally in run() itself (shouldInjectSkillsPlugin),
+   *  not by this field being conditionally omitted by a caller. */
   defaultSkillsPluginDir?: string;
 }
 
@@ -638,15 +635,6 @@ export class RoleRunner {
           "opts.allowedTools/opts.disallowedTools must not be set together with reviewCwd",
       );
     }
-    // #639: same caller-bug-not-silent-override posture as proxy/allowedTools above — a review
-    // session's `--plugin-dir` exclusion (shouldInjectSkillsPlugin("review") === false) is
-    // structural, so a caller supplying opts.pluginDir alongside reviewCwd is refused rather
-    // than silently accepted or silently dropped.
-    if (reviewMode && opts.pluginDir !== undefined) {
-      throw new Error(
-        "review session mode (reviewCwd) never attaches a skills plugin dir — opts.pluginDir must not be set together with reviewCwd",
-      );
-    }
     // Structural guard, not a live optimization: access.ts's PROXY_ROLE_TOOL_MATRIX is
     // deny-by-default (its own header comment — a role absent from the matrix, or present with an
     // empty grant, gets `[]`, never a default-allow branch a future edit could forget to wire).
@@ -702,12 +690,12 @@ export class RoleRunner {
     // own doc for why (gate② #557 FIX 5, an fd/file leak on the throw path).
     const proxyOpt = reviewMode || !roleGrantsProxyTools ? undefined : (opts.proxy ?? this.deps.defaultProxy);
     // #639: shouldInjectSkillsPlugin("review") is false, so this is unconditionally undefined in
-    // review mode regardless of what opts.pluginDir/defaults.defaultSkillsPluginDir carry
-    // (opts.pluginDir is refused together with reviewCwd above, so both are guaranteed absent
-    // here in review mode too) — the same "structural, not caller-omitted" exclusion `proxyOpt`
-    // above uses.
+    // review mode regardless of what deps.defaultSkillsPluginDir carries — the same "structural,
+    // not caller-omitted" exclusion `proxyOpt` above uses. #639 gate② round 1: no per-call
+    // opts.pluginDir override exists anymore (see RoleRunnerDeps.defaultSkillsPluginDir's own
+    // doc) — this RoleRunnerDeps-wide default is the ONLY source.
     const pluginDirForThisSession = shouldInjectSkillsPlugin(reviewMode ? "review" : "peripheral-role")
-      ? (opts.pluginDir ?? this.deps.defaultSkillsPluginDir)
+      ? this.deps.defaultSkillsPluginDir
       : undefined;
     let proxyHandle: ForgeProxyHandle | undefined;
     if (proxyOpt) {

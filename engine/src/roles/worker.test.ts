@@ -5205,6 +5205,60 @@ test("resume (#639): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reache
   }
 });
 
+test("resume (#639 gate② round 1): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reaches a genuine FIX-ENTRY resumed leg's argv too (opts.sessionId, no .handoff sentinel — mirrors the A1 fix-leg-entry test above, the gate found the #639 coverage above only exercised ordinary handoff-resume)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        `  printf '%s\\n' "$@" > "${join(dir, "fix-args.seen.tmp")}"`,
+        `  mv "${join(dir, "fix-args.seen.tmp")}" "${join(dir, "fix-args.seen")}"`,
+        RESULT_LINE,
+        "fi",
+        `echo '{"type":"result","subtype":"success","total_cost_usd":0.001,"model":"claude-stub","usage":{"input_tokens":1,"output_tokens":1}}'`,
+        "exit 0",
+      ].join("\n"),
+    );
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "issue-rendered-prompt",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      skillsPluginDir: "/data/generated/role-skills/deadbeef",
+    });
+    // Same driving-lane precondition as the A1 fix-leg-entry test: a fresh dispatch completes
+    // DONE quickly (no --resume in the fake stub's first invocation), leaving a done sentinel
+    // and NO handoff sentinel — exactly what a fix leg starts from.
+    const { name, sessionId } = await s.dispatch({ number: 21, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.done.json`)));
+    assert.ok(!existsSync(join(dir, `${name}.handoff.json`)), "no handoff sentinel — the fix-leg-entry precondition");
+
+    const resumed = await s.resume({ number: 21, title: "t", labels: [] }, name, {
+      sessionId,
+      prompt: "fix-leg: address PR #650's gate② review findings",
+    });
+    assert.equal(resumed.sessionId, sessionId, "SAME session — a fix leg continues the original conversation");
+
+    await waitForFile(join(dir, "fix-args.seen"), "fix-leg argv was not published");
+    const args = readFileSync(join(dir, "fix-args.seen"), "utf8").trim().split("\n");
+    const i = args.indexOf("--plugin-dir");
+    assert.ok(i !== -1, "--plugin-dir must reach a genuine FIX-ENTRY resumed leg's argv too");
+    assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
+
+    for (let i2 = 0; i2 < 400 && !existsSync(join(dir, `${name}.done.json`)); i2++) await sleep(20);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resume: opts.prompt REPLACES the ordinary issue-rendered prompt — the fix leg's own fix instruction — and is the exact string passed to claude -p", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

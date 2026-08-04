@@ -2,7 +2,7 @@
 // content-fidelity contract. Injection-policy-table and claudeArgs wiring are covered by
 // worker.test.ts/peripheral.test.ts (the call sites this module's output feeds).
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -48,6 +48,30 @@ not part of the skill.
 
 function mkTmpDir(): string {
   return mkdtempSync(join(tmpdir(), "sapwood-skills-plugin-"));
+}
+
+/** #639 gate② round 1: the immutability tests below used to compare a single published file's
+ *  `mtimeMs` before/after a second render/publish call — a timestamp pin proves nothing about
+ *  the invariant that actually matters (a REWRITE with identical bytes is acceptable by
+ *  definition; the file's content is what must never change, not its mtime, and a single-file
+ *  check also missed every OTHER file the directory carries). This walks the whole published
+ *  directory recursively and returns every file's exact bytes, keyed by its path relative to
+ *  `dir`, so a caller can snapshot the FULL tree before a second call and assert byte-for-byte
+ *  equality across ALL of it afterward — content-anchored, not timestamp-anchored. */
+function snapshotDirBytes(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const walk = (sub: string) => {
+    for (const entry of readdirSync(sub, { withFileTypes: true })) {
+      const abs = join(sub, entry.name);
+      if (entry.isDirectory()) {
+        walk(abs);
+      } else {
+        out[abs.slice(dir.length + 1)] = readFileSync(abs, "utf8");
+      }
+    }
+  };
+  walk(dir);
+  return out;
 }
 
 // ── extractMarkedSection ─────────────────────────────────────────────────────────────────────
@@ -149,15 +173,20 @@ test("renderSkillsPlugin: same source -> same hash, second call creates no new d
     const outRoot = join(root, "out");
 
     const first = renderSkillsPlugin({ securityMdPath, outRoot });
-    const manifestPath = join(first.dir, ".claude-plugin", "plugin.json");
-    const mtimeBefore = statSync(manifestPath).mtimeMs;
+    // #639 gate② round 1: content-anchored, not timestamp-anchored — snapshot every published
+    // file's exact bytes, not just plugin.json's mtime (see snapshotDirBytes's own doc).
+    const bytesBefore = snapshotDirBytes(first.dir);
     const dirsBefore = readdirSync(outRoot);
 
     const second = renderSkillsPlugin({ securityMdPath, outRoot });
 
     assert.equal(second.hash, first.hash);
     assert.equal(second.dir, first.dir);
-    assert.equal(statSync(manifestPath).mtimeMs, mtimeBefore, "a no-op re-render must not rewrite the published file");
+    assert.deepEqual(
+      snapshotDirBytes(first.dir),
+      bytesBefore,
+      "a no-op re-render must leave every published file byte-for-byte unchanged, not just unchanged in mtime",
+    );
     assert.deepEqual(readdirSync(outRoot), dirsBefore, "a no-op re-render must not create a new directory");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -172,7 +201,10 @@ test("renderSkillsPlugin: a changed source produces a new directory and leaves t
     const outRoot = join(root, "out");
 
     const first = renderSkillsPlugin({ securityMdPath, outRoot });
-    const firstManifestBefore = readFileSync(join(first.dir, ".claude-plugin", "plugin.json"), "utf8");
+    // #639 gate② round 1: snapshot EVERY file the first hash dir published (not just
+    // plugin.json) — see snapshotDirBytes's own doc for why a single-file/mtime pin under-
+    // covers the "previously published directories byte-untouched" invariant.
+    const firstBytesBefore = snapshotDirBytes(first.dir);
 
     writeFileSync(securityMdPath, FIXTURE_SECURITY_MD.replace("B — CI-executed.", "B — CI-executed (edited)."), "utf8");
     const second = renderSkillsPlugin({ securityMdPath, outRoot });
@@ -180,10 +212,10 @@ test("renderSkillsPlugin: a changed source produces a new directory and leaves t
     assert.notEqual(second.hash, first.hash);
     assert.notEqual(second.dir, first.dir);
     assert.ok(existsSync(first.dir), "the prior hash directory must still exist");
-    assert.equal(
-      readFileSync(join(first.dir, ".claude-plugin", "plugin.json"), "utf8"),
-      firstManifestBefore,
-      "the prior hash directory's own files must be byte-unchanged",
+    assert.deepEqual(
+      snapshotDirBytes(first.dir),
+      firstBytesBefore,
+      "every file in the prior hash directory must be byte-for-byte unchanged, not just plugin.json",
     );
     const secondSkillMd = readFileSync(join(second.dir, "skills", "ac-evidence-tiers", "SKILL.md"), "utf8");
     assert.ok(secondSkillMd.includes("edited"));
@@ -224,10 +256,16 @@ test("publishPluginAtomic: publishing the same hash twice directly is a no-op on
     const files = buildSkillsPluginFiles(FIXTURE_SECURITY_MD);
     const hash = hashPluginFiles(files);
     const first = publishPluginAtomic(root, hash, files);
-    const before = statSync(join(first, ".claude-plugin", "plugin.json")).mtimeMs;
+    // #639 gate② round 1: content-anchored, not timestamp-anchored — same snapshotDirBytes
+    // stance as the renderSkillsPlugin immutability tests above.
+    const bytesBefore = snapshotDirBytes(first);
     const second = publishPluginAtomic(root, hash, files);
     assert.equal(second, first);
-    assert.equal(statSync(join(first, ".claude-plugin", "plugin.json")).mtimeMs, before);
+    assert.deepEqual(
+      snapshotDirBytes(first),
+      bytesBefore,
+      "a second publish of the same hash must leave every file byte-for-byte unchanged",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -314,6 +352,38 @@ test("resolveSkillsPluginDir: roles.skills.enabled true -> renders under <cwd>/d
     const dir = resolveSkillsPluginDir({ roles: { skills: { enabled: true } } }, root);
     assert.ok(dir?.startsWith(join(root, "data", "generated", "role-skills")));
     assert.ok(existsSync(join(dir!, ".claude-plugin", "plugin.json")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// #639 gate② round 1: cli.ts's runTickEngine/runRoundsEngine call resolveSkillsPluginDir(cfg)
+// directly and thread the result into WorkerSupervisor's `skillsPluginDir` and RoleRunner's
+// `defaultSkillsPluginDir` — a live engine boot is too heavy a harness to drive from this suite
+// (see cli.ts's own comment at both call sites), so the production composition is pinned here
+// instead, at the resolver seam, PLUS the worker.test.ts/peripheral.test.ts argv tests that
+// prove `skillsPluginDir`/`defaultSkillsPluginDir` reach `--plugin-dir` once supplied. This test
+// closes the one gap those leave open: that resolveSkillsPluginDir's return value under a REAL
+// config shape is the EXACT directory renderSkillsPlugin published for that same
+// (securityMdPath, outRoot) pair — path equality, not merely "starts with the expected prefix"
+// (a prefix match alone would pass even if resolveSkillsPluginDir pointed at a sibling/stale
+// hash directory under the same outRoot).
+test("resolveSkillsPluginDir: production composition — returns the EXACT dir renderSkillsPlugin published for the same (securityMdPath, outRoot), not merely a prefix match", () => {
+  const root = mkTmpDir();
+  try {
+    mkdirSync(join(root, "docs"), { recursive: true });
+    writeFileSync(join(root, "docs", "security.md"), FIXTURE_SECURITY_MD, "utf8");
+    const outRoot = join(root, "data", "generated", "role-skills");
+    const securityMdPath = join(root, "docs", "security.md");
+
+    const resolved = resolveSkillsPluginDir({ roles: { skills: { enabled: true } } }, root);
+    const published = renderSkillsPlugin({ securityMdPath, outRoot });
+
+    assert.equal(
+      resolved,
+      published.dir,
+      "resolveSkillsPluginDir's return value must be path-identical to renderSkillsPlugin's own published dir",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

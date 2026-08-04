@@ -2418,7 +2418,7 @@ test("run: #253 no RoleRunnerDeps.defaultProxy and no opts.proxy -> today's beha
 
 // ── #639: role-session skill injection (--plugin-dir) ──────────────────────────────────────
 
-test("run (#639): RoleRunnerDeps.defaultSkillsPluginDir is used when a session's own RoleSessionOpts.pluginDir is omitted — 'peripheral-role' is YES per the injection policy table", async () => {
+test("run (#639): RoleRunnerDeps.defaultSkillsPluginDir applies to a peripheral-role session — 'peripheral-role' is YES per the injection policy table", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(
@@ -2437,31 +2437,7 @@ test("run (#639): RoleRunnerDeps.defaultSkillsPluginDir is used when a session's
   }
 });
 
-test("run (#639): a session's OWN RoleSessionOpts.pluginDir wins over RoleRunnerDeps.defaultSkillsPluginDir — never silently overridden", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
-  try {
-    const bin = mkStub(
-      dir,
-      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
-    );
-    const runner = mkRunner(dir, bin, { defaultSkillsPluginDir: "/data/generated/role-skills/default" });
-    const result = await runner.run({
-      roleId: "architect",
-      prompt: "p",
-      model: "sonnet",
-      effort: "medium",
-      fallbackModel: "sonnet",
-      pluginDir: "/data/generated/role-skills/per-call",
-    });
-    assert.equal(result.outcome, "done");
-    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
-    assert.equal(seen[seen.indexOf("--plugin-dir") + 1], "/data/generated/role-skills/per-call");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("run (#639): no RoleRunnerDeps.defaultSkillsPluginDir and no opts.pluginDir -> no --plugin-dir flag at all — the disabled-path byte-identical-argv regression", async () => {
+test("run (#639): no RoleRunnerDeps.defaultSkillsPluginDir -> no --plugin-dir flag at all — the disabled-path byte-identical-argv regression", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(
@@ -2498,31 +2474,6 @@ test("run (#639): reviewCwd NEVER attaches a skills plugin dir — structurally 
     assert.equal(result.outcome, "done");
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     assert.ok(!seen.includes("--plugin-dir"), "a review session must never receive --plugin-dir, even with a RoleRunner-wide default set");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(materializedDir, { recursive: true, force: true });
-  }
-});
-
-test("run (#639): reviewCwd combined with an explicit opts.pluginDir is refused (caller bug, not a silent override) — a review session never attaches a skills plugin dir", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
-  const materializedDir = mkdtempSync(join(tmpdir(), "sapwood-role-materialized-"));
-  try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\necho should-not-spawn\nexit 0\n`);
-    const runner = mkRunner(dir, bin);
-    await assert.rejects(
-      () =>
-        runner.run({
-          roleId: "engine-reviewer",
-          prompt: "review this diff",
-          model: "opus",
-          effort: "high",
-          fallbackModel: "none",
-          reviewCwd: materializedDir,
-          pluginDir: "/data/generated/role-skills/deadbeef",
-        }),
-      /reviewCwd/,
-    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(materializedDir, { recursive: true, force: true });
