@@ -1636,6 +1636,31 @@ export interface AlignDeps {
   planMdPath?: string;
 }
 
+/** #621: is there anything THIS round's align-CREATION (decompose) session would actually be
+ *  reacting to? An empty Ready pool (this round's milestone scope, same read architect.ts's own
+ *  empty-pool short-circuit uses) with no lane CARRIED over a round boundary (probe-signals.ts's
+ *  own #433 vocabulary: "a CARRIED lane is work" — active/handoff/gated-reentry, the same trio
+ *  that file's `active-lanes`/`handoff-resume-candidates`/`gated-reentry-candidates` signals
+ *  read) means the session would dispatch into a provable no-op: nothing dispatchable, nothing
+ *  mid-flight to reconsider. Local (SQLite) reads first, same cheapest-first ordering
+ *  probe-signals.ts uses, so the one network call (getReadyIssues) is skipped whenever a carried
+ *  lane alone already answers the question. Never gates the TRIAGE pass below, which is already
+ *  naturally free of this cost (it only dispatches a session per actual planless candidate).
+ *
+ *  `roundId <= 1` is exempt (same "no possible prior round" cutoff round-defaults.ts's own
+ *  renderLastMergedFromArtifact uses): round.ts's own standby doc is explicit that "the first
+ *  round of a run ALWAYS opens, giving the PO its decomposition shot" even over an all-empty
+ *  probe — an empty Ready pool on round 1 is exactly the fresh/unscoped-repo case decompose
+ *  exists to bootstrap FROM, never evidence there is nothing to do. Skipping it there would
+ *  defeat the entire reason round 1 is allowed to open in the first place. */
+async function alignCreationHasNothingToDo(forge: IForge, state: State, roundId: number): Promise<boolean> {
+  if (roundId <= 1) return false;
+  if (state.activeWorkers().length > 0) return false;
+  if (state.handoffWorkers().length > 0) return false;
+  if (state.gatedFailedWorkers().length > 0) return false;
+  return (await forge.getReadyIssues()).length === 0;
+}
+
 /** Builds the `aligning` phase's PeripheralStub. Idempotent at the round-ledger granularity
  *  (same rerun-not-resume contract as plan-review.ts's createPlanReviewStub): a non-null
  *  incoming marker means a PRIOR attempt this round already ran and externalized this phase's
@@ -1753,6 +1778,23 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           issues: persistedProposals.map(({ title, body }) => ({ title, body })),
           concerns: priorProgress.concerns ?? [],
         };
+      } else if (await alignCreationHasNothingToDo(deps.forge, deps.state, roundId)) {
+        // #621: an empty Ready pool with no carried lane — the align-creation session would pay
+        // judgment-tier price to reproduce "nothing to do". Skip it outright: no goal-file read,
+        // no session, no spend. `align-skipped` is the durable record (never a fabricated
+        // WAL/ledger spend entry — this branch never touches the spend ledger at all); triage
+        // (below, unconditional) is untouched, and the round proceeds through its remaining
+        // phases exactly as it would on any other degrade-open outcome.
+        try {
+          deps.state.appendEvent("align-skipped", { round_id: roundId, reason: "empty-pool" });
+        } catch (e) {
+          (deps.log ?? console.error)(`[sapwood:po] round ${roundId}: failed to record the align-skipped honesty event: ${String(e)}`);
+        }
+        (deps.log ?? console.error)(
+          `[sapwood:po] round ${roundId}: Ready pool empty and no carried lane — skipping the po-align session ` +
+            `this pass (triage still proceeds unaffected)`,
+        );
+        alignValidated = { ok: true, issues: [], concerns: [] };
       } else {
         const goalFilePath = deps.planMdPath ?? deps.cfg.goal.file;
         const planRead = readPlanMd(goalFilePath);
