@@ -48,6 +48,13 @@ import { MergeDriver } from "./roles/merge-driver.js";
 import { RoleRunner, type RoleRunnerDeps } from "./roles/peripheral.js";
 import { makeFallbackReviewers, makeReviewer } from "./roles/reviewer.js";
 import { buildRenderFixPrompt, buildRenderPrompt, discoverClaudeBin, probeLlmPing, WorkerSupervisor } from "./roles/worker.js";
+// #642: event-kinds registry validation for `events --kind`/`--exclude-kind` arguments (the
+// #425 registry's own doc: "add [a narrowing guard] with its first real caller" — this is it).
+import { EVENT_KIND_NAMES, isKnownEventKind } from "./state/event-kinds/index.js";
+// #642: the shared read-model — `status --json`/`events` build their DTOs off this module,
+// the SAME one dashboard/server.ts's routes now import from (read-model.ts's own header
+// comment has the full extraction rationale).
+import { buildStatusDTO, MAX_PAGE_LIMIT, READ_MODEL_FORMAT_VERSION, resolveConfigProvenance } from "./state/read-model.js";
 import {
   DEFAULT_DB_PATH,
   INSTANCE_LOCK_FILENAME,
@@ -55,6 +62,7 @@ import {
   type ParkRow,
   type ParkSource,
   SCHEMA_VERSION,
+  SqliteBusyError,
   State,
   type WorkerRow,
 } from "./state/state.js";
@@ -80,6 +88,13 @@ Commands:
     --dry-run      Preview what would be dispatched + a cost estimate, then exit
                    (no worker spawned, no state written)
   status [db-path]  Read engine state straight from SQLite (no live session needed)
+    --json         Machine-readable status (formatVersion 1) instead of the text summary
+  events [db-path]  Read the event ledger straight from SQLite (the codified monitor recipe)
+    --since-id N       Only events with id > N (default 0)
+    --kind K           Only this kind (repeatable; not combinable with --exclude-kind)
+    --exclude-kind K   Every kind EXCEPT this one (repeatable; not combinable with --kind)
+    --limit N          Page size, hard-capped (see --help)
+    --json             Machine-readable events instead of the text listing
   park clear     Clear a park episode receipt-first (refuses under a live engine)
     --source SOURCE  Clear only this park source (default: every open episode)
   validate [path]  Load + validate a sapwood config file, report OK or the issues
@@ -282,7 +297,7 @@ export function parseMilestoneFlag(argv: string[]): { rest: string[]; milestone?
 }
 
 const STATUS_USAGE = `\
-usage: sapwood status [db-path]
+usage: sapwood status [db-path] [--json]
 
 Read the engine's SQLite state DB directly (no live engine session required) and print
 a human-readable summary: active lanes/workers, PRs awaiting the review gate, spend vs
@@ -295,6 +310,18 @@ ones shown as "unknown".
 
 Flags:
   --config <path>  Load config from this path instead of probing the defaults
+  --json           Print a machine-readable DTO (formatVersion 1) instead of the text
+                    summary above — a DOCUMENTED PROJECTION (never a raw DB row), additive-
+                    only: a future sapwood may add fields to this shape, never remove/rename/
+                    retype one at this format version, and a client MUST ignore fields it
+                    does not recognize rather than fail on them (#642). Spend is reported as
+                    settled-per-worker + unclassified + an explicit incompleteness flag —
+                    never a fabricated $0.00 for spend this DTO could not attribute (e.g.
+                    #612's engine-review sessions, until #645's follow-up gives them their
+                    own line). The config section is available (with provenance = the
+                    resolved path) only when loadConfig actually succeeded — same "unknown
+                    on a config error" stance the text summary above already has, now
+                    structural (\`{available: false}\`) instead of the string "unknown".
   --help, -h       Print this help and exit
 `;
 
@@ -466,17 +493,24 @@ export interface StatusArgs {
   error?: string | undefined;
   dbPath: string;
   configPath?: string | undefined;
+  /** #642: `--json` — print the machine-readable StatusDTO instead of formatStatus's text. */
+  json: boolean;
 }
 
 export function parseStatusArgs(argv: string[]): StatusArgs {
   const args = argv.slice(3);
   if (args.includes("--help") || args.includes("-h")) {
-    return { help: true, dbPath: "data/sapwood.sqlite" };
+    return { help: true, dbPath: "data/sapwood.sqlite", json: false };
   }
   const positionals: string[] = [];
   let configPath: string | undefined;
+  let json = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
+    if (a === "--json") {
+      json = true;
+      continue;
+    }
     if (a === "--config") {
       // Value-taking flag: the operand must exist and not be another flag — `--config` at the
       // end of the line (silently loading the DEFAULT config) or `--config --bogus` (silently
@@ -484,18 +518,18 @@ export function parseStatusArgs(argv: string[]): StatusArgs {
       // exit 0 (Codex PR #70 P2). Fail closed instead.
       const next = args[i + 1];
       if (next === undefined || next.startsWith("-")) {
-        return { help: false, error: "--config requires a path", dbPath: "data/sapwood.sqlite" };
+        return { help: false, error: "--config requires a path", dbPath: "data/sapwood.sqlite", json: false };
       }
       configPath = next;
       i++;
       continue;
     }
     if (a.startsWith("-")) {
-      return { help: false, error: `unknown flag: ${a}`, dbPath: "data/sapwood.sqlite" };
+      return { help: false, error: `unknown flag: ${a}`, dbPath: "data/sapwood.sqlite", json: false };
     }
     positionals.push(a);
   }
-  return { help: false, dbPath: positionals[0] ?? "data/sapwood.sqlite", configPath };
+  return { help: false, dbPath: positionals[0] ?? "data/sapwood.sqlite", configPath, json };
 }
 
 /** Everything `sapwood status` reports, gathered from the DB (+ config, best-effort) — kept
@@ -619,13 +653,27 @@ export function formatStatus(s: StatusSnapshot): string {
  *  no journal-mode switch — status must never mutate/upgrade a DB an engine process (possibly
  *  an older engine) is still using. A schema version this engine's queries don't understand —
  *  newer OR older — is reported as a clear message instead of migrated over. */
+/** #642: `SqliteBusyError` -> the CLI's own structured/text rendering, shared by `status --json`
+ *  and `events` — a locked writer must produce this within the finite busy timeout (state.ts's
+ *  own doc), never a hang, and never the raw node:sqlite message. `--json` gets a structured
+ *  `{formatVersion, error: {kind: "busy", timeoutMs, message}}` body on stderr; the text path
+ *  gets one clean line. Exit 1 either way — a busy DB is a real failure to retry, not a "nothing
+ *  to show" success. */
+function busyResult(command: string, e: SqliteBusyError, json: boolean): { stdout: string; stderr: string; code: number } {
+  if (json) {
+    const body = { formatVersion: READ_MODEL_FORMAT_VERSION, error: { kind: "busy" as const, timeoutMs: e.timeoutMs, message: e.message } };
+    return { stdout: "", stderr: `${JSON.stringify(body)}\n`, code: 1 };
+  }
+  return { stdout: "", stderr: `sapwood ${command}: ${e.message}\n`, code: 1 };
+}
+
 export function runStatus(argv: string[]): { stdout: string; stderr: string; code: number } {
   const parsed = parseStatusArgs(argv);
   if (parsed.help) return { stdout: STATUS_USAGE, stderr: "", code: 0 };
   if (parsed.error) {
     return { stdout: "", stderr: `sapwood status: ${parsed.error}\n\n${STATUS_USAGE}`, code: 1 };
   }
-  const { dbPath, configPath } = parsed;
+  const { dbPath, configPath, json } = parsed;
   if (!existsSync(dbPath)) {
     return { stdout: `sapwood status: no state DB at ${dbPath} — engine has never run\n`, stderr: "", code: 0 };
   }
@@ -635,42 +683,310 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
   } catch {
     cfg = undefined; // reported as "unknown" fields, never fatal — the DB read is the point
   }
-  const state = new State(dbPath, { readOnly: true });
+  let state: State;
   try {
-    const dbVersion = state.userVersion();
-    if (dbVersion !== SCHEMA_VERSION) {
-      const hint =
-        dbVersion > SCHEMA_VERSION
-          ? "newer than this sapwood understands — upgrade sapwood"
-          : "older than this sapwood — run the engine (sapwood run) to migrate it; status never migrates";
-      return {
-        stdout: "",
-        stderr: `sapwood status: DB schema v${dbVersion} at ${dbPath} is ${hint} (engine schema v${SCHEMA_VERSION})\n`,
-        code: 1,
+    state = new State(dbPath, { readOnly: true });
+  } catch (e) {
+    // #642: a locked writer at OPEN time (the constructor's own probe read) — see busyResult's
+    // doc. Every other open failure (corruption, an unreadable file) is unchanged: it still
+    // propagates uncaught, exactly as before this existed.
+    if (e instanceof SqliteBusyError) return busyResult("status", e, json);
+    throw e;
+  }
+  try {
+    // #642 (Codex gate② round-1 P1 finding 2): the ENTIRE read sequence below — schema check
+    // through DTO/snapshot construction — runs inside withBusyNormalization, so a lock acquired
+    // by another connection AFTER the open above (which the constructor's own probe already
+    // handles) surfaces on ANY of these reads as the same structured SqliteBusyError, not a raw
+    // node:sqlite error from whichever individual State method happened to hit it.
+    return state.withBusyNormalization(() => {
+      const dbVersion = state.userVersion();
+      if (dbVersion !== SCHEMA_VERSION) {
+        const hint =
+          dbVersion > SCHEMA_VERSION
+            ? "newer than this sapwood understands — upgrade sapwood"
+            : "older than this sapwood — run the engine (sapwood run) to migrate it; status never migrates";
+        return {
+          stdout: "",
+          stderr: `sapwood status: DB schema v${dbVersion} at ${dbPath} is ${hint} (engine schema v${SCHEMA_VERSION})\n`,
+          code: 1,
+        };
+      }
+      const reconcile = parseReconcileCompleted(state.latestEvent("reconcile-completed")?.payload);
+      const concernEvents = state.eventsAfterId(0, ["concern-posted", "concern-adjudicated"]);
+      const unadjudicated = unadjudicatedConcerns(concernEvents).size;
+      // #403: deliberate wall-clock read. `sapwood status` reports TODAY's spend/DTO generation
+      // time as of the moment the operator runs it — a composition root, hence systemClock.
+      const now = systemClock();
+      if (json) {
+        const dto = buildStatusDTO({
+          state,
+          dbPath,
+          schemaVersion: dbVersion,
+          cfg: cfg ?? null,
+          configProvenance: cfg ? resolveConfigProvenance(configPath, existsSync) : undefined,
+          now,
+          unadjudicatedConcerns: unadjudicated,
+        });
+        return { stdout: `${JSON.stringify(dto)}\n`, stderr: "", code: 0 };
+      }
+      const snapshot: StatusSnapshot = {
+        dbPath,
+        schemaVersion: dbVersion,
+        active: state.activeWorkers(),
+        driving: state.drivingWorkers(),
+        killSwitchActive: state.isKillSwitchActive(),
+        pauseActive: state.isPauseActive(),
+        ceilingBreach: state.ceilingBreach(),
+        dailySpendUsd: state.dailySpendUsd(now),
+        lanesMax: cfg?.lanes.max ?? null,
+        dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
+        parked: state.parkedSources(),
+        orphanReport: reconcile ? { orphans: reconcile.orphans, overflow: reconcile.overflow } : null,
+        unadjudicatedConcerns: unadjudicated,
+        baseCiRed: baseRedPin(state),
       };
+      return { stdout: formatStatus(snapshot), stderr: "", code: 0 };
+    });
+  } catch (e) {
+    if (e instanceof SqliteBusyError) return busyResult("status", e, json);
+    throw e;
+  } finally {
+    state.close();
+  }
+}
+
+// ── #642: `sapwood events` — the codified dogfood monitor recipe, DB-only ──────────────────
+
+/** #642: the terminal-friendly default page size for `events`' TEXT output — deliberately
+ *  smaller than the dashboard's own DEFAULT_PAGE_LIMIT (500, read-model.ts): an operator
+ *  glancing at a terminal wants a screenful, a polling dashboard client wants a bigger batch.
+ *  The CAP (MAX_PAGE_LIMIT, shared with the dashboard) is the one number that must agree
+ *  between the two surfaces; the default does not need to. */
+const DEFAULT_EVENTS_LIMIT = 100;
+
+/** #642: the busy_timeout `events` applies to its readOnly open/query — a smallish, finite wait
+ *  (state.ts's DEFAULT_READONLY_BUSY_TIMEOUT_MS doc explains the "finite and non-zero" choice;
+ *  this reuses that same default rather than inventing a second number with no reason to
+ *  differ). */
+const EVENTS_BUSY_TIMEOUT_MS = 2000;
+
+const EVENTS_USAGE = `\
+usage: sapwood events [db-path] [options]
+
+Read the engine's event ledger straight from SQLite (no live engine session required) — the
+codified dogfood "monitor recipe" (#642): the same kind-filtered, id-cursor read a hand-rolled
+polling loop used to reimplement per session, now one contract shared with the dashboard's own
+\`/api/events\`.
+
+Defaults to data/sapwood.sqlite (the same path \`sapwood run\` writes to).
+
+Flags:
+  --since-id N       Only events with id > N (default 0; must be a non-negative integer)
+  --kind K           Only events of this kind (repeatable — ORs together). Not combinable
+                     with --exclude-kind (ambiguous precedence — pick one). An unknown kind
+                     name is a REJECTED argument, naming the valid kinds from the #425
+                     registry — an unrecognized kind ON A DB ROW (e.g. one a newer engine
+                     wrote) is a different case and is always passed through opaque, never
+                     rejected.
+  --exclude-kind K   Every kind EXCEPT this one (repeatable). Not combinable with --kind.
+  --limit N          Page size (default ${DEFAULT_EVENTS_LIMIT}). Must be a positive integer,
+                     hard-capped at ${MAX_PAGE_LIMIT} — a request above the cap is REJECTED
+                     (not silently clamped): a script that asked for N and silently got fewer
+                     is a worse failure mode than a clear error naming the cap.
+  --json             Print a machine-readable DTO (formatVersion 1) instead of the text
+                     listing below — same additive-only/clients-ignore-unknown contract as
+                     \`status --json\` (#642). Includes \`nextSinceId\`: the cursor for the NEXT
+                     call — defined even on an empty filtered page (advances to the ledger's
+                     current tail rather than leaving a poller stuck rescanning the same
+                     range forever), and \`snapshot.mode\` ("live" or "immutable-fallback" —
+                     see below).
+  --help, -h         Print this help and exit
+
+The kind filter is applied to the SQL WHERE clause BEFORE \`--limit\` — \`--kind merged --limit
+50\` returns up to 50 MERGED events, never up to 50 raw events filtered down to fewer.
+
+A writer holding the DB locked past a short, finite timeout is reported as a clear "busy, try
+again" failure (exit 1) — never a hang. Reading through a read-only FILESYSTEM falls back to an
+immutable snapshot that cannot see a currently-running engine's uncommitted-to-main rows; this
+is reported (stderr, and \`snapshot.mode\` under --json), never silently under-reported as if it
+were a live read.
+`;
+
+export interface EventsArgs {
+  help: boolean;
+  error?: string | undefined;
+  dbPath: string;
+  sinceId: number;
+  kinds: string[];
+  excludeKinds: string[];
+  limit: number;
+  json: boolean;
+}
+
+const EVENTS_DEFAULTS = {
+  dbPath: DEFAULT_DB_PATH,
+  sinceId: 0,
+  kinds: [] as string[],
+  excludeKinds: [] as string[],
+  limit: DEFAULT_EVENTS_LIMIT,
+  json: false,
+};
+
+export function parseEventsArgs(argv: string[]): EventsArgs {
+  const args = argv.slice(3);
+  if (args.includes("--help") || args.includes("-h")) {
+    return { help: true, ...EVENTS_DEFAULTS };
+  }
+  const fail = (error: string): EventsArgs => ({ help: false, error, ...EVENTS_DEFAULTS });
+
+  const positionals: string[] = [];
+  let sinceId = 0;
+  const kinds: string[] = [];
+  const excludeKinds: string[] = [];
+  let limit = DEFAULT_EVENTS_LIMIT;
+  let json = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--json") {
+      json = true;
+      continue;
     }
-    const reconcile = parseReconcileCompleted(state.latestEvent("reconcile-completed")?.payload);
-    const concernEvents = state.eventsAfterId(0, ["concern-posted", "concern-adjudicated"]);
-    const snapshot: StatusSnapshot = {
-      dbPath,
-      schemaVersion: dbVersion,
-      active: state.activeWorkers(),
-      driving: state.drivingWorkers(),
-      killSwitchActive: state.isKillSwitchActive(),
-      pauseActive: state.isPauseActive(),
-      ceilingBreach: state.ceilingBreach(),
-      // #403: deliberate wall-clock read. `sapwood status` reports TODAY's spend as of the
-      // moment the operator runs it; there is no seeded date anywhere on this path and no
-      // caller that would want a different day. This is a composition root, hence systemClock.
-      dailySpendUsd: state.dailySpendUsd(systemClock()),
-      lanesMax: cfg?.lanes.max ?? null,
-      dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
-      parked: state.parkedSources(),
-      orphanReport: reconcile ? { orphans: reconcile.orphans, overflow: reconcile.overflow } : null,
-      unadjudicatedConcerns: unadjudicatedConcerns(concernEvents).size,
-      baseCiRed: baseRedPin(state),
-    };
-    return { stdout: formatStatus(snapshot), stderr: "", code: 0 };
+    if (a === "--since-id") {
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith("-")) return fail("--since-id requires a value");
+      // #642 (Codex gate② round-1 P2 finding 4): CANONICAL decimal only. Number("0x10") is 16,
+      // Number("1e3") is 1000 — plain-old-JS-numeric-literal forms nobody types as a cursor, and
+      // silently accepting them means "--since-id 1e3" and "--since-id 1000" pick different-
+      // looking rows for no operator-visible reason. /^\d+$/ rejects both (and any leading `+`/
+      // decimal point) BEFORE Number() ever sees the string. Number.isSafeInteger below then
+      // rejects a canonical-looking value too large to represent exactly (e.g. a 20-digit
+      // string) — silently truncating/rounding a cursor id is worse than refusing it.
+      if (!/^\d+$/.test(next)) return fail(`--since-id requires a non-negative integer, got: ${next}`);
+      const n = Number(next);
+      if (!Number.isSafeInteger(n)) return fail(`--since-id requires a non-negative integer, got: ${next}`);
+      sinceId = n;
+      i++;
+      continue;
+    }
+    if (a === "--limit") {
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith("-")) return fail("--limit requires a value");
+      // Same canonical-decimal-only stance as --since-id above (Codex P2 finding 4) — a page
+      // size is likewise an operator/script-typed integer, never a JS numeric-literal form.
+      if (!/^\d+$/.test(next)) return fail(`--limit requires a positive integer, got: ${next}`);
+      const n = Number(next);
+      if (n < 1) return fail(`--limit requires a positive integer, got: ${next}`);
+      if (n > MAX_PAGE_LIMIT) return fail(`--limit ${n} exceeds the hard cap of ${MAX_PAGE_LIMIT}`);
+      limit = n;
+      i++;
+      continue;
+    }
+    if (a === "--kind" || a === "--exclude-kind") {
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith("-")) return fail(`${a} requires a value`);
+      if (!isKnownEventKind(next)) {
+        return fail(`unknown ${a}: ${next} (valid kinds: ${EVENT_KIND_NAMES.join(", ")})`);
+      }
+      (a === "--kind" ? kinds : excludeKinds).push(next);
+      i++;
+      continue;
+    }
+    if (a.startsWith("-")) return fail(`unknown flag: ${a}`);
+    positionals.push(a);
+  }
+  // #642 AC5: --kind + --exclude-kind together is REJECTED, never an invented precedence (which
+  // one would win — an intersection? a union? neither is what either flag alone means).
+  if (kinds.length > 0 && excludeKinds.length > 0) {
+    return fail("--kind and --exclude-kind cannot combine (ambiguous precedence — pick one)");
+  }
+  return { help: false, dbPath: positionals[0] ?? DEFAULT_DB_PATH, sinceId, kinds, excludeKinds, limit, json };
+}
+
+/** One event row for `events`' text listing — same fields the `--json` DTO's `events` array
+ *  carries, printed one per line. */
+function formatEventsText(
+  dbPath: string,
+  snapshotMode: "live" | "immutable-fallback",
+  rows: { id: number; ts: string; kind: string; payload: unknown }[],
+  nextSinceId: number,
+): string {
+  const lines = [
+    `sapwood events — ${dbPath}` + (snapshotMode === "immutable-fallback" ? " (immutable snapshot — live WAL frames not visible)" : ""),
+  ];
+  if (rows.length === 0) {
+    lines.push("(no matching events)");
+  } else {
+    for (const r of rows) lines.push(`#${r.id}  ${r.ts}  ${r.kind}  ${JSON.stringify(r.payload)}`);
+  }
+  lines.push(`nextSinceId: ${nextSinceId}`);
+  return lines.join("\n") + "\n";
+}
+
+/** `sapwood events`: DB-only (no forge/GitHub read — the gated/needs-human queues live on
+ *  GitHub and stay gh-side, per this issue's own non-goals), fully synchronous like
+ *  status/validate/park. Opens read-only with a finite busy timeout (state.ts's own doc) and a
+ *  short-lived read transaction per call (eventsPageFiltered's own doc) — never a long-held
+ *  handle across multiple statements. */
+export function runEvents(argv: string[]): { stdout: string; stderr: string; code: number } {
+  const parsed = parseEventsArgs(argv);
+  if (parsed.help) return { stdout: EVENTS_USAGE, stderr: "", code: 0 };
+  if (parsed.error) {
+    return { stdout: "", stderr: `sapwood events: ${parsed.error}\n\n${EVENTS_USAGE}`, code: 1 };
+  }
+  const { dbPath, sinceId, kinds, excludeKinds, limit, json } = parsed;
+  if (!existsSync(dbPath)) {
+    return { stdout: `sapwood events: no state DB at ${dbPath} — engine has never run\n`, stderr: "", code: 0 };
+  }
+  let state: State;
+  try {
+    state = new State(dbPath, { readOnly: true, busyTimeoutMs: EVENTS_BUSY_TIMEOUT_MS });
+  } catch (e) {
+    if (e instanceof SqliteBusyError) return busyResult("events", e, json);
+    throw e;
+  }
+  try {
+    // #642 (Codex gate② round-1 P1 finding 2): same whole-read-sequence busy normalization as
+    // runStatus above — schema check through DTO/text construction, not just eventsPageFiltered
+    // (which already normalizes internally) or the constructor's own open-time probe.
+    return state.withBusyNormalization(() => {
+      const dbVersion = state.userVersion();
+      if (dbVersion !== SCHEMA_VERSION) {
+        const hint =
+          dbVersion > SCHEMA_VERSION
+            ? "newer than this sapwood understands — upgrade sapwood"
+            : "older than this sapwood — run the engine (sapwood run) to migrate it; events never migrates";
+        return {
+          stdout: "",
+          stderr: `sapwood events: DB schema v${dbVersion} at ${dbPath} is ${hint} (engine schema v${SCHEMA_VERSION})\n`,
+          code: 1,
+        };
+      }
+      const filter = kinds.length > 0 ? { kinds } : excludeKinds.length > 0 ? { excludeKinds } : {};
+      // #642 (Codex gate② round-1 P1 finding 1): `tailId` comes back from the SAME call, the
+      // SAME transaction/snapshot as `rows` — never a separate later `state.maxEventId()` call,
+      // which is what let a matching event committed between the two reads get silently skipped
+      // (eventsPageFiltered's own doc has the full race). `nextSinceId` on an empty page is that
+      // shared tail, not a fresh independent read.
+      const { rows, tailId } = state.eventsPageFiltered(sinceId, filter, limit);
+      // #642 AC5: an EMPTY filtered page still advances the cursor — a filtered `WHERE...LIMIT`
+      // query with zero rows means (SQL evaluates the whole predicate, LIMIT only bounds OUTPUT)
+      // that literally no matching event exists anywhere after sinceId, AS OF THE SAME SNAPSHOT
+      // `tailId` was read from — so jumping the cursor to `tailId` never skips a real event: any
+      // event that could match was either already in that snapshot (and would have matched) or
+      // committed AFTER it (and is therefore still ahead of `tailId`, so a later call with
+      // sinceId=tailId will see it).
+      const nextSinceId = rows.length > 0 ? rows[rows.length - 1]!.id : Math.max(sinceId, tailId);
+      const snapshotMode: "live" | "immutable-fallback" = state.isImmutableSnapshot() ? "immutable-fallback" : "live";
+      if (json) {
+        const dto = { formatVersion: READ_MODEL_FORMAT_VERSION, dbPath, snapshot: { mode: snapshotMode }, events: rows, nextSinceId };
+        return { stdout: `${JSON.stringify(dto)}\n`, stderr: "", code: 0 };
+      }
+      return { stdout: formatEventsText(dbPath, snapshotMode, rows, nextSinceId), stderr: "", code: 0 };
+    });
+  } catch (e) {
+    if (e instanceof SqliteBusyError) return busyResult("events", e, json);
+    throw e;
   } finally {
     state.close();
   }
@@ -836,6 +1152,9 @@ export function runCli(argv: string[]): CliResult {
   }
   if (arg === "status") {
     return runStatus(argv);
+  }
+  if (arg === "events") {
+    return runEvents(argv);
   }
   if (arg === "park") {
     return runPark(argv);

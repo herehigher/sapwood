@@ -953,25 +953,78 @@ function isReadOnlyFsError(e: unknown): boolean {
   return /readonly|read-only|unable to open/i.test(String((e as { message?: unknown }).message ?? ""));
 }
 
-/** Open a DB read-only for `sapwood status`. See the State constructor's readOnly doc for the
- *  full rationale; this is factored out so the normal-open-then-immutable-fallback control
- *  flow reads cleanly. Never mutates sapwood state (query_only, no migrations). */
-function openReadOnly(path: string, isMemory: boolean): DatabaseSync {
-  // In-memory handles (tests) have no on-disk file and no WAL sidecar concern.
+/** True when a SQLite error means "another connection holds a lock this read couldn't get past
+ *  within its busy_timeout" (#642: `sapwood events`'/`status --json`'s structured busy-error
+ *  contract). SQLITE_BUSY is primary code 5; the extended variants (SQLITE_BUSY_RECOVERY = 261,
+ *  SQLITE_BUSY_SNAPSHOT = 517) both mask to the same primary byte. Same errcode-then-message-
+ *  fallback shape as isReadOnlyFsError above, for the same "node:sqlite doesn't always attach a
+ *  numeric code" reason. */
+function isBusyError(e: unknown): boolean {
+  const code = (e as { errcode?: unknown }).errcode;
+  if (typeof code === "number") return (code & 0xff) === 5 /* SQLITE_BUSY */;
+  return /database is locked|busy/i.test(String((e as { message?: unknown }).message ?? ""));
+}
+
+/** #642: the structured failure a read-only caller (`sapwood events`, `status --json`) gets
+ *  when a writer holds the DB locked past `timeoutMs` — a NAMED error class instead of the raw
+ *  node:sqlite message, so a CLI catch site can render a clean "busy, try again" line (and a
+ *  `--json` caller can emit `{error: {kind: "busy", timeoutMs}}`) rather than a stack trace.
+ *  Never thrown by a WRITE-mode State (single-writer-serial via the instance lock, #382) — only
+ *  the readOnly open/query path below constructs one. */
+export class SqliteBusyError extends Error {
+  readonly kind = "busy" as const;
+  constructor(
+    readonly timeoutMs: number,
+    cause: unknown,
+  ) {
+    super(`sapwood: database busy — a writer held the lock for longer than the ${timeoutMs}ms busy timeout`);
+    this.name = "SqliteBusyError";
+    this.cause = cause;
+  }
+}
+
+/** #642: the default finite busy timeout every readOnly State open applies (via `PRAGMA
+ *  busy_timeout`) before this module's own probe read. Finite and non-zero on purpose: 0 (the
+ *  SQLite default) fails on the FIRST instant of contention with a live engine's own
+ *  single-statement writes, which are typically sub-millisecond — a short wait absorbs that
+ *  ordinary race instead of surfacing it as an error every time a poller's tick lands mid-write.
+ *  Callers that need a SHORTER, deterministic window for testing (proving the busy path without
+ *  a real multi-second wait) pass `busyTimeoutMs` explicitly — see state.test.ts's locking
+ *  fixture. */
+export const DEFAULT_READONLY_BUSY_TIMEOUT_MS = 2000;
+
+/** Open a DB read-only for `sapwood status`/`sapwood events`. See the State constructor's
+ *  readOnly doc for the full rationale; this is factored out so the normal-open-then-immutable-
+ *  fallback control flow reads cleanly. Never mutates sapwood state (query_only, no migrations).
+ *
+ *  #642: returns `immutableFallback` alongside the handle — the constructor stores it so a
+ *  caller (status --json's `snapshot.mode`, events' same field) can report the degraded-snapshot
+ *  condition STRUCTURALLY instead of only via the stderr line already printed below (kept,
+ *  unchanged, for the plain-text callers that predate this). Also sets a finite `busy_timeout`
+ *  BEFORE the probe read, so contention with a live writer waits up to `busyTimeoutMs` and
+ *  raises the structured SqliteBusyError above instead of either hanging (it can't — the
+ *  timeout is finite) or failing on the very first instant of contention (timeout 0). */
+function openReadOnly(path: string, isMemory: boolean, busyTimeoutMs: number): { db: DatabaseSync; immutableFallback: boolean } {
+  // In-memory handles (tests) have no on-disk file and no WAL sidecar concern, hence no busy
+  // contention with a second connection to probe for either.
   if (isMemory) {
     const db = new DatabaseSync(path, { readOnly: true });
     db.exec("PRAGMA query_only = ON");
-    return db;
+    return { db, immutableFallback: false };
   }
   try {
     const db = new DatabaseSync(path, { readOnly: true });
+    // Local pragmas — never touch the file, so neither can itself raise SQLITE_BUSY. Set BEFORE
+    // the probe read below so the probe (the first real file access) is the one that honors it.
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
     db.exec("PRAGMA query_only = ON");
     // Probe: forces the -shm access a WAL DB needs, so a read-only-FS failure lands HERE
     // (where we can fall back) rather than later mid-status. On a writable FS this may
     // create SQLite's own -wal/-shm coordination files — acceptable (not sapwood state).
     db.prepare("PRAGMA user_version").get();
-    return db;
+    return { db, immutableFallback: false };
   } catch (e) {
+    if (isBusyError(e)) throw new SqliteBusyError(busyTimeoutMs, e);
     if (!isReadOnlyFsError(e)) throw e;
     // Read-only filesystem: SQLite can't create the -shm needed to read live WAL frames.
     // Fall back to immutable (reads the main DB directly, zero file creation) and warn that
@@ -983,7 +1036,7 @@ function openReadOnly(path: string, isMemory: boolean): DatabaseSync {
     );
     const db = new DatabaseSync(`${pathToFileURL(path).href}?immutable=1`, { readOnly: true });
     db.exec("PRAGMA query_only = ON");
-    return db;
+    return { db, immutableFallback: true };
   }
 }
 
@@ -1614,6 +1667,18 @@ export class State {
   // in-memory handles tests use — there is no directory to watch, so the kill switch is
   // always inactive there (tests inject their own via a real tmp-dir State instead).
   private readonly dataDir: string | null;
+  // #642: true iff this readOnly handle took openReadOnly's immutable-fallback branch (a
+  // read-only filesystem, so live WAL frames are not visible). Always false for a write-mode
+  // handle. Surfaced via isImmutableSnapshot() so a caller can report the degraded-snapshot
+  // condition structurally (status --json / events --json's `snapshot.mode`), not only via the
+  // stderr line openReadOnly already prints.
+  private readonly immutableFallback: boolean;
+  // #642: the busy_timeout this handle's readOnly open applied (or DEFAULT_READONLY_BUSY_TIMEOUT_MS
+  // for a write-mode handle, which never hits this path — recorded anyway so SqliteBusyError's
+  // message is always accurate about the timeout that actually elapsed). eventsPageFiltered
+  // reads it back when re-raising a busy error it catches mid-query (a SECOND contention window,
+  // not the constructor's own probe).
+  private readonly readBusyTimeoutMs: number;
 
   /** readOnly (#15, Codex PR #70): open the DB for inspection by `sapwood status` WITHOUT
    *  mutating sapwood STATE — no parent-dir mkdir, no journal_mode/foreign_keys pragma
@@ -1633,15 +1698,20 @@ export class State {
    *  (reads the main DB directly, ZERO file creation) AND warn on stderr that a running
    *  engine's uncommitted-to-main WAL frames won't be visible (a possibly-stale snapshot is
    *  the honest best a read-only FS allows). Write methods throw at the SQLite layer. */
-  constructor(path = DEFAULT_DB_PATH, opts: { readOnly?: boolean } = {}) {
+  constructor(path = DEFAULT_DB_PATH, opts: { readOnly?: boolean; busyTimeoutMs?: number } = {}) {
     // SQLite won't create missing parent dirs, and data/ is gitignored (absent on a
     // fresh checkout). Create it first. (Codex P2, PR #22.) Skip for special handles.
     const isMemory = path === ":memory:" || path.startsWith("file::memory:");
     this.dataDir = isMemory ? null : dirname(path);
     if (opts.readOnly) {
-      this.db = openReadOnly(path, isMemory);
+      this.readBusyTimeoutMs = opts.busyTimeoutMs ?? DEFAULT_READONLY_BUSY_TIMEOUT_MS;
+      const opened = openReadOnly(path, isMemory, this.readBusyTimeoutMs);
+      this.db = opened.db;
+      this.immutableFallback = opened.immutableFallback;
       return;
     }
+    this.immutableFallback = false;
+    this.readBusyTimeoutMs = DEFAULT_READONLY_BUSY_TIMEOUT_MS;
     if (this.dataDir) {
       mkdirSync(this.dataDir, { recursive: true });
     }
@@ -1649,6 +1719,65 @@ export class State {
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
     this.migrate();
+  }
+
+  /** #642: true iff this handle is a stale, read-only-filesystem snapshot (openReadOnly's
+   *  immutable fallback) — live WAL frames from a currently-running engine are NOT visible, so a
+   *  reader (status --json / events --json) should say so structurally rather than presenting
+   *  the read as equivalent to a normal live-WAL-aware open. Always false for a write-mode
+   *  handle (it never takes that branch). */
+  isImmutableSnapshot(): boolean {
+    return this.immutableFallback;
+  }
+
+  /** #642 (Codex gate② round-1 P1 finding 2): normalizes ANY raw SQLITE_BUSY raised while
+   *  running `fn` into the structured SqliteBusyError — not just the constructor's own open-
+   *  time probe, or a method (eventsPageFiltered, spendSummaryForDay) that already wraps
+   *  itself in readTransaction below. A lock acquired by ANOTHER connection AFTER this handle
+   *  successfully opened can surface on literally any LATER read — userVersion(),
+   *  activeWorkers(), dailySpendUsd(), maxEventId(), any of them — and a caller (cli.ts's
+   *  runStatus/runEvents) must not have to special-case every individual State method it
+   *  happens to call. Wrap the WHOLE read sequence in one call to this instead.
+   *
+   *  Already-normalized errors (thrown by a nested readTransaction call) pass through
+   *  unchanged — checked FIRST, so they are never double-wrapped: a SqliteBusyError's own
+   *  message contains the word "busy", which would otherwise re-match isBusyError's message-
+   *  fallback regex and produce a second SqliteBusyError with a different (outer) timeoutMs,
+   *  corrupting the original. */
+  withBusyNormalization<T>(fn: () => T): T {
+    try {
+      return fn();
+    } catch (e) {
+      if (e instanceof SqliteBusyError) throw e;
+      if (isBusyError(e)) throw new SqliteBusyError(this.readBusyTimeoutMs, e);
+      throw e;
+    }
+  }
+
+  /** #642 (Codex gate② round-1 P1 findings 1 + 3): BEGIN a short-lived read transaction, run
+   *  `fn`, COMMIT — so every read `fn` performs sees ONE consistent snapshot, and any
+   *  SQLITE_BUSY along the way is normalized into SqliteBusyError. Used by every method that
+   *  needs MORE THAN ONE read to agree with each other (eventsPageFiltered's page + ledger-
+   *  tail, spendSummaryForDay's settled/unclassified split + their sum) — see each call site's
+   *  own doc for why THAT pair specifically needs one snapshot. Rolls back on any error (a
+   *  read-only handle never needs the write a COMMIT would imply; ROLLBACK after a failed
+   *  BEGIN is a harmless no-op, never masking the real error). */
+  private readTransaction<T>(fn: () => T): T {
+    try {
+      this.db.exec("BEGIN");
+      const result = fn();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (e) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        /* BEGIN itself may be what threw (e.g. SQLITE_BUSY before any transaction opened) — a
+           ROLLBACK with nothing open is a harmless no-op error, never masks the real one below */
+      }
+      if (isBusyError(e)) throw new SqliteBusyError(this.readBusyTimeoutMs, e);
+      throw e;
+    }
   }
 
   /** Apply pending migrations in a transaction, bumping user_version. Idempotent. */
@@ -3414,6 +3543,120 @@ export class State {
         /* corrupt row — served as null, never a 500 for the whole page */
       }
       return { id: r.id, ts: r.ts, kind: r.kind, payload };
+    });
+  }
+
+  /** #642: `sapwood events`' own pager — deliberately NOT eventsPage above (which takes no kinds
+   *  filter, §8's raw-feed contract) nor eventsAfterId (which throws on an empty kinds list and
+   *  has no LIMIT at all, the round-window full-read shape #123 needs). The kind filter is a SQL
+   *  WHERE clause, so it is applied BEFORE `limit` — an `events --kind X --limit 50` gets up to
+   *  50 kind-X rows, never up to 50 raw rows filtered down to fewer (the exact bug #642's AC
+   *  calls out). `kinds` and `excludeKinds` are mutually exclusive by construction (the CLI
+   *  parse layer rejects both together, same INVARIANT eventsAfterId's non-empty-kinds guard
+   *  documents at its own call sites) — passing both here would silently AND them, so callers
+   *  must not.
+   *
+   *  Runs inside readTransaction (above) — a short-lived read transaction under the handle's
+   *  own `busy_timeout`, ONE consistent snapshot for both statements it issues.
+   *
+   *  #642 (Codex gate② round-1 P1 finding 1): the page query and the ledger TAIL (`MAX(id)`)
+   *  are read TOGETHER, in the SAME transaction, and the caller (cli.ts's runEvents) uses THIS
+   *  `tailId` — never a separate later `state.maxEventId()` call — to compute `nextSinceId` on
+   *  an empty filtered page. A separate later call was the actual bug: SQLite's snapshot
+   *  isolation means a write committed by ANOTHER connection AFTER this transaction's first
+   *  read is invisible to every read inside it (including this one's own tail query, even
+   *  though it runs SECOND) — so a matching event that lands between "the filtered page came
+   *  back empty" and "some other later read of the max id" would have its id folded into
+   *  nextSinceId by a naive two-call sequence, silently skipping it forever. Reading the tail
+   *  HERE, inside the SAME transaction as the page query, means it can only ever reflect what
+   *  the page query itself already saw (or missed) — a page and a tail that were computed
+   *  a moment apart from each other can never disagree about what had already happened. */
+  eventsPageFiltered(
+    afterId: number,
+    filter: { kinds?: readonly string[]; excludeKinds?: readonly string[] },
+    limit: number,
+  ): { rows: { id: number; ts: string; kind: string; payload: unknown }[]; tailId: number } {
+    let clause = "";
+    const params: (string | number)[] = [afterId];
+    if (filter.kinds && filter.kinds.length > 0) {
+      clause = ` AND kind IN (${filter.kinds.map(() => "?").join(",")})`;
+      params.push(...filter.kinds);
+    } else if (filter.excludeKinds && filter.excludeKinds.length > 0) {
+      clause = ` AND kind NOT IN (${filter.excludeKinds.map(() => "?").join(",")})`;
+      params.push(...filter.excludeKinds);
+    }
+    params.push(limit);
+    return this.readTransaction(() => {
+      const rawRows = this.db
+        .prepare(`SELECT id, ts, kind, payload FROM events WHERE id > ?${clause} ORDER BY id LIMIT ?`)
+        .all(...params) as { id: number; ts: string; kind: string; payload: string }[];
+      // Same transaction/snapshot as the page query above — see this method's own doc for why
+      // that is exactly what closes the P1 finding-1 race.
+      const tailRow = this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM events").get() as { m: number };
+      const rows = rawRows.map((r) => {
+        let payload: unknown = null;
+        try {
+          payload = JSON.parse(r.payload);
+        } catch {
+          /* corrupt row — served as null, never a 500/throw for the whole page (eventsPage's
+             same stance) */
+        }
+        // #642 (AC5): a row's `kind` is passed through OPAQUE, never checked against this
+        // binary's own event-kinds registry — an older `sapwood events` reading a newer engine's
+        // DB must still return that engine's valid-but-unrecognized-here kind, not reject it.
+        // Only the CLI's --kind/--exclude-kind ARGUMENT is validated against the registry (cli.ts
+        // parseEventsArgs), never a returned row.
+        return { id: r.id, ts: r.ts, kind: r.kind, payload };
+      });
+      return { rows, tailId: tailRow.m };
+    });
+  }
+
+  /** #642: the honest per-day spend split `status --json`'s spend section needs — SETTLED
+   *  spend attributed to a worker NAME this DB's `workers` table actually has a row for (an
+   *  exact match, same key `spentUsdForWorker` reads by), versus everything else, summed as
+   *  `unclassifiedUsd`. The second bucket is not a corruption signal: #612's engine-agent review
+   *  spend is deliberately recorded under `"<lane>:engine-review"` (review/production.ts's
+   *  `reviewSpendWorkerKey`) — a key that by design never matches a `workers.name` row — so it
+   *  lands here, honestly counted, rather than being silently absorbed into the reviewed lane's
+   *  own total or dropped. The real per-source split (settled worker spend vs. settled review
+   *  spend vs. anything else truly unattributed) is #645's follow-up — this is the honest
+   *  INTERIM shape: never fold an unattributed dollar into a worker's own total, and never
+   *  render it as zero. Same day window as `dailySpendUsd` (ts-prefix match).
+   *
+   *  #642 (Codex gate② round-1 P1 finding 3): `todayUsd` is returned FROM THIS SAME METHOD,
+   *  computed as `sum(byWorker) + unclassifiedUsd` — never a separate call to `dailySpendUsd`.
+   *  The bug that closes: `dailySpendUsd` is an INDEPENDENT query with its own snapshot: a
+   *  settlement (`recordSpend`) committing between it and this method's own two queries could
+   *  make `dailySpendUsd`'s total include a row neither `byWorker` nor `unclassifiedUsd` had
+   *  seen yet — `status --json` would then report `todayUsd > sum(settled) + unclassified`
+   *  while `incomplete` stayed `false`, exactly backwards from the honesty this field exists
+   *  for. Deriving `todayUsd` arithmetically from the two buckets THIS call already computed
+   *  (both inside readTransaction's one snapshot, below) makes that identity hold BY
+   *  CONSTRUCTION — there is no third independent read left to disagree with the other two. */
+  spendSummaryForDay(now: Date): { todayUsd: number; byWorker: { worker: string; usd: number }[]; unclassifiedUsd: number } {
+    const dayPrefix = now.toISOString().slice(0, 10);
+    return this.readTransaction(() => {
+      const byWorkerRaw = this.db
+        .prepare(
+          `SELECT s.worker AS worker, SUM(s.usd) AS usd
+           FROM spend_ledger s
+           WHERE s.ts LIKE ? AND EXISTS (SELECT 1 FROM workers w WHERE w.name = s.worker)
+           GROUP BY s.worker ORDER BY usd DESC, worker`,
+        )
+        .all(`${dayPrefix}%`) as unknown as { worker: string; usd: number }[];
+      const unclassifiedRow = this.db
+        .prepare(
+          `SELECT COALESCE(SUM(s.usd), 0) AS usd
+           FROM spend_ledger s
+           WHERE s.ts LIKE ? AND NOT EXISTS (SELECT 1 FROM workers w WHERE w.name = s.worker)`,
+        )
+        .get(`${dayPrefix}%`) as { usd: number };
+      // Re-shaped into ordinary objects — same null-prototype reason spendByModelForDay documents.
+      const byWorker = byWorkerRaw.map((r) => ({ worker: r.worker, usd: r.usd }));
+      const unclassifiedUsd = unclassifiedRow.usd;
+      const todayUsd = byWorker.reduce((sum, r) => sum + r.usd, 0) + unclassifiedUsd;
+      return { todayUsd, byWorker, unclassifiedUsd };
     });
   }
 

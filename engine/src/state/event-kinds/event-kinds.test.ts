@@ -15,7 +15,16 @@ import { FIX_LEG_CURSOR_KINDS } from "../../loop/fix-response.js";
 import { ROUND_ARTIFACT_EVENT_KINDS } from "../../loop/round-artifact.js";
 import { RETRO_EVENT_KINDS } from "../../retro/retro.js";
 import { PR_TOUCHED_EVENT_KINDS } from "../../retro/retro-digest.js";
-import { ESCALATION_SOURCE_TAGS, EVENT_KIND_DOMAINS, EVENT_KINDS, type EventKind, type EventTag, kindsTagged } from "./index.js";
+import {
+  ESCALATION_SOURCE_TAGS,
+  EVENT_KIND_DOMAINS,
+  EVENT_KIND_NAMES,
+  EVENT_KINDS,
+  type EventKind,
+  type EventTag,
+  isKnownEventKind,
+  kindsTagged,
+} from "./index.js";
 import { type Actionability, defineKinds } from "./types.js";
 
 /** The bidirectional assertion, written once: `list` must be exactly the set of kinds tagged
@@ -184,3 +193,20 @@ test("registry: every declared kind carries a non-empty glossary meaning and a v
 // not just `tags` — a kind object carrying `tags` alone must fail to compile.
 // @ts-expect-error — missing `meaning`/`actionability`: a bare `{ tags: [] }` kind must not compile.
 defineKinds({ "fixture-kind-missing-glossary": { tags: [] } });
+
+// ── #642: isKnownEventKind / EVENT_KIND_NAMES — `sapwood events --kind` argument validation ──
+
+test("#642 EVENT_KIND_NAMES: exactly the registered kinds, sorted, no duplicates", () => {
+  assert.deepEqual([...EVENT_KIND_NAMES].sort(), EVENT_KIND_NAMES, "already sorted");
+  assert.deepEqual(new Set(EVENT_KIND_NAMES), new Set(Object.keys(EVENT_KINDS)));
+  assert.equal(EVENT_KIND_NAMES.length, Object.keys(EVENT_KINDS).length, "no duplicates");
+});
+
+test("#642 isKnownEventKind: true for every registered kind, false for an arbitrary string", () => {
+  for (const kind of EVENT_KIND_NAMES) assert.equal(isKnownEventKind(kind), true, kind);
+  assert.equal(isKnownEventKind("not-a-real-kind"), false);
+  assert.equal(isKnownEventKind(""), false);
+  // Object.hasOwn, not `in` — a kind named "toString"/"constructor" must not false-positive off
+  // the prototype chain (EVENT_KINDS is a plain object literal, so this is the correct guard).
+  assert.equal(isKnownEventKind("constructor"), false);
+});

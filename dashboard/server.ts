@@ -20,188 +20,44 @@ import { createReadStream, existsSync, realpathSync, rmSync, statSync, writeFile
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
 import { loadConfig, type SapwoodConfig } from "../engine/src/config/config.js";
+// #642: engine-state derivation, the config allowlist, and the paging cap moved to
+// engine/src/state/read-model.ts — the shared read-model module `sapwood status --json`/
+// `sapwood events` now also consume. Re-exported here UNCHANGED (same names, same shapes) so
+// this file's own routes and server.test.ts's existing imports (`from "./server.js"`) are
+// undisturbed — see read-model.ts's own header comment for the full extraction rationale, and
+// server.test.ts's byte-identical regression coverage for the AC1 proof that this was a pure
+// extraction, not a behavior change.
+import {
+  allowlistedConfig,
+  CONFIG_ALLOWLIST,
+  currentEngineState,
+  deriveEngineState,
+  type EngineFacts,
+  type EngineState,
+  heartbeatStaleGapSec,
+  latestRunTerminal,
+  MAX_PAGE_LIMIT,
+  type RunTerminal,
+} from "../engine/src/state/read-model.js";
 import { State, type WorkerRow } from "../engine/src/state/state.js";
 
-/** #431: this lived in the engine as `engineSessionGapSec` and was deleted there along with the
- *  wall-clock session machinery (the wall clock now anchors to in-memory process start and
- *  never reads a gap). The DASHBOARD's need survives independently: the `stalled` derivation is
- *  a UI liveness heuristic over `last_tick_at` (the #431-surviving heartbeat), and it still
- *  wants a cadence-aware bound so a legal slow cadence doesn't render a healthy engine as
- *  stalled. Same math as the deleted helper — max(900s, 2× cadence) tolerates one missed tick
- *  at any legal cadence; non-finite/unknown cadence falls back to the 900s base. */
-export function heartbeatStaleGapSec(tickIntervalSec: number): number {
-  if (!Number.isFinite(tickIntervalSec) || tickIntervalSec <= 0) return 900;
-  return Math.max(900, 2 * tickIntervalSec);
-}
+export {
+  allowlistedConfig,
+  CONFIG_ALLOWLIST,
+  currentEngineState,
+  deriveEngineState,
+  type EngineFacts,
+  type EngineState,
+  heartbeatStaleGapSec,
+  latestRunTerminal,
+  MAX_PAGE_LIMIT,
+  type RunTerminal,
+};
 
 /** §8 default; overridable so several data dirs can be inspected side by side. */
 export const DEFAULT_PORT = 4517;
 
-/** Page size cap shared by `/api/events` and `/api/spend` — §8 gives them the same paging
- *  contract, so they get the same bound. A poll tail is small; replay pages from `after=0` and
- *  is expected to walk. Bounds one response, never the total the caller can read. */
-export const MAX_PAGE_LIMIT = 1000;
 const DEFAULT_PAGE_LIMIT = 500;
-
-// ── engine state (§8 derivation) ───────────────────────────────────────────────────────────
-
-export type EngineState = "running" | "standby" | "stalled" | "paused" | "winding-down" | "stopping" | "stopped";
-
-/** #407 (item 5): the newest run's terminal event, when it has one — how a dead engine finally
- *  gets to say WHY it is dead. The engine writes exactly one terminal per controlled exit
- *  (cli.ts's appendRunEnded doc): `run-ended` on a clean stop (payload: stoppedBy +
- *  stopCondition?), `engine-stalled` when the watchdog self-diagnosed a stall (payload: the
- *  fire-time enrichment — round/phase, last event, lastTickAt), and NOTHING on a crash/kill —
- *  so a null here under a stale tick age honestly means "crashed or killed". */
-export interface RunTerminal {
-  kind: "run-ended" | "engine-stalled";
-  payload: Record<string, unknown>;
-}
-
-/** Everything §8's derivation reads, lifted out of the DB so the rules are unit-testable
- *  against synthetic sentinel/ceiling/PAUSE fixtures without a live engine. */
-export interface EngineFacts {
-  now: Date;
-  killSwitch: boolean;
-  /** running + driving + fixing lanes — "drain in progress" for the kill-switch tier. */
-  activeLanes: number;
-  ceilingBreach: { reasons: string[]; at: Date } | null;
-  pause: boolean;
-  /** engine_session.last_tick_at, or null when the engine has never ticked here. */
-  lastTickAt: string | null;
-  staleGapSec: number;
-  roundOpen: boolean;
-  /** The newest standby-wait is newer than any standby-exit (#125: parked, healthy). */
-  standbyWaiting: boolean;
-  /** #407: latestRunTerminal(state) — null while the newest run has no terminal yet (alive, or
-   *  crashed; the tick age decides which reading the derivation gives it). */
-  terminal: RunTerminal | null;
-}
-
-/** §8's engine-state derivation, verbatim, in its fixed precedence order:
- *
- *    KILL_SWITCH  >  ceiling breach  >  staleness  >  PAUSE  >  standby  >  running
- *
- *  Two orderings in there are decisions, not accidents. STALENESS BEATS PAUSE (the 2026-07-21
- *  fix resolving §8 against loop-walkthrough §6): a dead engine that happens to have a PAUSE
- *  file must render `stalled`, because "paused" reads as a healthy, resumable engine and a
- *  crashed one is not — the sentinel is demoted to a secondary chip in the UI. And KILL_SWITCH
- *  outranks staleness: a stopped engine IS stale, and `stopped` is the truthful word for it.
- *
- *  An engine that has never ticked (`lastTickAt === null`) counts as stale — the fail-honest
- *  direction: nothing is ticking, so nothing may render green.
- *
- *  #407 (item 5): the stale branch now consults the newest run's terminal event (RunTerminal) to
- *  partition the three dead-engine states instead of one undifferentiated `stalled`:
- *    - `run-ended` -> "stopped": a CLEAN stop, with the stop reason in the terminal payload;
- *    - `engine-stalled` -> "stalled", now with the watchdog's reason payload attached;
- *    - no terminal -> the bare "stalled" of old, now honestly meaning "crashed or killed" —
- *      the engine died without getting to write anything, and that absence IS the record.
- *  Deliberately INSIDE the staleness branch only (the issue's own scoping): a just-stopped
- *  engine keeps its existing within-gap rendering until the tick age crosses the same threshold
- *  every other dead-engine reading already waits for. */
-export function deriveEngineState(f: EngineFacts): EngineState {
-  if (f.killSwitch) return f.activeLanes > 0 ? "stopping" : "stopped";
-  if (f.ceilingBreach) return "winding-down";
-  const tickAgeSec = f.lastTickAt === null ? Number.POSITIVE_INFINITY : (f.now.getTime() - Date.parse(f.lastTickAt)) / 1000;
-  if (!(tickAgeSec <= f.staleGapSec)) {
-    // NaN (unparseable timestamp) is stale too
-    return f.terminal?.kind === "run-ended" ? "stopped" : "stalled";
-  }
-  if (f.pause) return "paused";
-  if (!f.roundOpen && f.standbyWaiting) return "standby";
-  return "running";
-}
-
-// ── config allowlist (§3 E) ────────────────────────────────────────────────────────────────
-
-const ROLE_KEYS = ["verificationPlanReviewer", "verificationPlanDrafter", "architect", "po", "harvest", "retro"] as const;
-
-/** The EXHAUSTIVE list of resolved-config leaves the server will serve, grouped the way §3 E's
- *  drawer groups them (Board · Lanes · Worker · Safety · Review & merge · Labels), plus the
- *  per-role model/effort keys the §3 C lane captions and the §6 phase inspector read.
- *
- *  This is an allowlist and not a denylist on purpose: config grows, and a key added later — a
- *  token, a private URL, an internal path — must default to NOT being served. Everything the
- *  drawer shows is named here or it does not exist. */
-export const CONFIG_ALLOWLIST: readonly string[] = [
-  // Board
-  "board.owner",
-  "board.repo",
-  "board.projectNumber",
-  "board.statusField",
-  "board.status.backlog",
-  "board.status.ready",
-  "board.status.inProgress",
-  "board.status.done",
-  // Lanes
-  "lanes.max",
-  "lanes.roundDispatchCap",
-  "lanes.reserveCap",
-  "lanes.prFixCap",
-  "lanes.gatedReentryCap",
-  "lanes.frictionMin",
-  // Worker
-  "worker.model",
-  "worker.effort",
-  "worker.timeoutSec",
-  "worker.budgetUsdSoft",
-  "worker.maxResumes",
-  "worker.heartbeatStaleSecs",
-  // Safety
-  "guard.mode",
-  "cost.roundBudgetUsd",
-  "cost.dailyBudgetUsd",
-  "cost.maxWallClockSec",
-  "cost.drainWindowSec",
-  "stop.afterIssuesMerged",
-  "stop.afterPRsOpened",
-  "stop.afterSpendUsd",
-  "stop.onMilestoneComplete",
-  // Review & merge
-  "reviewer.mode",
-  "reviewer.triggerCommand",
-  "reviewer.deltaChainMax",
-  "reviewer.agent.model",
-  "reviewer.agent.effort",
-  "merge.mode",
-  // Labels (the resolved names, which is what the UI matches events against)
-  "labels.prefix",
-  "labels.inProgress",
-  "labels.needsHuman",
-  "labels.blocked",
-  "labels.reserve",
-  "labels.verifyNa",
-  "labels.planApproved",
-  "labels.originAgent",
-  "labels.split",
-  "labels.decomposed",
-  "labels.roundPool",
-  // Per-role model/effort (§3 E: the allowlist MUST include these — the captions read them)
-  ...ROLE_KEYS.flatMap((r) => [`roles.${r}.model`, `roles.${r}.effort`]),
-];
-
-/** Project the resolved config down to CONFIG_ALLOWLIST. Missing/undefined leaves are omitted
- *  entirely rather than serialized as null, so an optional key that is simply unset reads as
- *  absent in the drawer instead of as "configured to nothing". */
-export function allowlistedConfig(cfg: SapwoodConfig): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const path of CONFIG_ALLOWLIST) {
-    const segments = path.split(".");
-    let src: unknown = cfg;
-    for (const s of segments) {
-      src = src !== null && typeof src === "object" ? (src as Record<string, unknown>)[s] : undefined;
-    }
-    if (src === undefined) continue;
-    let dst = out;
-    for (const s of segments.slice(0, -1)) {
-      dst[s] ??= {};
-      dst = dst[s] as Record<string, unknown>;
-    }
-    dst[segments[segments.length - 1]!] = src;
-  }
-  return out;
-}
 
 // ── /api/loop/state (§8) ───────────────────────────────────────────────────────────────────
 
@@ -231,47 +87,6 @@ function laneItem(state: State, w: WorkerRow): Record<string, unknown> {
     contextTokens: w.context_tokens ?? null,
     tokenComposition,
   };
-}
-
-/** #125: the newest standby-wait is newer than any standby-exit — read off the SAME two events
- *  round.ts appends, in id order, so "parked" here means exactly what it means to the engine. */
-function standbyWaiting(state: State): boolean {
-  const trail = state.eventsAfterId(0, ["standby-wait", "standby-exit"]);
-  return trail[trail.length - 1]?.kind === "standby-wait";
-}
-
-/** #407 (item 5): the newest run's terminal event, or null — the same last-event-wins fold shape
- *  as standbyWaiting above, over the run-lifecycle triple. The trick that makes "since the last
- *  run-started" a one-liner: after a terminal lands the process EXITS, so nothing else from that
- *  run can follow it, and the next event of these kinds is necessarily the next run's own
- *  `run-started` — the newest of the three therefore fully decides the newest run's fate:
- *  `run-started` newest = no terminal yet (alive, or crashed — RunTerminal's doc), a terminal
- *  newest = that terminal belongs to the newest run. All three kinds are once-per-process-life
- *  rare, so the whole-history read stays cheap forever. Exported for the truth-table tests. */
-export function latestRunTerminal(state: Pick<State, "eventsAfterId">): RunTerminal | null {
-  const trail = state.eventsAfterId(0, ["run-started", "run-ended", "engine-stalled"]);
-  const last = trail[trail.length - 1];
-  if (last === undefined || last.kind === "run-started") return null;
-  return { kind: last.kind as RunTerminal["kind"], payload: (last.payload ?? {}) as Record<string, unknown> };
-}
-
-/** Read the live facts out of the DB + sentinels and derive §8's engine state word. Shared by
- *  `/api/loop/state` and `POST /api/control` (whose response is exactly this, read AFTER the
- *  signal lands — so the UI renders the real transition, never an optimistic flip). */
-export function currentEngineState(state: State, cfg: SapwoodConfig | null, now: Date): EngineState {
-  const round = state.openRound();
-  return deriveEngineState({
-    now,
-    killSwitch: state.isKillSwitchActive(),
-    activeLanes: state.activeWorkers().length,
-    ceilingBreach: state.ceilingBreach(),
-    pause: state.isPauseActive(),
-    lastTickAt: state.lastTickAt(),
-    staleGapSec: heartbeatStaleGapSec(cfg?.engine.tickIntervalSec ?? 0),
-    roundOpen: round !== undefined,
-    standbyWaiting: standbyWaiting(state),
-    terminal: latestRunTerminal(state),
-  });
 }
 
 export function loopState(state: State, cfg: SapwoodConfig | null, now: Date): Record<string, unknown> {
