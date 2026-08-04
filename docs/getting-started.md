@@ -68,25 +68,29 @@ sapwood init
    (`Ready` / `In Progress` / `Done` by default) — if the board doesn't exist at the
    configured `board.projectNumber`, init reports what to create rather than guessing.
 6. **Writes a starter `sapwood.config.yaml`** (with inline comments) if none exists yet.
-7. **Provisions the L1 worker deploy key (#606 gate② round 1) — the default onboarding path for
-   the worker's write capability.** `init` generates a per-repo ed25519 SSH key (`ssh-keygen`),
-   registers it as a **write** deploy key (`gh repo deploy-key add --allow-write --title
-   sapwood-worker`) under your own logged-in `gh` credential (requires repo admin), runs a
+7. **Provisions the L1 worker deploy key (#606 gate② round 1–2) — the default onboarding path
+   for the worker's write capability.** `init` generates a per-repo ed25519 SSH key
+   (`ssh-keygen`), registers it as a **write** deploy key (`gh repo deploy-key add --allow-write
+   --title sapwood-worker`) under your own logged-in `gh` credential (requires repo admin), runs a
    preflight SSH auth check, and — once green — writes BOTH `worker.deployKeyPath` and
    `worker.deployKeyId` into your config: the local `(path, id)` pair is the anchor every later
    `sapwood init` run RECONCILES against — never the bare key title, which may validly belong to
-   a different machine. `init` also makes sure the private key can never be committed: it checks
-   `.gitignore` for a rule covering it and adds a `data/` line if none is found. From then on,
-   every worker leg — dispatch, resume, AND fix — pushes over git transport ONLY, through this
-   key, with **no forge API credential in its environment at all**: it structurally cannot open a
-   PR, approve a review, label an issue, or touch the board — the engine does all of that from its
-   own, separately-held credential (see
+   a different machine (the config schema rejects a config carrying only one half of the pair).
+   `init` also keeps the private key out of an ordinary `git add -A`: it ensures `.gitignore`
+   ends with a rooted `/data/worker-deploy-key*` rule as its LAST line (appending it if it isn't
+   already there — gitignore is last-match-wins, so a rule at the very end always applies
+   regardless of anything earlier in the file); a deliberate `git add -f` can still stage it.
+   From then on, every worker leg — dispatch, resume, AND fix — pushes over git transport ONLY,
+   through this key, with **no forge API credential in its environment at all**: it structurally
+   cannot open a PR, approve a review, label an issue, or touch the board — the engine does all of
+   that from its own, separately-held credential (see
    [Worker credential tiers](security.md#worker-credential-tiers-351-606) for the full L0/L1
    picture and honest residuals). If you don't have repo admin, `init` logs exactly what to do by
    hand (or skip — the engine runs fully functional either way, at L0, today's fuller-credentialed
    default) and moves on; it never fails `init` over this. On a LATER run, if the recorded key
    ever stops reconciling (wiped local state, a second machine, a rotated/foreign key sharing the
-   title), `init` never deletes or touches the existing remote key — from an interactive terminal
+   title, a hand-edited id pointing at an unrelated key), `init` never deletes or touches any
+   existing remote key — from an interactive terminal
    it offers to register an additional key just for this machine (titled
    `sapwood-worker-<hostname>`); non-interactively it degrades to L0 and names the manual steps.
 8. **Scaffolds starter goal and review-doctrine files** at their configured paths

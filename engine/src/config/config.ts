@@ -1831,6 +1831,25 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
           "choose a different Claude model for reviewer.agent.model.",
     });
   }
+  // #606 gate② round 2 (R3-6): worker.deployKeyPath and worker.deployKeyId are the owner
+  // ruling's local (path, id) anchor PAIR — init.ts's reconcile logic reads them as a unit and
+  // treats "only one set" as meaningless (neither "fresh provisioning" nor "reconcile" has a
+  // sane interpretation of a lone half). Reject a lone half at parse time, naming which is
+  // missing and pointing at the fix ("re-run sapwood init", which always writes/clears both
+  // together) rather than letting it silently fall through to fresh-provisioning behavior with
+  // an orphaned half still sitting in the file.
+  if ((cfg.worker.deployKeyPath === undefined) !== (cfg.worker.deployKeyId === undefined)) {
+    const missing = cfg.worker.deployKeyPath === undefined ? "deployKeyPath" : "deployKeyId";
+    const present = cfg.worker.deployKeyPath === undefined ? "deployKeyId" : "deployKeyPath";
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["worker", missing],
+      message:
+        `worker.${missing} is unset but worker.${present} is set — these two form ONE local anchor ` +
+        `pair (#606 owner ruling) and must be BOTH set or BOTH unset. Re-run "sapwood init", which ` +
+        `always writes or clears them together, or remove worker.${present} by hand.`,
+    });
+  }
   // #286 (E4a, design #279 §4.3): mode: engine-agent with an empty/absent ci.requiredChecks is
   // legal (parse still succeeds — an operator may be mid-adoption) but WEAK: code-verifiable AC
   // can then at best be claim-based (no trusted CI execution evidence exists to confirm against),

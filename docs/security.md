@@ -447,37 +447,58 @@ leaves the engine fully functional at L0, never a startup failure.
 **OWNER RULING (gate② round 1, supersedes an earlier title-only-idempotence draft): the LOCAL
 `(deployKeyPath, deployKeyId)` pair is the anchor — a remote key's TITLE is never authoritative
 for "mine".** A `sapwood-worker`-titled key on the repo may validly belong to a DIFFERENT
-machine/operator; `sapwood init` never deletes or modifies a remote key it cannot prove it owns
-(`gh repo deploy-key delete` appears nowhere in this codebase, including guidance text). Once
-`worker.deployKeyPath`/`worker.deployKeyId` ARE both set, every `sapwood init` run RECONCILES
-rather than skipping: the local key file must exist, the recorded id must still be listed on the
-repo, and the SSH preflight (`ssh -T git@github.com`, matched against GitHub's own documented
-success shape — exit 1, stderr containing "successfully authenticated") must pass. All three
-green → a positive confirmation and L1 stays active. Any ONE of them failing (a wiped data dir, a
-second machine, a remotely rotated/foreign key, a rotated preflight) routes to a **WARN +
-operator choice**, offered only when `sapwood init` is running interactively (a real TTY):
-**(a)** leave every remote key untouched, clear the stale local anchor, generate a FRESH keypair,
-and register it as an ADDITIONAL deploy key titled `sapwood-worker-<hostname>` (collision-free
-per machine) — the new `(path, id)` becomes this machine's own anchor; or **(b)** leave every
-remote key untouched, clear the stale local anchor, and proceed degraded at L0. A non-interactive
-`sapwood init` (no TTY — the ordinary autonomous/CI invocation) defaults to **(b)**, the no-write,
-never-wedge path, and the WARN still names (a)'s manual steps. Because the stale anchor is
-CLEARED either way, "re-run `sapwood init`" is now an honest instruction: the next run either
-reconciles cleanly (choice (a) already happened) or re-diagnoses the SAME state truthfully,
-never silently skipping the check the way the superseded title-only design did. Any other
-sapwood-titled key still on the repo is named in the WARN for HUMAN cleanup — the engine never
-removes it.
+machine/operator. The engine never invokes or scripts remote deploy-key deletion or
+modification, owned or not — a stale or foreign key is only ever surfaced in a WARN for a HUMAN
+to review. `worker.deployKeyPath` and `worker.deployKeyId` are config-schema-enforced as a PAIR
+(gate② round 2, R3-6) — a config with only one set fails to parse at all, naming the missing half
+and pointing at re-running `sapwood init` (which always writes or clears both together).
 
-**The private key never lands in the repo's git history.** After provisioning (and on every
-reconcile pass that touches a freshly-created key), `sapwood init` checks the repo's
-`.gitignore` for a rule covering the key's location and appends a `data/` line (with an
-explanatory comment, creating `.gitignore` if it doesn't exist yet) when none is found — the
-shipped default key location (`data/worker-deploy-key[-<hostname>]`) sits under the SAME `data/`
-tree the engine's own state/sessions already live under and that a fresh repo has no reason to
-commit. This closes the "one `git add -A` publishes a live write-capable deploy key" gap: the
-guarantee is best-effort (a WARN, never a reason to fail init, if `.gitignore` itself can't be
-written), but it runs on every path that can leave a private key on disk, not just the happiest
-one.
+Once both ARE set, every `sapwood init` run RECONCILES rather than skipping: the local key file
+must exist; the recorded id must still be listed on the repo; that id-matched remote entry's OWN
+public-key content must match the local `.pub` file byte-for-byte (gate② round 2, R3-1 — proves
+the pair was recorded TOGETHER by this machine's own provisioning, not merely "an id that
+happens to be registered" plus "a local key that happens to authenticate" independently, which a
+hand-edited or foreign id sharing a different but also-registered key could otherwise fake); and
+the SSH preflight (`ssh -T git@github.com`, matched against GitHub's own documented success shape
+— exit 1, stderr containing "successfully authenticated") must pass. All four green → a positive
+confirmation and L1 stays active. Any ONE of them failing (a wiped data dir, a second machine, a
+remotely rotated/foreign key, a rotated preflight) routes to a **WARN + operator choice**,
+offered only when `sapwood init` is running interactively (a real TTY):
+**(a)** leave every remote key untouched, clear the stale local anchor, generate a FRESH keypair
+— never reusing a key file already sitting at the per-host path, or a per-host title already
+registered remotely under someone else's provisioning (treated as foreign, same never-touch
+rule): a numeric suffix (`-2`, `-3`, ...) picks a collision-free sibling path AND title together
+— and register it as an ADDITIONAL deploy key, reading back its GitHub-assigned id from a
+before/after id diff around the `add` call (gate② round 2, R3-1 — never a title match, which a
+stale/duplicate/racing title could match the wrong entry for; zero or more than one new id is
+treated as an ordinary provisioning failure) — the new `(path, id)` becomes this machine's own
+anchor; or **(b)** leave every remote key untouched, clear the stale local anchor, and proceed
+degraded at L0. A non-interactive `sapwood init` (no TTY — the ordinary autonomous/CI invocation)
+defaults to **(b)**, the no-write, never-wedge path, and the WARN still names (a)'s manual steps.
+Because the stale anchor is CLEARED either way — for a JSON config, a parse → delete → 2-space
+re-serialize → re-parse-and-verify round trip; for YAML, a surgical text edit scoped to the
+top-level `worker:` block's own body only (gate② round 2, R3-2/R3-4 — never a whole-file scan,
+which could otherwise strip or misread a same-shaped `deployKeyPath:`/`deployKeyId:` line sitting
+inside an unrelated block scalar elsewhere in the file); a flow-style `worker: { ... }` mapping is
+never edited (a hand-edit WARN instead, and this run's own report still degrades to L0 honestly
+regardless of whether the file itself could be cleared) — "re-run `sapwood init`" is now an
+honest instruction: the next run either reconciles cleanly (choice (a) already happened) or
+re-diagnoses the SAME state truthfully, never silently skipping the check the way the superseded
+title-only design did. Any other sapwood-titled key still on the repo is named in the WARN for
+HUMAN cleanup.
+
+**The private key does not end up staged by an ordinary `git add -A`.** After provisioning (and
+on every path that can leave a private key on disk), `sapwood init` ensures its `.gitignore`
+ends with the exact rooted rule `/data/worker-deploy-key*` as its LAST effective line (appending
+it, with an explanatory comment, if it isn't already there — creating `.gitignore` if it doesn't
+exist yet). gitignore semantics are last-match-wins, so an earlier, unrelated rule (even a
+negation) can never override a rule sitting at the very end of the file — this is deliberately
+NOT a full gitignore evaluator, just the simplest mechanism that is correct for this one pattern
+(gate② round 2, R3-7). The pattern covers the base key location and every per-host/numeric-
+suffixed sibling arm (a) can mint, plus each key's `.pub` counterpart. The guarantee is
+best-effort (a WARN, never a reason to fail init, if `.gitignore` itself can't be written): init
+appends a last-position ignore rule so an ordinary `git add -A` will not stage the worker deploy
+key(s); a deliberate `git add -f` still can.
 
 **Honest residuals — what L1 does NOT close:**
 
@@ -526,32 +547,37 @@ line, never a bare "something's wrong"):**
    Settings page) plus this section as the docs anchor. The engine is fully functional at L0
    either way — init itself never fails over this.
 2. **Reconcile fails — auth-fails/stale/mismatch.** Any of "local key file exists" / "recorded
-   id still listed" / "SSH preflight green" failing (rotated key, wiped data dir, second
-   machine, a foreign key sharing the `sapwood-worker` title) → a WARN naming the specific
-   reason(s), any other sapwood-titled key already on the repo (for HUMAN cleanup, never
-   engine-deleted), and — on an interactive `sapwood init` — the (a)/(b) choice above; a
+   id still listed" / "local `.pub` content matches that entry's own registered key" / "SSH
+   preflight green" failing (rotated key, wiped data dir, second machine, a foreign key sharing
+   the `sapwood-worker` title, a hand-edited id pointing at an unrelated but also-registered key)
+   → a WARN naming the specific reason(s), any other sapwood-titled key already on the repo (for
+   HUMAN cleanup), and — on an interactive `sapwood init` — the (a)/(b) choice above; a
    non-interactive run defaults to (b) and still names (a)'s manual steps. Dispatch continues at
    L0, never wedges, and the underlying SSH-auth probe is memoized so this WARN fires once per
    engine process life, not once per lane. Because the stale local anchor is CLEARED as part of
-   this WARN, re-running `sapwood init` genuinely re-diagnoses the state rather than replaying
-   the same skip forever.
-3. **L1 active but the default branch is unprotected — CONFIRMED (a 404 from the branch-
-   protection endpoint).** `sapwood init` checks branch protection on the repo's default branch
-   once provisioning/reconcile succeeds; a confirmed-unprotected default branch WARNs naming
-   branch protection (repo Settings → Branches → add a rule requiring the merge gate this engine
-   already drives PRs through) as the fix — because even though the deploy key structurally
-   cannot open a PR or merge, it CAN still `git push` directly to an unprotected default branch,
-   bypassing the review gate entirely via raw git transport. Branch protection is the mandatory
-   backstop this whole tier depends on, not an optional hardening step.
-4. **Branch-protection status CANNOT be verified — a DISTINCT WARN from #3.** A 403/plan-limit/
-   network/any other error that isn't a parseable 404 (e.g. a private-repo plan that can't
-   expose protection status via the API at all — the live probe #606's own issue recorded) is
-   NOT read as "confirmed unprotected": it gets its own WARN naming the underlying error and the
-   same advice ("if this repo's plan cannot expose protection, treat the default branch as
-   unprotected and add a rule by hand") without CLAIMING the API confirmed anything.
+   this WARN (JSON or YAML, by the config file's own format), re-running `sapwood init` genuinely
+   re-diagnoses the state rather than replaying the same skip forever.
+3. **L1 active but the default branch is unprotected — CONFIRMED.** `sapwood init` checks branch
+   protection on the repo's default branch once provisioning/reconcile succeeds: the legacy
+   branch-protection endpoint, AND — only when that endpoint 404s — whether any ruleset covers
+   the branch (`repos/<owner>/<repo>/rules/branches/<branch>`; a non-empty ruleset array counts
+   as protected). Only when BOTH report unprotected does the confirmed-unprotected WARN fire,
+   naming branch protection (repo Settings → Branches → add a rule requiring the merge gate this
+   engine already drives PRs through) as the fix — because even though the deploy key
+   structurally cannot open a PR or merge, it CAN still `git push` directly to an unprotected
+   default branch, bypassing the review gate entirely via raw git transport. Branch protection is
+   the mandatory backstop this whole tier depends on, not an optional hardening step.
+4. **Branch-protection status CANNOT be verified — a DISTINCT WARN from #3.** Any failure to even
+   read the repo's default branch, a 403/plan-limit/network/any other error from the legacy
+   endpoint that isn't a parseable 404 (e.g. a private-repo plan that can't expose protection
+   status via the API at all — the live probe #606's own issue recorded), or a failure reading
+   rulesets after a legacy 404, is NOT read as "confirmed unprotected": it gets its own WARN
+   naming the underlying error and the same advice ("if this repo's plan cannot expose
+   protection, treat the default branch as unprotected and add a rule by hand") without CLAIMING
+   the API confirmed anything.
 5. **`.gitignore` could not be updated to cover the private key.** A best-effort WARN naming the
-   exact path that needs a manual `data/` line — fires only when the automated append itself
-   fails (an unwritable `.gitignore`), never blocks provisioning.
+   exact rule that needs to be added by hand as the LAST line of `.gitignore` — fires only when
+   the automated append itself fails (an unwritable `.gitignore`), never blocks provisioning.
 
 ## Worker denylist vs. peripheral allowlist: deliberate asymmetry
 

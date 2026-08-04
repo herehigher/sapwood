@@ -4879,8 +4879,13 @@ test("spawnSshKeygen: a nonexistent parent directory rejects (does not throw syn
   await assert.rejects(() => spawnSshKeygen("/no/such/dir/sapwood-606/worker-deploy-key"));
 });
 
+// #606 gate② round 2 (R3-6): the config schema now enforces deployKeyPath/deployKeyId as a PAIR
+// (init.ts owns reconciling them; worker.ts's own runtime never reads deployKeyId at all — only
+// resolveDeployKeyPath's SSH preflight against deployKeyPath matters here), so every fixture
+// built from this helper needs a syntactically-valid deployKeyId alongside deployKeyPath purely
+// to satisfy the schema. The exact number is never read by anything under test in this file.
 const cfgWithDeployKey = (deployKeyPath: string): SapwoodConfig =>
-  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { deployKeyPath } });
+  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { deployKeyPath, deployKeyId: 1 } });
 
 test("dispatch: worker.deployKeyPath configured + preflight OK -> L1 active — GIT_SSH_COMMAND present, no gh credential reachable via env, Bash(gh *) absent from --allowedTools, Bash(git *) stays", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
