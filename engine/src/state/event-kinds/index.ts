@@ -89,8 +89,19 @@ export function soleKindTagged<T extends EventTag>(tag: T): KindsWithTag<T> {
   return all[0]!;
 }
 
-// No `isEventKind(string): kind is EventKind` narrowing guard here, deliberately: nothing needs
-// one. Kinds arriving from outside the compiler (a DB row read back) are compared, never
-// re-written, and the write path's enforcement is `appendEvent`'s signature. A guard with no
-// production caller is the unwired-function class docs/REVIEW-DOCTRINE.md names — add it with
-// its first real caller, not before.
+// #642: `EVENT_KIND_NAMES` + `isKnownEventKind` — a narrowing guard this registry used to have
+// no production caller for ("add it with its first real caller, not before" — this module's own
+// prior doc, before #643's glossary additions above displaced it). `sapwood events --kind`/
+// `--exclude-kind` is that first real caller: a CLI argument naming an unknown kind must be
+// REJECTED, naming the valid set from this registry (never a DB ROW's kind — see state.ts's
+// eventsPageFiltered doc for why a row is passed through opaque instead). Sorted so the CLI's
+// error message and any test asserting against it are stable byte output, not iteration-order-
+// dependent.
+export const EVENT_KIND_NAMES: readonly EventKind[] = (Object.keys(EVENT_KINDS) as EventKind[]).sort();
+
+/** Narrowing guard for a CLI ARGUMENT (never a DB row's kind — that stays opaque by design, see
+ *  above). `kind: string` rather than `unknown` since every caller already has a string (an argv
+ *  token) to check. */
+export function isKnownEventKind(kind: string): kind is EventKind {
+  return Object.hasOwn(EVENT_KINDS, kind);
+}
