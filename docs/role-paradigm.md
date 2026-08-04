@@ -12,7 +12,11 @@ non-negotiables), defense-in-depth atop guard.ts's own primary, wrapper-bypass-r
 argv-layer block; #350's `gh pr review*`/`gh release*` are surface narrowing — neither is
 needed by any stock worker workflow, so denying them too costs nothing; #488's `gh issue
 edit*`/`gh label*`/`gh project*` are governance-signal containment — a producer must never
-forge the labels/board `Status` the engine's gates trust) and open their own PRs; their
+forge the labels/board `Status` the engine's gates trust) and, at L0, still holds the `gh`
+grant an ad hoc `gh pr create` would use — though PR-opening is no longer that grant's
+ordinary job: the worker's job ends at push, and the engine opens the lane's PR itself once
+the session is over, adopting rather than duplicating one a worker opens anyway (#351, #605,
+`forge.ts::associateLanePr`); their
 actual boundary is tier 2 of the
 ladder below, the fail-closed guard hook intercepting merge/approve/ready — see
 [`security.md`](security.md). Gate② reviewers are also not peripheral roles; their separate

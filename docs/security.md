@@ -415,8 +415,12 @@ The asymmetry is compensated, but not erased, by several independent controls:
   strips forge credential variables in `peripheralSessionEnv()`, and leaves forge writes to
   validated engine code. Those sessions have no `gh` grant. This is **not** true of every role:
   `engine/src/roles/worker.ts` deliberately gives an ordinary initial coding leg
-  `Bash(gh *)` and inherits the engine environment so the stock worker workflow can push and
-  open its PR. Only credential-free fix legs remove that grant
+  `Bash(gh *)` and inherits the engine environment, though the stock worker workflow no longer
+  uses it to open a PR: the worker's job ends at push, and the engine opens the PR itself once
+  the session is over (#351, #605) — the grant stays for the rest of ordinary `gh` usage
+  (`gh pr comment`, `gh pr view`, `gh issue view`, …) and as the surface a worker could still
+  reach for despite the prompt, which `associateLanePr` (`forge.ts`) adopts rather than
+  duplicates. Only credential-free fix legs remove that grant
   (`WORKER_ALLOWED_TOOLS_NO_GH`) and use `workerCredentialFreeEnv()` to strip token/config
   variables, point `GH_CONFIG_DIR` at an empty per-lane directory, disable global/system git
   config and terminal prompting, and drop `SSH_AUTH_SOCK`. Even that environment is not a
