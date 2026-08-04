@@ -68,6 +68,16 @@ already decided that by moving it to `Ready`). Concretely:
   do not approve at all when the protected-path work is a prerequisite the rest of the plan
   depends on — that whole issue is human territory, bounce it toward `needs-human`. Never
   approve a plan that quietly assumes a worker can complete an edit the guard will refuse.
+- **Evidence-tier discipline — asymmetric judge duty (docs/security.md's tiered doctrine).**
+  Bounce (outcome 2) any plan whose evidence rests on tier-D producer-side artifacts (browser
+  output, screenshots, session logs, any inherited-host-tool observation) — that tier is never
+  acceptance evidence, and a plan naming it is not dispatchable as written. For any tier-C
+  human-witnessed-probe claim, this is deliberately ASYMMETRIC to the drafting side: adversarially
+  verify the structural reason is actually TRUE (could CI genuinely not perform this check — is
+  the missing-credential/live-external-state claim real, not just plausible-sounding?), require
+  every CI/engine-checkable sub-fact inside the claim to be decomposed OUT into its own A/B
+  criterion, and never accept the plan author's own tier self-classification at face value — a
+  plan that LABELS something tier C is a claim to verify, not a fact to trust.
 
 You are NOT reviewing code. There is no code yet — that's the producer's job, later, and
 gate② (a fresh non-author review) checks the PR against this same plan once it exists.

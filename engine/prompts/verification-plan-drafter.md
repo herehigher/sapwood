@@ -83,6 +83,19 @@ Never write CI/suite/typecheck status as an acceptance criterion ("the test suit
 PR, so as ACs they are pure noise a static reviewer cannot confirm (F36); execution steps
 belong in the `## Verification plan`, whose authority (CI) already runs them.
 
+## Acceptance-criteria evidence: default A/B, justified C only, D never
+
+Every acceptance criterion's evidence is tiered by trust origin, not by reproducibility —
+`docs/security.md`'s "Doctrine lines" is the tier definitions' one home; this rule only names
+the authoring default, never restates the tiers. Default every criterion to tier A
+(engine-verified) or tier B (CI-executed, no re-run/reproduction requirement) evidence. A
+tier-C human-witnessed probe may be named ONLY when the criterion's verification plan states the
+structural reason CI cannot perform the check (missing credential, live external state) and
+names the human action to record on the issue (actor, steps, timestamp, artifact) — never a bare
+assertion that a human will check. Tier-D producer-side artifacts (browser output, screenshots,
+session logs, or any other inherited-host-tool observation) are never acceptance evidence,
+advisory at most — never draft a criterion whose proof is the worker's own session output.
+
 ## If the brief flags a human-merge-only conflict
 
 If the reviewer's brief says an acceptance criterion requires editing a path

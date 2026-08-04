@@ -712,6 +712,45 @@ test("shipped engine-reviewer prompt (#454, design #402 R6 §6b): the triage doc
   );
 });
 
+// #628 (owner ruling 2026-08-04): docs/security.md's evidence-origin tiers (A/B/C/D) reach gate②
+// as two added constraints on top of the EXISTING, unchanged confirmed/cannot-confirm/
+// claim-accepted mechanics (design #279 §4.1) and the #454 enforced/judged boundary — this test
+// pins that the new rule is additive, not a rewrite of either.
+test("shipped engine-reviewer prompt (#628): tier-D producer-pasted session artifacts never reach `confirmed` (at most `claim-accepted`), and a tier-C probe confirms only against the issue-recorded probe, never PR-body narration", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.match(
+    prompt,
+    /Evidence-tier discipline \(docs\/security\.md's tiered doctrine\)/,
+    "names the rule and cites docs/security.md as the tier home",
+  );
+  assert.match(
+    prompt,
+    /is tier D and never raises a criterion to `confirmed`, whatever it claims/,
+    "tier D never yields confirmed, regardless of what the artifact claims",
+  );
+  assert.match(
+    prompt,
+    /at most it supports `claim-accepted` under the existing three-tier mechanics above/,
+    "tier D still fits inside the existing three-tier mechanics — no new status was introduced",
+  );
+  assert.match(
+    prompt,
+    /may reach `confirmed` only against the probe RECORD on the issue itself/,
+    "a tier-C claim confirms only against the recorded probe, not any other artifact",
+  );
+  assert.match(
+    prompt,
+    /never against PR-body narration describing what was\s+supposedly done, which is tier D regardless of how detailed it reads/,
+    "PR-body narration of a probe is itself tier D, however detailed",
+  );
+  // Additive, not a rewrite: the existing three-tier vocabulary and the #454 boundary section
+  // both still appear verbatim, unperturbed by the new paragraph.
+  assert.match(prompt, /\*\*`confirmed`\*\* — the criterion is CODE-VERIFIABLE/);
+  assert.match(prompt, /\*\*`cannot-confirm`\*\* — you looked and could NOT establish/);
+  assert.match(prompt, /\*\*`claim-accepted`\*\* — the criterion is NOT code-verifiable at all/);
+  assert.match(prompt, /## What the engine enforces vs\. what you judge/, "the #454 enforced/judged boundary section is untouched");
+});
+
 // #512: the runner-honesty rewrite touched three sites in the shipped prompt but must NOT touch
 // REQUIRED_PROMPT_PLACEHOLDERS or drop a placeholder from the shipped file — loadEngineReviewerPromptTemplate(undefined)
 // runs the SAME completeness check a custom promptFile gets (#74 fail-fast), so a regression here
