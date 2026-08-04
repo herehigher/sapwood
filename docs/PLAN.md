@@ -81,6 +81,7 @@ bootstrap_github,session_start}.sh`. Guard: `backend/src/zeroday/loop/guard.py`
 | 9 | Edge-case handling | **Rare edge cases degrade to `needs-human`, never to more machinery** (CTO, 2026-07-07, #69). Automation covers the common path only; when a low-probability edge would require new hardening/persistence/recovery code, the correct handling is: preserve the evidence, label `needs-human`, stop. First application: the drain path never runs git in worker worktrees (the whole #59–#68 issue family collapsed into sentinel-only handoff + dirty-worktree retention). |
 | 10 | Engine-agent reviewer | **Engine-composed, static, different-Claude-model gate② session** (#279): D1 no producer-code execution/Bash; D2 superseded by D6's engine-private, config-isolated checkout; D3 runs serially after trusted CI and reruns only when needed; D4 checkbox ACs receive engine IDs; D5 configured and actual reviewer models must differ from the producer's; D6 materializes the exact head from a private clone; D7 includes instruction context but changes to configured instruction paths escalate to human review. The dispatch-time full-body/AC snapshot is authoritative session input; code-verifiable confirmation requires app-slug-bound `ci.requiredChecks`; `engine-agent` is primary-only (never a fallback) and has no fallback model. |
 | 11 | Host-delegated capability management | **Amended 2026-08-03 (DR #616, owner-confirmed):** sapwood adopts host-delegated capability management — it abandons in-engine tool-permission/capability management for producer (worker) legs. Producer legs officially **inherit the operator's host Claude Code environment** — settings sources, MCP servers, skills — as documented behavior, not an accident of unset flags. **No `capabilities.*` config surface will ever be built.** Scope is **producer legs only**: the reviewer/peripheral sealing floor (gate② seal, Decision #10; #285/#410/#236 rulings) is untouched and stays non-negotiable. Rationale (owner): permission control is where complexity bugs live — don't over-invest; config-surface complexity hurts UX; this is an LLM-core product and cutting tools cuts the model's hands; favor empowerment under the trusted-repos-first threat model (Decision #3). A live probe against the worker's exact dispatch argv confirmed the premise (inherited MCP tools, including write/exec-class servers, are callable and arrive deferred rather than in the init inventory) before this decision was accepted. The engine keeps a small governance core instead — enumerated in [`docs/security.md`](security.md). |
+| 12 | Producer PR-opening ownership | **Amended 2026-08-04 (#351 final ruling, owner-confirmed; #605):** engine-open-PR is promoted from a rescue path to the **ordinary path** for worker lanes — a worker's job ends at pushing its branch; the engine performs the forge-API PR-open from deterministic code, at reclaim (`forge.ts::associateLanePr` — branch known, no open PR on it, branch confirmed pushed via `probePushedBranch`, session over → the engine calls `forge.openPR` with an engine-authored body carrying the `sapwood:pr-owner` marker). The worker prompt no longer instructs `gh pr create`; a worker that opens its own PR anyway (still possible pre-#606, while the `gh` grant remains) has it adopted via the marker, never duplicated — unchanged association behavior from #377. Motivated by the producer≠merger consequence of #606's L1 credential tier: a worker holding only a git-transport deploy key, no API credential at all, structurally cannot open a PR, making engine-open the only channel rather than an option — this decision precedes and unblocks #606. No engine git invocation targets a worker worktree on this path (#69 unchanged): `associateLanePr`'s forge calls are pure API writes. |
 
 ## Architecture (v1)
 
@@ -765,6 +766,18 @@ rule governs engine-injected context plus retrieval design (#215; #217, supersed
 see the guardrail/shackle criterion immediately below). Revisit input-side hardening
 when untrusted-repo support is actually scheduled, as its own milestone-level
 threat-model decision rather than a standing constraint on trusted-repo capabilities.
+
+**Peripheral vs. producer split (added post capability DR #616, for clarity — this rule was
+not contradicted by that ruling; it arguably justifies it).** "Enforceable at the action
+boundary" cuts differently for the two session classes this doc distinguishes. Peripheral
+sessions' action boundary is the CLI's own tool grant (no `Bash`, no write tool, `#110`'s
+zero-`gh` design) — genuinely enforceable, so capability was withheld there. A producer
+(worker) leg's action boundary is different in kind: the guard hook mediates Bash/file-tool
+calls but structurally cannot mediate `mcp__*` calls at all (docs/security.md's governance-core
+list), so in-engine capability *management* for the inherited MCP surface was never actually
+enforceable to begin with — DR #616 (Decision #11 above) is this same rule applied honestly to
+that surface, choosing the real enforcement points (the guard's write-path denial, branch
+protection) over a config knob that could not have been enforced.
 
 **The guardrail/shackle criterion (locked 2026-07-17, issue #238; first applied in
 #234).** A mediation design for role-session information access must never deny a

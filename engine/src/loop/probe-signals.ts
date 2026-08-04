@@ -69,6 +69,7 @@ export type ProbeCtx = {
     | "getPoolEligibleIssues"
     | "countOpenIssuesInMilestone"
     | "listOpenIssues"
+    | "getIssueMeta"
   >;
   /** #147 GATED RECLAIM is skipped entirely without a merge gate — presence, not the gate itself. */
   mergeGateConfigured: boolean;
@@ -158,12 +159,32 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
   },
   {
     name: "gated-reentry-candidates",
-    read: "local",
+    read: "forge",
     consumer: "conductor.ts tick() GATED RECLAIM (#147) — skipped entirely without a merge gate, so gated on deps.mergeGate",
+    // #630 (F32 follow-through, live park batch-7 round 312): a needs-human carrier OUTSIDE the
+    // run's `round.milestone` scope is not work this run can ever consume — the aligning/PO and
+    // gate⓪ passes it would wake are all milestone-scoped, and a human release of a candidate the
+    // run cannot dispatch into does nothing this run can observe or act on either. Reuses the SAME
+    // scope RoundScopedForge already applies to dispatch (round.ts) rather than a new age
+    // heuristic or config key — milestone unset stays "no scoping" (RoundScopedForge's own
+    // convention), so this signal's behavior is unchanged for every run that doesn't set
+    // round.milestone. Gated reclaim's own dispatch/reentry decision (conductor.ts, which already
+    // reads getIssueMeta per candidate) is UNTOUCHED: an off-milestone candidate keeps its labels
+    // and its human queue entry, it just no longer holds THIS probe's standby open.
     terminal:
-      "state.ts gatedFailedWorkers() ALREADY excludes `gated_reentry_capped = 1` (fail-closed one-way latch once reentry attempts are spent) and `gated_escalation_labeled = 0` (a row whose escalation label write failed is permanently invisible here) — neither shape is retried forever",
+      "state.ts gatedFailedWorkers() ALREADY excludes `gated_reentry_capped = 1` (fail-closed one-way latch once reentry attempts are spent) and `gated_escalation_labeled = 0` (a row whose escalation label write failed is permanently invisible here) — neither shape is retried forever. On TOP of that, a candidate whose issue's milestone doesn't match cfg.round.milestone stops counting for THIS signal the moment it (or the run's own milestone) moves into scope — it remains visible to gatedFailedWorkers() itself, so GATED RECLAIM still reclaims it the instant a differently-scoped run (or this run once re-milestoned) executes a tick; a human release on an indefinite timescale is exactly what the #630 disabled-consumer analysis says must not pin a probe open.",
     enabled: (ctx) => ctx.mergeGateConfigured,
-    probe: (ctx) => ctx.state.gatedFailedWorkers().length > 0,
+    probe: async (ctx) => {
+      const candidates = ctx.state.gatedFailedWorkers();
+      if (candidates.length === 0) return false;
+      const milestone = ctx.cfg.round.milestone;
+      if (!milestone) return true; // unset = no scoping — RoundScopedForge's own convention
+      for (const w of candidates) {
+        const meta = await ctx.forge.getIssueMeta(w.issue);
+        if (meta.milestone === milestone) return true;
+      }
+      return false;
+    },
   },
   {
     name: "ready-issues",

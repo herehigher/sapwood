@@ -98,11 +98,15 @@ export interface WorktreeGitState {
   /** How `dirty` was determined — never a measured `git status` call (this engine execs `git`
    *  nowhere outside worker.ts's claude-launch spawn / gh.ts's `gh` calls; see this module's
    *  header doc), so every value here is a DERIVATION, not a live read:
-   *  - `"structural-no-write-tools"` — the session's effective tool grant carries NO
-   *    WRITE-CAPABLE tool (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`/any `Bash(...)` entry —
-   *    every peripheral role's `ROLE_ALLOWED_TOOLS`/`PO_ALLOWED_TOOLS`/`CONFIRM_ALLOWED_TOOLS`
-   *    grant exactly `Read,Grep,Glob` and nothing else, #235 PR-B) and it gets a FRESH worktree,
-   *    so `dirty: false` is a structural guarantee, not a guess. Before #235 this was phrased as
+   *  - `"structural-no-write-tools"` — the session's effective ENGINE-GRANTED `--allowedTools`
+   *    string carries NO WRITE-CAPABLE tool NAME (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`/any
+   *    `Bash(...)` entry — every peripheral role's `ROLE_ALLOWED_TOOLS`/`PO_ALLOWED_TOOLS`/
+   *    `CONFIRM_ALLOWED_TOOLS` grant exactly `Read,Grep,Glob` and nothing else, #235 PR-B) and it
+   *    gets a FRESH worktree, so `dirty: false` is a guarantee about that grant, not proof the
+   *    session had no write capability at all: capability DR #616 means an unsealed session (any
+   *    role not running gate②'s `reviewCwd` mode) can still inherit an ambient host MCP server
+   *    with its own write-capable tools — `hasWriteCapableGrant`'s name-based check cannot see
+   *    those, and this basis says nothing about them either. Before #235 this was phrased as
    *    "the grant is EMPTY" — that was equivalent back when the base allow-list carried nothing
    *    at all; #235 makes `Read`/`Grep`/`Glob` (guard-confined to the worktree, see
    *    `docs/security.md`) the universal peripheral baseline, so "empty" and "no write-capable

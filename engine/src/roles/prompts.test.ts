@@ -79,12 +79,6 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // state the engine-enforced structural fact instead — writes/moves happen only from this
   // session's structured output, applied by the engine, regardless of what tools the session
   // holds — never a claim about the session's full tool inventory.
-  // #628 (owner ruling 2026-08-04, tiered supersession of #616's absolute CI-reproducible carry):
-  // adds "## Acceptance-criteria evidence: default A/B, justified C only, D never" (both
-  // align/triage modes) stating the authoring default (tier A/B, justified C, D-ban) and citing
-  // docs/security.md's tiered doctrine as the one home for the tier definitions. Identical wording
-  // to the matching sections added in po-decompose.md and verification-plan-drafter.md
-  // (mirror-pair discipline).
   "po.md": "f4229bc13cc68928e3c15d136cfd61479f46a17b076af97d68e1839927860bb9",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
@@ -143,12 +137,6 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // the structural fact (this loop only ever applies these writes from the structured output;
   // removing either label is never this role's output) without claiming anything about the
   // session's actual tool inventory.
-  // #628: adds an "Evidence-tier discipline — asymmetric judge duty" bullet to "What you're
-  // checking" — bounce (outcome 2) any plan resting on tier-D producer-side artifacts; for any
-  // tier-C human-witnessed-probe claim, adversarially verify the structural reason is TRUE,
-  // require CI/engine-checkable sub-facts decomposed OUT into A/B, never accept the author's own
-  // tier self-classification. Cites docs/security.md's tiered doctrine as the tier definitions'
-  // one home; this file never restates the tiers themselves.
   "verification-plan-reviewer.md": "2349a26c039aa4ba208013bb27c934410ee147bd6197f9595c85489375dbb240",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
@@ -173,9 +161,6 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #616's ambient-MCP-tool finding falsifies. Reworded to role-scope framing (posting a
   // comment/label, or touching needs-human/blocked, is never this role's OUTPUT, whatever tools
   // the session holds) instead of claiming the session has no channel that could do it.
-  // #628: same "## Acceptance-criteria evidence: default A/B, justified C only, D never" section
-  // as po.md/po-decompose.md above, identical wording (mirror-pair discipline) — placed right
-  // before the human-merge-only-conflict section, same relative position as in po.md.
   "verification-plan-drafter.md": "02a01e181592fbffee434337da45a8f0cfce3ff2b403506a8254ebc465abebd2",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
   // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
@@ -240,9 +225,6 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // ("the deterministic engine performs all validated issue, label, comment, board, and native
   // sub-issue writes") — falsified in principle by #616's ambient-MCP-tool finding. Dropped the
   // redundant closure claim rather than restating the structural fact a second way.
-  // #628: same "## Acceptance-criteria evidence: default A/B, justified C only, D never" section
-  // as po.md/verification-plan-drafter.md above, identical wording (mirror-pair discipline) —
-  // placed right after the "ready child touches a human-merge-only path" section.
   "po-decompose.md": "2a4e0b4f19a205ff404cf40353c458793e4c78b43f73a0665045fe223402b274",
 };
 
@@ -975,6 +957,40 @@ test("#410 architect.md: names WebSearch/WebFetch alongside the existing read-on
     /unless this deployment has turned the\s*\ngrant off/,
     "names the config off-switch, never assumes the grant is unconditional",
   );
+});
+
+// ── #605: engine-open-PR is the ORDINARY path for a worker lane, not a rescue fallback — the
+// worker's job ends at push, never at `gh pr create`. Same forbidden-instruction pattern
+// prompts.test.ts already applies to retro.md above (#235). ──
+
+test("#605 worker.md: never instructs the worker to open a pull request itself — the engine opens it after push", () => {
+  const body = readPrompt(defaultPromptPath());
+  assert.ok(!body.includes("gh pr create"), "worker.md must not instruct: gh pr create");
+  assert.ok(
+    !/\*\*Open a pull request\*\*/i.test(body),
+    "worker.md must not carry an affirmative 'open a pull request' step for the worker session",
+  );
+  assert.match(body, /do not open a pull request yourself/i, "explicitly tells the worker not to open the PR itself");
+  assert.match(body, /engine opens the PR/i, "the push-then-stop instruction names the engine, not the worker session, as the PR opener");
+  assert.match(body, /Commit and push your (?:work|branch)/, "the worker still owns commit+push — only the PR-open step moved");
+});
+
+test("#605: no shipped prompt (worker.md, fix.md, or any peripheral prompt) instructs `gh pr create`", () => {
+  for (const path of [
+    defaultPromptPath(),
+    defaultFixPromptPath(),
+    defaultPoPromptPath(),
+    defaultArchitectPromptPath(),
+    defaultVerificationPlanReviewerPromptPath(),
+    defaultVerificationPlanConfirmPromptPath(),
+    defaultVerificationPlanDrafterPromptPath(),
+    defaultHarvestPromptPath(),
+    defaultRetroPromptPath(),
+    defaultPoolPromptPath(),
+    defaultPoDecomposePromptPath(),
+  ]) {
+    assert.ok(!readPrompt(path).includes("gh pr create"), `${path} must not instruct gh pr create`);
+  }
 });
 
 // ── #628 (owner ruling 2026-08-04): AC-evidence doctrine tiered by trust origin, carried into

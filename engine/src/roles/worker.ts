@@ -14,7 +14,11 @@
 //
 // SECURITY: spawn uses an argv array + detached process group — never a shell. The coarse
 // allowed/disallowedTools below are noise-reduction only; the real boundary is the
-// fail-closed PreToolUse guard hook wired in via --settings (#26).
+// fail-closed PreToolUse guard hook wired in via --settings (#26) — but only for the
+// Bash/Write/Edit/MultiEdit/Read/Grep/Glob/NotebookRead tool family its matcher covers. A
+// producer leg inherits the operator's host MCP surface (capability DR #616) and no `mcp__`
+// tool call reaches this hook at all; see docs/security.md's "Worker network egress: accepted
+// blind spot" section for the residual and branch protection as the mandatory backstop.
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
@@ -311,11 +315,13 @@ export function classifyEgressTarget(text: string): "loopback" | undefined {
  *    assignments plus ordinary `env`/`sudo` prefixes) against the CALLER-SUPPLIED
  *    `suspectCommands` list; suspect names appearing in arguments are intentionally ignored.
  *  - **WebFetch/WebSearch** (#410): UNCONDITIONALLY a hit — every call is journalled, not just
- *    a configured subset, because these two tool names ARE the entire sanctioned
+ *    a configured subset, because these two tool names ARE the entire ENGINE-GRANTED
  *    peripheral-egress channel (unlike Bash, where most executables are legitimate worker
  *    activity and only a configured suspect list is worth flagging). `executable` carries the
  *    literal tool name; `snippet` is `WebFetch`'s `url` or `WebSearch`'s `query`, truncated the
- *    same way a Bash snippet is.
+ *    same way a Bash snippet is. (Capability DR #616 adds a second, INHERITED egress channel —
+ *    ambient `mcp__*` tools — covered by its own family below; these two names are no longer
+ *    the only sanctioned channel, just the only engine-granted one.)
  *
  *    Codex sol-high PR #417 review, P2-b (corrects an earlier, inaccurate version of this doc):
  *    this branch is **content-driven, not role-gated** — it hits on ANY `WebFetch`/`WebSearch`
@@ -929,9 +935,11 @@ export interface ClaudeArgsOpts {
   /** #234: inline `--mcp-config` JSON for the engine-hosted read-only forge MCP proxy — same
    *  inline-never-a-file stance as `settings` above (a file under stateDir would be a
    *  worker/session-writable on-disk target). Omitted -> no `--mcp-config` flag, unchanged
-   *  behavior for every caller that doesn't attach a proxy (peripheral.ts's RoleRunner is the
-   *  only caller that ever supplies it, and only when its own `proxy` opt is present). #285:
-   *  review sessions also set this, to `EMPTY_MCP_CONFIG_JSON` — see `strictMcpConfig`'s doc. */
+   *  behavior for every caller that doesn't attach a proxy: peripheral.ts's RoleRunner supplies
+   *  it when its own `proxy` opt is present, and so do this module's own `dispatch()`/`resume()`
+   *  (WorkerSupervisor) when a `proxyHandle` was minted — RoleRunner is not the only caller.
+   *  #285: review sessions also set this, to `EMPTY_MCP_CONFIG_JSON` — see `strictMcpConfig`'s
+   *  doc. */
   mcpConfig?: string;
   /** #285 (review session mode, D1 static-only, Codex sol-high P1): `--strict-mcp-config` —
    *  verified real against a live `claude` CLI (worker.ts's own `probeLlmPing` already uses it,

@@ -189,6 +189,9 @@ class FakeForge extends UnstubbedForge implements IForge {
   /** #484: GATED RECLAIM reads the issue's live state before the reentry cap (a CLOSED issue is
    *  terminal). Mutable per-issue; unlisted issues read OPEN, as every fixture here assumes. */
   issueState: Record<number, "OPEN" | "CLOSED"> = {};
+  /** #630: the probe's gated-reentry-candidates signal milestone-scopes via getIssueMeta, the
+   *  same read GATED RECLAIM already does. Mutable per-issue; unlisted issues read no milestone. */
+  issueMilestone: Record<number, string> = {};
   override async getIssueMeta(issue: number) {
     return {
       number: issue,
@@ -196,6 +199,7 @@ class FakeForge extends UnstubbedForge implements IForge {
       state: this.issueState[issue] ?? ("OPEN" as const),
       labels: this.issueLabels[issue] ?? [],
       updatedAt: "2026-01-01T00:00:00Z",
+      ...(this.issueMilestone[issue] !== undefined ? { milestone: this.issueMilestone[issue] } : {}),
     };
   }
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
@@ -4705,6 +4709,56 @@ test("runRounds (#433): standby must never withhold the next round while a CARRI
   await runRounds(deps);
   assert.ok(state.getRound(2) != null, "a second round must open — a carried lane is work, so standby must not engage");
   assert.equal(state.getWorker("lane-377")?.state, "done", "the carried lane was reclaimed, re-driven and merged without a human merge");
+  state.close();
+});
+
+test("runRounds standby (#630 AC3): a run whose ONLY gated-reentry candidate sits OUTSIDE the run's round.milestone reaches standby instead of idle-churning to the F32 breaker", async () => {
+  const forge = new FakeForge(); // ready/planReview/triage/milestone-backlog all empty
+  const state = new State(":memory:");
+  const cfg = mkCfg({ round: { milestone: "M-X", standby: { enabled: true } } });
+  // The live-park batch-7 shape: a needs-human carrier with an open PR (a genuine
+  // gatedFailedWorkers() candidate) whose issue sits in a DIFFERENT milestone than this run — and
+  // the human hold is NEVER cleared (off-milestone, owner-timescale, not releasable this run).
+  state.upsertWorker({
+    name: "lane-144",
+    issue: 144,
+    session_id: "s",
+    state: "failed",
+    started_at: "t",
+    ended_at: "t2",
+    pr: 373,
+    gated_escalation_labeled: 1,
+  });
+  forge.issueLabels[144] = [cfg.labels.needsHuman];
+  forge.issueMilestone[144] = "v0.2.3"; // off this run's "M-X" scope
+  // GATED RECLAIM must never even ask the gate: the human hold on #144 never clears.
+  const gate = new ScriptedMergeGate([]);
+  const events = spyOnEvents(state);
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop();
+  };
+  const deps = baseDeps({ forge, state, sleep, mergeGate: gate, tickIntervalSec: 5, cfg });
+  deps.registerSignals = (requestStop) => {
+    stop = once(requestStop);
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it, no idle-churn");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby actually engaged",
+  );
+  assert.equal(state.getRound(2), undefined, "no idle-churn round burned peripherals over a candidate this run can never consume");
+  assert.equal(
+    events.filter(([kind]) => kind === "idle-churn-detected").length,
+    0,
+    "the breaker never even samples a second identical round — standby is the first line",
+  );
+  assert.equal(gate.calls, 0, "GATED RECLAIM never consulted the merge gate — the human hold on #144 was never touched");
   state.close();
 });
 

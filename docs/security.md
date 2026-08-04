@@ -220,7 +220,13 @@ That gap is an accepted boundary, not an isolation feature waiting to be implied
 of the model. sapwood targets trusted repos first, and by owner decision does not place worker
 sessions in a network-isolated sandbox or proxy. Operators must therefore treat worker Bash
 egress as an explicit blind spot when deciding which repositories, host credentials, and
-environment data are safe to expose to a run.
+environment data are safe to expose to a run. This is not the engine's only inherited-capability
+egress gap: capability DR #616 (above) documents a second, broader one — the operator's ambient
+host MCP surface, which a producer leg inherits regardless of `Bash` and which the guard hook's
+matcher does not mediate either. The two are tracked separately because they arrived from
+different decisions and are detected by different mechanisms (the Bash lexical tripwire below vs.
+`scanEgressSuspects`'s `mcp__*` family, #617), not because either is more or less real than the
+other.
 
 The engine adds a monitor-only lexical tripwire at lane end. It scans the completed leg's
 existing Claude stream-json log for Bash tool calls whose executable matches
@@ -266,7 +272,11 @@ record (issue #410) rejected a domain allowlist (self-defeating — the point is
 things nobody knew to look for, and an allowlisted domain accepting an arbitrary path/query is
 itself an egress channel) and MCP delivery (the guard hook has no `mcp__` handling at all, so a
 built-in-tool grant stays visible to the engine's own enforcement layer and journal in a way an
-engine-hosted MCP tool would not).
+engine-hosted MCP tool would not) — the same guard-blind-spot fact capability DR #616 (above)
+later documented at doctrine level for producer legs generally; #410's choice of
+`WebSearch`/`WebFetch` over MCP for this specific grant remains sound for the same reason, it
+just no longer needs restating as though the guard's `mcp__` blindness were unique to this
+decision.
 
 **Grant, per-role, named exports.** `peripheral.ts`'s `ARCHITECT_ALLOWED_TOOLS`/
 `PO_ALIGN_ALLOWED_TOOLS`/`PO_TRIAGE_ALLOWED_TOOLS` each widen the base `ROLE_ALLOWED_TOOLS`/
@@ -277,16 +287,24 @@ role's OWN call site (`architect.ts`, `align.ts`'s po-align/po-triage sessions),
 that could ever reach the grant. `po-pool` (align.ts's third `PO_ALLOWED_TOOLS` caller) stays on
 the ungranted base unconditionally: it renders a distinct prompt (`po-pool.md`), never `po.md`.
 
-**The review family stays offline by construction** — with one honestly-scoped exception named
-below. `verification-plan-reviewer`, `verification-plan-drafter`,
-`verification-plan-reviewer-confirm`, and every gate② `engine-agent` review session never reference
-`cfg.webAccess` at all — refusal is the absence of a wire-up, not a check that could be
-misconfigured. Gate②'s review-session mode (`reviewCwd`, see below) goes further still: it
-REFUSES a caller-supplied `allowedTools` outright (thrown, not silently accepted) alongside
-`reviewCwd`, so even a future direct call attempting to widen it would fail loudly rather than
-reopen the surface. A gate whose conclusions could drift run to run over a live web result is
-not an inspectable gate — this is recorded as a deliberate reproducibility property. Gate②'s
-`--strict-mcp-config`/`--setting-sources ""` seal (see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard-285)
+**The review family never gets the built-in `WebSearch`/`WebFetch` grant — only gate②'s sealed
+review session is actually offline by construction.** `verification-plan-reviewer`,
+`verification-plan-drafter`, `verification-plan-reviewer-confirm`, and every gate②
+`engine-agent` review session never reference `cfg.webAccess` at all — refusal of THAT grant is
+the absence of a wire-up, not a check that could be misconfigured. But under capability DR #616
+that is a narrower claim than "offline": only gate②'s review-session mode (`reviewCwd`, see
+below) actually closes the MCP/settings surface (`--strict-mcp-config`/`--setting-sources ""`),
+so only it is genuinely offline by construction. `verification-plan-reviewer`/`-drafter`/
+`-confirm` run the ordinary unsealed `RoleRunner` path — no `WebSearch`/`WebFetch`, but an
+ambient host MCP server inherited from settings sources is not excluded by this wire-up's
+absence, and network reach through it is not covered by the audit journal below either (that
+scanner recognizes named tools, not every possible inherited `mcp__*` schema's semantics).
+Gate②'s review-session mode goes further still: it REFUSES a caller-supplied `allowedTools`
+outright (thrown, not silently accepted) alongside `reviewCwd`, so even a future direct call
+attempting to widen it would fail loudly rather than reopen the surface. A gate whose
+conclusions could drift run to run over a live web result is not an inspectable gate — this is
+recorded as a deliberate reproducibility property. Gate②'s `--strict-mcp-config`/
+`--setting-sources ""` seal (see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard-285)
 below) is unaffected by anything in this section — it was justified independently, for a
 materialized PR tree, and #410 leaves it exactly as it was.
 
@@ -378,9 +396,11 @@ something externally, rather than silently omit the check or guess.
 the worker's own Bash lexical tripwire already calls — now ALSO recognizes `WebFetch`/
 `WebSearch` `tool_use` blocks directly from the structured stream-json transcript
 (unconditionally, not gated by `worker.egressSuspectCommands`: unlike Bash, where most
-executables are legitimate, these two tool names ARE the entire sanctioned peripheral-egress
+executables are legitimate, these two tool names ARE the entire ENGINE-GRANTED peripheral-egress
 channel), and — by that same unconditional branch — `Agent`/`Task` `tool_use` blocks too (see
-the #534 paragraph below). `RoleRunner.run()` calls it on every session's own completed jsonl and
+the #534 paragraph below). Capability DR #616 adds a second, INHERITED egress channel — any
+`mcp__*` tool call — scanned unconditionally by the same function (#617, seam 4); see the
+inheritance doctrine above and the worker-egress blind-spot section below. `RoleRunner.run()` calls it on every session's own completed jsonl and
 emits the identical `egress-suspect` ledger event kind the worker's tripwire uses — `round-artifact.ts`'s
 existing assembler needs no changes to surface either kind. This flagging is deliberately
 **content-driven, not role-gated**: `--allowedTools`/`--disallowedTools` is a noise-reduction
@@ -418,8 +438,12 @@ The asymmetry is compensated, but not erased, by several independent controls:
   strips forge credential variables in `peripheralSessionEnv()`, and leaves forge writes to
   validated engine code. Those sessions have no `gh` grant. This is **not** true of every role:
   `engine/src/roles/worker.ts` deliberately gives an ordinary initial coding leg
-  `Bash(gh *)` and inherits the engine environment so the stock worker workflow can push and
-  open its PR. Only credential-free fix legs remove that grant
+  `Bash(gh *)` and inherits the engine environment, though the stock worker workflow no longer
+  uses it to open a PR: the worker's job ends at push, and the engine opens the PR itself once
+  the session is over (#351, #605) — the grant stays for the rest of ordinary `gh` usage
+  (`gh pr comment`, `gh pr view`, `gh issue view`, …) and as the surface a worker could still
+  reach for despite the prompt, which `associateLanePr` (`forge.ts`) adopts rather than
+  duplicates. Only credential-free fix legs remove that grant
   (`WORKER_ALLOWED_TOOLS_NO_GH`) and use `workerCredentialFreeEnv()` to strip token/config
   variables, point `GH_CONFIG_DIR` at an empty per-lane directory, disable global/system git
   config and terminal prompting, and drop `SSH_AUTH_SOCK`. Even that environment is not a
@@ -763,7 +787,9 @@ regardless of `enabled` — see the exception below. Each session's role scopes 
 subset of the tool algebra (`proxy/access.ts`'s `PROXY_ROLE_TOOL_MATRIX`), enforced server-side
 in the proxy itself (the CLI's own `--allowedTools` widening is noise reduction only, same stance
 as every other allow/deny pair on this page) — a role absent from the table below is granted **no
-tool at all** (deny-by-default, regression-tested):
+tool from this proxy** (deny-by-default, regression-tested, scoped to the proxy's own
+`mcp__forge__*` namespace only — it says nothing about an ambient host MCP server a session may
+separately inherit under capability DR #616, see the worker-egress blind-spot section):
 
 | Role | Tools granted |
 | --- | --- |
@@ -926,9 +952,11 @@ actually saw, so ambient drift between retries (a `CLAUDE.md` edited between att
 and attempt 2, a dirty worktree, a config change) never makes two attempts of the same
 phase look comparable when they weren't.
 
-**Wired for all 9/9 `runSessionWithRetry` peripheral call sites** — harvest,
+**Wired for all 10/10 `runSessionWithRetry` peripheral call sites** — harvest,
 architect, plan-review (the reviewer, drafter, and #214's confirm sessions), retro,
-and (as of [#251](https://github.com/herehigher/sapwood/issues/251)) `align.ts`'s
+[#310](https://github.com/herehigher/sapwood/issues/310)'s `decompose.ts` PO
+decompose sub-mode (`po-decompose`), and (as of
+[#251](https://github.com/herehigher/sapwood/issues/251)) `align.ts`'s
 three PO sessions (`po-align`, `po-triage`, `po-pool`) — **plus, as of
 [#617](https://github.com/herehigher/sapwood/issues/617) (capability DR #616's seam
 3), `WorkerSupervisor`'s `dispatch()`/`resume()`**: every worker/producer leg now
@@ -1037,11 +1065,14 @@ common cases right by coincidence but would have mis-resolved any other shared
 namespace, e.g. `refs/notes/*`, from a stale worktree-local shadow.) `dirty` is
 derived, never measured,
 from three distinct, honestly-labeled bases: `"structural-no-write-tools"` (the
-session's tool grant carries no WRITE-capable tool — `Write`/`Edit`/`MultiEdit`/
-`NotebookEdit`/any `Bash(...)` entry — the common case, so `dirty: false` is a
-structural guarantee; #235 makes `Read`/`Grep`/`Glob` the universal issues-only
-baseline, so this is no longer the same thing as "the allow-list is empty" — a
-read-only grant is still `dirty: false`); `"unknown-write-capable-session"` (the grant
+session's ENGINE-GRANTED `--allowedTools` string carries no WRITE-capable tool name —
+`Write`/`Edit`/`MultiEdit`/`NotebookEdit`/any `Bash(...)` entry — the common case, so
+`dirty: false` is a guarantee about that grant, not about the session's total capability;
+capability DR #616 means an unsealed session can still inherit an ambient host MCP server with
+its own write-capable tools, invisible to this name-based check — see the worker-egress
+blind-spot section. #235 makes `Read`/`Grep`/`Glob` the universal issues-only baseline, so this
+is no longer the same thing as "the allow-list is empty" — a read-only grant is still
+`dirty: false`); `"unknown-write-capable-session"` (the grant
 DOES include a write-capable tool, e.g. `retro`'s `Write`/`Edit`/`Bash(git ...)` — the
 engine cannot rule out a write, so `dirty: true` conservatively, never a false
 "definitely clean"); and `"worktree-missing"` (the worktree never appeared on disk at
