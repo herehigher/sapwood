@@ -995,7 +995,7 @@ export function runEvents(argv: string[]): { stdout: string; stderr: string; cod
 // ── #475: `sapwood park clear` — the engine-owned, receipt-first operator clear ─────────────
 
 const PARK_USAGE = `\
-usage: sapwood park clear [db-path] [--source SOURCE]
+usage: sapwood park clear [db-path] [--source SOURCE] [--reason "<text>"]
 
 Clear a park episode the way the engine itself would: append the \`park-resumed\`
 receipt (\`via: operator-clear\`) FIRST, then delete the park_state row, then take down
@@ -1011,6 +1011,13 @@ Defaults to ${DEFAULT_DB_PATH} (the same path \`sapwood run\` writes to).
 
 Flags:
   --source SOURCE  Clear only this park source
+  --reason "<text>"  Recorded verbatim in the park-resumed receipt (as clearReason) and
+                     echoed in stdout — the OPERATOR's reason for clearing, distinct from
+                     the episode's own reason for entering park. Optional for a human running
+                     this by hand; docs/supervision.md's governance section makes it REQUIRED
+                     practice for an agent supervisor (#644). Rejected if empty or
+                     whitespace-only text. Omitted entirely: behavior is unchanged from before
+                     this flag existed.
   --help, -h       Print this help and exit
 `;
 
@@ -1021,6 +1028,10 @@ export interface ParkArgs {
   error?: string | undefined;
   dbPath: string;
   source?: ParkSource | undefined;
+  /** #644: the operator's free-text clear reason — see PARK_USAGE. Undefined means the flag was
+   *  never passed (the pre-#644 shape); never an empty string (parseParkArgs fails closed on
+   *  empty/whitespace-only text before this field is ever set). */
+  reason?: string | undefined;
 }
 
 export function parseParkArgs(argv: string[]): ParkArgs {
@@ -1036,6 +1047,7 @@ export function parseParkArgs(argv: string[]): ParkArgs {
   }
   const positionals: string[] = [];
   let source: ParkSource | undefined;
+  let reason: string | undefined;
   for (let i = 1; i < args.length; i++) {
     const a = args[i]!;
     if (a === "--source") {
@@ -1052,12 +1064,30 @@ export function parseParkArgs(argv: string[]): ParkArgs {
       i++;
       continue;
     }
+    if (a === "--reason") {
+      // #644: same value-taking fail-closed shape as --source above — a missing or flag-shaped
+      // operand is rejected rather than silently consuming the NEXT flag as free text. A present
+      // but empty/whitespace-only value is a SEPARATE failure (caught below): the operand parsed
+      // fine syntactically, but recording "" as an audit reason is worse than refusing it — an
+      // empty clearReason would look identical to no --reason at all to a later reader, silently
+      // defeating the auditability this flag exists for.
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith("-")) {
+        return { help: false, error: "--reason requires a value", dbPath: DEFAULT_DB_PATH };
+      }
+      if (next.trim() === "") {
+        return { help: false, error: "--reason requires non-empty text", dbPath: DEFAULT_DB_PATH };
+      }
+      reason = next;
+      i++;
+      continue;
+    }
     if (a.startsWith("-")) {
       return { help: false, error: `unknown flag: ${a}`, dbPath: DEFAULT_DB_PATH };
     }
     positionals.push(a);
   }
-  return { help: false, dbPath: positionals[0] ?? DEFAULT_DB_PATH, source };
+  return { help: false, dbPath: positionals[0] ?? DEFAULT_DB_PATH, source, reason };
 }
 
 /** `sapwood park clear`: the operator clear, performed inside the engine's own protocol instead
@@ -1078,7 +1108,7 @@ export function runPark(argv: string[]): { stdout: string; stderr: string; code:
   if (parsed.error) {
     return { stdout: "", stderr: `sapwood park: ${parsed.error}\n\n${PARK_USAGE}`, code: 1 };
   }
-  const { dbPath, source } = parsed;
+  const { dbPath, source, reason } = parsed;
   // Never CREATE a DB (or its data dir) as a side effect of a clear — a missing DB means the
   // engine has never run here, which is an operator error worth reporting, not a silent success.
   if (!existsSync(dbPath)) {
@@ -1103,12 +1133,17 @@ export function runPark(argv: string[]): { stdout: string; stderr: string; code:
   try {
     const state = new State(dbPath);
     try {
-      const cleared = clearParksReceiptFirst(state, source ?? null);
+      const cleared = clearParksReceiptFirst(state, source ?? null, reason);
       if (cleared.length === 0) {
         const scope = source ? ` for source ${source}` : "";
         return { stdout: `sapwood park clear: no open park episode${scope} — nothing to clear\n`, stderr: "", code: 0 };
       }
-      const lines = cleared.map((p) => `  cleared ${p.source} (parked since ${p.enteredAt}) — reason: ${p.reason}`);
+      // #644: the clear-reason suffix is appended ONLY when --reason was given, so the no-flag
+      // output stays byte-identical to before this flag existed (the reverse test park-clear.test.ts
+      // pins). `p.reason` here is the EPISODE's own reason for entering park — unrelated to the
+      // operator's `reason` for clearing it, hence the distinct "clear reason" label.
+      const clearNote = reason !== undefined ? ` — clear reason: ${reason}` : "";
+      const lines = cleared.map((p) => `  cleared ${p.source} (parked since ${p.enteredAt}) — reason: ${p.reason}${clearNote}`);
       return {
         stdout: `sapwood park clear: ${cleared.length} park episode(s) cleared, receipt-first\n${lines.join("\n")}\n`,
         stderr: "",

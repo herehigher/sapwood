@@ -31,17 +31,32 @@ export const OPERATOR_CLEAR_VIA = "operator-clear";
 
 /** Clear `source` (or EVERY open episode when null), receipt-first. Returns the episodes that
  *  were actually open and got cleared — empty is a legitimate no-op, never an error: clearing an
- *  already-clear park is idempotent. */
+ *  already-clear park is idempotent.
+ *
+ *  `clearReason` (#644): the OPERATOR's free-text reason for clearing — distinct from
+ *  `row.reason` (why the episode entered park in the first place). Advisory for a human running
+ *  the CLI by hand; the #644 owner ruling makes it REQUIRED practice for an LLM supervisor
+ *  session (docs/supervision.md's governance section) — auditability for a trusted-operator
+ *  intervention, not a machine-enforced gate here. Omitted entirely (never a null/undefined key)
+ *  when the caller passes none, so an existing reader of this payload shape sees the exact same
+ *  JSON pre-#644 produced — the reverse test cli.ts's runPark relies on. */
 export function clearParksReceiptFirst(
   state: Pick<State, "parkedSources" | "appendEvent" | "clearPark">,
   source: ParkSource | null,
+  clearReason?: string,
 ): ParkRow[] {
   const open = state.parkedSources().filter((p) => source === null || p.source === source);
   for (const row of open) {
     // Receipt FIRST. Payload shape matches the startup path's (source/enteredAt/via) so the
     // per-source episode folds — stall-breaker.ts's and rapid-restart.ts's openEpisodeInLog,
     // both keyed on `payload.source` — close on it without knowing which writer produced it.
-    state.appendEvent("park-resumed", { source: row.source, enteredAt: row.enteredAt, via: OPERATOR_CLEAR_VIA });
+    // `clearReason` rides alongside, never replacing any of those three keys.
+    state.appendEvent("park-resumed", {
+      source: row.source,
+      enteredAt: row.enteredAt,
+      via: OPERATOR_CLEAR_VIA,
+      ...(clearReason !== undefined ? { clearReason } : {}),
+    });
     state.clearPark(row.source); // row, then (when this was the last episode) the ESCALATION marker
   }
   return open;

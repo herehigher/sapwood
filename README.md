@@ -121,6 +121,9 @@ flowchart LR
   validation, escalation).
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — common failures and what they
   mean.
+- [`docs/supervision.md`](docs/supervision.md) — the supervision playbook: monitoring a
+  run via `status`/`events`, batch open/close rituals, the stop ritual, and the
+  governance lines a human or LLM supervisor session operates under.
 - [`docs/dev-guide/`](docs/dev-guide/README.md) — **contributor development guide**:
   architecture, repository layout, core modules, persistence schema, and the
   change-risk map for anyone modifying sapwood itself.
