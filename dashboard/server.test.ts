@@ -286,6 +286,97 @@ test("/api/loop/state reports lanes.max and budgets as null when the config is u
   }
 });
 
+// ── #642 AC1: the shared read-model extraction changed nothing observable ─────────────────
+//
+// engine-state derivation, the config allowlist, and MAX_PAGE_LIMIT moved to
+// engine/src/state/read-model.ts (this file now imports and re-exports them) so `sapwood status
+// --json`/`sapwood events` can share the exact same semantic contract instead of growing a
+// second one (the issue's own Why). This test pins the three read routes' bodies against a fixed
+// fixture, field by field, so a future edit to read-model.ts that quietly changes a dashboard
+// response fails HERE, not in production. `ts`/`logPath`/`config` leaves that are wall-clock- or
+// tmp-dir-dependent are asserted against their OWN observed value (the same self-referential
+// technique state.test.ts's eventsPage test uses) rather than a literal, since those are not
+// what this refactor could have changed — everything ELSE is a literal, exhaustive match.
+test("#642 AC1: /api/loop/state, /api/events, /api/spend are byte-identical to their pre-extraction shape (regression pin)", async () => {
+  const fx = await fixture((s) => {
+    s.upsertWorker({ name: "w1", issue: 10, session_id: "s1", state: "running", started_at: "2026-07-24T11:00:00.000Z", ended_at: null });
+    s.recordSpend("w1", 10, 2.5, "2026-07-24T11:15:00.000Z", [
+      { model: "opus", inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0 },
+    ]);
+    s.appendEvent("dispatched", { issue: 10 });
+    s.appendEvent("merged", { pr: 20 });
+  });
+  try {
+    const loop = await getJson(fx, "/api/loop/state");
+    assert.deepEqual(loop, {
+      // No heartbeat was ever seeded (lastTickAt null -> infinite tick age -> stale, and no
+      // terminal event -> the bare "crashed or killed" reading, deriveEngineState's own doc).
+      engine: { state: "stalled", reasons: [], lastTickAt: null, terminal: null },
+      lanes: {
+        max: 3,
+        items: [
+          {
+            lane: "w1",
+            issue: 10,
+            state: "running",
+            pr: null,
+            startedAt: "2026-07-24T11:00:00.000Z",
+            endedAt: null,
+            costUsd: null, // in flight — the settled bill isn't written until reclaim
+            estCostUsd: null,
+            contextTokens: null,
+            tokenComposition: null,
+          },
+        ],
+      },
+      round: null,
+      spend: {
+        todayUsd: 2.5,
+        dailyBudgetUsd: 100,
+        runUsd: null,
+        runBudgetUsd: null,
+        byModel: [{ model: "opus", usd: 2.5, inputTokens: 10, outputTokens: 5 }],
+      },
+      rings: 1,
+      logPath: loop.logPath, // tmp-dir-dependent path — format checked separately below
+      config: loop.config, // static leaf values checked separately below (allowlist coverage
+      // already has its own dedicated test) — this route's own SHAPE is what's pinned here
+    });
+    assert.ok(String(loop.logPath).endsWith("sapwood.log"));
+    assert.equal(loop.config.lanes.max, 3);
+
+    const events = await getJson(fx, "/api/events");
+    assert.deepEqual(events, {
+      events: [
+        { id: 1, ts: events.events[0].ts, kind: "dispatched", payload: { issue: 10 } },
+        { id: 2, ts: events.events[1].ts, kind: "merged", payload: { pr: 20 } },
+      ],
+      lastId: 2,
+    });
+
+    const spend = await getJson(fx, "/api/spend");
+    assert.deepEqual(spend, {
+      spend: [
+        {
+          id: 1,
+          ts: "2026-07-24T11:15:00.000Z",
+          worker: "w1",
+          issue: 10,
+          usd: 2.5,
+          model: "opus",
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        },
+      ],
+      lastId: 1,
+    });
+  } finally {
+    fx.close();
+  }
+});
+
 test("/api/loop/state carries ceiling reasons only while winding-down (§8)", async () => {
   // A breach with no kill switch → winding-down → reasons surface.
   const fx = await fixture((s) => {
