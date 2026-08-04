@@ -162,12 +162,35 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
 
 ### Doctrine lines
 
-- **AC evidence must be CI-reproducible.** A verification plan's acceptance-criteria evidence
-  is never producer-side browser output or any other unreproducible artifact from the worker's
-  inherited host surface — it must be reproducible in CI, the same trusted, sealed environment
-  gate② and a human reviewer both see. Host-delegated capability means the producer leg's own
-  session output cannot be treated as evidence of anything the engine did not independently
-  verify.
+- **AC evidence is tiered by trust origin, not by reproducibility (owner ruling 2026-08-04,
+  #628, superseding #616's original absolute "CI-reproducible" form).** The invariant that
+  matters is that **the producer cannot forge the evidence** — CI is the common-case
+  implementation of that invariant, not its definition. A verification plan's acceptance-criteria
+  evidence is ranked into one of four tiers:
+
+  - **A — engine-verified.** Deterministic engine code computes the fact itself
+    (`probePushedBranch`, diff-hash pinning). Zero extra trust links; the predicate is untouchable
+    by the producer.
+  - **B — CI-executed.** The trusted executor ran the repo's checks **on the reviewed head SHA**,
+    and the engine consumes the check conclusion via API. **No re-run/reproduction requirement
+    anywhere** — one execution bound to the pinned head suffices; reproducibility is an audit
+    property, not an acceptance action. B sits below A because the producer influences check
+    CONTENT (the PR contains the tests — it can weaken them); mitigations: gate② reviews test
+    diffs, `ci.requiredChecks` is config-pinned (not PR-editable).
+  - **C — human-witnessed probe.** An operator personally runs the check and records actor +
+    steps + timestamp + artifact on the issue. Non-reproducible but producer-unforgeable; costs
+    human attention. Accepted ONLY when the plan names a structural reason CI cannot perform the
+    check (missing credential, live external state), the reason is independently verified at
+    gate⓪ (true, not merely present), CI/engine-checkable sub-facts are decomposed OUT of the
+    probe into A/B, and the producer never self-executes or self-attests it.
+  - **D — producer-side artifacts** (browser output, screenshots, session logs,
+    inherited-host-tool observations): **never acceptance evidence**, advisory at most. This ban
+    is the hard invariant — host-delegated capability means the producer leg's own session output
+    cannot be treated as evidence of anything the engine did not independently verify.
+
+  The repo already practices non-CI trusted evidence below tier A/B (the `verify:n/a` doc-gate;
+  an operator-run probe recorded on an issue) — this doctrine names that existing practice's
+  rules instead of contradicting it with an absolute CI-only form.
 - **Hosts lacking a veto-hook + sealed-session primitive run `produce-PR-and-stop` only.**
   Autonomous merge (Decision #5) depends on the guard hook and the gate② seal existing and
   being wired; a host environment that cannot provide an equivalent PreToolUse veto hook and a

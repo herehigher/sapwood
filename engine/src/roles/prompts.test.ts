@@ -79,7 +79,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // state the engine-enforced structural fact instead — writes/moves happen only from this
   // session's structured output, applied by the engine, regardless of what tools the session
   // holds — never a claim about the session's full tool inventory.
-  "po.md": "b79d63b3a7f562e474f3580d93be9d4ca626b5ec3cf1764c89e20a0d5016c6dc",
+  "po.md": "f4229bc13cc68928e3c15d136cfd61479f46a17b076af97d68e1839927860bb9",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
@@ -137,7 +137,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // the structural fact (this loop only ever applies these writes from the structured output;
   // removing either label is never this role's output) without claiming anything about the
   // session's actual tool inventory.
-  "verification-plan-reviewer.md": "1ec4577ae2752405d0de694db3514b9ba1489b56083bd0d7b1186db70e8bf0a9",
+  "verification-plan-reviewer.md": "2349a26c039aa4ba208013bb27c934410ee147bd6197f9595c85489375dbb240",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
   // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
@@ -161,7 +161,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #616's ambient-MCP-tool finding falsifies. Reworded to role-scope framing (posting a
   // comment/label, or touching needs-human/blocked, is never this role's OUTPUT, whatever tools
   // the session holds) instead of claiming the session has no channel that could do it.
-  "verification-plan-drafter.md": "514a946e1e661bbe0529e6c1942aa7dbe5f9dd74009745abe727695d8bd4ff45",
+  "verification-plan-drafter.md": "02a01e181592fbffee434337da45a8f0cfce3ff2b403506a8254ebc465abebd2",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
   // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
   // grant was never removed, so the capability paragraph again names it (when attached) instead
@@ -225,7 +225,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // ("the deterministic engine performs all validated issue, label, comment, board, and native
   // sub-issue writes") — falsified in principle by #616's ambient-MCP-tool finding. Dropped the
   // redundant closure claim rather than restating the structural fact a second way.
-  "po-decompose.md": "50e58472cae32c28f9aa46e599c71d3e03be72bfb718d083b2126fe541d3e32e",
+  "po-decompose.md": "2a4e0b4f19a205ff404cf40353c458793e4c78b43f73a0665045fe223402b274",
 };
 
 test("prompt snapshot: po.md hash matches the pinned revision", () => {
@@ -990,5 +990,95 @@ test("#605: no shipped prompt (worker.md, fix.md, or any peripheral prompt) inst
     defaultPoDecomposePromptPath(),
   ]) {
     assert.ok(!readPrompt(path).includes("gh pr create"), `${path} must not instruct gh pr create`);
+  }
+});
+
+// ── #628 (owner ruling 2026-08-04): AC-evidence doctrine tiered by trust origin, carried into
+// the plan-authoring/plan-judging prompts. docs/security.md's "Doctrine lines" is the tier
+// definitions' one home — every carrier below cites it rather than restating the tier prose, so
+// these assertions pin the AUTHORING-DEFAULT rule's key phrases, not the tier definitions
+// themselves (those live in docs/security.md, outside this test file's scope). ──────────────────
+
+test("#628: the three authoring prompts (po.md, po-decompose.md, verification-plan-drafter.md) carry the identical default-A/B + justified-C + D-ban rule, citing docs/security.md, never restating divergent terminology (mirror-pair discipline)", () => {
+  const EVIDENCE_TIER_HEADING = "## Acceptance-criteria evidence: default A/B, justified C only, D never";
+  const bodies = {
+    "po.md": readPrompt(defaultPoPromptPath()),
+    "po-decompose.md": readPrompt(defaultPoDecomposePromptPath()),
+    "verification-plan-drafter.md": readPrompt(defaultVerificationPlanDrafterPromptPath()),
+  };
+
+  for (const [name, body] of Object.entries(bodies)) {
+    assert.ok(body.includes(EVIDENCE_TIER_HEADING), `${name} carries the evidence-tier authoring-default heading`);
+    assert.ok(
+      body.includes("`docs/security.md`'s \"Doctrine lines\" is the tier definitions' one home"),
+      `${name} cites docs/security.md as the single doctrine home rather than restating the tiers`,
+    );
+    assert.ok(body.includes("Default every criterion to tier A"), `${name} states the default-A/B rule`);
+    assert.ok(
+      body.includes("A\ntier-C human-witnessed probe may be named ONLY when") ||
+        body.includes("A tier-C human-witnessed probe may be named ONLY when"),
+      `${name} states the justified-C-only condition`,
+    );
+    assert.ok(
+      body.includes("Tier-D producer-side artifacts") && body.includes("are never acceptance evidence"),
+      `${name} states the D-ban`,
+    );
+  }
+
+  // Mirror-pair discipline: the shared paragraph's distinctive sentences are BYTE-IDENTICAL
+  // across all three carriers, not merely present — a divergent rewording in one carrier is
+  // exactly the drift #628's "identical terminology" requirement exists to prevent.
+  const sharedSentences = [
+    "Default every criterion to tier A\n(engine-verified) or tier B (CI-executed, no re-run/reproduction requirement) evidence.",
+    "never a bare\nassertion that a human will check.",
+    "Tier-D producer-side artifacts (browser output, screenshots,\nsession logs, or any other inherited-host-tool observation) are never acceptance evidence,\nadvisory at most",
+  ];
+  const [first, ...rest] = Object.values(bodies);
+  for (const sentence of sharedSentences) {
+    assert.ok(first!.includes(sentence), `sanity: po.md itself contains the shared sentence: ${sentence}`);
+    for (const other of rest) {
+      assert.ok(other.includes(sentence), `carrier diverges from po.md's wording for: ${sentence}`);
+    }
+  }
+});
+
+test("#628: verification-plan-reviewer.md carries the asymmetric judge duty — producer-artifact bounce, C-claim adversarial verification (reason true, decomposition enforced, no self-classification)", () => {
+  const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
+  assert.ok(
+    body.includes("Evidence-tier discipline — asymmetric judge duty (docs/security.md's tiered doctrine)."),
+    "names the asymmetric-duty rule and cites docs/security.md as the tier home",
+  );
+  assert.ok(
+    body.includes("Bounce (outcome 2) any plan whose evidence rests on tier-D producer-side artifacts"),
+    "producer-artifact plans are bounced, not merely flagged",
+  );
+  assert.match(
+    body,
+    /adversarially\s+verify the structural reason is actually TRUE/,
+    "the structural reason must be independently verified, not merely present",
+  );
+  assert.ok(
+    body.includes("every CI/engine-checkable sub-fact inside the claim to be decomposed OUT into its own A/B\n  criterion"),
+    "requires decomposition of CI/engine-checkable sub-facts into A/B",
+  );
+  assert.ok(
+    body.includes("never accept the plan author's own tier self-classification at face value"),
+    "the author's own tier label is never taken at face value",
+  );
+});
+
+test("#628: no carrier re-restates the tier A/B/C/D definitions themselves — docs/security.md stays the single doctrine home", () => {
+  const carriers = [
+    readPrompt(defaultPoPromptPath()),
+    readPrompt(defaultPoDecomposePromptPath()),
+    readPrompt(defaultVerificationPlanDrafterPromptPath()),
+    readPrompt(defaultVerificationPlanReviewerPromptPath()),
+  ];
+  for (const body of carriers) {
+    assert.doesNotMatch(
+      body,
+      /engine-verified.*Deterministic engine code computes the fact itself/s,
+      "a prompt carrier must not restate tier A's own definition — docs/security.md owns it",
+    );
   }
 });

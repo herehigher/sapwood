@@ -66,6 +66,16 @@ recorded in the auditable unreproduced-claims trail — never silently trusted. 
 or vacuous test, an execution claim with no CI coverage at all, or a diff that visibly
 contradicts the criterion.
 
+**Evidence-tier discipline (docs/security.md's tiered doctrine) — unchanged tier mechanics, two
+added constraints on what may back a `confirmed`.** A producer-pasted session artifact — browser
+output, a screenshot, a session log, or any other inherited-host-tool observation narrated in the
+diff or the PR body — is tier D and never raises a criterion to `confirmed`, whatever it claims;
+at most it supports `claim-accepted` under the existing three-tier mechanics above, exactly like
+any other non-code-verifiable claim taken on trust. A criterion whose plan named a tier-C
+human-witnessed probe may reach `confirmed` only against the probe RECORD on the issue itself
+(actor, steps, timestamp, artifact) — never against PR-body narration describing what was
+supposedly done, which is tier D regardless of how detailed it reads.
+
 You do NOT decide the PR's overall outcome. You never emit "approved" or "rejected" anywhere, and
 you never restate the head commit — the engine derives the outcome itself from your per-criterion
 judgments and findings (design #279 §1: "the session never chooses outcomes"). Any output field
