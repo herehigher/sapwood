@@ -1802,16 +1802,21 @@ async function runTickEngine(
   // (default false, so this is a no-op call for every deployment until flipped) renders the v1
   // skills plugin dir NOW, so a missing/duplicated docs/security.md marker aborts startup with
   // zero dispatch rather than failing lazily on a worker's first `--plugin-dir` spawn.
-  // #639 gate② round 1: this composition (resolveSkillsPluginDir(cfg) threaded into
-  // WorkerSupervisor's skillsPluginDir and RoleRunner's defaultSkillsPluginDir below) is NOT
-  // itself under a unit test — driving runTickEngine/runRoundsEngine end-to-end would need a
-  // live engine boot, too heavy a harness for this seam. The wiring is pinned indirectly by
-  // three narrower tests instead: worker.test.ts's WorkerDeps.skillsPluginDir argv tests,
-  // peripheral.test.ts's RoleRunnerDeps.defaultSkillsPluginDir argv tests (both prove the field
-  // reaches `--plugin-dir` once supplied), and skills-plugin.test.ts's own "production
-  // composition" test (resolveSkillsPluginDir returns the exact dir renderSkillsPlugin
-  // published, path-identical). A regression here would have to break one of THOSE, or this
-  // three-line composition itself, to go unnoticed.
+  // #639 gate② round 2 (honesty correction to round 1's overclaim): the three spread lines below
+  // that thread this value into WorkerSupervisor's skillsPluginDir and RoleRunner's
+  // defaultSkillsPluginDir — `...(skillsPluginDir !== undefined ? {...} : {})` — are pinned by NO
+  // test. Deleting any one of them today leaves the whole suite green: worker.test.ts and
+  // peripheral.test.ts only prove that WorkerDeps.skillsPluginDir/RoleRunnerDeps.
+  // defaultSkillsPluginDir reach `--plugin-dir` ONCE SUPPLIED directly by a test, never that THIS
+  // cli.ts wiring is what supplies them; skills-plugin.test.ts's resolver test proves only that
+  // resolveSkillsPluginDir(cfg) itself returns the right directory, not that cli.ts threads it
+  // anywhere. A live-engine-boot harness to close that gap was adjudicated disproportionate for a
+  // capability that defaults off (`roles.skills.enabled: false`) in this v1. The actual closing
+  // evidence is #641's live token-economics probe: it must observe the rendered skills reaching
+  // REAL role sessions to measure anything, so a broken spread here would surface as that probe
+  // finding no skill attached — this composition stays genuinely untested by an automated test
+  // until then, and must be live-verified by #641 BEFORE `roles.skills.enabled` is ever flipped
+  // to default-on.
   const skillsPluginDir = resolveSkillsPluginDir(cfg);
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg);
@@ -2014,9 +2019,10 @@ async function runRoundsEngine(
   // round-0 identity (buildTickFixLegResume) — see round.ts's own doc for why this can't be
   // built once here the way the tick driver's fixLegResume is.
   const renderFixPrompt = buildRenderFixPrompt(cfg);
-  // #639: same fail-fast stance as runTickEngine's own comment above. #639 gate② round 1: same
-  // "pinned indirectly, not by a live-engine-boot test" posture — see runTickEngine's own
-  // comment above for the three tests that cover this composition.
+  // #639: same fail-fast stance as runTickEngine's own comment above. #639 gate② round 2: same
+  // untested-composition gap as runTickEngine's own comment above — no test covers the spread
+  // lines below; #641's live token-economics probe is the closing evidence, required before
+  // `roles.skills.enabled` ever defaults on.
   const skillsPluginDir = resolveSkillsPluginDir(cfg);
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg);
