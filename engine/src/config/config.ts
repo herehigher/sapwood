@@ -791,6 +791,19 @@ const Roles = z
     })
       .strict()
       .default({}),
+    // #639: engine-rendered role-session skill injection (docs/security.md's marker-delimited
+    // human-merge-only-paths/ac-evidence-tiers sections, pulled verbatim into an immutable
+    // content-hash-named plugin dir and attached via `--plugin-dir` — see skills-plugin.ts).
+    // Default false: v1 ships the mechanism unattached everywhere; #639's own PR series flips
+    // this to true only after a follow-up measures the effect (docs/security.md's "Config"
+    // note). `false` -> every claudeArgs()-producing caller stays byte-identical to pre-#639
+    // argv — resolveSkillsPluginDir short-circuits before ever reading docs/security.md.
+    skills: z
+      .object({
+        enabled: z.boolean().default(false),
+      })
+      .strict()
+      .default({}),
   })
   .strict();
 
@@ -1454,6 +1467,13 @@ const ConfigSchemaRaw = z
           // #539: docs/security.md carries the canonical human-merge-only list and documents this
           // mechanism's own trust chain — the same self-reference class as the two paths above.
           "docs/security.md",
+          // #639: the role-session skill-injection renderer — it reads docs/security.md's own
+          // marker-delimited sections VERBATIM and is the sole thing deciding what text a
+          // `--plugin-dir`-attached session can pull on demand. A change here could shift WHICH
+          // security.md text gets extracted (or how) without touching security.md's own bytes at
+          // all, so it is an instruction carrier in its own right, not merely covered by
+          // security.md's entry above.
+          "engine/src/roles/skills-plugin.ts",
         ]),
         // #248: the WAIT-tier hold label list (three-tier escalation model) — a HUMAN-applied
         // "I'm actively reviewing this" signal, distinct from `humanLabels`' engine-written

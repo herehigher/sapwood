@@ -346,9 +346,14 @@ test("#549 escalation helper: with instructionPaths [] a repointed-prompt edit s
   assert.deepEqual(await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg }), { kind: "clear" });
 });
 
-test("#539: each newly-covered mechanism-carrier default path escalates a PR that touches it", async () => {
+test("#539/#639: each newly-covered mechanism-carrier default path escalates a PR that touches it", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
-  for (const path of ["engine/src/review/instruction-path-escalation.ts", "engine/src/config/config.ts", "docs/security.md"]) {
+  for (const path of [
+    "engine/src/review/instruction-path-escalation.ts",
+    "engine/src/config/config.ts",
+    "docs/security.md",
+    "engine/src/roles/skills-plugin.ts",
+  ]) {
     const labels: string[] = [];
     let comments = 0;
     const forge = {

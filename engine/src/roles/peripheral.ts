@@ -40,6 +40,7 @@ import {
   resolveWorktreeHead,
   type WorktreeGitState,
 } from "./context-manifest.js";
+import { shouldInjectSkillsPlugin } from "./skills-plugin.js";
 import {
   claudeArgs,
   discoverClaudeBin,
@@ -478,6 +479,19 @@ export interface RoleRunnerDeps {
    *  is simply present or absent, the same "omitted = today's behavior, unchanged: no session
    *  anywhere gets a proxy attached" contract regardless of WHY the caller omitted it. */
   defaultProxy?: RoleSessionOpts["proxy"];
+  /** #639: the engine-rendered skills plugin directory (skills-plugin.ts's
+   *  resolveSkillsPluginDir — undefined when `roles.skills.enabled` is false, the default),
+   *  applied to every NON-review peripheral role session this RoleRunner instance runs. #639
+   *  gate② round 1: an earlier version also accepted a per-call `RoleSessionOpts.pluginDir`
+   *  override (mirroring `defaultProxy`'s per-call-wins convention) — removed. Unlike the forge
+   *  proxy, a plugin dir can carry hooks/MCP servers/commands (the #639 design ruling that
+   *  removed arbitrary `--plugin-dir` values in the first place), so an ad hoc per-call
+   *  override on TOP of the one engine-rendered, content-hashed directory would have reopened
+   *  exactly the surface that ruling closed — and it had zero shipped callers regardless. This
+   *  RoleRunnerDeps-wide default is now the ONLY source `run()` reads. NEVER applied in review
+   *  session mode (reviewCwd) — enforced structurally in run() itself (shouldInjectSkillsPlugin),
+   *  not by this field being conditionally omitted by a caller. */
+  defaultSkillsPluginDir?: string;
 }
 
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "jsonl"];
@@ -675,6 +689,14 @@ export class RoleRunner {
     // `roleGrantsProxyTools` and its caller-bug check are computed ABOVE now — see that block's
     // own doc for why (gate② #557 FIX 5, an fd/file leak on the throw path).
     const proxyOpt = reviewMode || !roleGrantsProxyTools ? undefined : (opts.proxy ?? this.deps.defaultProxy);
+    // #639: shouldInjectSkillsPlugin("review") is false, so this is unconditionally undefined in
+    // review mode regardless of what deps.defaultSkillsPluginDir carries — the same "structural,
+    // not caller-omitted" exclusion `proxyOpt` above uses. #639 gate② round 1: no per-call
+    // opts.pluginDir override exists anymore (see RoleRunnerDeps.defaultSkillsPluginDir's own
+    // doc) — this RoleRunnerDeps-wide default is the ONLY source.
+    const pluginDirForThisSession = shouldInjectSkillsPlugin(reviewMode ? "review" : "peripheral-role")
+      ? this.deps.defaultSkillsPluginDir
+      : undefined;
     let proxyHandle: ForgeProxyHandle | undefined;
     if (proxyOpt) {
       try {
@@ -742,6 +764,7 @@ export class RoleRunner {
             : {}),
         // NB: no addDir — same as worker.ts's dispatch(): a role session must never see engine
         // state (sentinels, the sqlite db) via --add-dir.
+        ...(pluginDirForThisSession ? { pluginDir: pluginDirForThisSession } : {}),
       });
       const startedMs = this.now().getTime();
       const session = spawnClaudeSession(this.bin, args, {

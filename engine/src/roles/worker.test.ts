@@ -951,6 +951,32 @@ test("claudeArgs: --mcp-config only when given (#234), inline JSON — never a f
   assert.equal(withProxy[i + 1], inlineJson);
 });
 
+test("claudeArgs (#639): pluginDir only when given -> --plugin-dir <path>; omitted -> no flag at all (the disabled-config regression)", () => {
+  const withoutPluginDir = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    worktree: "w",
+    name: "w",
+    sessionId: "s",
+  });
+  assert.ok(!withoutPluginDir.includes("--plugin-dir"));
+  const withPluginDir = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    worktree: "w",
+    name: "w",
+    sessionId: "s",
+    pluginDir: "/data/generated/role-skills/abc123",
+  });
+  const i = withPluginDir.indexOf("--plugin-dir");
+  assert.ok(i !== -1);
+  assert.equal(withPluginDir[i + 1], "/data/generated/role-skills/abc123");
+});
+
 test("claudeArgs (#285): worktree is OPTIONAL — omitted entirely -> no --worktree flag at all (review session mode spawns against an already-materialized cwd instead, via spawnClaudeSession's own cwd opt)", () => {
   const withWorktree = claudeArgs({
     prompt: "p",
@@ -4491,6 +4517,63 @@ test("dispatch: no proxy opt (every ordinary caller today) -> no --mcp-config fl
   }
 });
 
+test("dispatch (#639): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reaches argv (fresh dispatch is YES per the injection policy table)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      skillsPluginDir: "/data/generated/role-skills/deadbeef",
+    });
+    await s.dispatch({ number: 1, title: "t", labels: [] });
+    await waitForFile(join(dir, "args.seen"), "skills-plugin dispatch argv was not published");
+    const args = readFileSync(join(dir, "args.seen"), "utf8").trim().split("\n");
+    const i = args.indexOf("--plugin-dir");
+    assert.ok(i !== -1, "--plugin-dir must reach argv when WorkerDeps.skillsPluginDir is set");
+    assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch (#639): WorkerDeps.skillsPluginDir UNSET (today's default, roles.skills.enabled: false) -> no --plugin-dir flag at all — the disabled-path byte-identical-argv regression", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    await s.dispatch({ number: 1, title: "t", labels: [] });
+    await waitForFile(join(dir, "args.seen"), "ordinary dispatch argv was not published");
+    const args = readFileSync(join(dir, "args.seen"), "utf8");
+    assert.doesNotMatch(args, /--plugin-dir/);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("dispatch: a proxy mint FAILURE is non-fatal — the lane still dispatches and runs, unattached (mirrors peripheral.ts's RoleRunner stance)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
@@ -5096,6 +5179,80 @@ test("resume: a proxy opt mints a handle, widens --allowedTools with the handle'
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     for (let i = 0; i < 400 && calls.stopped === 0; i++) await sleep(20);
     assert.equal(calls.stopped, 1, "the proxy is torn down once the resumed lane's process exits (onExit)");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume (#639): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reaches the RESUMED leg's argv too (resume/fix legs are YES per the injection policy table)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const { s, name } = await mkHandoffLane(
+      dir,
+      `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`,
+      { skillsPluginDir: "/data/generated/role-skills/deadbeef" },
+    );
+    await s.resume({ number: 9, title: "t", labels: [] }, name);
+    await waitForFile(join(dir, "args.seen"), "skills-plugin resume argv was not published");
+    const args = readFileSync(join(dir, "args.seen"), "utf8").trim().split("\n");
+    const i = args.indexOf("--plugin-dir");
+    assert.ok(i !== -1, "--plugin-dir must reach the resumed leg's argv too");
+    assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume (#639 gate② round 1): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reaches a genuine FIX-ENTRY resumed leg's argv too (opts.sessionId, no .handoff sentinel — mirrors the A1 fix-leg-entry test above, the gate found the #639 coverage above only exercised ordinary handoff-resume)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        `  printf '%s\\n' "$@" > "${join(dir, "fix-args.seen.tmp")}"`,
+        `  mv "${join(dir, "fix-args.seen.tmp")}" "${join(dir, "fix-args.seen")}"`,
+        RESULT_LINE,
+        "fi",
+        `echo '{"type":"result","subtype":"success","total_cost_usd":0.001,"model":"claude-stub","usage":{"input_tokens":1,"output_tokens":1}}'`,
+        "exit 0",
+      ].join("\n"),
+    );
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "issue-rendered-prompt",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      skillsPluginDir: "/data/generated/role-skills/deadbeef",
+    });
+    // Same driving-lane precondition as the A1 fix-leg-entry test: a fresh dispatch completes
+    // DONE quickly (no --resume in the fake stub's first invocation), leaving a done sentinel
+    // and NO handoff sentinel — exactly what a fix leg starts from.
+    const { name, sessionId } = await s.dispatch({ number: 21, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.done.json`)));
+    assert.ok(!existsSync(join(dir, `${name}.handoff.json`)), "no handoff sentinel — the fix-leg-entry precondition");
+
+    const resumed = await s.resume({ number: 21, title: "t", labels: [] }, name, {
+      sessionId,
+      prompt: "fix-leg: address PR #650's gate② review findings",
+    });
+    assert.equal(resumed.sessionId, sessionId, "SAME session — a fix leg continues the original conversation");
+
+    await waitForFile(join(dir, "fix-args.seen"), "fix-leg argv was not published");
+    const args = readFileSync(join(dir, "fix-args.seen"), "utf8").trim().split("\n");
+    const i = args.indexOf("--plugin-dir");
+    assert.ok(i !== -1, "--plugin-dir must reach a genuine FIX-ENTRY resumed leg's argv too");
+    assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
+
+    for (let i2 = 0; i2 < 400 && !existsSync(join(dir, `${name}.done.json`)); i2++) await sleep(20);
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

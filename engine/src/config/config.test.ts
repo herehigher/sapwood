@@ -100,6 +100,9 @@ test("#292: escalation.instructionPaths has trust-chain defaults, is configurabl
     // #539: docs/security.md carries the canonical human-merge-only list and documents this
     // mechanism's own trust chain — the same self-reference class as the two paths above.
     "docs/security.md",
+    // #639: the role-session skill-injection renderer — reads docs/security.md's marker sections
+    // verbatim; a change here can shift what gets extracted without touching security.md itself.
+    "engine/src/roles/skills-plugin.ts",
   ]);
   assert.deepEqual(
     parseConfig(`${base}escalation: { instructionPaths: ["**/AGENTS.md", instructions/*.md] }`).escalation.instructionPaths,
@@ -1726,6 +1729,29 @@ test("roles.verificationPlanReviewer.enabled: a typo'd key is rejected, not sile
     () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { verificationPlanReviewer: { enable: false } }"),
     /enable\b|[Uu]nrecognized/,
   );
+});
+
+// ── #639: roles.skills.enabled (role-session skill injection, default false) ────────────────
+
+test("roles.skills.enabled: defaults to false", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.skills.enabled, false);
+});
+
+test("roles.skills.enabled: explicit true is honored", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { skills: { enabled: true } }");
+  assert.equal(cfg.roles.skills.enabled, true);
+});
+
+test("roles.skills: an unknown key (e.g. extraDir) is rejected, not silently dropped — v1 has no operator-dir knob", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { skills: { extraDir: /tmp/x } }"),
+    /extraDir|[Uu]nrecognized/,
+  );
+});
+
+test("roles.skills.enabled: a non-boolean value is rejected", () => {
+  assert.throws(() => parseConfig('board: { owner: a, repo: r, projectNumber: 1 }\nroles: { skills: { enabled: "yes" } }'), /enabled/);
 });
 
 test("roles.*.enabled: a non-boolean value is rejected", () => {

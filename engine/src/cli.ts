@@ -47,6 +47,7 @@ import { makeProductionEngineAgent } from "./review/production.js";
 import { MergeDriver } from "./roles/merge-driver.js";
 import { RoleRunner, type RoleRunnerDeps } from "./roles/peripheral.js";
 import { makeFallbackReviewers, makeReviewer } from "./roles/reviewer.js";
+import { resolveSkillsPluginDir } from "./roles/skills-plugin.js";
 import { buildRenderFixPrompt, buildRenderPrompt, discoverClaudeBin, probeLlmPing, WorkerSupervisor } from "./roles/worker.js";
 // #642: event-kinds registry validation for `events --kind`/`--exclude-kind` arguments (the
 // #425 registry's own doc: "add [a narrowing guard] with its first real caller" — this is it).
@@ -1826,6 +1827,26 @@ async function runTickEngine(
   // (below, after state/forge exist) closes the production gap #246 left open — see
   // buildTickFixLegResume's own doc for the tick driver's round 0 / phase "tick" audit identity.
   const renderFixPrompt = buildRenderFixPrompt(cfg);
+  // #639: same fail-fast stance as renderPrompt/renderFixPrompt above — `roles.skills.enabled`
+  // (default false, so this is a no-op call for every deployment until flipped) renders the v1
+  // skills plugin dir NOW, so a missing/duplicated docs/security.md marker aborts startup with
+  // zero dispatch rather than failing lazily on a worker's first `--plugin-dir` spawn.
+  // #639 gate② round 2 (honesty correction to round 1's overclaim): the three spread lines below
+  // that thread this value into WorkerSupervisor's skillsPluginDir and RoleRunner's
+  // defaultSkillsPluginDir — `...(skillsPluginDir !== undefined ? {...} : {})` — are pinned by NO
+  // test. Deleting any one of them today leaves the whole suite green: worker.test.ts and
+  // peripheral.test.ts only prove that WorkerDeps.skillsPluginDir/RoleRunnerDeps.
+  // defaultSkillsPluginDir reach `--plugin-dir` ONCE SUPPLIED directly by a test, never that THIS
+  // cli.ts wiring is what supplies them; skills-plugin.test.ts's resolver test proves only that
+  // resolveSkillsPluginDir(cfg) itself returns the right directory, not that cli.ts threads it
+  // anywhere. A live-engine-boot harness to close that gap was adjudicated disproportionate for a
+  // capability that defaults off (`roles.skills.enabled: false`) in this v1. The actual closing
+  // evidence is #641's live token-economics probe: it must observe the rendered skills reaching
+  // REAL role sessions to measure anything, so a broken spread here would surface as that probe
+  // finding no skill attached — this composition stays genuinely untested by an automated test
+  // until then, and must be live-verified by #641 BEFORE `roles.skills.enabled` is ever flipped
+  // to default-on.
+  const skillsPluginDir = resolveSkillsPluginDir(cfg);
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg);
   // #407 (item 1, gate② P2): the run boundary is OPEN — every controlled exit from here to
@@ -1900,6 +1921,10 @@ async function runTickEngine(
       // instant one does) would only ever reach a log line, never the queryable state event
       // WorkerDeps.state's own doc promises.
       state,
+      // #639: every worker leg this supervisor dispatches/resumes gets `--plugin-dir` attached
+      // (fresh dispatch + resume/fix-entry are all YES per the policy table) — undefined
+      // (no-op) whenever `roles.skills.enabled` is false.
+      ...(skillsPluginDir !== undefined ? { skillsPluginDir } : {}),
     });
     const stopMode = parseRunStopMode(argv);
     const stop = resolveStopConfig(argv, cfg);
@@ -2023,6 +2048,11 @@ async function runRoundsEngine(
   // round-0 identity (buildTickFixLegResume) — see round.ts's own doc for why this can't be
   // built once here the way the tick driver's fixLegResume is.
   const renderFixPrompt = buildRenderFixPrompt(cfg);
+  // #639: same fail-fast stance as runTickEngine's own comment above. #639 gate② round 2: same
+  // untested-composition gap as runTickEngine's own comment above — no test covers the spread
+  // lines below; #641's live token-economics probe is the closing evidence, required before
+  // `roles.skills.enabled` ever defaults on.
+  const skillsPluginDir = resolveSkillsPluginDir(cfg);
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg);
   // #407 (item 1, gate② P2): the run boundary's closing bracket — same contract as
@@ -2071,6 +2101,8 @@ async function runRoundsEngine(
       // #244 (Codex sol-high PR #260 review round 2, P2): same durable mint-failure observability
       // as the tick-driver path above, wired into the round-orchestrator's own WorkerSupervisor.
       state,
+      // #639: same wiring as runTickEngine's own WorkerSupervisor above.
+      ...(skillsPluginDir !== undefined ? { skillsPluginDir } : {}),
     });
     // #253: a default forge MCP proxy mint, shared by every peripheral role session this
     // RoleRunner instance ever runs across the whole `sapwood run` (round 0 / phase "peripheral"
@@ -2100,6 +2132,12 @@ async function runRoundsEngine(
       state,
       now: systemClock,
       ...(defaultProxy !== undefined ? { defaultProxy } : {}),
+      // #639: every peripheral role session this RoleRunner instance runs (aligning/architecting/
+      // plan_review/harvesting/retro) gets `--plugin-dir` attached via the policy table's
+      // "peripheral-role" bucket — structurally excluded for review-mode sessions regardless
+      // (RoleRunner.run() itself, not this wiring). Undefined (no-op) whenever
+      // `roles.skills.enabled` is false.
+      ...(skillsPluginDir !== undefined ? { defaultSkillsPluginDir: skillsPluginDir } : {}),
     });
     const peripherals = createDefaultPeripherals({ forge, state, cfg, runner, now: systemClock, log });
     const stop = resolveStopConfig(argv, cfg);
