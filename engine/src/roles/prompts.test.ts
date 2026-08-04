@@ -970,16 +970,8 @@ test("#605 worker.md: never instructs the worker to open a pull request itself â
     !/\*\*Open a pull request\*\*/i.test(body),
     "worker.md must not carry an affirmative 'open a pull request' step for the worker session",
   );
-  assert.match(
-    body,
-    /do not open a pull request yourself/i,
-    "explicitly tells the worker not to open the PR itself",
-  );
-  assert.match(
-    body,
-    /engine opens the PR/i,
-    "the push-then-stop instruction names the engine, not the worker session, as the PR opener",
-  );
+  assert.match(body, /do not open a pull request yourself/i, "explicitly tells the worker not to open the PR itself");
+  assert.match(body, /engine opens the PR/i, "the push-then-stop instruction names the engine, not the worker session, as the PR opener");
   assert.match(body, /Commit and push your (?:work|branch)/, "the worker still owns commit+push â€” only the PR-open step moved");
 });
 
