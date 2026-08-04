@@ -54,6 +54,7 @@ import {
   KNOWN_UNPROBED_NOTE,
   type PreSpawnManifestCapture,
 } from "./context-manifest.js";
+import { type SkillsSessionKind, shouldInjectSkillsPlugin } from "./skills-plugin.js";
 
 /** A durable resume intent exists, but the engine restarted before spawn confirmation made
  *  the outcome knowable. Retrying could create a second Claude process in the same worktree. */
@@ -1000,6 +1001,17 @@ export interface ClaudeArgsOpts {
    *  `--max-budget-usd` flag at all, unchanged behavior for every other caller (worker/role
    *  sessions never set this). */
   maxBudgetUsd?: number;
+  /** #639: `--plugin-dir <path>` — an engine-rendered, immutable, content-hash-named plugin
+   *  directory (skills-plugin.ts's renderSkillsPlugin) carrying the v1 reference skills
+   *  (human-merge-only-paths, ac-evidence-tiers), loaded session-scoped and namespaced (verified
+   *  against a live `claude` CLI during #639's design probe — distinct from `--add-dir`, which
+   *  does NOT load skills). Omitted -> no `--plugin-dir` flag, unchanged behavior for every
+   *  caller (today: every caller, since `roles.skills.enabled` defaults false) — the AC's
+   *  disabled-path byte-identical-argv regression. Callers decide whether to supply this per
+   *  skills-plugin.ts's `shouldInjectSkillsPlugin` policy table — never set for a review-mode
+   *  session (peripheral.ts's RoleRunner.run() enforces the exclusion structurally, mirroring
+   *  its own `worktree` omission for reviewMode). */
+  pluginDir?: string;
 }
 
 /** #285: the `--mcp-config` value review sessions pass alongside `--strict-mcp-config` — an
@@ -1108,6 +1120,7 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     // cost ceiling, distinct from the worker's own soft budget policy this module's header note
     // (above claudeArgs) documents.
     ...(o.maxBudgetUsd !== undefined ? ["--max-budget-usd", String(o.maxBudgetUsd)] : []),
+    ...(o.pluginDir ? ["--plugin-dir", o.pluginDir] : []),
     "--output-format",
     "stream-json",
     "--include-hook-events",
@@ -1490,6 +1503,14 @@ export interface WorkerDeps {
    *  capturePreSpawnManifestForLane's own doc. */
   preSpawnCaptureTimeoutMs?: number;
   preSpawnCapturePollMs?: number;
+  /** #639: the engine-rendered skills plugin directory (skills-plugin.ts's
+   *  resolveSkillsPluginDir — undefined when `roles.skills.enabled` is false, the default),
+   *  attached to EVERY worker leg this supervisor spawns: fresh dispatch() AND resume()
+   *  (handoff-resume and fix-entry both) — see ClaudeArgsOpts.pluginDir's own doc for the
+   *  `shouldInjectSkillsPlugin` policy this implements (every worker-leg kind is YES; only a
+   *  review-mode peripheral session, which WorkerSupervisor never runs, is excluded). Omitted ->
+   *  no `--plugin-dir` flag, unchanged argv for every existing caller. */
+  skillsPluginDir?: string;
 }
 
 /** #244: an optional, per-session revocable forge MCP proxy handle for a WORKER LEG (the fix-loop
@@ -1959,6 +1980,11 @@ export class WorkerSupervisor implements Supervisor {
       // `--setting-sources` stays untouched here too (#616 §5: action-side vs. content-side, same
       // ambient-CLAUDE.md posture as every other worker leg).
       ...(opts?.proxy?.credentialFree ? { strictMcpConfig: true } : {}),
+      // #639: fresh dispatch is `shouldInjectSkillsPlugin("worker-dispatch")` — always YES per
+      // the policy table (see ClaudeArgsOpts.pluginDir's doc); the actual value is undefined
+      // whenever `roles.skills.enabled` is false, so this is a no-op flag for every deployment
+      // until that config is flipped on.
+      ...(shouldInjectSkillsPlugin("worker-dispatch") && this.deps.skillsPluginDir ? { pluginDir: this.deps.skillsPluginDir } : {}),
     });
     // detached: child is its own process-group leader -> reclaim can SIGKILL the whole tree.
     // SAPWOOD_GUARD_MODE in the spawn env reaches the hook subprocess (inherited from claude)
@@ -2190,6 +2216,10 @@ export class WorkerSupervisor implements Supervisor {
     // #245 round-2 (A1): fix-leg entry (opts.sessionId set) vs. the ordinary #172 handoff-sentinel
     // path — mutually exclusive, resolved once here into a common (sessionId, dispatchedAt) pair
     // the rest of this method uses unchanged either way.
+    // #639: same branch also picks the injection-policy-table session kind (both resolve to YES
+    // — see shouldInjectSkillsPlugin's own doc — kept distinct only so a policy-table test can
+    // pin fix-entry and ordinary handoff-resume as two named cases, not one).
+    const skillsSessionKind: SkillsSessionKind = opts?.sessionId != null ? "worker-fix-entry" : "worker-resume";
     let sessionId: string;
     let dispatchedAt: string | null;
     if (opts?.sessionId != null) {
@@ -2300,6 +2330,9 @@ export class WorkerSupervisor implements Supervisor {
         // evidence, the credentialFree-implies-proxyHandle invariant here too since a
         // credentialFree mint failure REFUSES the resume above, before this call).
         ...(opts?.proxy?.credentialFree ? { strictMcpConfig: true } : {}),
+        // #639: see dispatch()'s own comment — resolves to a no-op flag whenever
+        // `roles.skills.enabled` is false (this.deps.skillsPluginDir undefined).
+        ...(shouldInjectSkillsPlugin(skillsSessionKind) && this.deps.skillsPluginDir ? { pluginDir: this.deps.skillsPluginDir } : {}),
       });
       startedMs = this.now().getTime();
       runningMarker = {

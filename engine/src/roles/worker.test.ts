@@ -951,6 +951,32 @@ test("claudeArgs: --mcp-config only when given (#234), inline JSON — never a f
   assert.equal(withProxy[i + 1], inlineJson);
 });
 
+test("claudeArgs (#639): pluginDir only when given -> --plugin-dir <path>; omitted -> no flag at all (the disabled-config regression)", () => {
+  const withoutPluginDir = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    worktree: "w",
+    name: "w",
+    sessionId: "s",
+  });
+  assert.ok(!withoutPluginDir.includes("--plugin-dir"));
+  const withPluginDir = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    worktree: "w",
+    name: "w",
+    sessionId: "s",
+    pluginDir: "/data/generated/role-skills/abc123",
+  });
+  const i = withPluginDir.indexOf("--plugin-dir");
+  assert.ok(i !== -1);
+  assert.equal(withPluginDir[i + 1], "/data/generated/role-skills/abc123");
+});
+
 test("claudeArgs (#285): worktree is OPTIONAL — omitted entirely -> no --worktree flag at all (review session mode spawns against an already-materialized cwd instead, via spawnClaudeSession's own cwd opt)", () => {
   const withWorktree = claudeArgs({
     prompt: "p",
@@ -4491,6 +4517,63 @@ test("dispatch: no proxy opt (every ordinary caller today) -> no --mcp-config fl
   }
 });
 
+test("dispatch (#639): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reaches argv (fresh dispatch is YES per the injection policy table)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      skillsPluginDir: "/data/generated/role-skills/deadbeef",
+    });
+    await s.dispatch({ number: 1, title: "t", labels: [] });
+    await waitForFile(join(dir, "args.seen"), "skills-plugin dispatch argv was not published");
+    const args = readFileSync(join(dir, "args.seen"), "utf8").trim().split("\n");
+    const i = args.indexOf("--plugin-dir");
+    assert.ok(i !== -1, "--plugin-dir must reach argv when WorkerDeps.skillsPluginDir is set");
+    assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch (#639): WorkerDeps.skillsPluginDir UNSET (today's default, roles.skills.enabled: false) -> no --plugin-dir flag at all — the disabled-path byte-identical-argv regression", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    await s.dispatch({ number: 1, title: "t", labels: [] });
+    await waitForFile(join(dir, "args.seen"), "ordinary dispatch argv was not published");
+    const args = readFileSync(join(dir, "args.seen"), "utf8");
+    assert.doesNotMatch(args, /--plugin-dir/);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("dispatch: a proxy mint FAILURE is non-fatal — the lane still dispatches and runs, unattached (mirrors peripheral.ts's RoleRunner stance)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
@@ -5096,6 +5179,26 @@ test("resume: a proxy opt mints a handle, widens --allowedTools with the handle'
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     for (let i = 0; i < 400 && calls.stopped === 0; i++) await sleep(20);
     assert.equal(calls.stopped, 1, "the proxy is torn down once the resumed lane's process exits (onExit)");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume (#639): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reaches the RESUMED leg's argv too (resume/fix legs are YES per the injection policy table)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const { s, name } = await mkHandoffLane(
+      dir,
+      `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`,
+      { skillsPluginDir: "/data/generated/role-skills/deadbeef" },
+    );
+    await s.resume({ number: 9, title: "t", labels: [] }, name);
+    await waitForFile(join(dir, "args.seen"), "skills-plugin resume argv was not published");
+    const args = readFileSync(join(dir, "args.seen"), "utf8").trim().split("\n");
+    const i = args.indexOf("--plugin-dir");
+    assert.ok(i !== -1, "--plugin-dir must reach the resumed leg's argv too");
+    assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

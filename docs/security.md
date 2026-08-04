@@ -162,6 +162,7 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
 
 ### Doctrine lines
 
+<!-- sapwood:skill:ac-evidence-tiers:start -->
 - **AC evidence is tiered by trust origin, not by reproducibility (owner ruling 2026-08-04,
   #628, superseding #616's original absolute "CI-reproducible" form).** The invariant that
   matters is that **the producer cannot forge the evidence** — CI is the common-case
@@ -191,6 +192,7 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
   The repo already practices non-CI trusted evidence below tier A/B (the `verify:n/a` doc-gate;
   an operator-run probe recorded on an issue) — this doctrine names that existing practice's
   rules instead of contradicting it with an absolute CI-only form.
+<!-- sapwood:skill:ac-evidence-tiers:end -->
 - **Hosts lacking a veto-hook + sealed-session primitive run `produce-PR-and-stop` only.**
   Autonomous merge (Decision #5) depends on the guard hook and the gate② seal existing and
   being wired; a host environment that cannot provide an equivalent PreToolUse veto hook and a
@@ -926,6 +928,35 @@ This closes nothing structurally — the broader worker-HOME filesystem-confinem
 detection later shows this vector being exercised in practice, arm (1)'s probe-then-pin gets its
 own issue with that evidence as the Why.
 
+#### Role-session skill injection — an accident fence, not a jail (#639)
+
+`engine/src/roles/skills-plugin.ts` renders two v1 reference skills (`human-merge-only-paths`,
+`ac-evidence-tiers`) verbatim from this file's own marker-delimited sections (see the
+`<!-- sapwood:skill:*:start/end -->` comments above and around the "Doctrine lines" AC-evidence
+tiers) into an immutable, content-hash-named plugin directory under
+`data/generated/role-skills/<hash>/`, attached to a session via `claude --plugin-dir`. This
+CONTENT-side-only: the render path's only input is this engine-shipped file — never anything
+issue-body- or PR-derived — and a published hash directory is never overwritten (M12's "accident
+fence, not a jail" doctrine: the goal is to stop a mistake, not to withstand an adversary who
+already has code-execution authority in the same repo).
+
+**Injection policy** (`shouldInjectSkillsPlugin` in the same module): every worker leg (fresh
+dispatch, resume, fix-entry) and every non-review peripheral role session gets `--plugin-dir`
+attached when `roles.skills.enabled` is `true` (default `false` — see config.ts's own comment);
+a review-mode session (`reviewCwd`, #285) NEVER does, enforced structurally in
+`RoleRunner.run()` itself, the same way that mode already hardcodes its tool profile and closes
+its MCP/settings surface.
+
+**Residual, not machinery-closed:** `data/generated/role-skills/**` is NOT yet a guard
+protected-path (the write-deny addition to `engine/src/guard/guard.ts` is human-merge-only —
+[Human-merge-only paths](#human-merge-only-paths) — and is this issue's own human-owned
+remainder, not shipped here). Until that lands, the same same-uid arbitrary-code-write residual
+this file's HONEST SCOPE notes already describe (a worker leg's `Bash(node *)`/`Bash(npm *)`
+grant runs with the operator's real filesystem access) could in principle write INTO a published
+hash directory rather than only reading it — no worse in kind than the #615 vector above, and
+named here for the same reason: detection/disclosure and an explicit human-owned fix are the
+honest response, not a claim that this doc alone closes it.
+
 ### Fix-loop `fixing` lane state (#245)
 
 Review findings (`HANDLE_THREADS`) used to fold straight to `needs-human` (`merge-driver.ts`'s
@@ -1332,6 +1363,7 @@ so the merge decision for this one PR is a human responsibility, not an engine o
 
 ## Human-merge-only paths
 
+<!-- sapwood:skill:human-merge-only-paths:start -->
 Some files are structurally off-limits to an autonomous worker because changing them
 would let a worker weaken the very mechanism that constrains it. Any change to these is
 **human-merge-only**, regardless of what merge mode is configured:
@@ -1352,6 +1384,7 @@ for `Bash` redirection/`tee`/`sed -i`/`git mv`/etc. against these paths, checked
 position-independently so a wrapper can't hide the write) — but the human-merge-only
 rule is also a process rule: even a PR that touches these files and somehow passes CI
 and review is not something the conductor should be configured to auto-merge.
+<!-- sapwood:skill:human-merge-only-paths:end -->
 
 ### `sapwood.config.*` is also the shipped starter config — a known consequence (#386)
 
