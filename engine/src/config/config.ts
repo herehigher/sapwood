@@ -904,6 +904,11 @@ const ProxyConfig = z
 // review family (verification-plan-reviewer/verification-plan-drafter/verification-plan-reviewer-confirm, and every gate② reviewer
 // form) never reads this key — their sessions never widen past ROLE_ALLOWED_TOOLS regardless of
 // this flag, by construction (no call site threads it in), not by convention.
+// Not a grandfathered exception to capability DR #616's "no capabilities.* config surface will
+// ever be built" — that ban is scoped to producer (worker) legs only (docs/security.md's
+// host-delegated capability management section); this key gates a peripheral-role grant, outside
+// the ruling's scope entirely. Predates #616 and stays as-is; not precedent for a new
+// producer-leg capability toggle.
 const WebAccess = z
   .object({
     enabled: z.boolean().default(true),

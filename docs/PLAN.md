@@ -766,6 +766,18 @@ see the guardrail/shackle criterion immediately below). Revisit input-side harde
 when untrusted-repo support is actually scheduled, as its own milestone-level
 threat-model decision rather than a standing constraint on trusted-repo capabilities.
 
+**Peripheral vs. producer split (added post capability DR #616, for clarity — this rule was
+not contradicted by that ruling; it arguably justifies it).** "Enforceable at the action
+boundary" cuts differently for the two session classes this doc distinguishes. Peripheral
+sessions' action boundary is the CLI's own tool grant (no `Bash`, no write tool, `#110`'s
+zero-`gh` design) — genuinely enforceable, so capability was withheld there. A producer
+(worker) leg's action boundary is different in kind: the guard hook mediates Bash/file-tool
+calls but structurally cannot mediate `mcp__*` calls at all (docs/security.md's governance-core
+list), so in-engine capability *management* for the inherited MCP surface was never actually
+enforceable to begin with — DR #616 (Decision #11 above) is this same rule applied honestly to
+that surface, choosing the real enforcement points (the guard's write-path denial, branch
+protection) over a config knob that could not have been enforced.
+
 **The guardrail/shackle criterion (locked 2026-07-17, issue #238; first applied in
 #234).** A mediation design for role-session information access must never deny a
 request AND still demand a definitive judgment from the same session — that
