@@ -6,19 +6,52 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createUserSettingsWatch } from "./user-settings-watch.js";
 
-test("user-settings-watch: an unreadable/absent settings file at construction, unchanged on a later tick -> stays silent", () => {
+const enoent = (): never => {
+  const err = new Error("ENOENT: no such file or directory") as NodeJS.ErrnoException;
+  err.code = "ENOENT";
+  throw err;
+};
+const eacces = (): never => {
+  const err = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+  err.code = "EACCES";
+  throw err;
+};
+
+test("user-settings-watch: an ABSENT settings file (ENOENT) at construction, unchanged on later ticks -> stays silent", () => {
   const logs: string[] = [];
   const events: Array<[string, unknown]> = [];
   const check = createUserSettingsWatch({ appendEvent: (kind, payload) => events.push([kind, payload]) }, (line) => logs.push(line), {
     homedir: () => "/home/op",
-    readFile: () => {
-      throw new Error("ENOENT: no such file or directory");
-    },
+    readFile: enoent,
   });
   check();
   check();
   assert.deepEqual(events, []);
   assert.deepEqual(logs, []);
+});
+
+test("user-settings-watch: an UNREADABLE settings file (EACCES) at construction discloses ONCE at construction — blindness is never conflated with absence — then stays silent while unreadable, and fires again on recovery (PR #632 review P2)", () => {
+  const logs: string[] = [];
+  const events: Array<[string, unknown]> = [];
+  let readable: string | null = null;
+  const check = createUserSettingsWatch({ appendEvent: (kind, payload) => events.push([kind, payload]) }, (line) => logs.push(line), {
+    homedir: () => "/home/op",
+    readFile: () => (readable === null ? eacces() : readable),
+  });
+  // The disclosure lands AT CONSTRUCTION (startup), before any tick-driven check() call.
+  assert.equal(events.length, 1);
+  assert.equal((events[0]![1] as { unreadable?: boolean }).unreadable, true);
+  assert.match(logs[0]!, /UNREADABLE/);
+  assert.match(logs[0]!, /Fix: make .*readable/);
+  // Steady-state unreadable: no repeat spam.
+  check();
+  check();
+  assert.equal(events.length, 1);
+  // Recovery to a readable file that carries a weakening entry: fires again, names it.
+  readable = JSON.stringify({ apiKeyHelper: "/tmp/evil.sh" });
+  check();
+  assert.equal(events.length, 2);
+  assert.deepEqual((events[1]![1] as { weakening: string[] }).weakening, ["apiKeyHelper"]);
 });
 
 test("user-settings-watch: identical content across two ticks -> stays silent (reverse case)", () => {
@@ -61,7 +94,7 @@ test("user-settings-watch: the file mutates between the startup snapshot and a l
   assert.equal(logs.length, 1);
 });
 
-test("user-settings-watch: a containment-weakening entry (apiKeyHelper) present from the very first tick fires once, then goes silent while it persists unchanged", () => {
+test("user-settings-watch: a containment-weakening entry (apiKeyHelper) already present at startup discloses AT CONSTRUCTION — before the first tick can dispatch a worker (PR #632 review P1) — then goes silent while it persists unchanged", () => {
   const logs: string[] = [];
   const events: Array<[string, unknown]> = [];
   const body = JSON.stringify({ apiKeyHelper: "/tmp/evil.sh" });
@@ -69,14 +102,19 @@ test("user-settings-watch: a containment-weakening entry (apiKeyHelper) present 
     homedir: () => "/home/op",
     readFile: () => body,
   });
-  check();
+  // The startup-timing pin: the disclosure exists BEFORE any check() call rides an onTick.
   assert.equal(events.length, 1);
   const [kind, payload] = events[0]!;
   assert.equal(kind, "user-settings-drift-detected");
-  assert.deepEqual(payload, { settingsPath: "/home/op/.claude/settings.json", changed: false, weakening: ["apiKeyHelper"] });
+  assert.deepEqual(payload, { settingsPath: "/home/op/.claude/settings.json", changed: true, weakening: ["apiKeyHelper"] });
+  assert.match(logs[0]!, /at startup/);
   assert.match(logs[0]!, /apiKeyHelper/);
+  // #554 pattern: the WARN carries its own fix, in the line itself.
+  assert.match(logs[0]!, /Fix: open .*settings\.json and remove any apiKeyHelper\/hooks entry/);
+  assert.match(logs[0]!, /nothing is blocked/);
 
-  // Same content, same weakening set, next tick -> silent (no repeat spam for a steady state).
+  // Same content, same weakening set, on the tick-driven checks -> silent (no repeat spam).
+  check();
   check();
   assert.equal(events.length, 1);
   assert.equal(logs.length, 1);

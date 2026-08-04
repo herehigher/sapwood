@@ -55,18 +55,34 @@ function weakeningEntries(parsed: unknown): string[] {
 }
 
 interface UserSettingsSnapshot {
-  /** `null` when the file is absent/unreadable — the ordinary, unmanaged-host case. */
+  /** `null` when the file is ABSENT (ENOENT) — the ordinary, unmanaged-host case, silent by
+   *  design. Absent is NOT the same as unreadable: an unreadable file (EACCES, EIO, …) gets the
+   *  `UNREADABLE_HASH` sentinel instead, because a detector that cannot read its subject is
+   *  BLIND, and blindness must be disclosed once rather than conflated with "nothing to watch"
+   *  (PR #632 review, P2: a startup EACCES previously produced no disclosure at all, and one
+   *  read failure silenced every later tick via `null === null`). */
   hash: string | null;
   weakening: string[];
+  /** Set only on the unreadable arm — carried into the WARN so the disclosure names the actual
+   *  error instead of a generic claim. */
+  unreadableReason?: string;
 }
+
+/** Sentinel hash for the unreadable state. Distinct from every real sha256 hex digest and from
+ *  the absent-file `null`, so unreadable→readable and readable→unreadable transitions both fire
+ *  the ordinary hash-changed arm, and steady-state unreadable stays silent after its one
+ *  disclosure. */
+const UNREADABLE_HASH = "__unreadable__";
 
 function readSnapshot(path: string, deps: UserSettingsWatchDeps): UserSettingsSnapshot {
   const readFile = deps.readFile ?? ((p: string) => readFileSync(p, "utf8"));
   let raw: string;
   try {
     raw = readFile(path);
-  } catch {
-    return { hash: null, weakening: [] };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT") return { hash: null, weakening: [] };
+    return { hash: UNREADABLE_HASH, weakening: [], unreadableReason: String(error) };
   }
   let weakening: string[] = [];
   try {
@@ -102,30 +118,68 @@ export function createUserSettingsWatch(
   deps: UserSettingsWatchDeps = {},
 ): () => void {
   const path = resolveSettingsPath(deps);
-  const baseline = readSnapshot(path, deps);
-  let lastHash = baseline.hash;
+  // Seeds are chosen so the construction-time check below fires exactly when there is something
+  // to disclose AT STARTUP and stays silent otherwise: a clean/absent file compares equal to its
+  // own baseline; pre-existing weakening keys differ from the blank weakening seed; an
+  // unreadable-at-startup file differs from the null hash seed (PR #632 review, P1: the first
+  // check used to ride the first onTick, which both drivers fire only AFTER `tick()` — so the
+  // first tick's worker dispatch happened before any disclosure landed).
+  let lastHash: string | null = null;
   let lastWeakeningKey = ""; // deliberately blank — see doc above.
+  {
+    const baseline = readSnapshot(path, deps);
+    // An absent or clean readable file is the silent startup baseline; anything else (weakening
+    // keys present, or unreadable) is left DIFFERENT from the seeds so the construction check
+    // fires once.
+    if (baseline.hash !== UNREADABLE_HASH && baseline.weakening.length === 0) {
+      lastHash = baseline.hash;
+    }
+  }
 
-  return function checkUserSettingsDrift(): void {
+  let startupCheck = true; // true only for the construction-time call below — labels its
+  // disclosure "at startup" instead of falsely claiming a change was observed.
+
+  function checkUserSettingsDrift(): void {
     try {
       const current = readSnapshot(path, deps);
       const changed = current.hash !== lastHash;
       const currentWeakeningKey = weakeningKey(current.weakening);
       const weakeningDrifted = currentWeakeningKey !== lastWeakeningKey;
       if (changed || weakeningDrifted) {
+        const unreadable = current.hash === UNREADABLE_HASH;
+        // #554 pattern: every disclosure carries its own fix, in the line itself.
+        const fix = unreadable
+          ? `Fix: make ${path} readable to the engine's own user (chmod/chown) — drift detection is BLIND until then and will resume on its own once the file reads again.`
+          : `Fix: open ${path} and remove any apiKeyHelper/hooks entry you did not put there yourself (or restore the file from a known-good copy); if the change is yours and intentional, no action is needed — this posture is detect-and-disclose (#615 arm 2), nothing is blocked.`;
         log(
-          `[sapwood:tick] operator user-level settings (${path}) ${changed ? "changed" : "weakening entries changed"} ` +
-            `since last observed — a worker leg's Bash(node *)/Bash(npm *) grant loads this file with the operator's ` +
+          `[sapwood:tick] operator user-level settings (${path}) ${
+            unreadable
+              ? `are UNREADABLE (${current.unreadableReason ?? "unknown error"}) — weakening state UNKNOWN, detector degraded${startupCheck ? " from startup" : ""}`
+              : startupCheck
+                ? "carry containment-weakening entries at startup"
+                : changed
+                  ? "changed since last observed"
+                  : "weakening entries changed since last observed"
+          } ` +
+            `— a worker leg's Bash(node *)/Bash(npm *) grant loads this file with the operator's ` +
             "REAL $HOME (structurally unconfined, see docs/security.md's HONEST SCOPE note); " +
-            (current.weakening.length > 0
-              ? `currently present: ${current.weakening.join(", ")}. `
-              : "no containment-weakening entries currently present. ") +
-            "See docs/security.md's #285 section and #615 for the accepted detect-and-disclose posture.",
+            (unreadable
+              ? ""
+              : current.weakening.length > 0
+                ? `currently present: ${current.weakening.join(", ")}. `
+                : "no containment-weakening entries currently present. ") +
+            fix,
         );
-        state.appendEvent("user-settings-drift-detected", { settingsPath: path, changed, weakening: current.weakening });
+        state.appendEvent("user-settings-drift-detected", {
+          settingsPath: path,
+          changed,
+          weakening: current.weakening,
+          ...(unreadable ? { unreadable: true } : {}),
+        });
       }
       lastHash = current.hash;
       lastWeakeningKey = currentWeakeningKey;
+      startupCheck = false;
     } catch (error) {
       // Same best-effort, never-block-the-loop stance as every sibling detector in this
       // neighborhood (checkWebAccessSettingsDenial, detectManagedPermissionMode): a failure HERE
@@ -133,5 +187,13 @@ export function createUserSettingsWatch(
       // tick loop it's riding along on.
       log(`[sapwood:tick] user-settings drift check failed (non-fatal, tick continues): ${String(error)}`);
     }
-  };
+  }
+
+  // The STARTUP disclosure itself (PR #632 review, P1): run one check at construction, which is
+  // the engine-startup moment (both CLI modes construct this before their loop starts). With the
+  // seeds above, a clean or absent file discloses nothing here; pre-existing weakening keys or an
+  // unreadable file disclose BEFORE the first tick can dispatch a worker, not one onTick after.
+  checkUserSettingsDrift();
+
+  return checkUserSettingsDrift;
 }
