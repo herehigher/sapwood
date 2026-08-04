@@ -958,3 +958,45 @@ test("#410 architect.md: names WebSearch/WebFetch alongside the existing read-on
     "names the config off-switch, never assumes the grant is unconditional",
   );
 });
+
+// ── #605: engine-open-PR is the ORDINARY path for a worker lane, not a rescue fallback — the
+// worker's job ends at push, never at `gh pr create`. Same forbidden-instruction pattern
+// prompts.test.ts already applies to retro.md above (#235). ──
+
+test("#605 worker.md: never instructs the worker to open a pull request itself — the engine opens it after push", () => {
+  const body = readPrompt(defaultPromptPath());
+  assert.ok(!body.includes("gh pr create"), "worker.md must not instruct: gh pr create");
+  assert.ok(
+    !/\*\*Open a pull request\*\*/i.test(body),
+    "worker.md must not carry an affirmative 'open a pull request' step for the worker session",
+  );
+  assert.match(
+    body,
+    /do not open a pull request yourself/i,
+    "explicitly tells the worker not to open the PR itself",
+  );
+  assert.match(
+    body,
+    /engine opens the PR/i,
+    "the push-then-stop instruction names the engine, not the worker session, as the PR opener",
+  );
+  assert.match(body, /Commit and push your (?:work|branch)/, "the worker still owns commit+push — only the PR-open step moved");
+});
+
+test("#605: no shipped prompt (worker.md, fix.md, or any peripheral prompt) instructs `gh pr create`", () => {
+  for (const path of [
+    defaultPromptPath(),
+    defaultFixPromptPath(),
+    defaultPoPromptPath(),
+    defaultArchitectPromptPath(),
+    defaultVerificationPlanReviewerPromptPath(),
+    defaultVerificationPlanConfirmPromptPath(),
+    defaultVerificationPlanDrafterPromptPath(),
+    defaultHarvestPromptPath(),
+    defaultRetroPromptPath(),
+    defaultPoolPromptPath(),
+    defaultPoDecomposePromptPath(),
+  ]) {
+    assert.ok(!readPrompt(path).includes("gh pr create"), `${path} must not instruct gh pr create`);
+  }
+});

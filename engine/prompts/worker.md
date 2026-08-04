@@ -75,13 +75,13 @@ start: it names failure classes this repo's reviewers have flagged more than onc
 ## Finishing up
 
 1. **Work on a feature branch** — never commit directly to the default branch.
-2. **Commit and push your work.** Write commit messages that explain *why*, not just
+2. **Commit and push your branch.** Write commit messages that explain *why*, not just
    *what*. Keep the branch pushed as you go so progress isn't lost if you're handed
    off mid-task.
-3. **Open a pull request** that references this issue (e.g. `Closes #{{issue.number}}`
-   in the PR body) and describes what changed, why, and how you verified it (the test
-   summary from step 4).
-4. **Stop there.** Do not merge, do not approve, do not request your own review. The
-   conductor drives the PR through gate① (CI green) and gate② (a fresh non-author
-   review) and merges it — or a human does, depending on this repo's configured merge
-   mode. Your job ends at "PR open, tests green, verification plan satisfied."
+3. **Stop there — do not open a pull request yourself.** The engine opens the PR once
+   your branch is pushed and your session ends, with `Closes #{{issue.number}}` and its
+   own owner marker in the body. Do not merge, do not approve, do not request your own
+   review. The conductor drives the PR through gate① (CI green) and gate② (a fresh
+   non-author review) and merges it — or a human does, depending on this repo's
+   configured merge mode. Your job ends at "branch pushed, tests green, verification
+   plan satisfied."
