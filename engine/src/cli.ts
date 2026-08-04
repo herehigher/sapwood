@@ -694,53 +694,63 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
     throw e;
   }
   try {
-    const dbVersion = state.userVersion();
-    if (dbVersion !== SCHEMA_VERSION) {
-      const hint =
-        dbVersion > SCHEMA_VERSION
-          ? "newer than this sapwood understands — upgrade sapwood"
-          : "older than this sapwood — run the engine (sapwood run) to migrate it; status never migrates";
-      return {
-        stdout: "",
-        stderr: `sapwood status: DB schema v${dbVersion} at ${dbPath} is ${hint} (engine schema v${SCHEMA_VERSION})\n`,
-        code: 1,
-      };
-    }
-    const reconcile = parseReconcileCompleted(state.latestEvent("reconcile-completed")?.payload);
-    const concernEvents = state.eventsAfterId(0, ["concern-posted", "concern-adjudicated"]);
-    const unadjudicated = unadjudicatedConcerns(concernEvents).size;
-    // #403: deliberate wall-clock read. `sapwood status` reports TODAY's spend/DTO generation
-    // time as of the moment the operator runs it — a composition root, hence systemClock.
-    const now = systemClock();
-    if (json) {
-      const dto = buildStatusDTO({
-        state,
+    // #642 (Codex gate② round-1 P1 finding 2): the ENTIRE read sequence below — schema check
+    // through DTO/snapshot construction — runs inside withBusyNormalization, so a lock acquired
+    // by another connection AFTER the open above (which the constructor's own probe already
+    // handles) surfaces on ANY of these reads as the same structured SqliteBusyError, not a raw
+    // node:sqlite error from whichever individual State method happened to hit it.
+    return state.withBusyNormalization(() => {
+      const dbVersion = state.userVersion();
+      if (dbVersion !== SCHEMA_VERSION) {
+        const hint =
+          dbVersion > SCHEMA_VERSION
+            ? "newer than this sapwood understands — upgrade sapwood"
+            : "older than this sapwood — run the engine (sapwood run) to migrate it; status never migrates";
+        return {
+          stdout: "",
+          stderr: `sapwood status: DB schema v${dbVersion} at ${dbPath} is ${hint} (engine schema v${SCHEMA_VERSION})\n`,
+          code: 1,
+        };
+      }
+      const reconcile = parseReconcileCompleted(state.latestEvent("reconcile-completed")?.payload);
+      const concernEvents = state.eventsAfterId(0, ["concern-posted", "concern-adjudicated"]);
+      const unadjudicated = unadjudicatedConcerns(concernEvents).size;
+      // #403: deliberate wall-clock read. `sapwood status` reports TODAY's spend/DTO generation
+      // time as of the moment the operator runs it — a composition root, hence systemClock.
+      const now = systemClock();
+      if (json) {
+        const dto = buildStatusDTO({
+          state,
+          dbPath,
+          schemaVersion: dbVersion,
+          cfg: cfg ?? null,
+          configProvenance: cfg ? resolveConfigProvenance(configPath, existsSync) : undefined,
+          now,
+          unadjudicatedConcerns: unadjudicated,
+        });
+        return { stdout: `${JSON.stringify(dto)}\n`, stderr: "", code: 0 };
+      }
+      const snapshot: StatusSnapshot = {
         dbPath,
         schemaVersion: dbVersion,
-        cfg: cfg ?? null,
-        configProvenance: cfg ? resolveConfigProvenance(configPath, existsSync) : undefined,
-        now,
+        active: state.activeWorkers(),
+        driving: state.drivingWorkers(),
+        killSwitchActive: state.isKillSwitchActive(),
+        pauseActive: state.isPauseActive(),
+        ceilingBreach: state.ceilingBreach(),
+        dailySpendUsd: state.dailySpendUsd(now),
+        lanesMax: cfg?.lanes.max ?? null,
+        dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
+        parked: state.parkedSources(),
+        orphanReport: reconcile ? { orphans: reconcile.orphans, overflow: reconcile.overflow } : null,
         unadjudicatedConcerns: unadjudicated,
-      });
-      return { stdout: `${JSON.stringify(dto)}\n`, stderr: "", code: 0 };
-    }
-    const snapshot: StatusSnapshot = {
-      dbPath,
-      schemaVersion: dbVersion,
-      active: state.activeWorkers(),
-      driving: state.drivingWorkers(),
-      killSwitchActive: state.isKillSwitchActive(),
-      pauseActive: state.isPauseActive(),
-      ceilingBreach: state.ceilingBreach(),
-      dailySpendUsd: state.dailySpendUsd(now),
-      lanesMax: cfg?.lanes.max ?? null,
-      dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
-      parked: state.parkedSources(),
-      orphanReport: reconcile ? { orphans: reconcile.orphans, overflow: reconcile.overflow } : null,
-      unadjudicatedConcerns: unadjudicated,
-      baseCiRed: baseRedPin(state),
-    };
-    return { stdout: formatStatus(snapshot), stderr: "", code: 0 };
+        baseCiRed: baseRedPin(state),
+      };
+      return { stdout: formatStatus(snapshot), stderr: "", code: 0 };
+    });
+  } catch (e) {
+    if (e instanceof SqliteBusyError) return busyResult("status", e, json);
+    throw e;
   } finally {
     state.close();
   }
@@ -845,8 +855,16 @@ export function parseEventsArgs(argv: string[]): EventsArgs {
     if (a === "--since-id") {
       const next = args[i + 1];
       if (next === undefined || next.startsWith("-")) return fail("--since-id requires a value");
+      // #642 (Codex gate② round-1 P2 finding 4): CANONICAL decimal only. Number("0x10") is 16,
+      // Number("1e3") is 1000 — plain-old-JS-numeric-literal forms nobody types as a cursor, and
+      // silently accepting them means "--since-id 1e3" and "--since-id 1000" pick different-
+      // looking rows for no operator-visible reason. /^\d+$/ rejects both (and any leading `+`/
+      // decimal point) BEFORE Number() ever sees the string. Number.isSafeInteger below then
+      // rejects a canonical-looking value too large to represent exactly (e.g. a 20-digit
+      // string) — silently truncating/rounding a cursor id is worse than refusing it.
+      if (!/^\d+$/.test(next)) return fail(`--since-id requires a non-negative integer, got: ${next}`);
       const n = Number(next);
-      if (!Number.isInteger(n) || n < 0) return fail(`--since-id requires a non-negative integer, got: ${next}`);
+      if (!Number.isSafeInteger(n)) return fail(`--since-id requires a non-negative integer, got: ${next}`);
       sinceId = n;
       i++;
       continue;
@@ -854,8 +872,11 @@ export function parseEventsArgs(argv: string[]): EventsArgs {
     if (a === "--limit") {
       const next = args[i + 1];
       if (next === undefined || next.startsWith("-")) return fail("--limit requires a value");
+      // Same canonical-decimal-only stance as --since-id above (Codex P2 finding 4) — a page
+      // size is likewise an operator/script-typed integer, never a JS numeric-literal form.
+      if (!/^\d+$/.test(next)) return fail(`--limit requires a positive integer, got: ${next}`);
       const n = Number(next);
-      if (!Number.isInteger(n) || n < 1) return fail(`--limit requires a positive integer, got: ${next}`);
+      if (n < 1) return fail(`--limit requires a positive integer, got: ${next}`);
       if (n > MAX_PAGE_LIMIT) return fail(`--limit ${n} exceeds the hard cap of ${MAX_PAGE_LIMIT}`);
       limit = n;
       i++;
@@ -925,38 +946,47 @@ export function runEvents(argv: string[]): { stdout: string; stderr: string; cod
     throw e;
   }
   try {
-    const dbVersion = state.userVersion();
-    if (dbVersion !== SCHEMA_VERSION) {
-      const hint =
-        dbVersion > SCHEMA_VERSION
-          ? "newer than this sapwood understands — upgrade sapwood"
-          : "older than this sapwood — run the engine (sapwood run) to migrate it; events never migrates";
-      return {
-        stdout: "",
-        stderr: `sapwood events: DB schema v${dbVersion} at ${dbPath} is ${hint} (engine schema v${SCHEMA_VERSION})\n`,
-        code: 1,
-      };
-    }
-    const filter = kinds.length > 0 ? { kinds } : excludeKinds.length > 0 ? { excludeKinds } : {};
-    let rows: { id: number; ts: string; kind: string; payload: unknown }[];
-    try {
-      rows = state.eventsPageFiltered(sinceId, filter, limit);
-    } catch (e) {
-      if (e instanceof SqliteBusyError) return busyResult("events", e, json);
-      throw e;
-    }
-    // #642 AC5: an EMPTY filtered page still advances the cursor — a filtered `WHERE...LIMIT`
-    // query with zero rows means (SQL evaluates the whole predicate, LIMIT only bounds OUTPUT)
-    // that literally no matching event exists anywhere after sinceId RIGHT NOW, so it is both
-    // correct and cheap to jump straight to the ledger's current tail — never leaving a poller
-    // pinned at the same sinceId, rescanning the identical (matchless) range on every call.
-    const nextSinceId = rows.length > 0 ? rows[rows.length - 1]!.id : Math.max(sinceId, state.maxEventId());
-    const snapshotMode: "live" | "immutable-fallback" = state.isImmutableSnapshot() ? "immutable-fallback" : "live";
-    if (json) {
-      const dto = { formatVersion: READ_MODEL_FORMAT_VERSION, dbPath, snapshot: { mode: snapshotMode }, events: rows, nextSinceId };
-      return { stdout: `${JSON.stringify(dto)}\n`, stderr: "", code: 0 };
-    }
-    return { stdout: formatEventsText(dbPath, snapshotMode, rows, nextSinceId), stderr: "", code: 0 };
+    // #642 (Codex gate② round-1 P1 finding 2): same whole-read-sequence busy normalization as
+    // runStatus above — schema check through DTO/text construction, not just eventsPageFiltered
+    // (which already normalizes internally) or the constructor's own open-time probe.
+    return state.withBusyNormalization(() => {
+      const dbVersion = state.userVersion();
+      if (dbVersion !== SCHEMA_VERSION) {
+        const hint =
+          dbVersion > SCHEMA_VERSION
+            ? "newer than this sapwood understands — upgrade sapwood"
+            : "older than this sapwood — run the engine (sapwood run) to migrate it; events never migrates";
+        return {
+          stdout: "",
+          stderr: `sapwood events: DB schema v${dbVersion} at ${dbPath} is ${hint} (engine schema v${SCHEMA_VERSION})\n`,
+          code: 1,
+        };
+      }
+      const filter = kinds.length > 0 ? { kinds } : excludeKinds.length > 0 ? { excludeKinds } : {};
+      // #642 (Codex gate② round-1 P1 finding 1): `tailId` comes back from the SAME call, the
+      // SAME transaction/snapshot as `rows` — never a separate later `state.maxEventId()` call,
+      // which is what let a matching event committed between the two reads get silently skipped
+      // (eventsPageFiltered's own doc has the full race). `nextSinceId` on an empty page is that
+      // shared tail, not a fresh independent read.
+      const { rows, tailId } = state.eventsPageFiltered(sinceId, filter, limit);
+      // #642 AC5: an EMPTY filtered page still advances the cursor — a filtered `WHERE...LIMIT`
+      // query with zero rows means (SQL evaluates the whole predicate, LIMIT only bounds OUTPUT)
+      // that literally no matching event exists anywhere after sinceId, AS OF THE SAME SNAPSHOT
+      // `tailId` was read from — so jumping the cursor to `tailId` never skips a real event: any
+      // event that could match was either already in that snapshot (and would have matched) or
+      // committed AFTER it (and is therefore still ahead of `tailId`, so a later call with
+      // sinceId=tailId will see it).
+      const nextSinceId = rows.length > 0 ? rows[rows.length - 1]!.id : Math.max(sinceId, tailId);
+      const snapshotMode: "live" | "immutable-fallback" = state.isImmutableSnapshot() ? "immutable-fallback" : "live";
+      if (json) {
+        const dto = { formatVersion: READ_MODEL_FORMAT_VERSION, dbPath, snapshot: { mode: snapshotMode }, events: rows, nextSinceId };
+        return { stdout: `${JSON.stringify(dto)}\n`, stderr: "", code: 0 };
+      }
+      return { stdout: formatEventsText(dbPath, snapshotMode, rows, nextSinceId), stderr: "", code: 0 };
+    });
+  } catch (e) {
+    if (e instanceof SqliteBusyError) return busyResult("events", e, json);
+    throw e;
   } finally {
     state.close();
   }

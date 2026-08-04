@@ -154,6 +154,28 @@ test("#642 AC3: an all-attributed day reports incomplete: false and unclassified
   });
 });
 
+test("#642 (Codex gate② round-1 P1 finding 3): the spend section's own identity — todayUsd === sum(settledByWorker) + unclassifiedUsd — always holds, over a fixture mixing known-worker, review-key, and orphan-key spend", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const configPath = writeConfig(dir);
+    const seed = new State(dbPath);
+    seed.upsertWorker({ name: "lane-a", issue: 1, session_id: "s1", state: "done", started_at: "2026-08-04T00:00:00.000Z", ended_at: "t" });
+    seed.upsertWorker({ name: "lane-b", issue: 2, session_id: "s2", state: "done", started_at: "2026-08-04T00:00:00.000Z", ended_at: "t" });
+    const now = new Date().toISOString();
+    seed.recordSpend("lane-a", 1, 1.1, now);
+    seed.recordSpend("lane-b", 2, 2.2, now);
+    seed.recordSpend("lane-a:engine-review", 1, 0.3, now); // #612's review-spend key
+    seed.recordSpend("nobody-owns-this-key", 9, 0.4, now); // a genuinely orphaned row
+    seed.close();
+
+    const body = parseStdout(runCli(["node", "sapwood", "status", dbPath, "--config", configPath, "--json"]));
+    const settledSum = body.spend.settledByWorker.reduce((sum: number, r: { usd: number }) => sum + r.usd, 0);
+    assert.equal(body.spend.todayUsd, settledSum + body.spend.unclassifiedUsd);
+    assert.equal(body.spend.unclassifiedUsd, 0.7); // 0.3 (review) + 0.4 (orphan)
+    assert.equal(body.spend.incomplete, true);
+  });
+});
+
 test("#642 AC4: without --config, the config section is structurally unavailable — never a guessed default rendered as real values", () => {
   withDir((dir) => {
     const dbPath = join(dir, "sapwood.sqlite");

@@ -77,6 +77,31 @@ test("parseEventsArgs: --limit requires a positive integer, hard-capped (#642 AC
   assert.equal(parseEventsArgs(["node", "sapwood", "events", "--limit", "1000"]).error, undefined, "exactly the cap is fine");
 });
 
+test("parseEventsArgs: #642 Codex gate② round-1 P2 finding 4 — --since-id/--limit reject non-canonical numeric forms (hex, exponential) and an unsafe-magnitude --since-id", () => {
+  // "0x10" and "1e3" are both legal JS numeric-literal forms Number() happily parses (16 and
+  // 1000 respectively) — neither is what an operator/script means by "an integer" typed on a
+  // command line, and silently accepting them means two visually-different flag values pick the
+  // identical cursor/page size for no reason the caller can see.
+  assert.match(
+    parseEventsArgs(["node", "sapwood", "events", "--since-id", "0x10"]).error ?? "",
+    /--since-id requires a non-negative integer/,
+  );
+  assert.match(
+    parseEventsArgs(["node", "sapwood", "events", "--since-id", "1e3"]).error ?? "",
+    /--since-id requires a non-negative integer/,
+  );
+  assert.match(parseEventsArgs(["node", "sapwood", "events", "--limit", "0x10"]).error ?? "", /--limit requires a positive integer/);
+  assert.match(parseEventsArgs(["node", "sapwood", "events", "--limit", "1e3"]).error ?? "", /--limit requires a positive integer/);
+  // A canonical-decimal string too large to represent exactly as a JS number (Number.MAX_SAFE_
+  // INTEGER is 2^53-1, 16 digits) must be rejected rather than silently rounded to a NEARBY id —
+  // a wrong-but-plausible-looking cursor is worse than a clear rejection.
+  const unsafe = parseEventsArgs(["node", "sapwood", "events", "--since-id", "99999999999999999999"]);
+  assert.match(unsafe.error ?? "", /--since-id requires a non-negative integer/);
+  // Canonical decimal, safe magnitude: still accepted (no regression from the tightened check).
+  assert.equal(parseEventsArgs(["node", "sapwood", "events", "--since-id", "123"]).sinceId, 123);
+  assert.equal(parseEventsArgs(["node", "sapwood", "events", "--limit", "250"]).limit, 250);
+});
+
 test("parseEventsArgs: --kind and --exclude-kind together is rejected — no invented precedence (#642 AC5)", () => {
   const parsed = parseEventsArgs(["node", "sapwood", "events", "--kind", "merged", "--exclude-kind", "dispatched"]);
   assert.match(parsed.error ?? "", /--kind and --exclude-kind cannot combine/);

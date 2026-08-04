@@ -273,14 +273,18 @@ export const DEFAULT_PAGE_LIMIT = 500;
  *  `state.spentUsdForWorker` uses, one row per worker `spend_ledger` actually has settled rows
  *  for today (never every currently-active lane — a lane with zero settled spend today simply
  *  has no row, rather than a fabricated 0 entry cluttering the list). `unclassifiedUsd` is
- *  everything else `dailySpendUsd` counts that ISN'T attributable to a known worker name —
- *  #612's `"<lane>:engine-review"` review-session spend keys land here today (state.ts's
+ *  everything else `todayUsd` counts that ISN'T attributable to a known worker name — #612's
+ *  `"<lane>:engine-review"` review-session spend keys land here today (state.ts's
  *  spendSummaryForDay doc) — and `incomplete` is true exactly when that bucket is non-empty, so
  *  a client can never mistake "some spend this DTO couldn't attribute" for "zero spend
- *  happened". `todayUsd` (`dailySpendUsd`) is always `>= sum(settledByWorker) +
- *  unclassifiedUsd` by construction — every spend_ledger row lands in exactly one of the two
- *  buckets or is excluded from both only if its `ts` falls outside today's window, which
- *  `dailySpendUsd` and this query both key off identically. */
+ *  happened".
+ *
+ *  #642 (Codex gate② round-1 P1 finding 3): `todayUsd` is `state.spendSummaryForDay`'s OWN
+ *  `todayUsd` — deliberately NOT a separate `state.dailySpendUsd(now)` call. The three numbers
+ *  now all come out of `spendSummaryForDay`'s single call (itself one read transaction,
+ *  state.ts's own doc), so `todayUsd === sum(settledByWorker) + unclassifiedUsd` holds BY
+ *  CONSTRUCTION — there is no independent third read left that a live settlement landing
+ *  mid-computation could make disagree with the other two. */
 export interface StatusSpendDTO {
   todayUsd: number;
   dailyBudgetUsd: number | null;
@@ -290,13 +294,13 @@ export interface StatusSpendDTO {
 }
 
 export function buildSpendSection(
-  state: Pick<State, "dailySpendUsd" | "spendSummaryForDay">,
+  state: Pick<State, "spendSummaryForDay">,
   cfg: Pick<SapwoodConfig, "cost"> | null,
   now: Date,
 ): StatusSpendDTO {
   const summary = state.spendSummaryForDay(now);
   return {
-    todayUsd: state.dailySpendUsd(now),
+    todayUsd: summary.todayUsd,
     dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
     settledByWorker: summary.byWorker,
     unclassifiedUsd: summary.unclassifiedUsd,

@@ -1730,6 +1730,56 @@ export class State {
     return this.immutableFallback;
   }
 
+  /** #642 (Codex gate② round-1 P1 finding 2): normalizes ANY raw SQLITE_BUSY raised while
+   *  running `fn` into the structured SqliteBusyError — not just the constructor's own open-
+   *  time probe, or a method (eventsPageFiltered, spendSummaryForDay) that already wraps
+   *  itself in readTransaction below. A lock acquired by ANOTHER connection AFTER this handle
+   *  successfully opened can surface on literally any LATER read — userVersion(),
+   *  activeWorkers(), dailySpendUsd(), maxEventId(), any of them — and a caller (cli.ts's
+   *  runStatus/runEvents) must not have to special-case every individual State method it
+   *  happens to call. Wrap the WHOLE read sequence in one call to this instead.
+   *
+   *  Already-normalized errors (thrown by a nested readTransaction call) pass through
+   *  unchanged — checked FIRST, so they are never double-wrapped: a SqliteBusyError's own
+   *  message contains the word "busy", which would otherwise re-match isBusyError's message-
+   *  fallback regex and produce a second SqliteBusyError with a different (outer) timeoutMs,
+   *  corrupting the original. */
+  withBusyNormalization<T>(fn: () => T): T {
+    try {
+      return fn();
+    } catch (e) {
+      if (e instanceof SqliteBusyError) throw e;
+      if (isBusyError(e)) throw new SqliteBusyError(this.readBusyTimeoutMs, e);
+      throw e;
+    }
+  }
+
+  /** #642 (Codex gate② round-1 P1 findings 1 + 3): BEGIN a short-lived read transaction, run
+   *  `fn`, COMMIT — so every read `fn` performs sees ONE consistent snapshot, and any
+   *  SQLITE_BUSY along the way is normalized into SqliteBusyError. Used by every method that
+   *  needs MORE THAN ONE read to agree with each other (eventsPageFiltered's page + ledger-
+   *  tail, spendSummaryForDay's settled/unclassified split + their sum) — see each call site's
+   *  own doc for why THAT pair specifically needs one snapshot. Rolls back on any error (a
+   *  read-only handle never needs the write a COMMIT would imply; ROLLBACK after a failed
+   *  BEGIN is a harmless no-op, never masking the real error). */
+  private readTransaction<T>(fn: () => T): T {
+    try {
+      this.db.exec("BEGIN");
+      const result = fn();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (e) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        /* BEGIN itself may be what threw (e.g. SQLITE_BUSY before any transaction opened) — a
+           ROLLBACK with nothing open is a harmless no-op error, never masks the real one below */
+      }
+      if (isBusyError(e)) throw new SqliteBusyError(this.readBusyTimeoutMs, e);
+      throw e;
+    }
+  }
+
   /** Apply pending migrations in a transaction, bumping user_version. Idempotent. */
   private migrate(): void {
     const current = this.userVersion();
@@ -3506,17 +3556,26 @@ export class State {
    *  documents at its own call sites) — passing both here would silently AND them, so callers
    *  must not.
    *
-   *  Runs inside a short-lived read transaction (BEGIN...COMMIT wraps the one SELECT) with the
-   *  handle's own `busy_timeout` — a writer holding the lock past that timeout raises the
-   *  structured SqliteBusyError (isBusyError above) instead of the raw node:sqlite message, so a
-   *  CLI catch site can render "busy, try again" instead of a stack trace. The transaction is
-   *  ROLLED BACK (never committed) on any error — a read-only handle never needs the write the
-   *  COMMIT would imply, and rollback is always safe to call after a failed BEGIN too. */
+   *  Runs inside readTransaction (above) — a short-lived read transaction under the handle's
+   *  own `busy_timeout`, ONE consistent snapshot for both statements it issues.
+   *
+   *  #642 (Codex gate② round-1 P1 finding 1): the page query and the ledger TAIL (`MAX(id)`)
+   *  are read TOGETHER, in the SAME transaction, and the caller (cli.ts's runEvents) uses THIS
+   *  `tailId` — never a separate later `state.maxEventId()` call — to compute `nextSinceId` on
+   *  an empty filtered page. A separate later call was the actual bug: SQLite's snapshot
+   *  isolation means a write committed by ANOTHER connection AFTER this transaction's first
+   *  read is invisible to every read inside it (including this one's own tail query, even
+   *  though it runs SECOND) — so a matching event that lands between "the filtered page came
+   *  back empty" and "some other later read of the max id" would have its id folded into
+   *  nextSinceId by a naive two-call sequence, silently skipping it forever. Reading the tail
+   *  HERE, inside the SAME transaction as the page query, means it can only ever reflect what
+   *  the page query itself already saw (or missed) — a page and a tail that were computed
+   *  a moment apart from each other can never disagree about what had already happened. */
   eventsPageFiltered(
     afterId: number,
     filter: { kinds?: readonly string[]; excludeKinds?: readonly string[] },
     limit: number,
-  ): { id: number; ts: string; kind: string; payload: unknown }[] {
+  ): { rows: { id: number; ts: string; kind: string; payload: unknown }[]; tailId: number } {
     let clause = "";
     const params: (string | number)[] = [afterId];
     if (filter.kinds && filter.kinds.length > 0) {
@@ -3527,16 +3586,14 @@ export class State {
       params.push(...filter.excludeKinds);
     }
     params.push(limit);
-    try {
-      this.db.exec("BEGIN");
-      const rows = this.db.prepare(`SELECT id, ts, kind, payload FROM events WHERE id > ?${clause} ORDER BY id LIMIT ?`).all(...params) as {
-        id: number;
-        ts: string;
-        kind: string;
-        payload: string;
-      }[];
-      this.db.exec("COMMIT");
-      return rows.map((r) => {
+    return this.readTransaction(() => {
+      const rawRows = this.db
+        .prepare(`SELECT id, ts, kind, payload FROM events WHERE id > ?${clause} ORDER BY id LIMIT ?`)
+        .all(...params) as { id: number; ts: string; kind: string; payload: string }[];
+      // Same transaction/snapshot as the page query above — see this method's own doc for why
+      // that is exactly what closes the P1 finding-1 race.
+      const tailRow = this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM events").get() as { m: number };
+      const rows = rawRows.map((r) => {
         let payload: unknown = null;
         try {
           payload = JSON.parse(r.payload);
@@ -3551,16 +3608,8 @@ export class State {
         // parseEventsArgs), never a returned row.
         return { id: r.id, ts: r.ts, kind: r.kind, payload };
       });
-    } catch (e) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {
-        /* BEGIN itself may be what threw (e.g. SQLITE_BUSY before any transaction opened) — a
-           ROLLBACK with nothing open is a harmless no-op error, never masks the real one below */
-      }
-      if (isBusyError(e)) throw new SqliteBusyError(this.readBusyTimeoutMs, e);
-      throw e;
-    }
+      return { rows, tailId: tailRow.m };
+    });
   }
 
   /** #642: the honest per-day spend split `status --json`'s spend section needs — SETTLED
@@ -3570,31 +3619,45 @@ export class State {
    *  spend is deliberately recorded under `"<lane>:engine-review"` (review/production.ts's
    *  `reviewSpendWorkerKey`) — a key that by design never matches a `workers.name` row — so it
    *  lands here, honestly counted, rather than being silently absorbed into the reviewed lane's
-   *  own total or dropped. `unclassifiedUsd` is exactly the gap `dailySpendUsd(now) -
-   *  sum(byWorker)` would compute by hand; this query gives both halves in one read instead of
-   *  making the caller re-derive one from the other. The real per-source split (settled worker
-   *  spend vs. settled review spend vs. anything else truly unattributed) is #645's follow-up —
-   *  this is the honest INTERIM shape: never fold an unattributed dollar into a worker's own
-   *  total, and never render it as zero. Same day window as dailySpendUsd (ts-prefix match). */
-  spendSummaryForDay(now: Date): { byWorker: { worker: string; usd: number }[]; unclassifiedUsd: number } {
+   *  own total or dropped. The real per-source split (settled worker spend vs. settled review
+   *  spend vs. anything else truly unattributed) is #645's follow-up — this is the honest
+   *  INTERIM shape: never fold an unattributed dollar into a worker's own total, and never
+   *  render it as zero. Same day window as `dailySpendUsd` (ts-prefix match).
+   *
+   *  #642 (Codex gate② round-1 P1 finding 3): `todayUsd` is returned FROM THIS SAME METHOD,
+   *  computed as `sum(byWorker) + unclassifiedUsd` — never a separate call to `dailySpendUsd`.
+   *  The bug that closes: `dailySpendUsd` is an INDEPENDENT query with its own snapshot: a
+   *  settlement (`recordSpend`) committing between it and this method's own two queries could
+   *  make `dailySpendUsd`'s total include a row neither `byWorker` nor `unclassifiedUsd` had
+   *  seen yet — `status --json` would then report `todayUsd > sum(settled) + unclassified`
+   *  while `incomplete` stayed `false`, exactly backwards from the honesty this field exists
+   *  for. Deriving `todayUsd` arithmetically from the two buckets THIS call already computed
+   *  (both inside readTransaction's one snapshot, below) makes that identity hold BY
+   *  CONSTRUCTION — there is no third independent read left to disagree with the other two. */
+  spendSummaryForDay(now: Date): { todayUsd: number; byWorker: { worker: string; usd: number }[]; unclassifiedUsd: number } {
     const dayPrefix = now.toISOString().slice(0, 10);
-    const byWorker = this.db
-      .prepare(
-        `SELECT s.worker AS worker, SUM(s.usd) AS usd
-         FROM spend_ledger s
-         WHERE s.ts LIKE ? AND EXISTS (SELECT 1 FROM workers w WHERE w.name = s.worker)
-         GROUP BY s.worker ORDER BY usd DESC, worker`,
-      )
-      .all(`${dayPrefix}%`) as unknown as { worker: string; usd: number }[];
-    const unclassified = this.db
-      .prepare(
-        `SELECT COALESCE(SUM(s.usd), 0) AS usd
-         FROM spend_ledger s
-         WHERE s.ts LIKE ? AND NOT EXISTS (SELECT 1 FROM workers w WHERE w.name = s.worker)`,
-      )
-      .get(`${dayPrefix}%`) as { usd: number };
-    // Re-shaped into ordinary objects — same null-prototype reason spendByModelForDay documents.
-    return { byWorker: byWorker.map((r) => ({ worker: r.worker, usd: r.usd })), unclassifiedUsd: unclassified.usd };
+    return this.readTransaction(() => {
+      const byWorkerRaw = this.db
+        .prepare(
+          `SELECT s.worker AS worker, SUM(s.usd) AS usd
+           FROM spend_ledger s
+           WHERE s.ts LIKE ? AND EXISTS (SELECT 1 FROM workers w WHERE w.name = s.worker)
+           GROUP BY s.worker ORDER BY usd DESC, worker`,
+        )
+        .all(`${dayPrefix}%`) as unknown as { worker: string; usd: number }[];
+      const unclassifiedRow = this.db
+        .prepare(
+          `SELECT COALESCE(SUM(s.usd), 0) AS usd
+           FROM spend_ledger s
+           WHERE s.ts LIKE ? AND NOT EXISTS (SELECT 1 FROM workers w WHERE w.name = s.worker)`,
+        )
+        .get(`${dayPrefix}%`) as { usd: number };
+      // Re-shaped into ordinary objects — same null-prototype reason spendByModelForDay documents.
+      const byWorker = byWorkerRaw.map((r) => ({ worker: r.worker, usd: r.usd }));
+      const unclassifiedUsd = unclassifiedRow.usd;
+      const todayUsd = byWorker.reduce((sum, r) => sum + r.usd, 0) + unclassifiedUsd;
+      return { todayUsd, byWorker, unclassifiedUsd };
+    });
   }
 
   /** `now`'s UTC calendar day of spend, grouped by model — §8's `spend.byModel`. Same day

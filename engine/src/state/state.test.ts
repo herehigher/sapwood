@@ -3627,14 +3627,15 @@ test("eventsPageFiltered: --kind filters BEFORE limit — a filtered page gets u
   s.appendEvent("dispatched", { issue: 4 });
   s.appendEvent("merged", { pr: 11 });
 
-  const page = s.eventsPageFiltered(0, { kinds: ["merged"] }, 3);
+  const { rows, tailId } = s.eventsPageFiltered(0, { kinds: ["merged"] }, 3);
   assert.deepEqual(
-    page.map((e) => ({ id: e.id, kind: e.kind, payload: e.payload })),
+    rows.map((e) => ({ id: e.id, kind: e.kind, payload: e.payload })),
     [
       { id: 4, kind: "merged", payload: { pr: 10 } },
       { id: 6, kind: "merged", payload: { pr: 11 } },
     ],
   );
+  assert.equal(tailId, 6, "the ledger's own tail, same transaction as the page");
   s.close();
 });
 
@@ -3645,9 +3646,9 @@ test("eventsPageFiltered: --exclude-kind drops the named kinds and keeps everyth
   s.appendEvent("dispatched", { issue: 2 });
   s.appendEvent("run-started", {});
 
-  const page = s.eventsPageFiltered(0, { excludeKinds: ["dispatched"] }, 10);
+  const { rows } = s.eventsPageFiltered(0, { excludeKinds: ["dispatched"] }, 10);
   assert.deepEqual(
-    page.map((e) => e.kind),
+    rows.map((e) => e.kind),
     ["merged", "run-started"],
   );
   s.close();
@@ -3657,9 +3658,9 @@ test("eventsPageFiltered: no filter at all returns every kind, same as eventsPag
   const s = mem();
   s.appendEvent("dispatched", { issue: 1 });
   s.appendEvent("merged", { pr: 10 });
-  const page = s.eventsPageFiltered(0, {}, 10);
+  const { rows } = s.eventsPageFiltered(0, {}, 10);
   assert.deepEqual(
-    page.map((e) => e.kind),
+    rows.map((e) => e.kind),
     ["dispatched", "merged"],
   );
   s.close();
@@ -3673,9 +3674,9 @@ test("eventsPageFiltered: a row whose kind this binary's registry doesn't know i
   // proves does NOT extend to the read path).
   const db = (s as unknown as { db: DatabaseSync }).db;
   db.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)").run("2026-08-04T00:00:00.000Z", "future-kind-v2", "{}");
-  const page = s.eventsPageFiltered(0, {}, 10);
+  const { rows } = s.eventsPageFiltered(0, {}, 10);
   assert.deepEqual(
-    page.map((e) => e.kind),
+    rows.map((e) => e.kind),
     ["future-kind-v2"],
   );
   s.close();
@@ -3685,8 +3686,44 @@ test("eventsPageFiltered: a corrupt payload is served as null, never a throw (sa
   const s = mem();
   const db = (s as unknown as { db: DatabaseSync }).db;
   db.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)").run("2026-08-04T00:00:00.000Z", "dispatched", "{not json");
-  assert.deepEqual(s.eventsPageFiltered(0, {}, 10)[0]!.payload, null);
+  assert.deepEqual(s.eventsPageFiltered(0, {}, 10).rows[0]!.payload, null);
   s.close();
+});
+
+test("#642 (Codex gate② round-1 P1 finding 1): eventsPageFiltered's tail reflects the SAME transaction snapshot as its page — a write committed by ANOTHER connection between the reader's first and second internal reads is invisible to BOTH, so nextSinceId (built from tailId) can never jump past an event the caller has not actually seen (deterministic interleaving via direct State/DatabaseSync calls, never timing/sleep)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-tail-race-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  new State(dbPath).close(); // WAL mode (the write-mode constructor's default) — snapshot
+  // isolation is exactly the WAL guarantee this test proves eventsPageFiltered relies on.
+
+  const reader = new State(dbPath, { readOnly: true });
+  const readerDb = (reader as unknown as { db: DatabaseSync }).db;
+  const writer = new State(dbPath);
+
+  // Replicate eventsPageFiltered's own two-statement sequence manually, so a real writer commit
+  // can be interleaved BETWEEN them — exactly the P1 race window, forced deterministically
+  // rather than hoped for via timing.
+  readerDb.exec("BEGIN");
+  const pageRows = readerDb.prepare("SELECT id, kind FROM events WHERE id > 0 AND kind IN ('merged') ORDER BY id LIMIT 10").all();
+  assert.deepEqual(pageRows, [], "no merged event exists yet — an empty filtered page");
+
+  // A SEPARATE connection commits a MATCHING event now, wall-clock BETWEEN the reader's two
+  // statements — the writer race eventsPageFiltered's fix must survive.
+  writer.appendEvent("merged", { pr: 1 }); // id 1
+  writer.close();
+
+  const tailRow = readerDb.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM events").get() as { m: number };
+  readerDb.exec("COMMIT");
+
+  // The reader's transaction snapshot was fixed at ITS OWN first read (before the writer's
+  // commit) — WAL's snapshot isolation means this second statement, though it runs AFTER the
+  // writer committed in wall-clock time, still sees the OLD state. tailId must stay 0: if a
+  // real `eventsPageFiltered` call used this tailId as nextSinceId, the very next call
+  // (sinceId=0) would still find the id-1 "merged" event — nothing was skipped.
+  assert.equal(tailRow.m, 0, "the snapshot from the transaction's FIRST read still holds for its second read");
+
+  reader.close();
+  rmSync(dir, { recursive: true, force: true });
 });
 
 // ── #642: spendSummaryForDay — the honest settled/unclassified split ───────────────────────
@@ -3701,8 +3738,12 @@ test("spendSummaryForDay: settled spend attributed to a KNOWN worker name goes i
   const summary = s.spendSummaryForDay(new Date("2026-08-04T12:00:00.000Z"));
   assert.deepEqual(summary.byWorker, [{ worker: "lane-a", usd: 1.5 }]);
   assert.equal(summary.unclassifiedUsd, 0.4);
-  // Invariant: dailySpendUsd (the pre-existing total) always equals the two buckets summed.
-  assert.equal(s.dailySpendUsd(new Date("2026-08-04T12:00:00.000Z")), 1.5 + 0.4);
+  // #642 (Codex gate② round-1 P1 finding 3): todayUsd comes from THIS SAME call (never a
+  // separate dailySpendUsd query) — the identity holds by construction, not by coincidence.
+  assert.equal(summary.todayUsd, 1.5 + 0.4);
+  // Still agrees with the pre-existing independent total, for a QUIET day with no concurrent
+  // writer — a sanity check, not the identity this method itself now guarantees.
+  assert.equal(s.dailySpendUsd(new Date("2026-08-04T12:00:00.000Z")), summary.todayUsd);
   s.close();
 });
 
@@ -3712,6 +3753,7 @@ test("spendSummaryForDay: an all-known day has zero unclassifiedUsd, not a fabri
   s.recordSpend("lane-a", 1, 2, "2026-08-04T01:00:00.000Z");
   const summary = s.spendSummaryForDay(new Date("2026-08-04T12:00:00.000Z"));
   assert.equal(summary.unclassifiedUsd, 0);
+  assert.equal(summary.todayUsd, 2);
   s.close();
 });
 
@@ -3722,6 +3764,22 @@ test("spendSummaryForDay: only today's ledger window counts, same ts-prefix matc
   s.recordSpend("lane-a", 1, 1, "2026-08-04T00:01:00.000Z"); // today
   const summary = s.spendSummaryForDay(new Date("2026-08-04T12:00:00.000Z"));
   assert.deepEqual(summary.byWorker, [{ worker: "lane-a", usd: 1 }]);
+  assert.equal(summary.todayUsd, 1, "yesterday's 9 is excluded — the identity holds within today's window only");
+  s.close();
+});
+
+test("#642 (Codex gate② round-1 P1 finding 3): todayUsd === sum(settledByWorker) + unclassifiedUsd ALWAYS holds — a fixture asserting the combined method's own identity, never re-derived from a separate dailySpendUsd call", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-a", issue: 1, session_id: "s1", state: "done", started_at: "2026-08-04T00:00:00.000Z", ended_at: "t" });
+  s.upsertWorker({ name: "lane-b", issue: 2, session_id: "s2", state: "done", started_at: "2026-08-04T00:00:00.000Z", ended_at: "t" });
+  s.recordSpend("lane-a", 1, 1.11, "2026-08-04T01:00:00.000Z");
+  s.recordSpend("lane-b", 2, 2.22, "2026-08-04T01:01:00.000Z");
+  s.recordSpend("lane-a:engine-review", 1, 0.33, "2026-08-04T01:02:00.000Z");
+  s.recordSpend("orphan-key-nobody-owns", 9, 0.44, "2026-08-04T01:03:00.000Z");
+
+  const summary = s.spendSummaryForDay(new Date("2026-08-04T12:00:00.000Z"));
+  const settledSum = summary.byWorker.reduce((sum, r) => sum + r.usd, 0);
+  assert.equal(summary.todayUsd, settledSum + summary.unclassifiedUsd);
   s.close();
 });
 
@@ -3791,6 +3849,69 @@ test("#642 AC6: eventsPageFiltered raises the same structured SqliteBusyError wh
     assert.throws(
       () => reader.eventsPageFiltered(0, {}, 10),
       (e: unknown) => e instanceof SqliteBusyError && e.timeoutMs === 50,
+    );
+  } finally {
+    writer.exec("ROLLBACK");
+    writer.close();
+    reader.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#642 (Codex gate② round-1 P1 finding 2): withBusyNormalization normalizes a busy error from a PLAIN read with no transaction/catch of its own (userVersion) — lock acquired AFTER a successful open, not just at open time or inside eventsPageFiltered/spendSummaryForDay's own readTransaction wrapping", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-busy-plain-read-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  new State(dbPath).close();
+  switchToRollbackJournal(dbPath);
+
+  // The reader opens successfully — NO lock is held anywhere yet, so the constructor's own
+  // probe (which already handles busy-at-OPEN-time) sees nothing.
+  const reader = new State(dbPath, { readOnly: true, busyTimeoutMs: 50 });
+  // Only NOW does a separate connection take the lock — the exact "acquired AFTER open"
+  // ordering finding 2 named. userVersion() is a single bare `PRAGMA` read with NO internal
+  // BEGIN/COMMIT/catch of its own (unlike eventsPageFiltered/spendSummaryForDay); without
+  // withBusyNormalization wrapping the call site, this would surface as a raw node:sqlite
+  // error instead of the structured SqliteBusyError every other busy path here returns.
+  const writer = new DatabaseSync(dbPath);
+  writer.exec("BEGIN EXCLUSIVE");
+  try {
+    assert.throws(
+      () => reader.withBusyNormalization(() => reader.userVersion()),
+      (e: unknown) => {
+        assert.ok(e instanceof SqliteBusyError, `expected SqliteBusyError, got: ${String(e)}`);
+        assert.equal((e as SqliteBusyError).timeoutMs, 50);
+        return true;
+      },
+    );
+  } finally {
+    writer.exec("ROLLBACK");
+    writer.close();
+    reader.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("withBusyNormalization: a SqliteBusyError raised by a NESTED readTransaction call (e.g. eventsPageFiltered) passes through unchanged — never double-wrapped with a second (outer) timeoutMs", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-busy-nested-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  new State(dbPath).close();
+  switchToRollbackJournal(dbPath);
+
+  const reader = new State(dbPath, { readOnly: true, busyTimeoutMs: 77 });
+  const writer = new DatabaseSync(dbPath);
+  writer.exec("BEGIN EXCLUSIVE");
+  try {
+    assert.throws(
+      () => reader.withBusyNormalization(() => reader.eventsPageFiltered(0, {}, 10)),
+      (e: unknown) => {
+        assert.ok(e instanceof SqliteBusyError);
+        // The INNER readTransaction's own timeoutMs (77, this handle's own busyTimeoutMs) —
+        // never re-stamped by the outer withBusyNormalization catch, which would corrupt it
+        // if the instanceof check were missing (isBusyError's message-fallback regex matches
+        // SqliteBusyError's own "database busy" message too).
+        assert.equal((e as SqliteBusyError).timeoutMs, 77);
+        return true;
+      },
     );
   } finally {
     writer.exec("ROLLBACK");
