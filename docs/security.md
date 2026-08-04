@@ -862,6 +862,47 @@ instead, which neither this mechanism nor the PoC exposes — the risk this note
 sharpest wherever `gh` ends up with a plaintext on-disk token (Linux, CI images, an explicit
 non-keychain login), not a universal property of every `gh` installation.
 
+#### Worker-leg user-settings persistence vector — detect & disclose (#615)
+
+The HONEST SCOPE note above covers the `Bash(node *)`/`Bash(npm *)` filesystem-read residual in
+general; this narrower note is about one SPECIFIC consequence of it that #600 explicitly declined
+to cover: `worker.ts`'s `claudeArgs` passes no `--setting-sources` flag on ANY worker leg
+(dispatch, resume, or fix), so an ordinary worker session loads every file-based settings source —
+project, local, AND the operator's own `~/.claude/settings.json` — unlike the review-session mode
+above, which closes exactly that `user`-scope inheritance with `--setting-sources ""`. Because a
+worker leg's `Bash` grant runs with the operator's REAL `$HOME` (the HONEST SCOPE residual, same
+paragraph), a producer leg in round N can in principle write `~/.claude/settings.json`
+(permission grants, hooks, or an `apiKeyHelper`), and every LATER worker leg — any lane, any round
+— inherits whatever that write left behind.
+
+**Owner ruling (2026-08-04, recorded on #615): arm (2), startup detection and disclosure,
+ships.** Two other arms were considered and rejected for this specific vector:
+
+- **Arm (1), pinning `--setting-sources` on worker legs** — ruled out. The #410 amendment already
+  measured that `--setting-sources ""` also stops the repo's own `CLAUDE.md` from loading, which
+  collides with the locked #236 ruling ("ambient repo context: record, don't seal"). A partial
+  source list (e.g. `"project,local"`) is unproven and carries a named `apiKeyHelper`-breakage
+  risk on hosts whose Claude auth lives in user settings — config-gating that would add a new
+  config key and a host-compatibility matrix for a vector the #351 L1 direction (worker =
+  transport-only deploy key, #606) is independently shrinking.
+- **Arm (3), documentation alone** — insufficient on its own: the vector is producer-influenceable
+  across rounds, which warrants observability, not prose alone.
+
+**What shipped:** `engine/src/loop/user-settings-watch.ts`'s `createUserSettingsWatch` —
+constructed once at engine startup (both drivers, `cli.ts`), it snapshots/hashes the operator's
+user-level settings file at construction, then its returned closure rides each driver's existing
+per-tick `onTick` hook to compare the CURRENT file against what was last observed. A later tick
+whose content hash differs, or whose set of containment-weakening keys (`apiKeyHelper`, `hooks`)
+differs from what was last observed, logs one WARN and appends exactly one durable
+`user-settings-drift-detected` event (the #425 event-kind registry) — never blocks, never mutates,
+never throws out of the tick loop. Same injected-`readFile`-seam testability convention as
+`checkWebAccessSettingsDenial` (#410).
+
+This closes nothing structurally — the broader worker-HOME filesystem-confinement residual (the
+`steal.mjs`-class gap the HONEST SCOPE note above describes) remains its own still-open item. If
+detection later shows this vector being exercised in practice, arm (1)'s probe-then-pin gets its
+own issue with that evidence as the Why.
+
 ### Fix-loop `fixing` lane state (#245)
 
 Review findings (`HANDLE_THREADS`) used to fold straight to `needs-human` (`merge-driver.ts`'s
@@ -1099,7 +1140,10 @@ hardcoded (not caller-overridable) for every review session:
   influenced the operator's own `~/.claude/settings.json` in an *earlier* round; a review session
   loading `user` settings would inherit whatever that earlier influence left behind. Loading no
   file sources at all removes that inheritance path for review specifically, without requiring the
-  broader (still-open) worker HOME residual to be solved.
+  broader (still-open) worker HOME residual to be solved — ordinary WORKER legs (dispatch/resume/
+  fix, as opposed to this review-session mode) remained uncovered until #615 ruled on them
+  specifically: see "Worker-leg user-settings persistence vector — detect & disclose (#615)" below
+  for that ruling and what shipped.
 - **The guard hook keeps working regardless** — it is mounted via **inline** `--settings`
   (`guardSettings()`'s JSON, passed as a CLI argument value, never a file), which this "Benchmark
   isolation recipe" section already establishes is a *separate* mechanism from file-based settings

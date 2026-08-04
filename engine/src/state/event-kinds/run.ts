@@ -60,6 +60,7 @@ export const RUN_EVENT_KINDS = defineKinds({
   "directive-applied": [],
   "forge-page-ceiling": [],
   "web-access-denied-by-operator-settings": [],
+  "user-settings-drift-detected": [],
   "fix-loop-unattached": [],
   "labels-reconciled": [],
   "board-normalized": [],
