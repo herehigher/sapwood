@@ -25,9 +25,9 @@ import { GOVERNANCE_EVENT_KINDS } from "./governance.js";
 import { LANE_EVENT_KINDS } from "./lane.js";
 import { REVIEW_EVENT_KINDS } from "./review.js";
 import { RUN_EVENT_KINDS } from "./run.js";
-import type { EventTag } from "./types.js";
+import type { EventTag, KindGlossary } from "./types.js";
 
-export type { EscalationSourceTag, EventTag } from "./types.js";
+export type { Actionability, EscalationSourceTag, EventTag, KindEntry, KindGlossary } from "./types.js";
 export { ESCALATION_SOURCE_TAGS } from "./types.js";
 
 /** Every event kind the engine writes, merged from the per-domain declaration files. The spread
@@ -61,7 +61,7 @@ export const EVENT_KIND_DOMAINS = {
  *  runtime fold below so a derived consumer list is narrowed to exactly its members (which is
  *  what lets the payload-typed `eventsSince` overload match the fix-leg list without a cast). */
 export type KindsWithTag<T extends EventTag> = {
-  [K in EventKind]: T extends (typeof EVENT_KINDS)[K][number] ? K : never;
+  [K in EventKind]: T extends (typeof EVENT_KINDS)[K]["tags"][number] ? K : never;
 }[EventKind];
 
 /** RUNTIME tag query — the derived consumer list. The one cast in the registry: a runtime
@@ -69,8 +69,15 @@ export type KindsWithTag<T extends EventTag> = {
  *  completeness test is what checks the two halves agree. */
 export function kindsTagged<T extends EventTag>(tag: T): KindsWithTag<T>[] {
   return (Object.keys(EVENT_KINDS) as EventKind[]).filter((kind) =>
-    (EVENT_KINDS[kind] as readonly EventTag[]).includes(tag),
+    (EVENT_KINDS[kind].tags as readonly EventTag[]).includes(tag),
   ) as KindsWithTag<T>[];
+}
+
+/** `EVENT_KINDS[kind]`'s glossary half — `#643`'s per-kind `meaning`/`actionability`/`see`, with
+ *  `tags` stripped off (the generator's only consumer; nothing runtime-facing needs it). */
+export function kindGlossary(kind: EventKind): KindGlossary {
+  const { tags: _tags, ...glossary } = EVENT_KINDS[kind];
+  return glossary;
 }
 
 /** `kindsTagged` for a tag that must name EXACTLY one kind (dissent's `RECEIPT_KIND` is the only

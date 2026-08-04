@@ -7,6 +7,16 @@
 import { defineKinds } from "./types.js";
 
 export const ESCALATION_EVENT_KINDS = defineKinds({
-  "escalation-resolved": [],
-  "needs-human-swept": [],
+  "escalation-resolved": {
+    tags: [],
+    meaning:
+      "the escalation reconciler observed an open escalation-source's resolution witness (a clear kind, a merge, a PR/issue close) — the durable record of HOW it resolved, before any label is touched.",
+    actionability: "routine",
+  },
+  "needs-human-swept": {
+    tags: [],
+    meaning:
+      "the escalation sweeper removed the needs-human label for a (source, issue) key it proved both engine-applied and resolved by an authorized witness — the latch that stops this key from being swept twice.",
+    actionability: "routine",
+  },
 });

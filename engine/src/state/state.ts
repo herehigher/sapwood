@@ -11,7 +11,7 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { capDigest } from "../retro/retro-digest.js";
 import type { AcceptanceCriterion, AcSnapshot } from "../review/ac-snapshot.js";
-import type { EventKind } from "./event-kinds/index.js";
+import type { EventKind, KindGlossary } from "./event-kinds/index.js";
 import type { EventPayloadFor, EventPayloads, PayloadTypedKind } from "./event-kinds/payloads.js";
 
 // Ordered migrations. index N upgrades schema from user_version N to N+1. Append-only:
@@ -1392,6 +1392,41 @@ export const PARK_SOURCES: readonly ParkSource[] = Object.keys({
   "consecutive-stalls": 0,
   "idle-churn": 0,
 } satisfies Record<ParkSource, 0>) as ParkSource[];
+
+/** #643: the same required-per-kind glossary treatment event-kinds/*.ts gives every `EventKind`,
+ *  for `ParkSource` — the same `satisfies Record<ParkSource, ...>` exhaustiveness check
+ *  `PARK_SOURCES` above already uses, so a sixth source added without a glossary row is a
+ *  compile error here too. `generate-glossary.ts` renders this alongside the event-kind glossary
+ *  into the sapwood-event-glossary skill. */
+export const PARK_SOURCE_GLOSSARY: Record<ParkSource, KindGlossary> = {
+  llm: {
+    meaning:
+      "the LLM session environment (Claude Code) is failing; carries probe/canary machinery and auto-resumes once the probe or canary succeeds.",
+    actionability: "intervene",
+  },
+  forge: {
+    meaning: "the forge (GitHub) environment is failing; carries probe machinery and auto-resumes once the probe succeeds.",
+    actionability: "intervene",
+  },
+  "rapid-restart": {
+    meaning:
+      "the crash-loop breaker tripped on restart cadence; no probe — clears only when a later engine start observes the birth window drained, or a human clears it.",
+    actionability: "intervene",
+    see: "#431",
+  },
+  "consecutive-stalls": {
+    meaning:
+      "the stall breaker (#407) tripped on a run of consecutive stalls; no probe — clears only when a later engine start observes the streak broken, or a human clears it.",
+    actionability: "intervene",
+    see: "#407",
+  },
+  "idle-churn": {
+    meaning:
+      "the idle-churn breaker (#470) tripped: rounds close cleanly but nothing consumable exists upstream; no probe (nothing downstream is broken to re-test) — clears only when a human clears it.",
+    actionability: "intervene",
+    see: "#470",
+  },
+} satisfies Record<ParkSource, KindGlossary>;
 
 /** #168: one environment-failure park episode — ONE ROW PER SOURCE (see the schema v11->v12
  *  migration comment for why per-source rows and why this lives in the state DB, not a file

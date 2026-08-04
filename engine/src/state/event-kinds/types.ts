@@ -46,9 +46,52 @@ export const ESCALATION_SOURCE_TAGS = ["escalation-source:always", "escalation-s
 
 export type EscalationSourceTag = (typeof ESCALATION_SOURCE_TAGS)[number];
 
-export type EventKindTable = Readonly<Record<string, readonly EventTag[]>>;
+// ── #643: per-kind glossary metadata ─────────────────────────────────────────────────────────
+//
+// Event-kind MEANINGS were tribal knowledge — code comments a loop supervisor never sees, and the
+// documented failure mode is a supervisor guessing an event's significance from its name alone
+// (logged supervisor error, dogfood batch 6). A literal-presence cross-check (event-kinds.test.ts)
+// proves a consumer list names the right KINDS; it says nothing about what any of them MEAN. The
+// fields below are that: required, per-kind, so the registry — not a role's private
+// interpretation of it — is the one place "what does this event tell a supervisor" is answered,
+// and `generate-glossary.ts` renders it into the sapwood-event-glossary skill every session reads.
 
-/** Identity function that PINS the literal key and tag types (`const` type parameter, so a domain
- *  file needs no `as const` noise). Everything downstream — the `EventKind` union, the type-level
- *  tag query, the payload map — is read off the type this preserves. */
+/** The four buckets a loop supervisor sorts an event into, in ascending order of "do something
+ *  about this now":
+ *   - `routine`        — expected steady-state traffic; no read is required.
+ *   - `expected-noise`  — looks alarming in isolation but is a known, self-healing retry/degrade
+ *     path; worth recognizing by name so it is not mistaken for a fresh incident.
+ *   - `investigate`     — not itself a call for action, but a signal a supervisor should read the
+ *     surrounding events for (a partial degrade, an anomaly, a companion write that may have
+ *     silently failed).
+ *   - `intervene`       — a human owes the next decision or action; this is what the engine's own
+ *     escalation-source/park/label machinery is telling a person to go look at. */
+export type Actionability = "routine" | "expected-noise" | "investigate" | "intervene";
+
+/** The required per-kind (and, by the same shape, per-`ParkSource`/per-`EscalationBucket`)
+ *  glossary entry. `meaning` is ONE factual line transcribed from the kind's own doc comment or
+ *  emit site — never invented — and `actionability` is judged from how the engine/docs already
+ *  treat the kind (an `escalation-source:*` tag is `intervene` by construction; a pure lifecycle
+ *  event is `routine`). `see` is an optional anchor (an issue number or a doc path) for a reader
+ *  who wants the full story instead of the one-line summary. */
+export interface KindGlossary {
+  readonly meaning: string;
+  readonly actionability: Actionability;
+  readonly see?: string;
+}
+
+/** A declared kind's full entry: the existing consumer-surface `tags` PLUS the glossary fields
+ *  above, in one required shape — so a kind declared without `meaning`/`actionability` fails to
+ *  compile (event-kinds.test.ts's `defineKinds` fixture pins exactly this), the same enforcement
+ *  `defineKinds`'s `const` type parameter already gives `tags`. */
+export interface KindEntry extends KindGlossary {
+  readonly tags: readonly EventTag[];
+}
+
+export type EventKindTable = Readonly<Record<string, KindEntry>>;
+
+/** Identity function that PINS the literal key and entry types (`const` type parameter, so a
+ *  domain file needs no `as const` noise). Everything downstream — the `EventKind` union, the
+ *  type-level tag query, the payload map, the generated glossary — is read off the type this
+ *  preserves. */
 export const defineKinds = <const T extends EventKindTable>(table: T): T => table;
