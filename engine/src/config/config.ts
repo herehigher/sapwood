@@ -156,6 +156,27 @@ const Worker = z
     // unreadable/malformed is a fail-fast startup error (loadPricingTable, loaded once at
     // supervisor construction) — never a silent fallback to the shipped default.
     pricingFile: z.string().optional(),
+    // #606 (#351 final ruling): the L1 scoped-worker-identity per-repo SSH deploy key —
+    // `sapwood init` provisions it (ssh-keygen + `gh repo deploy-key add --allow-write`) and
+    // writes this key back into the config file. Same #74 promptFile shape: a relative path
+    // resolves against the CONFIG FILE's directory (see loadConfig). Unset (default) -> L0,
+    // today's behavior unchanged (a worker leg inherits the operator's full credentialed env).
+    // Set -> worker.ts probes SSH auth once per engine life; success activates L1 (git-transport-
+    // only env, `Bash(gh *)` dropped from the leg's tool grant) on every dispatch/resume/fix leg;
+    // failure WARNs with a re-provision instruction and dispatch stays at L0 (never wedges). A
+    // set-but-missing file is a probe failure, not a startup error — unlike promptFile/pricingFile,
+    // an operator without repo-admin legitimately has no key to point at yet (see init.ts's
+    // guidance-carrying WARN for that path).
+    deployKeyPath: z.string().optional(),
+    // #606 gate② round 1 (owner ruling, supersedes the title-only design): the deploy key's
+    // GitHub-assigned numeric id, paired with deployKeyPath as the LOCAL anchor init.ts's
+    // ensureDeployKey reconciles against. The remote key TITLE is never authoritative for "is
+    // this mine" — a `sapwood-worker` title on the repo may validly belong to a different
+    // machine/operator, so idempotence and reconciliation key on this (path, id) pair instead.
+    // Written by init.ts alongside deployKeyPath; unset means no local key has ever been
+    // recorded (fresh provisioning runs). Both fields are set/cleared together — never one
+    // without the other — see init.ts's writeDeployKeyConfigIntoYaml/clearDeployKeyConfigFromYaml.
+    deployKeyId: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -1830,6 +1851,25 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
           "choose a different Claude model for reviewer.agent.model.",
     });
   }
+  // #606 gate② round 2 (R3-6): worker.deployKeyPath and worker.deployKeyId are the owner
+  // ruling's local (path, id) anchor PAIR — init.ts's reconcile logic reads them as a unit and
+  // treats "only one set" as meaningless (neither "fresh provisioning" nor "reconcile" has a
+  // sane interpretation of a lone half). Reject a lone half at parse time, naming which is
+  // missing and pointing at the fix ("re-run sapwood init", which always writes/clears both
+  // together) rather than letting it silently fall through to fresh-provisioning behavior with
+  // an orphaned half still sitting in the file.
+  if ((cfg.worker.deployKeyPath === undefined) !== (cfg.worker.deployKeyId === undefined)) {
+    const missing = cfg.worker.deployKeyPath === undefined ? "deployKeyPath" : "deployKeyId";
+    const present = cfg.worker.deployKeyPath === undefined ? "deployKeyId" : "deployKeyPath";
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["worker", missing],
+      message:
+        `worker.${missing} is unset but worker.${present} is set — these two form ONE local anchor ` +
+        `pair (#606 owner ruling) and must be BOTH set or BOTH unset. Re-run "sapwood init", which ` +
+        `always writes or clears them together, or remove worker.${present} by hand.`,
+    });
+  }
   // #286 (E4a, design #279 §4.3): mode: engine-agent with an empty/absent ci.requiredChecks is
   // legal (parse still succeeds — an operator may be mid-adoption) but WEAK: code-verifiable AC
   // can then at best be claim-based (no trusted CI execution evidence exists to confirm against),
@@ -1955,6 +1995,10 @@ export function loadConfig(path?: string): SapwoodConfig {
   // Same rule for worker.pricingFile (#33 follow-up, PR #85 review).
   if (cfg.worker.pricingFile !== undefined && !isAbsolute(cfg.worker.pricingFile)) {
     cfg.worker.pricingFile = resolve(dirname(file), cfg.worker.pricingFile);
+  }
+  // Same rule for worker.deployKeyPath (#606).
+  if (cfg.worker.deployKeyPath !== undefined && !isAbsolute(cfg.worker.deployKeyPath)) {
+    cfg.worker.deployKeyPath = resolve(dirname(file), cfg.worker.deployKeyPath);
   }
   // #88/#87: same relative-to-config-file resolution for the verification-plan-reviewer prompt.
   if (cfg.roles.verificationPlanReviewer.promptFile !== undefined && !isAbsolute(cfg.roles.verificationPlanReviewer.promptFile)) {

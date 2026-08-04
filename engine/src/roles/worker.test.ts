@@ -32,6 +32,7 @@ import {
   claudeArgs,
   defaultFixPromptPath,
   defaultPromptPath,
+  deployKeyTransportOverlay,
   discoverClaudeBin,
   EMPTY_MCP_CONFIG_JSON,
   extractFailureText,
@@ -50,17 +51,20 @@ import {
   parseResultText,
   parseSessionInit,
   parseToolUsage,
+  probeDeployKeySsh,
   probeLlmPing,
   renderPromptTemplate,
   resolveWorktreeHead,
   scanEgressSuspects,
   shellSingleQuote,
   spawnClaudeSession,
+  spawnSshKeygen,
   WORKER_ALLOWED_TOOLS_NO_GH,
   WORKER_DISALLOWED_TOOLS,
   type WorkerDeps,
   WorkerSupervisor,
   workerCredentialFreeEnv,
+  workerDeployKeyEnv,
 } from "./worker.js";
 
 /** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
@@ -4801,6 +4805,398 @@ test("WORKER_ALLOWED_TOOLS_NO_GH: byte-identical to WORKER_ALLOWED_TOOLS minus B
   assert.match(WORKER_ALLOWED_TOOLS_NO_GH, /Write/);
 });
 
+// ── #606 (#351 final ruling): L1 scoped-worker-identity — deploy-key env, preflight probe,
+//    keypair generation, and dispatch()/resume() wiring ─────────────────────────────────────
+
+// #606 gate② round 1 (P2-9): deployKeyTransportOverlay shell-quotes the key path (shellSingleQuote)
+// since GIT_SSH_COMMAND is shell-PARSED by git — an unquoted path with a space would break/mutate
+// the command.
+test("deployKeyTransportOverlay: pure unit — GIT_SSH_COMMAND shell-quotes the deploy key path, GIT_CONFIG_* rewrites origin to SSH", () => {
+  const overlay = deployKeyTransportOverlay("/tmp/fake-deploy-key", "o", "r");
+  assert.equal(overlay.GIT_SSH_COMMAND, "ssh -i '/tmp/fake-deploy-key' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new");
+  // env-based git config injection (no file touched) — two insteadOf entries so the origin's
+  // conventional HTTPS spelling (with or without a trailing .git) both rewrite to the same SSH URL.
+  assert.equal(overlay.GIT_CONFIG_COUNT, "2");
+  assert.equal(overlay.GIT_CONFIG_KEY_0, "url.git@github.com:o/r.git.insteadOf");
+  assert.equal(overlay.GIT_CONFIG_VALUE_0, "https://github.com/o/r.git");
+  assert.equal(overlay.GIT_CONFIG_KEY_1, "url.git@github.com:o/r.git.insteadOf");
+  assert.equal(overlay.GIT_CONFIG_VALUE_1, "https://github.com/o/r");
+});
+
+test("deployKeyTransportOverlay (#606 gate② round 1, P2-9): a key path containing a space is shell-quoted so it survives git's shell-parsed GIT_SSH_COMMAND intact", () => {
+  const overlay = deployKeyTransportOverlay("/tmp/my keys/worker-deploy-key", "o", "r");
+  assert.equal(
+    overlay.GIT_SSH_COMMAND,
+    "ssh -i '/tmp/my keys/worker-deploy-key' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
+  );
+});
+
+test("workerDeployKeyEnv (#606 gate② round 1, P1-3): pure unit — composes the FULL workerCredentialFreeEnv severing (GH_CONFIG_DIR repointed, GIT_CONFIG_GLOBAL/SYSTEM=/dev/null, GIT_TERMINAL_PROMPT=0, no SSH_AUTH_SOCK/GH_TOKEN) with the deploy-key transport overlay, other env preserved", () => {
+  const previous = { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK, GH_TOKEN: process.env.GH_TOKEN };
+  try {
+    process.env.SSH_AUTH_SOCK = "/tmp/agent.sock";
+    process.env.GH_TOKEN = "poison";
+    process.env.ANTHROPIC_API_KEY_TEST_MARKER_606 = "kept";
+    const env = workerDeployKeyEnv("/tmp/fake-deploy-key", "/tmp/fake-gh-config-dir-606", "o", "r");
+    // the deploy-key transport overlay
+    assert.equal(env.GIT_SSH_COMMAND, "ssh -i '/tmp/fake-deploy-key' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new");
+    assert.equal(env.GIT_CONFIG_COUNT, "2");
+    assert.equal(env.GIT_CONFIG_KEY_0, "url.git@github.com:o/r.git.insteadOf");
+    assert.equal(env.GIT_CONFIG_VALUE_0, "https://github.com/o/r.git");
+    assert.equal(env.GIT_CONFIG_KEY_1, "url.git@github.com:o/r.git.insteadOf");
+    assert.equal(env.GIT_CONFIG_VALUE_1, "https://github.com/o/r");
+    // P1-3: the FULL workerCredentialFreeEnv severing, not just token-var stripping — GH_CONFIG_DIR
+    // repointed at the empty per-lane dir, GIT_CONFIG_GLOBAL/SYSTEM nulled, GIT_TERMINAL_PROMPT=0.
+    assert.equal(env.GH_CONFIG_DIR, "/tmp/fake-gh-config-dir-606");
+    assert.equal(env.GIT_CONFIG_GLOBAL, "/dev/null");
+    assert.equal(env.GIT_CONFIG_SYSTEM, "/dev/null");
+    assert.equal(env.GIT_TERMINAL_PROMPT, "0");
+    assert.equal(env.SSH_AUTH_SOCK, undefined);
+    assert.equal(env.GH_TOKEN, undefined);
+    assert.equal(env.ANTHROPIC_API_KEY_TEST_MARKER_606, "kept");
+  } finally {
+    delete process.env.ANTHROPIC_API_KEY_TEST_MARKER_606;
+    if (previous.SSH_AUTH_SOCK === undefined) delete process.env.SSH_AUTH_SOCK;
+    else process.env.SSH_AUTH_SOCK = previous.SSH_AUTH_SOCK;
+    if (previous.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = previous.GH_TOKEN;
+  }
+});
+
+test("workerDeployKeyEnv: no forge API credential of ANY kind survives — the whole GH_/GITHUB_/GIT_CONFIG_ prefixed family is stripped before the deploy-key-specific and GH_CONFIG_DIR keys are added back", () => {
+  const poisoned = { GH_TOKEN: "p", GITHUB_TOKEN: "p", GITHUB_ENTERPRISE_TOKEN: "p", GH_HOST: "p", GIT_ASKPASS: "/p" };
+  const previous = Object.fromEntries(Object.keys(poisoned).map((k) => [k, process.env[k]]));
+  try {
+    Object.assign(process.env, poisoned);
+    const env = workerDeployKeyEnv("/tmp/fake-deploy-key", "/tmp/fake-gh-config-dir-606b", "o", "r");
+    for (const key of Object.keys(poisoned)) assert.equal(env[key], undefined, `${key} must not survive workerDeployKeyEnv`);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("probeDeployKeySsh: exit 1 + stderr containing 'successfully authenticated' -> ok (GitHub's own documented SSH-auth success shape)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-deploykey-probe-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\necho "Hi someuser! You've successfully authenticated, but GitHub does not provide shell access." >&2\nexit 1\n`,
+    );
+    assert.deepEqual(await probeDeployKeySsh("/tmp/fake-deploy-key", 15, bin), { ok: true });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeDeployKeySsh: exit 0 is NOT success — GitHub's SSH endpoint never grants shell access, so exit 0 means the probe never reached authentication at all", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-deploykey-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nexit 0\n`);
+    const r = await probeDeployKeySsh("/tmp/fake-deploy-key", 15, bin);
+    assert.equal(r.ok, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeDeployKeySsh: exit 1 with an UNRELATED stderr (e.g. permission denied, no matching key) -> failure, detail carries the first stderr line", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-deploykey-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho "git@github.com: Permission denied (publickey)." >&2\nexit 1\n`);
+    const r = await probeDeployKeySsh("/tmp/fake-deploy-key", 15, bin);
+    assert.equal(r.ok, false);
+    assert.match(r.detail ?? "", /Permission denied/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeDeployKeySsh: a nonexistent binary -> failure with a spawn detail, never throws", async () => {
+  const r = await probeDeployKeySsh("/tmp/fake-deploy-key", 15, "/no/such/binary/sapwood-606");
+  assert.equal(r.ok, false);
+  assert.match(r.detail ?? "", /spawn/i);
+});
+
+test("probeDeployKeySsh: a hang past timeoutSec is hard-killed and resolves failure with a timeout detail, never left dangling", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-deploykey-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const start = Date.now();
+    const r = await probeDeployKeySsh("/tmp/fake-deploy-key", 1, bin); // 1s timeout vs a 30s hang
+    assert.equal(r.ok, false);
+    assert.match(r.detail ?? "", /timed out/i);
+    // #606 gate② round 1 (P2-10): mirrors probeLlmPing's own timeout test (#403/F25) — a
+    // DELIBERATE real-time assertion, and the margin ordering is why it is not the banned "two
+    // uncontrolled real operations race" shape (docs/REVIEW-DOCTRINE.md). The stub does zero real
+    // work — it sleeps 30s — so the only thing that can end this call inside the bound is the
+    // timeout kill under test. The three numbers are ordered by construction and by orders of
+    // magnitude, not by tuning: probe timeout 1s < this bound 10s < stub sleep 30s. A run 9x
+    // slower than expected still passes; a regression that drops the kill cannot pass.
+    assert.ok(Date.now() - start < 10_000, "resolved via the timeout kill, not by waiting out the 30s sleep");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("spawnSshKeygen: generates a real ed25519 keypair (private key 0600, public key present) — a real ssh-keygen invocation, not a fixture", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-sshkeygen-"));
+  try {
+    const keyPath = join(dir, "worker-deploy-key");
+    await spawnSshKeygen(keyPath);
+    assert.ok(existsSync(keyPath), "private key must be written");
+    assert.ok(existsSync(`${keyPath}.pub`), "public key must be written");
+    const priv = readFileSync(keyPath, "utf8");
+    assert.match(priv, /BEGIN OPENSSH PRIVATE KEY/);
+    const pub = readFileSync(`${keyPath}.pub`, "utf8");
+    assert.match(pub, /^ssh-ed25519 /);
+    assert.doesNotMatch(priv, /Proc-Type: 4,ENCRYPTED/, 'generated with -N "" -> no passphrase, unattended-readable');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("spawnSshKeygen: a nonexistent parent directory rejects (does not throw synchronously, never wedges the caller)", async () => {
+  await assert.rejects(() => spawnSshKeygen("/no/such/dir/sapwood-606/worker-deploy-key"));
+});
+
+// #606 gate② round 2 (R3-6): the config schema now enforces deployKeyPath/deployKeyId as a PAIR
+// (init.ts owns reconciling them; worker.ts's own runtime never reads deployKeyId at all — only
+// resolveDeployKeyPath's SSH preflight against deployKeyPath matters here), so every fixture
+// built from this helper needs a syntactically-valid deployKeyId alongside deployKeyPath purely
+// to satisfy the schema. The exact number is never read by anything under test in this file.
+const cfgWithDeployKey = (deployKeyPath: string): SapwoodConfig =>
+  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { deployKeyPath, deployKeyId: 1 } });
+
+test("dispatch: worker.deployKeyPath configured + preflight OK -> L1 active — GIT_SSH_COMMAND present, no gh credential reachable via env, Bash(gh *) absent from --allowedTools, Bash(git *) stays", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const previous = { GH_TOKEN: process.env.GH_TOKEN, GITHUB_TOKEN: process.env.GITHUB_TOKEN };
+  const release = join(dir, "release-l1-dispatch");
+  try {
+    process.env.GH_TOKEN = "poison-gh-token";
+    process.env.GITHUB_TOKEN = "poison-github-token";
+    const hook = mkHook(dir);
+    // #606 gate② round 1 (P1-3): the stub PAUSES on `release` before exiting — GH_CONFIG_DIR is
+    // now created for an ordinary L1 leg too (not just credentialFree), and onExit removes it as
+    // soon as the child exits, so the directory-existence assertion below needs the child still
+    // alive to observe it (same release-gate pattern the credentialFree tests already use).
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen.tmp")}"\nmv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\nfor _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606");
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg: deployKeyCfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      probeDeployKeySsh: async () => ({ ok: true }),
+    });
+    await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-dispatch");
+    await waitForFile(join(dir, "env.seen"), "L1 dispatch env was not published");
+    const envText = readFileSync(join(dir, "env.seen"), "utf8");
+    assert.match(
+      envText,
+      /^GIT_SSH_COMMAND=ssh -i '\/tmp\/fake-deploy-key-606' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new$/m,
+    );
+    assert.doesNotMatch(envText, /GH_TOKEN=poison/);
+    assert.doesNotMatch(envText, /GITHUB_TOKEN=poison/);
+    // #606 gate② round 1 (P1-3): "transport-only" now means the SAME full severing
+    // workerCredentialFreeEnv demonstrates — GH_CONFIG_DIR repointed at a fresh, empty, per-lane
+    // directory (never the real $HOME/.config/gh), GIT_CONFIG_GLOBAL/SYSTEM nulled.
+    const ghConfigDirLine = envText.split("\n").find((l) => l.startsWith("GH_CONFIG_DIR="));
+    assert.ok(ghConfigDirLine, "GH_CONFIG_DIR must be set for an ordinary L1 leg too, not just credentialFree");
+    const ghConfigDir = ghConfigDirLine!.slice("GH_CONFIG_DIR=".length);
+    assert.ok(existsSync(ghConfigDir), "GH_CONFIG_DIR path must actually exist as a directory");
+    assert.deepEqual(readdirSync(ghConfigDir), [], "GH_CONFIG_DIR must be a FRESH, EMPTY directory");
+    assert.match(envText, /^GIT_CONFIG_GLOBAL=\/dev\/null$/m);
+    assert.match(envText, /^GIT_CONFIG_SYSTEM=\/dev\/null$/m);
+    const args = readFileSync(join(dir, "args.seen"), "utf8");
+    const argLines = args.trim().split("\n");
+    const allowedTools = argLines[argLines.indexOf("--allowedTools") + 1]!;
+    assert.doesNotMatch(allowedTools, /Bash\(gh \*\)/, "L1 must drop Bash(gh *) from the grant");
+    assert.match(allowedTools, /Bash\(git \*\)/, "git stays — L1 pushes via git, not gh");
+    writeFileSync(release, "");
+    for (let i = 0; i < 400 && !existsSync(join(dir, "lane-l1-dispatch.done.json")); i++) await sleep(20);
+    s.dispose();
+  } finally {
+    if (previous.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = previous.GH_TOKEN;
+    if (previous.GITHUB_TOKEN === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previous.GITHUB_TOKEN;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: worker.deployKeyPath UNSET -> L0, byte-identical to today (reverse test) — GH_TOKEN inherited, Bash(gh *) present, the injected probeDeployKeySsh dep is never even called", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const previous = { GH_TOKEN: process.env.GH_TOKEN };
+  try {
+    process.env.GH_TOKEN = "real-token-606";
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen.tmp")}"\nmv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    let probeCalled = false;
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg, // no worker.deployKeyPath set — the shared, default test cfg
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      probeDeployKeySsh: async () => {
+        probeCalled = true;
+        return { ok: true };
+      },
+    });
+    await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-l0-reverse");
+    await waitForFile(join(dir, "env.seen"), "L0 dispatch env was not published");
+    const envText = readFileSync(join(dir, "env.seen"), "utf8");
+    assert.match(envText, /^GH_TOKEN=real-token-606$/m, "L0 keeps today's full credentialed env");
+    assert.doesNotMatch(envText, /^GIT_SSH_COMMAND=/m);
+    const args = readFileSync(join(dir, "args.seen"), "utf8");
+    // L0 (no proxy, no deploy key) passes NEITHER --allowedTools nor --disallowedTools override at
+    // the claudeArgs opts layer — claudeArgs itself defaults to WORKER_ALLOWED_TOOLS internally, so
+    // the ARGV still carries --allowedTools with the DEFAULT (gh-including) string.
+    const argLines = args.trim().split("\n");
+    const allowedTools = argLines[argLines.indexOf("--allowedTools") + 1]!;
+    assert.match(allowedTools, /Bash\(gh \*\)/, "L0 keeps Bash(gh *) — unchanged from today");
+    assert.equal(probeCalled, false, "deployKeyPath unset -> resolveDeployKeyEnv must short-circuit before ever probing");
+    s.dispose();
+  } finally {
+    if (previous.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = previous.GH_TOKEN;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch (#554 pattern): deployKeyPath set but preflight auth fails -> guidance-carrying WARN naming the re-provision fix, dispatch continues at L0 (never wedges)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    const logs: string[] = [];
+    const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606-preflight-fail");
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg: deployKeyCfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      log: (m) => logs.push(m),
+      probeDeployKeySsh: async () => ({ ok: false, detail: "Permission denied (publickey)." }),
+    });
+    await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-preflight-fail");
+    await waitFor(() => logs.some((l) => l.includes("deploy-key")), "expected a deploy-key preflight WARN log line");
+    const warn = logs.find((l) => l.includes("deploy-key"))!;
+    assert.match(warn, /preflight failed/i);
+    assert.match(warn, /Permission denied \(publickey\)/);
+    assert.match(warn, /sapwood init/, "the WARN must name the exact re-provision fix");
+    assert.match(warn, /L0/);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: the deploy-key preflight probe is memoized — TWO dispatches share ONE probe call and ONE WARN log line, never re-probed per lane", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    const logs: string[] = [];
+    let probeCount = 0;
+    const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606-memo");
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg: deployKeyCfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      log: (m) => logs.push(m),
+      probeDeployKeySsh: async () => {
+        probeCount++;
+        return { ok: false, detail: "network unreachable" };
+      },
+    });
+    await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-memo-1");
+    await s.dispatch({ number: 2, title: "t2", labels: [] }, "lane-l1-memo-2");
+    await waitFor(() => existsSync(join(dir, "lane-l1-memo-2.done.json")), "second dispatch did not complete");
+    assert.equal(probeCount, 1, "the SSH-auth preflight must run at most once per supervisor life");
+    assert.equal(logs.filter((l) => l.includes("preflight failed")).length, 1, "the WARN must fire exactly once, not once per dispatch");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume: worker.deployKeyPath configured + preflight OK -> L1 active on a resumed leg too (same env/tool-narrowing as dispatch)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606-resume");
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg: deployKeyCfg,
+      stateDir: dir,
+      claudeBin: mkStub(dir, FAST_STUB),
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      probeDeployKeySsh: async () => ({ ok: true }),
+    });
+    const { name } = await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-resume");
+    await waitFor(() => existsSync(join(dir, `${name}.done.json`)), "initial dispatch did not complete");
+
+    const bin2 = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args2.seen.tmp")}"\nmv "${join(dir, "args2.seen.tmp")}" "${join(dir, "args2.seen")}"\nenv > "${join(dir, "env2.seen.tmp")}"\nmv "${join(dir, "env2.seen.tmp")}" "${join(dir, "env2.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s2 = new WorkerSupervisor({
+      now: realClock,
+      cfg: deployKeyCfg,
+      stateDir: dir,
+      claudeBin: bin2,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      probeDeployKeySsh: async () => ({ ok: true }),
+    });
+    // A resumed leg needs a fresh handoff sentinel (dispatch() above already reached .done, not
+    // .handoff) — write one directly, mirroring the shape requestHandoff itself writes.
+    writeFileSync(
+      join(dir, `${name}.handoff.json`),
+      JSON.stringify({ session_id: "resume-606-session", dispatched_at: new Date().toISOString() }),
+    );
+    await s2.resume({ number: 1, title: "t", labels: [] }, name);
+    await waitForFile(join(dir, "env2.seen"), "L1 resume env was not published");
+    const envText = readFileSync(join(dir, "env2.seen"), "utf8");
+    assert.match(
+      envText,
+      /^GIT_SSH_COMMAND=ssh -i '\/tmp\/fake-deploy-key-606-resume' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new$/m,
+    );
+    // #606 gate② round 1 (P1-3): full severing on a resumed L1 leg too, not just dispatch.
+    const ghConfigDirLine = envText.split("\n").find((l) => l.startsWith("GH_CONFIG_DIR="));
+    assert.ok(ghConfigDirLine, "GH_CONFIG_DIR must be set for a resumed L1 leg too");
+    assert.match(envText, /^GIT_CONFIG_GLOBAL=\/dev\/null$/m);
+    assert.match(envText, /^GIT_CONFIG_SYSTEM=\/dev\/null$/m);
+    const args = readFileSync(join(dir, "args2.seen"), "utf8");
+    const argLines = args.trim().split("\n");
+    const allowedTools = argLines[argLines.indexOf("--allowedTools") + 1]!;
+    assert.doesNotMatch(allowedTools, /Bash\(gh \*\)/, "L1 resume must drop Bash(gh *) from the grant");
+    assert.match(allowedTools, /Bash\(git \*\)/);
+    s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // #350: pin the FULL deny-list string so an accidental future edit (e.g. dropping a pattern
 // while adding another) fails loudly. The permission layer is intentionally broader than
 // guard.ts's argv-layer block: it denies the whole `gh pr review`/`gh release` verbs, while
@@ -5544,6 +5940,93 @@ test("resume: FIX-LEG ENTRY (opts.sessionId, no .handoff sentinel) — real Work
     assert.equal(probe.done, true, "the fix leg reaches its own fresh terminal sentinel");
     s.dispose();
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #606 gate② round 1 (P1-4): production fix legs ALWAYS dispatch with proxy.credentialFree:true
+// (conductor.ts's startFixLeg, conductor.ts:4354) — before this fix, dispatch()/resume() treated
+// deployKeyEnv and credentialFree as MUTUALLY EXCLUSIVE, so a fix leg with an L1 deploy key
+// configured got NEITHER an API credential NOR the deploy key and could not push its own fix.
+// This test is the "genuinely fix-shaped" case: opts.sessionId + opts.prompt (fix-leg entry,
+// mirroring the FIX-LEG ENTRY test above) PLUS a credentialFree proxy PLUS worker.deployKeyPath
+// configured — asserting the two postures COMPOSE rather than one silently winning.
+test("resume: FIX-LEG ENTRY (opts.sessionId+prompt) WITH credentialFree AND worker.deployKeyPath configured -> composed env: GIT_SSH_COMMAND present (the fix leg can push via the deploy key) AND the credential-free severing stays fully intact (GH_CONFIG_DIR fresh empty dir, GIT_CONFIG_GLOBAL/SYSTEM=/dev/null, no GH_TOKEN)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const previousGhToken = process.env.GH_TOKEN;
+  // #606 gate② round 1 (P1-3/P1-4): the --resume leg PAUSES on `release` before exiting — the
+  // GH_CONFIG_DIR directory-existence assertion below needs the child still alive to observe it
+  // (onExit removes it as soon as the child exits; same release-gate pattern the credentialFree
+  // tests above already use).
+  const release = join(dir, "release-fix-p14");
+  try {
+    process.env.GH_TOKEN = "poison-gh-token-p14";
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        `  printf '%s\\n' "$@" > "${join(dir, "fix-args-p14.seen.tmp")}"`,
+        `  mv "${join(dir, "fix-args-p14.seen.tmp")}" "${join(dir, "fix-args-p14.seen")}"`,
+        `  env > "${join(dir, "fix-env-p14.seen.tmp")}"`,
+        `  mv "${join(dir, "fix-env-p14.seen.tmp")}" "${join(dir, "fix-env-p14.seen")}"`,
+        `  for _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done`,
+        RESULT_LINE,
+        "fi",
+        `echo '{"type":"result","subtype":"success","total_cost_usd":0.001,"model":"claude-stub","usage":{"input_tokens":1,"output_tokens":1}}'`,
+        "exit 0",
+      ].join("\n"),
+    );
+    const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606-p14");
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg: deployKeyCfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "issue-rendered-prompt",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      probeDeployKeySsh: async () => ({ ok: true }),
+    });
+    // Fresh dispatch -> done (the driving-lane precondition a fix leg starts from).
+    const { name, sessionId } = await s.dispatch({ number: 21, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.done.json`)));
+
+    const { handle } = fakeWorkerProxyHandle();
+    const resumed = await s.resume({ number: 21, title: "t", labels: [] }, name, {
+      sessionId,
+      prompt: "fix-leg: address PR #99's review findings",
+      proxy: { mint: async () => handle as never, credentialFree: true },
+    });
+    assert.equal(resumed.sessionId, sessionId, "SAME session — a fix leg continues the original conversation");
+
+    await waitForFile(join(dir, "fix-env-p14.seen"), "fix-leg env was not published");
+    const envText = readFileSync(join(dir, "fix-env-p14.seen"), "utf8");
+    // The deploy-key overlay: the fix leg CAN push through the deploy key.
+    assert.match(
+      envText,
+      /^GIT_SSH_COMMAND=ssh -i '\/tmp\/fake-deploy-key-606-p14' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new$/m,
+    );
+    assert.match(envText, /^GIT_CONFIG_COUNT=2$/m);
+    // ...and the credential-free severing stays fully intact — COMPOSED, never replaced.
+    assert.doesNotMatch(envText, /GH_TOKEN=poison-gh-token-p14/);
+    const ghConfigDirLine = envText.split("\n").find((l) => l.startsWith("GH_CONFIG_DIR="));
+    assert.ok(ghConfigDirLine, "GH_CONFIG_DIR must still be set — the deploy key does not override credentialFree's own isolation");
+    const ghConfigDir = ghConfigDirLine!.slice("GH_CONFIG_DIR=".length);
+    assert.ok(existsSync(ghConfigDir), "GH_CONFIG_DIR must exist as a fresh directory");
+    assert.deepEqual(readdirSync(ghConfigDir), [], "GH_CONFIG_DIR must be a FRESH, EMPTY directory");
+    assert.match(envText, /^GIT_CONFIG_GLOBAL=\/dev\/null$/m);
+    assert.match(envText, /^GIT_CONFIG_SYSTEM=\/dev\/null$/m);
+    assert.match(envText, /^GIT_TERMINAL_PROMPT=0$/m);
+
+    writeFileSync(release, "");
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    s.dispose();
+  } finally {
+    if (previousGhToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = previousGhToken;
     rmSync(dir, { recursive: true, force: true });
   }
 });

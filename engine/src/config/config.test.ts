@@ -1011,6 +1011,88 @@ test("worker.pricingFile: a RELATIVE path resolves against the CONFIG FILE's dir
   }
 });
 
+// ── #606 (#351 final ruling): worker.deployKeyPath ──
+// gate② round 2 (R3-6): deployKeyPath/deployKeyId form ONE pair — every fixture below sets both,
+// since a lone half is now a parse-time rejection (see the R3-6 tests further down this file).
+test("worker.deployKeyPath: unset by default, overridable, follows the #74 promptFile shape", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.worker.deployKeyPath, undefined);
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 1 }",
+  );
+  assert.equal(over.worker.deployKeyPath, "data/worker-deploy-key");
+});
+
+test("worker.deployKeyPath: a RELATIVE path resolves against the CONFIG FILE's directory, exactly like promptFile (#74)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 1 }",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.worker.deployKeyPath, join(dir, "data", "worker-deploy-key"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worker.deployKeyPath: an ABSOLUTE path is left untouched by loadConfig's relative-resolution step", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    const abs = join(dir, "elsewhere", "worker-deploy-key");
+    writeFileSync(cfgPath, `board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: ${abs}, deployKeyId: 1 }`);
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.worker.deployKeyPath, abs);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #606 gate② round 1 (owner ruling): worker.deployKeyId — the (path, id) LOCAL anchor pair ──
+test("worker.deployKeyId: unset by default, overridable to a positive integer, no path-resolution applied (it's not a file path)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.worker.deployKeyId, undefined);
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 159210179 }",
+  );
+  assert.equal(over.worker.deployKeyId, 159210179);
+  assert.equal(over.worker.deployKeyPath, "data/worker-deploy-key");
+});
+
+test("worker.deployKeyId: rejects zero/negative/non-integer values — a GitHub deploy-key id is always a positive integer", () => {
+  for (const bad of [0, -1, 1.5]) {
+    assert.throws(() => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyId: ${bad} }`));
+  }
+});
+
+// #606 gate② round 2 (R3-6): deployKeyPath/deployKeyId form ONE local anchor pair — init.ts's
+// reconcile logic has no sane interpretation of only one half being set, so the schema rejects
+// that shape outright rather than letting it silently behave as "nothing configured" or
+// reconcile against a meaningless half-anchor.
+test("worker.deployKeyPath/deployKeyId (R3-6): rejects a config with ONLY deployKeyPath set, naming deployKeyId as the missing half", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key }"),
+    (e: Error) => /deployKeyId/.test(e.message) && /sapwood init/.test(e.message),
+  );
+});
+
+test("worker.deployKeyPath/deployKeyId (R3-6): rejects a config with ONLY deployKeyId set, naming deployKeyPath as the missing half", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyId: 42 }"),
+    (e: Error) => /deployKeyPath/.test(e.message) && /sapwood init/.test(e.message),
+  );
+});
+
+test("worker.deployKeyPath/deployKeyId (R3-6): BOTH set, or BOTH unset, parse cleanly — only a lone half is rejected", () => {
+  assert.doesNotThrow(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }"));
+  assert.doesNotThrow(() =>
+    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 42 }"),
+  );
+});
+
 // ── #88 gate⓪: labels.planApproved + roles.verificationPlanReviewer.promptFile ──────────────────────────
 // Session wiring (actually loading/rendering this prompt) lands with the peripheral-role-
 // runner issue; here the config surface is validated + path-resolved, same "accepted, not
