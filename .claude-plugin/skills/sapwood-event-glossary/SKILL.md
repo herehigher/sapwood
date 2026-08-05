@@ -170,6 +170,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `review-non-convergent` — **intervene** [escalation-source:always]: successive fix-leg review rounds failed to converge past the configured bound (#450); always proven by presence. (see #450)
 - `review-non-convergent-label-failed` — **investigate**: the needs-human label write for a review-non-convergent PR failed; the durable event is the only record.
 - `review-non-convergent-comment-failed` — **routine**: the explanatory PR comment for a review-non-convergent PR failed to post; the label/event are unaffected.
+- `comment-cursor-stale` — **intervene**: a checkpoint (gate⓪, dispatch, or drive) found the issue's comment-adjudication cursor stale or invalid relative to its own comment thread and refused to spend/dispatch/drive; needs-human applied with a deduplicated pointer comment. (see #652)
 
 ### Governance (align, triage, proposals, plan review, architect, harvest, retro)
 
