@@ -1867,6 +1867,10 @@ async function runTickEngine(
   const skillsPluginDir = resolveSkillsPluginDir(cfg);
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg);
+  // #668: hoisted above the try so the `finally` below can reap it regardless of which of the
+  // try block's own exits ran — undefined until the try body actually constructs one (a
+  // fail-fast startup throw before that point has nothing to reap).
+  let supervisor: WorkerSupervisor | undefined;
   // #407 (item 1, gate② P2): the run boundary is OPEN — every controlled exit from here to
   // process exit must close it with exactly one `run-ended`, so the bracket opens IMMEDIATELY
   // after the successful run-started append (P2: the takeover append used to sit before it,
@@ -1924,7 +1928,7 @@ async function runTickEngine(
     // which case MergeDriver.driveOne behaves exactly as before this existed.
     const fallbackReviewers = makeFallbackReviewers(cfg);
     const mergeGate = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers });
-    const supervisor = new WorkerSupervisor({
+    supervisor = new WorkerSupervisor({
       cfg,
       log,
       now: systemClock,
@@ -2036,6 +2040,12 @@ async function runTickEngine(
     // real error below.
     appendRunEnded(state, { stoppedBy: "error", error: String(error) }, log);
     throw error;
+  } finally {
+    // #668: the controlled-exit reap — BOTH the success return above and the rethrow above run
+    // this before actually leaving the function, so a lane still alive when the driver stopped
+    // (normal completion OR a thrown error) never strands its child process. No-op when
+    // `supervisor` never got constructed (a fail-fast startup throw before that line).
+    await supervisor?.reapAll();
   }
 }
 
@@ -2073,6 +2083,10 @@ async function runRoundsEngine(
   const skillsPluginDir = resolveSkillsPluginDir(cfg);
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg);
+  // #668: same hoist-above-the-try as runTickEngine's own comment above — the `finally` below
+  // reaps it regardless of exit path; undefined if a fail-fast startup throw runs before the
+  // try body constructs one.
+  let supervisor: WorkerSupervisor | undefined;
   // #407 (item 1, gate② P2): the run boundary's closing bracket — same contract as
   // runTickEngine's own comment above: the bracket opens IMMEDIATELY after the successful
   // run-started append, so every write of this run (takeover event included) sits inside it and
@@ -2109,7 +2123,7 @@ async function runRoundsEngine(
     const reviewer = engineAgent?.reviewer ?? makeReviewer(cfg);
     const fallbackReviewers = makeFallbackReviewers(cfg);
     const mergeGate = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers });
-    const supervisor = new WorkerSupervisor({
+    supervisor = new WorkerSupervisor({
       cfg,
       log,
       now: systemClock,
@@ -2253,6 +2267,9 @@ async function runRoundsEngine(
     // #407 (item 1): same controlled-failure bracket as runTickEngine's own catch.
     appendRunEnded(state, { stoppedBy: "error", error: String(error) }, log);
     throw error;
+  } finally {
+    // #668: same controlled-exit reap as runTickEngine's own finally above.
+    await supervisor?.reapAll();
   }
 }
 

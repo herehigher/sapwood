@@ -53,6 +53,9 @@ import {
   parseToolUsage,
   probeDeployKeySsh,
   probeLlmPing,
+  type ReapableChild,
+  type ReapOutcome,
+  reapChildren,
   renderPromptTemplate,
   resolveWorktreeHead,
   scanEgressSuspects,
@@ -4416,6 +4419,184 @@ function alive(pid: number): boolean {
     return false;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #668 (controlled-exit child reaping): reapChildren's own escalation state machine, against
+// FAKE children — no real subprocess, no real timer (opts.sleep resolves immediately), per this
+// repo's test doctrine (no-timing-dependent assertions; a seam, not a real-clock race). The
+// WorkerSupervisor.reapAll() adapter wiring (real pid/process-group semantics, requestHandoff
+// idempotency, dispose() vs reapAll()) is covered separately below with real short-lived stub
+// subprocesses, the same convention this file already uses for every other kill-path test.
+// ─────────────────────────────────────────────────────────────────────────────
+function fakeChild(
+  name: string,
+  opts: { diesOn?: NodeJS.Signals | "never"; startDead?: boolean } = {},
+): ReapableChild & { signals: NodeJS.Signals[] } {
+  const diesOn = opts.diesOn ?? "SIGTERM";
+  let dead = opts.startDead ?? false;
+  const signals: NodeJS.Signals[] = [];
+  return {
+    name,
+    signals,
+    isAlive: () => !dead,
+    signal: (sig) => {
+      signals.push(sig);
+      if (diesOn !== "never" && sig === diesOn) dead = true;
+    },
+  };
+}
+const INSTANT_SLEEP = async (): Promise<void> => {};
+
+test("reapChildren (#668): a child already dead before reap starts is never signaled at all — AC5 (reap must not manufacture work against a leg that already exited on its own)", async () => {
+  const c = fakeChild("lane-a", { startDead: true });
+  const outcomes = await reapChildren([c], { sleep: INSTANT_SLEEP });
+  assert.deepEqual(c.signals, [], "an already-dead child gets zero signals");
+  assert.deepEqual(outcomes, [{ name: "lane-a", alreadyDead: true, escalated: false, confirmedDead: true } satisfies ReapOutcome]);
+});
+
+test("reapChildren (#668): a child that dies from SIGTERM alone within the grace period is NEVER escalated to SIGKILL — the reverse of AC3/AC4, proving reap doesn't become a mid-work kill (AC5)", async () => {
+  const c = fakeChild("lane-b", { diesOn: "SIGTERM" });
+  const outcomes = await reapChildren([c], { sleep: INSTANT_SLEEP });
+  assert.deepEqual(c.signals, ["SIGTERM"], "SIGKILL was never sent to a lane that already died gracefully");
+  assert.deepEqual(outcomes, [{ name: "lane-b", alreadyDead: false, escalated: false, confirmedDead: true } satisfies ReapOutcome]);
+});
+
+test("reapChildren (#668): a child that survives the grace period is escalated to SIGTERM-then-SIGKILL, and death is VERIFIED (not assumed) before returning — AC3/AC4", async () => {
+  const c = fakeChild("lane-c", { diesOn: "SIGKILL" });
+  const outcomes = await reapChildren([c], { sleep: INSTANT_SLEEP });
+  assert.deepEqual(c.signals, ["SIGTERM", "SIGKILL"], "SIGTERM first, SIGKILL only after SIGTERM alone failed");
+  assert.deepEqual(outcomes, [{ name: "lane-c", alreadyDead: false, escalated: true, confirmedDead: true } satisfies ReapOutcome]);
+});
+
+test("reapChildren (#668): a child that survives even SIGKILL is reported as such — the orphan-process-group case AC4 forbids — logged rather than silently assumed dead or retried forever", async () => {
+  const c = fakeChild("lane-d", { diesOn: "never" });
+  const logged: string[] = [];
+  const outcomes = await reapChildren([c], { sleep: INSTANT_SLEEP, log: (m) => logged.push(m) });
+  assert.deepEqual(c.signals, ["SIGTERM", "SIGKILL"]);
+  assert.deepEqual(outcomes, [{ name: "lane-d", alreadyDead: false, escalated: true, confirmedDead: false } satisfies ReapOutcome]);
+  assert.ok(
+    logged.some((m) => m.includes("lane-d") && m.includes("orphan process group")),
+    `expected an orphan-process-group log naming lane-d, got: ${JSON.stringify(logged)}`,
+  );
+});
+
+test("reapChildren (#668): a mixed batch escalates EACH child independently — a graceful lane never receives the SIGKILL another lane's stubbornness triggers", async () => {
+  const graceful = fakeChild("lane-graceful", { diesOn: "SIGTERM" });
+  const stubborn = fakeChild("lane-stubborn", { diesOn: "SIGKILL" });
+  const outcomes = await reapChildren([graceful, stubborn], { sleep: INSTANT_SLEEP });
+  assert.deepEqual(graceful.signals, ["SIGTERM"]);
+  assert.deepEqual(stubborn.signals, ["SIGTERM", "SIGKILL"]);
+  const byName = new Map(outcomes.map((o) => [o.name, o]));
+  assert.equal(byName.get("lane-graceful")?.escalated, false);
+  assert.equal(byName.get("lane-stubborn")?.escalated, true);
+});
+
+test("reapChildren (#668): opts.graceMs is the ACTUAL bound the grace-phase poll loop uses — plumbed through, never hardcoded to the module default", async () => {
+  const events: string[] = [];
+  const c: ReapableChild = {
+    name: "lane-e",
+    isAlive: () => !events.includes("SIGKILL"),
+    signal: (sig) => events.push(sig),
+  };
+  await reapChildren([c], {
+    graceMs: 40,
+    sleep: async (ms) => {
+      events.push(`sleep:${ms}`);
+    },
+  });
+  const sigkillIdx = events.indexOf("SIGKILL");
+  assert.ok(sigkillIdx > 0, `expected SIGKILL to be sent, got: ${JSON.stringify(events)}`);
+  const graceSleeps = events.slice(0, sigkillIdx).filter((e) => e.startsWith("sleep:"));
+  assert.equal(
+    graceSleeps.length,
+    Math.ceil(40 / 25),
+    `a 3000ms default would poll 120 times; the custom 40ms bound should poll only ceil(40/25), got: ${JSON.stringify(events)}`,
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #668: WorkerSupervisor.reapAll() — the production adapter over reapChildren, against REAL
+// short-lived stub subprocesses (same convention as every other kill-path test in this file:
+// longRunningStub + trap TERM). reapChildren's own escalation state machine is exhaustively
+// covered above with fake children; these tests prove the adapter's isAlive/signal wiring
+// (real pid, real process group) and its composition with requestHandoff are correct.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("WorkerSupervisor.reapAll (#668): no live lanes -> resolves to [] immediately, no-op", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  try {
+    const s = sup(dir, "claude"); // never dispatches -> this.lanes is empty
+    assert.deepEqual(await s.reapAll(), []);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WorkerSupervisor.reapAll (#668): a lane that hands off cleanly on SIGTERM is reaped WITHOUT ever needing SIGKILL — reap composes with graceful handoff instead of overriding it (AC5)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  try {
+    // Cooperative: catches SIGTERM and exits 0, exactly like an ordinary graceful handoff.
+    const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 668, title: "t", labels: [] });
+    await waitForFile(ready, "stub installed its TERM trap before reap");
+    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    assert.equal(alive(pid), true);
+
+    const outcomes = await s.reapAll();
+
+    assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: false, confirmedDead: true }]);
+    assert.equal(alive(pid), false, "the process group is actually dead, not just assumed");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WorkerSupervisor.reapAll (#668): a lane that IGNORES SIGTERM is escalated to a whole-process-group SIGKILL, and group death is proven before reapAll resolves — AC3/AC4", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  try {
+    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> only SIGKILL ends it
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 669, title: "t", labels: [] });
+    await waitForFile(ready, "stub installed its TERM-ignoring trap before reap");
+    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    assert.equal(alive(pid), true);
+
+    // A small custom grace period keeps this test fast — the escalation timing itself (does the
+    // bound get honored) is already covered deterministically above via fake children.
+    const outcomes = await s.reapAll({ graceMs: 100 });
+
+    assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: true, confirmedDead: true }]);
+    assert.equal(alive(pid), false, "the whole process group (negative pid) is dead, not just the leader");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WorkerSupervisor.reapAll (#668): a lane ALREADY mid-drain (requestHandoff already sent by the existing ceiling/kill-switch path) is not double-SIGTERM'd, but reapAll still finishes the job — composes with, doesn't duplicate, the existing drain", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  try {
+    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> can ONLY die via reapAll's own SIGKILL
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 670, title: "t", labels: [] });
+    await waitForFile(ready, "stub installed its TERM-ignoring trap before drain");
+    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+
+    assert.equal(s.requestHandoff(name), true); // simulates an EARLIER ceiling/kill-switch drain
+    assert.equal(alive(pid), true, "SIGTERM alone doesn't end a lane that ignores it");
+
+    const outcomes = await s.reapAll({ graceMs: 100 });
+
+    assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: true, confirmedDead: true }]);
+    assert.equal(alive(pid), false, "reapAll still reaps a lane an earlier drain already signaled");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // #244: worker-leg forge MCP proxy attachment — mirrors peripheral.ts's RoleRunner mechanism

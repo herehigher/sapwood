@@ -3637,7 +3637,8 @@ export class WorkerSupervisor implements Supervisor {
     return null;
   }
 
-  /** Clear timers/fds so a host process can exit cleanly (tests). Does not kill children. */
+  /** Clear timers/fds so a host process can exit cleanly (tests). Does not kill children —
+   *  callers that also need every child dead (production shutdown) call reapAll(). */
   dispose(): void {
     for (const lane of this.lanes.values()) {
       clearInterval(lane.hb);
@@ -3648,6 +3649,46 @@ export class WorkerSupervisor implements Supervisor {
       }
     }
     this.lanes.clear();
+  }
+
+  /** #668: production shutdown reap — every child this supervisor still tracks in `this.lanes`
+   *  at the moment cli.ts's run path is about to return/throw. Neither cli.ts run path had a
+   *  supervisor cleanup `finally` before this (Codex final review, 2026-08-05); dispose() above
+   *  deliberately never kills children, so a lane still `running`/`fixing` when the engine
+   *  exits was left alive — the confirmed stranded-fix-leg incident this issue exists to close.
+   *
+   *  Composes with, never replaces, the existing drain paths (conductor.ts's ceiling/kill-switch
+   *  drain, checkSoftBudget's handoff): a lane already `handoffRequested` is NOT re-signaled here
+   *  (requestHandoff's own idempotent guard), so a leg already mid-graceful-handoff keeps
+   *  whatever grace it was already given. A lane that was NEVER asked to hand off (the common
+   *  case — the engine simply reached its stop condition or threw while legs were still live)
+   *  gets ONE requestHandoff() SIGTERM here, then reapChildren applies the shared grace-then-
+   *  group-SIGKILL escalation, verifying death before resolving — see reapChildren's own doc for
+   *  why this needs a death PROOF, not just an assumption. Never throws (mirrors dispose()'s own
+   *  best-effort stance): a lane that somehow survives SIGKILL is logged, not retried forever —
+   *  the engine process must still be able to exit.
+   *
+   *  ONLY reaps live in-memory lanes (this.lanes) — a lane surviving a PRIOR engine restart with
+   *  no in-memory handle (the detached/cross-process case reclaim() and requestHandoff() both
+   *  special-case) is out of scope: that shape is a NEW process's own supervisor construction on
+   *  the next `sapwood run`, which reconcileStartup/reviveEnvFailedPrLanes already reconcile —
+   *  this method reaps only what THIS process itself spawned and is about to abandon. */
+  async reapAll(opts: { graceMs?: number } = {}): Promise<ReapOutcome[]> {
+    const lanes = [...this.lanes.entries()];
+    if (lanes.length === 0) return [];
+    for (const [name, lane] of lanes) {
+      if (!lane.handoffRequested) this.requestHandoff(name);
+    }
+    const children: ReapableChild[] = lanes.map(([name, lane]) => ({
+      name,
+      isAlive: () => this.pidGroupAlive(lane.child.pid),
+      signal: (sig: NodeJS.Signals) => this.killGroup(lane.child, sig),
+    }));
+    return reapChildren(children, {
+      ...(opts.graceMs !== undefined ? { graceMs: opts.graceMs } : {}),
+      ...(this.deps.sleep !== undefined ? { sleep: this.deps.sleep } : {}),
+      log: (m) => this.log(m),
+    });
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────
@@ -3673,6 +3714,20 @@ export class WorkerSupervisor implements Supervisor {
       } catch {
         /* already gone */
       }
+    }
+  }
+  /** #668: is the WHOLE process group (negative pid) still alive? Used only by reapAll's death
+   *  verification — `killGroup`/`signalGroup` above already fall back to a direct-pid signal
+   *  when the group send fails, but verification checks the group specifically, since a
+   *  detached worker child is its own pgid leader and an orphaned group is exactly what this
+   *  issue's acceptance criteria (AC4) forbid. */
+  private pidGroupAlive(pid: number | null | undefined): boolean {
+    if (pid == null) return false;
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -3850,6 +3905,91 @@ export class WorkerSupervisor implements Supervisor {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** #668: the minimal surface reapChildren needs to SIGTERM/SIGKILL and verify death — never
+ *  `ChildProcess`, so a unit test can exercise the full grace/escalation/verify state machine
+ *  against a FAKE child (per this repo's test doctrine: no real subprocess, no real timer,
+ *  deterministic) instead of a spawned process. WorkerSupervisor.reapAll() adapts its real lanes
+ *  to this shape via pidGroupAlive/killGroup. */
+export interface ReapableChild {
+  /** Lane name, for logging/outcome-reporting only — never used to look anything up. */
+  name: string;
+  /** True while the process group is presumed alive. Never throws. */
+  isAlive: () => boolean;
+  /** Send `sig` to the whole process group. Never throws. */
+  signal: (sig: NodeJS.Signals) => void;
+}
+
+export interface ReapOutcome {
+  name: string;
+  /** The child had already exited before reapChildren sent anything. */
+  alreadyDead: boolean;
+  /** SIGTERM alone did not end it within the grace period — SIGKILL was sent. */
+  escalated: boolean;
+  /** Death was observed before this call returned. False is the orphan-process-group case
+   *  AC4 forbids in every production path; reapAll logs this rather than retrying forever, so
+   *  an engine exit is never blocked indefinitely by one wedged (e.g. D-state) process. */
+  confirmedDead: boolean;
+}
+
+const REAP_GRACE_MS = 3_000; // #668: SIGTERM->SIGKILL grace period at production shutdown
+const REAP_VERIFY_POLL_MS = 25;
+const REAP_VERIFY_TIMEOUT_MS = 500; // generous vs. a real SIGKILL's near-instant OS-level death
+
+/** #668: SIGTERM every still-alive child, then POLL (never a flat block) for up to `graceMs`
+ *  (default REAP_GRACE_MS) so a cooperative leg's own exit ends the wait the moment it happens —
+ *  production shutdown is never held hostage to the full grace period just because one lane
+ *  happened to be live. Any survivor past that bound is escalated to SIGKILL, then polled again
+ *  (bounded by REAP_VERIFY_TIMEOUT_MS) until death is confirmed or that bound is hit — the
+ *  "verify group death before the engine exits" half of the acceptance criteria, not just an
+ *  assumed kill. `sleep` defaults to a real, cancelable `setTimeout` (module-level `sleep`);
+ *  tests inject an immediately-resolving one so the whole state machine runs with zero real
+ *  wall-clock time (this repo's no-timing-dependent-assertions doctrine — a seam, not a bigger
+ *  margin). A child already dead when this is called is never signaled at all (AC5: reap must
+ *  not manufacture work against a leg that already exited on its own, e.g. via a completed
+ *  graceful handoff). */
+export async function reapChildren(
+  children: ReapableChild[],
+  opts: { graceMs?: number; sleep?: (ms: number) => Promise<void>; log?: (message: string) => void } = {},
+): Promise<ReapOutcome[]> {
+  const sleepFn = opts.sleep ?? sleep;
+  const graceMs = opts.graceMs ?? REAP_GRACE_MS;
+  const log = opts.log ?? (() => {});
+
+  const outcomes: ReapOutcome[] = [];
+  const live: ReapableChild[] = [];
+  for (const c of children) {
+    if (c.isAlive()) live.push(c);
+    else outcomes.push({ name: c.name, alreadyDead: true, escalated: false, confirmedDead: true });
+  }
+  if (live.length === 0) return outcomes;
+
+  const pollUntilDeadOrTimeout = async (candidates: ReapableChild[], boundMs: number): Promise<ReapableChild[]> => {
+    let pending = candidates.filter((c) => c.isAlive());
+    let waited = 0;
+    while (pending.length > 0 && waited < boundMs) {
+      await sleepFn(REAP_VERIFY_POLL_MS);
+      waited += REAP_VERIFY_POLL_MS;
+      pending = pending.filter((c) => c.isAlive());
+    }
+    return pending; // whatever is still alive once the bound is hit
+  };
+
+  for (const c of live) c.signal("SIGTERM");
+  const survivors = await pollUntilDeadOrTimeout(live, graceMs);
+  for (const c of survivors) c.signal("SIGKILL");
+  await pollUntilDeadOrTimeout(survivors, REAP_VERIFY_TIMEOUT_MS);
+
+  const survivorNames = new Set(survivors.map((c) => c.name));
+  for (const c of live) {
+    const confirmedDead = !c.isAlive();
+    if (!confirmedDead) {
+      log(`[sapwood:reap] ${c.name}: still alive after grace period + SIGKILL — possible orphan process group`);
+    }
+    outcomes.push({ name: c.name, alreadyDead: false, escalated: survivorNames.has(c.name), confirmedDead });
+  }
+  return outcomes;
 }
 
 /** POSIX single-quote escaping: wrap in '...' and replace each ' with '\'' so no shell
