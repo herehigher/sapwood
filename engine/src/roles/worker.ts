@@ -1922,15 +1922,26 @@ export class WorkerSupervisor implements Supervisor {
   // A missing/malformed configured file throws HERE, at startup, before any dispatch.
   private readonly pricing: PricingTable;
   private readonly lanes = new Map<string, Lane>();
-  // #668 (round 5 pivot): tracks reap operations onExit() kicks off, fire-and-forget from its OWN
-  // synchronous perspective, for a leader that just exited while its process GROUP was still
-  // alive (a descendant outliving it) — see onExit's own doc for why reaping happens THERE now,
-  // immediately, instead of in a durable registry checked later at engine exit (the design rounds
-  // 2-4 tried and retired). Keyed by lane name; an entry exists only while its reap is still
-  // running, deleted the instant reapDescendantsOnLeaderExit's own promise settles. reapAll() (the
-  // engine-exit path) awaits every entry still present here before it can itself return — an
-  // in-flight reap started moments before shutdown must still be allowed to finish, never
-  // abandoned just because the engine is on its way out (AC4: no orphan group on exit).
+  // #668 (round 5 pivot; keying fixed round 6 P1b): tracks reap operations onExit() kicks off,
+  // fire-and-forget from its OWN synchronous perspective, for a leader that just exited while its
+  // process GROUP was still alive (a descendant outliving it) — see onExit's own doc for why
+  // reaping happens THERE now, immediately, instead of in a durable registry checked later at
+  // engine exit (the design rounds 2-4 tried and retired). An entry exists only while its reap is
+  // still running, deleted the instant reapDescendantsOnLeaderExit's own promise settles.
+  // reapAll() (the engine-exit path) awaits every entry still present here before it can itself
+  // return — an in-flight reap started moments before shutdown must still be allowed to finish,
+  // never abandoned just because the engine is on its way out (AC4: no orphan group on exit).
+  //
+  // Keyed by `${laneName}#${pid}`, NEVER bare lane name (round 6 P1b, Codex): a lane name can be
+  // RESPAWNED under the same name (resume()'s entire fix-leg/handoff-resume design — its
+  // precondition is literally "a terminal sentinel already exists for this name") while an
+  // EARLIER leg's own leader-exit reap for that SAME name is still running. A bare-name key would
+  // let the fresh spawn's `.set(name, ...)` silently REPLACE (and thereby abandon, from
+  // reapAll()'s perspective) the still-in-flight prior promise — the exact same class of bug this
+  // round's own predecessor (the pgidRegistry) was retired for creating. The pid disambiguates:
+  // each real spawn gets a genuinely fresh OS pid, so two legs sharing a name can never share a
+  // key. `dispatch()`/`resume()` both await any matching (same-name-prefixed) in-flight entry
+  // before spawning a replacement — see `awaitInFlightLeaderExitReapsFor`'s own doc.
   private readonly inFlightLeaderExitReaps = new Map<string, Promise<ReapOutcome>>();
   // #395 (gate② round 3): one liveness-gated heartbeat per live lane, keyed by lane name —
   // persisted across setInterval ticks (util/heartbeat.ts's createHeartbeatGate needs its own
@@ -2090,6 +2101,11 @@ export class WorkerSupervisor implements Supervisor {
 
   async dispatch(issue: Issue, name?: string, opts?: { proxy?: WorkerProxyOpts }): Promise<{ name: string; sessionId: string }> {
     const laneName = name ?? `lane-${issue.number}-${randomUUID().slice(0, 8)}`;
+    // #668 (round 6 P1b): wait out any leader-exit reap still in flight for this SAME name before
+    // doing anything else — see awaitInFlightLeaderExitReapsFor's own doc. A no-op (resolves
+    // immediately) for the overwhelmingly common case (a freshly-generated, never-before-seen
+    // name); only matters for an explicitly caller-supplied `name` colliding with one.
+    await this.awaitInFlightLeaderExitReapsFor(laneName);
     // Refuse name reuse — a stale sentinel under this name means a concurrent/old lane; a
     // second worker would clobber its jsonl/sentinels (0day Codex #4).
     for (const ext of SENTINEL_EXTS) {
@@ -2446,6 +2462,12 @@ export class WorkerSupervisor implements Supervisor {
     name: string,
     opts?: { proxy?: WorkerProxyOpts; prompt?: string; sessionId?: string },
   ): Promise<{ name: string; sessionId: string }> {
+    // #668 (round 6 P1b): resume() is the REALISTIC path for this race — its whole design
+    // reuses an existing name (fix-leg entry and handoff-resume both require a terminal sentinel
+    // ALREADY on disk for it), which is exactly the shape onExit()'s leader-exit reap leaves
+    // behind (sentinel written, reap for a live descendant possibly still running). Wait it out
+    // before touching anything else — see awaitInFlightLeaderExitReapsFor's own doc.
+    await this.awaitInFlightLeaderExitReapsFor(name);
     const handoffPath = this.path(name, "handoff.json");
     const runningPath = this.path(name, "running.json");
     const running = this.readJson(runningPath);
@@ -3064,24 +3086,37 @@ export class WorkerSupervisor implements Supervisor {
     // reapAll()'s own engine-exit path can await it — see that field's and reapAll()'s own docs
     // for why an in-flight reap must never be abandoned just because the engine is shutting down.
     //
-    // RESIDUAL, stated rather than hidden: `pidGroupAlive` below and the reap it may trigger read
-    // `lane.child.pid` a handful of synchronous statements after the OS actually freed it (Node's
-    // own internal waitpid, which is what let this 'exit' handler fire at all) — a sub-second
-    // window in which, in principle, the OS could have already recycled that exact pid/pgid
-    // number for an unrelated process. This residual is the SAME class round 3's fingerprint
-    // machinery existed to close, but at a timescale (microseconds to low milliseconds between
-    // waitpid and this line running) where the odds are the kind of astronomically small this
-    // repo's own #616/#666-adjacent "residual, not eliminated" doctrine already accepts
-    // elsewhere, and unlike a pgidRegistry entry (which could sit for the ENTIRE rest of a
-    // long-running engine's life before ever being re-checked), this window closes on its own in
-    // the time it takes one more statement to execute.
+    // RESIDUAL #1 (this ONE-TIME check only, stated rather than hidden): `pidGroupAlive` below
+    // reads `lane.child.pid` a handful of synchronous statements after the OS actually freed it
+    // (Node's own internal waitpid, which is what let this 'exit' handler fire at all) — a
+    // one-shot window in which, in principle, the OS could have already recycled that exact
+    // pid/pgid number for an unrelated process BEFORE this very check runs, making the decision
+    // "should a reap even start" itself wrong. This residual is the SAME class round 3's
+    // fingerprint machinery existed to close, but at a timescale (microseconds to low
+    // milliseconds between waitpid and this line running, ONE check, not a sustained poll) where
+    // the odds are the kind of astronomically small this repo's own "residual, not eliminated"
+    // doctrine already accepts elsewhere, and unlike a pgidRegistry entry (which could sit for the
+    // ENTIRE rest of a long-running engine's life before ever being re-checked), this window
+    // closes on its own in the time it takes one more statement to execute.
+    //
+    // RESIDUAL #2 (round 6 P1a, the ONGOING risk once a reap actually starts — see reapChildren's
+    // own doc for the full statement and the mitigation applied there): every poll tick inside the
+    // reap this may trigger carries the SAME pid-identity blind spot, REPEATED across the whole
+    // grace period, not just once — a group that dies and is recycled entirely between two
+    // consecutive polls can absorb the escalation signal. These are two DISTINCT residuals at two
+    // different points in this one mechanism; conflating them into a single "sub-second" claim
+    // would understate #2.
     const pid = lane.child.pid;
     if (pid != null && this.pidGroupAlive(pid)) {
       const alreadySignaled = lane.handoffRequested; // an earlier drain may have already SIGTERM'd the whole group
+      // #668 (round 6 P1b): `${name}#${pid}` — see inFlightLeaderExitReaps' own doc for why a
+      // bare lane name would let a same-name respawn's fresh entry silently replace (and abandon)
+      // this one.
+      const key = `${name}#${pid}`;
       const reapPromise = this.reapDescendantsOnLeaderExit(name, pid, alreadySignaled);
-      this.inFlightLeaderExitReaps.set(name, reapPromise);
+      this.inFlightLeaderExitReaps.set(key, reapPromise);
       void reapPromise.finally(() => {
-        if (this.inFlightLeaderExitReaps.get(name) === reapPromise) this.inFlightLeaderExitReaps.delete(name);
+        if (this.inFlightLeaderExitReaps.get(key) === reapPromise) this.inFlightLeaderExitReaps.delete(key);
       });
     }
   }
@@ -3120,6 +3155,31 @@ export class WorkerSupervisor implements Supervisor {
       );
     }
     return outcome!;
+  }
+
+  /** #668 (round 6 P1b): dispatch()/resume() both call this FIRST, before doing any other work,
+   *  when about to spawn under `name` — waits for every leader-exit reap still in flight FOR THAT
+   *  SAME NAME (see inFlightLeaderExitReaps' own doc for why the key is `${name}#${pid}`, not the
+   *  bare name, and why this wait matters beyond just avoiding an abandoned promise). Two real
+   *  reasons this matters: (1) worktree overlap — a respawn under the same name (resume()'s entire
+   *  design: its precondition IS "a terminal sentinel already exists for this name") reuses the
+   *  SAME worktree directory; a stale descendant from the prior leg could still be touching files
+   *  there the instant the new leg starts writing to it. (2) keeping exactly one reap in flight
+   *  per name at a time, so a second overlapping reap for the same name (a further respawn while
+   *  THIS one is still draining) can never happen either.
+   *
+   *  Bounded automatically, never a new hang risk: each awaited promise is `reapChildren`'s own
+   *  SIGTERM -> grace -> SIGKILL -> verify sequence, which already has a hard bound (the grace
+   *  window plus the fixed SIGKILL-verify timeout) baked into `reapChildren` itself — this method
+   *  adds no additional timeout because it doesn't need one. Deliberately does NOT delay sentinel
+   *  publication — the prior leg's `.done`/`.failed`/`.handoff` sentinel is written synchronously
+   *  inside onExit() well before this reap even starts, so a caller polling for that sentinel
+   *  (e.g. the conductor) is never held up by this wait; only the NEXT spawn under the same name
+   *  is. */
+  private async awaitInFlightLeaderExitReapsFor(name: string): Promise<void> {
+    const prefix = `${name}#`;
+    const matching = [...this.inFlightLeaderExitReaps.entries()].filter(([key]) => key.startsWith(prefix)).map(([, p]) => p);
+    if (matching.length > 0) await Promise.all(matching);
   }
 
   /** #617 (seam 3, capability DR #616): the FILESYSTEM-derived half of a worker/producer leg's
@@ -4078,7 +4138,29 @@ const REAP_VERIFY_TIMEOUT_MS = 500; // generous vs. a real SIGKILL's near-instan
  *  not manufacture work against a leg that already exited on its own, e.g. via a completed
  *  graceful handoff), and a child flagged `alreadySignaled` skips this SIGTERM specifically —
  *  it already got its one SIGTERM from whoever set that flag — so no live child is ever
- *  SIGTERM'd twice by one reap (gate② finding, 2026-08-05). */
+ *  SIGTERM'd twice by one reap (gate② finding, 2026-08-05).
+ *
+ *  `pollUntilDeadOrTimeout`'s own filter is MONOTONIC — once a candidate's `isAlive()` observes
+ *  it dead, that candidate is removed from `pending` and never reappears there, no matter how
+ *  many further poll ticks run (round 6 P1a, verified property: `pending = pending.filter(...)`
+ *  only ever narrows across iterations, and nothing re-adds a prior entry) — so a child, once
+ *  seen dead, is never signaled again by anything downstream of that observation.
+ *
+ *  RESIDUAL (round 6 P1a, stated exactly rather than vaguely): `isAlive()` checks a raw pid
+ *  number, not a stable process identity — if a REAL group dies and the OS recycles that exact
+ *  pid/pgid for an unrelated process ENTIRELY within the gap between two consecutive polls (i.e.
+ *  within one `REAP_VERIFY_POLL_MS` tick, ~25ms), the death is never observed at all: the next
+ *  poll's `isAlive()` reports "alive" again, now meaning a totally different process, and that
+ *  mistaken liveness can persist for as long as the unrelated process does, sustained across the
+ *  ENTIRE remaining grace period (not just one tick) until the SIGKILL escalation is reached —
+ *  the exact mechanism: **a group that dies and is recycled entirely between two consecutive
+ *  polls can absorb the escalation signal.** Mitigated, not eliminated, by the extra `isAlive()`
+ *  check immediately before the SIGKILL send below (shrinking THAT specific transition to the
+ *  synchronous gap between the check and the `signal()` call — no longer bound by the 25ms poll
+ *  tick at all at that one point) — but the SAME recycle-inside-one-tick blind spot still applies
+ *  to every poll during the grace period leading up to it, and there is no way to close it
+ *  without a kernel-level generation counter POSIX doesn't provide. Accepted per this issue's own
+ *  boundary ruling (no engine-side resource watchdog); the practical floor, not engineered away. */
 export async function reapChildren(
   children: ReapableChild[],
   opts: { graceMs?: number; sleep?: (ms: number) => Promise<void>; log?: (message: string) => void } = {},
@@ -4110,10 +4192,18 @@ export async function reapChildren(
     if (!c.alreadySignaled) c.signal("SIGTERM");
   }
   const survivors = await pollUntilDeadOrTimeout(live, graceMs);
-  for (const c of survivors) c.signal("SIGKILL");
-  await pollUntilDeadOrTimeout(survivors, REAP_VERIFY_TIMEOUT_MS);
+  // #668 (round 6 P1a): one more explicit isAlive() check RIGHT HERE, immediately before the
+  // SIGKILL escalation itself — see this function's own doc for the residual this narrows.
+  // `survivors` is `pollUntilDeadOrTimeout`'s own last poll observation, which can already be
+  // stale by up to one `REAP_VERIFY_POLL_MS` tick; this re-check shrinks that gap down to the
+  // synchronous distance between the check and the signal call, and means a survivor that died in
+  // that window is never signaled at all (and — correctly, per `escalated`'s own contract, "SIGKILL
+  // was sent" — is NOT counted as escalated below, since it wasn't).
+  const stillAliveAtEscalation = survivors.filter((c) => c.isAlive());
+  for (const c of stillAliveAtEscalation) c.signal("SIGKILL");
+  await pollUntilDeadOrTimeout(stillAliveAtEscalation, REAP_VERIFY_TIMEOUT_MS);
 
-  const survivorNames = new Set(survivors.map((c) => c.name));
+  const survivorNames = new Set(stillAliveAtEscalation.map((c) => c.name));
   for (const c of live) {
     const confirmedDead = !c.isAlive();
     if (!confirmedDead) {

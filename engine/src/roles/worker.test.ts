@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -4884,7 +4885,11 @@ test("WorkerSupervisor.reapAll (#668 round 5): an in-flight leader-exit reap (ki
     // The gate is still HELD — onExit's own reap is genuinely stuck mid-poll (real, deterministic
     // control, never a sleep/timing guess), so this is a REAL in-flight reap, not a settled one.
     assert.equal(groupAlive(leaderPid), true, "sanity: the descendant is still alive — the gated reap hasn't been allowed to finish yet");
-    assert.ok(peekSupervisor(s).inFlightLeaderExitReaps.has(name), "onExit() must have registered the in-flight reap synchronously");
+    // #668 (round 6 P1b): keyed by `${name}#${pid}`, not the bare name — see inFlightLeaderExitReaps' own doc.
+    assert.ok(
+      [...peekSupervisor(s).inFlightLeaderExitReaps.keys()].some((k) => k.startsWith(`${name}#`)),
+      "onExit() must have registered the in-flight reap synchronously",
+    );
 
     const reapAllPromise = s.reapAll(); // must AWAIT the in-flight reap, not race past it
     release(); // let the held reap (and reapAll's own await of it) actually proceed now
@@ -4893,7 +4898,11 @@ test("WorkerSupervisor.reapAll (#668 round 5): an in-flight leader-exit reap (ki
     const byName = new Map(outcomes.map((o) => [o.name, o]));
     assert.equal(byName.get(name)?.confirmedDead, true, "reapAll()'s own outcome set must include the leader-exit reap it waited for");
     assert.equal(groupAlive(leaderPid), false, "the descendant is actually dead by the time reapAll() resolves — never abandoned at exit");
-    assert.equal(peekSupervisor(s).inFlightLeaderExitReaps.has(name), false, "the settled entry is removed, never left registered");
+    assert.equal(
+      [...peekSupervisor(s).inFlightLeaderExitReaps.keys()].some((k) => k.startsWith(`${name}#`)),
+      false,
+      "the settled entry is removed, never left registered",
+    );
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -4960,6 +4969,219 @@ test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #668 round 6 (Codex REQUEST_CHANGES on a489513): two P1 edges in the round-5 design.
+//
+// P1b: `inFlightLeaderExitReaps` was keyed by bare lane name. resume()'s ENTIRE design reuses an
+// existing name (its precondition is literally "a terminal sentinel already exists for this
+// name") — exactly the shape onExit()'s leader-exit reap leaves behind. A same-name respawn while
+// the PRIOR leg's own reap was still running would `.set(name, ...)` and silently REPLACE (thus
+// abandon, from reapAll()'s perspective) the still-in-flight old promise. Fixed: unique
+// `${name}#${pid}` keys (a fresh spawn's own pid can never collide) plus a respawn gate —
+// dispatch()/resume() both await any in-flight reap for their OWN name before doing anything else
+// (bounded automatically by reapChildren's own grace/verify windows; never delays the SENTINEL
+// itself, which onExit() already wrote before the reap even starts — only the NEXT spawn waits).
+//
+// P1a: restated the reapChildren pid-reuse residual honestly (see reapChildren's own doc for the
+// full statement) and added a cheap mitigation — one more `isAlive()` check immediately before
+// the SIGKILL escalation specifically, shrinking that one transition to a synchronous gap.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("WorkerSupervisor.resume (#668 round 6 P1b): a same-name respawn (fix-leg entry) while an EARLIER leg's leader-exit reap is still in flight WAITS for it — the old reap is never abandoned", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  try {
+    const descendantReadyFile = join(dir, "descendant.ready");
+    const bin = leaderExitStub(dir, descendantReadyFile);
+    const { sleep, release } = reapPollSleep({ held: true });
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      sleep,
+    });
+    const laneName = "lane-668-p1b-fixed";
+    const { name } = await s.dispatch({ number: 678, title: "t", labels: [] }, laneName);
+    assert.equal(name, laneName);
+    const firstLeaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+
+    await waitForFile(join(dir, `${name}.done.json`), "the first leg never exited / onExit never ran");
+    assert.equal(groupAlive(firstLeaderPid), true, "sanity: the first leg's descendant is still alive — its reap hasn't been released yet");
+    assert.ok(
+      [...peekSupervisor(s).inFlightLeaderExitReaps.keys()].some((k) => k.startsWith(`${name}#`)),
+      "onExit() must have registered the first leg's in-flight reap, keyed by this name",
+    );
+
+    // #245-shaped fix-leg entry: valid the instant a done/failed sentinel exists, which it does —
+    // the SAME real precondition a genuine fix-leg respawn would see while the prior reap drains.
+    const resumePromise = s.resume({ number: 678, title: "t", labels: [] }, name, { sessionId: randomUUID(), prompt: "fix it" });
+    // Named hang-guard race (this suite's own established idiom — see waitFor's own doc), never a
+    // precise-timing assertion: resume()'s OWN normal work (spawn confirmation for a REAL
+    // subprocess) genuinely takes some real milliseconds regardless of this gate, so a bare
+    // microtask-flush check can't tell "blocked by the gate" apart from "still doing its own
+    // ordinary async work" — this generously-bounded real race can. The gate is NEVER released
+    // before this race settles, so a fix-leg respawn resolving inside 300ms (vastly more than a
+    // real local process spawn ever needs) proves it did NOT wait for the earlier reap at all —
+    // the exact pre-fix bug.
+    const race = await Promise.race([
+      resumePromise.then(() => "resumed" as const),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 300)),
+    ]);
+    assert.equal(
+      race,
+      "timeout",
+      "resume() resolved before the earlier leg's leader-exit reap was ever released — it did not wait for it, the exact pre-fix bug",
+    );
+
+    release(); // let the held reap (and therefore the waiting resume()) actually proceed now
+    const { name: resumedName } = await resumePromise;
+    assert.equal(resumedName, name);
+    assert.equal(
+      groupAlive(firstLeaderPid),
+      false,
+      "the FIRST leg's own reap actually completed — its descendant is confirmed dead, never abandoned",
+    );
+
+    await s.reapAll(); // sweep up whatever the SECOND (resumed) leg's own leader-exit reap left behind
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WorkerSupervisor.resume (#668 round 6 P1b, RED-BEFORE differential): with the pre-fix bare-name key, a same-name respawn's registration REPLACES the prior in-flight entry instead of queuing behind it", async () => {
+  // This test doesn't call production code with a monkeypatch (worker.ts's own private key
+  // construction isn't reachable from here) — it instead demonstrates the DIFFERENCE in Map
+  // semantics directly: this is the exact mechanical bug report P1b names, made concrete. A
+  // bare-name key means two `.set(name, promiseN)` calls for the SAME name are not two entries —
+  // they're one entry, overwritten. The fix (unique `${name}#${pid}` keys) is what makes BOTH
+  // survive simultaneously, which the sibling round-6 P1b test above (and the dedicated two-in-
+  // flight test below) both rely on and prove against the REAL implementation.
+  const bareNameMap = new Map<string, Promise<ReapOutcome>>();
+  const p1 = Promise.resolve({ name: "lane-x", alreadyDead: false, escalated: false, confirmedDead: true } as ReapOutcome);
+  const p2 = Promise.resolve({ name: "lane-x", alreadyDead: false, escalated: true, confirmedDead: true } as ReapOutcome);
+  bareNameMap.set("lane-x", p1); // simulates onExit() registering the FIRST leg's reap under a bare name
+  assert.equal(bareNameMap.get("lane-x"), p1, "sanity: the first promise is registered");
+  bareNameMap.set("lane-x", p2); // simulates a same-name respawn's SECOND leg registering its OWN reap
+  assert.equal(bareNameMap.get("lane-x"), p2, "the second registration REPLACED the first under a bare-name key");
+  assert.equal(
+    bareNameMap.size,
+    1,
+    "only ONE entry survives — the first promise (and whatever reapAll() would have needed to await it) is gone",
+  );
+  // The fix's own key shape never has this problem, by construction:
+  const uniqueKeyMap = new Map<string, Promise<ReapOutcome>>();
+  uniqueKeyMap.set("lane-x#111", p1);
+  uniqueKeyMap.set("lane-x#222", p2);
+  assert.equal(
+    uniqueKeyMap.size,
+    2,
+    "unique name-hash-pid-shaped keys let both same-name entries coexist — this is the differential the fix produces",
+  );
+});
+
+test("WorkerSupervisor.reapAll (#668 round 6 P1b): TWO in-flight leader-exit reaps registered under the SAME lane name (different pids/keys) are BOTH awaited — reapAll() never returns early on just the first, and its outcome set includes both", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  try {
+    const s = sup(dir, "claude"); // dispatch() never called — both reaps are injected directly
+    const name = "lane-668-p1b-two";
+    let resolve1!: (o: ReapOutcome) => void;
+    let resolve2!: (o: ReapOutcome) => void;
+    const p1 = new Promise<ReapOutcome>((r) => {
+      resolve1 = r;
+    });
+    const p2 = new Promise<ReapOutcome>((r) => {
+      resolve2 = r;
+    });
+    const peek = peekSupervisor(s);
+    peek.inFlightLeaderExitReaps.set(`${name}#111`, p1);
+    peek.inFlightLeaderExitReaps.set(`${name}#222`, p2);
+    assert.equal(peek.inFlightLeaderExitReaps.size, 2, "sanity: both entries coexist under the same name prefix");
+
+    let reapAllResolved = false;
+    const reapAllPromise = s.reapAll().then((o) => {
+      reapAllResolved = true;
+      return o;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(reapAllResolved, false, "reapAll() must not resolve while EITHER in-flight reap is still pending");
+
+    resolve1({ name, alreadyDead: false, escalated: false, confirmedDead: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(
+      reapAllResolved,
+      false,
+      "reapAll() must still wait for the SECOND in-flight reap even after the first settles — this is the sequential-in-flight property",
+    );
+
+    resolve2({ name, alreadyDead: false, escalated: true, confirmedDead: true });
+    const outcomes = await reapAllPromise;
+    const forThisName = outcomes.filter((o) => o.name === name);
+    assert.equal(
+      forThisName.length,
+      2,
+      "reapAll()'s outcome set must include BOTH same-name reaps, never just the latest under a collapsed key",
+    );
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("reapChildren (#668 round 6 P1a): the poll loop's aliveness filter is MONOTONIC — once a candidate is observed dead it is removed from the pending set and never signaled again, no matter how many further poll ticks run", async () => {
+  const deathTick = 2; // dies from SIGTERM, observed on the SECOND poll check inside the grace-period loop
+  let aliveCalls = 0;
+  const signals: NodeJS.Signals[] = [];
+  const c: ReapableChild = {
+    name: "lane-monotonic",
+    isAlive: () => {
+      aliveCalls++;
+      return aliveCalls <= deathTick;
+    },
+    signal: (sig) => signals.push(sig),
+  };
+  const outcomes = await reapChildren([c], { graceMs: 200, sleep: INSTANT_SLEEP });
+  // If the filter re-admitted a once-dead candidate on any LATER tick, this child would receive a
+  // SIGKILL too (since `aliveCalls` keeps incrementing well past `deathTick` across the many
+  // remaining poll iterations up to graceMs=200) — it never does.
+  assert.deepEqual(signals, ["SIGTERM"], "no SIGKILL — once observed dead, never signaled again by any later poll tick");
+  assert.deepEqual(outcomes, [{ name: "lane-monotonic", alreadyDead: false, escalated: false, confirmedDead: true }]);
+});
+
+test("reapChildren (#668 round 6 P1a): a child that dies in the gap between the LAST grace-period poll and the SIGKILL escalation itself is never signaled — the extra pre-escalation liveness check shrinks that one transition to a synchronous gap, not a full poll tick", async () => {
+  const graceMs = 100;
+  const REAP_VERIFY_POLL_MS = 25; // mirrors worker.ts's own (unexported) module constant — see its own doc
+  // reapChildren's own isAlive() call sequence before the SIGKILL escalation is reached: (1) the
+  // top-level live/alreadyDead classification, (2) pollUntilDeadOrTimeout's own initial filter,
+  // then (3) one more filter per while-loop iteration (ceil(graceMs/POLL) of them). Pinning this
+  // exact count is what lets this test put the fake child's "death" EXACTLY one check past the
+  // real boundary reapChildren's grace phase observes — not one check too early (which would let
+  // the grace phase itself already catch it, testing nothing new) or too late.
+  const expectedGracePolls = 2 + Math.ceil(graceMs / REAP_VERIFY_POLL_MS);
+  let aliveCalls = 0;
+  const signals: NodeJS.Signals[] = [];
+  const c: ReapableChild = {
+    name: "lane-late-death",
+    isAlive: () => {
+      aliveCalls++;
+      // Alive throughout the ENTIRE grace-period poll (a genuine SIGKILL-bound survivor by every
+      // observation reapChildren makes during that phase) — dead starting from the VERY NEXT
+      // check, which is exactly the new pre-escalation recheck.
+      return aliveCalls <= expectedGracePolls;
+    },
+    signal: (sig) => signals.push(sig),
+  };
+  const outcomes = await reapChildren([c], { graceMs, sleep: INSTANT_SLEEP });
+  assert.deepEqual(signals, ["SIGTERM"], "SIGKILL must NEVER be sent — the pre-escalation recheck observed it already dead");
+  assert.deepEqual(outcomes, [{ name: "lane-late-death", alreadyDead: false, escalated: false, confirmedDead: true }]);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
