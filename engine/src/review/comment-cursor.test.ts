@@ -220,6 +220,27 @@ test("a ~~~ fence still closes normally on its own matching ~~~ closer — delim
   );
 });
 
+// ── #652 round 3 (finding 1): a closer must be BARE — info strings only open, never close ──────
+
+test("a same-character, long-enough run WITH an info string (```not-a-closer inside a ```md fence) does not close it — CommonMark closers allow only whitespace after the run, so the marker after it stays fenced", () => {
+  const body = ["```md", "```not-a-closer", "<!-- sapwood:comments-adjudicated-through: 7 -->", "```"].join("\n");
+  const result = computeCommentCursor(body, [entry("7")]);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "missing-marker");
+});
+
+test("an info-string OPENER still opens (```md) and a bare closer still closes — the closer restriction doesn't break the ordinary open-with-language case", () => {
+  const body = ["```md", "<!-- sapwood:comments-adjudicated-through: 5 -->", "```", "<!-- sapwood:comments-adjudicated-through: 7 -->"].join(
+    "\n",
+  );
+  const result = computeCommentCursor(body, [entry("7")]);
+  assert.deepEqual(
+    result,
+    { ok: true, cursor: "7", pending: [] },
+    "the fenced copy is ignored; the real standalone marker after the bare closer is honored",
+  );
+});
+
 // ── #652 round 1 (finding 5): dedup-key target-keying + serialization hardening ─────────────────
 
 test("commentCursorDedupeKey: a cursor re-pointed from one still-invalid target to ANOTHER (999 -> 998, both absent) dedupes DISTINCTLY — the correction still gets a fresh post", () => {

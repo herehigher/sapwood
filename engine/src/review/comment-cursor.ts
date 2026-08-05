@@ -68,12 +68,17 @@ function findStandaloneMarkerValues(body: string): string[] {
       const run = fenceMatch[1]!;
       if (fence === null) {
         fence = { char: run[0]!, len: run.length };
-      } else if (run[0] === fence.char && run.length >= fence.len) {
+      } else if (run[0] === fence.char && run.length >= fence.len && line.length === run.length) {
+        // #652 round 3 (finding 1): a CLOSER must be BARE — CommonMark allows an info string on
+        // opening fences only, so a matching-character, long-enough run followed by anything but
+        // whitespace (` ```not-a-closer `; `line` is already trimmed, so "bare" = run IS the
+        // whole line) is fence content, not a close.
         fence = null;
       }
-      // else: a fence-looking line of the WRONG character, or the right character but too SHORT
-      // to close the current opener, is just fence CONTENT — falls through to the `if (fence)
-      // continue` below like any other line inside the block, never toggles.
+      // else: a fence-looking line of the WRONG character, the right character but too SHORT
+      // to close the current opener, or a would-be closer carrying an info string, is just
+      // fence CONTENT — falls through to the `if (fence) continue` below like any other line
+      // inside the block, never toggles.
       continue;
     }
     if (fence !== null) continue;
