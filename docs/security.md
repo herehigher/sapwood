@@ -147,7 +147,14 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
   from writing to the repository outside the reviewed PR path; a protected default branch
   (no direct pushes, required reviews/checks) is documented as mandatory, not optional,
   precisely because the in-engine capability boundary was deliberately not built for producer
-  legs.
+  legs. **#633: this backstop's presence is now detected, not just documented.** Once per
+  engine start, `engine/src/loop/branch-protection-warning.ts` reads the target repo's default
+  branch protection state (classic branch-protection endpoint, then — only on a 404 — whether
+  an active ruleset covers the branch) and logs one warning naming the branch and both operator
+  exits when the branch is POSITIVELY VERIFIED unprotected. This is warn-only observation, same
+  #554 stance as the [managed-settings exception](#managed-settings-allowmanagedpermissionrulesonly-exception-554)
+  below: no startup refusal, no label, no gate, and an inconclusive read never fires the
+  warning — it never enforces the backstop it names.
 - **(b′) server-granularity MCP deny vs. `allowManagedPermissionRulesOnly` (#554).** The
   server-granularity deny for producer legs (known forge-authority/github-class and
   known write/exec/filesystem-class MCP servers appended to `WORKER_DISALLOWED_TOOLS`,
@@ -674,7 +681,11 @@ The asymmetry is compensated, but not erased, by several independent controls:
   interaction**: `allowManagedPermissionRulesOnly` discards `--disallowedTools`
   wholesale (see the paragraph above) — a host with that managed-settings mode on
   drops these MCP denies (and every other entry in `WORKER_DISALLOWED_TOOLS`) too,
-  which is exactly why branch protection, not this list, is the backstop of record.
+  which is exactly why branch protection, not this list, is the backstop of record — and (#633)
+  its presence, not just its documentation, is now checked once per engine start; see the
+  [Accepted blind spots](#accepted-blind-spots) section above for what that detector does and
+  does not do. Warn-only observation, same as everything else in this paragraph — it never
+  enforces the backstop.
 - `engine/src/roles/worker.ts` does not add the engine `data/` directory as a Claude tool
   root (there is no `--add-dir data`), so the tool layer does not offer a path into it.
   This is not Bash containment: worker Bash can reach `../../data`, exactly the residual
