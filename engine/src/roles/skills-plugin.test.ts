@@ -26,7 +26,10 @@ import {
  *  `ConfigSchema.parse({...})` would resolve for a fresh config. */
 const LABELS_CFG: ResolvedLabelsForSkill = {
   labels: { ...workflowLabelDefaults("sapwood:"), prefix: "sapwood:" },
-  escalation: { holdLabels: [holdLabelDefault("sapwood:")] },
+  escalation: {
+    holdLabels: [holdLabelDefault("sapwood:")],
+    humanLabels: [workflowLabelDefaults("sapwood:").needsHuman, workflowLabelDefaults("sapwood:").blocked],
+  },
 };
 
 const FIXTURE_SECURITY_MD = `# Security & trust model

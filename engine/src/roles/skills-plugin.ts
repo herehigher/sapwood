@@ -92,9 +92,11 @@ export interface PluginFile {
 const PLUGIN_MANIFEST: PluginFile["relPath"] = ".claude-plugin/plugin.json";
 
 /** #640: the one skill NOT extracted from a `docs/security.md` marker — its content is rendered
- *  from resolved `cfg.labels`/`cfg.escalation.holdLabels` against `labels.ts`'s `LABEL_SEMANTICS`
- *  registry, so a `labels.prefix` remap (or any other per-label override) always shows up as the
- *  RESOLVED name a session actually sees on real issues/PRs — never a default or a template. */
+ *  from resolved `cfg.labels`/`cfg.escalation.holdLabels`/`cfg.escalation.humanLabels` against
+ *  `labels.ts`'s `LABEL_SEMANTICS` registry, so a `labels.prefix` remap (or any other per-label
+ *  override) always shows up as the RESOLVED name a session actually sees on real issues/PRs —
+ *  never a default or a template. #658 review round 1 (P1): `humanLabels` is what lets the render
+ *  show each label's ACTUAL merge-veto membership instead of asserting it statically. */
 export function buildLabelsSkillFile(cfg: ResolvedLabelsForSkill): PluginFile {
   const description =
     "Which sapwood GitHub labels exist in THIS repo (resolved names, honoring any labels.prefix remap), who writes/removes " +

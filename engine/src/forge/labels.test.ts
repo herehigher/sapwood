@@ -107,9 +107,10 @@ test("#379 createMissingLabels: a real create failure (no permission) propagates
 // ── #640: typed per-label semantics registry ─────────────────────────────────────────────────
 
 function resolvedLabelsForSkill(prefix: string): ResolvedLabelsForSkill {
+  const defaults = workflowLabelDefaults(prefix);
   return {
-    labels: { ...workflowLabelDefaults(prefix), prefix },
-    escalation: { holdLabels: [holdLabelDefault(prefix)] },
+    labels: { ...defaults, prefix },
+    escalation: { holdLabels: [holdLabelDefault(prefix)], humanLabels: [defaults.needsHuman, defaults.blocked] },
   };
 }
 
@@ -177,9 +178,53 @@ test("#640 prefix-remap: the bare (empty) prefix resolves to unprefixed names", 
 test("#640 renderLabelsSkillBody: a hold row is emitted once per escalation.holdLabels entry", () => {
   const cfg: ResolvedLabelsForSkill = {
     labels: { ...workflowLabelDefaults("sapwood:"), prefix: "sapwood:" },
-    escalation: { holdLabels: ["sapwood:hold", "sapwood:hold-secondary"] },
+    escalation: { holdLabels: ["sapwood:hold", "sapwood:hold-secondary"], humanLabels: ["sapwood:needs-human", "sapwood:blocked"] },
   };
   const body = renderLabelsSkillBody(cfg);
   assert.ok(body.includes("`sapwood:hold`"));
   assert.ok(body.includes("`sapwood:hold-secondary`"));
+});
+
+// ── #658 review round 1, P1: merge-veto claims rendered from resolved escalation.humanLabels ──
+
+/** The body text of one `## \`name\`` section, up to (not including) the next `## ` heading —
+ *  lets a test assert on ONE row's rendered lines without the marker false-positiving on a
+ *  different row that happens to share substring text. */
+function labelSection(body: string, name: string): string {
+  const marker = `## \`${name}\`\n`;
+  const start = body.indexOf(marker);
+  assert.ok(start >= 0, `section for "${name}" not found`);
+  const rest = body.slice(start + marker.length);
+  const next = rest.indexOf("\n## ");
+  return next === -1 ? rest : rest.slice(0, next);
+}
+
+test("#658 P1: the default config renders today's semantics — needsHuman/blocked are the merge-veto members, reserve is not", () => {
+  const cfg = resolvedLabelsForSkill("sapwood:");
+  const body = renderLabelsSkillBody(cfg);
+  assert.match(labelSection(body, "sapwood:needs-human"), /\*\*Merge veto:\*\* member of `escalation\.humanLabels`/);
+  assert.match(labelSection(body, "sapwood:blocked"), /\*\*Merge veto:\*\* member of `escalation\.humanLabels`/);
+  assert.match(labelSection(body, "sapwood:reserve"), /\*\*Merge veto:\*\* NOT a member of `escalation\.humanLabels`/);
+});
+
+test("#658 P1: blocked absent from a repo's explicit escalation.humanLabels renders the NON-member line", () => {
+  const cfg: ResolvedLabelsForSkill = {
+    labels: { ...workflowLabelDefaults("sapwood:"), prefix: "sapwood:" },
+    escalation: { holdLabels: [holdLabelDefault("sapwood:")], humanLabels: ["sapwood:needs-human"] },
+  };
+  const body = renderLabelsSkillBody(cfg);
+  assert.match(labelSection(body, "sapwood:needs-human"), /\*\*Merge veto:\*\* member of `escalation\.humanLabels`/);
+  assert.match(labelSection(body, "sapwood:blocked"), /\*\*Merge veto:\*\* NOT a member of `escalation\.humanLabels`/);
+});
+
+test("#658 P1: reserve added to a repo's explicit escalation.humanLabels renders the MEMBER line", () => {
+  const cfg: ResolvedLabelsForSkill = {
+    labels: { ...workflowLabelDefaults("sapwood:"), prefix: "sapwood:" },
+    escalation: {
+      holdLabels: [holdLabelDefault("sapwood:")],
+      humanLabels: ["sapwood:needs-human", "sapwood:blocked", "sapwood:reserve"],
+    },
+  };
+  const body = renderLabelsSkillBody(cfg);
+  assert.match(labelSection(body, "sapwood:reserve"), /\*\*Merge veto:\*\* member of `escalation\.humanLabels`/);
 });

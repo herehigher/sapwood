@@ -266,15 +266,25 @@ export type LabelRegistryKey = WorkflowLabelKey | TaxonomyLabelKey | "hold";
 export const LABEL_SEMANTICS = {
   inProgress: {
     writer: "Engine — claimed the moment a lane dispatches the issue (forge.ts's claim path).",
-    remover: "Engine, on lane end (reconcile.ts's orphan sweep clears a claim its owning lane never released).",
+    remover:
+      "Engine only, at startup — reconcile.ts's orphan healer (`healOrphanedIssues`), for an issue whose owning lane died " +
+      "without releasing the claim. It moves the issue to Ready BEFORE removing the label, and tolerates a failed removal " +
+      "(logged, retried next startup) — so the issue is dispatchable again even if the stale label lingers on it.",
     gates: "Marks an issue in flight; excluded from re-dispatch while present.",
   },
   needsHuman: {
     writer:
       "Engine, at any of many escalation write sites (conductor.ts, escalation-writer.ts, decompose.ts, fix-response.ts, " +
       "architect.ts's contradiction pass), or a human directly.",
-    remover: "A human only, by removing the label — the #147 gated-reentry handshake that reclaims and re-drives the lane.",
-    gates: "Bucket 1 escalation (#397): holds dispatch, and — via `escalation.humanLabels` — vetoes the merge gate when present on a PR.",
+    remover:
+      "A human, by removing the label — the #147 gated-reentry handshake that reclaims and re-drives the lane. Also the " +
+      "engine itself, via escalation-sweep.ts's `sweepResolvedHolds`: it removes ONLY a `needs-human` the ledger PROVES the " +
+      "engine itself applied (an `always`-proof or proven-`payload` source, per escalation-reconcile.ts's `ESCALATION_SOURCES` " +
+      "— a hand-applied label has no such proof and is never touched), once the escalation is ledger-resolved AND an " +
+      "authorizing witness (merge or issue close, never a mere PR close) confirms it — latched by a `needs-human-swept` receipt.",
+    gates:
+      "Bucket 1 escalation (#397): holds dispatch. Whether it also vetoes the merge gate when present on a PR depends on " +
+      "`escalation.humanLabels` membership — see the rendered Merge veto line below for THIS repo's resolved answer.",
     distinguishFrom:
       "Means 'the machine STOPPED; a human owes the NEXT decision' — unlike `humanMergeOnly` ('a human must MERGE this PR', " +
       "never removed, not a member of `escalation.humanLabels`), `blocked` (an external wait, not necessarily a decision, but " +
@@ -284,8 +294,9 @@ export const LABEL_SEMANTICS = {
     writer: "Engine (the architect's severe-contradiction pass, `roles/architect.ts`) or a human.",
     remover: "A human only — the same #147 gated-reentry handshake as `needsHuman`.",
     gates:
-      "Bucket 1 escalation, same tier as `needsHuman`: holds dispatch and, via `escalation.humanLabels`, vetoes the merge gate " +
-      "on a PR (the PR-side human-veto channel, #399).",
+      "Bucket 1 escalation, same tier as `needsHuman`: holds dispatch. Whether it also vetoes the merge gate on a PR (the " +
+      "PR-side human-veto channel, #399) depends on `escalation.humanLabels` membership — see the rendered Merge veto line " +
+      "below for THIS repo's resolved answer.",
     distinguishFrom: "An external wait rather than 'the machine stopped', but every gate treats it identically to `needsHuman`.",
   },
   reserve: {
@@ -293,7 +304,8 @@ export const LABEL_SEMANTICS = {
     remover: "Human only.",
     gates: "Parks an issue out of the main dispatch lane.",
     distinguishFrom:
-      "Never engine-applied and not a member of `escalation.humanLabels` — unlike `needsHuman`/`blocked`, it never holds a PR merge.",
+      "Never engine-applied — unlike `needsHuman`/`blocked`, whether it holds a PR merge depends on `escalation.humanLabels` " +
+      "membership — see the rendered Merge veto line below for THIS repo's resolved answer.",
   },
   verifyNa: {
     writer:
@@ -306,7 +318,10 @@ export const LABEL_SEMANTICS = {
     distinguishFrom: "`verifyNa` + `planApproved` together is a forbidden mixed state (#94) — the dispatch gate refuses to dispatch it.",
   },
   planApproved: {
-    writer: "The verification-plan-reviewer peripheral (gate⓪) only, after quality-reviewing the plan — never self-applied by a worker.",
+    writer:
+      "The verification-plan-reviewer peripheral (gate⓪), after quality-reviewing the plan — or, when " +
+      "`roles.verificationPlanReviewer.enabled` is false (round-defaults.ts's plan_review-disabled fallback warning), a " +
+      "human/external process, since nothing in the engine applies it in that configuration. Never self-applied by a worker.",
     remover:
       "Never removed by the engine. Not 'approved forever' (#214): a pool member carrying it from a PRIOR round is " +
       "RE-CONFIRMED (a lightweight freshness pass), never re-applied, at every round-pool entry.",
@@ -334,10 +349,12 @@ export const LABEL_SEMANTICS = {
   roundPool: {
     writer: "Engine only — the aligning phase's pool-selection pass, up to the round's pool-candidate cap.",
     remover:
-      "Engine only, via the single fail-closed `removeRoundPoolLabel` helper (`round.ts`) — at round close (every open issue " +
-      "still carrying it, no exemptions) or during the pool-selection reconcile pass (a stray label outside this round's selection).",
+      "Engine only, always via the single fail-closed `removeRoundPoolLabel` helper (`round.ts`) — at round close (every open " +
+      "issue still carrying it, no exemptions), during the pool-selection reconcile pass (a stray label outside this round's " +
+      "selection), when decompose.ts's `applyParentFence` fences a parent being decomposed out of the pool, or when " +
+      "architect.ts's batch review returns a `drop` verdict for a pool member.",
     gates: "Round-pool membership: gate⓪ is scoped to this label, and the executing phase dispatches gate⓪-passed pool members only.",
-    distinguishFrom: "One of only two engine-removed labels (with `laneState`); config load rejects it aliasing any other protected label.",
+    distinguishFrom: "Config load rejects `labels.roundPool` aliasing any other protected label.",
   },
   humanMergeOnly: {
     writer: "Engine only, on the PR, exactly once — the instruction-path trust chain (#292).",
@@ -351,13 +368,14 @@ export const LABEL_SEMANTICS = {
   laneState: {
     writer: "Engine only, applied to a lane's PR while that lane is `driving` or `fixing`.",
     remover:
-      "Engine only, via the single fail-closed `removeLaneStateLabel` helper — removed the moment the lane reaches any " +
-      "terminal state (merged, escalated, dead).",
+      "Engine only, via the single fail-closed `removeLaneStateLabel` helper (`lane-state-label.ts`'s `syncLaneStateLabels`) " +
+      "— removed the moment the lane leaves the ACTIVE set (`driving`/`fixing`), which includes a nonterminal `handoff` (a " +
+      "graceful pause awaiting a resume decision, deliberately excluded from ACTIVE — see the module's own comment) as well " +
+      "as a genuinely terminal state (merged, escalated, dead). A paused-but-not-dead lane therefore loses the label too.",
     gates: "Nothing — a pure PR-list visibility signal, invisible to `deriveGate`, dispatch, and every queue.",
     distinguishFrom:
-      "The other engine-written-AND-engine-removed label (with `roundPool`). One label deliberately covers BOTH active lane " +
-      "states (`driving` and `fixing`) — which of the two is an engine-internal distinction, not something a human scanning " +
-      "the PR list needs a second bit for.",
+      "One label deliberately covers BOTH active lane states (`driving` and `fixing`) — which of the two is an " +
+      "engine-internal distinction, not something a human scanning the PR list needs a second bit for.",
   },
   planless: {
     writer: "Engine only — the PO's decomposition remainder path and its no-plan issue-creation path.",
@@ -411,12 +429,17 @@ export const LABEL_SEMANTICS = {
   "prio:2": {
     writer: "Human triage only.",
     remover: "Human only.",
-    gates: "Orders the Ready-lane candidate set (the default priority) — never gates WHETHER an issue dispatches.",
+    gates:
+      "Orders the Ready-lane candidate set (dispatches ahead of `prio:3` AND ahead of unlabeled issues — conductor.ts's " +
+      "`issuePriority` ranks an unlabeled issue 3, the same as `prio:3`, NOT 2; `prio:2` is not 'the default') — never gates " +
+      "WHETHER an issue dispatches.",
   },
   "prio:3": {
     writer: "Human triage only.",
     remover: "Human only.",
-    gates: "Orders the Ready-lane candidate set (dispatches last among priorities) — never gates WHETHER an issue dispatches.",
+    gates:
+      "Orders the Ready-lane candidate set (ranks last among priorities, tied with unlabeled issues — conductor.ts's " +
+      "`issuePriority` defaults an unlabeled issue to this same rank, 3) — never gates WHETHER an issue dispatches.",
   },
 } satisfies Record<LabelRegistryKey, LabelSemantics>;
 
@@ -430,12 +453,26 @@ export interface LabelSkillRow {
 }
 
 /** The shape `resolveLabelSkillRows`/`renderLabelsSkillBody` need off a resolved config — exactly
- *  `SapwoodConfig`'s `labels`/`escalation.holdLabels` fields, kept as a narrow structural type here
- *  so labels.ts does not import `SapwoodConfig` (config.ts already imports labels.ts). */
+ *  `SapwoodConfig`'s `labels`/`escalation.holdLabels`/`escalation.humanLabels` fields, kept as a
+ *  narrow structural type here so labels.ts does not import `SapwoodConfig` (config.ts already
+ *  imports labels.ts). `humanLabels` (#658 review round 1, P1) is what lets the renderer show a
+ *  label's ACTUAL, resolved merge-veto membership instead of asserting it statically — `blocked`
+ *  is a member by DEFAULT only (`resolveLabelDefaults` in config.ts), and an explicit
+ *  `escalation.humanLabels` array can omit it, or add an arbitrary other label, so the true answer
+ *  can only ever come from the resolved list, never from the registry's static prose. */
 export interface ResolvedLabelsForSkill {
   readonly labels: Record<WorkflowLabelKey, string> & { readonly prefix: string };
-  readonly escalation: { readonly holdLabels: readonly string[] };
+  readonly escalation: { readonly holdLabels: readonly string[]; readonly humanLabels: readonly string[] };
 }
+
+/** #658 review round 1, P1: registry keys whose static `gates`/`distinguishFrom` prose above
+ *  deliberately defers its `escalation.humanLabels` membership claim to the renderer — see each
+ *  entry's own text. Membership is config-dependent (only `needsHuman` is validation-guaranteed a
+ *  member; `blocked` is a member by default only; `reserve` is never a member by default but
+ *  nothing stops an operator adding it), so asserting it here as fixed prose would go stale the
+ *  moment a repo's `escalation.humanLabels` diverges from the shipped default — exactly the
+ *  registry-as-source-of-truth failure this file exists to prevent. */
+const HUMAN_LABELS_VETO_ROWS: ReadonlySet<LabelRegistryKey> = new Set(["needsHuman", "blocked", "reserve"]);
 
 /** #640 AC2/AC3: resolve every registry key to its ACTUAL, prefix-resolved label name — from
  *  `cfg.labels`/`cfg.escalation.holdLabels` only, never from `workflowLabelDefaults`/
@@ -479,6 +516,18 @@ export function renderLabelsSkillBody(cfg: ResolvedLabelsForSkill): string {
     lines.push(`- **Remover:** ${row.semantics.remover}`);
     lines.push(`- **Gates:** ${row.semantics.gates}`);
     if (row.semantics.distinguishFrom) lines.push(`- **Distinguish from:** ${row.semantics.distinguishFrom}`);
+    // #658 review round 1, P1: rendered, not asserted — the ONLY correct source for a
+    // config-dependent fact is the actual resolved `escalation.humanLabels` list.
+    if (HUMAN_LABELS_VETO_ROWS.has(row.key)) {
+      const isMember = labelsInclude(cfg.escalation.humanLabels, row.name);
+      lines.push(
+        `- **Merge veto:** ${
+          isMember
+            ? "member of `escalation.humanLabels` in THIS repo (vetoes PR merge while present)."
+            : "NOT a member of `escalation.humanLabels` in THIS repo (does not veto PR merge)."
+        }`,
+      );
+    }
     lines.push("");
   }
   return lines.join("\n").trimEnd();
