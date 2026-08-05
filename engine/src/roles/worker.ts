@@ -3658,15 +3658,20 @@ export class WorkerSupervisor implements Supervisor {
    *  exits was left alive — the confirmed stranded-fix-leg incident this issue exists to close.
    *
    *  Composes with, never replaces, the existing drain paths (conductor.ts's ceiling/kill-switch
-   *  drain, checkSoftBudget's handoff): a lane already `handoffRequested` is NOT re-signaled here
-   *  (requestHandoff's own idempotent guard), so a leg already mid-graceful-handoff keeps
-   *  whatever grace it was already given. A lane that was NEVER asked to hand off (the common
-   *  case — the engine simply reached its stop condition or threw while legs were still live)
-   *  gets ONE requestHandoff() SIGTERM here, then reapChildren applies the shared grace-then-
-   *  group-SIGKILL escalation, verifying death before resolving — see reapChildren's own doc for
-   *  why this needs a death PROOF, not just an assumption. Never throws (mirrors dispose()'s own
-   *  best-effort stance): a lane that somehow survives SIGKILL is logged, not retried forever —
-   *  the engine process must still be able to exit.
+   *  drain, checkSoftBudget's handoff): a lane already `handoffRequested` (an earlier drain
+   *  already sent its SIGTERM) is marked `alreadySignaled` below, so reapChildren skips ITS OWN
+   *  initial SIGTERM for that lane — exactly ONE SIGTERM ever reaches a live lane across the
+   *  whole reap, never a second one stacked on top of an in-progress TERM handler (gate②
+   *  finding, 2026-08-05: the previous version called requestHandoff() — itself a SIGTERM — AND
+   *  then unconditionally let reapChildren's own initial SIGTERM fire too, double-signaling
+   *  every freshly-reaped lane). A lane that was NEVER asked to hand off (the common case — the
+   *  engine simply reached its stop condition or threw while legs were still live) gets that one
+   *  SIGTERM from reapChildren itself; either way, reapChildren then applies the shared grace-
+   *  then-group-SIGKILL escalation, verifying death before resolving — see reapChildren's own doc
+   *  for why this needs a death PROOF, not just an assumption. Never throws (mirrors dispose()'s
+   *  own best-effort stance): a lane that somehow survives SIGKILL is logged and reported in the
+   *  returned outcome — see cli.ts's callers for how an unconfirmed death there is surfaced as a
+   *  failed run rather than silently discarded.
    *
    *  ONLY reaps live in-memory lanes (this.lanes) — a lane surviving a PRIOR engine restart with
    *  no in-memory handle (the detached/cross-process case reclaim() and requestHandoff() both
@@ -3676,14 +3681,16 @@ export class WorkerSupervisor implements Supervisor {
   async reapAll(opts: { graceMs?: number } = {}): Promise<ReapOutcome[]> {
     const lanes = [...this.lanes.entries()];
     if (lanes.length === 0) return [];
-    for (const [name, lane] of lanes) {
-      if (!lane.handoffRequested) this.requestHandoff(name);
-    }
-    const children: ReapableChild[] = lanes.map(([name, lane]) => ({
-      name,
-      isAlive: () => this.pidGroupAlive(lane.child.pid),
-      signal: (sig: NodeJS.Signals) => this.killGroup(lane.child, sig),
-    }));
+    const children: ReapableChild[] = lanes.map(([name, lane]) => {
+      const alreadySignaled = lane.handoffRequested;
+      lane.handoffRequested = true; // record intent regardless of who ends up sending the SIGTERM
+      return {
+        name,
+        alreadySignaled,
+        isAlive: () => this.pidGroupAlive(lane.child.pid),
+        signal: (sig: NodeJS.Signals) => this.killGroup(lane.child, sig),
+      };
+    });
     return reapChildren(children, {
       ...(opts.graceMs !== undefined ? { graceMs: opts.graceMs } : {}),
       ...(this.deps.sleep !== undefined ? { sleep: this.deps.sleep } : {}),
@@ -3915,6 +3922,13 @@ function sleep(ms: number): Promise<void> {
 export interface ReapableChild {
   /** Lane name, for logging/outcome-reporting only — never used to look anything up. */
   name: string;
+  /** True when this child already received its graceful SIGTERM from an earlier, independent
+   *  caller (e.g. a ceiling/kill-switch drain already in progress) — reapChildren then skips
+   *  ITS OWN initial SIGTERM for this child and goes straight to waiting out the grace window
+   *  (then escalating like any other child), so a lane never receives two SIGTERMs across one
+   *  reap. Omitted/false -> reapChildren sends the one and only SIGTERM itself, today's
+   *  behavior for a lane no one has signaled yet. */
+  alreadySignaled?: boolean;
   /** True while the process group is presumed alive. Never throws. */
   isAlive: () => boolean;
   /** Send `sig` to the whole process group. Never throws. */
@@ -3948,7 +3962,9 @@ const REAP_VERIFY_TIMEOUT_MS = 500; // generous vs. a real SIGKILL's near-instan
  *  wall-clock time (this repo's no-timing-dependent-assertions doctrine — a seam, not a bigger
  *  margin). A child already dead when this is called is never signaled at all (AC5: reap must
  *  not manufacture work against a leg that already exited on its own, e.g. via a completed
- *  graceful handoff). */
+ *  graceful handoff), and a child flagged `alreadySignaled` skips this SIGTERM specifically —
+ *  it already got its one SIGTERM from whoever set that flag — so no live child is ever
+ *  SIGTERM'd twice by one reap (gate② finding, 2026-08-05). */
 export async function reapChildren(
   children: ReapableChild[],
   opts: { graceMs?: number; sleep?: (ms: number) => Promise<void>; log?: (message: string) => void } = {},
@@ -3976,7 +3992,9 @@ export async function reapChildren(
     return pending; // whatever is still alive once the bound is hit
   };
 
-  for (const c of live) c.signal("SIGTERM");
+  for (const c of live) {
+    if (!c.alreadySignaled) c.signal("SIGTERM");
+  }
   const survivors = await pollUntilDeadOrTimeout(live, graceMs);
   for (const c of survivors) c.signal("SIGKILL");
   await pollUntilDeadOrTimeout(survivors, REAP_VERIFY_TIMEOUT_MS);

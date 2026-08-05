@@ -1177,6 +1177,89 @@ test("sapwood run (#668, default/rounds driver): reap ALSO runs when the run pat
   }
 });
 
+// ── #668 gate② finding [0] (2026-08-05): reapAll()'s own outcome must never be silently
+// discarded — an unconfirmed death (confirmedDead: false, the orphan-process-group case AC4
+// forbids) has to flip an otherwise-clean run's exit code, not vanish into a log line while the
+// run reports success. A REAL unconfirmed death can't be manufactured with an actual subprocess
+// (nothing in userspace outruns SIGKILL) — reapChildren's own "never dies" fake-child test
+// already proves reapAll CAN return that outcome; these tests prove cli.ts's OWN handling of it
+// by stubbing WorkerSupervisor.prototype.reapAll to return a fixed outcome array directly. ──────
+const stubReapAllReturning = (
+  outcomes: readonly { name: string; alreadyDead: boolean; escalated: boolean; confirmedDead: boolean }[],
+): (() => void) => {
+  const original = WorkerSupervisor.prototype.reapAll;
+  WorkerSupervisor.prototype.reapAll = async () => [...outcomes];
+  return () => {
+    WorkerSupervisor.prototype.reapAll = original;
+  };
+};
+
+test("sapwood run (#668 gate② finding [0], tick driver): an unconfirmed orphan flips an otherwise-clean run's exit code to 1 — never silently discarded", async () => {
+  const restore = stubReapAllReturning([{ name: "lane-orphan", alreadyDead: false, escalated: true, confirmedDead: false }]);
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge: new FakeForge(),
+      state: new State(":memory:"),
+      logger: silentLogger,
+    });
+    assert.equal(code, 1, "an unconfirmed orphan must force a failed exit code even though the tick itself succeeded");
+  } finally {
+    restore();
+  }
+});
+
+test("sapwood run (#668 gate② finding [0], tick driver): reverse — every outcome confirmedDead:true leaves the exit code exactly as runExitCode would have computed it (no false failure)", async () => {
+  const restore = stubReapAllReturning([{ name: "lane-ok", alreadyDead: false, escalated: false, confirmedDead: true }]);
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge: new FakeForge(),
+      state: new State(":memory:"),
+      logger: silentLogger,
+    });
+    assert.equal(code, 0, "a fully-confirmed reap must not itself fail an otherwise-clean run");
+  } finally {
+    restore();
+  }
+});
+
+test("sapwood run (#668 gate② finding [0], default/rounds driver): an unconfirmed orphan flips an otherwise-clean run's exit code to 1 — never silently discarded", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-reap-orphan-rounds-"));
+  const restore = stubReapAllReturning([{ name: "lane-orphan", alreadyDead: false, escalated: true, confirmedDead: false }]);
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    let stop = (): void => {};
+    const code = await runEngine(["node", "sapwood", "run"], {
+      cfg: mkCfg({ roles: { retro: { enabled: false } }, round: { standby: { enabled: false } } }),
+      forge: new FakeForge(),
+      state: new State(":memory:"),
+      logger: silentLogger,
+      roleRunnerDeps: {
+        stateDir: dir,
+        worktreeRoot: join(dir, "worktrees"),
+        claudeBin: bin,
+        heartbeatMs: 50,
+        guardHookPath: mkHook(dir),
+        preSpawnCaptureTimeoutMs: 150,
+        preSpawnCapturePollMs: 10,
+      },
+      sleep: async () => {},
+      registerSignals: (requestStop) => {
+        stop = requestStop;
+        return () => {};
+      },
+      onRoundPhase: (_roundId, phase: PeripheralPhase) => {
+        if (phase === "aligning") stop();
+      },
+    });
+    assert.equal(code, 1, "an unconfirmed orphan must force a failed exit code even though the round itself completed");
+  } finally {
+    restore();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #382 (F9): single-instance lock on the data dir, wired through runEngine — acquired before
 // any board/forge access, released on the normal exit path. Pid liveness is either scripted
 // (EngineOverrides.pidLiveness) or process.pid's own definitional liveness — never a real

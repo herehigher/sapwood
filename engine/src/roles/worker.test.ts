@@ -4430,7 +4430,7 @@ function alive(pid: number): boolean {
 // ─────────────────────────────────────────────────────────────────────────────
 function fakeChild(
   name: string,
-  opts: { diesOn?: NodeJS.Signals | "never"; startDead?: boolean } = {},
+  opts: { diesOn?: NodeJS.Signals | "never"; startDead?: boolean; alreadySignaled?: boolean } = {},
 ): ReapableChild & { signals: NodeJS.Signals[] } {
   const diesOn = opts.diesOn ?? "SIGTERM";
   let dead = opts.startDead ?? false;
@@ -4438,6 +4438,7 @@ function fakeChild(
   return {
     name,
     signals,
+    ...(opts.alreadySignaled !== undefined ? { alreadySignaled: opts.alreadySignaled } : {}),
     isAlive: () => !dead,
     signal: (sig) => {
       signals.push(sig);
@@ -4514,6 +4515,21 @@ test("reapChildren (#668): opts.graceMs is the ACTUAL bound the grace-phase poll
   );
 });
 
+test("reapChildren (#668 gate② finding [1]): a child flagged alreadySignaled never receives reapChildren's own initial SIGTERM — it already got its one SIGTERM from whoever set the flag", async () => {
+  const c = fakeChild("lane-mid-drain", { diesOn: "SIGKILL", alreadySignaled: true });
+  const outcomes = await reapChildren([c], { sleep: INSTANT_SLEEP });
+  assert.deepEqual(c.signals, ["SIGKILL"], "no SIGTERM at all from this call — only the escalation SIGKILL");
+  assert.deepEqual(outcomes, [{ name: "lane-mid-drain", alreadyDead: false, escalated: true, confirmedDead: true } satisfies ReapOutcome]);
+});
+
+test("reapChildren (#668 gate② finding [1]): a mixed batch — a fresh lane gets exactly ONE SIGTERM from this call, an already-signaled lane gets ZERO — never a double SIGTERM into either", async () => {
+  const fresh = fakeChild("lane-fresh", { diesOn: "SIGKILL" }); // never asked before -> reapChildren sends its one SIGTERM
+  const midDrain = fakeChild("lane-mid-drain", { diesOn: "SIGKILL", alreadySignaled: true }); // an earlier drain already sent SIGTERM
+  await reapChildren([fresh, midDrain], { sleep: INSTANT_SLEEP });
+  assert.deepEqual(fresh.signals, ["SIGTERM", "SIGKILL"], "the never-before-signaled lane gets exactly one SIGTERM, then escalates");
+  assert.deepEqual(midDrain.signals, ["SIGKILL"], "the already-signaled lane gets NO SIGTERM from this call — only escalation");
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // #668: WorkerSupervisor.reapAll() — the production adapter over reapChildren, against REAL
 // short-lived stub subprocesses (same convention as every other kill-path test in this file:
@@ -4576,7 +4592,12 @@ test("WorkerSupervisor.reapAll (#668): a lane that IGNORES SIGTERM is escalated 
   }
 });
 
-test("WorkerSupervisor.reapAll (#668): a lane ALREADY mid-drain (requestHandoff already sent by the existing ceiling/kill-switch path) is not double-SIGTERM'd, but reapAll still finishes the job — composes with, doesn't duplicate, the existing drain", async () => {
+test("WorkerSupervisor.reapAll (#668 gate② finding [1]): a lane ALREADY mid-drain (requestHandoff already sent by the existing ceiling/kill-switch path) is not double-SIGTERM'd, but reapAll still finishes the job — composes with, doesn't duplicate, the existing drain", async () => {
+  // The EXACT signal count (never two SIGTERMs into one lane) is proven deterministically above
+  // via reapChildren's own alreadySignaled fake-child tests — a real subprocess can't cheaply
+  // observe "how many SIGTERMs actually arrived" without patching the process-wide
+  // `process.kill`, which is too fragile against this suite's own heavy concurrent real-child
+  // usage. This test proves the REAL adapter still reaches the same end state end-to-end.
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
   try {
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> can ONLY die via reapAll's own SIGKILL
