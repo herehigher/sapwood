@@ -5,7 +5,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema } from "../config/config.js";
 import type { PRComment } from "../forge/forge.js";
-import { checkBodyDrift, checkCommentCursorFreshness, commentCursorIsStale, escalateCommentCursorStale } from "./comment-cursor-gate.js";
+import {
+  checkBodyDrift,
+  checkCommentCursorFreshness,
+  checkCommentCursorFreshnessWithComments,
+  commentCursorIsStale,
+  escalateCommentCursorStale,
+} from "./comment-cursor-gate.js";
 
 const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
 
@@ -68,6 +74,29 @@ test("checkCommentCursorFreshness: a forge read failure propagates (never caught
     getAuthenticatedActor: async () => "sapwood-bot",
   };
   await assert.rejects(() => checkCommentCursorFreshness(forge, 9, "body"), /network blip/);
+});
+
+// ── #665: checkCommentCursorFreshnessWithComments — the SAME fetch, comments also exposed ───────
+
+test("checkCommentCursorFreshnessWithComments: returns the same cursor result as checkCommentCursorFreshness, PLUS the raw comment stream it fetched — one getIssueComments call, not two", async () => {
+  let fetchCount = 0;
+  const raw = [comment("1", "owner-human", "a binding ruling")];
+  const forge = {
+    getIssueComments: async () => {
+      fetchCount++;
+      return raw;
+    },
+    getAuthenticatedActor: async () => "sapwood-bot",
+  };
+  const body = "<!-- sapwood:comments-adjudicated-through: 1 -->";
+  const { result, comments } = await checkCommentCursorFreshnessWithComments(forge, 9, body);
+  assert.deepEqual(result, { ok: true, cursor: "1", pending: [] });
+  assert.deepEqual(
+    comments,
+    raw,
+    "the exact PRComment objects (id, login, body) the forge returned — not just the pure id/isEngine projection",
+  );
+  assert.equal(fetchCount, 1);
 });
 
 // ── #652 round 1 (finding 1/2): checkBodyDrift — the standalone hash compare ────────────────────

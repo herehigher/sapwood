@@ -38,13 +38,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { SapwoodConfig } from "../config/config.js";
-import type { IForge, Issue } from "../forge/forge.js";
+import type { IForge, Issue, PRComment } from "../forge/forge.js";
 import { extractAcceptanceCriteria, extractVerificationPlan, extractVerificationSection } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 import type { PeripheralStub } from "../loop/round.js";
 import {
   checkBodyDrift,
-  checkCommentCursorFreshness,
+  checkCommentCursorFreshnessWithComments,
   commentCursorIsStale,
   escalateCommentCursorStale,
 } from "../review/comment-cursor-gate.js";
@@ -151,6 +151,34 @@ export function renderRolePrompt(template: string, issue: Issue, cfg: SapwoodCon
         `${[...Object.keys(ISSUE_VARS), ...Object.keys(cvars), ...Object.keys(extra)].join(", ")}`,
     );
   });
+}
+
+// #665: comment-digest caps for the rendered reviewer/confirm prompt — bounds prompt size
+// against a runaway comment thread, same rationale as comment-cursor.ts's own
+// POINTER_COMMENT_ID_CAP. ponytail: flat literal caps, widen (or make configurable) if a real
+// repo's thread ever needs more than this to be actionable.
+const COMMENT_DIGEST_COUNT_CAP = 30;
+const COMMENT_DIGEST_BODY_CHAR_CAP = 4000;
+
+/** #665: render the comment stream `checkGate0CommentCursor`'s pre-spend fetch already paid for
+ *  into prompt text — author, id, body, oldest-first (the same stream order GitHub returns and
+ *  comment-cursor.ts reasons about) — so the #653 comment-contradiction veto duty judges evidence
+ *  it actually received, mechanically, instead of prose conditioned on a tool call nothing
+ *  dispatches (the #665 root cause). Zero new forge reads: this is a pure render of comments the
+ *  pre-spend checkpoint already fetched. Each body is capped, and the list itself is capped, so a
+ *  runaway thread cannot blow out prompt size — an overflow past the count cap is named, never
+ *  silently dropped. An empty stream renders a plain sentence, never an empty tag pair a reviewer
+ *  might mistake for a rendering defect. */
+export function renderCommentDigest(comments: readonly PRComment[]): string {
+  if (comments.length === 0) return "(no comments on this issue)";
+  const shown = comments.slice(0, COMMENT_DIGEST_COUNT_CAP);
+  const overflow = comments.length - shown.length;
+  const entries = shown.map((c) => {
+    const body = c.body.length > COMMENT_DIGEST_BODY_CHAR_CAP ? `${c.body.slice(0, COMMENT_DIGEST_BODY_CHAR_CAP)}\n… [truncated]` : c.body;
+    return `### Comment ${c.id ?? "(no id)"} — @${c.login} (${c.createdAt})\n\n${body}`;
+  });
+  const overflowNote = overflow > 0 ? `\n\n… (${overflow} more comment(s) not shown, oldest ${shown.length} shown)` : "";
+  return `${entries.join("\n\n")}${overflowNote}`;
 }
 
 // ── #110 PR1: structured-output schemas + validators ────────────────────────────────────────
@@ -446,8 +474,17 @@ function approvedThisRound(state: State, roundId: number, issueNumber: number): 
  *  On either failure, applies the shared needs-human degrade (label + deduplicated pointer
  *  comment, #652 round 1 finding 3: now CONTAINED — see escalateCommentCursorStale's own doc) and
  *  records the durable event UNCONDITIONALLY, with the label/post outcome in its payload; returns
- *  `true`, meaning the caller must stop (refuse to spend / discard the decision without applying
- *  it). Returns `false` when it's safe to proceed. */
+ *  `blocked: true`, meaning the caller must stop (refuse to spend / discard the decision without
+ *  applying it). Returns `blocked: false` when it's safe to proceed.
+ *
+ *  #665: also returns `comments` — the raw comment stream this call's OWN
+ *  `checkCommentCursorFreshnessWithComments` fetch already paid for (empty when the drift check
+ *  short-circuited that fetch entirely, or when the freshness check reported stale — neither
+ *  reviewOneIssue's nor confirmOneIssue's pre-spend call site reads `comments` on a blocked
+ *  return, since the caller stops before ever rendering a prompt). The pre-spend checkpoint is
+ *  the ONLY call site that threads `comments` onward, into `renderCommentDigest` for the
+ *  reviewer/confirm prompt render — the other three checkpoints (pre-apply, pre-drafter-write,
+ *  post-confirm) run after a prompt was already rendered and never need it. */
 async function checkGate0CommentCursor(
   deps: PlanReviewDeps,
   issue: Issue,
@@ -455,14 +492,16 @@ async function checkGate0CommentCursor(
   checkpoint: "gate0-pre-spend" | "gate0-pre-apply" | "gate0-pre-drafter-write" | "gate0-post-confirm",
   liveBody: string,
   sessionRenderedBody?: string,
-): Promise<boolean> {
+): Promise<{ blocked: boolean; comments: readonly PRComment[] }> {
   const drift = sessionRenderedBody !== undefined ? checkBodyDrift(liveBody, sessionRenderedBody) : null;
   // Drift is checked FIRST and short-circuits the comment-stream fetch entirely when it fires —
   // a pure string compare against a body already in hand, cheaper than (and unrelated to) the
   // comment-freshness read, and there is nothing further worth checking once the input a session
   // judged is already known to be stale.
-  const result = drift ?? (await checkCommentCursorFreshness(deps.forge, issue.number, liveBody));
-  if (drift == null && !commentCursorIsStale(result)) return false;
+  const fetched = drift == null ? await checkCommentCursorFreshnessWithComments(deps.forge, issue.number, liveBody) : null;
+  const result = drift ?? fetched!.result;
+  const comments = fetched?.comments ?? [];
+  if (drift == null && !commentCursorIsStale(result)) return { blocked: false, comments };
   const { labeled, posted, labelError, postError } = await escalateCommentCursorStale(deps.forge, deps.cfg, issue.number, result);
   try {
     deps.state.appendEvent("comment-cursor-stale", {
@@ -478,7 +517,7 @@ async function checkGate0CommentCursor(
   } catch {
     /* contained — the forge escalation (label + pointer comment) already landed */
   }
-  return true;
+  return { blocked: true, comments };
 }
 
 /** #374 review (Codex sol-high verify-pass finding 1, P1 — fixes a recovery canary starvation):
@@ -579,10 +618,16 @@ async function reviewOneIssue(
       // #652 round 1 (finding 1): `currentBody` above IS this checkpoint's live read — passed
       // straight through, never re-fetched, so the exact text validated here is the exact text
       // `currentIssue`/the reviewer prompt render below.
-      if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-spend", currentBody)) return false;
+      const cursorCheck = await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-spend", currentBody);
+      if (cursorCheck.blocked) return false;
       sessionInputBody = currentBody;
 
-      const reviewerPrompt = renderRolePrompt(reviewerTemplate, currentIssue, deps.cfg);
+      // #665: the already-fetched comment stream (author, id, body) rendered straight into the
+      // prompt — see renderCommentDigest's own doc for why this is a zero-new-fetch substitution.
+      const reviewerPrompt = renderRolePrompt(reviewerTemplate, currentIssue, deps.cfg, {
+        "comments.digest": renderCommentDigest(cursorCheck.comments),
+        "comments.digestCap": String(COMMENT_DIGEST_COUNT_CAP),
+      });
       const reviewerRole = deps.cfg.roles.verificationPlanReviewer;
 
       const reviewResult = await runSessionWithRetry({
@@ -659,7 +704,7 @@ async function reviewOneIssue(
     // a direct body edit landing DURING the session, the same drift class the AC-snapshot
     // mechanism catches for dispatch/drive.
     const liveBodyPreApply = await deps.forge.getIssueBody(issue.number);
-    if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-apply", liveBodyPreApply, sessionInputBody)) return false;
+    if ((await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-apply", liveBodyPreApply, sessionInputBody)).blocked) return false;
 
     if (decision.decision === "approve") {
       if (decision.body !== undefined) await deps.forge.updateIssueBody(issue.number, decision.body);
@@ -820,7 +865,7 @@ async function reviewOneIssue(
     // `{{issue.body}}`/`{{reviewer.brief}}` substitution) was rendered from this cycle,
     // regardless of whether this cycle's decision came from a real reviewer session or a seed.
     const liveBodyPreDrafterWrite = await deps.forge.getIssueBody(issue.number);
-    if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-drafter-write", liveBodyPreDrafterWrite, currentBody)) {
+    if ((await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-drafter-write", liveBodyPreDrafterWrite, currentBody)).blocked) {
       return false;
     }
     await deps.forge.updateIssueBody(issue.number, draftValidated.body);
@@ -925,10 +970,15 @@ async function confirmOneIssue(
   // #652 round 1 (finding 1): `currentBody` above (line ~797) IS this checkpoint's live read —
   // passed straight through, never re-fetched (the same "fetch once, validate, then render" fix
   // as reviewOneIssue's own pre-spend call).
-  if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-spend", currentBody)) return false;
+  const cursorCheck = await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-spend", currentBody);
+  if (cursorCheck.blocked) return false;
 
   const currentIssue: Issue = { ...issue, body: currentBody };
-  const confirmPrompt = renderRolePrompt(confirmTemplate, currentIssue, deps.cfg);
+  // #665: same zero-new-fetch substitution as reviewOneIssue's own pre-spend checkpoint above.
+  const confirmPrompt = renderRolePrompt(confirmTemplate, currentIssue, deps.cfg, {
+    "comments.digest": renderCommentDigest(cursorCheck.comments),
+    "comments.digestCap": String(COMMENT_DIGEST_COUNT_CAP),
+  });
   // The confirm pass shares the verification-plan-reviewer's own role config (model/effort/fallback) — #214
   // only introduces a distinct PROMPT (roles.verificationPlanReviewer.confirmPromptFile), not a distinct role.
   const reviewerRole = deps.cfg.roles.verificationPlanReviewer;
@@ -1001,7 +1051,7 @@ async function confirmOneIssue(
     // (the label/comment machinery already contains its own failure handling) rather than silently
     // letting the approval stand.
     const liveBodyPostConfirm = await deps.forge.getIssueBody(issue.number);
-    if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-post-confirm", liveBodyPostConfirm, currentBody)) {
+    if ((await checkGate0CommentCursor(deps, issue, roundId, "gate0-post-confirm", liveBodyPostConfirm, currentBody)).blocked) {
       return false;
     }
     return false; // zero forge writes — the plan still holds, nothing to do

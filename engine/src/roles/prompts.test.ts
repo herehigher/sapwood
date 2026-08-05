@@ -140,7 +140,14 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #653: adds the comment-contradiction veto duty (gate⓪ judgment roles hold issue-comment read
   // tools but no prompt previously assigned them the duty to check comments against the body for
   // CONTRADICTION — #652 makes staleness deterministic; this is the judgment-side backstop).
-  "verification-plan-reviewer.md": "0b94746cab34ff3b2c696b2945d13f31d7566585829a4f9733ceec579195067a",
+  // #665: the #653 duty was inert — a live probe (evidence on #653) showed the reviewer session
+  // never called `issue_comments`, so the duty judged evidence it never received. Adds an
+  // `<issue-comments>{{comments.digest}}</issue-comments>` block (the SAME comment fetch the #652
+  // cursor checkpoint already performs, threaded through — zero new forge reads) so the stream is
+  // MECHANICALLY present rather than conditioned on a tool call. The veto-duty bullet now points
+  // at it and states the digest's cap honestly (an omission is an unknown, never a clean bill of
+  // health) — no positive-completeness claim introduced.
+  "verification-plan-reviewer.md": "f0a38b33caf4b9f058563a931f04747dae960992d6886449d9e16c8c50668028",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
   // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
@@ -156,7 +163,10 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // a third standing check alongside the existing human-merge-only-path and F36 execution-class
   // checks — the confirm pass holds the same comment access and zero-write-on-confirm shape, so
   // leaving it out would create an inconsistent re-endorsement path.
-  "verification-plan-reviewer-confirm.md": "e67ff2b5f9df653a26afaa2a6e19ee746f06217004fa7dc7cdae1eb1208573d6",
+  // #665: same fix as verification-plan-reviewer.md above — the confirm pass's own pre-spend
+  // checkpoint fetch is threaded into an `<issue-comments>` block instead of being discarded once
+  // staleness is decided, and the standing check points at it with the same honest cap wording.
+  "verification-plan-reviewer-confirm.md": "3cde03029cc6dd6d61c3a3880b1cfb7f63931ebcbb3669f14420e16589102a64",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — the
   // drafter's brief is still its primary instruction set; the forge grant (never removed) is a
   // read-only aid, never a write path, exactly as this file has always said.
