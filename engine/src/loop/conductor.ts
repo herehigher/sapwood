@@ -3734,6 +3734,37 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       }
       // RECLAIM: back to `driving`, same worker/PR — the DRIVE loop below picks it up this tick.
       //
+      // #676: re-baseline this lane's AC snapshot against the CURRENT live body, when it has one
+      // (`w.ac_body_hash` non-null — a pre-#283 legacy lane has nothing to re-baseline). Reaching
+      // this branch already proves a human/supervisor cleared the escalation hold since whatever
+      // put this lane here (`decision` above is not SKIP) — docs/supervision.md's owner ruling
+      // that an LLM supervisor session's `park clear`-equivalent interventions ARE the trusted-
+      // operator adjudication. Without this, the very next `checkAcDriftBeforeDrive` call would
+      // compare the (now-current) live body against the STALE dispatch-time snapshot, drift
+      // again, and re-escalate immediately — the #676 dead-end loop (clearing needs-human is not
+      // itself a re-baseline; only this reclaim path is). A lane whose escalation was NOT
+      // AC-drift (e.g. a fix-rounds cap) re-snapshots harmlessly to the same, unchanged body.
+      // Fail-closed preserved: a lane that was never labeled/escalated never reaches
+      // `gatedFailedWorkers()` in the first place, so drift without a prior adjudication still
+      // blocks exactly as before. `getIssueBody` is deliberately unguarded here, matching every
+      // other forge read in this loop (`getPRLabels`/`getIssueLabels`/`getPRStatus`/
+      // `getIssueMeta`) — a transient failure throws the tick, retried whole next tick, rather
+      // than reclaiming against a body we couldn't actually confirm. Ownership preserved too
+      // (#301 P1#3's own edge case): only re-baseline when the CURRENTLY stored ac_snapshots row
+      // for this issue still belongs to THIS lane (`bodyHash === w.ac_body_hash`) — a later,
+      // different dispatch that has since overwritten it is left alone, so the very next
+      // `checkAcDriftBeforeDrive` call still reports the ownership-mismatch it already knows how
+      // to produce, rather than this lane silently adopting a stranger dispatch's identity.
+      let acBodyHash = w.ac_body_hash ?? null;
+      if (acBodyHash != null) {
+        const ownedSnapshot = state.getAcSnapshot(w.issue);
+        if (ownedSnapshot && ownedSnapshot.bodyHash === acBodyHash) {
+          const liveBody = await forge.getIssueBody(w.issue);
+          const freshSnapshot = buildAcSnapshot(w.issue, liveBody, iso());
+          state.recordAcSnapshot(freshSnapshot);
+          acBodyHash = freshSnapshot.bodyHash;
+        }
+      }
       // #426 review round 2 (P2): ONE transaction (`upsertWorkerWithEvent`, the #447 shape), not
       // an upsert followed by an append. The `gated-reentry` event is an EPISODE-RESET BOUNDARY
       // for four separate readers now (DRIVE_QUEUED / FIX_LEG_DISPATCH_BLOCKED /
@@ -3751,6 +3782,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           review_triggered_head: null,
           review_triggered_at: null,
           gated_reentry_attempts: attempt,
+          ac_body_hash: acBodyHash,
         },
         "gated-reentry",
         { worker: w.name, issue: w.issue, pr, attempt },

@@ -926,6 +926,128 @@ test("tick DRIVE: AC-snapshot drift routes to needs-human with a drift-explainin
   st.close();
 });
 
+test("#676: GATED RECLAIM re-baselines the AC snapshot on supervisor clear — drift, label, clear, reentry drives normally with no re-escalation", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const originalBody = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: originalBody }];
+  forge.issueBodies[7] = originalBody;
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const workerName = (firstTick.dispatched.find((d) => d.kind === "dispatched") as { worker: string }).worker;
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
+  // #652 cursor-ritual fold: the body changes (e.g. folding a ruling + advancing the cursor
+  // marker) while the worker's PR is being driven.
+  const foldedBody = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests\n\n<!-- ruling folded -->";
+  forge.issueBodies[7] = foldedBody;
+  // The fake doesn't label-filter Ready itself (see the sibling #652 tests' own comment) — clear
+  // it so later ticks don't ALSO try to freshly dispatch the same issue number all over again.
+  forge.ready = [];
+  const gate = new FakeMergeGate();
+  const driftTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.ok(
+    driftTick.driven.some((d) => d.kind === "needs-human" && d.issue === 7 && d.reason.startsWith("ac-snapshot-drift")),
+    "drift is detected and escalated exactly as before",
+  );
+  assert.equal(st.getWorker(workerName)?.state, "failed");
+  assert.equal(gate.calls.length, 0);
+  // The supervisor verifies the fold is additive/benign and clears needs-human — the trusted-
+  // operator adjudication (docs/supervision.md governance).
+  forge.issueLabelsByIssue[7] = [];
+  const reentryTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(
+    reentryTick.gatedReclaimed,
+    [{ kind: "reclaimed", worker: workerName, issue: 7, pr: 99, attempt: 1 }],
+    "the reclaim happens",
+  );
+  // The re-baseline: THIS SAME tick's DRIVE phase must see the freshly-snapshotted body as
+  // current, not drift against the stale dispatch-time snapshot again.
+  assert.equal(gate.calls.length, 1, "driveOne IS called this tick — no second identical escalation");
+  assert.equal(st.getWorker(workerName)?.state, "driving");
+  assert.equal(
+    forge.labelsAdded.filter(([n, l]) => n === 7 && l === "needs-human").length,
+    1,
+    "needs-human was applied exactly once — the reentry never re-escalates the same drift",
+  );
+  assert.equal(st.getAcSnapshot(7)?.body, foldedBody, "the AC snapshot now reflects the folded body");
+  st.close();
+});
+
+test("#676: drift without a prior label write still blocks — GATED RECLAIM never reconsiders an unlabeled escalation", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const originalBody = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: originalBody }];
+  forge.issueBodies[7] = originalBody;
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const workerName = (firstTick.dispatched.find((d) => d.kind === "dispatched") as { worker: string }).worker;
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
+  forge.issueBodies[7] = "## Acceptance criteria\n\n- [ ] one EDITED\n\n## Verification plan\nrun tests";
+  // The needs-human label WRITE itself fails — gated_escalation_labeled stays 0, the existing
+  // fail-closed contract (gatedFailedWorkers() requires it to be 1).
+  forge.addLabel = async () => {
+    throw new Error("permissions blip");
+  };
+  forge.ready = [];
+  const gate = new FakeMergeGate();
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker(workerName)?.gated_escalation_labeled, 0);
+  // Even though nothing carries needs-human on GitHub (the write failed), GATED RECLAIM must
+  // never pick this row up — no adjudication ever actually landed.
+  const reentryTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(reentryTick.gatedReclaimed, []);
+  assert.equal(st.getWorker(workerName)?.state, "failed", "stays failed — permanently manual, per #301's own accepted stance");
+  assert.equal(gate.calls.length, 0);
+  st.close();
+});
+
+test("#676 regression: synthetic replay of the #662 sequence (cursor fold -> drift -> adjudicated clear) reaches automation resume with no second identical human adjudication", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const originalBody = "## Acceptance criteria\n\n- [ ] record the ruling on this issue\n\n## Verification plan\nrun tests";
+  forge.ready = [{ number: 662, title: "", labels: ["prio:3-feature"], body: originalBody }];
+  forge.issueBodies[662] = originalBody;
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const workerName = (firstTick.dispatched.find((d) => d.kind === "dispatched") as { worker: string }).worker;
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 675 };
+  // The #652 comment-cursor recovery ritual: fold the ruling + advance the cursor marker.
+  const ritualFoldedBody =
+    "## Acceptance criteria\n\n- [ ] record the ruling on this issue\n\n## Verification plan\nrun tests\n\n" +
+    "## RULING (adjudicated)\n\nOption B.\n\n<!-- sapwood:comments-adjudicated-through: 0 -->";
+  forge.issueBodies[662] = ritualFoldedBody;
+  forge.ready = [];
+  const gate = new FakeMergeGate();
+  const driftTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.ok(driftTick.driven.some((d) => d.kind === "needs-human" && d.issue === 662));
+  // Supervisor verifies the fold is additive (AC checklist byte-identical) and clears the label —
+  // ONE human adjudication.
+  forge.issueLabelsByIssue[662] = [];
+  const resumeTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker(workerName)?.state, "driving", "automation resumed — no dead end");
+  assert.equal(gate.calls.length, 1);
+  // Attempt 2 (the reported dead-end shape): had the pre-#676 bug still been present, this
+  // second drive tick would immediately re-drift against the STALE snapshot and re-escalate,
+  // demanding a SECOND identical human adjudication for the SAME fold. It must not.
+  const secondDriveTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(
+    secondDriveTick.driven.filter((d) => d.kind === "needs-human" && d.issue === 662).length,
+    0,
+    "no second identical escalation for the same already-adjudicated fold",
+  );
+  assert.equal(
+    forge.labelsAdded.filter(([n, l]) => n === 662 && l === "needs-human").length,
+    1,
+    "needs-human applied exactly once across the whole replay",
+  );
+  assert.equal(
+    resumeTick.gatedReclaimed.some((r) => r.kind === "reclaimed" && r.issue === 662),
+    true,
+  );
+  st.close();
+});
+
 test("tick DRIVE (#652 AC8, reverse test): a driving lane with ZERO comments and no cursor marker reaches gate.driveOne exactly as pre-#652 — no needs-human, no queued outcome", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
