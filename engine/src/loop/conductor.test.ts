@@ -1137,6 +1137,172 @@ test('#676 gate② finding [1] round 2 ("rebaseline-version-unbound"): a THIRD e
   st.close();
 });
 
+// ── #685 gate② finding [1] round 3 ("null-pin-anything"): round 2's fix above only closed the
+//    TOCTOU for the NON-null candidate (`checkAcDriftBeforeDrive`'s own escalation). The NULL
+//    candidate — `checkCommentCursorBeforeDrive`'s comment-cursor-stale escalation, which never
+//    pins anything at escalation time (its remediation IS the human's own post-escalation body
+//    edit) — was left trusting whatever body happened to be live at reclaim time outright. These
+//    three tests exercise GATED RECLAIM's fix directly (constructing the `failed`+eligible+
+//    null-candidate row by hand, mirroring the "unscoped-rebaseline" test above), rather than
+//    threading a full `checkCommentCursorBeforeDrive` escalation, so the reclaim-tick mechanics
+//    are isolated from the (already-covered) escalation-site behavior. ──
+
+test('#685 gate② finding [1] round 3 ("null-pin-anything"): a null-candidate reclaim STAGES the live body on its first post-clear observation rather than reclaiming on it outright — a THIRD edit landing before the confirming tick is never silently adopted, re-escalates instead, and the AC snapshot is never advanced past its pre-escalation version (red-before differential: the pre-#685 null branch drove PAST this exact same setup on the FIRST tick, before the edit even existed)', async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+
+  const v1 = "## Acceptance criteria\n\n- [ ] record the ruling on this issue\n\n## Verification plan\nrun tests";
+  st.recordAcSnapshot({ issue: 21, bodyHash: hashBody(v1), body: v1, manifest: [], snapshottedAt: "t0" });
+  // Mirrors exactly what `checkCommentCursorBeforeDrive` writes on its own escalation: eligible,
+  // but NO candidate pin (a pending comment, not a body edit, triggered it).
+  st.upsertWorker({
+    name: "lane-null",
+    issue: 21,
+    session_id: "s-lane-null",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 200,
+    gated_escalation_labeled: 1,
+    gated_escalation_carrier: "issue",
+    ac_body_hash: hashBody(v1),
+    ac_rebaseline_eligible: 1,
+    ac_rebaseline_candidate_hash: null,
+  });
+  // The #652 remediation ritual: the supervisor folds the ruling into the body...
+  const v2 =
+    "## Acceptance criteria\n\n- [ ] record the ruling on this issue\n\n## Verification plan\nrun tests\n\n" +
+    "## RULING (adjudicated)\n\nOption B.\n\n<!-- sapwood:comments-adjudicated-through: 0 -->";
+  forge.issueBodies[21] = v2;
+  // ...and clears needs-human — ONE human adjudication of v2.
+  forge.issueLabelsByIssue[21] = [];
+
+  // Tick 1: GATED RECLAIM's FIRST observation of the cleared hold. Pre-#685, this alone would
+  // have reclaimed AND driven (freshSnapshot=v2, no drift against itself) in one step. Post-#685,
+  // it only STAGES v2's hash — no state transition, no snapshot, no attempt burned.
+  const stageTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.equal(gate.calls.length, 0, "driveOne must NOT be called on the staging tick — nothing has been reclaimed yet");
+  assert.equal(st.getWorker("lane-null")?.state, "failed", "not yet reclaimed — staging only");
+  assert.equal(st.getWorker("lane-null")?.ac_rebaseline_candidate_hash, hashBody(v2), "v2's hash is now staged as the candidate");
+  assert.equal(st.getAcSnapshot(21)?.body, v1, "the AC snapshot is untouched by a staging-only pass");
+  assert.equal(
+    stageTick.gatedReclaimed.some((r) => r.issue === 21 && r.kind === "reclaimed"),
+    false,
+  );
+
+  // BEFORE the confirming tick runs, a THIRD, unadjudicated edit lands: v2 -> v3.
+  const v3 = v2.replace("Option B.", "Option B. MALICIOUSLY AMENDED.");
+  forge.issueBodies[21] = v3;
+
+  // Tick 2: the confirming observation. v3 disagrees with the staged v2 candidate — refuses the
+  // silent adopt exactly like a disagreeing non-null pin does (round 2's own mechanism): the
+  // reclaim still transitions to `driving` (the label WAS cleared), but with the OLD, untouched
+  // ac_body_hash — so the immediately-following checkAcDriftBeforeDrive re-detects drift (v3
+  // against the still-v1 snapshot) and re-escalates, rather than ever trusting v3.
+  const confirmTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.equal(gate.calls.length, 0, "driveOne is NEVER called on the unreviewed v3");
+  assert.ok(
+    confirmTick.driven.some((d) => d.kind === "needs-human" && d.issue === 21 && d.reason.startsWith("ac-snapshot-drift")),
+    "re-escalated for a fresh human look, never silently driven",
+  );
+  assert.equal(st.getWorker("lane-null")?.state, "failed");
+  assert.equal(st.getAcSnapshot(21)?.body, v1, "never snapshotted to v2 OR v3 — the pre-escalation snapshot is still on file");
+  st.close();
+});
+
+test('#685 gate② finding [1] round 3 ("null-pin-anything"): with NO further edit between the staging and confirming ticks, the legitimate #662-shaped replay (fold -> drift -> clear -> reclaim) still proceeds to automation resume — just one tick later than the non-null path', async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+
+  const v1 = "## Acceptance criteria\n\n- [ ] record the ruling on this issue\n\n## Verification plan\nrun tests";
+  st.recordAcSnapshot({ issue: 22, bodyHash: hashBody(v1), body: v1, manifest: [], snapshottedAt: "t0" });
+  st.upsertWorker({
+    name: "lane-null-2",
+    issue: 22,
+    session_id: "s-lane-null-2",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 201,
+    gated_escalation_labeled: 1,
+    gated_escalation_carrier: "issue",
+    ac_body_hash: hashBody(v1),
+    ac_rebaseline_eligible: 1,
+    ac_rebaseline_candidate_hash: null,
+  });
+  const v2 =
+    "## Acceptance criteria\n\n- [ ] record the ruling on this issue\n\n## Verification plan\nrun tests\n\n" +
+    "## RULING (adjudicated)\n\nOption B.\n\n<!-- sapwood:comments-adjudicated-through: 0 -->";
+  forge.issueBodies[22] = v2;
+  forge.issueLabelsByIssue[22] = [];
+
+  const stageTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.equal(st.getWorker("lane-null-2")?.state, "failed");
+  assert.equal(gate.calls.length, 0);
+  assert.equal(
+    stageTick.gatedReclaimed.some((r) => r.issue === 22 && r.kind === "reclaimed"),
+    false,
+  );
+
+  // Nothing else changes — the SAME v2 the supervisor adjudicated is still live.
+  const confirmTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.equal(st.getWorker("lane-null-2")?.state, "driving", "automation resumed — no dead end");
+  assert.equal(gate.calls.length, 1, "driveOne WAS called — nothing ever disagreed with the staged candidate");
+  assert.equal(
+    confirmTick.gatedReclaimed.some((r) => r.kind === "reclaimed" && r.issue === 22),
+    true,
+  );
+  assert.equal(st.getAcSnapshot(22)?.body, v2, "the fold is now the authoritative snapshot");
+  assert.equal(
+    confirmTick.driven.some((d) => d.kind === "needs-human" && d.issue === 22),
+    false,
+    "no second identical escalation for the same already-adjudicated fold",
+  );
+  st.close();
+});
+
+test('#685 gate② finding [1] round 3 ("null-pin-anything"): a body-fetch failure during the staging observation fails the tick closed — never silently staged, never reclaimed, retried whole next tick', async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+
+  const v1 = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  st.recordAcSnapshot({ issue: 23, bodyHash: hashBody(v1), body: v1, manifest: [], snapshottedAt: "t0" });
+  st.upsertWorker({
+    name: "lane-null-3",
+    issue: 23,
+    session_id: "s-lane-null-3",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 202,
+    gated_escalation_labeled: 1,
+    gated_escalation_carrier: "issue",
+    ac_body_hash: hashBody(v1),
+    ac_rebaseline_eligible: 1,
+    ac_rebaseline_candidate_hash: null,
+  });
+  forge.issueLabelsByIssue[23] = [];
+  forge.getIssueBody = async () => {
+    throw new Error("simulated forge outage");
+  };
+
+  await assert.rejects(() => tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate }), /simulated forge outage/);
+  assert.equal(st.getWorker("lane-null-3")?.state, "failed", "untouched — never terminalized on a transient read failure");
+  assert.equal(st.getWorker("lane-null-3")?.ac_rebaseline_candidate_hash, null, "never partially staged on a failed read");
+  assert.equal(st.getAcSnapshot(23)?.body, v1);
+  assert.equal(gate.calls.length, 0);
+  st.close();
+});
+
 test("tick DRIVE (#652 AC8, reverse test): a driving lane with ZERO comments and no cursor marker reaches gate.driveOne exactly as pre-#652 — no needs-human, no queued outcome", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

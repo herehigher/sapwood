@@ -1421,7 +1421,14 @@ export type GatedReclaimOutcome =
   | { kind: "reclaimed"; worker: string; issue: number; pr: number; attempt: number }
   | { kind: "capped"; worker: string; issue: number; pr: number; attempts: number }
   | { kind: "merged"; worker: string; issue: number; pr: number; attempts: number }
-  | { kind: "issue-closed"; worker: string; issue: number; pr: number; attempts: number };
+  | { kind: "issue-closed"; worker: string; issue: number; pr: number; attempts: number }
+  /** #685 gate② finding [1] round 3 ("null-pin-anything"): the null-candidate (comment-cursor-
+   *  stale) reclaim's FIRST observation of the cleared hold — stages the live body hash it just
+   *  read as the candidate a LATER tick must reconfirm, rather than reclaiming on it outright. No
+   *  attempt burned, no state transition — the row is left exactly `failed` as before, just with
+   *  a pin now recorded for next tick's read to confirm against. See the RECLAIM loop's own doc
+   *  for why one more tick's confirmation is the fix, not a fresh read used twice. */
+  | { kind: "candidate-staged"; worker: string; issue: number; pr: number };
 
 /** #172: one handoff-lane decision that changed durable state this tick. */
 export type ResumeOutcome =
@@ -3135,10 +3142,13 @@ async function checkCommentCursorBeforeDrive(
   // [1] hardening): this escalation's remediation IS a human's own post-escalation body edit (the
   // #652 ritual — fold the ruling, advance the cursor), so the body is EXPECTED to differ from
   // whatever was live when the stale cursor was first observed. Pinning to that pre-fold hash
-  // would refuse the fold forever, defeating #676's original fix for this exact path. See
-  // WorkerRow.ac_rebaseline_candidate_hash's own doc for the accepted, narrower residual this
-  // leaves: an edit landing between this escalation's own remediation and the reclaim tick is
-  // still trusted unconditionally, same as before this hardening round.
+  // would refuse the fold forever, defeating #676's original fix for this exact path.
+  // #685 gate② finding [1] round 3 ("null-pin-anything"): a bare `null` here used to mean "no
+  // candidate check ever applies to this row" — GATED RECLAIM's own reclaim loop now closes that
+  // instead of this escalation site: its FIRST post-clear observation STAGES the live body hash
+  // as the candidate (writing this same column) rather than trusting it outright, and only a
+  // LATER tick's reconfirmation actually reclaims. See the GATED RECLAIM loop's own doc (in
+  // `tick`) for the two-observation mechanics and the narrower residual that staging leaves.
   state.upsertWorker({
     ...w,
     state: "failed",
@@ -3809,29 +3819,75 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // drive on with nobody having adjudicated it). `w.ac_rebaseline_candidate_hash` pins the
       // live body hash `checkAcDriftBeforeDrive` itself observed at the moment it detected the
       // drift — re-baseline only when the live body at THIS reclaim still hashes to that pin. A
-      // `null` pin (comment-cursor-stale's own escalation, or a legacy pre-migration row) means
-      // no pin was ever taken — no candidate check applies there, eligibility+ownership alone
-      // still gate it (see WorkerRow.ac_rebaseline_candidate_hash's own doc for why that path
-      // can't be pinned without defeating its own remediation). A non-null pin that DISAGREES
-      // with the live read refuses the silent adopt: `acBodyHash`/`freshSnapshot` stay untouched,
-      // so this reclaim still transitions to `driving` (the label WAS cleared) but the very next
-      // `checkAcDriftBeforeDrive` call — same tick, DRIVE runs right after this loop — re-detects
-      // the (still-present, now against v3) drift and re-escalates for a FRESH human look at
-      // what's actually live, instead of silently trusting it.
+      // non-null pin that DISAGREES with the live read refuses the silent adopt: `acBodyHash`/
+      // `freshSnapshot` stay untouched, so this reclaim still transitions to `driving` (the label
+      // WAS cleared) but the very next `checkAcDriftBeforeDrive` call — same tick, DRIVE runs
+      // right after this loop — re-detects the (still-present, now against v3) drift and
+      // re-escalates for a FRESH human look at what's actually live, instead of silently
+      // trusting it.
+      //
+      // #685 gate② finding [1] round 3 ("null-pin-anything", Codex-confirmed P1-security): a
+      // `null` pin used to mean "no candidate check applies here — trust whatever's live" for
+      // BOTH of its sources (a legacy pre-migration row, AND `checkCommentCursorBeforeDrive`'s
+      // own comment-cursor-stale escalation, whose remediation IS a human's own post-escalation
+      // body edit — see that function's own doc). That second source is exactly the #676 fix
+      // this round-2 hardening forgot to close: because comment-cursor-stale never pins anything
+      // at escalation time, ANY body live at this reclaim tick — including a FOURTH edit that
+      // landed AFTER the supervisor's clear but BEFORE this tick got around to reading it — was
+      // silently accepted as "the adjudicated body" and driven on, exactly the unreviewed-ACs
+      // hole round 2 closed for the non-null-pin path.
+      //
+      // Fix: bind the null-pin case to the body AS ADJUDICATED AT CLEAR TIME the same way the
+      // non-null case binds to the body as adjudicated at escalation time — by pinning it, not by
+      // trusting a single unverified read. Since nothing was pinned at escalation, the FIRST
+      // reclaim tick to observe the hold cleared stages the live body hash it just read as the
+      // candidate (persisted via `ac_rebaseline_candidate_hash`, reusing the exact same column
+      // and comparison the non-null path already uses) — and STOPS THERE: no state transition, no
+      // attempt burned, no snapshot taken. The row is left exactly as `failed` as it already was.
+      // A LATER tick — the very next time `gatedFailedWorkers()` revisits this row, since it's
+      // still `failed` with the hold still absent — re-reads the live body and compares it
+      // against the now-non-null staged candidate through the SAME `candidateHash === liveHash`
+      // branch below the non-null path already relies on: a match reclaims with a fresh snapshot
+      // (nothing moved between the two observations); a mismatch refuses the silent adopt, same
+      // as a disagreeing non-null pin — `acBodyHash`/`freshSnapshot` stay untouched, this reclaim
+      // still transitions to `driving`, and the immediately-following `checkAcDriftBeforeDrive`
+      // call re-detects the drift against the (untouched) prior snapshot and re-escalates for a
+      // fresh human look, rather than ever adopting the unreviewed edit.
+      //
+      // Accepted residual (stated per #685's own ask, mirroring round 2's own accepted gap): the
+      // staging read itself is a single point-in-time snapshot — an edit landing in the same
+      // instant as THAT read (not a later tick, the read that produces the staged candidate
+      // itself) is indistinguishable from the legitimately-adjudicated body and is trusted at
+      // staging time. This is a race bounded to one observation tick's own read, not the
+      // previously-unbounded "any time before whichever tick happens to run reclaim" window this
+      // closes — the same class of TOCTOU inherent to any point-in-time read, including option
+      // (a)'s timeline-based alternative this round considered and rejected in favor of reusing
+      // the existing candidate-hash machinery (see this PR's own commit message for the
+      // trade-off). `ac_rebaseline_eligible` is deliberately NOT reset on a staging-only pass —
+      // single-use-per-episode still applies, just one tick later, once the candidate is either
+      // consumed (reclaimed) or the reclaim proceeds anyway on a mismatch (both paths below reset
+      // it exactly like before this round).
       let acBodyHash = w.ac_body_hash ?? null;
       let freshSnapshot: ReturnType<typeof buildAcSnapshot> | null = null;
+      let staged = false;
       if (acBodyHash != null && w.ac_rebaseline_eligible === 1) {
         const ownedSnapshot = state.getAcSnapshot(w.issue);
         if (ownedSnapshot && ownedSnapshot.bodyHash === acBodyHash) {
           const liveBody = await forge.getIssueBody(w.issue);
           const liveHash = hashBody(liveBody);
           const candidateHash = w.ac_rebaseline_candidate_hash ?? null;
-          if (candidateHash == null || candidateHash === liveHash) {
+          if (candidateHash == null) {
+            state.upsertWorker({ ...w, ac_rebaseline_candidate_hash: liveHash });
+            state.appendEvent("gated-reentry-candidate-staged", { worker: w.name, issue: w.issue, pr, attempts });
+            gatedReclaimed.push({ kind: "candidate-staged", worker: w.name, issue: w.issue, pr });
+            staged = true;
+          } else if (candidateHash === liveHash) {
             freshSnapshot = buildAcSnapshot(w.issue, liveBody, iso());
             acBodyHash = freshSnapshot.bodyHash;
           }
         }
       }
+      if (staged) continue; // wait for a later tick to confirm the freshly-staged candidate
       // #426 review round 2 (P2): ONE transaction (`upsertWorkerWithEvent`/
       // `recordAcSnapshotAndReclaimWorker`, the #447 shape), not separate writes. The
       // `gated-reentry` event is an EPISODE-RESET BOUNDARY for four separate readers now

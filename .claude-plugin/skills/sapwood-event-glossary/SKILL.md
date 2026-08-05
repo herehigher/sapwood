@@ -125,6 +125,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `gated-reentry-capped-label-failed` — **investigate** [escalation-source:never]: the needs-human re-apply write for a gated-reentry-capped lane failed; `never` a proof (the write's own failure is the point).
 - `gated-reentry-merged` — **routine**: a gated-reentry lane's PR was found already merged; the lane was collected as done rather than reentered.
 - `gated-reentry-issue-closed` — **routine**: a gated-reentry lane's issue was found already closed; the lane was collected as done rather than reentered.
+- `gated-reentry-candidate-staged` — **routine**: a gated-reentry lane whose escalation never pinned a body-hash candidate (comment-cursor-stale) had one staged from the live body on this tick's first observation of the cleared hold; reentry itself waits for a later tick to reconfirm it. (see #685)
 - `fix-leg-started` — **routine** [fix-leg]: a fresh fix leg was dispatched against a PR's outstanding findings/verdict.
 - `fix-leg-resumed` — **routine** [fix-leg]: an in-flight fix leg was resumed by a fresh worker session after a handoff/restart.
 - `fix-leg-adopted` — **routine** [fix-leg]: the engine adopted a fix-leg process it found already running at startup rather than treating it as orphaned.

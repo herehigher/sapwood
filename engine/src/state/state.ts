@@ -963,6 +963,12 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   // (`checkCommentCursorBeforeDrive`'s comment-cursor-stale escalation, whose remediation IS a
   // human's own post-escalation body edit — see that function's own doc for why pinning there
   // would defeat #676's original fix instead of hardening it).
+  //
+  // #685 (gate② finding [1] round 3, "null-pin-anything"): that NULL-for-comment-cursor-stale
+  // case was itself later found to leave a silent-adopt hole GATED RECLAIM's reclaim loop (not a
+  // further schema change — no new migration) now closes by staging a candidate INTO this same
+  // column at reclaim time instead of trusting an unpinned NULL outright. See this column's own
+  // WorkerRow field doc for the current, non-historical picture.
   (db) => {
     db.exec(`ALTER TABLE workers ADD COLUMN ac_rebaseline_candidate_hash TEXT;`);
   },
@@ -1237,17 +1243,28 @@ export interface WorkerRow {
    *  unrelated escalation on the same row). Optional; DB default 0. */
   ac_rebaseline_eligible?: number;
   /** #676 (schema v32->v33, gate② finding [1] round 2, "rebaseline-version-unbound"): the live
-   *  body hash `checkAcDriftBeforeDrive` observed AT THE MOMENT it detected the drift that
-   *  triggered this escalation — the version a human investigating `needs-human` is presumed to
-   *  have actually reviewed. GATED RECLAIM re-baselines only when the live body at reclaim time
-   *  STILL hashes to this value; a further edit (v2 reviewed+cleared, then replaced by v3 before
-   *  the reclaim tick) refuses the silent adopt instead, so the ordinary drift check re-escalates
-   *  against whatever is live now. `null` means either no pin was ever taken (reset on every
-   *  reclaim, same single-use-per-episode lifecycle as `ac_rebaseline_eligible`) or a pin is
-   *  deliberately not the right model for this escalation (`checkCommentCursorBeforeDrive`'s own
-   *  comment-cursor-stale path — see the migration comment for why) — `ac_rebaseline_eligible`
-   *  alone still gates whether ANY re-baseline happens; this column only narrows WHEN one that's
-   *  otherwise eligible is trusted. Optional; DB default NULL. */
+   *  body hash pinned as the version a human investigating `needs-human` is presumed to have
+   *  actually reviewed. GATED RECLAIM re-baselines only when the live body at reclaim time STILL
+   *  hashes to this value; a further edit (reviewed+cleared, then replaced before the reclaim
+   *  tick) refuses the silent adopt instead, so the ordinary drift check re-escalates against
+   *  whatever is live now. `ac_rebaseline_eligible` alone still gates whether ANY re-baseline
+   *  happens; this column only narrows WHEN one that's otherwise eligible is trusted.
+   *
+   *  Two writers, both pinning "the body a human is presumed to have reviewed," just at different
+   *  moments: `checkAcDriftBeforeDrive` pins it AT ESCALATION time (the drift it just detected).
+   *  #685 (gate② finding [1] round 3, "null-pin-anything"): GATED RECLAIM's own reclaim loop
+   *  (conductor.ts) now ALSO writes this column — for a row that reaches reclaim with this still
+   *  NULL (`checkCommentCursorBeforeDrive`'s comment-cursor-stale escalation, whose remediation IS
+   *  a human's own post-escalation body edit, so nothing coherent could be pinned at escalation
+   *  time — see that function's own doc), the reclaim loop's FIRST observation of the cleared hold
+   *  stages the live body hash it just read INTO this column and defers (no state transition, no
+   *  snapshot) rather than trusting that single read outright; only a LATER tick's reconfirmation
+   *  against the now-staged value actually reclaims. A `null` pin is therefore transient for that
+   *  path now — real ONLY for the one tick between the comment-cursor-stale escalation and the
+   *  reclaim loop's own staging write — never a permanent "no check applies" state past that tick.
+   *  Reset to NULL on every reclaim that actually consumes it (match or mismatch alike), same
+   *  single-use-per-episode lifecycle as `ac_rebaseline_eligible`; left untouched on a staging-only
+   *  pass (nothing was consumed yet). Optional; DB default NULL. */
   ac_rebaseline_candidate_hash?: string | null;
 }
 
