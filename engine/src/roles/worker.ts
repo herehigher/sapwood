@@ -36,7 +36,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine } from "../config/doctrine.js";
@@ -1806,18 +1806,6 @@ export function probeDeployKeySsh(deployKeyPath: string, timeoutSec = 15, sshBin
   });
 }
 
-/** #668 (r2[0], hardened gate② round 3 P1): one pgidRegistry entry — the pgid ALONE is not a
- *  safe reap target once `this.lanes` no longer vouches for it (see pgidRegistry's own doc for
- *  why); `fingerprint` is the ownership token re-verified before any signal. */
-interface PgidRecord {
-  pgid: number; // the leader's original pid — a detached child is its own pgid leader
-  /** The leader's `ps -p <pgid> -o lstart=` output, captured once right after a confirmed spawn.
-   *  `null` only when `ps` itself was unavailable/failed at capture time — an honest "never
-   *  fingerprinted", which verifyPgidOwnership treats as automatically unverifiable (fail
-   *  closed: a pgid this process never fingerprinted is never signaled). */
-  fingerprint: string | null;
-}
-
 interface Lane {
   child: ChildProcess;
   issue: number;
@@ -1934,31 +1922,16 @@ export class WorkerSupervisor implements Supervisor {
   // A missing/malformed configured file throws HERE, at startup, before any dispatch.
   private readonly pricing: PricingTable;
   private readonly lanes = new Map<string, Lane>();
-  // #668 (gate② round 2, r2[0]; hardened gate② round 3 P1): a durable pgid record OUTLIVING
-  // `this.lanes` — onExit() deletes a lane's `this.lanes` entry the instant the DIRECT child (the
-  // detached process-group leader) exits, but a descendant the leader forked inside the SAME
-  // process group can still be alive at that moment (the leader dying doesn't kill its own
-  // group). Without a separate record, reapAll()'s `this.lanes` snapshot loses every trace of
-  // that pgid the instant the leader exits — a surviving descendant becomes permanently
-  // unreapable, exactly the orphan AC4 forbids. Populated at both spawn sites (dispatch()/
-  // resume(), the same two places that create a `this.lanes` entry) and pruned on EVERY
-  // confirmed-dead observation, not just inside reapAll (round 3 P1 finding: a stale entry for a
-  // descendant that later exits on its own must not sit forever) — onExit() keeps the entry only
-  // while the group outlives its leader (see onExit's own doc), and every isAlive() check inside
-  // reapAll prunes eagerly the instant it observes death.
-  //
-  // Round 3 P1 (Codex): once `this.lanes` no longer has an entry, `child.pid` is JUST A NUMBER —
-  // the OS is free to recycle that exact pid (and therefore that exact pgid, which for a detached
-  // leader IS its own original pid) for a completely unrelated process once the zombie is reaped
-  // (which onExit's own 'exit' handler already did, via Node's internal waitpid, by the time this
-  // registry entry survives it). A reaper that can't tell "our old group" from "a stranger that
-  // happens to reuse the same pgid number" would SIGKILL an innocent process — worse than the
-  // leak this registry exists to fix. Each entry therefore carries an ownership `fingerprint`
-  // (the leader's own `ps -o lstart=` start-time string, captured once right after a confirmed
-  // spawn) alongside the raw pgid, and reapAll() re-verifies it (verifyPgidOwnership) immediately
-  // before EVER signaling a registry-only entry — never signaling one it can't reverify. See
-  // verifyPgidOwnership's own doc for exactly what is checked and its stated residual.
-  private readonly pgidRegistry = new Map<string, PgidRecord>(); // lane name -> {pgid, fingerprint}
+  // #668 (round 5 pivot): tracks reap operations onExit() kicks off, fire-and-forget from its OWN
+  // synchronous perspective, for a leader that just exited while its process GROUP was still
+  // alive (a descendant outliving it) — see onExit's own doc for why reaping happens THERE now,
+  // immediately, instead of in a durable registry checked later at engine exit (the design rounds
+  // 2-4 tried and retired). Keyed by lane name; an entry exists only while its reap is still
+  // running, deleted the instant reapDescendantsOnLeaderExit's own promise settles. reapAll() (the
+  // engine-exit path) awaits every entry still present here before it can itself return — an
+  // in-flight reap started moments before shutdown must still be allowed to finish, never
+  // abandoned just because the engine is on its way out (AC4: no orphan group on exit).
+  private readonly inFlightLeaderExitReaps = new Map<string, Promise<ReapOutcome>>();
   // #395 (gate② round 3): one liveness-gated heartbeat per live lane, keyed by lane name —
   // persisted across setInterval ticks (util/heartbeat.ts's createHeartbeatGate needs its own
   // "id seen at the last check" cursor to remember). Created lazily in heartbeatTick, removed in
@@ -2344,8 +2317,6 @@ export class WorkerSupervisor implements Supervisor {
     }
     if (spawnErr) {
       this.lanes.delete(laneName);
-      // #668 (r2[0]): pgidRegistry is populated further below, only once spawn is confirmed —
-      // this failure path returns before that point, so there is nothing to delete here.
       try {
         closeSync(jsonlFd);
       } catch {
@@ -2386,15 +2357,6 @@ export class WorkerSupervisor implements Supervisor {
     // Only set up the running marker + heartbeat if the child is still alive — a very fast
     // exit during the await is already handled by onExit (lane removed); don't resurrect it.
     if (this.lanes.has(laneName) && child.exitCode === null && child.signalCode === null) {
-      // #668 (r2[0], hardened gate② round 3 P1): register pgidRegistry HERE, only once spawn is
-      // durably confirmed — a lane that died within the spawn-confirm window above never gets an
-      // entry (nothing survives to reap). The fingerprint is captured NOW, while this is still
-      // definitely the leader we just spawned (no reuse window has had any chance to open yet) —
-      // see PgidRecord's and verifyPgidOwnership's own docs for how it's used.
-      if (child.pid != null) {
-        const fingerprint = await this.captureLeaderFingerprint(child.pid);
-        this.pgidRegistry.set(laneName, { pgid: child.pid, fingerprint });
-      }
       const startedIso = new Date(lane.startedMs).toISOString();
       this.writeJsonAtomic(this.path(laneName, "running.json"), {
         name: laneName,
@@ -2782,8 +2744,6 @@ export class WorkerSupervisor implements Supervisor {
     }
     if (spawnErr) {
       this.lanes.delete(name);
-      // #668 (r2[0]): pgidRegistry is populated further below, only once spawn is confirmed —
-      // this failure path returns before that point, so there is nothing to delete here.
       try {
         closeSync(jsonlFd);
       } catch {
@@ -2823,13 +2783,6 @@ export class WorkerSupervisor implements Supervisor {
       this.removeIfExists(this.path(name, "failed.json"));
     }
     if (this.lanes.has(name) && child.exitCode === null && child.signalCode === null) {
-      // #668 (r2[0], hardened gate② round 3 P1): same "register only once confirmed, fingerprint
-      // while it's definitely ours" as dispatch()'s own post-confirmation block — see that
-      // comment and PgidRecord's/verifyPgidOwnership's own docs.
-      if (child.pid != null) {
-        const fingerprint = await this.captureLeaderFingerprint(child.pid);
-        this.pgidRegistry.set(name, { pgid: child.pid, fingerprint });
-      }
       this.touchHeartbeat(name);
       lane.hb = setInterval(() => this.heartbeatTick(name), this.hbMs);
       // #617 (seam 3): same fire-and-forget capture dispatch() kicks off, same promise-on-`lane`
@@ -3094,13 +3047,79 @@ export class WorkerSupervisor implements Supervisor {
     // place its cursor ever needs clearing; never left to grow unboundedly over a long-running
     // engine process's lifetime.
     this.heartbeatGates.delete(name);
-    // #668 (r2[0]): the DIRECT child exiting is not proof its process GROUP is empty — a
-    // detached descendant sharing the same pgid can outlive its own leader. Only prune
-    // pgidRegistry here when the group is ALREADY fully dead (the common case — no lingering
-    // descendants); otherwise leave the entry in place so reapAll() can still find and reap that
-    // pgid by raw pid even though `this.lanes` no longer has anything to hand it. See
-    // pgidRegistry's and reapAll()'s own docs.
-    if (!this.pidGroupAlive(lane.child.pid)) this.pgidRegistry.delete(name);
+    // #668 (round 5 pivot — reap at the moment the pgid is FRESH, not when it's stale): the
+    // DIRECT child exiting is not proof its process GROUP is empty — a detached descendant
+    // sharing the same pgid can outlive its own leader (the confirmed stranded-fix-leg incident
+    // class this whole issue exists to close). Earlier rounds (r2[0]/r3) answered this with a
+    // durable pgidRegistry that outlived `this.lanes`, re-verified by an ownership fingerprint at
+    // reap time — round 5 (Codex, marginal-complexity ruling): that design kept sprouting new
+    // edges (comm-fallback false-negatives/positives, an awaited-fingerprint spawn race, pruning
+    // that only fired inside reapAll) because it deferred reaping to engine exit, by which time
+    // the pgid could be ANYTHING. The fix is to stop deferring: reap the group RIGHT HERE, while
+    // the pid is still definitively ours (its leader exited THIS INSTANT, inside this very
+    // handler) — no registry, no fingerprint, no re-verification machinery at all.
+    //
+    // Fire-and-forget FROM onExit's OWN synchronous perspective (this method returns immediately
+    // either way), but the resulting promise is tracked in `inFlightLeaderExitReaps` so
+    // reapAll()'s own engine-exit path can await it — see that field's and reapAll()'s own docs
+    // for why an in-flight reap must never be abandoned just because the engine is shutting down.
+    //
+    // RESIDUAL, stated rather than hidden: `pidGroupAlive` below and the reap it may trigger read
+    // `lane.child.pid` a handful of synchronous statements after the OS actually freed it (Node's
+    // own internal waitpid, which is what let this 'exit' handler fire at all) — a sub-second
+    // window in which, in principle, the OS could have already recycled that exact pid/pgid
+    // number for an unrelated process. This residual is the SAME class round 3's fingerprint
+    // machinery existed to close, but at a timescale (microseconds to low milliseconds between
+    // waitpid and this line running) where the odds are the kind of astronomically small this
+    // repo's own #616/#666-adjacent "residual, not eliminated" doctrine already accepts
+    // elsewhere, and unlike a pgidRegistry entry (which could sit for the ENTIRE rest of a
+    // long-running engine's life before ever being re-checked), this window closes on its own in
+    // the time it takes one more statement to execute.
+    const pid = lane.child.pid;
+    if (pid != null && this.pidGroupAlive(pid)) {
+      const alreadySignaled = lane.handoffRequested; // an earlier drain may have already SIGTERM'd the whole group
+      const reapPromise = this.reapDescendantsOnLeaderExit(name, pid, alreadySignaled);
+      this.inFlightLeaderExitReaps.set(name, reapPromise);
+      void reapPromise.finally(() => {
+        if (this.inFlightLeaderExitReaps.get(name) === reapPromise) this.inFlightLeaderExitReaps.delete(name);
+      });
+    }
+  }
+
+  /** #668 (round 5 pivot): reaps a group whose LEADER just exited (inside onExit(), this instant)
+   *  but which is still alive — a descendant outliving its leader, the actual stranded-child
+   *  incident class #668 exists to close. Reuses reapChildren's own SIGTERM -> grace ->
+   *  SIGKILL -> verify state machine (never a second implementation of that escalation) against a
+   *  single synthetic child bound to the raw pid — no `ChildProcess`/`Lane` object exists for a
+   *  descendant, only `signalGroup`/`pidGroupAlive`, which is all `ReapableChild` ever needed.
+   *  `alreadySignaled` mirrors reapAll()'s own r1[1] invariant: if an earlier drain already sent
+   *  the group a SIGTERM (killGroup signals the WHOLE group, so a descendant may already have
+   *  received it), this reap must not send a second one — go straight to the grace-then-escalate
+   *  wait. Never throws (reapChildren's own contract); an unconfirmed death is logged by name —
+   *  the same "honest surfacing over silent loss" stance cli.ts's own reapAndSurfaceOrphans takes
+   *  for the engine-exit path (r1[0]) — never a blocking retry (this repo's own boundary ruling
+   *  for #668 rejects an engine-side resource watchdog). */
+  private async reapDescendantsOnLeaderExit(name: string, pid: number, alreadySignaled: boolean): Promise<ReapOutcome> {
+    const [outcome] = await reapChildren(
+      [
+        {
+          name,
+          alreadySignaled,
+          isAlive: () => this.pidGroupAlive(pid),
+          signal: (sig: NodeJS.Signals) => this.signalGroup(pid, sig),
+        },
+      ],
+      {
+        ...(this.deps.sleep !== undefined ? { sleep: this.deps.sleep } : {}),
+        log: (m) => this.log(m),
+      },
+    );
+    if (outcome && !outcome.confirmedDead) {
+      this.log(
+        `[sapwood:reap] lane ${name}: descendant(s) survived a post-leader-exit reap (pid/pgid ${pid}) — possible orphan process group`,
+      );
+    }
+    return outcome!;
   }
 
   /** #617 (seam 3, capability DR #616): the FILESYSTEM-derived half of a worker/producer leg's
@@ -3748,23 +3767,18 @@ export class WorkerSupervisor implements Supervisor {
    *  `signal` makes the bookkeeping and the real SIGTERM/SIGKILL delivery the SAME event — a lane
    *  reapChildren never signals can never end up mistagged.
    *
-   *  #668 (gate② round 2, r2[0]): a pgid whose DIRECT child has already exited — onExit() already
-   *  ran and deleted the `this.lanes` entry — but whose process GROUP is still alive (a detached
-   *  descendant outliving its own leader) is invisible to a `this.lanes`-only snapshot. Those
-   *  survive in `pgidRegistry` instead (see its own doc) and are reaped here too, by raw pid
-   *  (no ChildProcess/Lane object exists any more for them). `laneNames` excludes anything
-   *  `this.lanes` already covers above, so a currently-live lane is never double-listed.
-   *
-   *  #668 (gate② round 3 P1, hardening r2[0]): a registry-only entry's `isAlive()` PRUNES the
-   *  entry the instant it observes the group dead (not only via this method's final outcome
-   *  sweep — reapChildren's own internal classification/poll calls `isAlive()` repeatedly, so a
-   *  descendant that exits naturally between two reap calls is pruned the very next time anything
-   *  checks it, never left registered forever). And its `signal()` NEVER fires blind: it first
-   *  re-verifies ownership (verifyPgidOwnership) against the fingerprint recorded at spawn —
-   *  `this.lanes` can no longer vouch that this pgid number is still ours (its leader's zombie was
-   *  already reaped by the time this entry outlived `this.lanes`, so the OS is free to have
-   *  recycled the pid/pgid for a total stranger). No match -> the entry is pruned and NOTHING is
-   *  signaled — see verifyPgidOwnership's own doc for exactly what's checked and its residual. */
+   *  #668 (round 5 pivot): this method ONLY handles lanes `this.lanes` still tracks — i.e. whose
+   *  leader process has NOT yet exited. That's deliberate, not an oversight: a still-tracked
+   *  leader's pid/pgid categorically cannot have been recycled (Node hasn't called waitpid for it
+   *  yet — that's WHY it's still in `this.lanes`), so signaling it needs no ownership check at
+   *  all. A lane whose leader ALREADY exited, leaving a live descendant behind, is a completely
+   *  different problem — see onExit()'s own doc for why that case is now handled THERE, at the
+   *  moment the pgid is fresh, instead of here at engine-exit time (rounds 2-4 tried a durable
+   *  registry re-checked here; retired per the repo's marginal-complexity ruling). This method's
+   *  OWN remaining duty toward that class is simply not to abandon one already in flight: it
+   *  awaits every entry in `inFlightLeaderExitReaps` (a reap onExit() kicked off, possibly mere
+   *  milliseconds before this call started) before it can itself return, so AC4 ("no orphan group
+   *  on exit") holds even for that race — by construction, not by re-verification machinery. */
   async reapAll(opts: { graceMs?: number } = {}): Promise<ReapOutcome[]> {
     const lanes = [...this.lanes.entries()];
     const laneChildren: ReapableChild[] = lanes.map(([name, lane]) => {
@@ -3779,139 +3793,22 @@ export class WorkerSupervisor implements Supervisor {
         },
       };
     });
-    const laneNames = new Set(lanes.map(([name]) => name));
-    const orphanPgidChildren: ReapableChild[] = [...this.pgidRegistry.entries()]
-      .filter(([name]) => !laneNames.has(name))
-      .map(([name, record]) => ({
-        name,
-        isAlive: () => {
-          const alive = this.pidGroupAlive(record.pgid);
-          // #668 (round 3 P1): prune on EVERY dead observation, not only this method's final
-          // outcome sweep — reapChildren calls isAlive() repeatedly (initial classification, then
-          // every poll tick), so this fires the moment ANY of those calls sees the group is gone.
-          if (!alive) this.pgidRegistry.delete(name);
-          return alive;
-        },
-        signal: async (sig: NodeJS.Signals) => {
-          // #668 (round 3 P1): re-verify ownership immediately before EVERY signal (SIGTERM AND
-          // the SIGKILL escalation) — never trust that a pgid we haven't touched since spawn is
-          // still the group we spawned. No match -> prune, signal NOTHING (never risk a
-          // stranger).
-          const verified = await this.verifyPgidOwnership(record.pgid, record.fingerprint);
-          if (!verified) {
-            this.log(
-              `[sapwood:reap] ${name}: pgid ${record.pgid} failed ownership re-verification (fingerprint mismatch or unfingerprinted — possible pid/pgid reuse) — pruning without signaling`,
-            );
-            this.pgidRegistry.delete(name);
-            return;
-          }
-          this.signalGroup(record.pgid, sig);
-        },
-      }));
-    const children = [...laneChildren, ...orphanPgidChildren];
-    if (children.length === 0) return [];
-    const outcomes = await reapChildren(children, {
-      ...(opts.graceMs !== undefined ? { graceMs: opts.graceMs } : {}),
-      ...(this.deps.sleep !== undefined ? { sleep: this.deps.sleep } : {}),
-      log: (m) => this.log(m),
-    });
-    for (const o of outcomes) {
-      if (o.confirmedDead) this.pgidRegistry.delete(o.name);
-    }
-    return outcomes;
-  }
-
-  /** #668 (round 3 P1): spawns `ps` (never a shell, never any of the OTHER child_process launch
-   *  functions Node ships — this module's own grep-invariant test pins `spawn` as the ONLY
-   *  child_process primitive it may use) and returns its trimmed stdout, or `null` on any failure
-   *  (non-zero exit, spawn error, empty output) — the same "never throw, honest absence" contract
-   *  every other best-effort probe in this module keeps (parseCostUsd's siblings, probeLlmPing,
-   *  etc). */
-  private psQuery(args: string[]): Promise<string | null> {
-    return new Promise((resolve) => {
-      let out = "";
-      let child: ChildProcess;
-      try {
-        child = spawn("ps", args, { stdio: ["ignore", "pipe", "ignore"] });
-      } catch {
-        resolve(null);
-        return;
-      }
-      child.stdout?.on("data", (chunk: Buffer) => {
-        out += chunk.toString("utf8");
-      });
-      child.on("error", () => resolve(null));
-      child.on("close", (code) => resolve(code === 0 && out.trim().length > 0 ? out.trim() : null));
-    });
-  }
-
-  /** #668 (round 3 P1): captures the leader's own ownership fingerprint right after a CONFIRMED
-   *  spawn (dispatch()/resume() both call this from their post-spawn-confirmation block, while
-   *  `child.pid` is still definitely the process this supervisor just started — no reuse window
-   *  has had any chance to open yet). `ps -p <pid> -o lstart=` (its start time) is portable across
-   *  macOS/BSD and Linux (procps-ng) ps. Returns `null` (never throws) when `ps` is unavailable or
-   *  the pid is somehow already gone by the time this runs — an honest "never fingerprinted",
-   *  which verifyPgidOwnership then treats as automatically unverifiable (fail closed). */
-  private async captureLeaderFingerprint(pid: number): Promise<string | null> {
-    return this.psQuery(["-p", String(pid), "-o", "lstart="]);
-  }
-
-  /** #668 (round 3 P1, Codex REQUEST_CHANGES on 57aaea9): re-verifies that `pgid` is STILL the
-   *  process group this supervisor spawned, before reapAll() sends it ANY signal. Required
-   *  because a pgidRegistry entry, by construction, only ever outlives `this.lanes` for a pgid
-   *  whose direct child (the leader) has ALREADY exited and been reaped — Node's own internal
-   *  waitpid call, which fires as part of emitting the 'exit' event onExit() handles, is exactly
-   *  what frees that pid/pgid number for OS reuse. A reaper that blindly SIGTERMs/SIGKILLs a
-   *  registry-only pgid without re-checking can therefore end up signaling a COMPLETELY UNRELATED
-   *  process that happened to reuse the same number — worse than the descendant leak this
-   *  registry exists to close.
-   *
-   *  Two independent checks, either one sufficient to verify:
-   *   (a) LEADER re-identification: `ps -p <pgid> -o lstart=` still names a live process at that
-   *       EXACT pid, whose start time matches the `fingerprint` recorded at spawn. This only ever
-   *       actually fires the "verified" branch in the rare case the leader itself somehow
-   *       survived past `this.lanes` losing it (not the common r2[0] shape, which has the leader
-   *       already dead) — but it's the strongest signal available when it applies, so it's
-   *       checked first.
-   *   (b) DESCENDANT family match: enumerate every process on the system (`ps -axo
-   *       pid=,pgid=,comm=`) and require at least one reporting THIS pgid whose short command name
-   *       (basename — macOS ps sometimes reports a full interpreter path here, e.g. an nvm-managed
-   *       node binary) is "node" (the claude CLI's own runtime today), "claude" (a literal
-   *       rename), or this supervisor's configured claudeBin's own basename (a custom binary).
-   *       This is the case that actually matters for r2[0]: the leader is gone, only descendants
-   *       remain, and their identity is the only signal left.
-   *
-   *  `fingerprint === null` (never captured at spawn — e.g. `ps` was unavailable then) fails
-   *  closed immediately: a pgid this process never fingerprinted is never signaled, full stop.
-   *
-   *  RESIDUAL, stated rather than hidden (Codex's own framing: a fully robust descendant
-   *  fingerprint is impossible, strictly): neither check is airtight. (a) can be fooled by a
-   *  pid-reuse landing a coincidentally-identical start-time string (astronomically unlikely, but
-   *  not zero). (b) can be fooled by an ENTIRELY UNRELATED process that happens to both reuse the
-   *  exact recycled pgid number AND run a command named "node"/"claude" — plausible on a dev box
-   *  running other Node tooling, though it requires that SPECIFIC pgid number to be reused within
-   *  the narrow window between this entry's leader dying and this check running. Both residuals
-   *  are strictly smaller than "sign whatever is sitting at this pgid number with no check at
-   *  all" (the pre-fix behavior), and this repo's own boundary ruling for #668 (the issue body)
-   *  already accepts "no engine-side resource watchdog" — a perfect kernel-level generation
-   *  counter simply doesn't exist in POSIX for this to close completely. The accepted failure
-   *  direction is a leaked group living a little longer (never signaled), NEVER a wrongly-killed
-   *  stranger — a mismatch always prunes and returns `false`, never "signal anyway". */
-  private async verifyPgidOwnership(pgid: number, fingerprint: string | null): Promise<boolean> {
-    if (fingerprint == null) return false; // never fingerprinted -> never signal (fail closed)
-    const leaderNow = await this.psQuery(["-p", String(pgid), "-o", "lstart="]);
-    if (leaderNow !== null && leaderNow === fingerprint) return true;
-    const listing = await this.psQuery(["-axo", "pid=,pgid=,comm="]);
-    if (listing === null) return false;
-    const expected = new Set(["node", "claude", basename(this.bin)]);
-    for (const line of listing.split("\n")) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length < 3) continue;
-      const linePgid = Number(parts[1]);
-      const comm = parts.slice(2).join(" "); // comm has no spaces in practice, but never split it wrong
-      if (linePgid === pgid && expected.has(basename(comm))) return true;
-    }
-    return false;
+    const liveOutcomes =
+      laneChildren.length === 0
+        ? []
+        : await reapChildren(laneChildren, {
+            ...(opts.graceMs !== undefined ? { graceMs: opts.graceMs } : {}),
+            ...(this.deps.sleep !== undefined ? { sleep: this.deps.sleep } : {}),
+            log: (m) => this.log(m),
+          });
+    // #668 (round 5 pivot): a reap onExit() already kicked off for a leader that exited moments
+    // ago (possibly WHILE this very call was starting) must still be allowed to finish — never
+    // abandoned just because the engine is shutting down. Snapshot the values BEFORE awaiting:
+    // `inFlightLeaderExitReaps` mutates itself as each promise settles (see onExit's own doc), so
+    // iterating the live map across an await would be iterating a moving target.
+    const inFlight = [...this.inFlightLeaderExitReaps.values()];
+    const leaderExitOutcomes = inFlight.length === 0 ? [] : await Promise.all(inFlight);
+    return [...liveOutcomes, ...leaderExitOutcomes];
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────
@@ -3939,13 +3836,12 @@ export class WorkerSupervisor implements Supervisor {
       }
     }
   }
-  /** #668: is the WHOLE process group (negative pid) still alive? Used by reapAll's (and its
-   *  orphan-pgid entries') death verification, and by onExit()'s r2[0] check of whether a lane's
-   *  pgidRegistry entry can be pruned the moment its direct child exits — `killGroup`/
-   *  `signalGroup` above already fall back to a direct-pid signal when the group send fails, but
-   *  verification checks the group specifically, since a detached worker child is its own pgid
-   *  leader and an orphaned group is exactly what this issue's acceptance criteria (AC4)
-   *  forbid. */
+  /** #668: is the WHOLE process group (negative pid) still alive? Used by reapAll's own death
+   *  verification, and by onExit() to decide whether a just-exited leader left a live descendant
+   *  behind worth reaping right there (see onExit's own doc) — `killGroup`/`signalGroup` above
+   *  already fall back to a direct-pid signal when the group send fails, but verification checks
+   *  the group specifically, since a detached worker child is its own pgid leader and an orphaned
+   *  group is exactly what this issue's acceptance criteria (AC4) forbid. */
   private pidGroupAlive(pid: number | null | undefined): boolean {
     if (pid == null) return false;
     try {
@@ -4149,12 +4045,8 @@ export interface ReapableChild {
   alreadySignaled?: boolean;
   /** True while the process group is presumed alive. Never throws. */
   isAlive: () => boolean;
-  /** Send `sig` to the whole process group. Never throws. May be async (#668 round 3 P1:
-   *  WorkerSupervisor's registry-only entries re-verify ownership — a real `ps` round-trip —
-   *  before ever actually signaling); reapChildren awaits it either way, so a synchronous `void`
-   *  implementation (every fake-child test, and reapAll's own `this.lanes`-backed children) is
-   *  unaffected — awaiting a non-Promise resolves on the spot. */
-  signal: (sig: NodeJS.Signals) => void | Promise<void>;
+  /** Send `sig` to the whole process group. Never throws. */
+  signal: (sig: NodeJS.Signals) => void;
 }
 
 export interface ReapOutcome {
@@ -4214,16 +4106,11 @@ export async function reapChildren(
     return pending; // whatever is still alive once the bound is hit
   };
 
-  // #668 (round 3 P1): `signal` may be async (WorkerSupervisor's registry-only entries re-verify
-  // ownership via a real `ps` round-trip before ever actually signaling) — awaited here so that
-  // verification always completes, and any resulting signal always lands, before this function
-  // moves on. A synchronous `void` implementation (every fake-child test, and every `this.lanes`-
-  // backed child) resolves on the spot, so this is a no-op behavior change for them.
   for (const c of live) {
-    if (!c.alreadySignaled) await c.signal("SIGTERM");
+    if (!c.alreadySignaled) c.signal("SIGTERM");
   }
   const survivors = await pollUntilDeadOrTimeout(live, graceMs);
-  for (const c of survivors) await c.signal("SIGKILL");
+  for (const c of survivors) c.signal("SIGKILL");
   await pollUntilDeadOrTimeout(survivors, REAP_VERIFY_TIMEOUT_MS);
 
   const survivorNames = new Set(survivors.map((c) => c.name));
