@@ -1928,6 +1928,82 @@ session. Workflow-command binding remains a documented residual: the agent revie
 changes in the diff, but the engine does not statically prove that a named CheckRun executed a
 particular command.
 
+## The comment-adjudication cursor (#652)
+
+Batch-8 incident (2026-08-04, PR #651 round 1): a binding owner ruling recorded as an ISSUE
+COMMENT was invisible to the worker, which reads only the issue BODY (`{{issue.body}}`,
+`worker.ts`) and faithfully implemented the stale body — 5 P1s in one PR. That body-only boundary
+is correct and stays: the body is maintainer-writable, while comments become world-writable once
+the repo is public (comment PROVENANCE filtering is a separately-deferred v0.3.0 entrance
+criterion, tracked on #329). What was missing is a check that the body is CURRENT relative to its
+own comment thread before the engine spends on gate⓪ review or dispatch — adjudications parked in
+comments were a standing trap, closed here.
+
+The mechanism is a deterministic, trust-independent staleness gate, pure code with no LLM in the
+loop: the issue body carries an adjudication-cursor marker
+`<!-- sapwood:comments-adjudicated-through: <comment-id> -->`, meaning "a maintainer has
+adjudicated every comment at or before this one" (adjudicated = folded into the body, or
+reviewed-and-nothing-to-fold). The marker identifies a concrete NON-engine comment by
+**stream position** in GitHub's oldest-first issue-comment stream, never by numeric id ordering —
+pending comments are the non-engine comments occurring after that position in the fetched stream.
+Cursor `0` denotes the position before the first comment (nothing adjudicated yet). A malformed
+marker, a duplicate marker, a cursor pointing at an engine comment, or a cursor whose target no
+longer exists all fail closed to needs-attention; a deleted PENDING comment simply supplies no
+content, but a deleted CURSOR TARGET requires a maintainer to reset the cursor to an existing
+adjudicated comment. An issue with no marker and zero comments is the one pass-through case —
+byte-identical to pre-#652 behavior.
+
+**Engine-comment exemption is marker AND actor, never either alone.** A comment is exempt from
+"pending" status only when it carries the central `ENGINE_COMMENT_MARKER` (`forge.ts`) AND its
+author matches the authenticated forge actor, resolved once per check
+(`IForge.getAuthenticatedActor`). An unresolvable actor exempts NO comment — the maximally
+fail-closed reading, never inferred from body content alone.
+
+**Three checkpoints cover the race between candidate selection and the work actually starting:**
+
+1. **Gate⓪** (`plan-review.ts`) checks freshness before spending on a verification-plan-reviewer
+   (or confirm) session, and rechecks immediately before applying ANY reviewer-derived body or
+   label write — a body edit or a pending comment landing WHILE the session ran discards that
+   cycle's decision without applying it, approve/verify_na/draft_request alike, never partially.
+2. **Dispatch** (`conductor.ts`'s DISPATCH loop) claims the issue first, then re-reads the live
+   body followed by comments **inside the existing rollback-on-failure unit** — the refreshed
+   body (never the pre-claim `getReadyIssues` body) is what the AC snapshot and the worker prompt
+   both use from that point on. A comment landing in the window between candidate selection and
+   the claim blocks the dispatch and the claim rolls back, exactly like a launch failure always
+   has.
+3. **Drive** (`conductor.ts`, immediately after `checkAcDriftBeforeDrive` and still before
+   `gate.driveOne`) rechecks comment freshness using the cursor embedded in the AC-snapshotted
+   body — never a fresh live body re-read, since the sibling drift check just confirmed the live
+   body still matches that snapshot. A comment arriving while the worker runs escalates exactly
+   like an ordinary AC-snapshot body drift.
+
+**Degrade is the existing needs-human machinery, no new machinery.** A confirmed stale/invalid
+cursor applies the existing `needsHuman` label and posts ONE deduplicated engine comment listing
+the bounded pending comment ids and the recovery steps (record the ruling, rewrite the body,
+advance the cursor to the last comment adjudicated, remove `needs-human`). Dedup is a live
+marker scan keyed on the cursor/pending-set identity — the same comment/pending combination never
+produces a second pointer comment, but a genuinely new pending comment gets its own fresh post. A
+comment or body fetch failure performs NO issue write at all and propagates through each
+checkpoint's own existing retry/environment-failure path (dispatch's rollback-on-failure catch,
+drive's queued-and-retried-next-tick stance, gate⓪'s ordinary thrown-error propagation) — network
+trouble must never turn a candidate into a human adjudication.
+
+**Rollout is a one-time backfill, not a migration.** The gate only ever blocks an issue that
+already carries comments as it approaches gate⓪/dispatch — there is no new CLI, no migration
+state, and no schema change; a repo's existing commented issues simply need a maintainer to walk
+each one through record-ruling → rewrite-body → advance-cursor once, same as the recovery steps
+the pointer comment itself names.
+
+**v1 residual: edits are out of scope, ordering is by comment CREATION only.** The cursor orders
+comment creation, not comment content-versions. Editing an already-cursored comment does not
+reopen it — GitHub's `lastEditedAt` is not consulted, and a maintainer who needs to publish a
+binding amendment to an already-adjudicated comment must post a NEW comment, not edit the old
+one. This mechanism does not claim complete historical comment-version freshness; it is
+deliberately narrow (trusted-repo deployment only, design adjudicated 2026-08-05) and this residual
+is accepted, not hidden — do not read "the cursor is current" as "every comment's current text was
+seen," only as "every comment CREATED at or before the cursor's target was adjudicated at some
+point in its history."
+
 ## See also
 
 - [`configuration.md`](configuration.md) — the `guard`, `reviewer`, `merge`, `ci`,

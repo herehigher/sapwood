@@ -299,11 +299,16 @@ class FakeForge extends UnstubbedForge implements IForge {
     this.issueComments.push([n, body]);
   }
   // #283: per-issue live body map — mutable so a test can simulate a mid-flight edit between
-  // dispatch and a later DRIVE-phase drift check. Defaults to "" (byte-for-byte the pre-#283
-  // behavior for any test that never populates it).
+  // dispatch and a later DRIVE-phase drift check.
+  // #652: an issue NOT explicitly seeded here falls back to whatever `ready` was given for it —
+  // dispatch now re-reads the live body (getIssueBody) after claim, so a test that only ever set
+  // `forge.ready = [{..., body}]` (never touching `issueBodies`) still sees that SAME body on the
+  // re-read, exactly as if nothing had changed since candidate selection. A test that wants to
+  // simulate a genuine mid-flight edit sets `issueBodies[n]` explicitly, which always wins.
   issueBodies: Record<number, string> = {};
   override async getIssueBody(n: number): Promise<string> {
-    return this.issueBodies[n] ?? "";
+    if (n in this.issueBodies) return this.issueBodies[n]!;
+    return this.ready.find((i) => i.number === n)?.body ?? "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
   override async updateIssueBody(issue: number, body: string): Promise<void> {
@@ -363,9 +368,31 @@ class FakeForge extends UnstubbedForge implements IForge {
   }
   /** #451 gate② round 3 (Codex P2): reflects `issueComments` (the same array `addIssueComment`
    *  writes to) — needed so `escalateReviewDisputed`'s marker-check-before-post read can actually
-   *  observe a comment the fake just "posted", the same way GithubForge's real read would. */
+   *  observe a comment the fake just "posted", the same way GithubForge's real read would.
+   *  #652: also merges `externalIssueComments` (test-seeded, NOT engine-authored — the shape a
+   *  human's binding ruling takes) AHEAD of the engine-posted ones, matching real chronology
+   *  (external comments seeded before a tick necessarily predate anything the engine posts
+   *  DURING that tick). Engine-posted comments are stamped with ENGINE_COMMENT_MARKER and the
+   *  fake's `authenticatedActor` login, mirroring GithubForge.addIssueComment's real stamp — so
+   *  the comment-adjudication cursor's engine-comment exemption (marker AND actor) sees them
+   *  exactly as it would in production. Every pre-#652 test leaves `externalIssueComments` empty,
+   *  so this is byte-identical to the old derivation for them. */
+  externalIssueComments: Record<number, { id: string; login: string; body: string }[]> = {};
+  authenticatedActor: string | null = "sapwood-bot";
+  override async getAuthenticatedActor(): Promise<string | null> {
+    return this.authenticatedActor;
+  }
   override async getIssueComments(n: number) {
-    return this.issueComments.filter(([issue]) => issue === n).map(([, body]) => ({ login: "sapwood", createdAt: "t", body }));
+    const external = (this.externalIssueComments[n] ?? []).map((c) => ({ ...c, createdAt: "t" }));
+    const engine = this.issueComments
+      .filter(([issue]) => issue === n)
+      .map(([, body], i) => ({
+        id: `EC_${n}_${i}`,
+        login: this.authenticatedActor ?? "sapwood-bot",
+        createdAt: "t",
+        body: `${body}\n\n<!-- sapwood:engine -->`,
+      }));
+    return [...external, ...engine];
   }
   /** #398: the PR-side twin — reflects `prComments` (the array `addPRComment` writes to) so a
    *  PR-carried escalation's marker-check-before-post read can observe a comment this fake just
@@ -750,6 +777,76 @@ test("tick dispatch: a launch failure rolls the board back to Ready", async () =
   st.close();
 });
 
+// ── #652: comment-adjudication cursor — dispatch claim -> re-read -> rollback ──────────────
+
+test("tick dispatch (#652): a non-engine comment already present when the cursor is missing blocks dispatch — the claim rolls back, needs-human applied, no worker spawned", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: "## Acceptance criteria\n\n- [ ] one" }];
+  // Simulates "a comment arriving between candidate selection (getReadyIssues) and the claim":
+  // by the time dispatch's post-claim re-read runs, this comment already exists in the stream.
+  forge.externalIssueComments[7] = [{ id: "1", login: "a-human", body: "binding ruling, never folded into the body" }];
+  await assert.rejects(() => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }));
+  assert.deepEqual(forge.claimed, [7]); // claimed first
+  assert.deepEqual(sup.dispatched, [] as Issue[]); // never spawned
+  assert.ok(forge.boardSet.some(([n, s]) => n === 7 && s === "ready")); // rolled back
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 7 && l === "needs-human"));
+  assert.equal(st.runningWorkers().length, 0);
+  st.close();
+});
+
+test("tick dispatch (#652): a fresh cursor (no marker, zero comments) dispatches exactly as before — byte-identical reverse-test shape", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  const body = "## Acceptance criteria\n\n- [ ] one";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body }];
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(
+    sup.dispatched.map((i) => i.number),
+    [7],
+  );
+  assert.deepEqual(forge.labelsAdded, [] as Array<[number, string]>);
+  st.close();
+});
+
+test("tick dispatch (#652): the AC snapshot and worker prompt use the RE-READ body, not the pre-claim getReadyIssues body", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  const staleBody = "## Acceptance criteria\n\n- [ ] stale criterion";
+  const liveBody = "## Acceptance criteria\n\n- [ ] one\n- [ ] two";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: staleBody }];
+  forge.issueBodies[7] = liveBody; // the LIVE body, re-read after claim — deliberately different
+  const seenBySpawn: { body: string | undefined } = { body: undefined };
+  const originalDispatch = sup.dispatch.bind(sup);
+  sup.dispatch = async (issue: Issue) => {
+    seenBySpawn.body = issue.body;
+    return originalDispatch(issue);
+  };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.equal(seenBySpawn.body, liveBody, "the worker prompt sees the refreshed body");
+  assert.equal(st.getAcSnapshot(7)?.body, liveBody, "the AC snapshot is built from the refreshed body");
+  st.close();
+});
+
+test("tick dispatch (#652): the engine-comment exemption (marker AND actor) lets a PRIOR engine comment through without blocking redispatch", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  // An engine comment (marker + matching actor, stamped by the fake's getIssueComments) must
+  // never itself count as a pending non-engine comment.
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: "## Acceptance criteria\n\n- [ ] one" }];
+  forge.issueComments.push([7, "sapwood: an earlier automated note"]);
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(
+    sup.dispatched.map((i) => i.number),
+    [7],
+  );
+  st.close();
+});
+
 // ── #283 (M10, E2, design #279 §5): AC-authority dispatch snapshot ─────────────────────────
 
 test("tick dispatch: an AC snapshot is persisted BEFORE the worker ever spawns, from the SAME body getReadyIssues fetched", async () => {
@@ -826,6 +923,126 @@ test("tick DRIVE: AC-snapshot drift routes to needs-human with a drift-explainin
   );
   assert.equal(st.getWorker(workerName)?.state, "failed");
   assert.ok(r.driven.some((d) => d.kind === "needs-human" && d.issue === 7 && d.reason.startsWith("ac-snapshot-drift")));
+  st.close();
+});
+
+test("tick DRIVE (#652 AC8, reverse test): a driving lane with ZERO comments and no cursor marker reaches gate.driveOne exactly as pre-#652 — no needs-human, no queued outcome", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const body = "## Acceptance criteria\n\n- [ ] one";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body }];
+  forge.issueBodies[7] = body;
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const workerName = (firstTick.dispatched.find((d) => d.kind === "dispatched") as { worker: string }).worker;
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
+  // forge.externalIssueComments[7] is never set -> getIssueComments returns [] for issue 7.
+  const gate = new FakeMergeGate();
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(gate.calls.length, 1, "driveOne IS called — nothing was ever stale, exactly like pre-#652");
+  assert.equal(gate.calls[0]!.issue, 7);
+  assert.deepEqual(forge.labelsAdded, [] as Array<[number, string]>);
+  st.close();
+});
+
+test("tick DRIVE (#652): a comment arriving while the worker runs (no body edit at all) escalates exactly like AC-snapshot drift — driveOne NEVER called, needs-human applied, deduplicated pointer comment posted", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const body = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  // Dispatch normally so the AC snapshot lands through the real DISPATCH path (zero comments at
+  // dispatch time -> the cursor check passes, exactly like today).
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body }];
+  forge.issueBodies[7] = body;
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const dispatchedOutcome = firstTick.dispatched.find((d) => d.kind === "dispatched");
+  assert.ok(dispatchedOutcome);
+  const workerName = (dispatchedOutcome as { worker: string }).worker;
+  // The worker finishes with a PR — promotes to `driving` on the NEXT tick's RECLAIM phase.
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
+  // The body itself is UNTOUCHED (no drift) — only a comment lands while the worker runs, the
+  // exact batch-8 incident shape this checkpoint exists to close.
+  forge.externalIssueComments[7] = [{ id: "1", login: "a-human", body: "a binding ruling, never folded into the body" }];
+  // The fake's getReadyIssues doesn't label-filter like the real forge does — clear it so this
+  // tick's DISPATCH phase doesn't re-offer the SAME issue a second real forge would have already
+  // excluded (needs-human is applied by DRIVE within this very tick, before DISPATCH runs).
+  forge.ready = [];
+  const gate = new FakeMergeGate();
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(gate.calls.length, 0, "driveOne must never be called once a pending comment is detected");
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 7 && l === "needs-human"));
+  assert.ok(
+    forge.issueComments.some(([n, c]) => n === 7 && /pending.*comment/i.test(c)),
+    "a pointer comment listing the pending comment is posted",
+  );
+  assert.equal(st.getWorker(workerName)?.state, "failed");
+  assert.ok(r.driven.some((d) => d.kind === "needs-human" && d.issue === 7 && d.reason === "comment-cursor-stale"));
+  st.close();
+});
+
+test("tick DRIVE (#652): the SAME pending comment never produces a second pointer comment across ticks — deduplicated", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const body = "## Acceptance criteria\n\n- [ ] one";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body }];
+  forge.issueBodies[7] = body;
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const workerName = (firstTick.dispatched.find((d) => d.kind === "dispatched") as { worker: string }).worker;
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
+  forge.externalIssueComments[7] = [{ id: "1", login: "a-human", body: "a binding ruling" }];
+  forge.ready = []; // see the sibling test's comment: the fake doesn't label-filter Ready itself
+  const gate = new FakeMergeGate();
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const postsAfterFirst = forge.issueComments.filter(([n]) => n === 7).length;
+  assert.equal(postsAfterFirst, 1);
+  // The lane is already `failed` (terminal) — but this pins the escalation helper's own dedup
+  // directly, independent of whether DRIVE would even re-visit a terminal lane.
+  const cursorResult = await import("../review/comment-cursor.js").then((m) =>
+    m.computeCommentCursor(body, [{ id: "1", isEngine: false }]),
+  );
+  const { escalateCommentCursorStale } = await import("../review/comment-cursor-gate.js");
+  await escalateCommentCursorStale(forge, mkCfg(), 7, cursorResult);
+  assert.equal(forge.issueComments.filter(([n]) => n === 7).length, 1, "no second pointer comment for the same cursor/pending set");
+  st.close();
+});
+
+test("tick DRIVE (#652): a comment-fetch failure queues (retried next tick) rather than escalating a human over an infra blip — no issue write at all", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const body = "## Acceptance criteria\n\n- [ ] one";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body }];
+  forge.issueBodies[7] = body;
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const workerName = (firstTick.dispatched.find((d) => d.kind === "dispatched") as { worker: string }).worker;
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
+  forge.getIssueComments = async () => {
+    throw new Error("network blip");
+  };
+  const gate = new FakeMergeGate();
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(gate.calls.length, 0, "driveOne is not called while the cursor check is unavailable");
+  assert.deepEqual(forge.labelsAdded, [] as Array<[number, string]>, "no needs-human write over a transient fetch failure");
+  assert.deepEqual(forge.issueComments, [] as Array<[number, string]>, "no pointer comment either");
+  assert.equal(st.getWorker(workerName)?.state, "driving", "the lane stays driving, retried next tick");
+  assert.ok(r.driven.some((d) => d.kind === "queued" && d.issue === 7));
+  st.close();
+});
+
+test("tick dispatch (#652): a comment-fetch failure during the post-claim re-read rolls the claim back — no needs-human write, rides the existing dispatch-rollback retry path", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: "## Acceptance criteria\n\n- [ ] one" }];
+  forge.getIssueComments = async () => {
+    throw new Error("network blip");
+  };
+  await assert.rejects(() => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }), /network blip/);
+  assert.deepEqual(forge.claimed, [7]); // claimed first
+  assert.deepEqual(sup.dispatched, [] as Issue[]); // never spawned
+  assert.ok(forge.boardSet.some(([n, s]) => n === 7 && s === "ready")); // rolled back
+  assert.deepEqual(forge.labelsAdded, [] as Array<[number, string]>, "no needs-human write over a transient fetch failure");
   st.close();
 });
 

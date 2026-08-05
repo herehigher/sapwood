@@ -4,10 +4,13 @@
 // but producers hold `gh issue edit` capability (worker.ts's grant) — the live issue body is
 // therefore NOT authoritative once a worker has been dispatched against it. This module is the
 // PERSISTENCE + TICK-TIME DRIFT-GATE half of the fix: BEFORE a worker ever spawns, conductor.ts's
-// DISPATCH loop calls `buildAcSnapshot` on the exact issue body `getReadyIssues` just fetched and
-// persists the result via `State.recordAcSnapshot` — same fail-closed unit as the claim/dispatch
-// attempt itself (a snapshot-write failure throws and rolls the board back to Ready exactly like
-// a dispatch() failure would, so a lane can never run against an unrecorded AC set). Later,
+// DISPATCH loop calls `buildAcSnapshot` on an issue body and persists the result via
+// `State.recordAcSnapshot` — same fail-closed unit as the claim/dispatch attempt itself (a
+// snapshot-write failure throws and rolls the board back to Ready exactly like a dispatch()
+// failure would, so a lane can never run against an unrecorded AC set). #652 (comment-adjudication
+// cursor): that body is now a RE-READ taken after the claim (`forge.getIssueBody`, inside the same
+// rollback-on-failure unit), never the earlier `getReadyIssues` read — closing the race window
+// between candidate selection and the claim. Later,
 // before conductor.ts's DRIVE loop ever hands a driving lane to `gate.driveOne`, it re-fetches the
 // LIVE issue body and calls `checkAcSnapshotDrift`: ANY full-body hash drift (not just the AC
 // section — every reviewer input in the body, per design #279 §5's R3 widening) fails closed —

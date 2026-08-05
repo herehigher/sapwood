@@ -69,7 +69,7 @@ class FakeForge extends UnstubbedForge implements IForge {
    *  the phase must carry cfg.labels.roundPool in its `labels` array. */
   poolEligibleIssues: Issue[] = [];
   issueLabels: Record<number, string[]> = {};
-  issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
+  issueComments: Record<number, { id?: string; login: string; createdAt: string; body: string }[]> = {};
   /** Mutable per-issue body — updateIssueBody writes here, and getIssueBody (the P1 refetch)
    *  reads it back, so tests can prove the next reviewer render sees an applied edit. */
   issueBodies: Record<number, string> = {};
@@ -169,6 +169,14 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async getIssueComments(issue: number) {
     this.getIssueCommentsCallCount++;
     return this.issueComments[issue] ?? [];
+  }
+  /** #652: the resolved authenticated forge actor — comment-cursor-gate.ts's engine-comment
+   *  exemption needs both a marker AND this actor match. Defaults to a stable non-null login so
+   *  every pre-#652 test (none of which populate non-engine `issueComments`) sees the same
+   *  byte-identical "zero pending comments" cursor result this file's tests already assume. */
+  authenticatedActor: string | null = "sapwood-bot";
+  override async getAuthenticatedActor(): Promise<string | null> {
+    return this.authenticatedActor;
   }
   override async createIssue(): Promise<number> {
     return 0;
@@ -330,6 +338,22 @@ test("createPlanReviewStub: outcome 1 (approve, no body revision) — engine app
   state.close();
 });
 
+test("createPlanReviewStub (#652 AC8, reverse test): an issue with ZERO comments and no cursor marker approves exactly as pre-#652 — both new checkpoints pass through, no extra write, no extra label", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 10, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[10] = PLAN_BODY; // no comment-cursor marker, and forge.issueComments[10] is never set (defaults to [])
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([{ result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 10 })) }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.equal(runner.calls.length, 1, "the session still runs — the pre-spend checkpoint passed through");
+  assert.deepEqual(forge.labelsAdded, [[10, "plan:approved"]], "ONLY plan:approved — no needs-human from either checkpoint");
+  assert.deepEqual(forge.issueCommentsPosted, [] as Array<[number, string]>, "no pointer comment — nothing was ever stale");
+  state.close();
+});
+
 test("createPlanReviewStub: outcome 1 (approve WITH a body revision) — the revised body is applied via updateIssueBody BEFORE the label", async () => {
   const forge = new FakeForge();
   forge.poolEligibleIssues = [{ number: 50, title: "t", labels: [ROUND_POOL_LABEL] }];
@@ -380,10 +404,16 @@ test("createPlanReviewStub: outcome 2 (request draft) end-to-end self-heal — r
   const forge = new FakeForge();
   forge.poolEligibleIssues = [{ number: 12, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[12] = NO_PLAN_BODY;
-  // A pre-existing, unrelated comment already sits on the issue — proves the brief no longer
-  // comes from (or is influenced by) issue comments at all (that snapshot/refetch machinery is
-  // deleted; the brief is the validated decision's BODY block, directly).
-  forge.issueComments[12] = [{ login: "human", createdAt: "t", body: "an unrelated human discussion" }];
+  // A pre-existing comment already sits on the issue — proves the brief no longer comes from (or
+  // is influenced by) issue comments at all (that snapshot/refetch machinery is deleted; the
+  // brief is the validated decision's BODY block, directly). #652: authored as an ENGINE comment
+  // (marker + the fake's default actor) so it is exempt from the comment-adjudication cursor
+  // regardless of body edits across cycles — this test is about content influence, not the
+  // staleness gate itself (covered separately in comment-cursor-gate.test.ts / plan-review's own
+  // #652 tests below).
+  forge.issueComments[12] = [
+    { id: "1", login: forge.authenticatedActor!, createdAt: "t", body: "an unrelated note <!-- sapwood:engine -->" },
+  ];
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
     { result: doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 12 }, "missing acceptance criteria")) },
@@ -409,8 +439,13 @@ test("createPlanReviewStub: outcome 2 (request draft) end-to-end self-heal — r
   // The engine still posts the brief as a GitHub-visible comment (traceability)...
   const posted = lastComment(forge, 12);
   assert.ok(posted.includes("missing acceptance criteria"));
-  // ...but never reads comments back — the freshness-snapshot machinery this replaced is gone.
-  assert.equal(forge.getIssueCommentsCallCount, 0);
+  // ...and never reads comments back FOR CONTENT — the pre-#652 freshness-snapshot machinery
+  // this replaced (comment content feeding the brief) is still gone; `posted` above proves the
+  // brief came from the reviewer's structured decision alone. #652 DOES read comments now, but
+  // only to check the comment-adjudication cursor (never to derive the brief's content) — one
+  // read per checkpoint (pre-spend + pre-apply) per cycle: cycle 0 (draft_request) + cycle 1
+  // (approve) = 4.
+  assert.equal(forge.getIssueCommentsCallCount, 4);
   state.close();
 });
 
@@ -957,6 +992,72 @@ test("validateDrafterOutput: a template-shaped body with sibling Verification pl
   assert.ok(plan!.includes("N is config-driven"), "extracted plan must carry the AC lines");
   assert.ok(plan!.includes("## Verification plan"), "extracted plan must carry the Verification heading");
   assert.ok(plan!.includes("feeds the poller N+1 transient failures"), "extracted plan must carry the verification steps");
+});
+
+// ── #652: comment-adjudication cursor — gate⓪'s pre-spend + pre-apply checkpoint pair ───────
+
+test("createPlanReviewStub (#652): pre-spend checkpoint — a stale cursor (unadjudicated non-engine comment, no marker) refuses to spend on a reviewer session at all", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 12, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[12] = NO_PLAN_BODY;
+  forge.issueComments[12] = [{ id: "1", login: "human", createdAt: "t", body: "a binding ruling, never folded into the body" }];
+  const runner = new ScriptedRunner([{ result: doneResult("reviewer-0", sapwoodResult({ decision: "approve", issue: 12 })) }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.equal(runner.calls.length, 0, "no reviewer session is ever spent while the cursor is stale");
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 12 && l === "needs-human"));
+  assert.ok(!forge.issueLabels[12]?.includes("plan:approved"), "never approved");
+  const posted = lastComment(forge, 12);
+  assert.match(posted, /pending/i);
+  assert.match(posted, /#1/);
+  state.close();
+});
+
+test("createPlanReviewStub (#652): pre-apply checkpoint — a comment arriving DURING the reviewer session discards its 'approve' decision without applying it", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 12, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[12] = NO_PLAN_BODY; // fresh cursor (no marker, zero comments) -> pre-spend passes
+  const runner = new ScriptedRunner([
+    {
+      result: doneResult("reviewer-0", sapwoodResult({ decision: "approve", issue: 12 }, PLAN_BODY)),
+      // Simulates a comment landing WHILE this session is running — observed only at the
+      // pre-apply recheck, never at pre-spend (which already passed for this cycle).
+      effect: () => {
+        forge.issueComments[12] = [{ id: "1", login: "human", createdAt: "t", body: "a binding ruling that arrived mid-session" }];
+      },
+    },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.equal(runner.calls.length, 1, "the reviewer session DID run — pre-spend passed on the (then-fresh) cursor");
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "the approve decision's body write is discarded, never applied");
+  assert.ok(!forge.issueLabels[12]?.includes("plan:approved"), "never approved — the decision was discarded, not applied");
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 12 && l === "needs-human"));
+  const posted = lastComment(forge, 12);
+  assert.match(posted, /pending/i);
+  state.close();
+});
+
+test("createPlanReviewStub (#652): a comment-fetch failure propagates — no issue write happens, rides the existing thrown-error path (never turns network trouble into a human adjudication)", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 12, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[12] = NO_PLAN_BODY;
+  forge.getIssueComments = async () => {
+    throw new Error("network blip");
+  };
+  const runner = new ScriptedRunner([{ result: doneResult("reviewer-0", sapwoodResult({ decision: "approve", issue: 12 })) }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await assert.rejects(() => stub.run({ roundId: 1, phase: "plan_review", marker: null }), /network blip/);
+  assert.equal(runner.calls.length, 0, "no session spent either — the pre-spend check's own fetch failed first");
+  assert.deepEqual(forge.labelsAdded, [] as Array<[number, string]>);
+  assert.deepEqual(forge.issueCommentsPosted, [] as Array<[number, string]>);
+  state.close();
 });
 
 // ── #214: gate⓪ scoped to the round pool + freshness re-confirm ────────────────────────────

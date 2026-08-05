@@ -146,6 +146,12 @@ export interface PRComment {
   login: string;
   createdAt: string; // ISO
   body: string;
+  // #652: the REST numeric comment id (stringified), when the underlying read populated it —
+  // parsePRComments always sets this from a real `gh api .../issues/<n>/comments` response.
+  // Optional so pre-#652 fixtures/callers that construct a PRComment literal without it keep
+  // typechecking; comment-cursor-gate.ts (the ONE consumer that needs comment identity) treats a
+  // missing id the same as an unmatched cursor target — never a crash.
+  id?: string;
 }
 
 /** One bounded top-level PR conversation comment. Unlike PRComment (legacy issue-comment
@@ -389,6 +395,14 @@ export interface IForge {
    *  most recent comment as the verification-plan-drafter's brief (#77 Amendment 2). Newest-last (gh's
    *  default chronological order). */
   getIssueComments(issue: number): Promise<PRComment[]>;
+  /** #652: the authenticated forge actor's login — the ONLY identity signal the comment-
+   *  adjudication cursor's engine-comment exemption may trust (paired with the central
+   *  `ENGINE_COMMENT_MARKER`; marker AND actor, never either alone, design adjudicated
+   *  2026-08-05). Resolved once per check, never cached across calls by this interface — a
+   *  caller that needs it repeatedly resolves it once itself. `null` when the identity cannot be
+   *  established (auth failure, network error, malformed response) — the caller's contract is:
+   *  an unresolvable actor exempts NO comment, ever. */
+  getAuthenticatedActor(): Promise<string | null>;
   /** #89: create a new issue (the PO peripheral's decomposition output) — title + body only.
    *  Labels are applied via the existing addLabel path afterward (e.g. `origin:agent`), rather
    *  than bundled into creation, so there is exactly one label-mutation code path in the
@@ -1257,6 +1271,20 @@ export class GithubForge implements IForge {
     // `issues/<n>/comments` route, so parsePRComments parses this unchanged.
     const out = await this.gh(["api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${issue}/comments`, "--paginate", "--slurp"]);
     return parsePRComments(out);
+  }
+
+  /** #652: `gh api user` — the authenticated actor's own login, per GitHub's REST identity
+   *  endpoint (the same token every other `gh` call in this class already uses). Fails closed to
+   *  `null` on ANY error (auth failure, network blip, malformed response) — never throws, per
+   *  IForge.getAuthenticatedActor's contract that an unresolvable actor exempts no comment. */
+  async getAuthenticatedActor(): Promise<string | null> {
+    try {
+      const out = await this.gh(["api", "user", "--jq", ".login"]);
+      const login = out.trim();
+      return login.length > 0 ? login : null;
+    } catch {
+      return null;
+    }
   }
 
   async createIssue(title: string, body: string): Promise<number> {
@@ -3075,10 +3103,15 @@ export function parsePRReactions(json: string): PRReaction[] {
 /** Pure parse of `gh api .../issues/<pr>/comments --paginate --slurp` (same page shapes as
  *  parsePRReactions). Malformed/missing fields degrade to ""/empty — never a throw. */
 export function parsePRComments(json: string): PRComment[] {
-  type Raw = { body?: string; created_at?: string; user?: { login?: string } };
+  type Raw = { id?: number | string; body?: string; created_at?: string; user?: { login?: string } };
   const parsed = JSON.parse(json) as Raw[] | Raw[][];
   const arr = parsed.flatMap((p) => (Array.isArray(p) ? p : [p]));
-  return arr.map((c) => ({ login: c.user?.login ?? "", createdAt: c.created_at ?? "", body: c.body ?? "" }));
+  return arr.map((c) => ({
+    login: c.user?.login ?? "",
+    createdAt: c.created_at ?? "",
+    body: c.body ?? "",
+    ...(c.id != null ? { id: String(c.id) } : {}),
+  }));
 }
 
 /** Pure parse of `gh api .../commits?since=... --paginate --slurp` (same page-shape convention

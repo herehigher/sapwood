@@ -42,6 +42,7 @@ import type { IForge, Issue } from "../forge/forge.js";
 import { extractAcceptanceCriteria, extractVerificationPlan, extractVerificationSection } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 import type { PeripheralStub } from "../loop/round.js";
+import { checkCommentCursorFreshness, commentCursorIsStale, escalateCommentCursorStale } from "../review/comment-cursor-gate.js";
 import type { State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 import {
@@ -419,6 +420,32 @@ function approvedThisRound(state: State, roundId: number, issueNumber: number): 
  *  verdict reuses this exact draft→re-review cycle (reviewer brief -> drafter -> re-review, same
  *  maxDraftCycles cap, same escalation path) rather than a bespoke copy of it. Cycle 1 onward runs
  *  a completely normal reviewer session, seed or not. */
+/** #652: gate⓪'s comment-adjudication cursor checkpoint — shared by reviewOneIssue's pre-spend
+ *  and pre-apply call sites. Always fetches the LIVE body + comment stream (never reuses an
+ *  earlier read, including `currentBody` fetched at the top of this cycle) — the entire point of
+ *  the pre-apply call is to catch drift that happened DURING the session that just ran, so a
+ *  cached read would defeat it. On a stale/invalid cursor, applies the shared needs-human degrade
+ *  (label + deduplicated pointer comment) and records the durable event; returns `true`, meaning
+ *  the caller must stop (refuse to spend / discard the decision without applying it). Returns
+ *  `false` when it's safe to proceed. */
+async function checkGate0CommentCursor(
+  deps: PlanReviewDeps,
+  issue: Issue,
+  roundId: number,
+  checkpoint: "gate0-pre-spend" | "gate0-pre-apply",
+): Promise<boolean> {
+  const liveBody = await deps.forge.getIssueBody(issue.number);
+  const result = await checkCommentCursorFreshness(deps.forge, issue.number, liveBody);
+  if (!commentCursorIsStale(result)) return false;
+  await escalateCommentCursorStale(deps.forge, deps.cfg, issue.number, result);
+  try {
+    deps.state.appendEvent("comment-cursor-stale", { round_id: roundId, issue: issue.number, checkpoint });
+  } catch {
+    /* contained — the forge escalation (label + pointer comment) already landed */
+  }
+  return true;
+}
+
 /** #374 review (Codex sol-high verify-pass finding 1, P1 — fixes a recovery canary starvation):
  *  returns `true` when THIS call's own session(s) observed a classified env failure (park
  *  entered/extended) this pass, `false` otherwise (approved / verify_na / self-heal-exhausted /
@@ -494,6 +521,11 @@ async function reviewOneIssue(
       decision = seed.decision;
       trail.push(seed.trailEntry);
     } else {
+      // #652: pre-spend checkpoint — refuse to spend on a reviewer session while the issue's
+      // comment-adjudication cursor is stale/invalid. The seed branch above never reaches here
+      // (it spends nothing), but the pre-apply checkpoint below still protects its decision.
+      if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-spend")) return false;
+
       const reviewerPrompt = renderRolePrompt(reviewerTemplate, currentIssue, deps.cfg);
       const reviewerRole = deps.cfg.roles.verificationPlanReviewer;
 
@@ -559,6 +591,13 @@ async function reviewOneIssue(
       decision = validated.decision;
       trail.push(`cycle ${cycle}: verification-plan-reviewer session ${reviewResult.name} -> ${decision.decision}`);
     }
+
+    // #652: pre-apply checkpoint — recheck IMMEDIATELY before applying ANY reviewer-derived body
+    // or label write, whether `decision` came from a real session (above) or a seed (#214's
+    // invalidated-confirm handoff). A body edit or a pending comment landing WHILE the session
+    // ran discards the decision without applying any of it — approve/verify_na/draft_request
+    // alike, never a partial apply.
+    if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-apply")) return false;
 
     if (decision.decision === "approve") {
       if (decision.body !== undefined) await deps.forge.updateIssueBody(issue.number, decision.body);
@@ -805,6 +844,12 @@ async function confirmOneIssue(
       trailEntry: "confirm: skipped — approved body has no checkbox acceptance-criteria set",
     });
   }
+
+  // #652: pre-spend checkpoint — same rule as reviewOneIssue's own (a confirm session is still
+  // "spending on a reviewer"). The confirm branch itself makes zero forge writes (see this
+  // function's own doc), so there is no separate pre-apply checkpoint here; an "invalidate"
+  // verdict hands off to reviewOneIssue's seed path, which carries its own pre-apply check.
+  if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-spend")) return false;
 
   const currentIssue: Issue = { ...issue, body: currentBody };
   const confirmPrompt = renderRolePrompt(confirmTemplate, currentIssue, deps.cfg);
