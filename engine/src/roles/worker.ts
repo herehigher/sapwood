@@ -2010,6 +2010,21 @@ export class WorkerSupervisor implements Supervisor {
     return result.ok ? path : undefined;
   }
 
+  /** #671: public wrapper around resolveDeployKeyPath()'s memoized SSH preflight, for cli.ts's
+   *  startup deploy-key tier check (deploy-key-startup-check.ts). Triggering the preflight here
+   *  SEEDS `this.deployKeyProbe`, so the first real dispatch()/resume() later on this SAME
+   *  instance just re-awaits the settled promise instead of re-shelling to `ssh` — startup +
+   *  first dispatch cost at most one SSH probe total. Returns `undefined` when
+   *  `cfg.worker.deployKeyPath` is unset (nothing to probe); otherwise the settled
+   *  {ok, detail} the memoized preflight resolved to, so the caller can report the failure
+   *  detail itself rather than re-deriving it. Never throws — same stance as
+   *  resolveDeployKeyPath, which this delegates to entirely. */
+  async checkDeployKeyPreflight(): Promise<LlmPingResult | undefined> {
+    if (!this.deps.cfg.worker.deployKeyPath) return undefined;
+    await this.resolveDeployKeyPath();
+    return this.deployKeyProbe;
+  }
+
   /** #244 (Codex sol-high PR #260 review, P2): durable mint-failure observability — a
    *  `proxy-mint-failed` state event (lane/role/sanitized reason), so a repeated or systemic mint
    *  failure is queryable after the fact, not just a transient stderr line. Contained: a

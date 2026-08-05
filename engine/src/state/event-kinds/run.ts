@@ -21,6 +21,13 @@ export const RUN_EVENT_KINDS = defineKinds({
     meaning: "a stale instance lock from a dead PID was taken over so this run could proceed (#382).",
     actionability: "investigate",
   },
+  "deploy-key-tier-detected": {
+    tags: [],
+    meaning:
+      "startup recorded the effective worker-credential tier (L0/L1) and which deploy-key arm produced it — visibility, not a gate (#671).",
+    actionability: "routine",
+    see: "#671",
+  },
 
   // Liveness watchdog + the run-level breakers (rapid-restart, consecutive-stalls, idle-churn).
   // None of these are `escalation-source:*` — see ESCALATION_SOURCES' own "DELIBERATELY ABSENT"

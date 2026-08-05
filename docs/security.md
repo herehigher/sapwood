@@ -502,6 +502,19 @@ best-effort (a WARN, never a reason to fail init, if `.gitignore` itself can't b
 appends a last-position ignore rule so an ordinary `git add -A` will not stage the worker deploy
 key(s); a deliberate `git add -f` still can.
 
+**Startup visibility, not a gate (#671).** `sapwood init` provisions and preflights the key, but
+a RUNNING engine used to discover key problems only lazily, at the first dispatch's own memoized
+SSH preflight — an operator could run a whole batch at L0 with no indication until they went
+digging in a single leg's logs. At engine startup (`cli.ts`, right after `WorkerSupervisor`
+construction, sharing that SAME instance's memoized preflight so this costs no extra SSH probe)
+the engine now checks which of four shapes applies — `deployKeyPath` unset, the path set but the
+key file missing/unreadable, the path set with the preflight failing, or the preflight passing —
+and reports the effective tier (L0/L1) and why in both the log and a `deploy-key-tier-detected`
+event. The two degrade shapes reuse the SAME guidance WARNs `sapwood init` itself emits
+(`deployKeyProvisioningFailedAction`/`deployKeyPreflightFailedAction`) rather than a third
+variant. This is disclosure only — L0 is a legal, fully-functional mode, and no arm blocks
+startup or dispatch.
+
 **Honest residuals — what L1 does NOT close:**
 
 - **Cross-lane clobber, accepted.** A GitHub deploy key is a REPO-wide credential, not a
