@@ -1119,13 +1119,26 @@ test("#653: both comment-reading gate⓪ prompts (verification-plan-reviewer.md,
   }
 });
 
-test("#653: the duty is veto-only — no positive-completeness claim is introduced alongside it", () => {
+// #657: broadened per adjudication — (a) whitespace-normalize before matching, so a
+// line-wrap-shaped drift ("Comments\nconfirm freshness") can't slip a regex anchored on a
+// single space; (b) the forbidden set covered only freshness/provenance/authorization framing,
+// leaving approve/authorize/expand-scope formulations — the OTHER three verbs the duty text
+// itself vetoes ("never justify approve/confirm, expand scope, or authorize a body change") —
+// unchecked. Still negative-form only (doctrine): this is a non-exhaustive forbidden set, not a
+// claim that these patterns are the only way a positive-completeness claim could be written.
+const FORBIDDEN_POSITIVE_FORMULATIONS: RegExp[] = [
+  /comments? (?:confirm|establish|prove|guarantee) (?:freshness|provenance|authorization)/i,
+  /comments? (?:can|may|could)? ?(?:justify|authorize) (?:an? )?(?:approve|approval|confirm|confirmation|scope expansion|a scope change|a body change|the body change)/i,
+  /comments? (?:approve|confirm) (?:the )?(?:plan|pr|issue|scope|body)/i,
+  /comments? (?:expand|widen) (?:the )?scope/i,
+];
+
+test("#653/#657: the duty is veto-only — no positive-completeness or approval/scope-authorization claim is introduced alongside it (whitespace-normalized, so line-wrap drift cannot slip the match)", () => {
   const bodies = [readPrompt(defaultVerificationPlanReviewerPromptPath()), readPrompt(defaultVerificationPlanConfirmPromptPath())];
-  for (const body of bodies) {
-    assert.doesNotMatch(
-      body,
-      /comments? (?:confirm|establish|prove|guarantee) (?:freshness|provenance|authorization)/i,
-      "comments must never be framed as establishing freshness/provenance/authorization",
-    );
+  for (const rawBody of bodies) {
+    const body = normalizeWhitespace(rawBody);
+    for (const pattern of FORBIDDEN_POSITIVE_FORMULATIONS) {
+      assert.doesNotMatch(body, pattern, `comments must never be framed with a forbidden positive/authorization formulation: ${pattern}`);
+    }
   }
 });

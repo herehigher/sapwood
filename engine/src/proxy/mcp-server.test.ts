@@ -305,6 +305,27 @@ test("tools/call: successful issue_details call returns content-parsable JSON an
   });
 });
 
+test("tools/call: issue_details AND issue_comments both preserve PRComment.id end-to-end (forge -> proxy response shape) — #653's gate⓪ veto duty can only 'name the conflicting comment ID' if the id survives to this model-visible surface", async () => {
+  await withServer(
+    {
+      forge: fakeForge({
+        getIssueComments: async () => [{ login: "a", createdAt: "2026-07-01T00:00:00Z", body: "a comment", id: "IC999" }],
+      }),
+    },
+    async (h) => {
+      const details = await callTool(h.url, h.token, "issue_details", { numbers: [1] });
+      assert.equal(details.body.result.isError, false);
+      const detailsParsed = JSON.parse(details.body.result.content[0].text);
+      assert.equal(detailsParsed.issues[0].comments.comments[0].id, "IC999");
+
+      const comments = await callTool(h.url, h.token, "issue_comments", { number: 1 });
+      assert.equal(comments.body.result.isError, false);
+      const commentsParsed = JSON.parse(comments.body.result.content[0].text);
+      assert.equal(commentsParsed.comments[0].id, "IC999");
+    },
+  );
+});
+
 test("tools/call: budget (call count) exhaustion mid-session -> explicit budget_exhausted tool result, not a transport error", async () => {
   await withServer({ budget: { maxCallsPerSession: 1, maxBytesPerSession: 1_000_000 } }, async (h) => {
     const first = await callTool(h.url, h.token, "search_issues", { query: "x" });
