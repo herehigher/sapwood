@@ -160,6 +160,22 @@ export function renderRolePrompt(template: string, issue: Issue, cfg: SapwoodCon
 const COMMENT_DIGEST_COUNT_CAP = 30;
 const COMMENT_DIGEST_BODY_CHAR_CAP = 4000;
 
+/** #672 (Codex gate② P2 on #665): a comment body is untrusted text — anyone who can comment on
+ *  the issue authored it, world-writable once the repo is public — and it is about to be
+ *  interpolated straight into the `<issue-comments>...</issue-comments>` data block
+ *  (renderCommentDigest below) inside the reviewer/confirm prompt. A literal `</issue-comments>`
+ *  (or any other tag, e.g. a forged `<issue-body>`) inside a comment would otherwise close/reopen
+ *  a block early and hand the reviewer attacker-authored text framed as prompt structure rather
+ *  than as quoted comment content — a prompt-injection escape hatch. Escaping every `<` is the
+ *  minimal neutralization: it denies the text the one character every one of this codebase's
+ *  data-block delimiters opens on, without touching anything else about the comment's readability
+ *  as plain text. No matching unescape exists anywhere downstream — this render has exactly one
+ *  consumer (a read-only judgment prompt) and nothing here ever reconstitutes or re-emits the
+ *  original bytes. */
+function escapeAngleBrackets(text: string): string {
+  return text.replaceAll("<", "&lt;");
+}
+
 /** #665: render the comment stream `checkGate0CommentCursor`'s pre-spend fetch already paid for
  *  into prompt text — author, id, body, oldest-first (the same stream order GitHub returns and
  *  comment-cursor.ts reasons about) — so the #653 comment-contradiction veto duty judges evidence
@@ -168,13 +184,22 @@ const COMMENT_DIGEST_BODY_CHAR_CAP = 4000;
  *  pre-spend checkpoint already fetched. Each body is capped, and the list itself is capped, so a
  *  runaway thread cannot blow out prompt size — an overflow past the count cap is named, never
  *  silently dropped. An empty stream renders a plain sentence, never an empty tag pair a reviewer
- *  might mistake for a rendering defect. */
+ *  might mistake for a rendering defect.
+ *
+ *  #672: each body is angle-bracket-escaped (escapeAngleBrackets above) BEFORE the truncation cap
+ *  is applied — the truncated text a reviewer actually sees is the exact text the cap describes,
+ *  and a comment cannot use its own truncation boundary to smuggle a half-escaped tag past the
+ *  cap either. */
 export function renderCommentDigest(comments: readonly PRComment[]): string {
   if (comments.length === 0) return "(no comments on this issue)";
   const shown = comments.slice(0, COMMENT_DIGEST_COUNT_CAP);
   const overflow = comments.length - shown.length;
   const entries = shown.map((c) => {
-    const body = c.body.length > COMMENT_DIGEST_BODY_CHAR_CAP ? `${c.body.slice(0, COMMENT_DIGEST_BODY_CHAR_CAP)}\n… [truncated]` : c.body;
+    const escapedBody = escapeAngleBrackets(c.body);
+    const body =
+      escapedBody.length > COMMENT_DIGEST_BODY_CHAR_CAP
+        ? `${escapedBody.slice(0, COMMENT_DIGEST_BODY_CHAR_CAP)}\n… [truncated]`
+        : escapedBody;
     return `### Comment ${c.id ?? "(no id)"} — @${c.login} (${c.createdAt})\n\n${body}`;
   });
   const overflowNote = overflow > 0 ? `\n\n… (${overflow} more comment(s) not shown, oldest ${shown.length} shown)` : "";
