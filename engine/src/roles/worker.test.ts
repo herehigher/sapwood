@@ -4420,6 +4420,18 @@ function alive(pid: number): boolean {
   }
 }
 
+/** Is the WHOLE process group (negative pid) still alive — the same check reapAll's own
+ *  pidGroupAlive uses, exposed here so r2[0]'s tests can assert on the group, not just the
+ *  (possibly already-gone) leader pid. */
+function groupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // #668 (controlled-exit child reaping): reapChildren's own escalation state machine, against
 // FAKE children — no real subprocess, no real timer (opts.sleep resolves immediately), per this
@@ -4613,6 +4625,139 @@ test("WorkerSupervisor.reapAll (#668 gate② finding [1]): a lane ALREADY mid-dr
 
     assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: true, confirmedDead: true }]);
     assert.equal(alive(pid), false, "reapAll still reaps a lane an earlier drain already signaled");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #668 gate② round 2 (design re-entry): two NEW lifecycle edges the reviewer found beyond the
+// round-1 fixes above — r2[0] (a leader-exited pgid's surviving descendants become unreapable)
+// and r2[1] (reapAll speculatively marking an already-dead lane as handed-off, corrupting the
+// sentinel onExit later writes for it). Both are tested at the REAL production seam: r2[0]
+// against real process-group semantics (no fake children — a pgid is a kernel fact, not
+// something reapChildren's own abstraction can stand in for), r2[1] against the exact
+// `handoffRequested` bookkeeping field onExit branches on / the real .handoff sentinel file it
+// produces.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("WorkerSupervisor.reapAll (#668 r2[1]): a lane whose child is ALREADY dead at reapAll() time is never marked handoffRequested — the exact bookkeeping onExit reads to choose .handoff vs .done/.failed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  try {
+    const s = sup(dir, "claude"); // dispatch() never called — this.lanes is populated directly below
+    // A REAL, detached, already-exited process group — confirmed dead via the SAME group check
+    // reapAll's own isAlive() uses, so this is a genuine "already dead" fact, not a guessed pid.
+    const trivial = spawn(mkStub(dir, "#!/usr/bin/env bash\nexit 0\n"), [], { detached: true, stdio: "ignore" });
+    const pid = trivial.pid!;
+    await new Promise<void>((resolve) => trivial.once("exit", () => resolve()));
+    await waitFor(() => !groupAlive(pid), "the trivial process group never actually died");
+
+    // #668 r2[1]: insert the lane DIRECTLY into `this.lanes`, reproducing the exact race the
+    // finding names — a lane still present at reapAll() time (its real onExit() hasn't run for
+    // this entry, mirroring "the pending 'exit' notification hasn't been processed yet") whose
+    // child has ALREADY exited. Only the two fields reapAll()'s own mapping touches are needed.
+    const fakeLane = { child: { pid }, handoffRequested: false };
+    (s as unknown as { lanes: Map<string, typeof fakeLane> }).lanes.set("lane-already-dead", fakeLane);
+
+    const outcomes = await s.reapAll();
+
+    assert.deepEqual(outcomes, [{ name: "lane-already-dead", alreadyDead: true, escalated: false, confirmedDead: true }]);
+    assert.equal(
+      fakeLane.handoffRequested,
+      false,
+      "an already-dead lane must never be marked handoffRequested — a later/pending onExit() must still see false and write .done/.failed honestly, never a fabricated .handoff",
+    );
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WorkerSupervisor.reapAll (#668 r2[1], reverse — a genuinely alive+signaled lane): the SAME reapAll() call DOES mark handoffRequested and DOES end up tagged .handoff, end-to-end through the real onExit — proves the fix ties the flag to the real signal, not to nothing at all", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  try {
+    const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n"); // cooperative graceful handoff
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 673, title: "t", labels: [] });
+    await waitForFile(ready, "stub installed its TERM trap before reap");
+
+    const outcomes = await s.reapAll();
+    assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: false, confirmedDead: true }]);
+
+    await waitForFile(join(dir, `${name}.handoff.json`), "a genuinely alive, reap-signaled lane must land .handoff, not .done/.failed");
+    assert.equal(existsSync(join(dir, `${name}.done.json`)), false);
+    assert.equal(existsSync(join(dir, `${name}.failed.json`)), false);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WorkerSupervisor.reapAll (#668 r2[0]): a pgid tracked ONLY in pgidRegistry (no this.lanes entry at all — the leader-already-exited shape) is still found and reaped, and pruned from the registry once confirmed dead", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  try {
+    const s = sup(dir, "claude");
+    // Stands in for a descendant whose leader already exited and whose lane entry onExit()
+    // already removed from `this.lanes` — the exact shape r2[0] names. Ignores TERM, so death
+    // can only come from reapAll's own SIGKILL escalation (proves the FULL escalation state
+    // machine applies to a pgid-only entry, not just to a live `this.lanes` lane).
+    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n");
+    const orphan = spawn(bin, [], { detached: true, stdio: "ignore" });
+    const pid = orphan.pid!;
+    await waitForFile(ready, "orphan stub did not install its TERM-ignoring trap");
+
+    (s as unknown as { pgidRegistry: Map<string, number> }).pgidRegistry.set("lane-orphan", pid);
+    assert.equal((s as unknown as { lanes: Map<string, unknown> }).lanes.has("lane-orphan"), false, "sanity: no this.lanes entry for it");
+
+    const outcomes = await s.reapAll({ graceMs: 100 });
+
+    assert.deepEqual(outcomes, [{ name: "lane-orphan", alreadyDead: false, escalated: true, confirmedDead: true }]);
+    assert.equal(groupAlive(pid), false, "the orphaned pgid's whole group is actually dead, not just assumed");
+    assert.equal(
+      (s as unknown as { pgidRegistry: Map<string, number> }).pgidRegistry.has("lane-orphan"),
+      false,
+      "a confirmed-dead pgid is pruned from the registry, never left to grow unboundedly",
+    );
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WorkerSupervisor.reapAll (#668 r2[0], the real production trigger): a leader that exits ON ITS OWN while a DESCENDANT in the SAME process group is still alive — onExit() already deleted the this.lanes entry, but reapAll() still finds and reaps the whole group via pgidRegistry", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  try {
+    const descendantPidFile = join(dir, "descendant.pid");
+    // The LEADER backgrounds a TERM-ignoring descendant (a non-interactive bash keeps a
+    // backgrounded job in the SAME process group — no new pgid), then exits immediately on its
+    // own, well before reapAll() is ever called — no drain, no signal, nothing asked it to stop.
+    const bin = mkStub(dir, `#!/usr/bin/env bash\n( trap '' TERM; sleep 100 ) &\necho $! > "${descendantPidFile}"\nexit 0\n`);
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 674, title: "t", labels: [] });
+    const leaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+
+    // Deterministic proof onExit() already ran for the REAL leader exit: its sentinel exists.
+    // No handoff was ever requested, so a clean exit(0) tags .done — proves this ISN'T a drain.
+    await waitForFile(join(dir, `${name}.done.json`), "leader never exited / onExit never ran");
+    assert.equal((s as unknown as { lanes: Map<string, unknown> }).lanes.has(name), false, "onExit already removed the this.lanes entry");
+    await waitForFile(descendantPidFile, "the descendant never reported its own pid");
+
+    assert.equal(groupAlive(leaderPid), true, "sanity: the descendant keeps the leader's own pgid alive after the leader itself is gone");
+    assert.equal(
+      (s as unknown as { pgidRegistry: Map<string, number> }).pgidRegistry.has(name),
+      true,
+      "onExit() must KEEP the pgidRegistry entry while the group outlives its leader — pruning here would lose the pgid forever",
+    );
+
+    const outcomes = await s.reapAll({ graceMs: 100 });
+
+    assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: true, confirmedDead: true }]);
+    assert.equal(
+      groupAlive(leaderPid),
+      false,
+      "the descendant is actually dead too — the whole group was reaped, not just the already-gone leader",
+    );
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

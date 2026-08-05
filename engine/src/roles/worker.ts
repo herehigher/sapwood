@@ -1922,6 +1922,19 @@ export class WorkerSupervisor implements Supervisor {
   // A missing/malformed configured file throws HERE, at startup, before any dispatch.
   private readonly pricing: PricingTable;
   private readonly lanes = new Map<string, Lane>();
+  // #668 (gate② round 2, r2[0]): a durable pgid record OUTLIVING `this.lanes` — onExit() deletes
+  // a lane's `this.lanes` entry the instant the DIRECT child (the detached process-group leader)
+  // exits, but a descendant the leader forked inside the SAME process group can still be alive at
+  // that moment (the leader dying doesn't kill its own group). Without a separate record,
+  // reapAll()'s `this.lanes` snapshot loses every trace of that pgid the instant the leader
+  // exits — a surviving descendant becomes permanently unreapable, exactly the orphan AC4
+  // forbids. Populated at both spawn sites (dispatch()/resume(), the same two places that create
+  // a `this.lanes` entry) and pruned ONLY once the whole GROUP is confirmed dead: onExit() keeps
+  // the entry when the group outlives its leader (see onExit's own doc), and reapAll() removes it
+  // once `ReapOutcome.confirmedDead` proves the group is actually gone. A failed spawn removes it
+  // immediately (mirrors the paired `this.lanes.delete` on that path) — no process group was ever
+  // durably left running there.
+  private readonly pgidRegistry = new Map<string, number>(); // lane name -> leader pid (group = -pid)
   // #395 (gate② round 3): one liveness-gated heartbeat per live lane, keyed by lane name —
   // persisted across setInterval ticks (util/heartbeat.ts's createHeartbeatGate needs its own
   // "id seen at the last check" cursor to remember). Created lazily in heartbeatTick, removed in
@@ -2275,6 +2288,9 @@ export class WorkerSupervisor implements Supervisor {
       ...(opts?.proxy?.credentialFree || deployKeyPath ? { ghConfigDir } : {}),
     };
     this.lanes.set(laneName, lane);
+    // #668 (r2[0]): registered alongside `this.lanes`, but pruned on a DIFFERENT lifecycle — see
+    // pgidRegistry's own doc.
+    if (child.pid != null) this.pgidRegistry.set(laneName, child.pid);
     child.on("exit", (code) => this.onExit(laneName, code));
 
     // spawn() reports a bad CLAUDE_BIN / missing `claude` via an async `error` event, not a
@@ -2307,6 +2323,7 @@ export class WorkerSupervisor implements Supervisor {
     }
     if (spawnErr) {
       this.lanes.delete(laneName);
+      this.pgidRegistry.delete(laneName); // #668 (r2[0]): no durable process group was ever left running here
       try {
         closeSync(jsonlFd);
       } catch {
@@ -2691,6 +2708,9 @@ export class WorkerSupervisor implements Supervisor {
       ...(opts?.proxy?.credentialFree || deployKeyPath ? { ghConfigDir } : {}),
     };
     this.lanes.set(name, lane);
+    // #668 (r2[0]): registered alongside `this.lanes`, but pruned on a DIFFERENT lifecycle — see
+    // pgidRegistry's own doc.
+    if (child.pid != null) this.pgidRegistry.set(name, child.pid);
     child.on("exit", (code) => this.onExit(name, code));
 
     // #395: bounded — same rationale as dispatch()'s own spawn-confirmation await (Node gives
@@ -2734,6 +2754,7 @@ export class WorkerSupervisor implements Supervisor {
     }
     if (spawnErr) {
       this.lanes.delete(name);
+      this.pgidRegistry.delete(name); // #668 (r2[0]): no durable process group was ever left running here
       try {
         closeSync(jsonlFd);
       } catch {
@@ -3037,6 +3058,13 @@ export class WorkerSupervisor implements Supervisor {
     // place its cursor ever needs clearing; never left to grow unboundedly over a long-running
     // engine process's lifetime.
     this.heartbeatGates.delete(name);
+    // #668 (r2[0]): the DIRECT child exiting is not proof its process GROUP is empty — a
+    // detached descendant sharing the same pgid can outlive its own leader. Only prune
+    // pgidRegistry here when the group is ALREADY fully dead (the common case — no lingering
+    // descendants); otherwise leave the entry in place so reapAll() can still find and reap that
+    // pgid by raw pid even though `this.lanes` no longer has anything to hand it. See
+    // pgidRegistry's and reapAll()'s own docs.
+    if (!this.pidGroupAlive(lane.child.pid)) this.pgidRegistry.delete(name);
   }
 
   /** #617 (seam 3, capability DR #616): the FILESYSTEM-derived half of a worker/producer leg's
@@ -3673,29 +3701,65 @@ export class WorkerSupervisor implements Supervisor {
    *  returned outcome — see cli.ts's callers for how an unconfirmed death there is surfaced as a
    *  failed run rather than silently discarded.
    *
-   *  ONLY reaps live in-memory lanes (this.lanes) — a lane surviving a PRIOR engine restart with
-   *  no in-memory handle (the detached/cross-process case reclaim() and requestHandoff() both
-   *  special-case) is out of scope: that shape is a NEW process's own supervisor construction on
-   *  the next `sapwood run`, which reconcileStartup/reviveEnvFailedPrLanes already reconcile —
-   *  this method reaps only what THIS process itself spawned and is about to abandon. */
+   *  #668 (gate② round 2, r2[1]): `lane.handoffRequested` is flipped to `true` INSIDE the
+   *  `signal` closure below — i.e. only the instant THIS reap actually sends a real signal to a
+   *  lane it found still alive — never speculatively for every lane up front. The earlier version
+   *  set the flag unconditionally before reapChildren even ran, so a lane whose child had already
+   *  exited on its own (isAlive() false — reapChildren never calls `signal` for it at all, per
+   *  AC5) still got tagged as if it had been asked to hand off; that lane's already-pending
+   *  onExit() then read `handoffRequested === true` and wrote a FABRICATED `.handoff` sentinel in
+   *  place of the real `.done`/`.failed` its actual exit code earned. Deferring the write into
+   *  `signal` makes the bookkeeping and the real SIGTERM/SIGKILL delivery the SAME event — a lane
+   *  reapChildren never signals can never end up mistagged.
+   *
+   *  #668 (gate② round 2, r2[0]): a pgid whose DIRECT child has already exited — onExit() already
+   *  ran and deleted the `this.lanes` entry — but whose process GROUP is still alive (a detached
+   *  descendant outliving its own leader) is invisible to a `this.lanes`-only snapshot. Those
+   *  survive in `pgidRegistry` instead (see its own doc) and are reaped here too, by raw pid
+   *  (no ChildProcess/Lane object exists any more for them — `signalGroup`/`pidGroupAlive` need
+   *  only the pid). `laneNames` excludes anything `this.lanes` already covers above, so a
+   *  currently-live lane is never double-listed. A `confirmedDead` outcome (from either source)
+   *  prunes its `pgidRegistry` entry — anything left unconfirmed stays registered, honestly
+   *  reflecting that the group might still be out there.
+   *
+   *  ONLY reaps what THIS process itself spawned and is about to abandon — a lane surviving a
+   *  PRIOR engine restart with no in-memory handle (the detached/cross-process case reclaim() and
+   *  requestHandoff() both special-case) is out of scope: that shape is a NEW process's own
+   *  supervisor construction on the next `sapwood run`, which reconcileStartup/
+   *  reviveEnvFailedPrLanes already reconcile. */
   async reapAll(opts: { graceMs?: number } = {}): Promise<ReapOutcome[]> {
     const lanes = [...this.lanes.entries()];
-    if (lanes.length === 0) return [];
-    const children: ReapableChild[] = lanes.map(([name, lane]) => {
+    const laneChildren: ReapableChild[] = lanes.map(([name, lane]) => {
       const alreadySignaled = lane.handoffRequested;
-      lane.handoffRequested = true; // record intent regardless of who ends up sending the SIGTERM
       return {
         name,
         alreadySignaled,
         isAlive: () => this.pidGroupAlive(lane.child.pid),
-        signal: (sig: NodeJS.Signals) => this.killGroup(lane.child, sig),
+        signal: (sig: NodeJS.Signals) => {
+          lane.handoffRequested = true; // r2[1]: only true once a signal is ACTUALLY sent
+          this.killGroup(lane.child, sig);
+        },
       };
     });
-    return reapChildren(children, {
+    const laneNames = new Set(lanes.map(([name]) => name));
+    const orphanPgidChildren: ReapableChild[] = [...this.pgidRegistry.entries()]
+      .filter(([name]) => !laneNames.has(name))
+      .map(([name, pid]) => ({
+        name,
+        isAlive: () => this.pidGroupAlive(pid),
+        signal: (sig: NodeJS.Signals) => this.signalGroup(pid, sig),
+      }));
+    const children = [...laneChildren, ...orphanPgidChildren];
+    if (children.length === 0) return [];
+    const outcomes = await reapChildren(children, {
       ...(opts.graceMs !== undefined ? { graceMs: opts.graceMs } : {}),
       ...(this.deps.sleep !== undefined ? { sleep: this.deps.sleep } : {}),
       log: (m) => this.log(m),
     });
+    for (const o of outcomes) {
+      if (o.confirmedDead) this.pgidRegistry.delete(o.name);
+    }
+    return outcomes;
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────
@@ -3723,11 +3787,13 @@ export class WorkerSupervisor implements Supervisor {
       }
     }
   }
-  /** #668: is the WHOLE process group (negative pid) still alive? Used only by reapAll's death
-   *  verification — `killGroup`/`signalGroup` above already fall back to a direct-pid signal
-   *  when the group send fails, but verification checks the group specifically, since a
-   *  detached worker child is its own pgid leader and an orphaned group is exactly what this
-   *  issue's acceptance criteria (AC4) forbid. */
+  /** #668: is the WHOLE process group (negative pid) still alive? Used by reapAll's (and its
+   *  orphan-pgid entries') death verification, and by onExit()'s r2[0] check of whether a lane's
+   *  pgidRegistry entry can be pruned the moment its direct child exits — `killGroup`/
+   *  `signalGroup` above already fall back to a direct-pid signal when the group send fails, but
+   *  verification checks the group specifically, since a detached worker child is its own pgid
+   *  leader and an orphaned group is exactly what this issue's acceptance criteria (AC4)
+   *  forbid. */
   private pidGroupAlive(pid: number | null | undefined): boolean {
     if (pid == null) return false;
     try {
