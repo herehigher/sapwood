@@ -1092,6 +1092,51 @@ test('#676 gate② finding [1] ("unscoped-rebaseline"): GATED RECLAIM does NOT r
   st.close();
 });
 
+test('#676 gate② finding [1] round 2 ("rebaseline-version-unbound"): a THIRD edit landing after the supervisor clears needs-human is never silently adopted — GATED RECLAIM re-escalates instead of driving on an unreviewed body', async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+
+  const v1 = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  forge.ready = [{ number: 11, title: "", labels: ["prio:3-feature"], body: v1 }];
+  forge.issueBodies[11] = v1;
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  const workerName = (firstTick.dispatched.find((d) => d.kind === "dispatched") as { worker: string }).worker;
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 100 };
+
+  // v1 -> v2: the drift a supervisor is presumed to actually inspect.
+  const v2 = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests\n\n<!-- v2 fold -->";
+  forge.issueBodies[11] = v2;
+  forge.ready = [];
+  const driftTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.ok(driftTick.driven.some((d) => d.kind === "needs-human" && d.issue === 11 && d.reason.startsWith("ac-snapshot-drift")));
+  assert.equal(st.getWorker(workerName)?.ac_rebaseline_candidate_hash, hashBody(v2), "the drift check pinned v2's hash");
+
+  // The supervisor inspects v2, judges it benign, and clears needs-human — but BEFORE the
+  // reclaim tick actually runs, a THIRD, unadjudicated edit lands: v2 -> v3.
+  forge.issueLabelsByIssue[11] = [];
+  const v3 = "## Acceptance criteria\n\n- [ ] one MALICIOUSLY EDITED\n\n## Verification plan\nrun tests\n\n<!-- v2 fold -->";
+  forge.issueBodies[11] = v3;
+
+  const reclaimTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  // The reclaim itself still happens (the label WAS cleared) — but v3 disagrees with the pinned
+  // v2 candidate, so driveOne is never reached: same-tick DRIVE re-detects the (still-present,
+  // now-against-v3) drift and re-escalates instead of silently trusting v3.
+  assert.deepEqual(reclaimTick.gatedReclaimed, [{ kind: "reclaimed", worker: workerName, issue: 11, pr: 100, attempt: 1 }]);
+  assert.equal(gate.calls.length, 0, "driveOne is NEVER called on the unreviewed v3");
+  assert.ok(
+    reclaimTick.driven.some((d) => d.kind === "needs-human" && d.issue === 11 && d.reason.startsWith("ac-snapshot-drift")),
+    "re-escalated for a fresh human look at what's actually live now",
+  );
+  assert.equal(st.getWorker(workerName)?.state, "failed");
+  // The snapshot was NEVER advanced to v3 (nor even to v2 — the ownership-preserving snapshot
+  // recorded at dispatch is still what's on file; v3 was rejected outright).
+  assert.equal(st.getAcSnapshot(11)?.body, v1);
+  st.close();
+});
+
 test("tick DRIVE (#652 AC8, reverse test): a driving lane with ZERO comments and no cursor marker reaches gate.driveOne exactly as pre-#652 — no needs-human, no queued outcome", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

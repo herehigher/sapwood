@@ -946,6 +946,26 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   (db) => {
     db.exec(`ALTER TABLE workers ADD COLUMN ac_rebaseline_eligible INTEGER NOT NULL DEFAULT 0;`);
   },
+  // 32 -> 33 (#676 gate② finding [1] round 2, "rebaseline-version-unbound"): the TOCTOU close.
+  // `ac_rebaseline_eligible` alone answered "was this escalation about the AC snapshot" but not
+  // "is the body GATED RECLAIM is about to trust the SAME one a human actually looked at" — a
+  // producer/body editor could drift the body to v2, have a supervisor inspect v2 and clear
+  // needs-human, then replace it with v3 before the reclaim tick actually ran; the engine would
+  // silently snapshot v3 and drive on, even though nobody ever adjudicated v3. This column pins
+  // the live body's hash AT THE MOMENT `checkAcDriftBeforeDrive` observes the drift that triggers
+  // the escalation — the version a human investigating `needs-human` would actually see and is
+  // presumed to have reviewed. GATED RECLAIM re-baselines only when the live body at reclaim time
+  // STILL matches this pinned hash; any further edit refuses the silent adopt and falls through to
+  // the ordinary drift re-check instead, forcing a fresh human look at whatever is live NOW. NULL
+  // is the fail-OPEN value used only where a pin is structurally impossible (a missing-snapshot or
+  // ownership-mismatch anomaly, which never read a live body to pin at all — the existing
+  // ownership guard already refuses to re-baseline those) or genuinely not the right model
+  // (`checkCommentCursorBeforeDrive`'s comment-cursor-stale escalation, whose remediation IS a
+  // human's own post-escalation body edit — see that function's own doc for why pinning there
+  // would defeat #676's original fix instead of hardening it).
+  (db) => {
+    db.exec(`ALTER TABLE workers ADD COLUMN ac_rebaseline_candidate_hash TEXT;`);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -1216,6 +1236,19 @@ export interface WorkerRow {
    *  per episode — see the migration comment for why a stale 1 must never leak into a later,
    *  unrelated escalation on the same row). Optional; DB default 0. */
   ac_rebaseline_eligible?: number;
+  /** #676 (schema v32->v33, gate② finding [1] round 2, "rebaseline-version-unbound"): the live
+   *  body hash `checkAcDriftBeforeDrive` observed AT THE MOMENT it detected the drift that
+   *  triggered this escalation — the version a human investigating `needs-human` is presumed to
+   *  have actually reviewed. GATED RECLAIM re-baselines only when the live body at reclaim time
+   *  STILL hashes to this value; a further edit (v2 reviewed+cleared, then replaced by v3 before
+   *  the reclaim tick) refuses the silent adopt instead, so the ordinary drift check re-escalates
+   *  against whatever is live now. `null` means either no pin was ever taken (reset on every
+   *  reclaim, same single-use-per-episode lifecycle as `ac_rebaseline_eligible`) or a pin is
+   *  deliberately not the right model for this escalation (`checkCommentCursorBeforeDrive`'s own
+   *  comment-cursor-stale path — see the migration comment for why) — `ac_rebaseline_eligible`
+   *  alone still gates whether ANY re-baseline happens; this column only narrows WHEN one that's
+   *  otherwise eligible is trusted. Optional; DB default NULL. */
+  ac_rebaseline_candidate_hash?: string | null;
 }
 
 /** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
@@ -1843,8 +1876,8 @@ export class State {
             gated_reentry_attempts, gated_reentry_capped, gated_escalation_labeled,
             gated_escalation_carrier,
             resume_attempts, resume_capped, fix_rounds, fixing_handoff, ac_body_hash,
-            ac_rebaseline_eligible)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ac_rebaseline_eligible, ac_rebaseline_candidate_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            issue = excluded.issue, session_id = excluded.session_id,
            state = excluded.state, started_at = excluded.started_at,
@@ -1871,7 +1904,8 @@ export class State {
            fix_rounds = excluded.fix_rounds,
            fixing_handoff = excluded.fixing_handoff,
            ac_body_hash = excluded.ac_body_hash,
-           ac_rebaseline_eligible = excluded.ac_rebaseline_eligible`,
+           ac_rebaseline_eligible = excluded.ac_rebaseline_eligible,
+           ac_rebaseline_candidate_hash = excluded.ac_rebaseline_candidate_hash`,
       )
       .run(
         row.name,
@@ -1901,6 +1935,7 @@ export class State {
         row.fixing_handoff ?? 0,
         row.ac_body_hash ?? null,
         row.ac_rebaseline_eligible ?? 0,
+        row.ac_rebaseline_candidate_hash ?? null,
       );
   }
 

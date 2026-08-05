@@ -17,7 +17,7 @@ import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue, PRChangedFile, PRCheckItem } from "../forge/forge.js";
 import { firstMatchingLabel, labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge/labels.js";
 import { capDigest } from "../retro/retro-digest.js";
-import { buildAcSnapshot, checkAcSnapshotDrift } from "../review/ac-snapshot.js";
+import { buildAcSnapshot, checkAcSnapshotDrift, hashBody } from "../review/ac-snapshot.js";
 import { parseEngineReviewArtifact } from "../review/audit.js";
 import {
   type CommentCursorResult,
@@ -2988,6 +2988,13 @@ async function checkAcDriftBeforeDrive(
 
   const snapshot = state.getAcSnapshot(w.issue);
   let reason: string;
+  // #676 gate② finding [1] round 2 ("rebaseline-version-unbound"): the live body hash observed
+  // HERE, at the exact moment the drift is detected — the version a human investigating
+  // needs-human is presumed to actually review. Only the real drift branch below ever reads a
+  // live body at all; the other two anomaly branches (missing snapshot / ownership mismatch)
+  // leave this null — there's no coherent "the drift a human reviewed" for a bookkeeping anomaly,
+  // and GATED RECLAIM's own ownership guard already refuses to re-baseline those regardless.
+  let rebaselineCandidateHash: string | null = null;
   if (!snapshot) {
     // #301 P1#1: this lane's OWN dispatch recorded a snapshot (expectedHash is non-null) — its
     // absence now is an anomaly (a crash/corruption/future-refactor gap), never "nothing to
@@ -3013,6 +3020,7 @@ async function checkAcDriftBeforeDrive(
     const result = checkAcSnapshotDrift(liveBody, snapshot);
     if (result.ok) return null; // ownership confirmed, no live-body drift -> drive normally
     reason = result.reason;
+    rebaselineCandidateHash = hashBody(liveBody);
   }
 
   let labeled = 1;
@@ -3025,6 +3033,10 @@ async function checkAcDriftBeforeDrive(
   }
   // #676 gate② finding [1]: this escalation IS about the AC-authority snapshot — mark the row
   // eligible for GATED RECLAIM's re-baseline (see WorkerRow.ac_rebaseline_eligible's own doc).
+  // Round 2 (finding [1] again, "rebaseline-version-unbound"): pin the candidate hash alongside
+  // it — see WorkerRow.ac_rebaseline_candidate_hash's own doc. NULL on the two anomaly branches
+  // (no live body was ever read there), so GATED RECLAIM's own eligibility+ownership checks are
+  // what actually keep those from re-baselining, exactly as before this round.
   state.upsertWorker({
     ...w,
     state: "failed",
@@ -3032,6 +3044,7 @@ async function checkAcDriftBeforeDrive(
     gated_escalation_labeled: labeled,
     gated_escalation_carrier: "issue",
     ac_rebaseline_eligible: 1,
+    ac_rebaseline_candidate_hash: rebaselineCandidateHash,
   });
   // #301 review round 3 (P2): the durable event lands HERE — immediately after the terminal
   // upsert, BEFORE the comment is ever attempted — so it is the crash-safe record of "this
@@ -3118,6 +3131,14 @@ async function checkCommentCursorBeforeDrive(
   // #676 gate② finding [1]: this escalation IS about the AC-authority snapshot (a pending
   // comment, typically resolved by the SAME body-fold ritual that trips ac-snapshot-drift) —
   // eligible for GATED RECLAIM's re-baseline, same as checkAcDriftBeforeDrive's own escalation.
+  // Deliberately NO candidate-hash pin (`ac_rebaseline_candidate_hash: null`, round 2's finding
+  // [1] hardening): this escalation's remediation IS a human's own post-escalation body edit (the
+  // #652 ritual — fold the ruling, advance the cursor), so the body is EXPECTED to differ from
+  // whatever was live when the stale cursor was first observed. Pinning to that pre-fold hash
+  // would refuse the fold forever, defeating #676's original fix for this exact path. See
+  // WorkerRow.ac_rebaseline_candidate_hash's own doc for the accepted, narrower residual this
+  // leaves: an edit landing between this escalation's own remediation and the reclaim tick is
+  // still trusted unconditionally, same as before this hardening round.
   state.upsertWorker({
     ...w,
     state: "failed",
@@ -3125,6 +3146,7 @@ async function checkCommentCursorBeforeDrive(
     gated_escalation_labeled: labeled ? 1 : 0,
     gated_escalation_carrier: "issue",
     ac_rebaseline_eligible: 1,
+    ac_rebaseline_candidate_hash: null,
   });
   state.appendEvent("comment-cursor-stale", {
     issue: w.issue,
@@ -3778,14 +3800,36 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // alone, so the very next drift check still reports the ownership-mismatch it already
       // knows how to produce, rather than this lane silently adopting a stranger dispatch's
       // identity.
+      //
+      // #676 gate② finding [1] round 2 ("rebaseline-version-unbound"): ownership alone still
+      // left a TOCTOU window — the live body GATED RECLAIM reads here is whatever happens to be
+      // live THIS tick, which is not necessarily the version a human actually reviewed before
+      // clearing the label (drift to v2, a supervisor inspects v2 and clears, a THIRD edit lands
+      // v2->v3 before this tick runs — pre-hardening, this code would silently snapshot v3 and
+      // drive on with nobody having adjudicated it). `w.ac_rebaseline_candidate_hash` pins the
+      // live body hash `checkAcDriftBeforeDrive` itself observed at the moment it detected the
+      // drift — re-baseline only when the live body at THIS reclaim still hashes to that pin. A
+      // `null` pin (comment-cursor-stale's own escalation, or a legacy pre-migration row) means
+      // no pin was ever taken — no candidate check applies there, eligibility+ownership alone
+      // still gate it (see WorkerRow.ac_rebaseline_candidate_hash's own doc for why that path
+      // can't be pinned without defeating its own remediation). A non-null pin that DISAGREES
+      // with the live read refuses the silent adopt: `acBodyHash`/`freshSnapshot` stay untouched,
+      // so this reclaim still transitions to `driving` (the label WAS cleared) but the very next
+      // `checkAcDriftBeforeDrive` call — same tick, DRIVE runs right after this loop — re-detects
+      // the (still-present, now against v3) drift and re-escalates for a FRESH human look at
+      // what's actually live, instead of silently trusting it.
       let acBodyHash = w.ac_body_hash ?? null;
       let freshSnapshot: ReturnType<typeof buildAcSnapshot> | null = null;
       if (acBodyHash != null && w.ac_rebaseline_eligible === 1) {
         const ownedSnapshot = state.getAcSnapshot(w.issue);
         if (ownedSnapshot && ownedSnapshot.bodyHash === acBodyHash) {
           const liveBody = await forge.getIssueBody(w.issue);
-          freshSnapshot = buildAcSnapshot(w.issue, liveBody, iso());
-          acBodyHash = freshSnapshot.bodyHash;
+          const liveHash = hashBody(liveBody);
+          const candidateHash = w.ac_rebaseline_candidate_hash ?? null;
+          if (candidateHash == null || candidateHash === liveHash) {
+            freshSnapshot = buildAcSnapshot(w.issue, liveBody, iso());
+            acBodyHash = freshSnapshot.bodyHash;
+          }
         }
       }
       // #426 review round 2 (P2): ONE transaction (`upsertWorkerWithEvent`/
@@ -3803,10 +3847,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // reads as a stranger dispatch's snapshot on the very next tick's retry, re-escalating the
       // already-adjudicated drift.
       const attempt = attempts + 1;
-      // `ac_rebaseline_eligible` is reset to 0 UNCONDITIONALLY here — single-use per escalation
-      // episode (see the WorkerRow field's own doc): whether or not this reclaim actually
-      // re-baselined, a stale 1 must never survive to a LATER, unrelated escalation on this same
-      // row.
+      // `ac_rebaseline_eligible`/`ac_rebaseline_candidate_hash` are reset UNCONDITIONALLY here —
+      // single-use per escalation episode (see the WorkerRow fields' own doc): whether or not
+      // this reclaim actually re-baselined, a stale value must never survive to a LATER,
+      // unrelated escalation on this same row.
       const reclaimedRow: WorkerRow = {
         ...w,
         state: "driving",
@@ -3816,6 +3860,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         gated_reentry_attempts: attempt,
         ac_body_hash: acBodyHash,
         ac_rebaseline_eligible: 0,
+        ac_rebaseline_candidate_hash: null,
       };
       const reentryEventPayload = { worker: w.name, issue: w.issue, pr, attempt };
       if (freshSnapshot) {
