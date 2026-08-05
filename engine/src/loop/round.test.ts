@@ -137,7 +137,12 @@ class FakeForge extends UnstubbedForge implements IForge {
   }
   override async mergePR(): Promise<void> {}
   override async addPRComment(): Promise<void> {}
-  override async addIssueComment(): Promise<void> {}
+  throwOnAddIssueComment = false;
+  override async addIssueComment(issue: number, body: string): Promise<void> {
+    if (this.throwOnAddIssueComment) throw new Error("gh comment write failed");
+    if (this.issueComments[issue] === undefined) this.issueComments[issue] = [];
+    this.issueComments[issue]!.push({ login: "sapwood", createdAt: "2026-01-01T00:00:00Z", body });
+  }
   override async getIssueBody(_issue: number): Promise<string> {
     return "";
   }
@@ -3994,6 +3999,39 @@ test("escalatePoolRemovalFailures (#432 round 6, P1-1): addLabel failing EVERY t
   const terminals = state.eventsAfterId(0, ["round-pool-removal-capped"]);
   assert.equal(terminals.length, 1, "the terminal event landed despite the label write failing every time");
   assert.deepEqual(terminals[0]!.payload, { issue: 9, labeled: 0, labelError: "Error: permission denied" });
+  state.close();
+});
+
+test("escalatePoolRemovalFailures (#655 AC3): the pool-removal-cap escalation carries a reason comment on the issue", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg({ round: { maxPoolRemovalAttempts: 1 } });
+  state.appendEvent("pool-reconcile-incomplete", { round_id: 1, failed_issues: [9] });
+
+  await escalatePoolRemovalFailures(forge, cfg, state, [9]);
+
+  assert.equal(forge.issueComments[9]?.length, 1);
+  const body = forge.issueComments[9]![0]!.body;
+  assert.match(body, /<!-- sapwood:needs-human-reason:round-pool-removal-capped:9 -->/);
+  assert.match(body, new RegExp(`\`${cfg.labels.roundPool}\` label failed to remove 1 time`));
+  assert.match(body, new RegExp(`Remove \`${cfg.labels.needsHuman}\` from this issue once resolved to retry \\(#147 gated reentry\\)`));
+  state.close();
+});
+
+test("escalatePoolRemovalFailures (#655 AC2/AC3): a reason-comment write failure leaves the label outcome and terminal event unaffected", async () => {
+  const forge = new FakeForge();
+  forge.throwOnAddIssueComment = true;
+  const state = new State(":memory:");
+  const cfg = mkCfg({ round: { maxPoolRemovalAttempts: 1 } });
+  state.appendEvent("pool-reconcile-incomplete", { round_id: 1, failed_issues: [9] });
+
+  await escalatePoolRemovalFailures(forge, cfg, state, [9]);
+
+  assert.equal(forge.addLabelCalls.length, 1);
+  const terminals = state.eventsAfterId(0, ["round-pool-removal-capped"]);
+  assert.equal(terminals.length, 1);
+  assert.deepEqual(terminals[0]!.payload, { issue: 9, labeled: 1 });
+  assert.equal(forge.issueComments[9], undefined, "the failed comment attempt left no partial trace");
   state.close();
 });
 

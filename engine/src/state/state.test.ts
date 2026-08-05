@@ -3654,6 +3654,44 @@ test("eventsPageFiltered: --exclude-kind drops the named kinds and keeps everyth
   s.close();
 });
 
+test("eventsPageFiltered (#655 AC4): --issue filters on the payload's issue field, composing with --kind (an AND, not an OR)", () => {
+  const s = mem();
+  s.appendEvent("dispatched", { issue: 1 });
+  s.appendEvent("drive-needs-human", { worker: "lane-1", issue: 1, pr: 10, reason: "gate:HUMAN" });
+  s.appendEvent("dispatched", { issue: 2 });
+  s.appendEvent("drive-needs-human", { worker: "lane-2", issue: 2, pr: 20, reason: "fix-rounds-cap:2/2" });
+
+  const allForIssue1 = s.eventsPageFiltered(0, { issue: 1 }, 10);
+  assert.deepEqual(
+    allForIssue1.rows.map((e) => e.kind),
+    ["dispatched", "drive-needs-human"],
+  );
+
+  const kindAndIssue = s.eventsPageFiltered(0, { kinds: ["drive-needs-human"], issue: 2 }, 10);
+  assert.deepEqual(
+    kindAndIssue.rows.map((e) => e.payload),
+    [{ worker: "lane-2", issue: 2, pr: 20, reason: "fix-rounds-cap:2/2" }],
+  );
+  s.close();
+});
+
+test("eventsPageFiltered (#655 AC4, gate② finding): --issue never throws on a malformed-payload row in the scanned range — SQLite's json_extract raises 'malformed JSON' on invalid input, which would otherwise abort the WHOLE query (not just that row) and hide every LATER matching event, contradicting this method's own 'corrupt payload served as null, never a throw' contract", () => {
+  const s = mem();
+  const db = (s as unknown as { db: DatabaseSync }).db;
+  // A corrupt row sits BEFORE a real, matching one — proves the malformed row is excluded from
+  // the match rather than aborting the scan and silently losing everything after it.
+  db.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)").run("2026-08-05T00:00:00.000Z", "dispatched", "{not json");
+  s.appendEvent("drive-needs-human", { worker: "lane-1", issue: 1, pr: 10, reason: "gate:HUMAN" });
+
+  const { rows } = s.eventsPageFiltered(0, { issue: 1 }, 10);
+  assert.deepEqual(
+    rows.map((e) => e.kind),
+    ["drive-needs-human"],
+    "the malformed row never matches (json_valid guard), and the real match after it is still returned",
+  );
+  s.close();
+});
+
 test("eventsPageFiltered: no filter at all returns every kind, same as eventsPage", () => {
   const s = mem();
   s.appendEvent("dispatched", { issue: 1 });

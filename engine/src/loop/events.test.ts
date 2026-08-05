@@ -36,6 +36,7 @@ test("parseEventsArgs: defaults — since-id 0, no kind filter, default limit, t
     sinceId: 0,
     kinds: [],
     excludeKinds: [],
+    issue: undefined,
     limit: 100,
     json: false,
   });
@@ -49,9 +50,25 @@ test("parseEventsArgs: --since-id/--kind/--exclude-kind(repeat rejected together
     sinceId: 42,
     kinds: ["merged"],
     excludeKinds: [],
+    issue: undefined,
     limit: 10,
     json: true,
   });
+});
+
+test("parseEventsArgs: --issue parses and requires a non-negative integer", () => {
+  assert.equal(parseEventsArgs(["node", "sapwood", "events", "--issue", "42"]).issue, 42);
+  assert.match(parseEventsArgs(["node", "sapwood", "events", "--issue"]).error ?? "", /--issue requires a value/);
+  assert.match(parseEventsArgs(["node", "sapwood", "events", "--issue", "-1"]).error ?? "", /--issue requires a value/);
+  assert.match(parseEventsArgs(["node", "sapwood", "events", "--issue", "abc"]).error ?? "", /non-negative integer/);
+  assert.equal(parseEventsArgs(["node", "sapwood", "events", "--issue", "0"]).issue, 0);
+});
+
+test("parseEventsArgs: --issue composes with --kind (not mutually exclusive, unlike --kind/--exclude-kind)", () => {
+  const parsed = parseEventsArgs(["node", "sapwood", "events", "--issue", "7", "--kind", "merged"]);
+  assert.equal(parsed.error, undefined);
+  assert.equal(parsed.issue, 7);
+  assert.deepEqual(parsed.kinds, ["merged"]);
 });
 
 test("parseEventsArgs: --kind is repeatable", () => {
@@ -177,6 +194,42 @@ test("events: --exclude-kind drops the named kind and keeps everything else", ()
     assert.deepEqual(
       body.events.map((e: { kind: string }) => e.kind),
       ["merged"],
+    );
+  });
+});
+
+test("events: #655 AC4 --issue returns exactly the events whose payload issue equals N, mixed-issue ledger", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const seed = new State(dbPath);
+    seed.appendEvent("dispatched", { issue: 1 });
+    seed.appendEvent("drive-needs-human", { worker: "lane-1", issue: 1, pr: 10, reason: "gate:HUMAN" });
+    seed.appendEvent("dispatched", { issue: 2 });
+    seed.appendEvent("drive-needs-human", { worker: "lane-2", issue: 2, pr: 20, reason: "fix-rounds-cap:2/2" });
+    seed.close();
+
+    const body = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--issue", "1", "--json"]));
+    assert.deepEqual(
+      body.events.map((e: { kind: string }) => e.kind),
+      ["dispatched", "drive-needs-human"],
+    );
+    assert.equal(body.nextSinceId, 2, "the last MATCHING row's id, not the ledger tail — the page had rows");
+  });
+});
+
+test("events: #655 AC4 --issue composes with --kind (an AND, not an OR)", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const seed = new State(dbPath);
+    seed.appendEvent("dispatched", { issue: 1 });
+    seed.appendEvent("drive-needs-human", { worker: "lane-1", issue: 1, pr: 10, reason: "gate:HUMAN" });
+    seed.appendEvent("drive-needs-human", { worker: "lane-2", issue: 2, pr: 20, reason: "fix-rounds-cap:2/2" });
+    seed.close();
+
+    const body = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--issue", "1", "--kind", "drive-needs-human", "--json"]));
+    assert.deepEqual(
+      body.events.map((e: { kind: string; payload: unknown }) => e.payload),
+      [{ worker: "lane-1", issue: 1, pr: 10, reason: "gate:HUMAN" }],
     );
   });
 });

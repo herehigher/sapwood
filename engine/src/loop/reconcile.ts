@@ -495,7 +495,8 @@ function laneOrphanPr(openPrs: readonly OpenPrBody[], w: WorkerRow): { pr: numbe
  *  same reason cli.ts's `buildLanePrAssociator` duck-types the rest of `LanePrForge`: it is a
  *  `GithubForge` method that is deliberately not part of the narrower `IForge` every test double
  *  implements. Production always has it; a bare-`IForge` double degrades to a no-op sweep. */
-export type OrphanSweepForge = Pick<IForge, "addLabel"> & Partial<Pick<GithubOpenPrReader, "listOpenPrBodies">>;
+export type OrphanSweepForge = Pick<IForge, "addLabel" | "getIssueComments" | "addIssueComment"> &
+  Partial<Pick<GithubOpenPrReader, "listOpenPrBodies">>;
 
 interface GithubOpenPrReader {
   listOpenPrBodies(): Promise<OpenPrBody[]>;
@@ -595,7 +596,18 @@ export async function sweepMidRunOrphanPrs(
         midRun: true,
         via,
       });
-      await escalateToNeedsHuman(forge, state, cfg, w.issue, ORPHAN_PR_ESCALATED, { pr, worker: w.name, via });
+      await escalateToNeedsHuman(
+        forge,
+        state,
+        cfg,
+        w.issue,
+        ORPHAN_PR_ESCALATED,
+        { pr, worker: w.name, via },
+        // #655: reason visibility — the label write outcome/terminal event are unaffected by a
+        // failed comment (escalateToNeedsHuman's own doc).
+        `sapwood: PR #${pr} is open but this issue's lane (${w.name}) is dead (${via}) — held for a human rather than left for the ` +
+          `next requeue to duplicate the work. Remove \`${cfg.labels.needsHuman}\` from this issue once resolved to retry (#147 gated reentry).`,
+      );
       orphans.push({ pr, issue: w.issue, worker: w.name, via });
       claimedThisPass.add(pr);
       log(`[sapwood:reconcile] PR #${pr} is open but its lane ${w.name} (#${w.issue}) is dead (${via}) — issue held for a human.`);

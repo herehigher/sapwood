@@ -3577,17 +3577,34 @@ export class State {
    *  a moment apart from each other can never disagree about what had already happened. */
   eventsPageFiltered(
     afterId: number,
-    filter: { kinds?: readonly string[]; excludeKinds?: readonly string[] },
+    // #655: `issue` composes with `kinds`/`excludeKinds` (AC4) — a SEPARATE `AND`ed clause, not
+    // folded into the kind/exclude-kind mutual exclusivity above (that pair is exclusive of EACH
+    // OTHER, never of `issue`). Matches on the payload's `issue` field via `json_extract`, the
+    // same approach this file's own escalation-lookup queries already use (e.g. the
+    // `json_extract(payload, '$.issue')` clauses above) — reused rather than a second filtering
+    // strategy invented for this one caller. Guarded by `json_valid(payload)` (gate② finding):
+    // unlike those escalation-lookup queries, which only ever read rows THIS engine itself wrote
+    // (append-only, always valid JSON), this filter runs over the WHOLE unbounded ledger range —
+    // `json_extract` raises SQLite's "malformed JSON" error on an invalid payload, which aborts
+    // the ENTIRE query, not just that one row, silently losing every later matching event too.
+    // `json_valid` short-circuits false before `json_extract` ever runs on that row, so a corrupt
+    // row simply never matches — the same "served as null, never a throw" stance this method's
+    // own JS-side JSON.parse fallback below already holds for every OTHER filter shape.
+    filter: { kinds?: readonly string[]; excludeKinds?: readonly string[]; issue?: number },
     limit: number,
   ): { rows: { id: number; ts: string; kind: string; payload: unknown }[]; tailId: number } {
     let clause = "";
     const params: (string | number)[] = [afterId];
     if (filter.kinds && filter.kinds.length > 0) {
-      clause = ` AND kind IN (${filter.kinds.map(() => "?").join(",")})`;
+      clause += ` AND kind IN (${filter.kinds.map(() => "?").join(",")})`;
       params.push(...filter.kinds);
     } else if (filter.excludeKinds && filter.excludeKinds.length > 0) {
-      clause = ` AND kind NOT IN (${filter.excludeKinds.map(() => "?").join(",")})`;
+      clause += ` AND kind NOT IN (${filter.excludeKinds.map(() => "?").join(",")})`;
       params.push(...filter.excludeKinds);
+    }
+    if (filter.issue !== undefined) {
+      clause += ` AND json_valid(payload) AND json_extract(payload, '$.issue') = ?`;
+      params.push(filter.issue);
     }
     params.push(limit);
     return this.readTransaction(() => {

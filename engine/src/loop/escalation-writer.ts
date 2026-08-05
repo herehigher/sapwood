@@ -42,6 +42,16 @@ import type { IForge } from "../forge/forge.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import type { State } from "../state/state.js";
 
+/** #655: the marker for a bare-issue escalation's optional reason comment — keyed on (eventKind,
+ *  issue) since each of this writer's callers escalates a given issue via exactly one eventKind
+ *  (`reconcile.ts`'s orphan-PR sweep latches its own candidate via `ORPHAN_SWEEP_CHECKED` before a
+ *  re-check is even possible; `round.ts`'s pool-removal-cap latches via `poolRemovalEscalated`
+ *  before a re-attempt), so a single dedup key per (eventKind, issue) can never collide across two
+ *  genuinely different escalations of the same issue the way a bare `issue`-only key could. */
+export function needsHumanReasonMarker(eventKind: EventKind, issue: number): string {
+  return `<!-- sapwood:needs-human-reason:${eventKind}:${issue} -->`;
+}
+
 /** Best-effort `needs-human` label write + UNCONDITIONAL outcome-bearing terminal event — see
  *  this module's own doc for the full crash-window/failure-tolerance argument. `eventKind`'s
  *  payload always carries `issue` and `labeled` (`1` on a successful write, `0` — with
@@ -51,17 +61,28 @@ import type { State } from "../state/state.js";
  *  as every other durable-record append in this codebase: a lost append means only that the
  *  NEXT pass's idempotence check still sees "not yet escalated" and retries the whole sequence,
  *  which is always safe (the label write is idempotent, and this function recomputes its own
- *  outcome fresh on every call — it never assumes a prior attempt's result). */
+ *  outcome fresh on every call — it never assumes a prior attempt's result).
+ *
+ *  #655: `reasonComment`, when given, posts a marker-deduped courtesy comment on the issue AFTER
+ *  the unconditional event append above — the reason plus the standard removal instruction, same
+ *  visibility conductor.ts's `escalateNeedsHuman` gives its own first-escalation carrier. Entirely
+ *  best-effort (a failed read OR a failed post is caught, never re-thrown): this writer's whole
+ *  point is that the label outcome and the terminal event are NEVER gated on a forge write that
+ *  can fail, and a courtesy comment must not become a second thing that can. Omitted by
+ *  `dissent.ts`'s caller by definition — that escalation exists BECAUSE repeated comment posting
+ *  already failed, so attempting one more here would be the exact failure mode this writer exists
+ *  to route around. */
 export async function escalateToNeedsHuman(
   // #384: the two members this writer actually uses, rather than the whole `IForge`/`SapwoodConfig`
   // — every existing caller still satisfies it, and a narrow caller (reconcile.ts's mid-run orphan
   // sweep) no longer has to carry a full forge/config it has no other use for.
-  forge: Pick<IForge, "addLabel">,
+  forge: Pick<IForge, "addLabel" | "getIssueComments" | "addIssueComment">,
   state: Pick<State, "appendEvent">,
   cfg: { labels: { needsHuman: string } },
   issue: number,
   eventKind: EventKind,
   extraPayload: Record<string, unknown>,
+  reasonComment?: string,
 ): Promise<void> {
   let labeled = 1;
   let labelError: string | null = null;
@@ -75,5 +96,16 @@ export async function escalateToNeedsHuman(
     state.appendEvent(eventKind, { issue, ...extraPayload, labeled, ...(labelError != null ? { labelError } : {}) });
   } catch {
     // Best-effort — see this function's own doc for why a lost append here is safe to retry.
+  }
+  if (reasonComment != null) {
+    try {
+      const marker = needsHumanReasonMarker(eventKind, issue);
+      const existing = await forge.getIssueComments(issue);
+      if (!existing.some((c) => c.body.includes(marker))) {
+        await forge.addIssueComment(issue, `${marker}\n${reasonComment}`);
+      }
+    } catch {
+      // Best-effort — see this function's own doc for why a lost/duplicated attempt here is safe.
+    }
   }
 }
