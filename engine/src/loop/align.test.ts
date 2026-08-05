@@ -638,16 +638,10 @@ test("createAligningStub #621 (reverse): a NON-EMPTY Ready pool still dispatches
   state.close();
 });
 
-test("createAligningStub #621 (reverse): an EMPTY Ready pool with a CARRIED lane (active/handoff/gated-reentry) still dispatches the align session", async () => {
-  const carriedLaneStates: Array<{
-    state: "running" | "driving" | "fixing" | "handoff" | "failed";
-    pr?: number;
-    extra?: Record<string, unknown>;
-  }> = [
-    { state: "running" },
-    { state: "handoff" },
-    { state: "failed", pr: 55, extra: { gated_reentry_capped: 0, gated_escalation_labeled: 1 } },
-  ];
+test("createAligningStub #621 (reverse): an EMPTY Ready pool with a CARRIED active/handoff lane still dispatches the align session", async () => {
+  // #637 narrowed this trio to active/handoff only — gated-reentry is covered by its own tests
+  // below (it now suppresses, not dispatches).
+  const carriedLaneStates: Array<{ state: "running" | "driving" | "fixing" | "handoff" }> = [{ state: "running" }, { state: "handoff" }];
   for (const carried of carriedLaneStates) {
     const forge = new FakeForge();
     forge.ready = []; // Ready pool is empty — only the carried lane keeps this round "not idle"
@@ -660,14 +654,95 @@ test("createAligningStub #621 (reverse): an EMPTY Ready pool with a CARRIED lane
       state: carried.state,
       started_at: "2026-08-01T00:00:00.000Z",
       ended_at: null,
-      ...(carried.pr !== undefined ? { pr: carried.pr } : {}),
-      ...(carried.extra ?? {}),
     });
     const deps: AlignDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
     const stub = createAligningStub(deps);
     const { ranSession } = await stub.run({ roundId: 23, phase: "aligning", marker: null });
 
     assert.equal(runner.calls.length, 1, `a carried '${carried.state}' lane must still dispatch the align session`);
+    assert.equal(ranSession, true);
+    assert.equal(state.eventsAfterId(0, ["align-skipped"]).length, 0);
+    state.close();
+  }
+});
+
+// ── #637: gated-reentry alone no longer counts as a carried lane for the align-creation skip ──
+//
+// Live evidence (batch-7, round 317, PR #629's own batch): an empty Ready pool with three
+// gated-reentry lanes (#632/#635/#636, all latched to the human-merge queue by #527) still
+// dispatched the judgment-tier po-align session and produced a `{proposals: [], concerns: []}`
+// no-op — the exact spend #621 was filed to eliminate. Rationale (verified in review, not
+// assumed): the align-CREATION session's output (new issue proposals + concerns) is consumed by
+// issue creation/triage only — nothing on the gated-reclaim path (conductor.ts's GATED RECLAIM,
+// #147/#499) reads it, so a lane awaiting a human release cannot consume anything a skipped
+// session would have produced. Active/handoff lanes are untouched by this issue (still carried,
+// tested above).
+
+test("createAligningStub #637: empty Ready pool + ONLY a gated-reentry lane -> the align session is skipped, an align-skipped{reason:'empty-pool'} event is recorded, no spend", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // Ready pool empty — the gated-reentry lane must NOT count as carried anymore
+  const runner = new ScriptedRunner([doneResult("must-not-run", alignResultText([]))]);
+  const state = new State(":memory:");
+  const logs: string[] = [];
+  state.upsertWorker({
+    name: "lane-gated",
+    issue: 900,
+    session_id: "s",
+    state: "failed",
+    started_at: "2026-08-01T00:00:00.000Z",
+    ended_at: null,
+    pr: 55,
+    gated_reentry_capped: 0,
+    gated_escalation_labeled: 1,
+  });
+  const deps: AlignDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, log: (line) => logs.push(line) };
+  const stub = createAligningStub(deps);
+  const { marker, ranSession } = await stub.run({ roundId: 24, phase: "aligning", marker: null });
+
+  assert.equal(marker, alignMarker(24));
+  assert.equal(runner.calls.length, 0, "a gated-reentry-only lane must no longer dispatch the po-align session");
+  assert.equal(ranSession, false);
+
+  const skipped = state.eventsAfterId(0, ["align-skipped"]);
+  assert.equal(skipped.length, 1);
+  const payload = skipped[0]!.payload as { round_id: number; reason: string };
+  assert.equal(payload.round_id, 24);
+  assert.equal(payload.reason, "empty-pool");
+  assert.ok(logs.some((l) => /skipping the po-align session/.test(l)));
+  assert.equal(state.spentUsdForWorker("po-align-1"), 0, "no spend ledgered for a session that never ran");
+  state.close();
+});
+
+test("createAligningStub #637: an ACTIVE or HANDOFF lane alongside a gated-reentry lane still dispatches (only gated-reentry's contribution to the skip changed)", async () => {
+  for (const otherState of ["running", "handoff"] as const) {
+    const forge = new FakeForge();
+    forge.ready = [];
+    const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+    const state = new State(":memory:");
+    state.upsertWorker({
+      name: "lane-gated",
+      issue: 900,
+      session_id: "s",
+      state: "failed",
+      started_at: "2026-08-01T00:00:00.000Z",
+      ended_at: null,
+      pr: 55,
+      gated_reentry_capped: 0,
+      gated_escalation_labeled: 1,
+    });
+    state.upsertWorker({
+      name: `lane-${otherState}`,
+      issue: 901,
+      session_id: "s2",
+      state: otherState,
+      started_at: "2026-08-01T00:00:00.000Z",
+      ended_at: null,
+    });
+    const deps: AlignDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+    const stub = createAligningStub(deps);
+    const { ranSession } = await stub.run({ roundId: 25, phase: "aligning", marker: null });
+
+    assert.equal(runner.calls.length, 1, `a carried '${otherState}' lane must still dispatch even alongside a gated-reentry lane`);
     assert.equal(ranSession, true);
     assert.equal(state.eventsAfterId(0, ["align-skipped"]).length, 0);
     state.close();
