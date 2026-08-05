@@ -230,9 +230,12 @@ test("a same-character, long-enough run WITH an info string (```not-a-closer ins
 });
 
 test("an info-string OPENER still opens (```md) and a bare closer still closes — the closer restriction doesn't break the ordinary open-with-language case", () => {
-  const body = ["```md", "<!-- sapwood:comments-adjudicated-through: 5 -->", "```", "<!-- sapwood:comments-adjudicated-through: 7 -->"].join(
-    "\n",
-  );
+  const body = [
+    "```md",
+    "<!-- sapwood:comments-adjudicated-through: 5 -->",
+    "```",
+    "<!-- sapwood:comments-adjudicated-through: 7 -->",
+  ].join("\n");
   const result = computeCommentCursor(body, [entry("7")]);
   assert.deepEqual(
     result,
