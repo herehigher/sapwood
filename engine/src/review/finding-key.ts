@@ -124,16 +124,34 @@ export interface FindingKeyResult {
 }
 
 /**
- * The engine-agent path's identity key (design #402 §3a): `(kind ?? "unclassified", path)`. The
- * `path` here is `ClassifiedFinding.path` AFTER `finding-axes.ts`'s `resolveFindingPath` has
- * already dropped an out-of-diff value to `undefined` — this function trusts `path === undefined`
- * to mean "no verified location," never re-validating against a changed-path set itself (that
- * would duplicate R1's own job, the marginal-complexity violation this module's header doc's
- * "reuses" list exists to avoid).
+ * The engine-agent path's identity key (design #402 §3a, amended #678): `(kind ?? "unclassified",
+ * path, idDigest)`. The `path` here is `ClassifiedFinding.path` AFTER `finding-axes.ts`'s
+ * `resolveFindingPath` has already dropped an out-of-diff value to `undefined` — this function
+ * trusts `path === undefined` to mean "no verified location," never re-validating against a
+ * changed-path set itself (that would duplicate R1's own job, the marginal-complexity violation
+ * this module's header doc's "reuses" list exists to avoid).
+ *
+ * #678: the located key ALSO folds in `shortIdDigest(f.id)` — before this, the located key was
+ * bare `(kind, path)`, so any two correctness findings in the same file collided regardless of
+ * which defect they actually named (live evidence: PR #677's round 1
+ * `unconfirmed-orphan-still-exits`/`graceful-handoff-double-sigterm` and round 2's
+ * `lost-process-group-after-leader-exit`/`already-dead-lane-becomes-handoff` — four distinct
+ * defects, one collapsed key, false recurrence on a large file). `f.id` is the reviewer's own
+ * stable per-finding slug (`engine-reviewer.md`: "a short slug or ordinal — never reused across
+ * findings in [one review]"); digested here for the same prose-via-id reason the unlocated path
+ * already digests it (see this module's "PROSE-VIA-ID" header doc), never folded in raw. This is
+ * candidate 1 of the issue's two: a content-hash of the finding body (candidate 2) was rejected —
+ * any rewording defeats a content hash, and this module is structurally prose-free by design (see
+ * "STRUCTURAL DATA ONLY" above), so hashing prose would mean accepting a `body` parameter neither
+ * function has ever taken. Slugs are reviewer-authored, so a genuinely-identical defect reworded
+ * into a new slug across rounds CAN still miss recurrence here — accepted, and the safer
+ * direction (design #402 §3b's own fallback, the fix-rounds cap, still catches a lane that never
+ * converges) over the alternative of FABRICATING recurrence between two unrelated findings that
+ * merely share a file, which is what #677 actually hit.
  */
 export function engineAgentFindingKey(f: { id: string; kind?: FindingKind; path?: string }): FindingKeyResult {
   const kind = f.kind ?? UNCLASSIFIED_KIND;
-  if (f.path !== undefined) return { key: encodeKey(["engine-agent", "loc", kind, f.path]), located: true };
+  if (f.path !== undefined) return { key: encodeKey(["engine-agent", "loc", kind, f.path, shortIdDigest(f.id)]), located: true };
   return { key: encodeKey(["engine-agent", "unloc", kind, shortIdDigest(f.id)]), located: false };
 }
 

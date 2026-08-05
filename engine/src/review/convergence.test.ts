@@ -249,6 +249,46 @@ test("classic-path (thread) keys: recurrence fires the same way as engine-agent 
   assert.deepEqual(result, { stalled: "recurrence" });
 });
 
+// ── #678: recurrence key discrimination — the #677 regression pair ────────────────────────────
+// Live batch-10 evidence (PR #677, events #8652-#8653): round 1's `unconfirmed-orphan-still-exits`
+// and `graceful-handoff-double-sigterm`, and round 2's `lost-process-group-after-leader-exit` and
+// `already-dead-lane-becomes-handoff`, are FOUR distinct, real defects in the same file
+// (`engine/src/roles/worker.ts`), same category (`correctness`) — before #678, the bare
+// `(kind, path)` key collapsed all four to one identical key and the engine declared false
+// recurrence after a single fix round. These two tests pin both directions of the fix: the #677
+// shape must NOT signal recurrence, and a genuinely re-raised identical finding still must.
+
+test("#678/#677: two rounds, same file+category, DISJOINT finding slugs -> NOT recurrence (the exact PR #677 shape)", () => {
+  const WORKER_TS = "engine/src/roles/worker.ts";
+  const round1 = [
+    blocking(engineAgentFindingKey({ id: "unconfirmed-orphan-still-exits", kind: "correctness", path: WORKER_TS }).key),
+    blocking(engineAgentFindingKey({ id: "graceful-handoff-double-sigterm", kind: "correctness", path: WORKER_TS }).key),
+  ];
+  const round2 = [
+    blocking(engineAgentFindingKey({ id: "lost-process-group-after-leader-exit", kind: "correctness", path: WORKER_TS }).key),
+    blocking(engineAgentFindingKey({ id: "already-dead-lane-becomes-handoff", kind: "correctness", path: WORKER_TS }).key),
+  ];
+  const result = classifyProgress(round1, round2, [WORKER_TS], 0);
+  assert.equal(
+    result,
+    "converging",
+    "four distinct defects in one file must never fake recurrence — the fix leg resolved r1's findings and the reviewer found new ones, that is progress",
+  );
+});
+
+test("#678: an IDENTICAL slug re-raised across rounds still signals recurrence (the safer-direction property must survive)", () => {
+  const WORKER_TS = "engine/src/roles/worker.ts";
+  const key = engineAgentFindingKey({ id: "lost-process-group-after-leader-exit", kind: "correctness", path: WORKER_TS }).key;
+  const round1 = [blocking(key)];
+  const round2 = [blocking(key)]; // the claimed fix did NOT actually resolve it — same slug, re-raised
+  const result = classifyProgress(round1, round2, [WORKER_TS], 0);
+  assert.deepEqual(
+    result,
+    { stalled: "recurrence" },
+    "a genuinely re-raised identical finding after a claimed fix must still trigger recurrence",
+  );
+});
+
 // ── computeFlatStreak: the pure trailing-streak counter ─────────────────────────────────────────
 
 /** Untruncated round shorthand — `r(3)` === `{ count: 3, truncated: false }`. */

@@ -9,9 +9,19 @@ import { boundRecords, classicThreadFindingKey, engineAgentFindingKey } from "./
 
 // ── engine-agent path ───────────────────────────────────────────────────────────────────────
 
-test("engineAgentFindingKey: identical (kind, path) findings from two different reviews produce equal keys", () => {
+test("engineAgentFindingKey: identical (kind, path), DIFFERENT ids from two different reviews -> DIFFERENT keys (#678)", () => {
+  // Same file, same category, but two distinct reviewer-authored slugs — #677's exact shape: two
+  // unrelated correctness findings in the same file must not collapse to one key.
   const a = engineAgentFindingKey({ id: "review-1-finding-a", kind: "security", path: "src/x.ts" });
   const b = engineAgentFindingKey({ id: "review-2-finding-b", kind: "security", path: "src/x.ts" });
+  assert.notEqual(a.key, b.key);
+  assert.equal(a.located, true);
+  assert.equal(b.located, true);
+});
+
+test("engineAgentFindingKey: identical (kind, path, id) findings from two different reviews produce equal keys", () => {
+  const a = engineAgentFindingKey({ id: "same-slug", kind: "security", path: "src/x.ts" });
+  const b = engineAgentFindingKey({ id: "same-slug", kind: "security", path: "src/x.ts" });
   assert.equal(a.key, b.key);
   assert.equal(a.located, true);
   assert.equal(b.located, true);
@@ -36,10 +46,16 @@ test("engineAgentFindingKey: different kinds, same path, produce different keys"
   assert.notEqual(a.key, b.key);
 });
 
-test("engineAgentFindingKey: kind absent -> unclassified, same key across two absent-kind findings on the same path", () => {
+test("engineAgentFindingKey: kind absent -> unclassified, same id+path -> same key regardless of kind-absence", () => {
+  const a = engineAgentFindingKey({ id: "f1", path: "src/x.ts" });
+  const b = engineAgentFindingKey({ id: "f1", path: "src/x.ts" });
+  assert.equal(a.key, b.key);
+});
+
+test("engineAgentFindingKey: kind absent, DIFFERENT ids on the same path -> different keys (#678: id now discriminates)", () => {
   const a = engineAgentFindingKey({ id: "f1", path: "src/x.ts" });
   const b = engineAgentFindingKey({ id: "f2", path: "src/x.ts" });
-  assert.equal(a.key, b.key);
+  assert.notEqual(a.key, b.key);
 });
 
 // ── unlocated marking (verification item 2) ─────────────────────────────────────────────────
@@ -185,16 +201,20 @@ test("#449: no PROTECTED_SUFFIXES source file contains this issue's new symbols 
 // innocent format tweak here cannot silently break that future parse, AND so ambiguity between a
 // located and an unlocated key is provably impossible — not merely unlikely.
 
-test('#449 gate② P3c: engineAgentFindingKey grammar is pinned — located key is exactly `["engine-agent","loc",<kind>,<path>]`', () => {
-  assert.equal(
-    engineAgentFindingKey({ id: "f1", kind: "security", path: "src/x.ts" }).key,
-    JSON.stringify(["engine-agent", "loc", "security", "src/x.ts"]),
-  );
-  assert.equal(
-    engineAgentFindingKey({ id: "f1", path: "src/x.ts" }).key,
-    JSON.stringify(["engine-agent", "loc", "unclassified", "src/x.ts"]),
+test('#678: engineAgentFindingKey grammar is pinned — located key is exactly `["engine-agent","loc",<kind>,<path>,<16-hex-char id digest>]`', () => {
+  const withKind = engineAgentFindingKey({ id: "f1", kind: "security", path: "src/x.ts" });
+  const decodedWithKind = JSON.parse(withKind.key) as string[];
+  assert.deepEqual(decodedWithKind.slice(0, 4), ["engine-agent", "loc", "security", "src/x.ts"]);
+  assert.match(decodedWithKind[4]!, /^[0-9a-f]{16}$/, "the fifth element is a 16-hex-char id digest");
+
+  const kindAbsent = engineAgentFindingKey({ id: "f1", path: "src/x.ts" });
+  const decodedKindAbsent = JSON.parse(kindAbsent.key) as string[];
+  assert.deepEqual(
+    decodedKindAbsent.slice(0, 4),
+    ["engine-agent", "loc", "unclassified", "src/x.ts"],
     "kind absent -> the literal 'unclassified' token",
   );
+  assert.equal(decodedWithKind[4], decodedKindAbsent[4], "same id -> same digest, regardless of kind");
 });
 
 test('#449 gate② P3c: engineAgentFindingKey grammar is pinned — unlocated key is exactly `["engine-agent","unloc",<kind>,<16-hex-char id digest>]`', () => {
