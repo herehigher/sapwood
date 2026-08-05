@@ -6618,6 +6618,28 @@ test("tick DRIVE: a driving lane with no known PR number fails safe to needs-hum
   assert.equal(st.getWorker("lane-a")?.state, "failed");
   assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
   assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-a", issue: 2, pr: -1, reason: "driving-lane-missing-pr" }]);
+  // #655 gate② round 2: this IS the real issue-carrier needs-human escalation in this codebase —
+  // the label and the reason comment co-locate on the issue, same as every PR-carrier escalation
+  // gets on its PR.
+  assert.equal(forge.issueComments.length, 1);
+  assert.equal(forge.issueComments[0]![0], 2);
+  assert.match(forge.issueComments[0]![1], /<!-- sapwood:needs-human-reason:drive-no-pr:2 -->/);
+  assert.match(forge.issueComments[0]![1], /Remove `needs-human` from this issue once resolved to retry \(#147 gated reentry\)/);
+  st.close();
+});
+
+test("tick DRIVE (#655 gate② round 2): a driving-lane-missing-pr comment failure leaves the label outcome and terminal transition unaffected", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  st.upsertWorker({ name: "lane-a", issue: 2, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: null });
+  forge.throwOnAddIssueComment = true;
+  const gate = new FakeMergeGate();
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-a")?.state, "failed");
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-a", issue: 2, pr: -1, reason: "driving-lane-missing-pr" }]);
+  assert.deepEqual(forge.issueComments, [], "the failed comment attempt left no partial trace");
   st.close();
 });
 
@@ -12247,6 +12269,10 @@ test("tick RESUME (A2): a fixing-origin handoff with no PR escalates (fail-safe)
   assert.deepEqual(forge.labelsAdded, [[5, "needs-human"]]);
   const events = st.eventsSince("1970-01-01T00:00:00Z", ["fix-leg-resume-no-pr"]);
   assert.equal(events.length, 1);
+  // #655 gate② round 2: same issue-carrier reason comment as the plain DRIVE-loop fail-safe above.
+  assert.equal(forge.issueComments.length, 1);
+  assert.equal(forge.issueComments[0]![0], 5);
+  assert.match(forge.issueComments[0]![1], /<!-- sapwood:needs-human-reason:fix-leg-resume-no-pr:5 -->/);
   st.close();
 });
 

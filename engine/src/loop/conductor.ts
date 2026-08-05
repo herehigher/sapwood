@@ -55,6 +55,7 @@ import {
   probeDueWithHint,
 } from "./env-failure.js";
 import { isHumanMergeOnlyVerdict } from "./escalation-buckets.js";
+import { needsHumanReasonMarker } from "./escalation-writer.js";
 import {
   attemptThreadWrite,
   computeDisputeEscalation,
@@ -3790,6 +3791,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
         await forge.addLabel(w.issue, cfg.labels.needsHuman);
         state.appendEvent("drive-no-pr", { worker: w.name, issue: w.issue });
+        // #655 gate② round 2: this IS the real issue-carrier needs-human escalation — `pr` never
+        // exists here, so the label AND the reason comment both go to the issue by construction
+        // (unlike escalateNeedsHuman, whose two callers always supply a PR — see that function's
+        // own doc for why ITS issue-carrier branch is unreachable and therefore not the right
+        // place to close this). Best-effort, marker-deduped: a failed comment must never block
+        // the label write or the terminal transition, both of which already landed above.
+        const noPrMarker = needsHumanReasonMarker("drive-no-pr", w.issue);
+        const noPrBody =
+          `${noPrMarker}\n` +
+          `sapwood: this driving lane lost track of its PR number (an engine invariant violation, not a normal ` +
+          `escalation) — held for a human rather than left silently stuck. Remove \`${cfg.labels.needsHuman}\` from ` +
+          `this issue once resolved to retry (#147 gated reentry).`;
+        await commentOnEscalationCarrier(forge, cfg, "issue", w.issue, -1, noPrMarker, noPrBody).catch(() => {});
         driven.push({ kind: "needs-human", worker: w.name, issue: w.issue, pr: -1, reason: "driving-lane-missing-pr" });
         continue;
       }
@@ -4856,6 +4870,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         await forge.addLabel(w.issue, cfg.labels.needsHuman).catch(() => {});
         state.upsertWorker({ ...w, ended_at: iso() });
         state.appendEvent("fix-leg-resume-no-pr", { worker: w.name, issue: w.issue });
+        // #655 gate② round 2: same issue-carrier reason comment as `driving-lane-missing-pr`
+        // above — best-effort, marker-deduped, never blocking the label/terminal writes.
+        const noPrMarker = needsHumanReasonMarker("fix-leg-resume-no-pr", w.issue);
+        const noPrBody =
+          `${noPrMarker}\n` +
+          `sapwood: a fixing-origin handoff resumed with no PR on record (an engine invariant violation, not a ` +
+          `normal escalation) — held for a human rather than silently dropping the fix attempt. Remove ` +
+          `\`${cfg.labels.needsHuman}\` from this issue once resolved to retry (#147 gated reentry).`;
+        await commentOnEscalationCarrier(forge, cfg, "issue", w.issue, -1, noPrMarker, noPrBody).catch(() => {});
         continue;
       }
       const pr = w.pr;
