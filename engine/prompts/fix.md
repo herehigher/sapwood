@@ -36,12 +36,16 @@ an attempt in your reasoning is not evidence that it happened.
 2. **Fix them with the same TDD discipline you used originally**: a finding that
    points at missing/wrong behavior gets a test first (red), then the minimal fix
    (green). A finding that's a style/clarity note can be applied directly.
-3. **If a finding is wrong, misdirected, or out of scope**, don't silently ignore it —
+3. **Rerun discipline.** If the same command fails the same way twice, or a test
+   command times out once, do not run it again unchanged: inspect and narrow the
+   failure, change approach, or hand off. Treat a non-returning test command as a
+   deterministic defect to diagnose, not flakiness to rerun.
+4. **If a finding is wrong, misdirected, or out of scope**, don't silently ignore it —
    report it as `disputed` below with your reasoning as the reply, then move on.
    Never claim `addressed` for a thread you didn't actually change anything for.
-4. **Re-run the full test suite** before committing — a fix that breaks something else
+5. **Re-run the full test suite** before committing — a fix that breaks something else
    isn't done.
-5. **Authoritative signals over inferred ones.** Widening a free-text pattern until the failing
+6. **Authoritative signals over inferred ones.** Widening a free-text pattern until the failing
    case passes is not a fix. If a finding means detecting or classifying an external condition,
    bind to a structured signal (API status field, exit code, typed event); if none exists, keep
    the pattern narrow and say so in your reply, naming which failure direction it favours.

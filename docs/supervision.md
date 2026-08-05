@@ -138,6 +138,11 @@ This section covers the supervision-side placement/removal discipline layered on
   whatever's running. `sapwood status` while draining shows the same active/driving
   lanes you'd see mid-run; watch it (or poll `events`) until active lanes reach zero
   rather than assuming the drain finished the moment you set the sentinel.
+- **Spin/livelock detection.** If the engine PID remains alive while the event cursor
+  stops advancing across polls and CPU or RSS continues rising, capture the PID/process
+  tree and last event page, then follow the Stop ritual—using the second signal if
+  graceful drain cannot complete—verify every lane descendant is gone, and do not
+  restart unchanged.
 - **Sentinel removal.** `data/KILL_SWITCH`/`data/PAUSE` are OUT-OF-BAND controls — the
   engine never removes either one itself. Remove the sentinel only once you intend the
   *next* `sapwood run` (or the next tick, if the process is still alive under a signal
