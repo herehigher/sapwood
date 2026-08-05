@@ -694,6 +694,12 @@ test("reconcileDurableConcerns (#432 round 6, P1-2): a concern whose issue is PE
     reason: "this issue's premise seems wrong",
     labeled: 1,
   });
+  // #655 AC3: the dissent path is EXEMPT from the shared writer's optional reason comment — this
+  // escalation exists BECAUSE comment posting already failed repeatedly (that's what
+  // maxConcernPostAttempts counts), so attempting one more here would be the exact failure mode
+  // this escalation exists to route around. `escalateUnpostableConcern` never passes a
+  // `reasonComment` argument to `escalateToNeedsHuman` — pinned here as zero comments posted.
+  assert.deepEqual(forge.comments[777] ?? [], []);
   state.close();
 });
 

@@ -2757,6 +2757,16 @@ function carrierNoun(carrier: EscalationCarrier): string {
   return carrier === "pr" ? "from this pull request" : "from this issue";
 }
 
+/** #655: the marker for `escalateNeedsHuman`'s FIRST-escalation reason comment — keyed on
+ *  (worker, pr) rather than (worker, pr, headOid) like `reviewDisputedCommentMarker`, because this
+ *  branch only ever runs once per lane's life: `escalateNeedsHuman`'s own `gatedAttempts === 0`
+ *  guard is true for exactly the lanes that have never been through GATED RECLAIM, and a lane that
+ *  HAS goes through the attempt-trail branch instead (a different comment, no marker needed — see
+ *  that branch's own doc for why). No headOid component is needed for the same reason. */
+function needsHumanReasonCommentMarker(worker: string, pr: number): string {
+  return `<!-- sapwood:needs-human-reason:${worker}:${pr} -->`;
+}
+
 /** #398: the marker-checked escalation COMMENT, on the same carrier its label went to — because
  *  every one of these comments ends by telling a human to remove that label, and an instruction
  *  posted somewhere other than where the label actually is, is a wrong instruction.
@@ -2792,12 +2802,14 @@ async function commentOnEscalationCarrier(
 /** #147 P2 + #246 review round 1 (C1): the SHARED needs-human escalation for a `driving` lane —
  *  label write FIRST (recorded durably via `gated_escalation_labeled` so GATED RECLAIM's
  *  absence-is-a-human-act invariant holds even on a failed write), THEN the terminal upsert,
- *  THEN (only for a lane that's already been through GATED RECLAIM once) the attempt-trail
- *  comment. Extracted so BOTH the plain gate===HUMAN case and #246's own "FIXABLE but the fix
- *  loop isn't wired" degrade (C1 below) go through byte-for-byte the SAME escalation — an
- *  unconfigured fix loop must never silently retry forever where the pre-#246 gate would have
- *  visibly escalated to a human; it degrades to the EXACT same visible escalation instead,
- *  never a parallel path.
+ *  THEN a best-effort comment on the same carrier: the attempt-trail comment for a lane that's
+ *  already been through GATED RECLAIM once, or (#655) a marker-deduped REASON comment — the
+ *  `reason` plus the standard removal instruction — the very first time this lane escalates, so a
+ *  human looking at the board sees WHY without running the CLI. Extracted so BOTH the plain
+ *  gate===HUMAN case and #246's own "FIXABLE but the fix loop isn't wired" degrade (C1 below) go
+ *  through byte-for-byte the SAME escalation — an unconfigured fix loop must never silently retry
+ *  forever where the pre-#246 gate would have visibly escalated to a human; it degrades to the
+ *  EXACT same visible escalation instead, never a parallel path.
  *
  *  #398 — CARRIER: this is the main artery ("the most common escalation in the whole engine"),
  *  and it used to write the ISSUE while `deriveGate` (merge-driver.ts) read the PR's labels, so
@@ -2856,6 +2868,20 @@ async function escalateNeedsHuman(
           capHitEscalationNote(cfg)
         : `Remove \`${cfg.labels.needsHuman}\` from this pull request again once it's addressed to retry.`);
     await (carrier === "pr" ? forge.addPRComment(pr, body) : forge.addIssueComment(w.issue, body)).catch(() => {});
+  } else {
+    // #655: the FIRST escalation for a lane gets its own reason comment — same carrier the label
+    // just went to (#398), marker-deduped via `commentOnEscalationCarrier` so a crash between this
+    // call landing server-side and the `upsertWorker` above persisting (the row would still read
+    // `driving`, so a fresh tick re-derives gate===HUMAN and calls this function again) never
+    // double-posts. Best-effort — caught, never re-thrown — because the terminal transition and
+    // the event append above are both UNCONDITIONAL already and must not be gated on a courtesy
+    // comment (same tolerance the attempt-trail branch above already has).
+    const marker = needsHumanReasonCommentMarker(w.name, pr);
+    const body =
+      `${marker}\n` +
+      `sapwood: PR #${pr} escalated to \`${cfg.labels.needsHuman}\` — ${reason}. ` +
+      `Remove \`${cfg.labels.needsHuman}\` ${carrierNoun(carrier)} to retry (#147 gated reentry).`;
+    await commentOnEscalationCarrier(forge, cfg, carrier, w.issue, pr, marker, body).catch(() => {});
   }
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason };
 }

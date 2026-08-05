@@ -791,6 +791,9 @@ Flags:
                      wrote) is a different case and is always passed through opaque, never
                      rejected.
   --exclude-kind K   Every kind EXCEPT this one (repeatable). Not combinable with --kind.
+  --issue N          Only events whose payload \`issue\` field equals N (a non-negative
+                     integer). Composes with --kind/--exclude-kind (an AND, not an OR) — the
+                     one-command answer to "why does issue N carry needs-human" (#655).
   --limit N          Page size (default ${DEFAULT_EVENTS_LIMIT}). Must be a positive integer,
                      hard-capped at ${MAX_PAGE_LIMIT} — a request above the cap is REJECTED
                      (not silently clamped): a script that asked for N and silently got fewer
@@ -821,6 +824,7 @@ export interface EventsArgs {
   sinceId: number;
   kinds: string[];
   excludeKinds: string[];
+  issue?: number | undefined;
   limit: number;
   json: boolean;
 }
@@ -830,6 +834,7 @@ const EVENTS_DEFAULTS = {
   sinceId: 0,
   kinds: [] as string[],
   excludeKinds: [] as string[],
+  issue: undefined as number | undefined,
   limit: DEFAULT_EVENTS_LIMIT,
   json: false,
 };
@@ -845,6 +850,7 @@ export function parseEventsArgs(argv: string[]): EventsArgs {
   let sinceId = 0;
   const kinds: string[] = [];
   const excludeKinds: string[] = [];
+  let issue: number | undefined;
   let limit = DEFAULT_EVENTS_LIMIT;
   let json = false;
   for (let i = 0; i < args.length; i++) {
@@ -893,6 +899,17 @@ export function parseEventsArgs(argv: string[]): EventsArgs {
       i++;
       continue;
     }
+    if (a === "--issue") {
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith("-")) return fail("--issue requires a value");
+      // Same canonical-decimal-only stance as --since-id/--limit above (Codex P2 finding 4).
+      if (!/^\d+$/.test(next)) return fail(`--issue requires a non-negative integer, got: ${next}`);
+      const n = Number(next);
+      if (!Number.isSafeInteger(n)) return fail(`--issue requires a non-negative integer, got: ${next}`);
+      issue = n;
+      i++;
+      continue;
+    }
     if (a.startsWith("-")) return fail(`unknown flag: ${a}`);
     positionals.push(a);
   }
@@ -901,7 +918,7 @@ export function parseEventsArgs(argv: string[]): EventsArgs {
   if (kinds.length > 0 && excludeKinds.length > 0) {
     return fail("--kind and --exclude-kind cannot combine (ambiguous precedence — pick one)");
   }
-  return { help: false, dbPath: positionals[0] ?? DEFAULT_DB_PATH, sinceId, kinds, excludeKinds, limit, json };
+  return { help: false, dbPath: positionals[0] ?? DEFAULT_DB_PATH, sinceId, kinds, excludeKinds, issue, limit, json };
 }
 
 /** One event row for `events`' text listing — same fields the `--json` DTO's `events` array
@@ -935,7 +952,7 @@ export function runEvents(argv: string[]): { stdout: string; stderr: string; cod
   if (parsed.error) {
     return { stdout: "", stderr: `sapwood events: ${parsed.error}\n\n${EVENTS_USAGE}`, code: 1 };
   }
-  const { dbPath, sinceId, kinds, excludeKinds, limit, json } = parsed;
+  const { dbPath, sinceId, kinds, excludeKinds, issue, limit, json } = parsed;
   if (!existsSync(dbPath)) {
     return { stdout: `sapwood events: no state DB at ${dbPath} — engine has never run\n`, stderr: "", code: 0 };
   }
@@ -963,7 +980,8 @@ export function runEvents(argv: string[]): { stdout: string; stderr: string; cod
           code: 1,
         };
       }
-      const filter = kinds.length > 0 ? { kinds } : excludeKinds.length > 0 ? { excludeKinds } : {};
+      const kindFilter = kinds.length > 0 ? { kinds } : excludeKinds.length > 0 ? { excludeKinds } : {};
+      const filter = issue !== undefined ? { ...kindFilter, issue } : kindFilter;
       // #642 (Codex gate② round-1 P1 finding 1): `tailId` comes back from the SAME call, the
       // SAME transaction/snapshot as `rows` — never a separate later `state.maxEventId()` call,
       // which is what let a matching event committed between the two reads get silently skipped

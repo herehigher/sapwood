@@ -932,10 +932,13 @@ const SWEEP_CFG = { labels: { needsHuman: "sapwood:needs-human" } };
 
 function mkSweepForge(prs: OpenPrBody[]) {
   const added: Array<[number, string]> = [];
+  const issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
   const forge = {
     added,
+    issueComments,
     reads: 0,
     throwOnAddLabel: false,
+    throwOnAddIssueComment: false,
     async listOpenPrBodies(): Promise<OpenPrBody[]> {
       forge.reads++;
       return prs;
@@ -943,6 +946,14 @@ function mkSweepForge(prs: OpenPrBody[]) {
     async addLabel(issue: number, label: string): Promise<void> {
       if (forge.throwOnAddLabel) throw new Error("gh label write failed");
       added.push([issue, label]);
+    },
+    async getIssueComments(issue: number) {
+      return issueComments[issue] ?? [];
+    },
+    async addIssueComment(issue: number, body: string): Promise<void> {
+      if (forge.throwOnAddIssueComment) throw new Error("gh comment write failed");
+      if (issueComments[issue] === undefined) issueComments[issue] = [];
+      issueComments[issue].push({ login: "sapwood", createdAt: "2026-01-01T00:00:00Z", body });
     },
   };
   return forge;
@@ -981,6 +992,32 @@ test("#384 F12: a dead lane's still-open engine PR is detected mid-run and dispo
       via: "marker",
     });
     assert.deepEqual(events[1]?.payload, { issue: 207, pr: 365, worker: "lane-207", via: "marker", labeled: 1 });
+    // #655 AC3: the orphan-PR escalation carries a reason comment on the issue (the carrier the
+    // label went to), naming the dead PR and the standard removal instruction.
+    assert.equal(forge.issueComments[207]?.length, 1);
+    assert.match(forge.issueComments[207]![0]!.body, /<!-- sapwood:needs-human-reason:orphan-pr-escalated:207 -->/);
+    assert.match(forge.issueComments[207]![0]!.body, /PR #365/);
+    assert.match(
+      forge.issueComments[207]![0]!.body,
+      /Remove `sapwood:needs-human` from this issue once resolved to retry \(#147 gated reentry\)/,
+    );
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#384 F12/#655 AC3: a comment write failure leaves the escalation outcome unaffected — label/event unchanged, no partial trace", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-orphan-sweep-"));
+  const state = new State(join(root, "state.sqlite"));
+  try {
+    seedDeadPrlessLane(state, 207);
+    const forge = mkSweepForge([{ number: 365, body: `Closes #207\n\n${prOwnerMarker("lane-207", 207)}` }]);
+    forge.throwOnAddIssueComment = true;
+    assert.deepEqual(await sweepMidRunOrphanPrs(forge, state, SWEEP_CFG), [{ pr: 365, issue: 207, worker: "lane-207", via: "marker" }]);
+    assert.deepEqual(forge.added, [[207, "sapwood:needs-human"]]);
+    assert.equal(state.eventsAfterId(0, ["orphan-pr-escalated"]).length, 1);
+    assert.equal(forge.issueComments[207], undefined, "the failed comment attempt left no partial trace");
   } finally {
     state.close();
     rmSync(root, { recursive: true, force: true });
@@ -1055,6 +1092,10 @@ test("#384 F12: an unreadable PR list is contained and retried — the lane keep
         throw new Error("gh rate limited");
       },
       async addLabel(): Promise<void> {},
+      async getIssueComments() {
+        return [];
+      },
+      async addIssueComment(): Promise<void> {},
     };
     await assert.doesNotReject(() => sweepMidRunOrphanPrs(broken, state, SWEEP_CFG, (m) => logs.push(m)));
     assert.match(logs.join("\n"), /gh rate limited/);
@@ -1087,7 +1128,20 @@ test("#384 F12: a forge that cannot list open PRs at all (a bare IForge double) 
   const state = new State(join(root, "state.sqlite"));
   try {
     seedDeadPrlessLane(state, 207);
-    assert.deepEqual(await sweepMidRunOrphanPrs({ async addLabel(): Promise<void> {} }, state, SWEEP_CFG), []);
+    assert.deepEqual(
+      await sweepMidRunOrphanPrs(
+        {
+          async addLabel(): Promise<void> {},
+          async getIssueComments() {
+            return [];
+          },
+          async addIssueComment(): Promise<void> {},
+        },
+        state,
+        SWEEP_CFG,
+      ),
+      [],
+    );
     assert.equal(state.eventsAfterId(0, ["orphan-detected", "orphan-sweep-checked"]).length, 0, "nothing latched — nothing was checked");
   } finally {
     state.close();

@@ -2261,6 +2261,74 @@ test("tick DRIVE: needs-human -> worker failed + needs-human label", async () =>
   st.close();
 });
 
+// ── #655 AC1/AC2: the FIRST `escalateNeedsHuman` escalation for a lane also posts a
+// marker-deduped REASON comment on the same carrier the label went to — a human looking at the
+// board sees WHY without running the CLI. Repeat (gated) escalations keep their existing
+// attempt-trail comment unchanged (#398's own tests above already pin "never two comments"). ──
+
+test("#655 AC1: the FIRST needs-human escalation for a lane posts exactly one marker-deduped reason comment on the carrier", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "needs-human", pr: 55, reason: "gate:HUMAN:HANDLE_THREADS" };
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-a")?.state, "failed");
+  assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-a", issue: 2, pr: 55, reason: "gate:HUMAN:HANDLE_THREADS" }]);
+  // PR-born lane -> PR carrier (#398) -> the reason comment lands on the PR, never the issue.
+  assert.deepEqual(forge.issueComments, []);
+  assert.equal(forge.prComments.length, 1);
+  const [commentPr, commentBody] = forge.prComments[0]!;
+  assert.equal(commentPr, 55);
+  assert.match(commentBody, /<!-- sapwood:needs-human-reason:lane-a:55 -->/);
+  assert.match(commentBody, /gate:HUMAN:HANDLE_THREADS/);
+  assert.match(commentBody, /Remove `needs-human` from this pull request to retry \(#147 gated reentry\)/);
+  st.close();
+});
+
+test("#655 AC1: a marker-collision replay (the reason comment already landed server-side from a crashed prior attempt) never duplicates it", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  // Simulates the crash window: an earlier attempt's comment reached GitHub, but the process
+  // died before the terminal `upsertWorker` durably persisted — a resumed pass re-derives the
+  // SAME first-time escalation and must not re-post.
+  forge.prComments.push([55, "<!-- sapwood:needs-human-reason:lane-a:55 -->\nsapwood: PR #55 escalated..."]);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "needs-human", pr: 55, reason: "gate:HUMAN:HANDLE_THREADS" };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-a")?.state, "failed");
+  assert.equal(forge.prComments.length, 1, "the marker check found the existing comment -> skipped the post");
+  st.close();
+});
+
+test("#655 AC2: a reason-comment write failure leaves the label outcome, terminal transition, and event append all unaffected", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  forge.throwOnAddPRComment = true;
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "needs-human", pr: 55, reason: "gate:HUMAN:HANDLE_THREADS" };
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  // Identical to the comment-free behavior (#398 AC1 test above): the label lands, the row goes
+  // terminal, and the driven outcome is reported — a failed COURTESY comment blocks none of it.
+  assert.equal(st.getWorker("lane-a")?.state, "failed");
+  assert.deepEqual(forge.prLabelsAdded, [[55, "needs-human"]]);
+  assert.equal(st.getWorker("lane-a")?.gated_escalation_labeled, 1);
+  assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-a", issue: 2, pr: 55, reason: "gate:HUMAN:HANDLE_THREADS" }]);
+  const ev = st.latestEvent("drive-needs-human") as { payload: { reason: string; labeled: number } } | undefined;
+  assert.equal(ev?.payload.labeled, 1);
+  assert.equal(ev?.payload.reason, "gate:HUMAN:HANDLE_THREADS");
+  assert.deepEqual(forge.prComments, [], "the failed comment attempt left no partial trace");
+  st.close();
+});
+
 test("tick DRIVE: queued -> stays driving (retried next tick), no board/label side effects", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
@@ -9034,7 +9102,15 @@ test("#426 AC1: a permanently IN_PROGRESS check opens the pin ONCE, ages across 
     clock = new Date("2026-07-20T02:00:00.000Z");
     const t4 = await tick(tickOpts());
     assert.equal(rawEventKinds(path).filter((k) => k === "ci-pending-escalated").length, 1);
-    assert.equal(forge.prComments.filter(([pr]) => pr === 4260).length, 1);
+    // #655: t4 is this lane's FIRST-ever `escalateNeedsHuman` call (gatedAttempts===0), so it now
+    // ALSO posts its own marker-deduped reason comment (on the SAME carrier, the PR) — one comment
+    // per mechanism, never a second copy of either. The "no second escalation comment" contract
+    // this test names is specifically about the ci-pending-escalated evidence comment above not
+    // re-firing, pinned by the event-count assert just above.
+    const pr4260Comments = forge.prComments.filter(([pr]) => pr === 4260);
+    assert.equal(pr4260Comments.length, 2);
+    assert.match(pr4260Comments[1]![1], /<!-- sapwood:needs-human-reason:lane-ci:4260 -->/);
+    assert.match(pr4260Comments[1]![1], /gate:HUMAN:MERGE_OK/);
     // #398 carrier handshake: the latch surface `ciPendingDuration` reads (the PR's labels) is the
     // same object this escalation wrote, so the next gate pass sees it and escalates for real —
     // and THAT pass is the one that moves the row and records where the label went.

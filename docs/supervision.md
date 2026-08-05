@@ -180,6 +180,11 @@ meaning (and how each differs from `needs-human`) lives in `docs/configuration.m
 gh issue list --repo OWNER/REPO --label "sapwood:needs-human" --state open
 gh pr list    --repo OWNER/REPO --label "sapwood:needs-human" --state open
 
+# Why is issue N labelled needs-human? The reason is on the carrier itself (#655's own
+# marker-deduped comment on the FIRST escalation) and in the ledger — the latter is one
+# command, no jq projection needed:
+sapwood events --issue N
+
 # PRs a human must merge (one-way verdict — never re-decided by the loop):
 gh pr list    --repo OWNER/REPO --label "sapwood:human-merge-only" --state open
 

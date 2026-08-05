@@ -929,7 +929,19 @@ export async function escalatePoolRemovalFailures(
   for (const issue of failedIssues) {
     if (poolRemovalEscalated(state, issue)) continue; // idempotence — already handed to a human
     if (poolRemovalFailureCount(state, issue) < cfg.round.maxPoolRemovalAttempts) continue;
-    await escalateToNeedsHuman(forge, state, cfg, issue, "round-pool-removal-capped", {});
+    await escalateToNeedsHuman(
+      forge,
+      state,
+      cfg,
+      issue,
+      "round-pool-removal-capped",
+      {},
+      // #655: reason visibility — the label write outcome/terminal event are unaffected by a
+      // failed comment (escalateToNeedsHuman's own doc).
+      `sapwood: this issue's \`${cfg.labels.roundPool}\` label failed to remove ${cfg.round.maxPoolRemovalAttempts} time(s) in a row — ` +
+        `held for a human rather than risk stale round-pool bookkeeping. Remove \`${cfg.labels.needsHuman}\` from this issue once ` +
+        `resolved to retry (#147 gated reentry).`,
+    );
   }
 }
 

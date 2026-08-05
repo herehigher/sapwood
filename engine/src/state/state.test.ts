@@ -3654,6 +3654,27 @@ test("eventsPageFiltered: --exclude-kind drops the named kinds and keeps everyth
   s.close();
 });
 
+test("eventsPageFiltered (#655 AC4): --issue filters on the payload's issue field, composing with --kind (an AND, not an OR)", () => {
+  const s = mem();
+  s.appendEvent("dispatched", { issue: 1 });
+  s.appendEvent("drive-needs-human", { worker: "lane-1", issue: 1, pr: 10, reason: "gate:HUMAN" });
+  s.appendEvent("dispatched", { issue: 2 });
+  s.appendEvent("drive-needs-human", { worker: "lane-2", issue: 2, pr: 20, reason: "fix-rounds-cap:2/2" });
+
+  const allForIssue1 = s.eventsPageFiltered(0, { issue: 1 }, 10);
+  assert.deepEqual(
+    allForIssue1.rows.map((e) => e.kind),
+    ["dispatched", "drive-needs-human"],
+  );
+
+  const kindAndIssue = s.eventsPageFiltered(0, { kinds: ["drive-needs-human"], issue: 2 }, 10);
+  assert.deepEqual(
+    kindAndIssue.rows.map((e) => e.payload),
+    [{ worker: "lane-2", issue: 2, pr: 20, reason: "fix-rounds-cap:2/2" }],
+  );
+  s.close();
+});
+
 test("eventsPageFiltered: no filter at all returns every kind, same as eventsPage", () => {
   const s = mem();
   s.appendEvent("dispatched", { issue: 1 });
