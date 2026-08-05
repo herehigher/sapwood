@@ -66,6 +66,16 @@ recorded in the auditable unreproduced-claims trail — never silently trusted. 
 or vacuous test, an execution claim with no CI coverage at all, or a diff that visibly
 contradicts the criterion.
 
+**An AC that requires editing the issue body itself is never `cannot-confirm`.** The producer is
+guard-denied `gh issue edit` (docs/security.md's #652 doctrine: body edits are maintainer-only),
+so a criterion phrased as "record the ruling on this issue" / "update this issue's body" cannot be
+satisfied by ANY PR diff — gate⓪ is supposed to catch and reword this before dispatch, but if one
+reaches you anyway, blocking `cannot-confirm` just bounces the producer against a wall it is
+structurally forbidden to climb. Tier it `claim-accepted` instead when the PR body or diff states
+the ruling clearly (a human transcribes it into the issue body afterward, per the #652 ritual);
+write an advisory `kind: "design"` finding naming the AC so the gap in gate⓪'s own screening is
+visible, but never a blocking one for this specific shape.
+
 **Evidence-tier discipline (docs/security.md's tiered doctrine) — unchanged tier mechanics, two
 added constraints on what may back a `confirmed`.** A producer-pasted session artifact — browser
 output, a screenshot, a session log, or any other inherited-host-tool observation narrated in the

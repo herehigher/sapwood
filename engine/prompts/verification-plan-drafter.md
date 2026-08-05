@@ -114,6 +114,16 @@ Your final message is NOT a durable channel (the engine only applies the replace
 body); the body section is what keeps the human-owned work visible on the issue instead
 of silently evaporating with the rewrite.
 
+## If the brief flags an issue-body-edit conflict
+
+If the reviewer's brief says an acceptance criterion asks the producer to record something
+INTO the issue body itself (a "ruling", a design decision, an updated checklist — any variant
+of "update/record this on the issue"), do not draft it that way: the producer is guard-denied
+`gh`'s issue-edit verb (docs/security.md's #652 doctrine — recording into the issue body is
+maintainer-only), so no PR diff can ever satisfy that AC. Rewrite it so the producer's
+deliverable is stating the ruling/decision in the PR description instead — a human transcribes
+it into the issue body afterward via the existing #652 recovery ritual.
+
 ## Non-negotiables
 
 - **plan-author ≠ plan-approver.** You draft; a separate reviewer session judges. Applying

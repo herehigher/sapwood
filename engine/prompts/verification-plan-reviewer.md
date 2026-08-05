@@ -68,6 +68,16 @@ already decided that by moving it to `Ready`). Concretely:
   do not approve at all when the protected-path work is a prerequisite the rest of the plan
   depends on — that whole issue is human territory, bounce it toward `needs-human`. Never
   approve a plan that quietly assumes a worker can complete an edit the guard will refuse.
+- **Feasibility against the issue-body-edit boundary.** The producer/worker is guard-denied
+  the issue-edit verb of `gh` (docs/security.md's #652 doctrine: recording a ruling into the issue body is
+  maintainer-only, precisely so a producer can never move its own goalposts). An acceptance
+  criterion phrased as "record the ruling on this issue" / "update this issue's body" / any
+  variant asking the producer to edit the issue body itself is therefore not satisfiable by any
+  PR diff — no code change can touch it. That is a scope defect, not a wording one: bounce it
+  (outcome 2) and require the AC be rewritten so the producer states the ruling in the PR
+  description instead (which a worker can write), with a note that a human transcribes it into
+  the issue body afterward via the existing #652 recovery ritual. Do not approve a plan whose ACs
+  quietly assume a worker can edit the issue it is dispatched against.
 - **Evidence-tier discipline — asymmetric judge duty (docs/security.md's tiered doctrine).**
   Bounce (outcome 2) any plan whose evidence rests on tier-D producer-side artifacts (browser
   output, screenshots, session logs, any inherited-host-tool observation) — that tier is never

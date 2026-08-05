@@ -140,7 +140,12 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #653: adds the comment-contradiction veto duty (gate⓪ judgment roles hold issue-comment read
   // tools but no prompt previously assigned them the duty to check comments against the body for
   // CONTRADICTION — #652 makes staleness deterministic; this is the judgment-side backstop).
-  "verification-plan-reviewer.md": "0b94746cab34ff3b2c696b2945d13f31d7566585829a4f9733ceec579195067a",
+  // retro round #328: adds a standing feasibility check mirroring the existing human-merge-only
+  // one — an AC phrased as "record the ruling on this issue" asks the producer to edit the issue
+  // body itself, which `gh`'s issue-edit verb denies it (#652 doctrine: maintainer-only). #676/#685
+  // bounced 3 review rounds on exactly this shape before escalating; gate⓪ now bounces it before
+  // dispatch instead.
+  "verification-plan-reviewer.md": "bc36ebaaf21ea39f1a3e9f6984bcbf6d255ef1d518a16ff13b2f69b198932f9f",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
   // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
@@ -156,7 +161,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // a third standing check alongside the existing human-merge-only-path and F36 execution-class
   // checks — the confirm pass holds the same comment access and zero-write-on-confirm shape, so
   // leaving it out would create an inconsistent re-endorsement path.
-  "verification-plan-reviewer-confirm.md": "e67ff2b5f9df653a26afaa2a6e19ee746f06217004fa7dc7cdae1eb1208573d6",
+  // retro round #328: same issue-body-edit feasibility check as verification-plan-reviewer.md
+  // above, mirrored as a fourth standing check alongside human-merge-only/F36/#653.
+  "verification-plan-reviewer-confirm.md": "e5060be3afa7c2077451367d8d53175959cccddfabff2ba77151fb831fd4dc37",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — the
   // drafter's brief is still its primary instruction set; the forge grant (never removed) is a
   // read-only aid, never a write path, exactly as this file has always said.
@@ -168,7 +175,10 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #616's ambient-MCP-tool finding falsifies. Reworded to role-scope framing (posting a
   // comment/label, or touching needs-human/blocked, is never this role's OUTPUT, whatever tools
   // the session holds) instead of claiming the session has no channel that could do it.
-  "verification-plan-drafter.md": "02a01e181592fbffee434337da45a8f0cfce3ff2b403506a8254ebc465abebd2",
+  // retro round #328: new "If the brief flags an issue-body-edit conflict" section — mirrors the
+  // existing human-merge-only-conflict section, so the drafter repairs an unsatisfiable
+  // record-the-ruling AC the same way it already repairs an unsatisfiable protected-path AC.
+  "verification-plan-drafter.md": "f26294ea779e3a360bec55fbdf26b8842bc8143e08738a5a17941d966b4c9d63",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
   // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
   // grant was never removed, so the capability paragraph again names it (when attached) instead
