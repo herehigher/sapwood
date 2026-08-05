@@ -3023,7 +3023,16 @@ async function checkAcDriftBeforeDrive(
     labeled = 0;
     labelError = String(e);
   }
-  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled, gated_escalation_carrier: "issue" });
+  // #676 gate② finding [1]: this escalation IS about the AC-authority snapshot — mark the row
+  // eligible for GATED RECLAIM's re-baseline (see WorkerRow.ac_rebaseline_eligible's own doc).
+  state.upsertWorker({
+    ...w,
+    state: "failed",
+    ended_at: iso(),
+    gated_escalation_labeled: labeled,
+    gated_escalation_carrier: "issue",
+    ac_rebaseline_eligible: 1,
+  });
   // #301 review round 3 (P2): the durable event lands HERE — immediately after the terminal
   // upsert, BEFORE the comment is ever attempted — so it is the crash-safe record of "this
   // escalation happened, and what the label write did" regardless of whatever the comment attempt
@@ -3106,12 +3115,16 @@ async function checkCommentCursorBeforeDrive(
   // read/post attempt (contained, see its own doc) — the event append below is now genuinely
   // UNCONDITIONAL on the label+post outcome, not merely "reached only when nothing threw."
   const { labeled, posted, labelError, postError } = await escalateCommentCursorStale(forge, cfg, w.issue, cursorResult);
+  // #676 gate② finding [1]: this escalation IS about the AC-authority snapshot (a pending
+  // comment, typically resolved by the SAME body-fold ritual that trips ac-snapshot-drift) —
+  // eligible for GATED RECLAIM's re-baseline, same as checkAcDriftBeforeDrive's own escalation.
   state.upsertWorker({
     ...w,
     state: "failed",
     ended_at: iso(),
     gated_escalation_labeled: labeled ? 1 : 0,
     gated_escalation_carrier: "issue",
+    ac_rebaseline_eligible: 1,
   });
   state.appendEvent("comment-cursor-stale", {
     issue: w.issue,
@@ -3734,59 +3747,82 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       }
       // RECLAIM: back to `driving`, same worker/PR — the DRIVE loop below picks it up this tick.
       //
-      // #676: re-baseline this lane's AC snapshot against the CURRENT live body, when it has one
-      // (`w.ac_body_hash` non-null — a pre-#283 legacy lane has nothing to re-baseline). Reaching
-      // this branch already proves a human/supervisor cleared the escalation hold since whatever
-      // put this lane here (`decision` above is not SKIP) — docs/supervision.md's owner ruling
-      // that an LLM supervisor session's `park clear`-equivalent interventions ARE the trusted-
-      // operator adjudication. Without this, the very next `checkAcDriftBeforeDrive` call would
-      // compare the (now-current) live body against the STALE dispatch-time snapshot, drift
-      // again, and re-escalate immediately — the #676 dead-end loop (clearing needs-human is not
-      // itself a re-baseline; only this reclaim path is). A lane whose escalation was NOT
-      // AC-drift (e.g. a fix-rounds cap) re-snapshots harmlessly to the same, unchanged body.
-      // Fail-closed preserved: a lane that was never labeled/escalated never reaches
-      // `gatedFailedWorkers()` in the first place, so drift without a prior adjudication still
-      // blocks exactly as before. `getIssueBody` is deliberately unguarded here, matching every
-      // other forge read in this loop (`getPRLabels`/`getIssueLabels`/`getPRStatus`/
-      // `getIssueMeta`) — a transient failure throws the tick, retried whole next tick, rather
-      // than reclaiming against a body we couldn't actually confirm. Ownership preserved too
-      // (#301 P1#3's own edge case): only re-baseline when the CURRENTLY stored ac_snapshots row
-      // for this issue still belongs to THIS lane (`bodyHash === w.ac_body_hash`) — a later,
-      // different dispatch that has since overwritten it is left alone, so the very next
-      // `checkAcDriftBeforeDrive` call still reports the ownership-mismatch it already knows how
-      // to produce, rather than this lane silently adopting a stranger dispatch's identity.
+      // #676: re-baseline this lane's AC snapshot against the CURRENT live body, when this lane's
+      // escalation was actually ABOUT the AC-authority snapshot (`w.ac_rebaseline_eligible === 1`
+      // — set ONLY by `checkAcDriftBeforeDrive`/`checkCommentCursorBeforeDrive`, see
+      // WorkerRow.ac_rebaseline_eligible's own doc) and it has a snapshot to re-baseline at all
+      // (`w.ac_body_hash` non-null — a pre-#283 legacy lane has neither). Reaching this branch
+      // already proves a human/supervisor cleared the escalation hold since whatever put this
+      // lane here (`decision` above is not SKIP) — docs/supervision.md's owner ruling that an LLM
+      // supervisor session's `park clear`-equivalent interventions ARE the trusted-operator
+      // adjudication. Without this, the very next `checkAcDriftBeforeDrive`/
+      // `checkCommentCursorBeforeDrive` call would compare the (now-current) live body against
+      // the STALE dispatch-time snapshot, drift/stale again, and re-escalate immediately — the
+      // #676 dead-end loop (clearing needs-human is not itself a re-baseline; only this reclaim
+      // path is).
+      //
+      // #676 gate② finding [1] ("unscoped-rebaseline"): gating on `ac_rebaseline_eligible` (an
+      // authoritative per-episode signal each escalation site sets explicitly), never on "no
+      // other reason could plausibly apply" — a lane escalated for an UNRELATED reason (fix-
+      // rounds cap, review-disputed, the #375 drain escalation, ...) leaves this 0 and its
+      // snapshot untouched, so an unrelated hold's clear can never silently adopt a live body
+      // edit nobody actually adjudicated. Fail-closed preserved on the other axis too: a lane
+      // that was never labeled/escalated never reaches `gatedFailedWorkers()` at all, so drift
+      // with no prior adjudication still blocks exactly as before. `getIssueBody` is deliberately
+      // unguarded here, matching every other forge read in this loop (`getPRLabels`/
+      // `getIssueLabels`/`getPRStatus`/`getIssueMeta`) — a transient failure throws the tick,
+      // retried whole next tick, rather than reclaiming against a body we couldn't actually
+      // confirm. Ownership preserved too (#301 P1#3's own edge case): only re-baseline when the
+      // CURRENTLY stored ac_snapshots row for this issue still belongs to THIS lane (`bodyHash
+      // === w.ac_body_hash`) — a later, different dispatch that has since overwritten it is left
+      // alone, so the very next drift check still reports the ownership-mismatch it already
+      // knows how to produce, rather than this lane silently adopting a stranger dispatch's
+      // identity.
       let acBodyHash = w.ac_body_hash ?? null;
-      if (acBodyHash != null) {
+      let freshSnapshot: ReturnType<typeof buildAcSnapshot> | null = null;
+      if (acBodyHash != null && w.ac_rebaseline_eligible === 1) {
         const ownedSnapshot = state.getAcSnapshot(w.issue);
         if (ownedSnapshot && ownedSnapshot.bodyHash === acBodyHash) {
           const liveBody = await forge.getIssueBody(w.issue);
-          const freshSnapshot = buildAcSnapshot(w.issue, liveBody, iso());
-          state.recordAcSnapshot(freshSnapshot);
+          freshSnapshot = buildAcSnapshot(w.issue, liveBody, iso());
           acBodyHash = freshSnapshot.bodyHash;
         }
       }
-      // #426 review round 2 (P2): ONE transaction (`upsertWorkerWithEvent`, the #447 shape), not
-      // an upsert followed by an append. The `gated-reentry` event is an EPISODE-RESET BOUNDARY
-      // for four separate readers now (DRIVE_QUEUED / FIX_LEG_DISPATCH_BLOCKED /
-      // CONVERGENCE_EPISODE / CI_PENDING reset kinds), so a crash between the two writes used to
-      // leave a durably-reclaimed `driving` lane with NO reset on record — and #426 made that
-      // load-bearing rather than merely noisy: the lane's pre-escalation CI-pending pin would
-      // still read past the bound, terminalizing it in the very next drain after the restart.
-      // Pre-existing code, promoted to atomic because this issue made the missing event harmful.
+      // #426 review round 2 (P2): ONE transaction (`upsertWorkerWithEvent`/
+      // `recordAcSnapshotAndReclaimWorker`, the #447 shape), not separate writes. The
+      // `gated-reentry` event is an EPISODE-RESET BOUNDARY for four separate readers now
+      // (DRIVE_QUEUED / FIX_LEG_DISPATCH_BLOCKED / CONVERGENCE_EPISODE / CI_PENDING reset kinds),
+      // so a crash between the writes used to leave a durably-reclaimed `driving` lane with NO
+      // reset on record — and #426 made that load-bearing rather than merely noisy: the lane's
+      // pre-escalation CI-pending pin would still read past the bound, terminalizing it in the
+      // very next drain after the restart. #676 gate② finding [2] ("rebaseline-crash-window"):
+      // when a fresh snapshot was taken above, the `ac_snapshots` write joins the SAME
+      // transaction (`recordAcSnapshotAndReclaimWorker`) rather than committing separately BEFORE
+      // it — a crash between two separate commits used to leave `ac_snapshots` on the new hash
+      // while `workers.ac_body_hash` still held the old one, which the ownership guard above then
+      // reads as a stranger dispatch's snapshot on the very next tick's retry, re-escalating the
+      // already-adjudicated drift.
       const attempt = attempts + 1;
-      state.upsertWorkerWithEvent(
-        {
-          ...w,
-          state: "driving",
-          ended_at: iso(),
-          review_triggered_head: null,
-          review_triggered_at: null,
-          gated_reentry_attempts: attempt,
-          ac_body_hash: acBodyHash,
-        },
-        "gated-reentry",
-        { worker: w.name, issue: w.issue, pr, attempt },
-      );
+      // `ac_rebaseline_eligible` is reset to 0 UNCONDITIONALLY here — single-use per escalation
+      // episode (see the WorkerRow field's own doc): whether or not this reclaim actually
+      // re-baselined, a stale 1 must never survive to a LATER, unrelated escalation on this same
+      // row.
+      const reclaimedRow: WorkerRow = {
+        ...w,
+        state: "driving",
+        ended_at: iso(),
+        review_triggered_head: null,
+        review_triggered_at: null,
+        gated_reentry_attempts: attempt,
+        ac_body_hash: acBodyHash,
+        ac_rebaseline_eligible: 0,
+      };
+      const reentryEventPayload = { worker: w.name, issue: w.issue, pr, attempt };
+      if (freshSnapshot) {
+        state.recordAcSnapshotAndReclaimWorker(freshSnapshot, reclaimedRow, "gated-reentry", reentryEventPayload);
+      } else {
+        state.upsertWorkerWithEvent(reclaimedRow, "gated-reentry", reentryEventPayload);
+      }
       gatedReclaimed.push({ kind: "reclaimed", worker: w.name, issue: w.issue, pr, attempt });
     }
   }

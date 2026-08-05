@@ -933,6 +933,19 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       ALTER TABLE park_state_new RENAME TO park_state;
     `);
   },
+  // 31 -> 32 (#676 gate② finding [1], "unscoped-rebaseline"): an AUTHORITATIVE per-episode signal
+  // for whether a `failed`+pr row's escalation is one of the two DRIVE checkpoints that consume
+  // the AC-authority snapshot (ac-snapshot-drift / comment-cursor-stale) — the only two GATED
+  // RECLAIM should ever re-baseline `ac_snapshots`/`ac_body_hash` for. Every OTHER escalation site
+  // (fix-rounds cap, review-disputed, fix-leg-undecidable, the #375 drain escalation, ...) sets
+  // `gated_escalation_labeled = 1` on the exact same `failed`+pr shape but has nothing to do with
+  // the issue body — re-baselining on ANY of those would silently adopt whatever the live body
+  // happens to read as newly authoritative, defeating the drift gate for an edit nobody actually
+  // adjudicated. DEFAULT 0 is the fail-closed direction: every pre-migration row (and every
+  // escalation site this PR doesn't touch) reads as "not eligible", never as a false positive.
+  (db) => {
+    db.exec(`ALTER TABLE workers ADD COLUMN ac_rebaseline_eligible INTEGER NOT NULL DEFAULT 0;`);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -1193,6 +1206,16 @@ export interface WorkerRow {
   /** #287 (E4b): the COMPANION clock — see the schema v24->v25 migration comment for why this is
    *  separate from engine_review_pin_at. */
   engine_review_first_attempt_at?: string | null;
+  /** #676 (schema v31->v32, gate② finding [1]): 1 iff THIS row's most recent `failed` transition
+   *  was written by `checkAcDriftBeforeDrive` or `checkCommentCursorBeforeDrive` — the two DRIVE
+   *  checkpoints whose escalation is actually ABOUT the AC-authority snapshot (a body/cursor edit
+   *  since dispatch). GATED RECLAIM's reclaim branch (conductor.ts) reads this to decide whether
+   *  re-baselining `ac_snapshots`/`ac_body_hash` against the live body is warranted — a lane
+   *  escalated for any OTHER reason (fix-rounds cap, review-disputed, ...) leaves this 0 and its
+   *  snapshot untouched. Reset to 0 on every reclaim REGARDLESS of whether it was 1 (single-use
+   *  per episode — see the migration comment for why a stale 1 must never leak into a later,
+   *  unrelated escalation on the same row). Optional; DB default 0. */
+  ac_rebaseline_eligible?: number;
 }
 
 /** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
@@ -1819,8 +1842,9 @@ export class State {
             review_fallback_head, review_fallback_kind,
             gated_reentry_attempts, gated_reentry_capped, gated_escalation_labeled,
             gated_escalation_carrier,
-            resume_attempts, resume_capped, fix_rounds, fixing_handoff, ac_body_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            resume_attempts, resume_capped, fix_rounds, fixing_handoff, ac_body_hash,
+            ac_rebaseline_eligible)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            issue = excluded.issue, session_id = excluded.session_id,
            state = excluded.state, started_at = excluded.started_at,
@@ -1846,7 +1870,8 @@ export class State {
            resume_capped = excluded.resume_capped,
            fix_rounds = excluded.fix_rounds,
            fixing_handoff = excluded.fixing_handoff,
-           ac_body_hash = excluded.ac_body_hash`,
+           ac_body_hash = excluded.ac_body_hash,
+           ac_rebaseline_eligible = excluded.ac_rebaseline_eligible`,
       )
       .run(
         row.name,
@@ -1875,6 +1900,7 @@ export class State {
         row.fix_rounds ?? 0,
         row.fixing_handoff ?? 0,
         row.ac_body_hash ?? null,
+        row.ac_rebaseline_eligible ?? 0,
       );
   }
 
@@ -2395,6 +2421,31 @@ export class State {
   upsertWorkerWithEvent(row: WorkerRow, kind: EventKind, payload: unknown): void {
     this.db.exec("BEGIN");
     try {
+      this.upsertWorker(row);
+      this.appendEvent(kind, payload);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /** #676 gate② finding [2] ("rebaseline-crash-window"): GATED RECLAIM's AC-snapshot re-baseline
+   *  — the fresh `ac_snapshots` row, the reclaimed worker row (carrying that SAME fresh
+   *  `bodyHash` as `ac_body_hash`), and the `gated-reentry` reset event — in ONE transaction,
+   *  same shape as `upsertWorkerWithEvent` above. Before this, `recordAcSnapshot` committed on
+   *  its own connection call, separate from the worker upsert: a process exit between the two
+   *  left `ac_snapshots.issue` stamped with the NEW hash while `workers.ac_body_hash` still held
+   *  the OLD one. On restart, `checkAcDriftBeforeDrive`'s ownership guard (`snapshot.bodyHash !==
+   *  expectedHash`) reads that disagreement as "a different, later dispatch overwrote this
+   *  lane's snapshot" — the engine's own torn write re-escalating the exact drift this reclaim
+   *  had just adjudicated. Either both land or neither does, so a crashed reclaim is always
+   *  re-runnable from an unchanged row (the ownership check in the caller sees its OWN prior
+   *  snapshot again, never a half-applied one). */
+  recordAcSnapshotAndReclaimWorker(snapshot: AcSnapshot, row: WorkerRow, kind: EventKind, payload: unknown): void {
+    this.db.exec("BEGIN");
+    try {
+      this.recordAcSnapshot(snapshot);
       this.upsertWorker(row);
       this.appendEvent(kind, payload);
       this.db.exec("COMMIT");

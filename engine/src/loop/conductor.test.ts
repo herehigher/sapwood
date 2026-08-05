@@ -25,6 +25,7 @@ import {
   readPrOwner,
 } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+import { hashBody } from "../review/ac-snapshot.js";
 import type { EngineReviewArtifact } from "../review/audit.js";
 import { classicThreadFindingKey, engineAgentFindingKey } from "../review/finding-key.js";
 import { type DriveOutcome, MergeDriver } from "../roles/merge-driver.js";
@@ -1045,6 +1046,49 @@ test("#676 regression: synthetic replay of the #662 sequence (cursor fold -> dri
     resumeTick.gatedReclaimed.some((r) => r.kind === "reclaimed" && r.issue === 662),
     true,
   );
+  st.close();
+});
+
+test('#676 gate② finding [1] ("unscoped-rebaseline"): GATED RECLAIM does NOT re-baseline a lane escalated for a reason UNRELATED to the AC snapshot — an unrelated body edit is still caught as drift on the very next drive tick', async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+
+  const originalBody = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  st.recordAcSnapshot({ issue: 10, bodyHash: hashBody(originalBody), body: originalBody, manifest: [], snapshottedAt: "t0" });
+  // A lane escalated by a NON-AC-drift path (e.g. the fix-rounds cap, or `escalateNeedsHuman`'s
+  // generic "review-disputed"/"drive-needs-human" callers) — `gated_escalation_labeled=1` and
+  // `ac_body_hash` set from its original dispatch, but `ac_rebaseline_eligible` left at its
+  // default 0, since those escalation sites never touch it (only `checkAcDriftBeforeDrive`/
+  // `checkCommentCursorBeforeDrive` do).
+  st.upsertWorker({
+    name: "lane-a",
+    issue: 10,
+    session_id: "s-lane-a",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 99,
+    gated_escalation_labeled: 1,
+    ac_body_hash: hashBody(originalBody),
+  });
+  forge.issueLabelsByIssue[10] = []; // the human cleared needs-human — addressing the UNRELATED finding
+  // An edit to the live body landed too, independent of (and never adjudicated by) that clear.
+  forge.issueBodies[10] = "## Acceptance criteria\n\n- [ ] one EDITED\n\n## Verification plan\nrun tests";
+
+  // GATED RECLAIM reclaims (the fix-cap-shaped hold WAS cleared), but DRIVE runs immediately
+  // after it in this SAME tick — so the untouched snapshot's drift against the unrelated edit is
+  // caught right away, proving the snapshot was genuinely preserved rather than silently
+  // rewritten to paper over it.
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-a", issue: 10, pr: 99, attempt: 1 }]);
+  assert.ok(r.driven.some((d) => d.kind === "needs-human" && d.issue === 10 && d.reason.startsWith("ac-snapshot-drift")));
+  assert.equal(st.getWorker("lane-a")?.state, "failed", "re-escalated within the same tick — never silently driven through");
+  // The snapshot is UNTOUCHED — no silent adoption of an edit nobody actually adjudicated.
+  assert.equal(st.getAcSnapshot(10)?.body, originalBody);
+  assert.equal(st.getWorker("lane-a")?.ac_body_hash, hashBody(originalBody));
   st.close();
 });
 
