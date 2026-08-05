@@ -10041,6 +10041,17 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   // Filtered: `prComments` also holds the merge driver's own `@codex review` trigger posts.
   const gatedNotices = () => forge.prComments.filter(([, body]) => body.startsWith("sapwood: gated-PR"));
   assert.equal(gatedNotices().length, 1);
+  // #655 gate② finding: escalateNeedsHuman's trail comment (attempts>0) and its first-escalation
+  // reason comment (attempts===0) are mutually exclusive branches of the SAME if/else — this
+  // assertion proves it directly rather than trusting the prefix filter above alone: excluding
+  // only the review-trigger posts (the one other source of prComments in this scenario), the
+  // repeat escalation produced exactly the one trail comment above and NOTHING else — never a
+  // second, marker-based reason comment riding alongside it.
+  assert.equal(
+    forge.prComments.filter(([, body]) => !body.startsWith("@codex review")).length,
+    1,
+    "the repeat escalation posts exactly one comment total — the trail notice, never a second reason comment too",
+  );
   assert.match(gatedNotices()[0]![1], /attempt 1\/1/);
   assert.match(gatedNotices()[0]![1], /last automatic attempt/);
   // #167 review (Codex P2+P3 adjudication): cap-hit is this codebase's nearest mechanism to

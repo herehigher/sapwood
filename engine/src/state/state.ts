@@ -3582,7 +3582,14 @@ export class State {
     // OTHER, never of `issue`). Matches on the payload's `issue` field via `json_extract`, the
     // same approach this file's own escalation-lookup queries already use (e.g. the
     // `json_extract(payload, '$.issue')` clauses above) — reused rather than a second filtering
-    // strategy invented for this one caller.
+    // strategy invented for this one caller. Guarded by `json_valid(payload)` (gate② finding):
+    // unlike those escalation-lookup queries, which only ever read rows THIS engine itself wrote
+    // (append-only, always valid JSON), this filter runs over the WHOLE unbounded ledger range —
+    // `json_extract` raises SQLite's "malformed JSON" error on an invalid payload, which aborts
+    // the ENTIRE query, not just that one row, silently losing every later matching event too.
+    // `json_valid` short-circuits false before `json_extract` ever runs on that row, so a corrupt
+    // row simply never matches — the same "served as null, never a throw" stance this method's
+    // own JS-side JSON.parse fallback below already holds for every OTHER filter shape.
     filter: { kinds?: readonly string[]; excludeKinds?: readonly string[]; issue?: number },
     limit: number,
   ): { rows: { id: number; ts: string; kind: string; payload: unknown }[]; tailId: number } {
@@ -3596,7 +3603,7 @@ export class State {
       params.push(...filter.excludeKinds);
     }
     if (filter.issue !== undefined) {
-      clause += ` AND json_extract(payload, '$.issue') = ?`;
+      clause += ` AND json_valid(payload) AND json_extract(payload, '$.issue') = ?`;
       params.push(filter.issue);
     }
     params.push(limit);

@@ -2821,7 +2821,21 @@ async function commentOnEscalationCarrier(
  *  (GATED RECLAIM) and the resolution reconciler (escalation-reconcile.ts) decide by observing
  *  the label's ABSENCE and must look at the object the write actually went to. The trail comment
  *  follows the label onto the same object for the same reason — a "remove the label to retry"
- *  instruction posted somewhere other than where the label is, is a wrong instruction. */
+ *  instruction posted somewhere other than where the label is, is a wrong instruction.
+ *
+ *  #655 gate② adjudication: the "the issue otherwise" clause above is NOT reachable through this
+ *  function's own two call sites today — `pr` is typed `number` (never null) precisely because
+ *  each caller already ran the `w.pr == null` fail-safe check earlier in DRIVE's loop (the
+ *  separate `driving-lane-missing-pr` branch, which never calls this function at all — it writes
+ *  the issue label inline and is a pre-#655, pre-#398 fail-safe for an invariant violation, not a
+ *  normal escalation shape). `escalationCarrier`/`labelEscalationCarrier`/`commentOnEscalationCarrier`
+ *  are all still carrier-generic (this function's own first-escalation reason comment below routes
+ *  through them unconditionally, same as the label write above it) — so an issue-carrier lane
+ *  would be handled correctly the day a real caller supplies one; there is no gap to close in the
+ *  IMPLEMENTATION, only in what today's two callers can ever construct. Deliberately not tested
+ *  here for that reason: a test exercising `carrier === "issue"` through THIS function would have
+ *  to bypass its own type signature to construct an input no real caller can produce, which tests
+ *  a fabrication, not a behavior. */
 async function escalateNeedsHuman(
   forge: IForge,
   state: State,
