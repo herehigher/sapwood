@@ -1638,14 +1638,24 @@ export interface AlignDeps {
 
 /** #621: is there anything THIS round's align-CREATION (decompose) session would actually be
  *  reacting to? An empty Ready pool (this round's milestone scope, same read architect.ts's own
- *  empty-pool short-circuit uses) with no lane CARRIED over a round boundary (probe-signals.ts's
- *  own #433 vocabulary: "a CARRIED lane is work" — active/handoff/gated-reentry, the same trio
- *  that file's `active-lanes`/`handoff-resume-candidates`/`gated-reentry-candidates` signals
- *  read) means the session would dispatch into a provable no-op: nothing dispatchable, nothing
- *  mid-flight to reconsider. Local (SQLite) reads first, same cheapest-first ordering
- *  probe-signals.ts uses, so the one network call (getReadyIssues) is skipped whenever a carried
- *  lane alone already answers the question. Never gates the TRIAGE pass below, which is already
- *  naturally free of this cost (it only dispatches a session per actual planless candidate).
+ *  empty-pool short-circuit uses) with no lane CARRIED over a round boundary means the session
+ *  would dispatch into a provable no-op: nothing dispatchable, nothing mid-flight to reconsider.
+ *  Local (SQLite) reads first, so the one network call (getReadyIssues) is skipped whenever a
+ *  carried lane alone already answers the question. Never gates the TRIAGE pass below, which is
+ *  already naturally free of this cost (it only dispatches a session per actual planless
+ *  candidate).
+ *
+ *  #637: the carried-lane set here is active/handoff ONLY — gated-reentry (state.
+ *  gatedFailedWorkers()) is deliberately EXCLUDED, diverging from probe-signals.ts's own #433
+ *  "CARRIED lane" trio (active-lanes/handoff-resume-candidates/gated-reentry-candidates), which
+ *  keeps gated-reentry for its OWN, different consumer (conductor.ts's GATED RECLAIM tick-side
+ *  phase, #147/#499) and stays accurate as written — the two sets are allowed to differ because
+ *  they answer different questions. Live evidence (batch-7, round 317, PR #629's own batch): an
+ *  empty Ready pool with three gated-reentry lanes still counted as "carried" here and dispatched
+ *  a judgment-tier po-align session that produced `{proposals: [], concerns: []}` — a provable
+ *  no-op, since nothing on the gated-reclaim path reads align-CREATION output (only issue
+ *  creation/triage consume it). A lane latched to the human-merge queue awaiting release cannot
+ *  consume anything a skipped session would have produced, so it no longer holds this skip open.
  *
  *  `roundId <= 1` is exempt (same "no possible prior round" cutoff round-defaults.ts's own
  *  renderLastMergedFromArtifact uses): round.ts's own standby doc is explicit that "the first
@@ -1657,7 +1667,6 @@ async function alignCreationHasNothingToDo(forge: IForge, state: State, roundId:
   if (roundId <= 1) return false;
   if (state.activeWorkers().length > 0) return false;
   if (state.handoffWorkers().length > 0) return false;
-  if (state.gatedFailedWorkers().length > 0) return false;
   return (await forge.getReadyIssues()).length === 0;
 }
 
