@@ -139,7 +139,11 @@ test("requiredLabels: two holdLabels entries that normalize to the SAME name ded
   const custom = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }\nescalation: { holdLabels: [reviewing, Reviewing] }");
   const specs = requiredLabels(custom);
   const matches = specs.filter((l) => l.name.toLowerCase() === "reviewing");
-  assert.equal(matches.length, 1, "two holdLabels entries normalizing to the same name must produce exactly one LabelSpec, not a duplicate");
+  assert.equal(
+    matches.length,
+    1,
+    "two holdLabels entries normalizing to the same name must produce exactly one LabelSpec, not a duplicate",
+  );
 });
 
 test("preflight throws actionably when not logged in", async () => {

@@ -250,7 +250,12 @@ test("#658 round 2 (A): the three escalation rows always render BOTH Merge veto 
     assert.match(section, /\*\*Merge veto:\*\*/, name);
     assert.match(section, /\*\*Dispatch hold:\*\*/, name);
   }
-  assert.match(labelSection(body, "sapwood:reserve"), /\*\*Dispatch hold:\*\* NOT a member of `escalation\.humanLabels`/);
+  // #658 round 3 (P1): needsHuman/blocked/reserve hold dispatch UNCONDITIONALLY (forge.ts's
+  // `isDispatchable`, conductor.ts's `orderForDispatch`) regardless of `escalation.humanLabels`
+  // membership — reserve is NOT a member of humanLabels here, yet it still holds dispatch.
+  for (const name of ["sapwood:needs-human", "sapwood:blocked", "sapwood:reserve"]) {
+    assert.match(labelSection(body, name), /\*\*Dispatch hold:\*\* holds dispatch \(unconditional/, name);
+  }
 });
 
 test("#658 round 2 (A): a non-escalation row matching NEITHER predicate renders neither Merge veto nor Dispatch hold", () => {
@@ -286,8 +291,12 @@ test("#658 round 2 (A): a bare substring entry ('sapwood') in escalation.humanLa
   assert.match(labelSection(body, "sapwood:in-progress"), /\*\*Merge veto:\*\* member of `escalation\.humanLabels`/);
   assert.match(labelSection(body, "sapwood:type:feature"), /\*\*Merge veto:\*\* member of `escalation\.humanLabels`/);
   assert.match(labelSection(body, "sapwood:hold"), /\*\*Merge veto:\*\* member of `escalation\.humanLabels`/);
-  // No real label is ever named exactly "sapwood", so the exact-identity Dispatch hold fact never
-  // renders a MEMBER line anywhere in the body — only the three escalation rows' NOT-member line.
+  // No real label is ever named exactly "sapwood", so the exact-identity, humanLabels-derived
+  // Dispatch hold MEMBER line never renders anywhere in the body.
   assert.doesNotMatch(body, /\*\*Dispatch hold:\*\* member of/);
-  assert.match(labelSection(body, "sapwood:needs-human"), /\*\*Dispatch hold:\*\* NOT a member of `escalation\.humanLabels`/);
+  // #658 round 3 (P1): needsHuman holds dispatch UNCONDITIONALLY regardless — the bare "sapwood"
+  // substring entry never gives it an EXACT-identity humanLabels match, but the unconditional
+  // exclude fires anyway, so it still renders "holds dispatch (unconditional...)", never
+  // "NOT a member".
+  assert.match(labelSection(body, "sapwood:needs-human"), /\*\*Dispatch hold:\*\* holds dispatch \(unconditional/);
 });

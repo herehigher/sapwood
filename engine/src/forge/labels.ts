@@ -432,20 +432,33 @@ export const LABEL_SEMANTICS = {
   "prio:0": {
     writer: "Human triage only.",
     remover: "Human only.",
-    gates: "Orders the Ready-lane candidate set (round-pool selection dispatches prio:0 first) — never gates WHETHER an issue dispatches.",
+    gates:
+      "Orders the Ready-lane candidate set (round-pool selection dispatches prio:0 first). `prio:0`/`prio:1`/`prio:2` are " +
+      "META-classified ranks (`isCodingRank` returns false for rank<=2 — conductor.ts's `issuePriority`/`isCodingRank`, " +
+      "~line 301), so a `prio:0` candidate's dispatch THIS TICK can be DEFERRED, not just re-ordered: the dispatch loop's " +
+      "`metaLaneAllowed` check (conductor.ts:~5014-5019) reserves `codingFloor(cfg.lanes.max)` lanes for coding-ranked " +
+      '(`prio:3`+/unlabeled) work whenever any is still waiting, skipping a meta candidate with `reason: "meta-floor"` ' +
+      "instead of dispatching it that tick.",
   },
   "prio:1": {
     writer: "Human triage only.",
     remover: "Human only.",
-    gates: "Orders the Ready-lane candidate set (dispatches ahead of prio:2/prio:3) — never gates WHETHER an issue dispatches.",
+    gates:
+      "Orders the Ready-lane candidate set (dispatches ahead of prio:2/prio:3). Same META-classified rank as `prio:0`/" +
+      "`prio:2` (`isCodingRank` returns false for rank<=2, conductor.ts's `issuePriority`/`isCodingRank`) — a `prio:1` " +
+      "candidate's dispatch THIS TICK can likewise be DEFERRED by the meta-floor (`metaLaneAllowed`, " +
+      "conductor.ts:~5014-5019): coding-ranked work still waiting reserves `codingFloor(cfg.lanes.max)` lanes, skipping " +
+      'this candidate with `reason: "meta-floor"` instead of dispatching it that tick.',
   },
   "prio:2": {
     writer: "Human triage only.",
     remover: "Human only.",
     gates:
       "Orders the Ready-lane candidate set (dispatches ahead of `prio:3` AND ahead of unlabeled issues — conductor.ts's " +
-      "`issuePriority` ranks an unlabeled issue 3, the same as `prio:3`, NOT 2; `prio:2` is not 'the default') — never gates " +
-      "WHETHER an issue dispatches.",
+      "`issuePriority` ranks an unlabeled issue 3, the same as `prio:3`, NOT 2; `prio:2` is not 'the default'). Same " +
+      "META-classified rank as `prio:0`/`prio:1` (`isCodingRank` returns false for rank<=2) — a `prio:2` candidate's " +
+      "dispatch THIS TICK can likewise be DEFERRED by the meta-floor (`metaLaneAllowed`, conductor.ts:~5014-5019) " +
+      "whenever coding-ranked work is still waiting.",
   },
   "prio:3": {
     writer: "Human triage only.",
@@ -453,8 +466,11 @@ export const LABEL_SEMANTICS = {
     gates:
       "Orders the Ready-lane candidate set (tied with unlabeled issues — conductor.ts's `issuePriority` defaults an " +
       "unlabeled issue to this same rank, 3 — and ranked AHEAD of any HIGHER-numbered `prio:N` the parser accepts, e.g. " +
-      "`prio:4`, per conductor.test.ts's own rank-4 fixture; NOT last among every priority the system can express) — " +
-      "never gates WHETHER an issue dispatches.",
+      "`prio:4`, per conductor.test.ts's own rank-4 fixture; NOT last among every priority the system can express). " +
+      "`prio:3` is CODING-classified (`isCodingRank` returns true for rank>=3) — it is never itself deferred by the " +
+      "meta-floor; it is the rank the floor RESERVES lanes for: `metaLaneAllowed` (conductor.ts:~5014-5019) counts a " +
+      "still-waiting `prio:3`/unlabeled candidate as `codingWaiting` and skips a lower-ranked meta candidate " +
+      '(`prio:0`-`prio:2`) instead, with `reason: "meta-floor"`.',
   },
 } satisfies Record<LabelRegistryKey, LabelSemantics>;
 
@@ -518,6 +534,37 @@ export function resolveLabelSkillRows(cfg: ResolvedLabelsForSkill): LabelSkillRo
   return rows;
 }
 
+/** #658 round 3 (P1, correction-reintroduced defect): the REAL composed dispatch-exclusion set a
+ *  label's rendered `Dispatch hold` line must reflect — never `escalation.humanLabels`
+ *  membership alone (that was the bug: it rendered `reserve`/`needsHuman`/`blocked` as "NOT a
+ *  member" whenever a repo's `escalation.humanLabels` happened to omit them, when in fact all
+ *  three hold dispatch in EVERY config). Mirrors three sites exactly — do not re-derive this
+ *  from prose, cite these three if it ever needs re-tracing:
+ *   - forge.ts's `isDispatchable` (~line 2522, called from `getReadyIssues`/`selectReadyIssues`):
+ *     `labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)` excludes
+ *     UNCONDITIONALLY, before `escalation.humanLabels` is ever consulted.
+ *   - conductor.ts's `orderForDispatch` (~line 1627): builds `reserveish = [cfg.labels.reserve,
+ *     ...cfg.escalation.humanLabels]` and filters through `hasReserveLabel` — so `reserve` is
+ *     ALSO excluded UNCONDITIONALLY, independent of `escalation.humanLabels` membership.
+ *   - that same `orderForDispatch` array's `...cfg.escalation.humanLabels` spread: every OTHER
+ *     label holds dispatch only if it is an EXACT member of that resolved list
+ *     (`hasReserveLabel`'s `labelsInclude` — exact identity, not substring).
+ *  `why: "unconditional"` takes precedence over `"humanLabels"` even when a row's resolved name
+ *  is ALSO explicitly listed in `escalation.humanLabels` — the unconditional exclude fires
+ *  regardless, so it is the true reason either way. */
+function computeDispatchHold(
+  row: LabelSkillRow,
+  cfg: ResolvedLabelsForSkill,
+): { readonly holdsDispatch: boolean; readonly why: "unconditional" | "humanLabels" | null } {
+  if (row.key === "needsHuman" || row.key === "blocked" || row.key === "reserve") {
+    return { holdsDispatch: true, why: "unconditional" };
+  }
+  if (labelsInclude(cfg.escalation.humanLabels, row.name)) {
+    return { holdsDispatch: true, why: "humanLabels" };
+  }
+  return { holdsDispatch: false, why: null };
+}
+
 /** The `sapwood-labels` skill body (everything after SKILL.md's frontmatter) — rendered fresh at
  *  engine startup by skills-plugin.ts's `buildLabelsSkillFile`, from the SAME resolved cfg every
  *  other engine read uses. Deterministic given `cfg` (no wall-clock, no `Date.now()`), so a
@@ -539,16 +586,22 @@ export function renderLabelsSkillBody(cfg: ResolvedLabelsForSkill): string {
     // construction. Where the two would ever disagree, the rendered facts are authoritative.
     "The prose under each label below (Writer/Remover/Gates/Distinguish from) describes that " +
       "label's DESIGNED role. The **Merge veto** / **Dispatch hold** lines are RENDERED FACTS, " +
-      "computed from THIS repo's resolved `escalation.humanLabels` list using the same predicate " +
-      "functions the engine's gates call — never a re-derived approximation — and they take " +
-      "PRECEDENCE over the prose above whenever the two would ever disagree.",
+      "computed from the same predicates the engine's own gates call — never a re-derived " +
+      "approximation — and they take PRECEDENCE over the prose above whenever the two would ever " +
+      "disagree. **Merge veto** is `escalation.humanLabels` membership alone. **Dispatch hold** " +
+      "is the WIDER composed exclusion set gate⓪ and dispatch actually apply: `needsHuman` / " +
+      "`blocked` / `reserve` hold dispatch UNCONDITIONALLY, in every config, regardless of " +
+      "`escalation.humanLabels` membership; every other row holds dispatch only if it is an " +
+      "EXACT member of the resolved `escalation.humanLabels` list.",
     "",
     "`escalation.humanLabels` matching is NOT uniform: the merge gate matches by SUBSTRING " +
       "(`labelsIncludeAnySubstring`, merge-driver.ts's `deriveGate`) — a short entry like " +
-      "`sapwood` matches every label name that CONTAINS it, not just an exact one — while dispatch " +
-      "matches the same list by EXACT identity (`labelsInclude`, conductor.ts's `orderForDispatch` " +
-      "/ `hasReserveLabel`). The two lines below reflect that difference; they can disagree for " +
-      "the same row.",
+      "`sapwood` matches every label name that CONTAINS it, not just an exact one — while the " +
+      "`escalation.humanLabels`-derived portion of dispatch hold matches the same list by EXACT " +
+      "identity (`labelsInclude`, conductor.ts's `orderForDispatch` / `hasReserveLabel`). The two " +
+      "lines below reflect that difference; they can disagree for the same row. `needsHuman` / " +
+      "`blocked` / `reserve` hold dispatch unconditionally either way — see each row's own " +
+      "Dispatch hold line.",
     "",
   ];
   for (const row of resolveLabelSkillRows(cfg)) {
@@ -578,16 +631,19 @@ export function renderLabelsSkillBody(cfg: ResolvedLabelsForSkill): string {
         }`,
       );
     }
-    // Dispatch hold: conductor.ts's `orderForDispatch` builds `[cfg.labels.reserve,
-    // ...cfg.escalation.humanLabels]` and filters through `hasReserveLabel`, which calls
-    // `labelsInclude` (conductor.ts:~1627) — exact identity match, not substring.
-    const dispatchHoldMember = labelsInclude(cfg.escalation.humanLabels, row.name);
-    if (alwaysRender || dispatchHoldMember) {
+    // Dispatch hold: computed from the REAL composed dispatch-exclusion set — see
+    // `computeDispatchHold`'s doc comment for the three sites it mirrors. Never
+    // `escalation.humanLabels` membership alone (#658 round 3 P1).
+    const dispatchHold = computeDispatchHold(row, cfg);
+    if (alwaysRender || dispatchHold.holdsDispatch) {
       lines.push(
         `- **Dispatch hold:** ${
-          dispatchHoldMember
-            ? "member of `escalation.humanLabels` in THIS repo (holds an issue carrying it out of dispatch)."
-            : "NOT a member of `escalation.humanLabels` in THIS repo (does not hold dispatch)."
+          dispatchHold.why === "unconditional"
+            ? "holds dispatch (unconditional — excluded regardless of `escalation.humanLabels` " +
+              "membership; see forge.ts's `isDispatchable` / conductor.ts's `orderForDispatch`)."
+            : dispatchHold.holdsDispatch
+              ? "member of `escalation.humanLabels` in THIS repo (holds an issue carrying it out of dispatch)."
+              : "NOT a member of `escalation.humanLabels` in THIS repo (does not hold dispatch)."
         }`,
       );
     }

@@ -481,15 +481,9 @@ test("#310 gate② P1-2: split and decomposed reject aliases with each other and
 test("#658 round 2 (B): two resolved workflow labels colliding with each other (not just the specific pairs the earlier guards check) is rejected", () => {
   const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
   // labels.inProgress aliasing labels.reserve trips no OTHER guard in this file — round 2's gap.
-  assert.throws(
-    () => parseConfig(`${base}labels: { inProgress: sapwood:reserve }`),
-    /labels\.inProgress.*collides with labels\.reserve/is,
-  );
+  assert.throws(() => parseConfig(`${base}labels: { inProgress: sapwood:reserve }`), /labels\.inProgress.*collides with labels\.reserve/is);
   // Case-insensitive, same semantics as every other collision guard.
-  assert.throws(
-    () => parseConfig(`${base}labels: { inProgress: SAPWOOD:RESERVE }`),
-    /labels\.inProgress.*collides with labels\.reserve/is,
-  );
+  assert.throws(() => parseConfig(`${base}labels: { inProgress: SAPWOOD:RESERVE }`), /labels\.inProgress.*collides with labels\.reserve/is);
 });
 
 test("#658 round 2 (B): a resolved workflow label colliding with a fixed taxonomy label name is rejected", () => {
