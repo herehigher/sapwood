@@ -61,6 +61,7 @@ import {
   resolveWorktreeHead,
   scanEgressSuspects,
   shellSingleQuote,
+  signalOnceAndReport,
   spawnClaudeSession,
   spawnSshKeygen,
   WORKER_ALLOWED_TOOLS_NO_GH,
@@ -4806,21 +4807,32 @@ function reapPollSleep(opts: { held?: boolean } = {}): { sleep: (ms: number) => 
   };
 }
 
-/** #668 round 5: a leader stub script that backgrounds a real `node` descendant registering a
- *  SIGTERM no-op handler (never relying on a bash `trap` surviving `exec`, its own can of
- *  POSIX-signal-disposition worms), then BUSY-WAITS for the descendant's own readiness file
- *  before calling `exit 0` — closing the race onExit()'s reap would otherwise have against the
- *  descendant's own startup: onExit()'s automatic reap fires the INSTANT the leader exits and
- *  sends its SIGTERM synchronously, so without this wait a fresh `node` process could still be
- *  mid-startup (module loading, V8 init, BEFORE its own `process.on('SIGTERM', ...)` line has
- *  even run) when that signal arrives, dying from the OS's ordinary default disposition instead
- *  of proving the ignore-then-escalate path this test suite wants deterministic control over. */
-function leaderExitStub(dir: string, descendantReadyFile: string): string {
+/** #668 round 5 (rebased round 8 — see signalOnceAndReport's own doc: the descendant path no
+ *  longer escalates to SIGKILL at all, so a stubborn descendant is never actually reaped by this
+ *  path, only reported): a leader stub script that backgrounds a real `node` descendant, then
+ *  BUSY-WAITS for the descendant's own readiness file before calling `exit 0` — closing the race
+ *  onExit()'s reap would otherwise have against the descendant's own startup: onExit()'s
+ *  automatic reap fires the INSTANT the leader exits and sends its SIGTERM synchronously, so
+ *  without this wait a fresh `node` process could still be mid-startup (module loading, V8 init,
+ *  BEFORE its own `process.on('SIGTERM', ...)` line has even run) when that signal arrives, dying
+ *  from the OS's ordinary default disposition instead of proving the behavior this suite wants
+ *  deterministic control over.
+ *
+ *  Default (COOPERATIVE): the descendant dies from the single SIGTERM alone, but only after a
+ *  short REAL internal delay (its own `setTimeout`, not this test file's `sleep` seam) — long
+ *  enough that a test holding `reapPollSleep`'s gate can reliably observe "still alive" right
+ *  after the SIGTERM was sent, proving a GENUINELY in-flight reap, not one that raced past
+ *  observation. `opts.ignoreTerm: true` makes it never die from SIGTERM at all — the shape round
+ *  8's "reported, never force-killed" tests need. */
+function leaderExitStub(dir: string, descendantReadyFile: string, opts: { ignoreTerm?: boolean } = {}): string {
+  const sigtermHandler = opts.ignoreTerm
+    ? "process.on('SIGTERM',()=>{});"
+    : "process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),100));";
   return mkStub(
     dir,
     [
       "#!/usr/bin/env bash",
-      `( exec node -e "process.on('SIGTERM',()=>{});require('fs').writeFileSync('${descendantReadyFile}','1');setInterval(()=>{},1000);" ) &`,
+      `( exec node -e "${sigtermHandler}require('fs').writeFileSync('${descendantReadyFile}','1');setInterval(()=>{},1000);" ) &`,
       `while [ ! -f "${descendantReadyFile}" ]; do sleep 0.01; done`,
       "exit 0",
       "",
@@ -4828,72 +4840,53 @@ function leaderExitStub(dir: string, descendantReadyFile: string): string {
   );
 }
 
-test("WorkerSupervisor onExit (#668 round 5): a leader that exits ON ITS OWN while a live DESCENDANT shares its process group is reaped RIGHT THERE — no reapAll() call anywhere in this test, zero registry involved, just onExit()'s own fire-and-forget reap", async () => {
+test("WorkerSupervisor onExit (#668 round 8): a leader that exits ON ITS OWN while a live COOPERATIVE DESCENDANT shares its process group is reaped RIGHT THERE by the SINGLE SIGTERM alone — no escalation needed, no reapAll() call anywhere in this test, just onExit()'s own fire-and-forget signal", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
   try {
     const descendantReadyFile = join(dir, "descendant.ready");
-    const bin = leaderExitStub(dir, descendantReadyFile);
-    const { sleep } = reapPollSleep(); // instant — this test proves the mechanism works end to end, no reapAll() call needed
-    const s = new WorkerSupervisor({
-      now: realClock,
-      cfg,
-      stateDir: dir,
-      claudeBin: bin,
-      renderPrompt: () => "test prompt",
-      heartbeatMs: 50,
-      guardHookPath: mkHook(dir),
-      sleep,
-    });
+    const bin = leaderExitStub(dir, descendantReadyFile); // cooperative — dies from the one SIGTERM after its own REAL internal delay
+    const s = sup(dir, bin); // real default sleep — the descendant's own internal delay is the timing source, not an injected seam
     const { name } = await s.dispatch({ number: 675, title: "t", labels: [] });
     const leaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
 
     // The leader script itself doesn't exit until the descendant's readiness file exists (see
     // leaderExitStub's own doc) — so by the time `.done.json` lands, the descendant was DEFINITELY
-    // alive and TERM-hardened, closing the startup race deterministically.
+    // alive and its SIGTERM handler registered, closing the startup race deterministically.
     await waitForFile(join(dir, `${name}.done.json`), "leader never exited / onExit never ran");
 
-    // NO s.reapAll() call anywhere in this test — onExit()'s own fire-and-forget reap must do the
-    // whole job by itself. Bounded wait (never a fixed sleep) for the descendant to actually die.
-    await waitFor(() => !groupAlive(leaderPid), "onExit's own leader-exit reap never actually killed the descendant");
+    // NO s.reapAll() call anywhere in this test — onExit()'s own fire-and-forget SIGTERM must do
+    // the whole job by itself (round 8: no SIGKILL escalation exists on this path at all). Bounded
+    // wait (never a fixed sleep) for the descendant to actually die from the single signal.
+    await waitFor(() => !groupAlive(leaderPid), "onExit's own single SIGTERM never actually killed the cooperative descendant");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("WorkerSupervisor.reapAll (#668 round 5): an in-flight leader-exit reap (kicked off by onExit(), genuinely still running — held open by a controllable gate) is AWAITED by reapAll(), never abandoned — the group is confirmed dead by the time reapAll() resolves, and its outcome is included", async () => {
+test("WorkerSupervisor.reapAll (#668 round 8): an in-flight leader-exit reap (onExit()'s single SIGTERM already sent, the cooperative descendant still mid-death on its own real internal delay) is AWAITED by reapAll(), never abandoned — the group is confirmed dead by the time reapAll() resolves, and its outcome is included", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
   try {
     const descendantReadyFile = join(dir, "descendant.ready");
-    const bin = leaderExitStub(dir, descendantReadyFile);
-    const { sleep, release } = reapPollSleep({ held: true });
-    const s = new WorkerSupervisor({
-      now: realClock,
-      cfg,
-      stateDir: dir,
-      claudeBin: bin,
-      renderPrompt: () => "test prompt",
-      heartbeatMs: 50,
-      guardHookPath: mkHook(dir),
-      sleep,
-    });
+    const bin = leaderExitStub(dir, descendantReadyFile); // cooperative — its own REAL internal delay is the timing source here
+    const s = sup(dir, bin); // real default sleep — an artificial gate would race PAST the descendant's real delay every time (round 8's own lesson: instant-resolving sleep exhausts the WHOLE virtual grace budget in microseconds, never giving a real subprocess timer a chance to fire)
     const { name } = await s.dispatch({ number: 676, title: "t", labels: [] });
     const leaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
 
     await waitForFile(join(dir, `${name}.done.json`), "leader never exited / onExit never ran");
 
-    // The gate is still HELD — onExit's own reap is genuinely stuck mid-poll (real, deterministic
-    // control, never a sleep/timing guess), so this is a REAL in-flight reap, not a settled one.
-    assert.equal(groupAlive(leaderPid), true, "sanity: the descendant is still alive — the gated reap hasn't been allowed to finish yet");
+    // onExit()'s SIGTERM fires synchronously the instant the leader exits — done.json landing is
+    // proof that already happened. The descendant's own internal delay (well over any file-poll +
+    // scheduling overhead here) makes this a reliable "still genuinely in flight" window, not an
+    // artificial one.
+    assert.equal(groupAlive(leaderPid), true, "sanity: the descendant is still alive — its own internal delay hasn't elapsed yet");
     // #668 (round 6 P1b): keyed by `${name}#${pid}`, not the bare name — see inFlightLeaderExitReaps' own doc.
     assert.ok(
       [...peekSupervisor(s).inFlightLeaderExitReaps.keys()].some((k) => k.startsWith(`${name}#`)),
       "onExit() must have registered the in-flight reap synchronously",
     );
 
-    const reapAllPromise = s.reapAll(); // must AWAIT the in-flight reap, not race past it
-    release(); // let the held reap (and reapAll's own await of it) actually proceed now
-    const outcomes = await reapAllPromise;
+    const outcomes = await s.reapAll(); // must AWAIT the in-flight reap, not race past it
 
     const byName = new Map(outcomes.map((o) => [o.name, o]));
     assert.equal(byName.get(name)?.confirmedDead, true, "reapAll()'s own outcome set must include the leader-exit reap it waited for");
@@ -4923,7 +4916,7 @@ test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is
       [
         "#!/usr/bin/env bash",
         'if echo "$*" | grep -q LEADER_EXIT_MARKER; then',
-        `  ( exec node -e "process.on('SIGTERM',()=>{});require('fs').writeFileSync('${descendantReadyFile}','1');setInterval(()=>{},1000);" ) &`,
+        `  ( exec node -e "process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),100));require('fs').writeFileSync('${descendantReadyFile}','1');setInterval(()=>{},1000);" ) &`,
         `  while [ ! -f "${descendantReadyFile}" ]; do sleep 0.01; done`,
         "  exit 0",
         "else",
@@ -4934,7 +4927,9 @@ test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is
         "",
       ].join("\n"),
     );
-    const { sleep } = reapPollSleep(); // instant — this test only cares about the OUTCOME, not the timing
+    // Real default sleep (no injected seam here — round 8's own lesson: an instant-resolving
+    // sleep would exhaust the WHOLE virtual grace budget in microseconds, never giving the
+    // leader-exit lane's cooperative descendant's own real internal delay a chance to fire).
     const s = new WorkerSupervisor({
       now: realClock,
       cfg,
@@ -4943,7 +4938,6 @@ test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is
       renderPrompt: (issue) => (issue.number === 900 ? "LEADER_EXIT_MARKER" : "HEALTHY_MARKER"),
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
-      sleep,
     });
 
     const { name: healthyName } = await s.dispatch({ number: 901, title: "t", labels: [] });
@@ -4959,7 +4953,7 @@ test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is
     assert.equal(alive(healthyPid), true, "the healthy, unrelated lane must be completely untouched by the other lane's leader-exit reap");
     assert.equal(peekSupervisor(s).lanes.has(healthyName), true, "the healthy lane is still a live, tracked lane");
 
-    await s.reapAll(); // clean up the healthy lane so the test doesn't leak a live process
+    await s.reapAll({ graceMs: 100 }); // clean up the healthy lane (this.lanes' own full escalation path, unaffected by round 8) fast — real sleep otherwise defaults to a real 3s grace window
     // #395/#668 (pre-existing suite-wide note): reapAll()'s own group-liveness check can observe
     // death a hair before Node's internal 'exit' event (and this process's plain per-pid check)
     // catches up — a bounded poll, never an immediate assertion, is this suite's own established
@@ -4989,11 +4983,16 @@ test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is
 // the SIGKILL escalation specifically, shrinking that one transition to a synchronous gap.
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("WorkerSupervisor.resume (#668 round 6 P1b): a same-name respawn (fix-leg entry) while an EARLIER leg's leader-exit reap is still in flight WAITS for it — the old reap is never abandoned", async () => {
+test("WorkerSupervisor.resume (#668 round 6 P1b, rebased round 8): a same-name respawn (fix-leg entry) while an EARLIER leg's leader-exit reap is still in flight WAITS for it — the old reap is never abandoned (it can SETTLE either way — confirmed dead or merely reported — the respawn gate only needs it to finish, not to succeed)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
   try {
     const descendantReadyFile = join(dir, "descendant.ready");
-    const bin = leaderExitStub(dir, descendantReadyFile);
+    // TERM-ignoring on purpose: this test is about the RESPAWN GATE (does resume() wait for the
+    // prior reap to settle), not about whether that prior reap succeeds at killing anything —
+    // round 8 never escalates on this path, so an ignore-TERM descendant lets the held gate stay
+    // fully deterministic (no real subprocess timing dependency at all) rather than needing a
+    // real internal delay to race against.
+    const bin = leaderExitStub(dir, descendantReadyFile, { ignoreTerm: true });
     const { sleep, release } = reapPollSleep({ held: true });
     const s = new WorkerSupervisor({
       now: realClock,
@@ -5038,16 +5037,34 @@ test("WorkerSupervisor.resume (#668 round 6 P1b): a same-name respawn (fix-leg e
       "resume() resolved before the earlier leg's leader-exit reap was ever released — it did not wait for it, the exact pre-fix bug",
     );
 
-    release(); // let the held reap (and therefore the waiting resume()) actually proceed now
+    release(); // let the held reap (and therefore the waiting resume()) actually SETTLE now — round 8: it reports, never kills, since the descendant ignores SIGTERM
     const { name: resumedName } = await resumePromise;
     assert.equal(resumedName, name);
+    // Round 8: the FIRST leg's descendant is NEVER force-killed (it ignores SIGTERM, and this path
+    // no longer escalates) — it's still alive here, on purpose. What matters for THIS test is that
+    // resume() didn't proceed until the reap SETTLED (proven by the race above), not that the
+    // settlement killed anything.
     assert.equal(
       groupAlive(firstLeaderPid),
-      false,
-      "the FIRST leg's own reap actually completed — its descendant is confirmed dead, never abandoned",
+      true,
+      "round 8: an ignore-TERM descendant is reported, never force-killed — it's still alive, by design",
     );
 
-    await s.reapAll(); // sweep up whatever the SECOND (resumed) leg's own leader-exit reap left behind
+    // Clean up directly with SIGKILL — round 8 deliberately leaves an ignore-TERM descendant for
+    // an operator, but THIS test still must not leak live processes. Both the first leg's own
+    // (still-alive) descendant AND whatever the resumed (second) leg's own leader-exit reap left
+    // behind (same ignore-TERM shape, same bin) need it.
+    try {
+      process.kill(-firstLeaderPid, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+    try {
+      const secondRunning = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")) as { wrapper_pid?: number };
+      if (typeof secondRunning.wrapper_pid === "number") process.kill(-secondRunning.wrapper_pid, "SIGKILL");
+    } catch {
+      /* running.json already gone (its own onExit already ran), or the pgid is already gone */
+    }
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -5182,6 +5199,130 @@ test("reapChildren (#668 round 6 P1a): a child that dies in the gap between the 
   const outcomes = await reapChildren([c], { graceMs, sleep: INSTANT_SLEEP });
   assert.deepEqual(signals, ["SIGTERM"], "SIGKILL must NEVER be sent — the pre-escalation recheck observed it already dead");
   assert.deepEqual(outcomes, [{ name: "lane-late-death", alreadyDead: false, escalated: false, confirmedDead: true }]);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #668 round 8 (Codex r8, supervisor ruling: STOP hardening — check-then-signal is
+// TOCTOU-unavoidable on POSIX, so DELETE the exposure instead of narrowing it further). Final
+// scope for the leader-exited-descendant path: exactly ONE SIGTERM (inside onExit(), at the
+// freshest possible moment), exactly ONE bounded liveness observation afterward, and NO SIGKILL
+// escalation — a survivor is REPORTED (logged + surfaced through reapAll()'s existing
+// orphan-surfacing path when still in flight at engine-exit time), never force-killed. The
+// this.lanes path (reapAll(), over leaders Node hasn't waitpid'd yet — so their pid cannot have
+// been recycled) is UNCHANGED: it keeps reapChildren's own full SIGTERM->grace->SIGKILL->verify
+// escalation, proven still intact below.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("signalOnceAndReport (#668 round 8): a descendant that IGNORES SIGTERM is NEVER SIGKILL'd — exactly one signal total, no matter how long the grace-period poll runs", async () => {
+  const signals: NodeJS.Signals[] = [];
+  const c: ReapableChild = {
+    name: "lane-ignores-term",
+    isAlive: () => !signals.includes("SIGKILL"), // would only ever become false if a SIGKILL were (wrongly) sent
+    signal: (sig) => signals.push(sig),
+  };
+  const outcome = await signalOnceAndReport(c, { graceMs: 100, sleep: INSTANT_SLEEP });
+  assert.deepEqual(signals, ["SIGTERM"], "exactly one signal ever reaches an ignore-TERM descendant on this path — no SIGKILL, ever");
+  assert.deepEqual(outcome, { name: "lane-ignores-term", alreadyDead: false, escalated: false, confirmedDead: false });
+});
+
+test("signalOnceAndReport (#668 round 8): alreadySignaled skips even the ONE SIGTERM this path sends — an earlier drain's own signal to the whole group counts", async () => {
+  const signals: NodeJS.Signals[] = [];
+  const c: ReapableChild = {
+    name: "lane-already-signaled",
+    alreadySignaled: true,
+    isAlive: () => true, // never dies — proves the outcome is purely about signaling, not aliveness
+    signal: (sig) => signals.push(sig),
+  };
+  const outcome = await signalOnceAndReport(c, { graceMs: 50, sleep: INSTANT_SLEEP });
+  assert.deepEqual(signals, [], "zero signals — an already-signaled descendant gets NOTHING from this call, not even the one SIGTERM");
+  assert.deepEqual(outcome, { name: "lane-already-signaled", alreadyDead: false, escalated: false, confirmedDead: false });
+});
+
+test("signalOnceAndReport (#668 round 8): a COOPERATIVE descendant that dies from the single SIGTERM is confirmed dead — the positive path still works, just without any escalation machinery behind it", async () => {
+  const signals: NodeJS.Signals[] = [];
+  const c: ReapableChild = {
+    name: "lane-cooperative",
+    isAlive: () => !signals.includes("SIGTERM"), // dies the instant (and only because) the SIGTERM lands
+    signal: (sig) => signals.push(sig),
+  };
+  const outcome = await signalOnceAndReport(c, { graceMs: 100, sleep: INSTANT_SLEEP });
+  assert.deepEqual(signals, ["SIGTERM"]);
+  assert.deepEqual(outcome, { name: "lane-cooperative", alreadyDead: false, escalated: false, confirmedDead: true });
+});
+
+test("WorkerSupervisor onExit + reapAll (#668 round 8, real end-to-end): a leader-exited descendant that IGNORES SIGTERM is REPORTED — surfaced through reapAll()'s existing orphan path (confirmedDead: false) while still in flight — and is left completely alive, never force-killed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  const descendantReadyFile = join(dir, "descendant.ready");
+  const bin = leaderExitStub(dir, descendantReadyFile, { ignoreTerm: true });
+  const { sleep, release } = reapPollSleep({ held: true }); // deterministic: no real timing dependency needed since this descendant never dies either way
+  const s = new WorkerSupervisor({
+    now: realClock,
+    cfg,
+    stateDir: dir,
+    claudeBin: bin,
+    renderPrompt: () => "test prompt",
+    heartbeatMs: 50,
+    guardHookPath: mkHook(dir),
+    sleep,
+  });
+  let leaderPid = -1;
+  try {
+    const { name } = await s.dispatch({ number: 679, title: "t", labels: [] });
+    leaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    await waitForFile(join(dir, `${name}.done.json`), "leader never exited / onExit never ran");
+    assert.ok(
+      [...peekSupervisor(s).inFlightLeaderExitReaps.keys()].some((k) => k.startsWith(`${name}#`)),
+      "onExit() must have registered the in-flight reap",
+    );
+
+    release(); // let the (never-dying) reap settle — round 8: it reports, it never escalates
+    const outcomes = await s.reapAll();
+
+    const byName = new Map(outcomes.map((o) => [o.name, o]));
+    assert.equal(
+      byName.get(name)?.confirmedDead,
+      false,
+      "reapAll()'s own outcome set surfaces the unconfirmed descendant — the existing orphan path, never silently dropped",
+    );
+    assert.equal(byName.get(name)?.escalated, false, "never escalated — this path has no SIGKILL step to escalate to");
+    assert.equal(
+      groupAlive(leaderPid),
+      true,
+      "the descendant is left completely alive — reported, never force-killed, exactly as round 8 specifies",
+    );
+    s.dispose();
+  } finally {
+    try {
+      if (leaderPid !== -1) process.kill(-leaderPid, "SIGKILL"); // test cleanup only — never part of production behavior
+    } catch {
+      /* already gone */
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WorkerSupervisor.reapAll (#668 round 8, unchanged-behavior pin): a lane STILL IN this.lanes (leader not yet waitpid'd) that IGNORES SIGTERM is STILL escalated to a whole-process-group SIGKILL — this.lanes' own full escalation path is untouched by round 8's descendant-path change", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  try {
+    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> only SIGKILL ends it
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 680, title: "t", labels: [] });
+    await waitForFile(ready, "stub installed its TERM-ignoring trap before reap");
+    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    assert.equal(alive(pid), true);
+
+    const outcomes = await s.reapAll({ graceMs: 100 });
+
+    assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: true, confirmedDead: true }]);
+    assert.equal(
+      alive(pid),
+      false,
+      "this.lanes' own path still escalates to SIGKILL and confirms death — round 8 did not touch this path at all",
+    );
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
