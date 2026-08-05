@@ -1128,10 +1128,13 @@ gates call, never asserted as fixed prose (#658 review rounds 1–4). Dispatch h
 dispatch UNCONDITIONALLY in every config (forge.ts's `isDispatchable`, gate⓪; conductor.ts's
 `orderForDispatch`), regardless of `escalation.humanLabels`; every other label holds dispatch
 only if it is an EXACT member of that resolved list. The three escalation rows (`needs-human`/
-`blocked`/`reserve`) always show both facts, member/unconditional or not; `decomposed` shows the
-Dispatch hold fact (unconditional) but not the Merge veto fact, since it is not a
-`escalation.humanLabels` candidate; every other label shows a fact only when its resolved name
-actually matches that gate's predicate. The
+`blocked`/`reserve`) always show both facts, member/unconditional or not; `decomposed` always
+shows the Dispatch hold fact (unconditional), but — unlike those three — it is not in the
+ALWAYS_RENDER set, so its Merge veto fact follows the same rule as every other label: rendered
+only when its resolved name actually matches `escalation.humanLabels`. Under default config
+`decomposed` is not a member, so no Merge veto line renders for it there, but a repo whose
+`escalation.humanLabels` explicitly includes `decomposed` does see its Merge veto MEMBER line,
+exactly like any other label. The
 registry is the PROMOTION of label semantics that used to live only as TS doc
 comments on `labels.ts`, unreadable from any role session — the incidents this closes: a worker
 self-applying `human-merge-only` (#539), an architect blocking a Ready issue via label with no

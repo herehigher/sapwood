@@ -255,14 +255,36 @@ test("#658 round 2 (A): the three escalation rows always render BOTH Merge veto 
   // decomposed — round 3 fixed the first three but missed `decomposed`, which both functions
   // also exclude unconditionally (isDispatchable's `isDecomposed` check, and orderForDispatch's
   // own `labelsInclude(i.labels, cfg.labels.decomposed)` filter), independent of
-  // `escalation.humanLabels` membership — none of the four is a member of humanLabels-by-default
-  // config, `reserve`/`decomposed` outright never are, yet all four still hold dispatch.
+  // `escalation.humanLabels` membership. All four still hold dispatch regardless of that
+  // membership — but default membership itself differs per label: `needsHuman`/`blocked` ARE
+  // default `escalation.humanLabels` members (config.ts's `resolveLabelDefaults`:
+  // `cfg.escalation.humanLabels ??= [resolvedLabels.needsHuman, resolvedLabels.blocked]`), while
+  // `reserve`/`decomposed` are not members by default, or ever automatically.
   for (const name of ["sapwood:needs-human", "sapwood:blocked", "sapwood:reserve", "sapwood:decomposed"]) {
     assert.match(labelSection(body, name), /\*\*Dispatch hold:\*\* holds dispatch \(unconditional/, name);
   }
-  // `decomposed` is not an escalation.humanLabels candidate, so — unlike the three ALWAYS_RENDER
-  // rows — it does NOT get a rendered Merge veto line at all (neither member nor non-member).
+  // #658 round 5 (P2): scoped to THIS test's default-config fixture (`cfg`/`body` above, whose
+  // `escalation.humanLabels` = [needsHuman, blocked] per `resolvedLabelsForSkill`) — under that
+  // config, `decomposed` is not an `escalation.humanLabels` member, and — unlike the three
+  // ALWAYS_RENDER rows — it only gets a rendered Merge veto line when its resolved name actually
+  // matches that predicate, so under THIS default-config fixture it gets none at all (neither
+  // member nor non-member line). This is NOT a special case of `decomposed`: it is excluded from
+  // `ALWAYS_RENDER_ESCALATION_ROWS`, not from `escalation.humanLabels`-membership eligibility
+  // itself — see the next test for the positive counterpart, where a config that explicitly adds
+  // `decomposed` to `escalation.humanLabels` renders its Merge veto MEMBER line.
   assert.doesNotMatch(labelSection(body, "sapwood:decomposed"), /Merge veto/);
+});
+
+test("#658 round 5: decomposed added to a repo's explicit escalation.humanLabels renders its Merge veto MEMBER line too — decomposed is excluded from ALWAYS_RENDER_ESCALATION_ROWS (so it gets no line under default config), not from escalation.humanLabels-membership eligibility itself", () => {
+  const cfg: ResolvedLabelsForSkill = {
+    labels: { ...workflowLabelDefaults("sapwood:"), prefix: "sapwood:" },
+    escalation: {
+      holdLabels: [holdLabelDefault("sapwood:")],
+      humanLabels: ["sapwood:needs-human", "sapwood:blocked", "sapwood:decomposed"],
+    },
+  };
+  const body = renderLabelsSkillBody(cfg);
+  assert.match(labelSection(body, "sapwood:decomposed"), /\*\*Merge veto:\*\* member of `escalation\.humanLabels`/);
 });
 
 test("#658 round 2 (A): a non-escalation row matching NEITHER predicate renders neither Merge veto nor Dispatch hold", () => {
