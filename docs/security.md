@@ -1115,6 +1115,18 @@ issue-body- or PR-derived — and a published hash directory is never overwritte
 fence, not a jail" doctrine: the goal is to stop a mistake, not to withstand an adversary who
 already has code-execution authority in the same repo).
 
+**#640 adds a third skill, `sapwood-labels`, on the same plugin dir.** Unlike the two above, its
+content is NOT extracted from this file's markers — it is rendered from `engine/src/forge/
+labels.ts`'s `LABEL_SEMANTICS` registry (writer/remover/gates/distinguish-from per label) against
+THIS repo's fully-resolved `cfg.labels`/`cfg.escalation.holdLabels`, so a `labels.prefix` remap
+always shows the RESOLVED names a session actually sees on real issues/PRs, never a default or a
+template. The registry is the PROMOTION of label semantics that used to live only as TS doc
+comments on `labels.ts`, unreadable from any role session — the incidents this closes: a worker
+self-applying `human-merge-only` (#539), an architect blocking a Ready issue via label with no
+engine event (batch 6), and repeated supervisor label-timeline misreads. Same CONTENT-side-only
+posture as the two marker-extracted skills: the render path's only input is the engine's own
+resolved config, never issue-body- or PR-derived text.
+
 **Injection policy** (`shouldInjectSkillsPlugin` in the same module): every worker leg (fresh
 dispatch, resume, fix-entry) and every non-review peripheral role session gets `--plugin-dir`
 attached when `roles.skills.enabled` is `true` (default `false` — see config.ts's own comment);

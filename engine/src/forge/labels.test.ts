@@ -3,12 +3,20 @@ import { test } from "node:test";
 import {
   createMissingLabels,
   firstMatchingLabel,
+  holdLabelDefault,
+  LABEL_SEMANTICS,
+  type LabelRegistryKey,
+  type LabelSemantics,
   labelsInclude,
   labelsIncludeAnySubstring,
   matchBlockedByLabel,
   matchPriorityLabel,
   normalizeLabel,
+  type ResolvedLabelsForSkill,
+  renderLabelsSkillBody,
+  resolveLabelSkillRows,
   SAPWOOD_LABEL_PREFIX,
+  TAXONOMY_SPECS,
   taxonomyLabels,
   workflowLabelDefaults,
 } from "./labels.js";
@@ -94,4 +102,84 @@ test("#379 createMissingLabels: a real create failure (no permission) propagates
     throw Object.assign(new Error("gh failed"), { stderr: "HTTP 403: Resource not accessible by integration" });
   };
   await assert.rejects(() => createMissingLabels(run, "o/r", [{ name: "sapwood:split", color: "fbca04", description: "d" }]), /gh failed/);
+});
+
+// ── #640: typed per-label semantics registry ─────────────────────────────────────────────────
+
+function resolvedLabelsForSkill(prefix: string): ResolvedLabelsForSkill {
+  return {
+    labels: { ...workflowLabelDefaults(prefix), prefix },
+    escalation: { holdLabels: [holdLabelDefault(prefix)] },
+  };
+}
+
+test("registry: every LABEL_SEMANTICS entry carries a non-empty writer, remover, and gates", () => {
+  for (const [key, entry] of Object.entries(LABEL_SEMANTICS)) {
+    assert.ok(entry.writer.trim().length > 0, `"${key}" is missing a writer`);
+    assert.ok(entry.remover.trim().length > 0, `"${key}" is missing a remover`);
+    assert.ok(entry.gates.trim().length > 0, `"${key}" is missing a gates description`);
+  }
+});
+
+// #640 AC1: "removing any label's registry entry is a type error, not a runtime gap (pinned by a
+// type-level test fixture)". Checked by `npm run typecheck` (tsconfig.typecheck.json, #403 — NO
+// exclusions, so a `@ts-expect-error` directive inside a `.test.ts` file is REAL, CI-visible
+// enforcement, same shape as event-kinds.test.ts's own `defineKinds` fixture). Omitting a single
+// key from a `Record<LabelRegistryKey, LabelSemantics>` must not compile.
+const { hold: _omittedHold, ...labelSemanticsMissingHold } = LABEL_SEMANTICS;
+// @ts-expect-error — omitting "hold" from the registry must not satisfy Record<LabelRegistryKey, LabelSemantics>.
+const _typeLevelExhaustivenessFixture: Record<LabelRegistryKey, LabelSemantics> = labelSemanticsMissingHold;
+
+test("#640 cross-check: every label produced by workflowLabelDefaults/TAXONOMY_SPECS/hold defaults appears in the rendered skill exactly once", () => {
+  const prefix = "sapwood:";
+  const cfg = resolvedLabelsForSkill(prefix);
+  const body = renderLabelsSkillBody(cfg);
+  const expectedNames = [
+    ...Object.values(workflowLabelDefaults(prefix)),
+    ...taxonomyLabels(prefix).map((s) => s.name),
+    holdLabelDefault(prefix),
+  ];
+  assert.equal(new Set(expectedNames).size, expectedNames.length, "fixture sanity: no duplicate expected names");
+  for (const name of expectedNames) {
+    const marker = `\`${name}\``;
+    const occurrences = body.split(marker).length - 1;
+    assert.equal(occurrences, 1, `"${name}" must appear exactly once in the rendered skill, got ${occurrences}`);
+  }
+});
+
+test("#640 cross-check: resolveLabelSkillRows covers exactly the workflow + taxonomy + hold label set, no more, no fewer", () => {
+  const rows = resolveLabelSkillRows(resolvedLabelsForSkill("sapwood:"));
+  assert.equal(rows.length, Object.keys(workflowLabelDefaults("sapwood:")).length + TAXONOMY_SPECS.length + 1);
+  const keys = new Set(rows.map((r) => r.key));
+  for (const key of Object.keys(workflowLabelDefaults("sapwood:"))) assert.ok(keys.has(key as LabelRegistryKey), key);
+  for (const spec of TAXONOMY_SPECS) assert.ok(keys.has(spec.name), spec.name);
+  assert.ok(keys.has("hold"));
+});
+
+test("#640 prefix-remap: a nondefault labels.prefix renders the skill with RESOLVED names throughout, no default-name leakage", () => {
+  const prefix = "acme:";
+  const cfg = resolvedLabelsForSkill(prefix);
+  const body = renderLabelsSkillBody(cfg);
+  assert.ok(body.includes("`acme:needs-human`"));
+  assert.ok(body.includes("`acme:type:feature`"));
+  assert.ok(body.includes("`acme:hold`"));
+  assert.ok(!body.includes("sapwood:"), "no default sapwood: prefix may leak into a remapped render");
+});
+
+test("#640 prefix-remap: the bare (empty) prefix resolves to unprefixed names", () => {
+  const cfg = resolvedLabelsForSkill("");
+  const body = renderLabelsSkillBody(cfg);
+  assert.ok(body.includes("`needs-human`"));
+  assert.ok(body.includes("`type:feature`"));
+  assert.ok(!body.includes("sapwood:"));
+});
+
+test("#640 renderLabelsSkillBody: a hold row is emitted once per escalation.holdLabels entry", () => {
+  const cfg: ResolvedLabelsForSkill = {
+    labels: { ...workflowLabelDefaults("sapwood:"), prefix: "sapwood:" },
+    escalation: { holdLabels: ["sapwood:hold", "sapwood:hold-secondary"] },
+  };
+  const body = renderLabelsSkillBody(cfg);
+  assert.ok(body.includes("`sapwood:hold`"));
+  assert.ok(body.includes("`sapwood:hold-secondary`"));
 });

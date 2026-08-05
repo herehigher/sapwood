@@ -103,6 +103,9 @@ test("#292: escalation.instructionPaths has trust-chain defaults, is configurabl
     // #639: the role-session skill-injection renderer — reads docs/security.md's marker sections
     // verbatim; a change here can shift what gets extracted without touching security.md itself.
     "engine/src/roles/skills-plugin.ts",
+    // #640: labels.ts's LABEL_SEMANTICS registry — rendered verbatim into the sapwood-labels
+    // skill, the same "instruction source" exposure the entry above names for skills-plugin.ts.
+    "engine/src/forge/labels.ts",
   ]);
   assert.deepEqual(
     parseConfig(`${base}escalation: { instructionPaths: ["**/AGENTS.md", instructions/*.md] }`).escalation.instructionPaths,

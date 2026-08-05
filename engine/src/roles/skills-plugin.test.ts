@@ -7,7 +7,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { holdLabelDefault, type ResolvedLabelsForSkill, workflowLabelDefaults } from "../forge/labels.js";
 import {
+  buildLabelsSkillFile,
   buildSkillsPluginFiles,
   extractMarkedSection,
   hashPluginFiles,
@@ -18,6 +20,14 @@ import {
   shouldInjectSkillsPlugin,
   writePluginFiles,
 } from "./skills-plugin.js";
+
+/** #640: a resolved-labels fixture every buildSkillsPluginFiles/renderSkillsPlugin/
+ *  resolveSkillsPluginDir call below needs — the default `sapwood:` prefix, matching what
+ *  `ConfigSchema.parse({...})` would resolve for a fresh config. */
+const LABELS_CFG: ResolvedLabelsForSkill = {
+  labels: { ...workflowLabelDefaults("sapwood:"), prefix: "sapwood:" },
+  escalation: { holdLabels: [holdLabelDefault("sapwood:")] },
+};
 
 const FIXTURE_SECURITY_MD = `# Security & trust model
 
@@ -114,23 +124,25 @@ test("extractMarkedSection: end marker before start marker throws", () => {
 
 // ── buildSkillsPluginFiles (pure) ────────────────────────────────────────────────────────────
 
-test("buildSkillsPluginFiles: produces the plugin manifest + one SKILL.md per spec, sorted by path", () => {
-  const files = buildSkillsPluginFiles(FIXTURE_SECURITY_MD);
+test("buildSkillsPluginFiles: produces the plugin manifest + one SKILL.md per spec + #640's sapwood-labels, sorted by path", () => {
+  const files = buildSkillsPluginFiles(FIXTURE_SECURITY_MD, LABELS_CFG);
   const paths = files.map((f) => f.relPath);
   assert.deepEqual(
     paths,
-    [".claude-plugin/plugin.json", ...SKILLS_PLUGIN_SPECS.map((s) => `skills/${s.id}/SKILL.md`)].sort((a, b) => a.localeCompare(b)),
+    [".claude-plugin/plugin.json", "skills/sapwood-labels/SKILL.md", ...SKILLS_PLUGIN_SPECS.map((s) => `skills/${s.id}/SKILL.md`)].sort(
+      (a, b) => a.localeCompare(b),
+    ),
   );
 });
 
 test("buildSkillsPluginFiles: plugin.json is valid JSON naming the plugin", () => {
-  const manifest = buildSkillsPluginFiles(FIXTURE_SECURITY_MD).find((f) => f.relPath === ".claude-plugin/plugin.json")!;
+  const manifest = buildSkillsPluginFiles(FIXTURE_SECURITY_MD, LABELS_CFG).find((f) => f.relPath === ".claude-plugin/plugin.json")!;
   const parsed = JSON.parse(manifest.content);
   assert.equal(parsed.name, "sapwood-role-skills");
 });
 
 test("buildSkillsPluginFiles: each SKILL.md body byte-matches the corresponding marker-delimited security.md section", () => {
-  const files = buildSkillsPluginFiles(FIXTURE_SECURITY_MD);
+  const files = buildSkillsPluginFiles(FIXTURE_SECURITY_MD, LABELS_CFG);
   for (const spec of SKILLS_PLUGIN_SPECS) {
     const skillMd = files.find((f) => f.relPath === `skills/${spec.id}/SKILL.md`)!.content;
     const frontmatterEnd = skillMd.indexOf("---\n\n");
@@ -141,25 +153,40 @@ test("buildSkillsPluginFiles: each SKILL.md body byte-matches the corresponding 
 });
 
 test("buildSkillsPluginFiles: SKILL.md frontmatter carries name + non-empty description", () => {
-  const files = buildSkillsPluginFiles(FIXTURE_SECURITY_MD);
+  const files = buildSkillsPluginFiles(FIXTURE_SECURITY_MD, LABELS_CFG);
   for (const spec of SKILLS_PLUGIN_SPECS) {
     const skillMd = files.find((f) => f.relPath === `skills/${spec.id}/SKILL.md`)!.content;
     assert.match(skillMd, new RegExp(`^---\\nname: ${spec.id}\\ndescription: .+\\n---\\n\\n`));
   }
 });
 
+// ── buildLabelsSkillFile (#640) ──────────────────────────────────────────────────────────────
+
+test("buildLabelsSkillFile: frontmatter carries name sapwood-labels + non-empty description", () => {
+  const file = buildLabelsSkillFile(LABELS_CFG);
+  assert.equal(file.relPath, "skills/sapwood-labels/SKILL.md");
+  assert.match(file.content, /^---\nname: sapwood-labels\ndescription: .+\n---\n\n/);
+});
+
+test("buildLabelsSkillFile: body carries every resolved workflow label name", () => {
+  const file = buildLabelsSkillFile(LABELS_CFG);
+  for (const name of Object.values(workflowLabelDefaults("sapwood:"))) {
+    assert.ok(file.content.includes(`\`${name}\``), `expected "${name}" in the rendered skill`);
+  }
+});
+
 // ── hashPluginFiles ──────────────────────────────────────────────────────────────────────────
 
 test("hashPluginFiles: identical file sets hash identically", () => {
-  const a = buildSkillsPluginFiles(FIXTURE_SECURITY_MD);
-  const b = buildSkillsPluginFiles(FIXTURE_SECURITY_MD);
+  const a = buildSkillsPluginFiles(FIXTURE_SECURITY_MD, LABELS_CFG);
+  const b = buildSkillsPluginFiles(FIXTURE_SECURITY_MD, LABELS_CFG);
   assert.equal(hashPluginFiles(a), hashPluginFiles(b));
 });
 
 test("hashPluginFiles: a changed source section changes the hash", () => {
-  const before = hashPluginFiles(buildSkillsPluginFiles(FIXTURE_SECURITY_MD));
+  const before = hashPluginFiles(buildSkillsPluginFiles(FIXTURE_SECURITY_MD, LABELS_CFG));
   const changed = FIXTURE_SECURITY_MD.replace("B — CI-executed.", "B — CI-executed (edited).");
-  const after = hashPluginFiles(buildSkillsPluginFiles(changed));
+  const after = hashPluginFiles(buildSkillsPluginFiles(changed, LABELS_CFG));
   assert.notEqual(before, after);
 });
 
@@ -172,13 +199,13 @@ test("renderSkillsPlugin: same source -> same hash, second call creates no new d
     writeFileSync(securityMdPath, FIXTURE_SECURITY_MD, "utf8");
     const outRoot = join(root, "out");
 
-    const first = renderSkillsPlugin({ securityMdPath, outRoot });
+    const first = renderSkillsPlugin({ securityMdPath, outRoot, labelsCfg: LABELS_CFG });
     // #639 gate② round 1: content-anchored, not timestamp-anchored — snapshot every published
     // file's exact bytes, not just plugin.json's mtime (see snapshotDirBytes's own doc).
     const bytesBefore = snapshotDirBytes(first.dir);
     const dirsBefore = readdirSync(outRoot);
 
-    const second = renderSkillsPlugin({ securityMdPath, outRoot });
+    const second = renderSkillsPlugin({ securityMdPath, outRoot, labelsCfg: LABELS_CFG });
 
     assert.equal(second.hash, first.hash);
     assert.equal(second.dir, first.dir);
@@ -200,14 +227,14 @@ test("renderSkillsPlugin: a changed source produces a new directory and leaves t
     writeFileSync(securityMdPath, FIXTURE_SECURITY_MD, "utf8");
     const outRoot = join(root, "out");
 
-    const first = renderSkillsPlugin({ securityMdPath, outRoot });
+    const first = renderSkillsPlugin({ securityMdPath, outRoot, labelsCfg: LABELS_CFG });
     // #639 gate② round 1: snapshot EVERY file the first hash dir published (not just
     // plugin.json) — see snapshotDirBytes's own doc for why a single-file/mtime pin under-
     // covers the "previously published directories byte-untouched" invariant.
     const firstBytesBefore = snapshotDirBytes(first.dir);
 
     writeFileSync(securityMdPath, FIXTURE_SECURITY_MD.replace("B — CI-executed.", "B — CI-executed (edited)."), "utf8");
-    const second = renderSkillsPlugin({ securityMdPath, outRoot });
+    const second = renderSkillsPlugin({ securityMdPath, outRoot, labelsCfg: LABELS_CFG });
 
     assert.notEqual(second.hash, first.hash);
     assert.notEqual(second.dir, first.dir);
@@ -236,11 +263,11 @@ test("renderSkillsPlugin: crash-consistency — a staged-but-never-renamed direc
     // fully-written directory that is NOT the published hash path and that renderSkillsPlugin
     // itself never created a reference to.
     const orphanStageDir = join(outRoot, ".stage-orphan-from-a-crash");
-    const files = buildSkillsPluginFiles(FIXTURE_SECURITY_MD);
+    const files = buildSkillsPluginFiles(FIXTURE_SECURITY_MD, LABELS_CFG);
     writePluginFiles(orphanStageDir, files);
     assert.ok(existsSync(orphanStageDir));
 
-    const result = renderSkillsPlugin({ securityMdPath, outRoot });
+    const result = renderSkillsPlugin({ securityMdPath, outRoot, labelsCfg: LABELS_CFG });
 
     assert.notEqual(result.dir, orphanStageDir, "argv must never be handed the orphaned stage directory");
     assert.equal(hashPluginFiles(files), result.hash);
@@ -253,7 +280,7 @@ test("renderSkillsPlugin: crash-consistency — a staged-but-never-renamed direc
 test("publishPluginAtomic: publishing the same hash twice directly is a no-op on the second call", () => {
   const root = mkTmpDir();
   try {
-    const files = buildSkillsPluginFiles(FIXTURE_SECURITY_MD);
+    const files = buildSkillsPluginFiles(FIXTURE_SECURITY_MD, LABELS_CFG);
     const hash = hashPluginFiles(files);
     const first = publishPluginAtomic(root, hash, files);
     // #639 gate② round 1: content-anchored, not timestamp-anchored — same snapshotDirBytes
@@ -277,7 +304,7 @@ test("renderSkillsPlugin: a missing security.md file aborts with a naming error"
   const root = mkTmpDir();
   try {
     assert.throws(
-      () => renderSkillsPlugin({ securityMdPath: join(root, "nope.md"), outRoot: join(root, "out") }),
+      () => renderSkillsPlugin({ securityMdPath: join(root, "nope.md"), outRoot: join(root, "out"), labelsCfg: LABELS_CFG }),
       /nope\.md.*refusing to start/,
     );
   } finally {
@@ -290,7 +317,7 @@ test("renderSkillsPlugin: a security.md missing a required marker aborts startup
   try {
     const securityMdPath = join(root, "security.md");
     writeFileSync(securityMdPath, "# no markers at all", "utf8");
-    assert.throws(() => renderSkillsPlugin({ securityMdPath, outRoot: join(root, "out") }), /missing start marker/);
+    assert.throws(() => renderSkillsPlugin({ securityMdPath, outRoot: join(root, "out"), labelsCfg: LABELS_CFG }), /missing start marker/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -305,7 +332,10 @@ test("renderSkillsPlugin: a security.md with a duplicated marker aborts startup,
       FIXTURE_SECURITY_MD.replace("### a subsection", "<!-- sapwood:skill:human-merge-only-paths:start -->\n### a subsection"),
       "utf8",
     );
-    assert.throws(() => renderSkillsPlugin({ securityMdPath, outRoot: join(root, "out") }), /duplicated start marker/);
+    assert.throws(
+      () => renderSkillsPlugin({ securityMdPath, outRoot: join(root, "out"), labelsCfg: LABELS_CFG }),
+      /duplicated start marker/,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -318,7 +348,7 @@ test("renderSkillsPlugin: against this repo's real docs/security.md, every skill
   const realSecurityMdPath = join(here, "..", "..", "..", "docs", "security.md");
   const root = mkTmpDir();
   try {
-    const result = renderSkillsPlugin({ securityMdPath: realSecurityMdPath, outRoot: join(root, "out") });
+    const result = renderSkillsPlugin({ securityMdPath: realSecurityMdPath, outRoot: join(root, "out"), labelsCfg: LABELS_CFG });
     const securityMd = readFileSync(realSecurityMdPath, "utf8");
     for (const spec of SKILLS_PLUGIN_SPECS) {
       const skillMd = readFileSync(join(result.dir, "skills", spec.id, "SKILL.md"), "utf8");
@@ -337,7 +367,7 @@ test("resolveSkillsPluginDir: roles.skills.enabled false -> undefined, no render
   const root = mkTmpDir();
   try {
     // No docs/security.md under `root` at all — if this rendered anyway it would throw.
-    const dir = resolveSkillsPluginDir({ roles: { skills: { enabled: false } } }, root);
+    const dir = resolveSkillsPluginDir({ roles: { skills: { enabled: false } }, ...LABELS_CFG }, root);
     assert.equal(dir, undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -349,7 +379,7 @@ test("resolveSkillsPluginDir: roles.skills.enabled true -> renders under <cwd>/d
   try {
     mkdirSync(join(root, "docs"), { recursive: true });
     writeFileSync(join(root, "docs", "security.md"), FIXTURE_SECURITY_MD, "utf8");
-    const dir = resolveSkillsPluginDir({ roles: { skills: { enabled: true } } }, root);
+    const dir = resolveSkillsPluginDir({ roles: { skills: { enabled: true } }, ...LABELS_CFG }, root);
     assert.ok(dir?.startsWith(join(root, "data", "generated", "role-skills")));
     assert.ok(existsSync(join(dir!, ".claude-plugin", "plugin.json")));
   } finally {
@@ -376,8 +406,8 @@ test("resolveSkillsPluginDir: production composition — returns the EXACT dir r
     const outRoot = join(root, "data", "generated", "role-skills");
     const securityMdPath = join(root, "docs", "security.md");
 
-    const resolved = resolveSkillsPluginDir({ roles: { skills: { enabled: true } } }, root);
-    const published = renderSkillsPlugin({ securityMdPath, outRoot });
+    const resolved = resolveSkillsPluginDir({ roles: { skills: { enabled: true } }, ...LABELS_CFG }, root);
+    const published = renderSkillsPlugin({ securityMdPath, outRoot, labelsCfg: LABELS_CFG });
 
     assert.equal(
       resolved,

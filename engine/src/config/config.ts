@@ -1495,6 +1495,11 @@ const ConfigSchemaRaw = z
           // all, so it is an instruction carrier in its own right, not merely covered by
           // security.md's entry above.
           "engine/src/roles/skills-plugin.ts",
+          // #640: labels.ts's LABEL_SEMANTICS registry is now an instruction source too — it is
+          // rendered VERBATIM into the sapwood-labels skill every role session can pull on demand
+          // (skills-plugin.ts's buildLabelsSkillFile), the same "changes what a session reads
+          // without a prompt-text diff" exposure the entry above names for skills-plugin.ts itself.
+          "engine/src/forge/labels.ts",
         ]),
         // #248: the WAIT-tier hold label list (three-tier escalation model) — a HUMAN-applied
         // "I'm actively reviewing this" signal, distinct from `humanLabels`' engine-written
