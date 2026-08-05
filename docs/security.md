@@ -1120,9 +1120,13 @@ content is NOT extracted from this file's markers — it is rendered from `engin
 labels.ts`'s `LABEL_SEMANTICS` registry (writer/remover/gates/distinguish-from per label) against
 THIS repo's fully-resolved `cfg.labels`/`cfg.escalation.holdLabels`/`cfg.escalation.humanLabels`,
 so a `labels.prefix` remap always shows the RESOLVED names a session actually sees on real
-issues/PRs, never a default or a template — and, for `needs-human`/`blocked`/`reserve`, whether
-that label actually vetoes a PR merge is likewise rendered from the real resolved
-`escalation.humanLabels` list, never asserted as fixed prose (#658 review round 1, P1). The
+issues/PRs, never a default or a template — and whether a label actually vetoes a PR merge
+(substring match, the merge gate's own rule) or holds an issue out of dispatch (exact-identity
+match, dispatch's own rule) is likewise rendered from the real resolved `escalation.humanLabels`
+list using the SAME predicate functions those two gates call, never asserted as fixed prose
+(#658 review rounds 1–2). The three escalation rows (`needs-human`/`blocked`/`reserve`) always
+show both facts, member or not; every other label shows a fact only when its resolved name
+actually matches that gate's predicate. The
 registry is the PROMOTION of label semantics that used to live only as TS doc
 comments on `labels.ts`, unreadable from any role session — the incidents this closes: a worker
 self-applying `human-merge-only` (#539), an architect blocking a Ready issue via label with no

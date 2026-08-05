@@ -270,7 +270,10 @@ export const LABEL_SEMANTICS = {
       "Engine only, at startup — reconcile.ts's orphan healer (`healOrphanedIssues`), for an issue whose owning lane died " +
       "without releasing the claim. It moves the issue to Ready BEFORE removing the label, and tolerates a failed removal " +
       "(logged, retried next startup) — so the issue is dispatchable again even if the stale label lingers on it.",
-    gates: "Marks an issue in flight; excluded from re-dispatch while present.",
+    gates:
+      "Marks an issue in flight; excluded from dispatch ONLY UNTIL the orphan healer moves the issue back to Ready (see " +
+      "Remover, above), which happens BEFORE the label removal. After that move, dispatch does not re-check for this label " +
+      "at all — so a lingering, not-yet-removed `in-progress` label can coexist with a dispatchable issue.",
   },
   needsHuman: {
     writer:
@@ -279,9 +282,13 @@ export const LABEL_SEMANTICS = {
     remover:
       "A human, by removing the label — the #147 gated-reentry handshake that reclaims and re-drives the lane. Also the " +
       "engine itself, via escalation-sweep.ts's `sweepResolvedHolds`: it removes ONLY a `needs-human` the ledger PROVES the " +
-      "engine itself applied (an `always`-proof or proven-`payload` source, per escalation-reconcile.ts's `ESCALATION_SOURCES` " +
-      "— a hand-applied label has no such proof and is never touched), once the escalation is ledger-resolved AND an " +
-      "authorizing witness (merge or issue close, never a mere PR close) confirms it — latched by a `needs-human-swept` receipt.",
+      "engine itself applied (an `always`-proof or proven-`payload` source, per escalation-reconcile.ts's `ESCALATION_SOURCES`), " +
+      "once the escalation is ledger-resolved AND an authorizing witness (merge or issue close, never a mere PR close) confirms " +
+      "it — latched by a `needs-human-swept` receipt. A label applied by a human with NO matching engine escalation in the " +
+      "ledger is untouched, permanently — proof is about the ORIGINAL escalation's provenance, not the physical label's " +
+      "authorship. The module's own accepted blind spot (escalation-sweep.ts:47) is the one exception: a human who RE-applies " +
+      "the label by hand in the narrow window between the engine's resolution and the sweep running loses it anyway — that " +
+      "reapplied, now ledger-co-owned physical label IS swept.",
     gates:
       "Bucket 1 escalation (#397): holds dispatch. Whether it also vetoes the merge gate when present on a PR depends on " +
       "`escalation.humanLabels` membership — see the rendered Merge veto line below for THIS repo's resolved answer.",
@@ -350,9 +357,13 @@ export const LABEL_SEMANTICS = {
     writer: "Engine only — the aligning phase's pool-selection pass, up to the round's pool-candidate cap.",
     remover:
       "Engine only, always via the single fail-closed `removeRoundPoolLabel` helper (`round.ts`) — at round close (every open " +
-      "issue still carrying it, no exemptions), during the pool-selection reconcile pass (a stray label outside this round's " +
-      "selection), when decompose.ts's `applyParentFence` fences a parent being decomposed out of the pool, or when " +
-      "architect.ts's batch review returns a `drop` verdict for a pool member.",
+      "issue still carrying it), during the pool-selection reconcile pass (a stray label outside this round's selection), " +
+      "when decompose.ts's `applyParentFence` fences a parent being decomposed out of the pool, or when architect.ts's batch " +
+      "review returns a `drop` verdict for a pool member. Round close itself skips exactly two categories rather than " +
+      "removing unconditionally (round.ts:~1970): an issue already `poolRemovalEscalated` (handed to a human — an unrelated " +
+      "wake must never re-attempt and re-fail a removal the engine already gave up on) and an issue at or over " +
+      "`cfg.round.maxPoolRemovalAttempts` failed removals (escalated again, in case a prior escalation's event append was " +
+      "lost, instead of retried).",
     gates: "Round-pool membership: gate⓪ is scoped to this label, and the executing phase dispatches gate⓪-passed pool members only.",
     distinguishFrom: "Config load rejects `labels.roundPool` aliasing any other protected label.",
   },
@@ -369,9 +380,11 @@ export const LABEL_SEMANTICS = {
     writer: "Engine only, applied to a lane's PR while that lane is `driving` or `fixing`.",
     remover:
       "Engine only, via the single fail-closed `removeLaneStateLabel` helper (`lane-state-label.ts`'s `syncLaneStateLabels`) " +
-      "— removed the moment the lane leaves the ACTIVE set (`driving`/`fixing`), which includes a nonterminal `handoff` (a " +
-      "graceful pause awaiting a resume decision, deliberately excluded from ACTIVE — see the module's own comment) as well " +
-      "as a genuinely terminal state (merged, escalated, dead). A paused-but-not-dead lane therefore loses the label too.",
+      "— removal is ATTEMPTED the tick the lane leaves the ACTIVE set (`driving`/`fixing`), which includes a nonterminal " +
+      "`handoff` (a graceful pause awaiting a resume decision, deliberately excluded from ACTIVE — see the module's own " +
+      "comment) as well as a genuinely terminal state (merged, escalated, dead); a paused-but-not-dead lane therefore loses " +
+      "the label too. Not necessarily removed THAT tick: a forge failure or hitting the per-tick removal budget " +
+      "(`MAX_REMOVALS_PER_TICK`, lane-state-label.ts:149) leaves the label in place, logged, and retried next tick.",
     gates: "Nothing — a pure PR-list visibility signal, invisible to `deriveGate`, dispatch, and every queue.",
     distinguishFrom:
       "One label deliberately covers BOTH active lane states (`driving` and `fixing`) — which of the two is an " +
@@ -438,8 +451,10 @@ export const LABEL_SEMANTICS = {
     writer: "Human triage only.",
     remover: "Human only.",
     gates:
-      "Orders the Ready-lane candidate set (ranks last among priorities, tied with unlabeled issues — conductor.ts's " +
-      "`issuePriority` defaults an unlabeled issue to this same rank, 3) — never gates WHETHER an issue dispatches.",
+      "Orders the Ready-lane candidate set (tied with unlabeled issues — conductor.ts's `issuePriority` defaults an " +
+      "unlabeled issue to this same rank, 3 — and ranked AHEAD of any HIGHER-numbered `prio:N` the parser accepts, e.g. " +
+      "`prio:4`, per conductor.test.ts's own rank-4 fixture; NOT last among every priority the system can express) — " +
+      "never gates WHETHER an issue dispatches.",
   },
 } satisfies Record<LabelRegistryKey, LabelSemantics>;
 
@@ -465,14 +480,21 @@ export interface ResolvedLabelsForSkill {
   readonly escalation: { readonly holdLabels: readonly string[]; readonly humanLabels: readonly string[] };
 }
 
-/** #658 review round 1, P1: registry keys whose static `gates`/`distinguishFrom` prose above
- *  deliberately defers its `escalation.humanLabels` membership claim to the renderer — see each
- *  entry's own text. Membership is config-dependent (only `needsHuman` is validation-guaranteed a
- *  member; `blocked` is a member by default only; `reserve` is never a member by default but
- *  nothing stops an operator adding it), so asserting it here as fixed prose would go stale the
- *  moment a repo's `escalation.humanLabels` diverges from the shipped default — exactly the
- *  registry-as-source-of-truth failure this file exists to prevent. */
-const HUMAN_LABELS_VETO_ROWS: ReadonlySet<LabelRegistryKey> = new Set(["needsHuman", "blocked", "reserve"]);
+/** #658 review round 2 (A): the three escalation rows whose static `gates`/`distinguishFrom` prose
+ *  above deliberately defers its `escalation.humanLabels` membership claim to the renderer — see
+ *  each entry's own text. Membership is config-dependent (only `needsHuman` is
+ *  validation-guaranteed a member; `blocked` is a member by default only; `reserve` is never a
+ *  member by default but nothing stops an operator adding it), so asserting it here as fixed prose
+ *  would go stale the moment a repo's `escalation.humanLabels` diverges from the shipped default —
+ *  exactly the registry-as-source-of-truth failure this file exists to prevent.
+ *
+ *  Repurposed at round 2 (was `HUMAN_LABELS_VETO_ROWS`, gating a single "Merge veto" line): these
+ *  three rows get BOTH the Merge veto and Dispatch hold facts rendered UNCONDITIONALLY — member or
+ *  non-member — because they are the rows an operator actually reasons about escalation through.
+ *  Every OTHER row (the remaining 18: the other 10 workflow labels, 8 taxonomy labels, hold) gets
+ *  a fact line only when that row's resolved name actually matches the corresponding predicate —
+ *  see `renderLabelsSkillBody` below. */
+const ALWAYS_RENDER_ESCALATION_ROWS: ReadonlySet<LabelRegistryKey> = new Set(["needsHuman", "blocked", "reserve"]);
 
 /** #640 AC2/AC3: resolve every registry key to its ACTUAL, prefix-resolved label name — from
  *  `cfg.labels`/`cfg.escalation.holdLabels` only, never from `workflowLabelDefaults`/
@@ -508,6 +530,26 @@ export function renderLabelsSkillBody(cfg: ResolvedLabelsForSkill): string {
       "registry against THIS repo's resolved config (never hand-edited, never a `labels.prefix` " +
       "template). Every name below is the ACTUAL label this repo uses.",
     "",
+    // #658 review round 2 (A): designed-role vs rendered-facts precedence. The Writer/Remover/
+    // Gates/Distinguish-from prose above each `##` heading describes a label's DESIGNED role,
+    // hand-written and static. The Merge veto / Dispatch hold lines below are RENDERED, not
+    // asserted: computed straight from THIS repo's resolved `escalation.humanLabels` list with
+    // the SAME predicate functions the engine's own gates call (never a re-derived
+    // approximation), so drift between this skill and the gates it describes is impossible by
+    // construction. Where the two would ever disagree, the rendered facts are authoritative.
+    "The prose under each label below (Writer/Remover/Gates/Distinguish from) describes that " +
+      "label's DESIGNED role. The **Merge veto** / **Dispatch hold** lines are RENDERED FACTS, " +
+      "computed from THIS repo's resolved `escalation.humanLabels` list using the same predicate " +
+      "functions the engine's gates call — never a re-derived approximation — and they take " +
+      "PRECEDENCE over the prose above whenever the two would ever disagree.",
+    "",
+    "`escalation.humanLabels` matching is NOT uniform: the merge gate matches by SUBSTRING " +
+      "(`labelsIncludeAnySubstring`, merge-driver.ts's `deriveGate`) — a short entry like " +
+      "`sapwood` matches every label name that CONTAINS it, not just an exact one — while dispatch " +
+      "matches the same list by EXACT identity (`labelsInclude`, conductor.ts's `orderForDispatch` " +
+      "/ `hasReserveLabel`). The two lines below reflect that difference; they can disagree for " +
+      "the same row.",
+    "",
   ];
   for (const row of resolveLabelSkillRows(cfg)) {
     lines.push(`## \`${row.name}\``);
@@ -516,15 +558,36 @@ export function renderLabelsSkillBody(cfg: ResolvedLabelsForSkill): string {
     lines.push(`- **Remover:** ${row.semantics.remover}`);
     lines.push(`- **Gates:** ${row.semantics.gates}`);
     if (row.semantics.distinguishFrom) lines.push(`- **Distinguish from:** ${row.semantics.distinguishFrom}`);
-    // #658 review round 1, P1: rendered, not asserted — the ONLY correct source for a
-    // config-dependent fact is the actual resolved `escalation.humanLabels` list.
-    if (HUMAN_LABELS_VETO_ROWS.has(row.key)) {
-      const isMember = labelsInclude(cfg.escalation.humanLabels, row.name);
+    // #658 review round 2 (A): rendered, not asserted, for EVERY row — the ONLY correct source
+    // for a config-dependent fact is the actual resolved `escalation.humanLabels` list, read
+    // through the SAME predicate the corresponding gate itself calls (never a re-derived
+    // approximation). The three escalation rows always get both lines (member or non-member, so
+    // an operator never has to infer absence); every other row gets a line only when its
+    // resolved name actually matches that predicate — most of the other 18 rows never will, and
+    // a line asserting "NOT a member" on all of them would bury the ones that do.
+    const alwaysRender = ALWAYS_RENDER_ESCALATION_ROWS.has(row.key);
+    // Merge gate: merge-driver.ts's `deriveGate` calls `labelsIncludeAnySubstring(input.labels,
+    // input.humanLabels)` (merge-driver.ts:111) — substring match.
+    const mergeVetoMember = labelsIncludeAnySubstring([row.name], cfg.escalation.humanLabels);
+    if (alwaysRender || mergeVetoMember) {
       lines.push(
         `- **Merge veto:** ${
-          isMember
+          mergeVetoMember
             ? "member of `escalation.humanLabels` in THIS repo (vetoes PR merge while present)."
             : "NOT a member of `escalation.humanLabels` in THIS repo (does not veto PR merge)."
+        }`,
+      );
+    }
+    // Dispatch hold: conductor.ts's `orderForDispatch` builds `[cfg.labels.reserve,
+    // ...cfg.escalation.humanLabels]` and filters through `hasReserveLabel`, which calls
+    // `labelsInclude` (conductor.ts:~1627) — exact identity match, not substring.
+    const dispatchHoldMember = labelsInclude(cfg.escalation.humanLabels, row.name);
+    if (alwaysRender || dispatchHoldMember) {
+      lines.push(
+        `- **Dispatch hold:** ${
+          dispatchHoldMember
+            ? "member of `escalation.humanLabels` in THIS repo (holds an issue carrying it out of dispatch)."
+            : "NOT a member of `escalation.humanLabels` in THIS repo (does not hold dispatch)."
         }`,
       );
     }

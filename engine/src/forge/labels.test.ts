@@ -228,3 +228,66 @@ test("#658 P1: reserve added to a repo's explicit escalation.humanLabels renders
   const body = renderLabelsSkillBody(cfg);
   assert.match(labelSection(body, "sapwood:reserve"), /\*\*Merge veto:\*\* member of `escalation\.humanLabels`/);
 });
+
+// ── #658 review round 2 (A): per-row Merge veto / Dispatch hold rendered from the RUNTIME
+// predicates the merge gate and dispatch actually call, for every row, not just the three
+// escalation rows ──
+
+test("#658 round 2 (A): the header states designed-role-vs-rendered-facts precedence and the substring-vs-exact matching split", () => {
+  const cfg = resolvedLabelsForSkill("sapwood:");
+  const body = renderLabelsSkillBody(cfg);
+  assert.match(body, /RENDERED FACTS/);
+  assert.match(body, /PRECEDENCE/);
+  assert.match(body, /SUBSTRING/);
+  assert.match(body, /EXACT identity/);
+});
+
+test("#658 round 2 (A): the three escalation rows always render BOTH Merge veto and Dispatch hold lines, member or not", () => {
+  const cfg = resolvedLabelsForSkill("sapwood:"); // default humanLabels = [needsHuman, blocked] — reserve is NOT a member
+  const body = renderLabelsSkillBody(cfg);
+  for (const name of ["sapwood:needs-human", "sapwood:blocked", "sapwood:reserve"]) {
+    const section = labelSection(body, name);
+    assert.match(section, /\*\*Merge veto:\*\*/, name);
+    assert.match(section, /\*\*Dispatch hold:\*\*/, name);
+  }
+  assert.match(labelSection(body, "sapwood:reserve"), /\*\*Dispatch hold:\*\* NOT a member of `escalation\.humanLabels`/);
+});
+
+test("#658 round 2 (A): a non-escalation row matching NEITHER predicate renders neither Merge veto nor Dispatch hold", () => {
+  const cfg = resolvedLabelsForSkill("sapwood:");
+  const body = renderLabelsSkillBody(cfg);
+  const section = labelSection(body, "sapwood:type:bug");
+  assert.doesNotMatch(section, /Merge veto/);
+  assert.doesNotMatch(section, /Dispatch hold/);
+});
+
+test("#658 round 2 (A): a taxonomy label added to escalation.humanLabels renders its OWN Merge veto + Dispatch hold member lines, not just the three escalation rows", () => {
+  const cfg: ResolvedLabelsForSkill = {
+    labels: { ...workflowLabelDefaults("sapwood:"), prefix: "sapwood:" },
+    escalation: {
+      holdLabels: [holdLabelDefault("sapwood:")],
+      humanLabels: ["sapwood:needs-human", "sapwood:blocked", "sapwood:type:feature"],
+    },
+  };
+  const body = renderLabelsSkillBody(cfg);
+  const section = labelSection(body, "sapwood:type:feature");
+  assert.match(section, /\*\*Merge veto:\*\* member of `escalation\.humanLabels`/);
+  assert.match(section, /\*\*Dispatch hold:\*\* member of `escalation\.humanLabels`/);
+});
+
+test("#658 round 2 (A): a bare substring entry ('sapwood') in escalation.humanLabels renders Merge veto MEMBER lines broadly (substring match) but never a Dispatch hold MEMBER line anywhere (exact match never hits a bare substring) — pinning the sane presentation for this footgun entry", () => {
+  const cfg: ResolvedLabelsForSkill = {
+    labels: { ...workflowLabelDefaults("sapwood:"), prefix: "sapwood:" },
+    escalation: { holdLabels: [holdLabelDefault("sapwood:")], humanLabels: ["sapwood"] },
+  };
+  const body = renderLabelsSkillBody(cfg);
+  // Every default-prefixed row's resolved name CONTAINS "sapwood", so the substring-matched
+  // Merge veto fact renders as a member on rows far outside the three escalation rows.
+  assert.match(labelSection(body, "sapwood:in-progress"), /\*\*Merge veto:\*\* member of `escalation\.humanLabels`/);
+  assert.match(labelSection(body, "sapwood:type:feature"), /\*\*Merge veto:\*\* member of `escalation\.humanLabels`/);
+  assert.match(labelSection(body, "sapwood:hold"), /\*\*Merge veto:\*\* member of `escalation\.humanLabels`/);
+  // No real label is ever named exactly "sapwood", so the exact-identity Dispatch hold fact never
+  // renders a MEMBER line anywhere in the body — only the three escalation rows' NOT-member line.
+  assert.doesNotMatch(body, /\*\*Dispatch hold:\*\* member of/);
+  assert.match(labelSection(body, "sapwood:needs-human"), /\*\*Dispatch hold:\*\* NOT a member of `escalation\.humanLabels`/);
+});

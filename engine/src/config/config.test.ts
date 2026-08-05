@@ -474,6 +474,50 @@ test("#310 gate② P1-2: split and decomposed reject aliases with each other and
   );
 });
 
+// ── #658 review round 2 (B): exhaustive label-name collision guard — every rendered label name
+// (13 resolved workflow labels, 8 fixed taxonomy names, holdLabels) must be case-insensitively
+// distinct from every other one, not just the specific pairs the guards above happen to check ──
+
+test("#658 round 2 (B): two resolved workflow labels colliding with each other (not just the specific pairs the earlier guards check) is rejected", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  // labels.inProgress aliasing labels.reserve trips no OTHER guard in this file — round 2's gap.
+  assert.throws(
+    () => parseConfig(`${base}labels: { inProgress: sapwood:reserve }`),
+    /labels\.inProgress.*collides with labels\.reserve/is,
+  );
+  // Case-insensitive, same semantics as every other collision guard.
+  assert.throws(
+    () => parseConfig(`${base}labels: { inProgress: SAPWOOD:RESERVE }`),
+    /labels\.inProgress.*collides with labels\.reserve/is,
+  );
+});
+
+test("#658 round 2 (B): a resolved workflow label colliding with a fixed taxonomy label name is rejected", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  // Overriding labels.needsHuman alone re-derives escalation.humanLabels from the new value
+  // (resolveLabelDefaults), so this trips ONLY the new workflow-x-taxonomy guard, not the
+  // pre-existing needsHuman/humanLabels membership guard.
+  assert.throws(
+    () => parseConfig(`${base}labels: { needsHuman: "sapwood:type:feature" }`),
+    /labels\.needsHuman.*collides with the taxonomy label `type:feature`/is,
+  );
+});
+
+test("#658 round 2 (B): escalation.holdLabels colliding with a fixed taxonomy label name is rejected", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.throws(
+    () => parseConfig(`${base}escalation: { holdLabels: ["sapwood:type:bug"] }`),
+    /escalation\.holdLabels.*collides with the taxonomy label `type:bug`/is,
+  );
+});
+
+test("#658 round 2 (B): the shipped default config (zero label overrides) still parses — no default workflow/taxonomy/hold name collides with another", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.doesNotThrow(() => parseConfig(base));
+  assert.doesNotThrow(() => parseConfig(`${base}labels: { prefix: "TEAM:" }`));
+  assert.doesNotThrow(() => parseConfig(`${base}labels: { prefix: "" }`));
+});
+
 // ── #156: reviewer.triggerCommand — user-defined review trigger entry point ─────────────────
 
 test("#156: reviewer.triggerCommand defaults to `@codex review` (byte-for-byte today's hardcoded trigger)", () => {

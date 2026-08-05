@@ -137,11 +137,19 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
   // label here is not "writing a hold" (write-side asymmetry, #248's own doctrine, is about the
   // engine applying a hold TO an issue/PR — creating the label definition itself is the same
   // one-time repo-setup act `sapwood init` already does for needsHuman/blocked/etc above).
-  // Deduplicated case-insensitively against `base` (and against itself) — a `holdLabels` entry
-  // that happens to equal a taxonomy label name (config load's own collision guard only checks
-  // it against OTHER protected labels/humanLabels, not the fixed type:*/prio:* taxonomy) must
-  // not produce two LabelSpec rows with the same name and different color/description.
-  const haveNames = new Set(base.map((spec) => normalizeLabel(spec.name)));
+  // #658 review round 2 (B): this used to also dedupe against `base` (every workflow + taxonomy
+  // name), because config load's collision guard checked `holdLabels` against every OTHER
+  // protected/workflow label but NOT the fixed type:*/prio:* taxonomy — a `holdLabels` entry
+  // equal to a taxonomy name could reach here. Round 2 closed that gap AT THE SOURCE
+  // (config.ts's exhaustive collision guard now rejects holdLabels x taxonomy, same as it always
+  // rejected holdLabels x workflow), so `cfg.escalation.holdLabels` can no longer contain any name
+  // in `base` by the time it reaches this function — dedup-against-`base` is now dead code,
+  // deleted rather than kept as a defense against a config state parsing no longer allows. The one
+  // case still reachable here — two `holdLabels` ENTRIES that normalize to the same name (config
+  // load only rejects a `holdLabels` entry colliding with something ELSE, not two entries
+  // colliding with EACH OTHER, since both assert the identical fact rather than aliasing two
+  // different ones) — keeps its dedupe, now scoped to `holdLabels` alone.
+  const haveNames = new Set<string>();
   const holdSpecs: LabelSpec[] = [];
   for (const name of cfg.escalation.holdLabels) {
     const key = normalizeLabel(name);
