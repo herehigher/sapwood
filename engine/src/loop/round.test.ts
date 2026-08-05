@@ -386,7 +386,22 @@ function once(fn: () => void): () => void {
 }
 
 /** Bounded safety net: stop the loop after `maxRounds` peripheral-phase invocations so a
- *  round.ts bug (never closing, never stopping) fails the test instead of hanging the suite. */
+ *  round.ts bug (never closing, never stopping) fails the test instead of hanging the suite.
+ *
+ *  #669: `onRoundPhase` fires ONLY for the 5 peripheral phases (aligning/architecting/
+ *  plan_review/harvesting/retro — runPeripheral's own call site); it is never called from the
+ *  "executing" phase's own dispatch-drain loop, nor from the standby/park-recovery wait loops
+ *  elsewhere in this file. A stall confined to one of THOSE loops (e.g. a tick() that fails on
+ *  every attempt while a lane never goes terminal) would call neither onRoundPhase nor onTick
+ *  on any of its failing iterations, so the `calls` counter above would never move — the exact
+ *  defect class driver.test.ts's `boundedStop` had (#669: it counted only successful `onTick`
+ *  callbacks, so an all-throwing tick bypassed it entirely). None of this file's current
+ *  scenarios exercise that gap (verified: every stuck-loop test here bounds itself some other
+ *  way — a CountdownSupervisor lane that naturally goes terminal, or an explicit onTick-driven
+ *  stop), but the gap is real, so this adds an independent, generously-thresholded backstop on
+ *  `sleep` (every one of those OTHER loops' own waits, called every iteration regardless of
+ *  success) — deliberately a SEPARATE counter/threshold from `calls` above, not merged into it,
+ *  so it never perturbs any of this file's ~76 exactly-calibrated `maxPhaseCalls` call sites. */
 function boundedStopOnPhase(deps: RoundDeps, maxPhaseCalls: number): () => void {
   let stop = () => {};
   deps.registerSignals = (requestStop) => {
@@ -400,6 +415,16 @@ function boundedStopOnPhase(deps: RoundDeps, maxPhaseCalls: number): () => void 
     calls++;
     if (calls >= maxPhaseCalls) stop();
   };
+  if (deps.sleep) {
+    const prevSleep = deps.sleep;
+    const SLEEP_BACKSTOP = 500; // generous: no correctly-behaving test here comes remotely close
+    let sleepCalls = 0;
+    deps.sleep = async (ms) => {
+      await prevSleep(ms);
+      sleepCalls++;
+      if (sleepCalls >= SLEEP_BACKSTOP) stop();
+    };
+  }
   return () => stop();
 }
 
