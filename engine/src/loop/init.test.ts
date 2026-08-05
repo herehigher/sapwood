@@ -128,11 +128,22 @@ test("requiredLabels (#400): the hold label's description names purpose/carrier/
   assert.ok(doc.includes(spec.description), `docs/configuration.md must quote the shipped description verbatim: ${spec.description}`);
 });
 
-test("requiredLabels (#248 review round 1, G2): dedupes a holdLabels entry against the rest of the taxonomy case-insensitively — never two LabelSpec rows for the same name", () => {
-  const custom = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }\nescalation: { holdLabels: [SAPWOOD:TYPE:FEATURE] }");
+test("#658 review round 2 (B): a holdLabels entry colliding with a taxonomy label name is now rejected AT CONFIG LOAD — the #248 round-1 dedup-in-requiredLabels this superseded is gone", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }\nescalation: { holdLabels: [SAPWOOD:TYPE:FEATURE] }"),
+    /escalation\.holdLabels.*collides with the taxonomy label `type:feature`/is,
+  );
+});
+
+test("requiredLabels: two holdLabels entries that normalize to the SAME name dedupe to one LabelSpec row — not an alias collision (config load doesn't reject two entries asserting the identical fact), so the dedupe here stays", () => {
+  const custom = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }\nescalation: { holdLabels: [reviewing, Reviewing] }");
   const specs = requiredLabels(custom);
-  const matches = specs.filter((l) => l.name.toLowerCase() === "sapwood:type:feature");
-  assert.equal(matches.length, 1, "a hold label colliding with an existing taxonomy name produces exactly one LabelSpec, not a duplicate");
+  const matches = specs.filter((l) => l.name.toLowerCase() === "reviewing");
+  assert.equal(
+    matches.length,
+    1,
+    "two holdLabels entries normalizing to the same name must produce exactly one LabelSpec, not a duplicate",
+  );
 });
 
 test("preflight throws actionably when not logged in", async () => {

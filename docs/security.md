@@ -1115,6 +1115,33 @@ issue-body- or PR-derived — and a published hash directory is never overwritte
 fence, not a jail" doctrine: the goal is to stop a mistake, not to withstand an adversary who
 already has code-execution authority in the same repo).
 
+**#640 adds a third skill, `sapwood-labels`, on the same plugin dir.** Unlike the two above, its
+content is NOT extracted from this file's markers — it is rendered from `engine/src/forge/
+labels.ts`'s `LABEL_SEMANTICS` registry (writer/remover/gates/distinguish-from per label) against
+THIS repo's fully-resolved `cfg.labels`/`cfg.escalation.holdLabels`/`cfg.escalation.humanLabels`,
+so a `labels.prefix` remap always shows the RESOLVED names a session actually sees on real
+issues/PRs, never a default or a template — and whether a label actually vetoes a PR merge
+(substring match against `escalation.humanLabels`, the merge gate's own rule) or holds an issue
+out of dispatch is likewise rendered from real resolved config using the SAME predicates those
+gates call, never asserted as fixed prose (#658 review rounds 1–4). Dispatch hold is NOT
+`escalation.humanLabels` membership alone: `needs-human`/`blocked`/`reserve`/`decomposed` hold
+dispatch UNCONDITIONALLY in every config (forge.ts's `isDispatchable`, gate⓪; conductor.ts's
+`orderForDispatch`), regardless of `escalation.humanLabels`; every other label holds dispatch
+only if it is an EXACT member of that resolved list. The three escalation rows (`needs-human`/
+`blocked`/`reserve`) always show both facts, member/unconditional or not; `decomposed` always
+shows the Dispatch hold fact (unconditional), but — unlike those three — it is not in the
+ALWAYS_RENDER set, so its Merge veto fact follows the same rule as every other label: rendered
+only when its resolved name actually matches `escalation.humanLabels`. Under default config
+`decomposed` is not a member, so no Merge veto line renders for it there, but a repo whose
+`escalation.humanLabels` explicitly includes `decomposed` does see its Merge veto MEMBER line,
+exactly like any other label. The
+registry is the PROMOTION of label semantics that used to live only as TS doc
+comments on `labels.ts`, unreadable from any role session — the incidents this closes: a worker
+self-applying `human-merge-only` (#539), an architect blocking a Ready issue via label with no
+engine event (batch 6), and repeated supervisor label-timeline misreads. Same CONTENT-side-only
+posture as the two marker-extracted skills: the render path's only input is the engine's own
+resolved config, never issue-body- or PR-derived text.
+
 **Injection policy** (`shouldInjectSkillsPlugin` in the same module): every worker leg (fresh
 dispatch, resume, fix-entry) and every non-review peripheral role session gets `--plugin-dir`
 attached when `roles.skills.enabled` is `true` (default `false` — see config.ts's own comment);

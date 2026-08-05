@@ -22,7 +22,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { holdLabelDefault, labelsInclude, normalizeLabel, SAPWOOD_LABEL_PREFIX, workflowLabelDefaults } from "../forge/labels.js";
+import {
+  holdLabelDefault,
+  labelsInclude,
+  normalizeLabel,
+  SAPWOOD_LABEL_PREFIX,
+  TAXONOMY_SPECS,
+  workflowLabelDefaults,
+} from "../forge/labels.js";
 import { DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
 
 export const DEFAULT_EGRESS_SUSPECT_COMMANDS = [
@@ -1495,6 +1502,11 @@ const ConfigSchemaRaw = z
           // all, so it is an instruction carrier in its own right, not merely covered by
           // security.md's entry above.
           "engine/src/roles/skills-plugin.ts",
+          // #640: labels.ts's LABEL_SEMANTICS registry is now an instruction source too — it is
+          // rendered VERBATIM into the sapwood-labels skill every role session can pull on demand
+          // (skills-plugin.ts's buildLabelsSkillFile), the same "changes what a session reads
+          // without a prompt-text diff" exposure the entry above names for skills-plugin.ts itself.
+          "engine/src/forge/labels.ts",
         ]),
         // #248: the WAIT-tier hold label list (three-tier escalation model) — a HUMAN-applied
         // "I'm actively reviewing this" signal, distinct from `humanLabels`' engine-written
@@ -1805,6 +1817,84 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
             `applying one would silently double as the other's signal; use a distinct value.`,
         });
       }
+    }
+  });
+  // #658 review round 2 (B): every guard above checks a SPECIFIC pair of protected labels — but
+  // none of them is exhaustive, and two gaps survive as a result. (1) The 13 resolved workflow
+  // labels are never cross-checked against EACH OTHER as a full set: only the ones with an
+  // auto-removal or firing-signal hazard (roundPool, laneState, split/decomposed,
+  // humanMergeOnly/planless) are checked against the rest, so e.g. `labels.inProgress` aliasing
+  // `labels.blocked` slips through every guard above. (2) The 8 fixed taxonomy label names
+  // (`TAXONOMY_SPECS`, resolved under `labels.prefix`) are never checked against ANYTHING, so
+  // `labels.needsHuman: "sapwood:type:feature"` would silently alias a pure-classification label
+  // nothing above ever inspects. This closes both gaps with one exhaustive, fail-closed pass —
+  // pre-v1, no compat concerns — using the same case-insensitive `labelsInclude` comparison every
+  // guard above uses.
+  const workflowLabelEntries: Array<[string, string]> = [
+    ["labels.inProgress", cfg.labels.inProgress],
+    ["labels.needsHuman", cfg.labels.needsHuman],
+    ["labels.blocked", cfg.labels.blocked],
+    ["labels.reserve", cfg.labels.reserve],
+    ["labels.verifyNa", cfg.labels.verifyNa],
+    ["labels.planApproved", cfg.labels.planApproved],
+    ["labels.originAgent", cfg.labels.originAgent],
+    ["labels.split", cfg.labels.split],
+    ["labels.decomposed", cfg.labels.decomposed],
+    ["labels.roundPool", cfg.labels.roundPool],
+    ["labels.humanMergeOnly", cfg.labels.humanMergeOnly],
+    ["labels.laneState", cfg.labels.laneState],
+    ["labels.planless", cfg.labels.planless],
+  ];
+  const taxonomyLabelEntries: Array<[string, string]> = TAXONOMY_SPECS.map((spec) => [
+    // Backtick-quoted, not double-quote-quoted like the value parens below: `ctx.addIssue`'s
+    // message ends up JSON.stringify'd inside ZodError.message, which backslash-escapes a literal
+    // `"` — a regex asserting on the RAW text (every test in this file does) would have to match
+    // that escape too. Backticks need no such escaping.
+    `taxonomy label \`${spec.name}\``,
+    `${normalizeLabel(cfg.labels.prefix)}${spec.name}`,
+  ]);
+  // Workflow x workflow: every unordered pair, attributed to the first (lower-index) field —
+  // same one-issue-per-pair convention every guard above uses.
+  for (let i = 0; i < workflowLabelEntries.length; i++) {
+    for (let j = i + 1; j < workflowLabelEntries.length; j++) {
+      const [keyA, valueA] = workflowLabelEntries[i]!;
+      const [keyB, valueB] = workflowLabelEntries[j]!;
+      if (!labelsInclude([valueB], valueA)) continue;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: keyA.split("."),
+        message:
+          `${keyA} ("${valueA}") collides with ${keyB} ("${valueB}") — every resolved workflow ` +
+          `label name must be case-insensitively distinct; use a distinct value for ${keyA}.`,
+      });
+    }
+  }
+  // Workflow x taxonomy: a workflow label may not alias a fixed taxonomy name either.
+  for (const [workflowKey, workflowValue] of workflowLabelEntries) {
+    for (const [taxonomyKey, taxonomyValue] of taxonomyLabelEntries) {
+      if (!labelsInclude([taxonomyValue], workflowValue)) continue;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: workflowKey.split("."),
+        message:
+          `${workflowKey} ("${workflowValue}") collides with the ${taxonomyKey} ("${taxonomyValue}") — ` +
+          `a workflow label must not alias a fixed taxonomy label; use a distinct value for ${workflowKey}.`,
+      });
+    }
+  }
+  // holdLabels x taxonomy (holdLabels x workflow is already covered by holdCollisionTargets
+  // above, which folds labels.roundPool + every entry of otherLabels — the same 13 resolved
+  // workflow names checked pairwise above — into holdCollisionTargets).
+  cfg.escalation.holdLabels.forEach((holdLabel, i) => {
+    for (const [taxonomyKey, taxonomyValue] of taxonomyLabelEntries) {
+      if (!labelsInclude([taxonomyValue], holdLabel)) continue;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["escalation", "holdLabels", i],
+        message:
+          `escalation.holdLabels entry ("${holdLabel}") collides with the ${taxonomyKey} ("${taxonomyValue}") — ` +
+          `the hold (WAIT) tier must not alias a fixed taxonomy label; use a distinct value.`,
+      });
     }
   });
   // #286 (E4a, D5): the engine-agent reviewer's model must be DISTINGUISHABLE from the

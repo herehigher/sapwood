@@ -6,14 +6,18 @@
 // trust tiers) by restating it in their own prompt text — five and four prompt sites
 // respectively, per #639's own count — instead of pulling it from ONE canonical home on demand.
 // Claude Code skills are a pull-model carrier: a one-line description always loads, the full
-// body only on invocation. This module renders the two v1 skills from docs/security.md's own
+// body only on invocation. This module renders #639's two v1 skills from docs/security.md's own
 // marker-delimited sections VERBATIM — it changes no prompt text and authors no new doctrine; it
 // only gives a role session a second, on-demand way to read doctrine that already lives in one
-// place.
+// place. #640 adds a third skill, `sapwood-labels`, rendered from resolved config against
+// `labels.ts`'s LABEL_SEMANTICS registry rather than a security.md marker (see
+// `buildLabelsSkillFile`) — the registry is the PROMOTION of label semantics that used to live
+// only as TS doc comments on labels.ts, unreadable from any role session (#640).
 //
 // CONTENT-SIDE ONLY (Codex P1-3 concurrency/crash + poison-channel resolutions, #639's own
-// design): the render path's only input is docs/security.md, an engine-shipped file — never
-// anything issue-body- or PR-derived. A rendered plugin directory is immutable once published
+// design): the security.md-derived skills' only input is docs/security.md, an engine-shipped
+// file; `sapwood-labels`' only input is the engine's own resolved config — never anything
+// issue-body- or PR-derived. A rendered plugin directory is immutable once published
 // (content-hash-named, atomic stage->rename, never overwritten) so every session that reads the
 // SAME hash sees the SAME bytes for the engine's whole remaining lifetime.
 //
@@ -22,6 +26,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { type ResolvedLabelsForSkill, renderLabelsSkillBody } from "../forge/labels.js";
 
 export interface SkillsPluginSpec {
   /** Both the skill's directory name (`skills/<id>/`) and the marker id matched in
@@ -34,9 +39,11 @@ export interface SkillsPluginSpec {
   description: string;
 }
 
-/** v1: exactly the two skills #639 names. Adding a THIRD is a follow-up issue's job (a wider
- *  render/inject surface), not a config knob — see #639's "no extraDir" ruling: an operator dir
- *  isn't accepted here either, only these two engine-authored, marker-verified extracts. */
+/** #639's v1: exactly these two marker-extracted skills — verbatim `docs/security.md` sections.
+ *  #640 adds a THIRD skill (`sapwood-labels`, below), rendered from resolved config + the
+ *  `labels.ts` semantics registry rather than a security.md marker, so it is built and assembled
+ *  separately (`buildLabelsSkillFile`/`buildSkillsPluginFiles`) instead of joining this list — an
+ *  operator-supplied extra dir is still not accepted (#639's "no extraDir" ruling stands). */
 export const SKILLS_PLUGIN_SPECS: readonly SkillsPluginSpec[] = [
   {
     id: "human-merge-only-paths",
@@ -84,11 +91,29 @@ export interface PluginFile {
 
 const PLUGIN_MANIFEST: PluginFile["relPath"] = ".claude-plugin/plugin.json";
 
-/** Build the plugin's file set (manifest + one SKILL.md per spec) from an already-read
- *  docs/security.md string. PURE — no filesystem access — so extraction/rendering is testable
+/** #640: the one skill NOT extracted from a `docs/security.md` marker — its content is rendered
+ *  from resolved `cfg.labels`/`cfg.escalation.holdLabels`/`cfg.escalation.humanLabels` against
+ *  `labels.ts`'s `LABEL_SEMANTICS` registry, so a `labels.prefix` remap (or any other per-label
+ *  override) always shows up as the RESOLVED name a session actually sees on real issues/PRs —
+ *  never a default or a template. #658 review round 1 (P1): `humanLabels` is what lets the render
+ *  show each label's ACTUAL merge-veto membership instead of asserting it statically. */
+export function buildLabelsSkillFile(cfg: ResolvedLabelsForSkill): PluginFile {
+  const description =
+    "Which sapwood GitHub labels exist in THIS repo (resolved names, honoring any labels.prefix remap), who writes/removes " +
+    "each one, what it gates, and how to tell apart labels a supervisor easily confuses (needs-human vs human-merge-only vs " +
+    "blocked vs hold vs planless) — rendered from engine/src/forge/labels.ts's LABEL_SEMANTICS registry (generated, do not hand-edit).";
+  return {
+    relPath: "skills/sapwood-labels/SKILL.md",
+    content: `---\nname: sapwood-labels\ndescription: ${description}\n---\n\n${renderLabelsSkillBody(cfg)}\n`,
+  };
+}
+
+/** Build the plugin's file set (manifest + one SKILL.md per `docs/security.md`-extracted spec,
+ *  plus #640's config-rendered `sapwood-labels`) from an already-read docs/security.md string and
+ *  the resolved label config. PURE — no filesystem access — so extraction/rendering is testable
  *  without a real file on disk. Sorted by relPath: the caller hashes this list in this exact
  *  order, so a stable order is what makes the hash deterministic across process runs. */
-export function buildSkillsPluginFiles(securityMd: string): PluginFile[] {
+export function buildSkillsPluginFiles(securityMd: string, labelsCfg: ResolvedLabelsForSkill): PluginFile[] {
   const files: PluginFile[] = [
     {
       relPath: PLUGIN_MANIFEST,
@@ -101,6 +126,7 @@ export function buildSkillsPluginFiles(securityMd: string): PluginFile[] {
         2,
       )}\n`,
     },
+    buildLabelsSkillFile(labelsCfg),
   ];
   for (const spec of SKILLS_PLUGIN_SPECS) {
     const body = extractMarkedSection(securityMd, spec.id);
@@ -189,17 +215,22 @@ export interface RenderedSkillsPlugin {
   hash: string;
 }
 
-/** The engine-startup entry point: read docs/security.md, extract+render the v1 skills, publish
- *  atomically under `outRoot`, return the versioned directory a session's `--plugin-dir` should
- *  point at. FAIL-CLOSED at startup — a missing docs/security.md, or a missing/duplicated
- *  marker, throws HERE, before any session ever dispatches (same "read eagerly, abort startup"
- *  posture as worker.ts's buildRenderPrompt / plan-review.ts's loadRolePromptTemplate). */
-export function renderSkillsPlugin(opts: { securityMdPath: string; outRoot: string }): RenderedSkillsPlugin {
+/** The engine-startup entry point: read docs/security.md, extract+render the v1 skills plus
+ *  #640's config-rendered `sapwood-labels`, publish atomically under `outRoot`, return the
+ *  versioned directory a session's `--plugin-dir` should point at. FAIL-CLOSED at startup — a
+ *  missing docs/security.md, or a missing/duplicated marker, throws HERE, before any session
+ *  ever dispatches (same "read eagerly, abort startup" posture as worker.ts's buildRenderPrompt /
+ *  plan-review.ts's loadRolePromptTemplate). */
+export function renderSkillsPlugin(opts: {
+  securityMdPath: string;
+  outRoot: string;
+  labelsCfg: ResolvedLabelsForSkill;
+}): RenderedSkillsPlugin {
   if (!existsSync(opts.securityMdPath)) {
     throw new Error(`roles.skills.enabled requires ${opts.securityMdPath} to exist — refusing to start`);
   }
   const securityMd = readFileSync(opts.securityMdPath, "utf8");
-  const files = buildSkillsPluginFiles(securityMd);
+  const files = buildSkillsPluginFiles(securityMd, opts.labelsCfg);
   const hash = hashPluginFiles(files);
   const dir = publishPluginAtomic(opts.outRoot, hash, files);
   return { dir, hash };
@@ -209,11 +240,15 @@ export function renderSkillsPlugin(opts: { securityMdPath: string; outRoot: stri
  *  claudeArgs()-producing caller stays byte-identical to pre-#639 argv (the AC's reverse test).
  *  `true` renders (or reuses) the plugin dir eagerly and fails startup closed on any marker
  *  problem — never a lazily-discovered failure mid-round. */
-export function resolveSkillsPluginDir(cfg: { roles: { skills: { enabled: boolean } } }, cwd: string = process.cwd()): string | undefined {
+export function resolveSkillsPluginDir(
+  cfg: { roles: { skills: { enabled: boolean } } } & ResolvedLabelsForSkill,
+  cwd: string = process.cwd(),
+): string | undefined {
   if (!cfg.roles.skills.enabled) return undefined;
   return renderSkillsPlugin({
     securityMdPath: join(cwd, "docs", "security.md"),
     outRoot: join(cwd, "data", "generated", "role-skills"),
+    labelsCfg: { labels: cfg.labels, escalation: cfg.escalation },
   }).dir;
 }
 
