@@ -38,26 +38,45 @@ import { createHash } from "node:crypto";
  *  inline-code backticks anywhere on the same line (`` `<!-- sapwood:... -->` `` or "see `<!--
  *  ... -->` above") fail this anchor by construction, no separate inline-code detection needed. */
 const MARKER_LINE_RE = /^<!--\s*sapwood:comments-adjudicated-through:\s*(\S+?)\s*-->$/;
-/** Toggled on any line that OPENS or CLOSES a fenced code block (``` or ~~~, GFM's two fence
- *  characters) — a marker line between such a pair is a quoted EXAMPLE (a doc, an issue body
- *  showing the syntax), never an authoritative instruction, so it is skipped regardless of the
- *  line-anchor match above. */
-const FENCE_RE = /^(```|~~~)/;
+/** Matches a fence-opening/closing run — 3+ backticks OR 3+ tildes, GFM's two fence characters —
+ *  at the start of a (already-trimmed) line. Group 1 is the exact run, so the caller can read off
+ *  BOTH which character it is and how long it is (#652 round 2, finding 3 — see
+ *  `findStandaloneMarkerValues` below for why both matter). */
+const FENCE_RE = /^(`{3,}|~{3,})/;
 
 /** Scan `body` for standalone adjudication-cursor marker lines, in document order, skipping any
  *  that fall inside a fenced code block. Returns the raw marker VALUE text for every standalone
  *  match (never the surrounding markup) — `computeCommentCursor` below decides what an empty,
- *  single, or multi-element result means. */
+ *  single, or multi-element result means.
+ *
+ *  #652 round 2 (finding 3): fence tracking is DELIMITER-AWARE, per CommonMark's own fenced-code
+ *  rule — an open fence records its character (`` ` `` or `~`) and run length; a line only CLOSES
+ *  it when it is the SAME character, with a run at least as long as the opener's. Before this, any
+ *  fence-looking line (either character, any length >= 3) toggled a single boolean, so a `~~~`
+ *  line appearing INSIDE a ``` ` ``` fence (e.g. a code sample that itself talks about tilde
+ *  fences) incorrectly closed it — the marker line right after would then read as outside any
+ *  fence and become authoritative. A same-fence-type line that's merely too SHORT to close (e.g. a
+ *  stray `` `` `` inside a ```` ```` ````-opened fence) is, by the same rule, just fence content
+ *  too — never a close, and never a new open either (a fence cannot nest). */
 function findStandaloneMarkerValues(body: string): string[] {
   const values: string[] = [];
-  let inFence = false;
+  let fence: { char: string; len: number } | null = null;
   for (const rawLine of body.split(/\r?\n/)) {
     const line = rawLine.trim();
-    if (FENCE_RE.test(line)) {
-      inFence = !inFence;
+    const fenceMatch = FENCE_RE.exec(line);
+    if (fenceMatch) {
+      const run = fenceMatch[1]!;
+      if (fence === null) {
+        fence = { char: run[0]!, len: run.length };
+      } else if (run[0] === fence.char && run.length >= fence.len) {
+        fence = null;
+      }
+      // else: a fence-looking line of the WRONG character, or the right character but too SHORT
+      // to close the current opener, is just fence CONTENT — falls through to the `if (fence)
+      // continue` below like any other line inside the block, never toggles.
       continue;
     }
-    if (inFence) continue;
+    if (fence !== null) continue;
     const m = MARKER_LINE_RE.exec(line);
     if (m) values.push(m[1]!);
   }
@@ -146,7 +165,11 @@ export function computeCommentCursor(body: string, comments: readonly CommentStr
       pending: allNonEngineIds,
       // #652 round 1 (finding 5): distinct duplicate SETS dedupe distinctly — see
       // commentCursorDedupeKey's own doc for why `target` (not a hardcoded literal) feeds the key.
-      target: matches.join(","),
+      // #652 round 2 (finding 4): JSON.stringify, not `join(",")` — matching `pending`'s own
+      // serialization just below (commentCursorDedupeKey's doc) — `join(",")` collapses
+      // `["a,b", "c"]` and `["a", "b,c"]` to the identical `"a,b,c"` string, so two genuinely
+      // different duplicate-marker sets could dedupe-collide on this same key.
+      target: JSON.stringify(matches),
     };
   }
 

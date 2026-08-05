@@ -190,6 +190,36 @@ test("a standalone marker OUTSIDE a fence still counts even when the body ALSO s
   assert.deepEqual(result, { ok: true, cursor: "5", pending: ["7"] }, "only the real, un-fenced marker is honored");
 });
 
+// ── #652 round 2 (finding 3): delimiter-aware fence tracking ───────────────────────────────────
+
+test("a ~~~ line inside a ``` fence does NOT close it — a marker right after stays non-authoritative (round-1 reproduction: the naive same-boolean toggle let this pair close the fence, making the marker authoritative)", () => {
+  const body = ["```", "~~~", "<!-- sapwood:comments-adjudicated-through: 5 -->", "```"].join("\n");
+  const result = computeCommentCursor(body, [entry("5"), entry("7")]);
+  // The marker never left the (still-open) ``` fence, so nothing standalone was found — with
+  // non-engine comments present, that's missing-marker, never `cursor: "5"`.
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "missing-marker");
+});
+
+test("a same-character but too-SHORT run (3 backticks inside a 4-backtick-opened fence) does not close it either — length, not just character, must match", () => {
+  const body = ["````", "```", "<!-- sapwood:comments-adjudicated-through: 5 -->", "````"].join("\n");
+  const result = computeCommentCursor(body, [entry("5"), entry("7")]);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "missing-marker");
+});
+
+test("a ~~~ fence still closes normally on its own matching ~~~ closer — delimiter-awareness doesn't break the ordinary same-character case", () => {
+  const body = ["~~~", "<!-- sapwood:comments-adjudicated-through: 5 -->", "~~~", "<!-- sapwood:comments-adjudicated-through: 7 -->"].join(
+    "\n",
+  );
+  const result = computeCommentCursor(body, [entry("7"), entry("9")]);
+  assert.deepEqual(
+    result,
+    { ok: true, cursor: "7", pending: ["9"] },
+    "the fenced copy is ignored; the real standalone marker after it is honored",
+  );
+});
+
 // ── #652 round 1 (finding 5): dedup-key target-keying + serialization hardening ─────────────────
 
 test("commentCursorDedupeKey: a cursor re-pointed from one still-invalid target to ANOTHER (999 -> 998, both absent) dedupes DISTINCTLY — the correction still gets a fresh post", () => {

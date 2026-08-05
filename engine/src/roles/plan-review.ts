@@ -427,7 +427,7 @@ function approvedThisRound(state: State, roundId: number, issueNumber: number): 
  *  a completely normal reviewer session, seed or not. */
 /** #652: gate⓪'s comment-adjudication cursor checkpoint — shared by reviewOneIssue's pre-spend,
  *  pre-apply, and (round 1, finding 2) pre-drafter-write call sites, plus confirmOneIssue's own
- *  pre-spend.
+ *  pre-spend and (round 2, finding 1) post-confirm.
  *
  *  `liveBody` is supplied by the CALLER, never fetched here (round 1, finding 1's "align
  *  pre-spend" fix): at pre-spend there is nothing to re-fetch — the caller's own single
@@ -452,7 +452,7 @@ async function checkGate0CommentCursor(
   deps: PlanReviewDeps,
   issue: Issue,
   roundId: number,
-  checkpoint: "gate0-pre-spend" | "gate0-pre-apply" | "gate0-pre-drafter-write",
+  checkpoint: "gate0-pre-spend" | "gate0-pre-apply" | "gate0-pre-drafter-write" | "gate0-post-confirm",
   liveBody: string,
   sessionRenderedBody?: string,
 ): Promise<boolean> {
@@ -498,7 +498,15 @@ async function reviewOneIssue(
   reviewerTemplate: string,
   drafterTemplate: string,
   roundId: number,
-  seed?: { decision: ReviewerDecision; trailEntry: string },
+  // #652 round 2 (finding 1): `sessionInputBody`, when supplied, is the body the SEEDING
+  // session (confirmOneIssue's own confirm session, NOT a reviewer session this function ever
+  // ran) actually rendered its prompt from — threaded through so THIS cycle's pre-apply
+  // checkpoint below can body-drift-compare against it, exactly as it already does for a real
+  // reviewer/drafter session's own `sessionInputBody`/`currentBody`. Omitted (the self-heal skip
+  // seeds below, confirmOneIssue's missing-plan/missing-AC branches) because no session rendered
+  // anything there — the decision is a deterministic engine-authored brief, not a session verdict
+  // that could have gone stale mid-session.
+  seed?: { decision: ReviewerDecision; trailEntry: string; sessionInputBody?: string },
 ): Promise<boolean> {
   const l = deps.cfg.labels;
   const maxCycles = deps.cfg.roles.verificationPlanReviewer.maxDraftCycles;
@@ -549,14 +557,15 @@ async function reviewOneIssue(
     const currentBody = await deps.forge.getIssueBody(issue.number);
     const currentIssue: Issue = { ...issue, body: currentBody };
 
-    // #652 round 1 (finding 1): the body-drift comparison target for THIS cycle's pre-apply
-    // checkpoint below — set only when a reviewer SESSION actually rendered a prompt from a known
-    // body this cycle (the `else` branch). The seed branch's decision instead came from
-    // confirmOneIssue's OWN confirm session, rendered against confirmOneIssue's OWN body read —
-    // a value this function has no access to — so the seed cycle's pre-apply checkpoint below
-    // stays comment-cursor-only, exactly as before round 1 (confirmOneIssue's own pre-spend
-    // checkpoint already covers body-drift for that session).
-    let sessionInputBody: string | undefined;
+    // #652 round 1 (finding 1) / round 2 (finding 1): the body-drift comparison target for THIS
+    // cycle's pre-apply checkpoint below — set from a reviewer SESSION that actually rendered a
+    // prompt from a known body this cycle (the `else` branch), OR threaded straight from
+    // `seed.sessionInputBody` when the seed came from confirmOneIssue's OWN confirm session
+    // (round 2: previously left undefined here, disabling the pre-apply body-drift compare for
+    // every seed-born "invalidate" decision — confirmOneIssue now passes its own rendered body
+    // through the seed, see this function's `seed` param doc). Stays undefined for the two
+    // self-heal skip seeds (no session ever rendered anything there), same as before.
+    let sessionInputBody: string | undefined = seed?.sessionInputBody;
     let decision: ReviewerDecision;
     if (cycle === 0 && seed) {
       // #214: an invalidated confirm pass hands its brief straight in — no reviewer session
@@ -982,15 +991,33 @@ async function confirmOneIssue(
   }
 
   if (validated.decision === "confirm") {
+    // #652 round 2 (finding 1): "confirm" makes zero forge writes of its own, but returning
+    // straight away IMPLICITLY preserves `plan:approved` against whatever the live body now is —
+    // a body edit landing WHILE the confirm session ran would let a stale "still holds" verdict
+    // stand against a body the session never saw. `currentBody` (top of this function) is the
+    // exact body the confirm session was rendered from; recheck it against a fresh live read here,
+    // the same body-drift discard the pre-apply/pre-drafter-write checkpoints already give the
+    // approve/draft_request outcomes. On drift this escalates needs-human and discards the verdict
+    // (the label/comment machinery already contains its own failure handling) rather than silently
+    // letting the approval stand.
+    const liveBodyPostConfirm = await deps.forge.getIssueBody(issue.number);
+    if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-post-confirm", liveBodyPostConfirm, currentBody)) {
+      return false;
+    }
     return false; // zero forge writes — the plan still holds, nothing to do
   }
 
   // invalidate -> feed the SAME machinery an unadjudicated draft_request would (existing caps,
   // existing escalation) via reviewOneIssue's seed. The confirm session's BODY block IS the
-  // brief (validateConfirmOutput already required it non-empty for "invalidate").
+  // brief (validateConfirmOutput already required it non-empty for "invalidate"). `currentBody`
+  // (top of this function) is the exact body the confirm session was rendered from — threaded
+  // through as `sessionInputBody` (#652 round 2 finding 1) so reviewOneIssue's own pre-apply
+  // checkpoint can body-drift-compare the invalidate verdict too, not just a real reviewer
+  // session's decision.
   return await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId, {
     decision: { decision: "draft_request", issue: issue.number, body: validated.body! },
     trailEntry: `confirm: verification-plan-reviewer(confirm) session ${result.name} -> invalidate`,
+    sessionInputBody: currentBody,
   });
 }
 

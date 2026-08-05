@@ -1346,6 +1346,89 @@ test("createPlanReviewStub (#214): confirm 'invalidate' feeds the SAME draft-cyc
   state.close();
 });
 
+// ── #652 round 2 (finding 1): confirm-session body-drift threading ─────────────────────────
+
+test("createPlanReviewStub (#652 round 2, finding 1): a DIRECT body edit landing DURING the confirm session discards its 'invalidate' seed at the pre-apply checkpoint — body-drift, the confirm session's OWN rendered body threaded through the seed handoff", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 300, title: "stale plan", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }];
+  forge.issueBodies[300] =
+    "OLD PLAN referencing a file since renamed.\n\n## Acceptance criteria\n\n- [ ] it works\n\n" +
+    "## Verification\n\nRun `npm test` from the old (now-renamed) location.";
+  const editedBody = "A maintainer rewrote this issue entirely WHILE the confirm session ran.";
+  const runner = new ScriptedRunner([
+    {
+      result: doneResult("confirm-300", sapwoodResult({ decision: "invalidate", issue: 300 }, "references a file since renamed on main")),
+      // A maintainer edits the body DIRECTLY while the confirm session runs — the confirm
+      // session's OWN rendered body (read before this session started) is what the invalidate
+      // seed must be compared against, not left unthreaded (undefined -> no drift check at all,
+      // the round-1 gap this test closes).
+      effect: () => {
+        forge.issueBodies[300] = editedBody;
+      },
+    },
+  ]);
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["verification-plan-reviewer-confirm"],
+    "the drafter never ran — the seeded 'invalidate' decision was discarded at the pre-apply checkpoint before it could be applied",
+  );
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "no body write — the seed's implicit draft-cycle apply is discarded, never applied");
+  assert.equal(forge.issueBodies[300], editedBody, "the maintainer's direct edit survives untouched");
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 300 && l === "needs-human"));
+  const posted = lastComment(forge, 300);
+  assert.match(posted, /changed since the session/i);
+  const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["comment-cursor-stale"]);
+  assert.equal(events.length, 1);
+  const payload = events[0]!.payload as { checkpoint: string; cause: string };
+  assert.equal(payload.checkpoint, "gate0-pre-apply");
+  assert.equal(payload.cause, "body-drift");
+  state.close();
+});
+
+test("createPlanReviewStub (#652 round 2, finding 1): a DIRECT body edit landing DURING the confirm session discards a 'confirm' outcome too — the post-session drift check fires BEFORE the (implicit, zero-write) approval is preserved", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 301, title: "confirmed plan", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }];
+  forge.issueBodies[301] = PLAN_BODY;
+  const editedBody = "A maintainer rewrote this issue entirely WHILE the confirm session ran.";
+  const runner = new ScriptedRunner([
+    {
+      result: doneResult("confirm-301", sapwoodResult({ decision: "confirm", issue: 301 })),
+      effect: () => {
+        forge.issueBodies[301] = editedBody;
+      },
+    },
+  ]);
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.equal(runner.calls.length, 1, "only the confirm session runs — 'confirm' never delegates into the draft cycle");
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "'confirm' never wrote a body — drift or not");
+  assert.equal(forge.issueBodies[301], editedBody, "the maintainer's direct edit survives untouched");
+  assert.ok(
+    forge.labelsAdded.some(([n, l]) => n === 301 && l === "needs-human"),
+    "the stale 'still holds' verdict is discarded via the same needs-human degrade, not silently let stand",
+  );
+  const posted = lastComment(forge, 301);
+  assert.match(posted, /changed since the session/i);
+  const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["comment-cursor-stale"]);
+  assert.equal(events.length, 1);
+  const payload = events[0]!.payload as { checkpoint: string; cause: string };
+  assert.equal(payload.checkpoint, "gate0-post-confirm");
+  assert.equal(payload.cause, "body-drift");
+  state.close();
+});
+
 // ── #214 gate② review (P2): confirm-invalidate can route into a verify_na verdict on an issue
 //    that ALREADY carries plan:approved — a state reviewOneIssue never saw pre-#214. Following
 //    the ordinary "remove needs-human to accept" comment literally would leave the forbidden
