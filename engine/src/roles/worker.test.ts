@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync,
   closeSync,
@@ -4509,7 +4509,9 @@ test("reapChildren (#668): opts.graceMs is the ACTUAL bound the grace-phase poll
   const c: ReapableChild = {
     name: "lane-e",
     isAlive: () => !events.includes("SIGKILL"),
-    signal: (sig) => events.push(sig),
+    signal: (sig) => {
+      events.push(sig);
+    },
   };
   await reapChildren([c], {
     graceMs: 40,
@@ -4640,7 +4642,68 @@ test("WorkerSupervisor.reapAll (#668 gate② finding [1]): a lane ALREADY mid-dr
 // something reapChildren's own abstraction can stand in for), r2[1] against the exact
 // `handoffRequested` bookkeeping field onExit branches on / the real .handoff sentinel file it
 // produces.
+//
+// gate② round 3 (Codex REQUEST_CHANGES on 57aaea9, P1 + P2): round 2's pgidRegistry had no
+// ownership check and no natural-death pruning — a registry-only entry could grow unboundedly
+// (a descendant that exits on its own between two reapAll() calls was never pruned) and, worse,
+// after OS pid/pgid reuse reapAll() could have signaled — including SIGKILL — a completely
+// unrelated recycled process group. Fixed with a per-entry ownership fingerprint
+// (WorkerSupervisor.verifyPgidOwnership), re-checked immediately before EVERY signal, plus eager
+// pruning on any dead observation (not just reapAll's own final sweep). P2 also flagged that the
+// original r2[1] "reverse" test passed even on the PRE-fix code (any implementation that
+// eventually marks an alive+signaled lane handed-off satisfies it) — replaced below with a
+// mixed-batch test whose DIFFERENTIAL outcome (one lane's flag flips, the other's doesn't, in the
+// SAME reapAll() call) only the fixed code can produce; the old unconditional-set code would mark
+// BOTH true regardless of liveness.
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** #668 round 3: fetches a process's REAL `lstart` fingerprint the exact way
+ *  captureLeaderFingerprint (production) does, so a test that hand-constructs a pgidRegistry
+ *  entry can register a fingerprint that will genuinely re-verify — test setup only, never
+ *  exercised as "the code under test". */
+function psLstart(pid: number): string {
+  return execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" }).trim();
+}
+
+/** #668 round 3: a real, short-lived `node` child process that ignores SIGTERM (registers a
+ *  no-op handler at the NODE level — never relies on a bash `trap` surviving `exec`, which is
+ *  its own can of POSIX-signal-disposition worms). Its `ps` comm is literally "node" (or a path
+ *  ending in "/node" on an nvm-managed install — either way verifyPgidOwnership's basename match
+ *  finds it), mirroring what a real claude CLI leg's own descendants plausibly are — the SAME
+ *  family verifyPgidOwnership's descendant check looks for. detached so it gets its own pgid
+ *  when spawned directly (the "orphan-registered-standalone" tests) or shares its PARENT's pgid
+ *  when backgrounded from inside a bash leader script (the "real production trigger" test) —
+ *  exactly like the production shape being tested either way.
+ *
+ *  `ready` resolves once the child's OWN stdout write proves `process.on('SIGTERM', ...)` has
+ *  ALREADY executed — a real synchronization event, never a sleep/poll guess. Without this, a
+ *  caller that signals (or ownership-checks) the child immediately after `spawn()` returns can
+ *  race node's own startup (module loading, V8 init) and hit the process BEFORE its handler is
+ *  registered, when SIGTERM would still terminate it by default — the exact class of race this
+ *  repo's no-timing-dependent-tests doctrine requires an injected seam for, not a bigger margin. */
+function nodeTermIgnoringChild(): { child: ChildProcessLike; ready: Promise<void> } {
+  const child = spawn("node", ["-e", "process.on('SIGTERM',()=>{});process.stdout.write('ready\\n');setInterval(()=>{},1000);"], {
+    detached: true,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const ready = new Promise<void>((resolve) => {
+    child.stdout?.once("data", () => resolve());
+  });
+  return { child, ready };
+}
+type ChildProcessLike = ReturnType<typeof spawn>;
+
+/** Casts a WorkerSupervisor to expose its private `lanes`/`pgidRegistry` maps for direct test
+ *  injection — the ONLY way to deterministically reproduce the exact races these findings name
+ *  (see each test's own comment for why a real-timing race would violate this repo's
+ *  no-timing-dependent-tests doctrine). Mirrors the existing `lanes` cast pattern already used
+ *  elsewhere in this file (search "as unknown as { lanes"). */
+function peekSupervisor(s: WorkerSupervisor): {
+  lanes: Map<string, { child: { pid: number | null }; handoffRequested: boolean }>;
+  pgidRegistry: Map<string, { pgid: number; fingerprint: string | null }>;
+} {
+  return s as unknown as ReturnType<typeof peekSupervisor>;
+}
 
 test("WorkerSupervisor.reapAll (#668 r2[1]): a lane whose child is ALREADY dead at reapAll() time is never marked handoffRequested — the exact bookkeeping onExit reads to choose .handoff vs .done/.failed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
@@ -4656,9 +4719,9 @@ test("WorkerSupervisor.reapAll (#668 r2[1]): a lane whose child is ALREADY dead 
     // #668 r2[1]: insert the lane DIRECTLY into `this.lanes`, reproducing the exact race the
     // finding names — a lane still present at reapAll() time (its real onExit() hasn't run for
     // this entry, mirroring "the pending 'exit' notification hasn't been processed yet") whose
-    // child has ALREADY exited. Only the two fields reapAll()'s own mapping touches are needed.
+    // child has ALREADY exited.
     const fakeLane = { child: { pid }, handoffRequested: false };
-    (s as unknown as { lanes: Map<string, typeof fakeLane> }).lanes.set("lane-already-dead", fakeLane);
+    peekSupervisor(s).lanes.set("lane-already-dead", fakeLane);
 
     const outcomes = await s.reapAll();
 
@@ -4674,7 +4737,47 @@ test("WorkerSupervisor.reapAll (#668 r2[1]): a lane whose child is ALREADY dead 
   }
 });
 
-test("WorkerSupervisor.reapAll (#668 r2[1], reverse — a genuinely alive+signaled lane): the SAME reapAll() call DOES mark handoffRequested and DOES end up tagged .handoff, end-to-end through the real onExit — proves the fix ties the flag to the real signal, not to nothing at all", async () => {
+test("WorkerSupervisor.reapAll (#668 r2[1], gate② round 3 P2 rework — DISCRIMINATING mixed batch): in ONE reapAll() call, an alive+signaled lane's handoffRequested flips true while an already-dead lane's stays false — an outcome the pre-fix unconditional-set code (which flipped EVERY this.lanes entry's flag up front, before checking liveness) could never produce", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  try {
+    const s = sup(dir, "claude"); // dispatch() never called — both lanes are injected directly
+
+    // Lane A: genuinely alive, cooperatively dies on SIGTERM (proves the flag DOES flip when a
+    // real signal is actually sent — the positive half of the discrimination).
+    const { bin: aliveBin, ready: aliveReady } = longRunningStub(dir, "trap 'exit 0' TERM\n");
+    const aliveChild = spawn(aliveBin, [], { detached: true, stdio: "ignore" });
+    await waitForFile(aliveReady, "lane-alive stub did not install its TERM trap");
+    const aliveLane = { child: { pid: aliveChild.pid! }, handoffRequested: false };
+
+    // Lane B: already dead before reapAll() even starts (same real-death technique as the test
+    // above) — proves the flag does NOT flip for a lane reapChildren never signals, in the SAME
+    // call that DID flip lane A's.
+    const trivial = spawn(mkStub(dir, "#!/usr/bin/env bash\nexit 0\n"), [], { detached: true, stdio: "ignore" });
+    const deadPid = trivial.pid!;
+    await new Promise<void>((resolve) => trivial.once("exit", () => resolve()));
+    await waitFor(() => !groupAlive(deadPid), "lane-dead's process group never actually died");
+    const deadLane = { child: { pid: deadPid }, handoffRequested: false };
+
+    const peek = peekSupervisor(s);
+    peek.lanes.set("lane-alive", aliveLane);
+    peek.lanes.set("lane-dead", deadLane);
+    assert.equal(aliveLane.handoffRequested, false, "sanity: neither flag is set before reapAll() runs");
+    assert.equal(deadLane.handoffRequested, false, "sanity: neither flag is set before reapAll() runs");
+
+    const outcomes = await s.reapAll();
+
+    const byName = new Map(outcomes.map((o) => [o.name, o]));
+    assert.equal(byName.get("lane-alive")?.alreadyDead, false);
+    assert.equal(byName.get("lane-dead")?.alreadyDead, true);
+    assert.equal(aliveLane.handoffRequested, true, "the genuinely alive, actually-signaled lane's flag DOES flip");
+    assert.equal(deadLane.handoffRequested, false, "the already-dead, never-signaled lane's flag stays false — the differential proof");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WorkerSupervisor.reapAll (#668 r2[1], real end-to-end outcome integrity): a genuinely alive, reap-signaled lane still lands the REAL .handoff sentinel via a full dispatch()+onExit() round trip — the fix's mechanism produces the correct file, not just the correct in-memory flag", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
   try {
     const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n"); // cooperative graceful handoff
@@ -4694,28 +4797,28 @@ test("WorkerSupervisor.reapAll (#668 r2[1], reverse — a genuinely alive+signal
   }
 });
 
-test("WorkerSupervisor.reapAll (#668 r2[0]): a pgid tracked ONLY in pgidRegistry (no this.lanes entry at all — the leader-already-exited shape) is still found and reaped, and pruned from the registry once confirmed dead", async () => {
+test("WorkerSupervisor.reapAll (#668 r2[0]): a pgid tracked ONLY in pgidRegistry (no this.lanes entry at all — the leader-already-exited shape), with a CORRECT fingerprint, is still found and reaped, and pruned from the registry once confirmed dead", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
   try {
     const s = sup(dir, "claude");
-    // Stands in for a descendant whose leader already exited and whose lane entry onExit()
-    // already removed from `this.lanes` — the exact shape r2[0] names. Ignores TERM, so death
-    // can only come from reapAll's own SIGKILL escalation (proves the FULL escalation state
-    // machine applies to a pgid-only entry, not just to a live `this.lanes` lane).
-    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n");
-    const orphan = spawn(bin, [], { detached: true, stdio: "ignore" });
+    // Stands in for a leader whose lane entry onExit() already removed from `this.lanes` but
+    // which is STILL alive itself (the "leader re-identification" ownership branch) — ignores
+    // TERM at the node level, so death can only come from reapAll's own SIGKILL escalation
+    // (proves the FULL escalation state machine applies to a pgid-only entry, not just to a live
+    // `this.lanes` lane).
+    const { child: orphan, ready } = nodeTermIgnoringChild();
+    await ready; // its SIGTERM handler is DEFINITELY registered now — no startup race
     const pid = orphan.pid!;
-    await waitForFile(ready, "orphan stub did not install its TERM-ignoring trap");
 
-    (s as unknown as { pgidRegistry: Map<string, number> }).pgidRegistry.set("lane-orphan", pid);
-    assert.equal((s as unknown as { lanes: Map<string, unknown> }).lanes.has("lane-orphan"), false, "sanity: no this.lanes entry for it");
+    peekSupervisor(s).pgidRegistry.set("lane-orphan", { pgid: pid, fingerprint: psLstart(pid) });
+    assert.equal(peekSupervisor(s).lanes.has("lane-orphan"), false, "sanity: no this.lanes entry for it");
 
     const outcomes = await s.reapAll({ graceMs: 100 });
 
     assert.deepEqual(outcomes, [{ name: "lane-orphan", alreadyDead: false, escalated: true, confirmedDead: true }]);
     assert.equal(groupAlive(pid), false, "the orphaned pgid's whole group is actually dead, not just assumed");
     assert.equal(
-      (s as unknown as { pgidRegistry: Map<string, number> }).pgidRegistry.has("lane-orphan"),
+      peekSupervisor(s).pgidRegistry.has("lane-orphan"),
       false,
       "a confirmed-dead pgid is pruned from the registry, never left to grow unboundedly",
     );
@@ -4725,14 +4828,30 @@ test("WorkerSupervisor.reapAll (#668 r2[0]): a pgid tracked ONLY in pgidRegistry
   }
 });
 
-test("WorkerSupervisor.reapAll (#668 r2[0], the real production trigger): a leader that exits ON ITS OWN while a DESCENDANT in the SAME process group is still alive — onExit() already deleted the this.lanes entry, but reapAll() still finds and reaps the whole group via pgidRegistry", async () => {
+test("WorkerSupervisor.reapAll (#668 r2[0], the real production trigger): a leader that exits ON ITS OWN while a DESCENDANT in the SAME process group is still alive — onExit() already deleted the this.lanes entry, but reapAll() still finds, ownership-verifies (via the descendant command-family check, since the leader itself is gone), and reaps the whole group via pgidRegistry", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
   try {
     const descendantPidFile = join(dir, "descendant.pid");
-    // The LEADER backgrounds a TERM-ignoring descendant (a non-interactive bash keeps a
-    // backgrounded job in the SAME process group — no new pgid), then exits immediately on its
-    // own, well before reapAll() is ever called — no drain, no signal, nothing asked it to stop.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\n( trap '' TERM; sleep 100 ) &\necho $! > "${descendantPidFile}"\nexit 0\n`);
+    const descendantReadyFile = join(dir, "descendant.ready");
+    // The LEADER backgrounds a real `node` descendant that ignores SIGTERM at the node level
+    // (see nodeTermIgnoringChild's own doc for why — this leader script inlines a similar
+    // one-liner rather than reusing that helper, since it must run INSIDE the spawned bash
+    // stub, not in this test process), then exits immediately on its own — no drain, no signal,
+    // nothing asked it to stop. A non-interactive bash keeps a backgrounded job in the SAME
+    // process group as the script itself (no new pgid), so the descendant survives under the
+    // leader's own original pid-as-pgid. The descendant writes descendantReadyFile itself, AFTER
+    // registering its SIGTERM handler — a real synchronization event this test waits on before
+    // ever touching reapAll(), never a sleep/poll guess at "has node finished starting up yet".
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        `( exec node -e "process.on('SIGTERM',()=>{});require('fs').writeFileSync('${descendantReadyFile}','1');setInterval(()=>{},1000);" ) &`,
+        `echo $! > "${descendantPidFile}"`,
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
     const s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 674, title: "t", labels: [] });
     const leaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
@@ -4740,15 +4859,17 @@ test("WorkerSupervisor.reapAll (#668 r2[0], the real production trigger): a lead
     // Deterministic proof onExit() already ran for the REAL leader exit: its sentinel exists.
     // No handoff was ever requested, so a clean exit(0) tags .done — proves this ISN'T a drain.
     await waitForFile(join(dir, `${name}.done.json`), "leader never exited / onExit never ran");
-    assert.equal((s as unknown as { lanes: Map<string, unknown> }).lanes.has(name), false, "onExit already removed the this.lanes entry");
+    assert.equal(peekSupervisor(s).lanes.has(name), false, "onExit already removed the this.lanes entry");
     await waitForFile(descendantPidFile, "the descendant never reported its own pid");
+    await waitForFile(descendantReadyFile, "the descendant's SIGTERM handler was never confirmed registered");
 
     assert.equal(groupAlive(leaderPid), true, "sanity: the descendant keeps the leader's own pgid alive after the leader itself is gone");
-    assert.equal(
-      (s as unknown as { pgidRegistry: Map<string, number> }).pgidRegistry.has(name),
-      true,
+    const registered = peekSupervisor(s).pgidRegistry.get(name);
+    assert.ok(
+      registered,
       "onExit() must KEEP the pgidRegistry entry while the group outlives its leader — pruning here would lose the pgid forever",
     );
+    assert.ok(registered?.fingerprint, "dispatch() must have captured a real fingerprint for the leader at spawn time");
 
     const outcomes = await s.reapAll({ graceMs: 100 });
 
@@ -4758,8 +4879,85 @@ test("WorkerSupervisor.reapAll (#668 r2[0], the real production trigger): a lead
       false,
       "the descendant is actually dead too — the whole group was reaped, not just the already-gone leader",
     );
+    assert.equal(peekSupervisor(s).pgidRegistry.has(name), false, "confirmed-dead -> pruned");
     s.dispose();
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WorkerSupervisor.reapAll (#668 round 3 P1): a retained pgidRegistry entry whose descendant EXITS ON ITS OWN before reapAll() is ever called is pruned the moment anything checks it — alreadyDead, ZERO signals sent, never left registered forever", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  try {
+    const s = sup(dir, "claude");
+    // A real process that dies of its own accord — standing in for onExit() having kept a
+    // registry entry (the group was alive when the leader died) whose sole surviving descendant
+    // has SINCE exited naturally, with no reapAll() call anywhere in between.
+    const trivial = spawn(mkStub(dir, "#!/usr/bin/env bash\nexit 0\n"), [], { detached: true, stdio: "ignore" });
+    const pid = trivial.pid!;
+    await new Promise<void>((resolve) => trivial.once("exit", () => resolve()));
+    await waitFor(() => !groupAlive(pid), "the trivial process group never actually died");
+
+    // The fingerprint value is irrelevant here — isAlive() (a bare pidGroupAlive check) rejects
+    // this entry before verifyPgidOwnership (which only runs inside `signal`) is ever reached.
+    peekSupervisor(s).pgidRegistry.set("lane-natural-death", { pgid: pid, fingerprint: "irrelevant, never checked" });
+
+    const outcomes = await s.reapAll();
+
+    assert.deepEqual(
+      outcomes,
+      [{ name: "lane-natural-death", alreadyDead: true, escalated: false, confirmedDead: true }],
+      "alreadyDead:true proves isAlive() rejected it before `signal` (and therefore ownership verification) was ever invoked — AC5, zero signals to a leg that already exited on its own",
+    );
+    assert.equal(
+      peekSupervisor(s).pgidRegistry.has("lane-natural-death"),
+      false,
+      "a naturally-dead descendant's stale entry is pruned, never left registered forever",
+    );
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WorkerSupervisor.reapAll (#668 round 3 P1, the recycled-pgid shape): a pgidRegistry entry whose fingerprint does NOT match reality is NEVER signaled — a real, unrelated, still-alive process is left completely untouched, and the entry is pruned anyway", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // an innocent, unrelated, real live process
+  const innocent = spawn(bin, [], { detached: true, stdio: "ignore" });
+  const pid = innocent.pid!;
+  try {
+    await waitForFile(ready, "innocent stub never started");
+    const s = sup(dir, "claude");
+    // Fabricates the recycled-pgid shape directly: a REAL, alive pgid, registered under a
+    // fingerprint that could never be its own (a fixed, decades-old timestamp string, not
+    // whatever `ps -p <pid> -o lstart=` would actually report for a process started just now).
+    // The innocent process is a plain bash script (comm "bash"), which also fails the
+    // descendant command-family check — nothing here should ever verify.
+    peekSupervisor(s).pgidRegistry.set("lane-recycled", { pgid: pid, fingerprint: "Thu Jan  1 00:00:00 1970" });
+
+    const outcomes = await s.reapAll({ graceMs: 50 });
+
+    // Never confirmed dead: escalated to the SIGKILL step (a live-but-unverified entry keeps
+    // being retried until the reap concludes), but at NO point did a real signal ever land —
+    // see the alive assertion below, which is the actual safety property under test.
+    assert.deepEqual(outcomes, [{ name: "lane-recycled", alreadyDead: false, escalated: true, confirmedDead: false }]);
+    assert.equal(
+      groupAlive(pid),
+      true,
+      "an ownership-check failure must NEVER signal the process — a stranger stays completely untouched, even after the SIGKILL step",
+    );
+    assert.equal(
+      peekSupervisor(s).pgidRegistry.has("lane-recycled"),
+      false,
+      "the entry is still pruned (never left registered), even though nothing was ever signaled",
+    );
+    s.dispose();
+  } finally {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      /* already gone, or never started */
+    }
     rmSync(dir, { recursive: true, force: true });
   }
 });
