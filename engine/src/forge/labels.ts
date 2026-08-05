@@ -534,21 +534,38 @@ export function resolveLabelSkillRows(cfg: ResolvedLabelsForSkill): LabelSkillRo
   return rows;
 }
 
-/** #658 round 3 (P1, correction-reintroduced defect): the REAL composed dispatch-exclusion set a
- *  label's rendered `Dispatch hold` line must reflect — never `escalation.humanLabels`
- *  membership alone (that was the bug: it rendered `reserve`/`needsHuman`/`blocked` as "NOT a
+/** #658 round 4 (P2, correction-reintroduced defect — again): the REAL composed dispatch-exclusion
+ *  set a label's rendered `Dispatch hold` line must reflect — never `escalation.humanLabels`
+ *  membership alone (round 3's bug: it rendered `reserve`/`needsHuman`/`blocked` as "NOT a
  *  member" whenever a repo's `escalation.humanLabels` happened to omit them, when in fact all
- *  three hold dispatch in EVERY config). Mirrors three sites exactly — do not re-derive this
- *  from prose, cite these three if it ever needs re-tracing:
+ *  three hold dispatch in EVERY config). Round 3 fixed those three but missed a FOURTH label both
+ *  sites also exclude unconditionally: `decomposed`. Traced completely — every label EITHER
+ *  function unconditionally excludes or filters, cite these sites if it ever needs re-tracing,
+ *  do not re-derive from prose:
  *   - forge.ts's `isDispatchable` (~line 2522, called from `getReadyIssues`/`selectReadyIssues`):
- *     `labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)` excludes
- *     UNCONDITIONALLY, before `escalation.humanLabels` is ever consulted.
- *   - conductor.ts's `orderForDispatch` (~line 1627): builds `reserveish = [cfg.labels.reserve,
- *     ...cfg.escalation.humanLabels]` and filters through `hasReserveLabel` — so `reserve` is
- *     ALSO excluded UNCONDITIONALLY, independent of `escalation.humanLabels` membership.
+ *     `isDecomposed(labels, l)` (line 2523) excludes `decomposed` UNCONDITIONALLY, first, before
+ *     any other check; `labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)`
+ *     (line 2524) excludes `needsHuman`/`blocked` UNCONDITIONALLY too, before
+ *     `escalation.humanLabels` is ever consulted. (`verifyNa`+`planApproved` together is also
+ *     excluded, but conditionally — only when BOTH are present on the same issue — so it is not
+ *     part of this per-label unconditional set.)
+ *   - conductor.ts's `orderForDispatch` (~lines 1629–1631): its first filter,
+ *     `!labelsInclude(i.labels, cfg.labels.decomposed)` (line 1629), excludes `decomposed`
+ *     UNCONDITIONALLY, independently confirming the forge.ts exclusion above. Its second filter
+ *     builds `reserveish = [cfg.labels.reserve, ...cfg.escalation.humanLabels]` (line 1627) and
+ *     filters through `hasReserveLabel` (line 1630) — so `reserve` is ALSO excluded
+ *     UNCONDITIONALLY (the literal array entry), independent of `escalation.humanLabels`
+ *     membership. Its third filter, `labelsBlockers(...).length === 0` (line 1631), excludes
+ *     issues carrying a `blocked-by:N` token — a dynamic per-issue pattern (`matchBlockedByLabel`),
+ *     not a named registry label, so it has no row in this registry and is out of scope here.
  *   - that same `orderForDispatch` array's `...cfg.escalation.humanLabels` spread: every OTHER
  *     label holds dispatch only if it is an EXACT member of that resolved list
  *     (`hasReserveLabel`'s `labelsInclude` — exact identity, not substring).
+ *  Every other registry label (`inProgress`, `verifyNa`, `planApproved`, `originAgent`, `split`,
+ *  `roundPool`, `humanMergeOnly`, `laneState`, `planless`, every taxonomy label, `hold`) appears
+ *  in NEITHER function's unconditional checks — traced against the actual code, not guessed —
+ *  so each holds dispatch only via `escalation.humanLabels` membership, exactly like the
+ *  fallthrough branch below.
  *  `why: "unconditional"` takes precedence over `"humanLabels"` even when a row's resolved name
  *  is ALSO explicitly listed in `escalation.humanLabels` — the unconditional exclude fires
  *  regardless, so it is the true reason either way. */
@@ -556,7 +573,7 @@ function computeDispatchHold(
   row: LabelSkillRow,
   cfg: ResolvedLabelsForSkill,
 ): { readonly holdsDispatch: boolean; readonly why: "unconditional" | "humanLabels" | null } {
-  if (row.key === "needsHuman" || row.key === "blocked" || row.key === "reserve") {
+  if (row.key === "needsHuman" || row.key === "blocked" || row.key === "reserve" || row.key === "decomposed") {
     return { holdsDispatch: true, why: "unconditional" };
   }
   if (labelsInclude(cfg.escalation.humanLabels, row.name)) {
@@ -590,9 +607,9 @@ export function renderLabelsSkillBody(cfg: ResolvedLabelsForSkill): string {
       "approximation — and they take PRECEDENCE over the prose above whenever the two would ever " +
       "disagree. **Merge veto** is `escalation.humanLabels` membership alone. **Dispatch hold** " +
       "is the WIDER composed exclusion set gate⓪ and dispatch actually apply: `needsHuman` / " +
-      "`blocked` / `reserve` hold dispatch UNCONDITIONALLY, in every config, regardless of " +
-      "`escalation.humanLabels` membership; every other row holds dispatch only if it is an " +
-      "EXACT member of the resolved `escalation.humanLabels` list.",
+      "`blocked` / `reserve` / `decomposed` hold dispatch UNCONDITIONALLY, in every config, " +
+      "regardless of `escalation.humanLabels` membership; every other row holds dispatch only if " +
+      "it is an EXACT member of the resolved `escalation.humanLabels` list.",
     "",
     "`escalation.humanLabels` matching is NOT uniform: the merge gate matches by SUBSTRING " +
       "(`labelsIncludeAnySubstring`, merge-driver.ts's `deriveGate`) — a short entry like " +
@@ -600,8 +617,8 @@ export function renderLabelsSkillBody(cfg: ResolvedLabelsForSkill): string {
       "`escalation.humanLabels`-derived portion of dispatch hold matches the same list by EXACT " +
       "identity (`labelsInclude`, conductor.ts's `orderForDispatch` / `hasReserveLabel`). The two " +
       "lines below reflect that difference; they can disagree for the same row. `needsHuman` / " +
-      "`blocked` / `reserve` hold dispatch unconditionally either way — see each row's own " +
-      "Dispatch hold line.",
+      "`blocked` / `reserve` / `decomposed` hold dispatch unconditionally either way — see each " +
+      "row's own Dispatch hold line.",
     "",
   ];
   for (const row of resolveLabelSkillRows(cfg)) {

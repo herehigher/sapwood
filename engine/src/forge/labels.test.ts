@@ -250,12 +250,19 @@ test("#658 round 2 (A): the three escalation rows always render BOTH Merge veto 
     assert.match(section, /\*\*Merge veto:\*\*/, name);
     assert.match(section, /\*\*Dispatch hold:\*\*/, name);
   }
-  // #658 round 3 (P1): needsHuman/blocked/reserve hold dispatch UNCONDITIONALLY (forge.ts's
-  // `isDispatchable`, conductor.ts's `orderForDispatch`) regardless of `escalation.humanLabels`
-  // membership — reserve is NOT a member of humanLabels here, yet it still holds dispatch.
-  for (const name of ["sapwood:needs-human", "sapwood:blocked", "sapwood:reserve"]) {
+  // #658 round 4 (P2): the FULL unconditional-exclusion set traced against forge.ts's
+  // `isDispatchable` and conductor.ts's `orderForDispatch` is needsHuman/blocked/reserve/
+  // decomposed — round 3 fixed the first three but missed `decomposed`, which both functions
+  // also exclude unconditionally (isDispatchable's `isDecomposed` check, and orderForDispatch's
+  // own `labelsInclude(i.labels, cfg.labels.decomposed)` filter), independent of
+  // `escalation.humanLabels` membership — none of the four is a member of humanLabels-by-default
+  // config, `reserve`/`decomposed` outright never are, yet all four still hold dispatch.
+  for (const name of ["sapwood:needs-human", "sapwood:blocked", "sapwood:reserve", "sapwood:decomposed"]) {
     assert.match(labelSection(body, name), /\*\*Dispatch hold:\*\* holds dispatch \(unconditional/, name);
   }
+  // `decomposed` is not an escalation.humanLabels candidate, so — unlike the three ALWAYS_RENDER
+  // rows — it does NOT get a rendered Merge veto line at all (neither member nor non-member).
+  assert.doesNotMatch(labelSection(body, "sapwood:decomposed"), /Merge veto/);
 });
 
 test("#658 round 2 (A): a non-escalation row matching NEITHER predicate renders neither Merge veto nor Dispatch hold", () => {

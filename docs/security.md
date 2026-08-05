@@ -1123,13 +1123,15 @@ so a `labels.prefix` remap always shows the RESOLVED names a session actually se
 issues/PRs, never a default or a template — and whether a label actually vetoes a PR merge
 (substring match against `escalation.humanLabels`, the merge gate's own rule) or holds an issue
 out of dispatch is likewise rendered from real resolved config using the SAME predicates those
-gates call, never asserted as fixed prose (#658 review rounds 1–3). Dispatch hold is NOT
-`escalation.humanLabels` membership alone: `needs-human`/`blocked`/`reserve` hold dispatch
-UNCONDITIONALLY in every config (forge.ts's `isDispatchable`, gate⓪; conductor.ts's
+gates call, never asserted as fixed prose (#658 review rounds 1–4). Dispatch hold is NOT
+`escalation.humanLabels` membership alone: `needs-human`/`blocked`/`reserve`/`decomposed` hold
+dispatch UNCONDITIONALLY in every config (forge.ts's `isDispatchable`, gate⓪; conductor.ts's
 `orderForDispatch`), regardless of `escalation.humanLabels`; every other label holds dispatch
 only if it is an EXACT member of that resolved list. The three escalation rows (`needs-human`/
-`blocked`/`reserve`) always show both facts, member/unconditional or not; every other label shows
-a fact only when its resolved name actually matches that gate's predicate. The
+`blocked`/`reserve`) always show both facts, member/unconditional or not; `decomposed` shows the
+Dispatch hold fact (unconditional) but not the Merge veto fact, since it is not a
+`escalation.humanLabels` candidate; every other label shows a fact only when its resolved name
+actually matches that gate's predicate. The
 registry is the PROMOTION of label semantics that used to live only as TS doc
 comments on `labels.ts`, unreadable from any role session — the incidents this closes: a worker
 self-applying `human-merge-only` (#539), an architect blocking a Ready issue via label with no
