@@ -498,6 +498,9 @@ export class RoundScopedForge implements IForge {
   getIssueComments(issue: number) {
     return this.inner.getIssueComments(issue);
   }
+  getAuthenticatedActor() {
+    return this.inner.getAuthenticatedActor();
+  }
 
   /** Same milestone scoping as getReadyIssues() above — the plan_review peripheral's
    *  candidates are dispatch candidates too (just for review, not for a worker), so this round
@@ -700,6 +703,9 @@ export class PoolScopedForge implements IForge {
   }
   getIssueComments(issue: number) {
     return this.inner.getIssueComments(issue);
+  }
+  getAuthenticatedActor() {
+    return this.inner.getAuthenticatedActor();
   }
   getIssuesNeedingPlanReview() {
     return this.inner.getIssuesNeedingPlanReview();

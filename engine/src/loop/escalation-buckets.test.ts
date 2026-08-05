@@ -349,6 +349,15 @@ const SITE_INVENTORY: Record<
     src: "await forge.addLabel(issue, cfg.labels.needsHuman);",
     why: "shared: a durable dissent concern OR a stale roundPool-removal both reaching their retry cap",
   },
+  // 1h — #652: the comment-adjudication cursor's shared escalation, called from all three
+  // checkpoints (gate⓪ pre-spend/pre-apply, dispatch claim/re-read, drive pre-gate②) — ONE site,
+  // same pattern as escalation-writer.ts's shared writer above.
+  "review/comment-cursor-gate.ts#0": {
+    bucket: "needs-human",
+    carrier: "issue",
+    src: "await forge.addLabel(issue, cfg.labels.needsHuman);",
+    why: "the issue body's adjudication cursor is stale/invalid relative to its own comment thread (missing/malformed/duplicate marker, cursor targeting an engine comment or a deleted target, or unadjudicated pending comments) — issue-born: the fact is about the ISSUE's body/comment-thread currency, not any PR",
+  },
   // 1f — gate verdicts that mean "the machine is stuck", INCLUDING the three non-gate-prefixed
   // merge-driver reasons the AC calls out by name.
   "roles/merge-driver.ts#2": {
@@ -443,7 +452,7 @@ test("#397 AC: EVERY escalation write site in engine source is classified into e
   }
 });
 
-test("#397 AC: the corrected site inventory — 8 PR-side label writes, 28 issue-side (#398 moved fix-response's escalation to the PR and deleted its issue twin, and folded escalateNeedsHuman/review-disputed/review-non-convergent into the shared carrier writer's two arms), and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
+test("#397 AC: the corrected site inventory — 8 PR-side label writes, 29 issue-side (#398 moved fix-response's escalation to the PR and deleted its issue twin, and folded escalateNeedsHuman/review-disputed/review-non-convergent into the shared carrier writer's two arms; #652 added the comment-adjudication cursor's shared escalation site), and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
   const sites = scanEscalationSites();
   const labelSites = sites.filter(
     (s) => SITE_INVENTORY[s.key]!.src.includes("addLabel(") || SITE_INVENTORY[s.key]!.src.includes("addPRLabel("),
@@ -456,8 +465,8 @@ test("#397 AC: the corrected site inventory — 8 PR-side label writes, 28 issue
   );
   assert.equal(
     labelSites.length - prSide.length,
-    28,
-    "issue-side escalation writes (#397's count, minus #398's deleted fix-response issue twin, minus the three issue writes — escalateNeedsHuman, review-disputed, review-non-convergent — now folded into the shared carrier writer)",
+    29,
+    "issue-side escalation writes (#397's count, minus #398's deleted fix-response issue twin, minus the three issue writes — escalateNeedsHuman, review-disputed, review-non-convergent — now folded into the shared carrier writer, plus #652's comment-adjudication cursor site)",
   );
   // The four sites the AC names explicitly because they carry no `gate:HUMAN:` reason prefix.
   for (const key of ["roles/merge-driver.ts#4", "roles/merge-driver.ts#5", "roles/merge-driver.ts#6", "loop/conductor.ts#0"]) {

@@ -37,6 +37,16 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
+  // #660 fix leg (busy-spin livelock): a stable login, mirroring round-defaults.test.ts's/
+  // conductor.test.ts's/plan-review.test.ts's own FakeForge fixtures — no test in this file
+  // exercises the comment-adjudication cursor's engine-comment exemption itself (getIssueComments
+  // below always returns []), so a fixed value (never unresolvable) is all the dispatch/drive
+  // checkpoints' incidental calls here need. Missing this stub throws on every dispatch attempt
+  // (UnstubbedForge's loud-throw design) — with the injected zero-delay sleep this file's
+  // --until-idle tests use, that queues-and-retries at full speed forever instead of idling.
+  override async getAuthenticatedActor(): Promise<string | null> {
+    return "sapwood-bot";
+  }
   override async getReadyIssues(): Promise<Issue[]> {
     return this.ready;
   }

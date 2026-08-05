@@ -20,6 +20,12 @@ import { capDigest } from "../retro/retro-digest.js";
 import { buildAcSnapshot, checkAcSnapshotDrift } from "../review/ac-snapshot.js";
 import { parseEngineReviewArtifact } from "../review/audit.js";
 import {
+  type CommentCursorResult,
+  checkCommentCursorFreshness,
+  commentCursorIsStale,
+  escalateCommentCursorStale,
+} from "../review/comment-cursor-gate.js";
+import {
   type ConvergenceStallSignal,
   type ConvergenceVerdict,
   classifyProgress,
@@ -3056,6 +3062,70 @@ async function checkAcDriftBeforeDrive(
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `ac-snapshot-drift: ${reason}` };
 }
 
+/** #652: comment-adjudication cursor — review-time recheck, called for every driving lane
+ *  immediately AFTER checkAcDriftBeforeDrive (above) confirms the live body has NOT drifted, and
+ *  BEFORE `gate.driveOne` is ever invoked. "Before DRIVE invokes gate②, comment freshness is
+ *  rechecked using the cursor embedded in the SNAPSHOTTED body; a comment arriving while the
+ *  worker runs escalates exactly like existing body drift" (design adjudicated 2026-08-05).
+ *
+ *  Deliberately checks against `snapshot.body`, never a fresh live body read: the sibling
+ *  drift check just above already re-confirmed the live body still matches that snapshot, so a
+ *  second body fetch here would be redundant, not more current. Only the comment STREAM needs a
+ *  live read — a comment can arrive without touching the body at all, which is exactly the
+ *  batch-8 incident this whole feature exists to close.
+ *
+ *  Returns `null` when the lane should drive normally this tick: no AC snapshot recorded (a
+ *  pre-#283/#652 legacy lane — nothing to recheck a cursor against, same "drive normally"
+ *  stance checkAcDriftBeforeDrive takes on its own missing-snapshot arm) or the cursor is
+ *  current (no pending non-engine comments past it). A comment-fetch failure queues (retried
+ *  next tick) rather than escalating a human over an infra blip — comment-cursor-gate.ts's own
+ *  fetch-failure stance, mirrored here the same way checkAcDriftBeforeDrive mirrors it for its
+ *  own live-body read. A confirmed stale/invalid cursor applies the shared needs-human degrade
+ *  (label + deduplicated pointer comment) and terminalizes the lane exactly like an AC-snapshot
+ *  drift does. */
+async function checkCommentCursorBeforeDrive(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  w: WorkerRow,
+  pr: number,
+  iso: () => string,
+): Promise<DrivenOutcome | null> {
+  const snapshot = state.getAcSnapshot(w.issue);
+  if (!snapshot) return null;
+
+  let cursorResult: CommentCursorResult;
+  try {
+    cursorResult = await checkCommentCursorFreshness(forge, w.issue, snapshot.body);
+  } catch (e) {
+    return { kind: "queued", worker: w.name, issue: w.issue, pr, reason: `comment-cursor-check-unavailable: ${String(e)}` };
+  }
+  if (!commentCursorIsStale(cursorResult)) return null;
+
+  // #652 round 1 (finding 3): escalateCommentCursorStale no longer throws past its own dedup-
+  // read/post attempt (contained, see its own doc) — the event append below is now genuinely
+  // UNCONDITIONAL on the label+post outcome, not merely "reached only when nothing threw."
+  const { labeled, posted, labelError, postError } = await escalateCommentCursorStale(forge, cfg, w.issue, cursorResult);
+  state.upsertWorker({
+    ...w,
+    state: "failed",
+    ended_at: iso(),
+    gated_escalation_labeled: labeled ? 1 : 0,
+    gated_escalation_carrier: "issue",
+  });
+  state.appendEvent("comment-cursor-stale", {
+    issue: w.issue,
+    checkpoint: "drive",
+    worker: w.name,
+    pr,
+    labeled,
+    posted,
+    ...(labelError !== undefined ? { labelError } : {}),
+    ...(postError !== undefined ? { postError } : {}),
+  });
+  return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: "comment-cursor-stale" };
+}
+
 export async function tick(deps: TickDeps): Promise<TickResult> {
   const { forge, state, supervisor, cfg } = deps;
   const now = deps.now;
@@ -3824,6 +3894,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       const driftOutcome = await checkAcDriftBeforeDrive(forge, state, cfg, w, pr, iso);
       if (driftOutcome) {
         driven.push(driftOutcome);
+        continue;
+      }
+      // #652: comment-adjudication cursor recheck — immediately after the AC-snapshot drift
+      // check above confirms the body itself hasn't drifted, and still BEFORE gate.driveOne. A
+      // comment can arrive without ever touching the body (the batch-8 incident shape); see
+      // checkCommentCursorBeforeDrive's own doc for the fail-closed ordering.
+      const cursorOutcome = await checkCommentCursorBeforeDrive(forge, state, cfg, w, pr, iso);
+      if (cursorOutcome) {
+        driven.push(cursorOutcome);
         continue;
       }
       // #55 P1-B: the trigger decision now lives in gate.driveOne itself (it's the only place
@@ -5099,16 +5178,43 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // assignment is safe because every path past the try/catch below only runs on success.
       let acSnapshot!: ReturnType<typeof buildAcSnapshot>;
       try {
+        // #652: re-read the LIVE body, then comments (inside checkCommentCursorFreshness),
+        // INSIDE this same rollback-on-failure unit — closes the race window between candidate
+        // selection (getReadyIssues, above) and this claim: a comment landing in that window
+        // must still block this dispatch, and a body edit landing in that window is what the AC
+        // snapshot and worker prompt see from here on, never the pre-claim `issue.body` (design
+        // adjudicated 2026-08-05). A fetch failure here propagates straight into the catch below
+        // — no issue write happens before it, so it rides the SAME rollback/retry path as any
+        // other dispatch-time forge hiccup (comment-cursor-gate.ts's own fetch-failure stance:
+        // never catch, never turn network trouble into a human adjudication).
+        const liveBody = await forge.getIssueBody(issue.number);
+        const cursorResult = await checkCommentCursorFreshness(forge, issue.number, liveBody);
+        if (commentCursorIsStale(cursorResult)) {
+          // #652 round 1 (finding 3): escalateCommentCursorStale no longer throws past its own
+          // dedup-read/post attempt (contained, see its own doc) — the event below is now
+          // genuinely UNCONDITIONAL on the label+post outcome, appended before the deliberate
+          // throw two lines down (which exists only to trigger THIS try/catch's own rollback).
+          const { labeled, posted, labelError, postError } = await escalateCommentCursorStale(forge, cfg, issue.number, cursorResult);
+          state.appendEvent("comment-cursor-stale", {
+            issue: issue.number,
+            checkpoint: "dispatch",
+            labeled,
+            posted,
+            ...(labelError !== undefined ? { labelError } : {}),
+            ...(postError !== undefined ? { postError } : {}),
+          });
+          throw new Error(`comment-cursor-stale: issue #${issue.number}'s adjudication cursor is not current — refusing dispatch`);
+        }
+        const dispatchIssue: Issue = { ...issue, body: liveBody };
         // #283 (M10, E2, design #279 §5): the AC-authority snapshot lands BEFORE the worker
         // ever spawns — same fail-closed unit as the dispatch attempt itself (this try/catch):
         // if persisting it throws, the catch below rolls the board claim back to Ready exactly
         // like a supervisor.dispatch() failure would, so a snapshot-write hiccup can never leave
-        // a worker running against an unrecorded AC set. Built from the SAME `issue.body`
-        // getReadyIssues already fetched this tick for the dispatch decision — never a second,
-        // possibly-disagreeing live read.
-        acSnapshot = buildAcSnapshot(issue.number, issue.body ?? "", iso());
+        // a worker running against an unrecorded AC set. #652: built from the RE-READ body above
+        // (never the pre-claim `issue.body`) — see this block's own header comment.
+        acSnapshot = buildAcSnapshot(issue.number, liveBody, iso());
         state.recordAcSnapshot(acSnapshot);
-        dispatchRes = await supervisor.dispatch(issue);
+        dispatchRes = await supervisor.dispatch(dispatchIssue);
       } catch (e) {
         state.appendEvent("dispatch-failed", { issue: issue.number, error: String(e) });
         // #31 (finding 1): persist the rollback BEFORE attempting it. The dispatch error `e` is

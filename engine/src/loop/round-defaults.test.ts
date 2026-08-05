@@ -68,6 +68,13 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
+  // #652 round 2 (finding 2): a stable login, mirroring conductor.test.ts's/plan-review.test.ts's
+  // own FakeForge fixtures — no test in this file exercises the comment-adjudication cursor's
+  // engine-comment exemption itself, so a fixed value (never unresolvable) is all any incidental
+  // call site here needs.
+  override async getAuthenticatedActor(): Promise<string | null> {
+    return "sapwood-bot";
+  }
   ready: Issue[] = [];
   override async getReadyIssues(): Promise<Issue[]> {
     return this.ready;

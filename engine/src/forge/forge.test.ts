@@ -2496,6 +2496,46 @@ test("getIssueComments: reuses parsePRComments' shape/pagination tolerance off t
   assert.ok(seen[0]!.includes("--paginate") && seen[0]!.includes("--slurp"));
 });
 
+// #652: parsePRComments/getIssueComments now surface the REST numeric comment id (stringified)
+// — comment-cursor-gate.ts's cursor-target matching needs stable per-comment identity.
+test("parsePRComments: carries the REST numeric id, stringified; absent id is simply omitted (never a throw)", () => {
+  const r = parsePRComments(
+    JSON.stringify([
+      { id: 123, body: "a", created_at: "t1", user: { login: "x" } },
+      { body: "b", created_at: "t2", user: { login: "y" } },
+    ]),
+  );
+  assert.deepEqual(r, [
+    { id: "123", login: "x", createdAt: "t1", body: "a" },
+    { login: "y", createdAt: "t2", body: "b" },
+  ]);
+});
+
+test("getAuthenticatedActor: parses `gh api user --jq .login` to the login", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return "sapwood-bot\n";
+  };
+  assert.equal(await forge.getAuthenticatedActor(), "sapwood-bot");
+  assert.deepEqual(seen[0], ["api", "user", "--jq", ".login"]);
+});
+
+test("getAuthenticatedActor: any failure (auth, network, empty output) fails closed to null, never throws", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+    throw new Error("not authenticated");
+  };
+  assert.equal(await forge.getAuthenticatedActor(), null);
+
+  const forge2 = new GithubForge(c);
+  (forge2 as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => "";
+  assert.equal(await forge2.getAuthenticatedActor(), null);
+});
+
 // ── #234: forge MCP proxy read surface — pure parsers ───────────────────────────────────────
 
 test("parseIssueMeta: parses gh issue view --json number,title,state,labels,updatedAt,milestone", () => {
