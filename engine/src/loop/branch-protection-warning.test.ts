@@ -102,6 +102,29 @@ test("readBranchProtectionState: legacy endpoint 5xx/network failure -> cannot-v
   assert.deepEqual(await readBranchProtectionState(run, REPO), { kind: "cannot-verify" });
 });
 
+test("readBranchProtectionState: collision — command path contains an unrelated 3-digit number, real status is 502 -> cannot-verify, not confirmed-unprotected", async () => {
+  // #673 gate② P1 (second pass): a bare `\d{3}` scan over the full text matches the FIRST
+  // 3-digit run it finds — including one baked into the repo/branch path itself (e.g. a repo
+  // literally named "project-404"), even when the ACTUAL HTTP status a few characters later is a
+  // real 502. The marker must be anchored to gh's own "(HTTP <code>)" shape (verified against a
+  // real `gh api` 404: stderr reads `gh: Not Found (HTTP 404)`), never a bare 3-digit sequence.
+  // The ruleset endpoint MUST have a real handler here (an empty-array "confirmed-unprotected"
+  // response, same as the genuine-404 tests above) — otherwise a bare-3-digit false-404 would
+  // fall through to fakeRun's "no handler" throw, land in the OTHER cannot-verify arm (ruleset
+  // read failure), and pass for the wrong reason, masking the exact bug this test exists to catch.
+  const collisionRepo = "acme/project-404";
+  const serverErrorWithPathCollision = execFileError(
+    `gh api repos/${collisionRepo}/branches/main/protection`,
+    "gh: Internal Server Error (HTTP 502)\n",
+  );
+  const run = fakeRun({
+    [`repos/${collisionRepo} --jq`]: "main\n",
+    [`repos/${collisionRepo}/branches/main/protection`]: serverErrorWithPathCollision,
+    [`repos/${collisionRepo}/rules/branches/main`]: "[]",
+  });
+  assert.deepEqual(await readBranchProtectionState(run, collisionRepo), { kind: "cannot-verify" });
+});
+
 test("readBranchProtectionState: legacy 404 but ruleset read fails -> cannot-verify", async () => {
   const run = fakeRun({
     "repos/acme/widgets --jq": "main\n",

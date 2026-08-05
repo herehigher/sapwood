@@ -37,10 +37,16 @@ export async function readBranchProtectionState(run: GhRunner, repo: string): Pr
     // property — never just the first line. Classify on the full text (message + stderr, if
     // present) or a first-line-only read silently reclassifies every genuinely-unprotected
     // branch as cannot-verify and this detector never warns (the bug this comment guards).
+    //
+    // The marker itself must be anchored to gh's own error-line shape — `gh: <msg> (HTTP
+    // <code>)`, verified against a real `gh api` 404 — not a bare `\d{3}` scan: a bare scan
+    // false-matches an unrelated 3-digit run elsewhere in the text (e.g. a repo/branch/path
+    // segment like "project-404"), which would misclassify a real 5xx/network failure as a 404
+    // and fire a false unprotected-WARN (#673 gate② P1 on the first fix attempt).
     const message = e instanceof Error ? e.message : String(e);
     const stderr = typeof (e as { stderr?: unknown })?.stderr === "string" ? (e as { stderr: string }).stderr : "";
     const text = `${message}\n${stderr}`;
-    const status = text.match(/\b(\d{3})\b/)?.[1];
+    const status = text.match(/\bHTTP\s+(\d{3})\b/i)?.[1];
     if (status !== "404") return { kind: "cannot-verify" };
     // Legacy protection is absent — this repo's plan may still enforce a RULESET on the branch
     // instead (a separate GitHub feature the legacy endpoint doesn't report at all), so check
