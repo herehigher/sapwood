@@ -42,7 +42,12 @@ import type { IForge, Issue } from "../forge/forge.js";
 import { extractAcceptanceCriteria, extractVerificationPlan, extractVerificationSection } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 import type { PeripheralStub } from "../loop/round.js";
-import { checkCommentCursorFreshness, commentCursorIsStale, escalateCommentCursorStale } from "../review/comment-cursor-gate.js";
+import {
+  checkBodyDrift,
+  checkCommentCursorFreshness,
+  commentCursorIsStale,
+  escalateCommentCursorStale,
+} from "../review/comment-cursor-gate.js";
 import type { State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 import {
@@ -420,26 +425,56 @@ function approvedThisRound(state: State, roundId: number, issueNumber: number): 
  *  verdict reuses this exact draft→re-review cycle (reviewer brief -> drafter -> re-review, same
  *  maxDraftCycles cap, same escalation path) rather than a bespoke copy of it. Cycle 1 onward runs
  *  a completely normal reviewer session, seed or not. */
-/** #652: gate⓪'s comment-adjudication cursor checkpoint — shared by reviewOneIssue's pre-spend
- *  and pre-apply call sites. Always fetches the LIVE body + comment stream (never reuses an
- *  earlier read, including `currentBody` fetched at the top of this cycle) — the entire point of
- *  the pre-apply call is to catch drift that happened DURING the session that just ran, so a
- *  cached read would defeat it. On a stale/invalid cursor, applies the shared needs-human degrade
- *  (label + deduplicated pointer comment) and records the durable event; returns `true`, meaning
- *  the caller must stop (refuse to spend / discard the decision without applying it). Returns
- *  `false` when it's safe to proceed. */
+/** #652: gate⓪'s comment-adjudication cursor checkpoint — shared by reviewOneIssue's pre-spend,
+ *  pre-apply, and (round 1, finding 2) pre-drafter-write call sites, plus confirmOneIssue's own
+ *  pre-spend.
+ *
+ *  `liveBody` is supplied by the CALLER, never fetched here (round 1, finding 1's "align
+ *  pre-spend" fix): at pre-spend there is nothing to re-fetch — the caller's own single
+ *  `getIssueBody` read IS the body about to be rendered into the session prompt, so THAT exact
+ *  read is what gets validated (fetch once, validate, then render — no second, potentially
+ *  divergent, unvalidated read). At pre-apply / pre-drafter-write the caller performs a genuinely
+ *  FRESH read (a session just ran — a cached read would defeat the entire point of rechecking)
+ *  and passes it here as `liveBody`, alongside `sessionRenderedBody` (round 1, finding 1/2): the
+ *  body the just-finished session was ACTUALLY given, i.e. `currentBody` from the top of this
+ *  cycle. When supplied, a hash mismatch between the two is a `body-drift` discard — the same
+ *  fail-closed path a stale/invalid comment cursor already takes, distinguished only by the
+ *  event's `cause` field, so a maintainer's direct body edit mid-session is caught exactly like a
+ *  late-arriving comment (the batch-8 class this checkpoint exists to close), never silently
+ *  overwritten by a decision computed against the pre-edit text.
+ *
+ *  On either failure, applies the shared needs-human degrade (label + deduplicated pointer
+ *  comment, #652 round 1 finding 3: now CONTAINED — see escalateCommentCursorStale's own doc) and
+ *  records the durable event UNCONDITIONALLY, with the label/post outcome in its payload; returns
+ *  `true`, meaning the caller must stop (refuse to spend / discard the decision without applying
+ *  it). Returns `false` when it's safe to proceed. */
 async function checkGate0CommentCursor(
   deps: PlanReviewDeps,
   issue: Issue,
   roundId: number,
-  checkpoint: "gate0-pre-spend" | "gate0-pre-apply",
+  checkpoint: "gate0-pre-spend" | "gate0-pre-apply" | "gate0-pre-drafter-write",
+  liveBody: string,
+  sessionRenderedBody?: string,
 ): Promise<boolean> {
-  const liveBody = await deps.forge.getIssueBody(issue.number);
-  const result = await checkCommentCursorFreshness(deps.forge, issue.number, liveBody);
-  if (!commentCursorIsStale(result)) return false;
-  await escalateCommentCursorStale(deps.forge, deps.cfg, issue.number, result);
+  const drift = sessionRenderedBody !== undefined ? checkBodyDrift(liveBody, sessionRenderedBody) : null;
+  // Drift is checked FIRST and short-circuits the comment-stream fetch entirely when it fires —
+  // a pure string compare against a body already in hand, cheaper than (and unrelated to) the
+  // comment-freshness read, and there is nothing further worth checking once the input a session
+  // judged is already known to be stale.
+  const result = drift ?? (await checkCommentCursorFreshness(deps.forge, issue.number, liveBody));
+  if (drift == null && !commentCursorIsStale(result)) return false;
+  const { labeled, posted, labelError, postError } = await escalateCommentCursorStale(deps.forge, deps.cfg, issue.number, result);
   try {
-    deps.state.appendEvent("comment-cursor-stale", { round_id: roundId, issue: issue.number, checkpoint });
+    deps.state.appendEvent("comment-cursor-stale", {
+      round_id: roundId,
+      issue: issue.number,
+      checkpoint,
+      cause: drift != null ? "body-drift" : "comment-cursor",
+      labeled,
+      posted,
+      ...(labelError !== undefined ? { labelError } : {}),
+      ...(postError !== undefined ? { postError } : {}),
+    });
   } catch {
     /* contained — the forge escalation (label + pointer comment) already landed */
   }
@@ -514,6 +549,14 @@ async function reviewOneIssue(
     const currentBody = await deps.forge.getIssueBody(issue.number);
     const currentIssue: Issue = { ...issue, body: currentBody };
 
+    // #652 round 1 (finding 1): the body-drift comparison target for THIS cycle's pre-apply
+    // checkpoint below — set only when a reviewer SESSION actually rendered a prompt from a known
+    // body this cycle (the `else` branch). The seed branch's decision instead came from
+    // confirmOneIssue's OWN confirm session, rendered against confirmOneIssue's OWN body read —
+    // a value this function has no access to — so the seed cycle's pre-apply checkpoint below
+    // stays comment-cursor-only, exactly as before round 1 (confirmOneIssue's own pre-spend
+    // checkpoint already covers body-drift for that session).
+    let sessionInputBody: string | undefined;
     let decision: ReviewerDecision;
     if (cycle === 0 && seed) {
       // #214: an invalidated confirm pass hands its brief straight in — no reviewer session
@@ -524,7 +567,11 @@ async function reviewOneIssue(
       // #652: pre-spend checkpoint — refuse to spend on a reviewer session while the issue's
       // comment-adjudication cursor is stale/invalid. The seed branch above never reaches here
       // (it spends nothing), but the pre-apply checkpoint below still protects its decision.
-      if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-spend")) return false;
+      // #652 round 1 (finding 1): `currentBody` above IS this checkpoint's live read — passed
+      // straight through, never re-fetched, so the exact text validated here is the exact text
+      // `currentIssue`/the reviewer prompt render below.
+      if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-spend", currentBody)) return false;
+      sessionInputBody = currentBody;
 
       const reviewerPrompt = renderRolePrompt(reviewerTemplate, currentIssue, deps.cfg);
       const reviewerRole = deps.cfg.roles.verificationPlanReviewer;
@@ -597,7 +644,13 @@ async function reviewOneIssue(
     // invalidated-confirm handoff). A body edit or a pending comment landing WHILE the session
     // ran discards the decision without applying any of it — approve/verify_na/draft_request
     // alike, never a partial apply.
-    if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-apply")) return false;
+    // #652 round 1 (finding 1): a FRESH live read — never `currentBody` above, which is the body
+    // the session (when one ran this cycle) was GIVEN, not what may have changed since. Compared
+    // against `sessionInputBody` (undefined for the seed branch, see its own doc above) to catch
+    // a direct body edit landing DURING the session, the same drift class the AC-snapshot
+    // mechanism catches for dispatch/drive.
+    const liveBodyPreApply = await deps.forge.getIssueBody(issue.number);
+    if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-apply", liveBodyPreApply, sessionInputBody)) return false;
 
     if (decision.decision === "approve") {
       if (decision.body !== undefined) await deps.forge.updateIssueBody(issue.number, decision.body);
@@ -750,6 +803,17 @@ async function reviewOneIssue(
       return false;
     }
     trail.push(`cycle ${cycle}: verification-plan-drafter session ${drafterResult.name} -> drafted a revised body`);
+    // #652 round 1 (finding 2): recheck IMMEDIATELY before applying the drafter's write — the
+    // drafter SESSION just ran (a long-running gap), so a comment/body edit landing during it
+    // must be caught HERE, not only at the next cycle's pre-spend (which would already have
+    // overwritten a maintainer's edit with the drafter's now-stale output). Compared against
+    // `currentBody` — the exact body `currentIssue` (and so the drafter's own
+    // `{{issue.body}}`/`{{reviewer.brief}}` substitution) was rendered from this cycle,
+    // regardless of whether this cycle's decision came from a real reviewer session or a seed.
+    const liveBodyPreDrafterWrite = await deps.forge.getIssueBody(issue.number);
+    if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-drafter-write", liveBodyPreDrafterWrite, currentBody)) {
+      return false;
+    }
     await deps.forge.updateIssueBody(issue.number, draftValidated.body);
     // Loop back -> re-run the reviewer against the drafter's edit (body refetched above).
   }
@@ -849,7 +913,10 @@ async function confirmOneIssue(
   // "spending on a reviewer"). The confirm branch itself makes zero forge writes (see this
   // function's own doc), so there is no separate pre-apply checkpoint here; an "invalidate"
   // verdict hands off to reviewOneIssue's seed path, which carries its own pre-apply check.
-  if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-spend")) return false;
+  // #652 round 1 (finding 1): `currentBody` above (line ~797) IS this checkpoint's live read —
+  // passed straight through, never re-fetched (the same "fetch once, validate, then render" fix
+  // as reviewOneIssue's own pre-spend call).
+  if (await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-spend", currentBody)) return false;
 
   const currentIssue: Issue = { ...issue, body: currentBody };
   const confirmPrompt = renderRolePrompt(confirmTemplate, currentIssue, deps.cfg);

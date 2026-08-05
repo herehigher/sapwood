@@ -796,7 +796,7 @@ test("tick dispatch (#652): a non-engine comment already present when the cursor
   st.close();
 });
 
-test("tick dispatch (#652): a fresh cursor (no marker, zero comments) dispatches exactly as before — byte-identical reverse-test shape", async () => {
+test("tick dispatch (#652): a fresh cursor (no marker, zero comments) dispatches exactly as before — behavior-identical reverse-test shape (AC8 wording, #652 round 1: no new writes/labels/outcome changes; the checkpoint itself adds a comment/actor read)", async () => {
   const st = new State(":memory:");
   const sup = new FakeSupervisor();
   const forge = new FakeForge();

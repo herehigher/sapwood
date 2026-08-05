@@ -1951,7 +1951,15 @@ marker, a duplicate marker, a cursor pointing at an engine comment, or a cursor 
 longer exists all fail closed to needs-attention; a deleted PENDING comment simply supplies no
 content, but a deleted CURSOR TARGET requires a maintainer to reset the cursor to an existing
 adjudicated comment. An issue with no marker and zero comments is the one pass-through case —
-byte-identical to pre-#652 behavior.
+behavior-identical to pre-#652 behavior (no new writes, labels, or outcome changes for that case;
+the checkpoints themselves DO add comment/actor reads on every other case, see below).
+
+**Marker recognition is standalone-line anchored (round 1 hardening).** A marker counts only when
+it is the ENTIRE trimmed line, and never when that line falls inside a fenced (` ``` `/`~~~`)
+code block. Quoting the syntax for a maintainer's benefit is always safe and never mistaken for an
+authoritative marker: wrapping the marker in single backticks (inline code), leaving prose on the
+same line, or placing it inside a fenced block all parse as ordinary text, not a cursor. Only a
+bare marker, alone on its own trimmed line and outside any fence, is honored.
 
 **Engine-comment exemption is marker AND actor, never either alone.** A comment is exempt from
 "pending" status only when it carries the central `ENGINE_COMMENT_MARKER` (`forge.ts`) AND its
@@ -1959,12 +1967,23 @@ author matches the authenticated forge actor, resolved once per check
 (`IForge.getAuthenticatedActor`). An unresolvable actor exempts NO comment — the maximally
 fail-closed reading, never inferred from body content alone.
 
-**Three checkpoints cover the race between candidate selection and the work actually starting:**
+**A missing comment id fails the whole check closed.** If any comment in the fetched stream
+carries no id at all (a forge-read anomaly), the cursor cannot be evaluated against an incomplete
+stream — the check fails closed with the STREAM POSITION of the first id-less comment, never a
+silently-substituted placeholder id that could accidentally collide with (or be mistaken for) a
+real cursor target.
+
+**Checkpoints cover the race between candidate selection and the work actually starting, each
+checking BOTH comment-cursor freshness and (round 1) whether the live body still matches the body
+a session was actually given:**
 
 1. **Gate⓪** (`plan-review.ts`) checks freshness before spending on a verification-plan-reviewer
-   (or confirm) session, and rechecks immediately before applying ANY reviewer-derived body or
-   label write — a body edit or a pending comment landing WHILE the session ran discards that
-   cycle's decision without applying it, approve/verify_na/draft_request alike, never partially.
+   (or confirm) session — that exact read (never a second, separately-fetched one) is what gets
+   rendered into the session's prompt. It rechecks immediately before applying ANY
+   reviewer-derived body or label write, AND (round 1) immediately before the drafter's own body
+   write — a pending comment OR a direct body edit landing WHILE a session ran discards that
+   cycle's decision (or the drafter's draft) without applying it, approve/verify_na/draft_request
+   alike, never partially.
 2. **Dispatch** (`conductor.ts`'s DISPATCH loop) claims the issue first, then re-reads the live
    body followed by comments **inside the existing rollback-on-failure unit** — the refreshed
    body (never the pre-claim `getReadyIssues` body) is what the AC snapshot and the worker prompt
@@ -1978,14 +1997,25 @@ fail-closed reading, never inferred from body content alone.
    like an ordinary AC-snapshot body drift.
 
 **Degrade is the existing needs-human machinery, no new machinery.** A confirmed stale/invalid
-cursor applies the existing `needsHuman` label and posts ONE deduplicated engine comment listing
-the bounded pending comment ids and the recovery steps (record the ruling, rewrite the body,
-advance the cursor to the last comment adjudicated, remove `needs-human`). Dedup is a live
-marker scan keyed on the cursor/pending-set identity — the same comment/pending combination never
-produces a second pointer comment, but a genuinely new pending comment gets its own fresh post. A
-comment or body fetch failure performs NO issue write at all and propagates through each
-checkpoint's own existing retry/environment-failure path (dispatch's rollback-on-failure catch,
-drive's queued-and-retried-next-tick stance, gate⓪'s ordinary thrown-error propagation) — network
+cursor — or (gate⓪ only, round 1) a confirmed body-drift discard, recorded with a distinct event
+`cause` so the two are never conflated — applies the existing `needsHuman` label and posts ONE
+deduplicated engine comment listing the bounded pending comment ids and the recovery steps
+(record the ruling, rewrite the body, advance the cursor to the last comment adjudicated, remove
+`needs-human`; a body-drift discard names only the label removal — there is no cursor/marker
+action for it). Dedup is a live marker scan keyed on the cursor/pending-set identity — the same
+comment/pending combination never produces a second pointer comment, a genuinely new pending
+comment gets its own fresh post, and (round 1) a cursor corrected from one still-invalid target
+to another (e.g. a marker re-pointed from a deleted comment to a DIFFERENT deleted comment)
+dedupes distinctly rather than being silently suppressed by the earlier target's key. The dedup
+read and the pointer-comment post are themselves CONTAINED (round 1, adopting #659's
+escalation-writer.ts discipline): a failure there is reported in the outcome (`posted: false`,
+`postError`), never thrown past the label write — every checkpoint's durable
+`comment-cursor-stale` event is UNCONDITIONAL, carrying the full label/post outcome in its
+payload, so a dedup-fetch or post failure can no longer strand an issue labeled `needs-human`
+with neither a pointer comment nor a durable event to explain it. A comment or body fetch failure
+performs NO issue write at all and propagates through each checkpoint's own existing
+retry/environment-failure path (dispatch's rollback-on-failure catch, drive's
+queued-and-retried-next-tick stance, gate⓪'s ordinary thrown-error propagation) — network
 trouble must never turn a candidate into a human adjudication.
 
 **Rollout is a one-time backfill, not a migration.** The gate only ever blocks an issue that

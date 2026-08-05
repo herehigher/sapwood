@@ -3061,7 +3061,10 @@ async function checkCommentCursorBeforeDrive(
   }
   if (!commentCursorIsStale(cursorResult)) return null;
 
-  const { labeled } = await escalateCommentCursorStale(forge, cfg, w.issue, cursorResult);
+  // #652 round 1 (finding 3): escalateCommentCursorStale no longer throws past its own dedup-
+  // read/post attempt (contained, see its own doc) — the event append below is now genuinely
+  // UNCONDITIONAL on the label+post outcome, not merely "reached only when nothing threw."
+  const { labeled, posted, labelError, postError } = await escalateCommentCursorStale(forge, cfg, w.issue, cursorResult);
   state.upsertWorker({
     ...w,
     state: "failed",
@@ -3069,7 +3072,16 @@ async function checkCommentCursorBeforeDrive(
     gated_escalation_labeled: labeled ? 1 : 0,
     gated_escalation_carrier: "issue",
   });
-  state.appendEvent("comment-cursor-stale", { issue: w.issue, checkpoint: "drive", worker: w.name, pr, labeled });
+  state.appendEvent("comment-cursor-stale", {
+    issue: w.issue,
+    checkpoint: "drive",
+    worker: w.name,
+    pr,
+    labeled,
+    posted,
+    ...(labelError !== undefined ? { labelError } : {}),
+    ...(postError !== undefined ? { postError } : {}),
+  });
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: "comment-cursor-stale" };
 }
 
@@ -5115,8 +5127,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         const liveBody = await forge.getIssueBody(issue.number);
         const cursorResult = await checkCommentCursorFreshness(forge, issue.number, liveBody);
         if (commentCursorIsStale(cursorResult)) {
-          await escalateCommentCursorStale(forge, cfg, issue.number, cursorResult);
-          state.appendEvent("comment-cursor-stale", { issue: issue.number, checkpoint: "dispatch" });
+          // #652 round 1 (finding 3): escalateCommentCursorStale no longer throws past its own
+          // dedup-read/post attempt (contained, see its own doc) — the event below is now
+          // genuinely UNCONDITIONAL on the label+post outcome, appended before the deliberate
+          // throw two lines down (which exists only to trigger THIS try/catch's own rollback).
+          const { labeled, posted, labelError, postError } = await escalateCommentCursorStale(forge, cfg, issue.number, cursorResult);
+          state.appendEvent("comment-cursor-stale", {
+            issue: issue.number,
+            checkpoint: "dispatch",
+            labeled,
+            posted,
+            ...(labelError !== undefined ? { labelError } : {}),
+            ...(postError !== undefined ? { postError } : {}),
+          });
           throw new Error(`comment-cursor-stale: issue #${issue.number}'s adjudication cursor is not current — refusing dispatch`);
         }
         const dispatchIssue: Issue = { ...issue, body: liveBody };

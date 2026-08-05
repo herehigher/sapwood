@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema } from "../config/config.js";
 import type { PRComment } from "../forge/forge.js";
-import { checkCommentCursorFreshness, commentCursorIsStale, escalateCommentCursorStale } from "./comment-cursor-gate.js";
+import { checkBodyDrift, checkCommentCursorFreshness, commentCursorIsStale, escalateCommentCursorStale } from "./comment-cursor-gate.js";
 
 const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
 
@@ -68,6 +68,28 @@ test("checkCommentCursorFreshness: a forge read failure propagates (never caught
     getAuthenticatedActor: async () => "sapwood-bot",
   };
   await assert.rejects(() => checkCommentCursorFreshness(forge, 9, "body"), /network blip/);
+});
+
+// ── #652 round 1 (finding 1/2): checkBodyDrift — the standalone hash compare ────────────────────
+
+test("checkBodyDrift: identical bodies -> null (nothing to discard)", () => {
+  assert.equal(checkBodyDrift("same text", "same text"), null);
+});
+
+test("checkBodyDrift: a changed body -> a synthetic body-drift CommentCursorResult, pending empty", () => {
+  const result = checkBodyDrift("live text, edited", "original text a session was given");
+  assert.notEqual(result, null);
+  assert.equal(result?.ok, false);
+  if (result && !result.ok) {
+    assert.equal(result.reason, "body-drift");
+    assert.deepEqual(result.pending, []);
+    assert.match(result.detail, /changed since the session/);
+  }
+});
+
+test("checkBodyDrift: whitespace-only differences still count as drift (hash compare, not a semantic diff)", () => {
+  const result = checkBodyDrift("text ", "text");
+  assert.notEqual(result, null);
 });
 
 // ── escalateCommentCursorStale: needs-human + deduplicated pointer comment ─────────────────────
@@ -144,4 +166,67 @@ test("escalateCommentCursorStale: a needs-human label-write failure is reported,
   assert.match(outcome.labelError ?? "", /403 forbidden/);
   assert.equal(outcome.posted, true);
   assert.equal(commentsPosted.length, 1);
+});
+
+// ── #652 round 1 (finding 3): dedup-read/post failures are CONTAINED, never thrown ──────────────
+
+test("escalateCommentCursorStale: a dedup-fetch (getIssueComments) failure is reported, never thrown — label still attempted, posted: false with postError set", async () => {
+  const labelsAdded: { issue: number; label: string }[] = [];
+  const forge = {
+    addLabel: async (issue: number, label: string) => {
+      labelsAdded.push({ issue, label });
+    },
+    getIssueComments: async () => {
+      throw new Error("dedup read: 500 internal error");
+    },
+    addIssueComment: async () => {
+      throw new Error("must never be reached — the dedup read already threw");
+    },
+  };
+  const result = { ok: true as const, cursor: "0", pending: ["1"] };
+  // Must NOT throw — the whole point of this hardening.
+  const outcome = await escalateCommentCursorStale(forge, cfg, 9, result);
+  assert.equal(labelsAdded.length, 1, "the label write is attempted regardless of the dedup read's fate");
+  assert.equal(outcome.labeled, true);
+  assert.equal(outcome.posted, false, "unknown whether it was already posted -> never claim a post that may not have happened");
+  assert.match(outcome.postError ?? "", /dedup read: 500 internal error/);
+});
+
+test("escalateCommentCursorStale: an addIssueComment (post) failure is reported, never thrown — the dedup read itself succeeded", async () => {
+  const labelsAdded: { issue: number; label: string }[] = [];
+  const forge = {
+    addLabel: async (issue: number, label: string) => {
+      labelsAdded.push({ issue, label });
+    },
+    getIssueComments: async () => [] as PRComment[],
+    addIssueComment: async () => {
+      throw new Error("502 bad gateway");
+    },
+  };
+  const result = { ok: true as const, cursor: "0", pending: ["1"] };
+  const outcome = await escalateCommentCursorStale(forge, cfg, 9, result);
+  assert.equal(labelsAdded.length, 1);
+  assert.equal(outcome.labeled, true);
+  assert.equal(outcome.posted, false);
+  assert.match(outcome.postError ?? "", /502 bad gateway/);
+});
+
+test("escalateCommentCursorStale: BOTH the label write and the dedup read fail — both outcomes are reported, still never thrown", async () => {
+  const forge = {
+    addLabel: async () => {
+      throw new Error("403 forbidden");
+    },
+    getIssueComments: async () => {
+      throw new Error("network blip");
+    },
+    addIssueComment: async () => {
+      throw new Error("must never be reached");
+    },
+  };
+  const result = { ok: true as const, cursor: "0", pending: ["1"] };
+  const outcome = await escalateCommentCursorStale(forge, cfg, 9, result);
+  assert.equal(outcome.labeled, false);
+  assert.match(outcome.labelError ?? "", /403 forbidden/);
+  assert.equal(outcome.posted, false);
+  assert.match(outcome.postError ?? "", /network blip/);
 });
