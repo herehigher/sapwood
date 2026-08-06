@@ -3590,6 +3590,35 @@ export class State {
     return (this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM events").get() as { m: number }).m;
   }
 
+  /** #688: the SUBJECT-scoped twin of maxEventId() above — util/heartbeat.ts's createHeartbeatGate
+   *  uses this (via worker.ts's per-lane call site) as its spam-suppression progress id instead of
+   *  the global MAX(id). Liveness is per-lane: with the global id, two concurrent lanes on the
+   *  same cadence permanently starve one of them (whichever ticks second always sees the OTHER
+   *  lane's just-appended id and skips, forever — not a race, deterministic; live batch-10
+   *  evidence, 2026-08-06). Scoped to `$.worker` — the same payload field `dispatched`,
+   *  `park-canary`, `worker-heartbeat`, `egress-suspect`, and the other worker-scoped kinds above
+   *  already carry — so "this lane's own progress" is any event mentioning it, not just its own
+   *  heartbeats. */
+  maxEventIdForWorker(worker: string): number {
+    const row = this.db.prepare(`SELECT COALESCE(MAX(id), 0) AS m FROM events WHERE json_extract(payload, '$.worker') = ?`).get(worker) as {
+      m: number;
+    };
+    return row.m;
+  }
+
+  /** #688: maxEventIdForWorker's twin for peripheral.ts's role sessions — the `role-session-*`
+   *  event kinds (role-session-heartbeat, role-session-spawn-timeout, role-session-exit-lost) all
+   *  key their subject on payload `$.name` (the unique `role-${roleId}-${uuid}` session name, not
+   *  the shared `roleId`), so this is the correct per-session scope for the same reason
+   *  maxEventIdForWorker is scoped to `$.worker`: multiple concurrent role sessions on the same
+   *  cadence must not starve each other via a shared global id. */
+  maxEventIdForRoleSession(name: string): number {
+    const row = this.db.prepare(`SELECT COALESCE(MAX(id), 0) AS m FROM events WHERE json_extract(payload, '$.name') = ?`).get(name) as {
+      m: number;
+    };
+    return row.m;
+  }
+
   /** #123: id-cursor variant of spentUsdSince (same rationale as eventsAfterId). */
   spentUsdAfterId(afterId: number): number {
     const row = this.db.prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE id > ?").get(afterId) as { total: number };

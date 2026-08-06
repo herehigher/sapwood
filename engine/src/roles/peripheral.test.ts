@@ -13,6 +13,7 @@ import { DEFAULT_LLM_FAILURE_PATTERNS, type EnvFailureSource } from "../loop/env
 import type { EventKind } from "../state/event-kinds/index.js";
 import type { EventPayloadFor } from "../state/event-kinds/payloads.js";
 import type { ParkRow } from "../state/state.js";
+import { State } from "../state/state.js";
 import type { ContextManifest } from "./context-manifest.js";
 import {
   ARCHITECT_ALLOWED_TOOLS,
@@ -59,6 +60,17 @@ const realClock = (): Date => new Date();
 const INIT_OBSERVED_GUARD_MS = 30_000;
 
 const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Same poll-until-true shape as worker.test.ts's own `waitFor` — used only by the #688
+ *  concurrent-role-session heartbeat test below, which needs to observe real State rows
+ *  produced by a REAL running child on its own timer, not a fixed sleep. */
+const waitFor = async (predicate: () => boolean, message: string, timeoutMs = 30_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(message);
+    await sleepMs(5);
+  }
+};
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 
@@ -547,7 +559,7 @@ exit ${opts.exitCode}
 
 const mkEventSink = (): {
   events: Array<[string, unknown]>;
-  state: { appendEvent: (k: string, p: unknown) => void; maxEventId: () => number };
+  state: { appendEvent: (k: string, p: unknown) => void; maxEventIdForRoleSession: (name: string) => number };
 } => {
   const events: Array<[string, unknown]> = [];
   return {
@@ -556,7 +568,7 @@ const mkEventSink = (): {
       appendEvent: (kind: string, payload: unknown): void => {
         events.push([kind, payload]);
       },
-      maxEventId: () => events.length,
+      maxEventIdForRoleSession: (name: string) => events.filter(([, p]) => (p as { name?: unknown } | undefined)?.name === name).length,
     },
   };
 };
@@ -1058,7 +1070,7 @@ test("#410: a peripheral session's WebFetch/WebSearch tool_use calls produce the
     const bin = mkStub(dir, `#!/usr/bin/env bash\ncat <<'EOF'\n${stream}\nEOF\nexit 0\n`);
     const events: Array<{ kind: string; payload: unknown }> = [];
     const runner = mkRunner(dir, bin, {
-      state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }), maxEventId: () => 0 },
+      state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }), maxEventIdForRoleSession: () => 0 },
     });
     const result = await runner.run({
       roleId: "architect",
@@ -1100,7 +1112,7 @@ test("#410 (Codex sol-high PR #417 review, P2-b): a role session WITHOUT the Web
     const bin = mkStub(dir, `#!/usr/bin/env bash\ncat <<'EOF'\n${stream}\nEOF\nexit 0\n`);
     const events: Array<{ kind: string; payload: unknown }> = [];
     const runner = mkRunner(dir, bin, {
-      state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }), maxEventId: () => 0 },
+      state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }), maxEventIdForRoleSession: () => 0 },
     });
     await runner.run({ roleId: "verification-plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(
@@ -2145,7 +2157,7 @@ test("run (#395 gate② P2-1b): a spawn confirmation timeout appends a durable r
       appendEvent: (kind: string, payload: unknown): void => {
         events.push([kind, payload]);
       },
-      maxEventId: () => events.length,
+      maxEventIdForRoleSession: () => events.length,
     };
     const runner = mkRunner(dir, bin, {
       cfg: { ...cfg, liveness: { ...cfg.liveness, spawnConfirmTimeoutMs: 1 } },
@@ -2883,6 +2895,58 @@ exit 0
 // the real child's own (very much still pending) exit, while killTree's existing SIGTERM->SIGKILL
 // fallback still reaps the real process so the test leaves nothing running behind it.
 
+test("run (#688, same mechanism as worker.ts's lane test — AC3): TWO concurrent role sessions on the same heartbeat cadence, against a real State, BOTH keep heart-beating", async () => {
+  const dirA = mkdtempSync(join(tmpdir(), "sapwood-role-a-"));
+  const dirB = mkdtempSync(join(tmpdir(), "sapwood-role-b-"));
+  const state = new State(":memory:");
+  try {
+    const releaseA = join(dirA, "release");
+    const releaseB = join(dirB, "release");
+    const binA = mkStub(
+      dirA,
+      `#!/usr/bin/env bash\necho '{"type":"system","subtype":"init"}'\nwhile [ ! -f ${JSON.stringify(releaseA)} ]; do sleep 0.01; done\necho '{"type":"result","subtype":"success","total_cost_usd":0.0001}'\n`,
+    );
+    const binB = mkStub(
+      dirB,
+      `#!/usr/bin/env bash\necho '{"type":"system","subtype":"init"}'\nwhile [ ! -f ${JSON.stringify(releaseB)} ]; do sleep 0.01; done\necho '{"type":"result","subtype":"success","total_cost_usd":0.0001}'\n`,
+    );
+    const runnerA = mkRunner(dirA, binA, { state, heartbeatMs: 15 });
+    const runnerB = mkRunner(dirB, binB, { state, heartbeatMs: 15 });
+    const runA = runnerA.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    // #688's own live incident was two sessions dispatched moments apart (7s), not
+    // simultaneously — a small real gap here reproduces that stagger.
+    await sleepMs(20);
+    const runB = runnerB.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    const heartbeatsByName = (): Map<string, number> => {
+      const counts = new Map<string, number>();
+      for (const e of state.eventsAfterId(0, ["role-session-heartbeat"])) {
+        const name = (e.payload as { name: string }).name;
+        counts.set(name, (counts.get(name) ?? 0) + 1);
+      }
+      return counts;
+    };
+    // Both sessions alive and heart-beating concurrently: neither may be permanently starved by
+    // the other's progress — the same starvation bug worker.ts's lane test proves fixed, for the
+    // peripheral.ts role-session-heartbeat caller.
+    await waitFor(
+      () => {
+        const counts = [...heartbeatsByName().values()];
+        return counts.length === 2 && counts.every((n) => n >= 2);
+      },
+      `at least one role session was starved — heartbeat counts by name: ${JSON.stringify([...heartbeatsByName()])}`,
+    );
+    writeFileSync(releaseA, "");
+    writeFileSync(releaseB, "");
+    const [resultA, resultB] = await Promise.all([runA, runB]);
+    assert.equal(resultA.outcome, "done");
+    assert.equal(resultB.outcome, "done");
+  } finally {
+    state.close();
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+  }
+});
+
 test("run (#395 item 1): TWO CONSECUTIVE dead pid readings with no real exit event -> exitPromise resolves synthetically (null), outcome 'failed' via the EXISTING non-done path, a durable role-session-exit-lost event recorded", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
@@ -2892,7 +2956,7 @@ test("run (#395 item 1): TWO CONSECUTIVE dead pid readings with no real exit eve
       appendEvent: (kind: string, payload: unknown): void => {
         events.push([kind, payload]);
       },
-      maxEventId: () => events.length,
+      maxEventIdForRoleSession: () => events.length,
     };
     let probeCalls = 0;
     const runner = new RoleRunner({
@@ -3057,7 +3121,7 @@ test("run (#395 gate② follow-up, P1): once timedOut latches, role-session-hear
         events.push([kind, payload]);
         if (kind === "role-session-heartbeat") lastHeartbeatCallIndex = callIndex;
       },
-      maxEventId: () => events.length,
+      maxEventIdForRoleSession: () => events.length,
     };
     let fakeMs = Date.now();
     let bumped = false;
@@ -3195,7 +3259,7 @@ test("run (#395 gate② follow-up, P2): a timeout kill whose own exit notificati
       appendEvent: (kind: string, payload: unknown): void => {
         events.push([kind, payload]);
       },
-      maxEventId: () => events.length,
+      maxEventIdForRoleSession: () => events.length,
     };
     let fakeMs = Date.now();
     let bumped = false;

@@ -19,9 +19,20 @@
 //     and keeps heart-beating — this is NOT a progress-content check (deliberately: gating on
 //     JSONL growth or child output would kill a quiet-but-working session, which is normal).
 //  2. SPAM (#383, #395 P2-2): only emit when it would otherwise be the SOLE record of anything —
-//     skip the append when state.maxEventId() has already advanced since the last heartbeat
-//     check (something else already proved progress this cadence). A busy engine then emits
-//     ~zero heartbeats; a genuinely quiet one emits at most one per cadence.
+//     skip the append when the caller-supplied `currentProgressId()` has already advanced since
+//     the last heartbeat check (something else already proved progress this cadence). A busy
+//     subject then emits ~zero heartbeats; a genuinely quiet one emits at most one per cadence.
+//
+//     #688: `currentProgressId` is caller-supplied, deliberately NOT this module reaching for
+//     `state.maxEventId()` itself. The two per-lane/per-role-session call sites (worker.ts,
+//     peripheral.ts) must scope it to the SUBJECT this heartbeat represents (state.
+//     maxEventIdForWorker(name) / state.maxEventIdForRoleSession(name)) — liveness is PER-SUBJECT,
+//     and one lane's progress says nothing about another's. Live batch-10 evidence (2026-08-06):
+//     with two concurrent lanes sharing one global id, whichever lane ticks second in a race
+//     always sees the OTHER lane's just-appended id and skips — forever, deterministically, not a
+//     flaky race (see heartbeat.test.ts's "starvation" regression). round.ts's single process-wide
+//     loop heartbeat is the one caller that correctly keeps `() => state.maxEventId()` unscoped —
+//     there is only ONE subject (this run), so global and per-subject coincide.
 //
 // round.ts's standby/park-recovery waits have no child to probe — they reuse this same gate with
 // `isAlive: () => true` (guard 1 is a no-op there; only guard 2 applies). See each call site's
@@ -44,11 +55,18 @@ export interface HeartbeatGate {
   tick: (kind: EventKind, payload: Record<string, unknown>) => void;
 }
 
-export function createHeartbeatGate(state: Pick<State, "appendEvent" | "maxEventId">, isAlive: () => boolean): HeartbeatGate {
-  let lastSeenId = state.maxEventId();
+export function createHeartbeatGate(
+  state: Pick<State, "appendEvent">,
+  isAlive: () => boolean,
+  // #688: the SUBJECT-scoped progress id (e.g. state.maxEventIdForWorker(name) /
+  // state.maxEventIdForRoleSession(name)) — see this module's own header doc for why this must
+  // never be a global id shared across concurrent subjects.
+  currentProgressId: () => number,
+): HeartbeatGate {
+  let lastSeenId = currentProgressId();
   return {
     tick(kind, payload) {
-      const currentId = state.maxEventId();
+      const currentId = currentProgressId();
       if (currentId !== lastSeenId) {
         // Something else already proved progress this cadence — this heartbeat has nothing to
         // add. Re-baseline so the NEXT check measures silence from here, not from the old id.
@@ -61,10 +79,10 @@ export function createHeartbeatGate(state: Pick<State, "appendEvent" | "maxEvent
       } catch {
         /* best-effort */
       }
-      // The append above just advanced maxEventId itself — re-read so the NEXT tick's baseline
-      // reflects it (otherwise every subsequent tick would see "changed" against a stale id and
-      // silently skip forever).
-      lastSeenId = state.maxEventId();
+      // The append above just advanced this subject's own progress id — re-read so the NEXT
+      // tick's baseline reflects it (otherwise every subsequent tick would see "changed" against
+      // a stale id and silently skip forever).
+      lastSeenId = currentProgressId();
     },
   };
 }

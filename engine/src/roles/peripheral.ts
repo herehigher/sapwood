@@ -424,11 +424,14 @@ export interface RoleRunnerDeps {
   /** #395 (gate② round 2/3): narrow State surface for the run() heartbeat interval's own
    *  progress signal (util/heartbeat.ts's createHeartbeatGate — a `role-session-heartbeat` event,
    *  appended on the SAME `hb` interval this runner already keeps alive for the whole session).
-   *  `maxEventId` is needed for the gate's own "don't speak over other progress" check, on top of
-   *  `appendEvent`. Same optional/omitted = zero-behavior-change contract as every other narrow-
-   *  state dep in this codebase (e.g. worker.ts's WorkerDeps.state) — cli.ts's real production
-   *  construction always supplies it; a bare test fake simply never gets the heartbeat event. */
-  state?: Pick<State, "appendEvent" | "maxEventId">;
+   *  `maxEventIdForRoleSession` is needed for the gate's own "don't speak over other progress FOR
+   *  THIS SESSION" check, on top of `appendEvent` — #688 scoped this from the prior global
+   *  `maxEventId`, which permanently starved every-but-one concurrent role session (see
+   *  heartbeat.ts's own header doc). Same optional/omitted = zero-behavior-change contract as
+   *  every other narrow-state dep in this codebase (e.g. worker.ts's WorkerDeps.state) — cli.ts's
+   *  real production construction always supplies it; a bare test fake simply never gets the
+   *  heartbeat event. */
+  state?: Pick<State, "appendEvent" | "maxEventIdForRoleSession">;
   /** #395 item 1: the pid-liveness probe run()'s heartbeat interval uses BOTH to gate the
    *  `role-session-heartbeat` event (via createHeartbeatGate's `isAlive`) AND to detect a lost
    *  child-exit notification (util/heartbeat.ts's createExitLossDetector) — the SAME probe for
@@ -914,9 +917,11 @@ export class RoleRunner {
       // growth / child-output gate): a legitimately quiet-but-working session (no output for
       // minutes) must keep heart-beating as long as the child is alive, or a healthy slow
       // session would be killed. createHeartbeatGate (util/heartbeat.ts) also folds in the P2-2
-      // spam fix: skip the append when something ELSE already advanced maxEventId this cadence
-      // (an otherwise-busy engine emits ~zero of these). Optional (RoleRunnerDeps.state) for the
-      // same "omitted = zero behavior change" contract every other optional dep here uses.
+      // spam fix: skip the append when something ELSE already advanced THIS SESSION's own
+      // progress this cadence (#688: maxEventIdForRoleSession(name), scoped per session, not the
+      // prior global maxEventId() that starved every-but-one concurrent role session). Optional
+      // (RoleRunnerDeps.state) for the same "omitted = zero behavior change" contract every other
+      // optional dep here uses.
       //
       // #395 item 1: this SAME probe (never a second implementation) also backs
       // createExitLossDetector below — reused, not new machinery. `deps.isPidAlive` is injectable
@@ -933,7 +938,9 @@ export class RoleRunner {
           return false;
         }
       };
-      const heartbeatGate = this.deps.state ? createHeartbeatGate(this.deps.state, isChildAlive) : undefined;
+      const heartbeatGate = this.deps.state
+        ? createHeartbeatGate(this.deps.state, isChildAlive, () => this.deps.state!.maxEventIdForRoleSession(name))
+        : undefined;
       // #395 item 1: the pid probe above already POSITIVELY detects a dead child — today (before
       // this) that detection only silenced the heartbeat, and the engine's sole response to a
       // genuinely lost exit notification (this issue's whole premise) was to fall silent on

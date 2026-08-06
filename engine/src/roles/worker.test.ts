@@ -1567,7 +1567,7 @@ test("#304 fail-safe: an egress event write failure is logged but cannot change 
         appendEvent: () => {
           throw new Error("events unavailable");
         },
-        maxEventId: () => 0,
+        maxEventIdForWorker: () => 0,
         recordContextManifest: () => {},
       },
     });
@@ -2740,6 +2740,42 @@ test("dispatch (#395 gate② round 3, P1): a LIVE worker leg heart-beats against
       countAtDeath,
       "no FURTHER worker-heartbeat events were appended once the child was confirmed dead, even though the setInterval kept firing",
     );
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch (#688, batch-10 lane-678/lane-670 evidence): TWO concurrent lanes on the same heartbeat cadence, against a real State, BOTH keep heart-beating — a global-id gate starves whichever lane loses the race, deterministically, this proves the real maxEventIdForWorker wiring does not", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const state = new State(":memory:");
+  let s: WorkerSupervisor | undefined;
+  try {
+    const { bin } = longRunningStub(dir);
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 15, // fast cadence so several ticks land quickly for both lanes
+      guardHookPath: mkHook(dir),
+      state,
+    });
+    const { name: nameA } = await s.dispatch({ number: 21, title: "lane-a", labels: [] });
+    // #688's own live incident was two lanes dispatched moments apart (7s), not simultaneously —
+    // a small real gap here reproduces that stagger rather than an artificial simultaneous start.
+    await sleep(20);
+    const { name: nameB } = await s.dispatch({ number: 22, title: "lane-b", labels: [] });
+    const heartbeatsFor = (name: string): number =>
+      state.eventsAfterId(0, ["worker-heartbeat"]).filter((e) => (e.payload as { worker: string }).worker === name).length;
+    // Both lanes alive and heart-beating concurrently: neither may be permanently starved by the
+    // other's progress — the exact bug this issue fixes (a global maxEventId gate lets whichever
+    // lane ticks second in a race see the other's just-appended id and skip forever).
+    await waitFor(() => heartbeatsFor(nameA) >= 2, `lane A (${nameA}) starved — no more than one worker-heartbeat landed`);
+    await waitFor(() => heartbeatsFor(nameB) >= 2, `lane B (${nameB}) starved — no more than one worker-heartbeat landed`);
   } finally {
     killAnyRunningLanes(s);
     s?.dispose();
