@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import {
   chmodSync,
   closeSync,
@@ -84,8 +84,8 @@ test("WorkerSupervisor: default guard hook resolves the compiled hook in the gua
     const guardHookPath = (supervisor as unknown as { guardHookPath: string }).guardHookPath;
     assert.equal(guardHookPath, fileURLToPath(new URL("../guard/guard-hook.js", import.meta.url)));
   } finally {
+    killAnyRunningLanes(supervisor);
     supervisor?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1033,27 +1033,9 @@ test("claudeArgs (#285, Codex sol-high PR #300 review, P1): strictMcpConfig -> -
 });
 
 // ── Integration: stub `claude` (zero token) drives the real spawn/sentinel/probe path ──
-/** #691 (Codex gate② hardening): the filename `killAnyRunningLanes` reads its kill-list from —
- *  see `mkStub`'s doc for why this is populated by a SELF-REPORT from the real spawned process,
- *  never by trusting a `*.running.json` sentinel's `wrapper_pid` field on faith. */
-const SPAWNED_PIDS_FILE = ".spawned-pids";
 const mkStub = (dir: string, body: string): string => {
   const p = join(dir, "claude-stub");
-  // #691 (Codex gate② hardening, replacing a design that trusted `wrapper_pid` out of
-  // `*.running.json` files): `killAnyRunningLanes` must never signal a pid it cannot prove this
-  // TEST actually spawned — a `*.running.json` is just JSON a test is free to fabricate, and one
-  // does (the #294 contested-branch test below writes `wrapper_pid: process.pid` to a hand-rolled
-  // marker for a lane that was never spawned at all; killing that pid would SIGKILL the test
-  // runner's own process group). `$$` inside a REAL running shell is unfalsifiable — only a
-  // genuinely-spawned process can append its own pid here, so this file is the trusted spawn
-  // registry `killAnyRunningLanes` reads from instead. Inserted right after the shebang line (the
-  // convention every body passed to this helper already follows), so it announces before any of
-  // the body's own logic runs.
-  const nl = body.indexOf("\n");
-  const shebangLine = nl === -1 ? body : body.slice(0, nl + 1);
-  const rest = nl === -1 ? "" : body.slice(nl + 1);
-  const announced = `${shebangLine}echo "$$" >> "${join(dir, SPAWNED_PIDS_FILE)}"\n${rest}`;
-  writeFileSync(p, announced, { mode: 0o755 });
+  writeFileSync(p, body, { mode: 0o755 });
   chmodSync(p, 0o755);
   return p;
 };
@@ -1077,7 +1059,6 @@ test("spawnClaudeSession (#285): opts.cwd, when given, is the spawned process's 
     // from the un-resolved path string this test passed in, while still being the SAME directory.
     assert.equal(realpathSync(out), realpathSync(targetCwd), "the spawned process actually ran with cwd=targetCwd");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
     rmSync(targetCwd, { recursive: true, force: true });
   }
@@ -1098,7 +1079,6 @@ test("spawnClaudeSession (#285): opts.cwd OMITTED -> the spawned process inherit
     const out = readFileSync(jsonlPath, "utf8").trim();
     assert.equal(realpathSync(out), realpathSync(process.cwd()), "no cwd given -> inherits the engine process's own cwd, unchanged");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1136,56 +1116,69 @@ const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"succes
  *  own (verified empirically; `dispose()` only clears timers/fds -- its own doc says "does not
  *  kill children").
  *
- *  Codex gate② (a072bb1 review): the FIRST version of this trusted a `*.running.json`
- *  sentinel's `wrapper_pid` field, parsed off disk, with no proof this test actually spawned
- *  that pid -- the exact class #668/PR#677 spent eight review rounds on (never signal a pid you
- *  cannot prove you own). Concretely wrong: this file's own #294 contested-branch test writes
- *  `wrapper_pid: process.pid` into a hand-rolled `*.running.json` for a lane that was NEVER
- *  spawned, purely to exercise `probe()`'s branch-contention logic -- the old code would have
- *  read that marker and issued `process.kill(-process.pid, "SIGKILL")`, killing the test
- *  runner's own process group. Fixed by never trusting sentinel JSON for identity: `mkStub`
- *  (this file) now has every REAL spawned process self-report its own pid via `$$` (unfalsifiable
- *  -- only a genuinely-running shell can append it) into `SPAWNED_PIDS_FILE`, and this function
- *  reads ONLY that registry. A terminal lane's process already exited on its own (ESRCH on kill,
- *  tolerated) -- this is CLEANUP, never an assertion, so best-effort and silent throughout.
+ *  Codex gate② (a072bb1 review, P1): the FIRST version of this trusted a `*.running.json`
+ *  sentinel's `wrapper_pid` field parsed off disk, with no proof this test actually spawned that
+ *  pid -- the exact class #668/PR#677 spent eight review rounds on (never signal a pid you cannot
+ *  prove you own). Concretely wrong: this file's own #294 contested-branch test writes
+ *  `wrapper_pid: process.pid` into a hand-rolled marker for a lane that was NEVER spawned; the old
+ *  code would have called `process.kill(-process.pid, "SIGKILL")`, killing the test runner's own
+ *  process group.
  *
- *  Hard, unconditional refusals on top of the registry (defense in depth, not the primary
- *  mechanism): never signal this test runner's own pid or its parent's pid. */
-function killAnyRunningLanes(dir: string): void {
-  let raw: string;
-  try {
-    raw = readFileSync(join(dir, SPAWNED_PIDS_FILE), "utf8");
-  } catch {
-    return; // no registry -- nothing was ever spawned (or the dir is already gone)
-  }
-  for (const line of raw.split("\n")) {
-    const pid = Number.parseInt(line.trim(), 10);
-    if (!Number.isInteger(pid) || pid <= 0) continue;
-    // Hard, unconditional refusals -- no `process.getpgid` in Node's `process` API (portably
-    // reaching for one, e.g. by shelling out to `ps`, is exactly the platform-fragile pattern
-    // that produced #691's OWN root cause upstream, PR #690's `ps -o lstart=`), so ownership is
-    // proved by the SPAWNED_PIDS_FILE registry alone (only a genuinely-running shell can have
-    // appended its own `$$` there) plus these two cheap, portable identity checks.
-    if (pid === process.pid) continue; // never this test runner's own pid
-    if (pid === process.ppid) continue; // never this test runner's own parent
-    try {
-      process.kill(-pid, "SIGKILL"); // negative pid -> the whole detached process group
-    } catch {
-      /* already dead (ESRCH) -- best-effort only */
+ *  Codex gate② round 2 (ffa3c46 re-review, P2 downgraded from P1): the FIRST fix replaced the
+ *  sentinel with a persistent self-reported pid registry (`$$` appended to a `.spawned-pids` file
+ *  by every real spawned process) -- an improvement (unfalsifiable identity) but still wrong in
+ *  the same FAMILY of bug: it proved a pid was HISTORICALLY spawned by this test, never that it is
+ *  CURRENTLY still that same process. Three concrete holes: (a) a child exists before its first
+ *  shell command appends `$$`, so immediate-failure cleanup could miss it; (b) entries were never
+ *  removed after exit, so a LATER sweep would still try to signal a pid the test spawned an HOUR
+ *  ago and that already exited -- and after pid reuse, `kill(-pid)` lands on a brand-new, wholly
+ *  unrelated process group; (c) the `process.pid`/`ppid` refusals didn't cover this runner's own
+ *  actual process group.
+ *
+ *  Final design -- kill by LIVE HANDLE, never by persisted text, closing the whole family at once:
+ *  each `WorkerSupervisor.lanes` entry already holds the real `ChildProcess` object
+ *  (`worker.ts`'s `Lane.child`) for as long as that lane is tracked -- the same object `dispose()`
+ *  clears intervals from, read here via the SAME unsafe-cast-to-private-field pattern this file
+ *  already uses throughout (`guardHookPath`, `signalGroup`, `writeJsonAtomic`, ...), so this needs
+ *  NO production-code change. `child.exitCode`/`child.signalCode` is Node's own live/dead
+ *  determination for THIS EXACT handle -- not a snapshot, not a name, not reusable by an unrelated
+ *  process -- so "is this pid still mine and still alive" is answered by the runtime itself, the
+ *  same authority `worker.ts`'s own `onExit` handler relies on. No registry, no self-report, no
+ *  identity refusal list: none of that is needed once the check is against the handle itself.
+ *  Every caller must invoke this BEFORE disposing the same supervisor(s) -- `dispose()` clears
+ *  `this.lanes`, which is the only place these handles are reachable from. */
+function killAnyRunningLanes(...supervisors: Array<WorkerSupervisor | undefined>): void {
+  for (const s of supervisors) {
+    if (!s) continue;
+    const lanes = (s as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes;
+    for (const lane of lanes.values()) {
+      const child = lane.child;
+      if (child.exitCode !== null || child.signalCode !== null) continue; // already exited -- nothing to do
+      const pid = child.pid;
+      if (typeof pid === "number") {
+        try {
+          process.kill(-pid, "SIGKILL"); // whole detached group -- covers a foreground `sleep` grandchild
+        } catch {
+          /* ESRCH -- already gone, or never became its own group leader */
+        }
+      }
+      try {
+        child.kill("SIGKILL"); // belt-and-braces: Node addressing its OWN handle directly
+      } catch {
+        /* already gone */
+      }
     }
   }
 }
 
-// #691 Codex gate② P1 (a072bb1 review): a spawned-pids registry entry equal to `process.pid` must
-// be REFUSED, unconditionally -- red-before against the FIRST version of this fix, which trusted
-// `*.running.json`'s `wrapper_pid` field directly and would have called
-// `process.kill(-process.pid, "SIGKILL")` for this file's own #294 contested-branch test (its
-// hand-rolled `wrapper_pid: process.pid` marker). That version only survived by accident --
-// `node --test`'s worker isn't its own process-group leader on this host, so the negative-pid
-// signal happened to ESRCH -- not by design. `process.kill` is spied here (never a REAL signal
-// sent) so this proof cannot itself take down the runner if the refusal ever regresses.
-test("killAnyRunningLanes (#691 Codex gate② P1): a spawned-pids entry equal to process.pid is REFUSED -- the runner's own pid is never signalled, in any form", () => {
+// #691 Codex gate② round 2 (ffa3c46 re-review, P2): retargeted from the pid-registry version --
+// proves the sweep does NOT signal a lane whose CHILD HAS ALREADY EXITED, even though its lane
+// record is still present in the supervisor (the exact shape ffa3c46's persistent-registry design
+// got wrong: it never removed a pid after exit, so a later sweep would still try to signal it).
+// `process.kill` is spied (never a real signal sent) so this proof is safe to run unconditionally.
+test("killAnyRunningLanes (#691 Codex gate② round 2): a lane whose child has already exited produces ZERO process.kill calls -- liveness is proved against the live ChildProcess handle, never a persisted record", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   const killCalls: Array<{ pid: number; signal: unknown }> = [];
   const realKill = process.kill.bind(process);
   process.kill = ((pid: number, signal?: unknown) => {
@@ -1193,11 +1186,20 @@ test("killAnyRunningLanes (#691 Codex gate② P1): a spawned-pids entry equal to
     return true;
   }) as typeof process.kill;
   try {
-    writeFileSync(join(dir, SPAWNED_PIDS_FILE), `${process.pid}\n`);
-    killAnyRunningLanes(dir);
-    assert.deepEqual(killCalls, [], "the runner's own pid must never reach process.kill in any form (positive or negated)");
+    const bin = mkStub(dir, FAST_STUB);
+    s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 1, title: "t", labels: [] });
+    const lanes = (s as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes;
+    const lane = lanes.get(name);
+    assert.ok(lane, "the lane record must still be present -- this proof is about a STALE-but-present record, not a missing one");
+    // Wait for the REAL child to actually exit (not just the .done.json sentinel landing -- the
+    // sentinel can be written a tick before the wrapper process itself is reaped by the OS).
+    await waitFor(() => lane.child.exitCode !== null || lane.child.signalCode !== null, "the dispatched child never exited");
+    killAnyRunningLanes(s);
+    assert.deepEqual(killCalls, [], "an already-exited child's still-present lane record must never reach process.kill");
   } finally {
     process.kill = realKill;
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1221,7 +1223,6 @@ test("probeLlmPing: exit 0 + 'pong' on stdout -> ok (case-insensitive, whitespac
     const bin = mkStub(dir, `#!/usr/bin/env bash\necho "  Pong  "\nexit 0\n`);
     assert.deepEqual(await probeLlmPing(bin, "haiku", 0.05, 30), { ok: true });
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1234,7 +1235,6 @@ test("probeLlmPing: exit 0 but NON-pong stdout -> failure, detail carries the fi
     assert.equal(r.ok, false);
     assert.ok(r.detail?.includes("I'm sorry"));
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1247,7 +1247,6 @@ test("probeLlmPing (P3): a sentence CONTAINING 'pong' is a failure — success r
     assert.equal(r.ok, false, "a refusal mentioning 'pong' must never read as provider health");
     assert.ok(r.detail?.includes("I cannot return only pong"));
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1260,7 +1259,6 @@ test("probeLlmPing: non-zero exit -> failure even with 'pong' on stdout; detail 
     assert.equal(r.ok, false);
     assert.equal(r.detail, "Error: Exceeded USD budget (0.01)");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1273,7 +1271,6 @@ test("probeLlmPing: an older CLI rejecting the ping's flags surfaces the unknown
     assert.equal(r.ok, false);
     assert.ok(r.detail?.includes("unknown option"));
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1300,7 +1297,6 @@ test("probeLlmPing: a hang past probeTimeoutSec is hard-killed and resolves fail
     // run 9x slower than expected still passes; a regression that drops the kill cannot pass.
     assert.ok(Date.now() - start < 10_000, "resolved via the timeout kill, not by waiting out the 30s sleep");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1320,7 +1316,6 @@ test("probeLlmPing (#578): output still in flight when the process exits is NOT 
     const bin = mkStub(dir, `#!/usr/bin/env bash\n( sleep 0.3; echo pong ) &\nexit 0\n`);
     assert.deepEqual(await probeLlmPing(bin, "haiku", 0.05, 30), { ok: true });
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1351,7 +1346,6 @@ test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no
       "Respond with the single word 'pong' and nothing else.",
     ]);
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1398,8 +1392,8 @@ test("dispatch -> stub claude runs -> .done sentinel + parsed cost; probe sees D
       { model: "claude-stub", inputTokens: 12, outputTokens: 34, cacheReadTokens: 0, cacheCreationTokens: 0 },
     ]);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1432,9 +1426,9 @@ test("#304 wiring: a completed lane records one egress-suspect event through the
     ]);
     assert.equal((await s.probe(name)).done, true);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     state?.close();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1475,9 +1469,9 @@ test("#341 wiring: a completed lane writes at most the per-leg egress cap and lo
     );
     assert.equal((await s.probe(name)).done, true);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     state?.close();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1513,8 +1507,8 @@ test("#304 fail-safe: an egress event write failure is logged but cannot change 
     assert.equal(probe.failed, false);
     assert.ok(logs.some((line) => line.includes("egress tripwire failed (non-fatal)") && line.includes("events unavailable")));
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1540,8 +1534,8 @@ test("probe: #377 lanePr supplies prNumber and derives hasPr from it (the lane's
     assert.equal(probe.hasPr, true);
     assert.equal(probe.prNumber, 42);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1568,8 +1562,8 @@ test("probe: #595 lanePr's outcome.title rides onto LaneProbe.prTitle (the SAME 
     assert.equal(probe.prNumber, 42);
     assert.equal(probe.prTitle, "feat: the lane's PR");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1596,8 +1590,8 @@ test("probe: #595 lanePr's outcome without a title omits LaneProbe.prTitle rathe
     assert.equal(probe.prTitle, undefined);
     assert.ok(!Object.hasOwn(probe, "prTitle"));
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1623,8 +1617,8 @@ test("probe: #377 lanePr returning null -> hasPr false, prNumber undefined (fail
     assert.equal(probe.hasPr, false);
     assert.equal(probe.prNumber, undefined);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1676,8 +1670,8 @@ test("probe: #377 passes the lane's OWN branch (read from its worktree git HEAD,
 
     await s.reclaim(name);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1711,8 +1705,8 @@ test("probe: #377 gate② P1 — a CONFIRMED-DEAD wrapper with no sentinel still
     assert.equal(probe.handoff, false);
     assert.equal(seen.at(-1)!.sessionOver, true, "nothing is left alive to race the engine's own `gh pr create`");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1737,8 +1731,8 @@ test("probe: #377 gate② round 3 (P1) — an INCONCLUSIVE association (forge wr
     assert.equal(probe.prNumber, undefined);
     assert.equal(probe.prAssociationInconclusive, true, "UNKNOWN is not the same claim as 'this lane has no PR'");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1770,8 +1764,8 @@ test("probe: #377 gate② round 3 (P1) — the inconclusive deferral is BOUNDED:
     assert.equal(settled.hasPr, false);
     assert.ok(logs.some((l) => l.includes("lane-wedge") && l.includes("PR association still unknown")));
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1798,8 +1792,8 @@ test("probe: #377 gate② round 3 (P1) — a CONCLUSIVE answer resets the retry 
     inconclusive = true;
     assert.equal((await s.probe("lane-blip2")).prAssociationInconclusive, true, "budget reset by the conclusive answer");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1848,8 +1842,8 @@ test("probe: #377 gate② round 5 (P1) — a branch another LIVE lane is sitting
     await s.probe("lane-victim");
     assert.equal(seen.at(-1)!.branch, "feat/294-hold");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1869,8 +1863,8 @@ test("probe: costUsd is 0 while a lane is still running (no terminal sentinel ye
     assert.ok(probe.dispatchedAgeSec! >= 0, "probe surfaces age from persisted dispatched_at");
     await s.reclaim(name);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1898,8 +1892,8 @@ test("probe: recovers costUsd from the jsonl when a restart-orphaned lane has NO
       { model: "claude-opus-4-6", inputTokens: 7, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
     ]);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1913,8 +1907,8 @@ test("dispatch rejects a name already in use (no concurrent same-name clobber)",
     writeFileSync(join(dir, "lane-x.running.json"), "{}"); // pretend a lane is occupying the name
     await assert.rejects(() => s!.dispatch({ number: 1, title: "t", labels: [] }, "lane-x"), /in use|occupied|exists/i);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1934,8 +1928,8 @@ test("reclaim kills a stubborn (ignores TERM) claude subtree via SIGKILL", async
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "process group killed");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1957,8 +1951,8 @@ test("requestHandoff -> graceful SIGTERM -> .handoff sentinel (resumable, not ki
     const probe = await s.probe(name);
     assert.equal(probe.handoff, true);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1987,9 +1981,9 @@ test("requestHandoff reaches a RESTARTED-engine lane via the persisted pid (Code
     assert.equal(s2.requestHandoff(name), false); // idempotent: second request is a no-op
     assert.equal(s2.requestHandoff("lane-unknown"), false); // no persisted lane -> false, no throw
   } finally {
+    killAnyRunningLanes(s1, s2);
     s2?.dispose();
     s1?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2007,8 +2001,8 @@ test("requestHandoff, worker dies by signal (no clean wrap-up), and no worktree 
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handoff-requested + signal-killed is .handoff, not .failed");
     assert.ok(!existsSync(join(dir, `${name}.failed.json`)));
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2085,9 +2079,9 @@ test("#172: resumed no-result SIGTERM ignores leg 1's result and ledgers its bas
     assert.ok(Math.abs(state.spentUsdForWorker(name) - (1 + resumedExpected)) < 1e-12);
     assert.equal(logs.filter((line) => line.includes("source=assistant-usage-estimate")).length, 1);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     state.close();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2115,8 +2109,8 @@ test("resumeIntentState: reads only matching resume-authored confirmed/unconfirm
     writeFileSync(marker, JSON.stringify({ name: "lane-intent", issue: 172, spawn_confirmed: false }));
     assert.equal(s.resumeIntentState("lane-intent", 172), "none", "dispatch markers are not resume intents");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2132,8 +2126,8 @@ test("resume: fails closed when the lane has no .handoff sentinel (nothing to re
       /no \.handoff sentinel|nothing to resume/i,
     );
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2159,8 +2153,8 @@ test("resume: a dead matching running sentinel is durable interrupted-resume pro
       sessionId: "survivor",
     });
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2180,8 +2174,8 @@ test("resume: spawn error removes the unconfirmed intent and leaves handoff retr
     assert.equal(existsSync(join(dir, "lane-spawn-error.running.json")), false);
     assert.equal(existsSync(join(dir, "lane-spawn-error.handoff.json")), true);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2223,8 +2217,8 @@ test("resume (#395 PM follow-up): resume()'s OWN spawn confirmation await — a 
     await assert.rejects(() => s!.resume({ number: 5, title: "t", labels: [] }, "lane-resume-timeout"), /spawn confirmation timed out/i);
     assert.equal(existsSync(join(dir, "lane-resume-timeout.running.json")), false, "no bogus running marker left behind");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2272,8 +2266,8 @@ test("resume (#395 gate② P2-2): a merely-DELAYED (not lost) real spawn event r
       "the late spawn handler must not resurrect running.json once the race already settled on timed-out",
     );
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2320,8 +2314,8 @@ test("resume: --resume reuses the ORIGINAL session id, clears .handoff, and the 
     // that value directly in State.recordSpend.
     assert.equal(probe.costUsd, 0.05);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2357,8 +2351,8 @@ test("resume: also sets SAPWOOD_WORKTREE_ROOT to the same lane's resolved worktr
     await waitForFile(join(dir, "resume-root.seen"), "resumed worktree root was not published");
     assert.equal(readFileSync(join(dir, "resume-root.seen"), "utf8").trim(), join(worktreeRoot, name));
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2384,9 +2378,9 @@ test("resume: fails closed in hard mode when the guard hook is missing (no ungua
     });
     await assert.rejects(() => s2!.resume({ number: 3, title: "t", labels: [] }, name), /guard hook not found|unguarded/i);
   } finally {
+    killAnyRunningLanes(s, s2);
     s?.dispose();
     s2?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2468,10 +2462,10 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
     assert.equal(readFileSync(join(dir, "mode.seen"), "utf8").trim(), "soft"); // env reached the worker
     assert.equal(readFileSync(join(dir, "token.seen"), "utf8").trim(), "worker-forge-token");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     if (previousGhToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previousGhToken;
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2505,8 +2499,8 @@ test("dispatch sets SAPWOOD_WORKTREE_ROOT to the resolved absolute worktree path
     await waitForFile(join(dir, "root.seen"), "worker worktree root was not published");
     assert.equal(readFileSync(join(dir, "root.seen"), "utf8").trim(), join(worktreeRoot, name));
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2526,8 +2520,8 @@ test("dispatch fails closed in hard mode when the guard hook is missing (no ungu
     });
     await assert.rejects(() => s!.dispatch({ number: 1, title: "t", labels: [] }), /guard hook not found|unguarded/i);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2542,8 +2536,8 @@ test("dispatch rejects (and cleans up) when claude can't spawn — bad CLAUDE_BI
     assert.ok(!existsSync(join(dir, "lane-bad.running.json")));
     assert.ok(!existsSync(join(dir, "lane-bad.jsonl")));
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2570,8 +2564,8 @@ test("dispatch (#395): cfg.liveness.spawnConfirmTimeoutMs is threaded through �
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.done.json`)), "done sentinel written — the configured timeout never fired");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2615,8 +2609,8 @@ test("dispatch (#395 PM follow-up): a spawn confirmation that never arrives is b
     assert.ok(!existsSync(laneWorktree), "the orphaned worktree was removed — nothing else ever tracks this never-registered lane");
     assert.ok(!existsSync(join(dir, "lane-timeout-wt.running.json")));
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2667,9 +2661,9 @@ test("dispatch (#395 gate② round 3, P1): a LIVE worker leg heart-beats against
       "no FURTHER worker-heartbeat events were appended once the child was confirmed dead, even though the setInterval kept firing",
     );
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     state.close();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2699,8 +2693,8 @@ test("enforces worker timeout: a run past timeoutSec is killed and marked failed
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "timed-out worker process killed");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2751,8 +2745,8 @@ test("#33: crossing worker.budgetUsdSoft mid-run triggers requestHandoff exactly
     // The terminal sentinel means onExit cleared the heartbeat interval, so the count is final.
     assert.equal(handoffCalls, 1, "requestHandoff fired exactly once for the soft-budget crossing");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2788,8 +2782,8 @@ test("#33: a cache-heavy stream under budget does NOT trigger a handoff -- cache
     assert.ok(!existsSync(join(dir, `${name}.failed.json`)));
     await s.reclaim(name);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2840,8 +2834,8 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "custom pricingFile rates drove the soft-budget handoff");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2899,8 +2893,8 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "new post-resume spend crossing the budget triggers a fresh graceful handoff");
     assert.ok(!existsSync(join(dir, `${name}.failed.json`)));
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2947,8 +2941,8 @@ test("#155: probe() persists the live telemetry trio (estCostUsd, contextTokens,
     });
     await s.reclaim(name);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2978,8 +2972,8 @@ test("#287: probe() reports actualModel from the session-init line's own self-re
     assert.equal(p.actualModel, "claude-opus-4-8");
     await s.reclaim(name);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2995,8 +2989,8 @@ test("#287: probe() reports no actualModel before the init line has landed (hone
     assert.equal(p.actualModel, undefined);
     await s.reclaim(name);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3036,8 +3030,8 @@ test("#155: contextTokens is deliberately NON-monotonic — a later, smaller ass
     assert.equal(p.liveTelemetry?.contextTokens, 500, "smaller second turn DROPS contextTokens — never smoothed into a running max");
     await s.reclaim(name);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3101,8 +3095,8 @@ test("#155: a resumed lane's persisted estCostUsd covers only the CURRENT leg (r
     });
     await s.reclaim(name);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3124,8 +3118,8 @@ test("#155: a DETACHED lane (no in-memory handle) carries no live telemetry — 
     const p = await s.probe(name);
     assert.equal(p.liveTelemetry, undefined, "a detached lane has no known baseline -> no live telemetry, never a guessed one");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3151,8 +3145,8 @@ test("#168: probe() of a FAILED lane surfaces failureText from the jsonl (stdout
     assert.ok(p.failureText?.includes("429 too many requests"), "raw non-JSON stderr lines are captured, not just parsed JSON fields");
     assert.ok(p.failureText?.includes("rate_limit_error"));
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3172,8 +3166,8 @@ test("#168: probe() of a DONE (non-failed) lane never populates failureText", as
     assert.equal(p.done, true);
     assert.equal(p.failureText, undefined);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3191,8 +3185,8 @@ test("#168: failureText is tail-capped for a large jsonl — the classifiable er
     assert.ok(p.failureText && p.failureText.length <= 4000, "capped, not the whole 10k+ jsonl");
     assert.ok(p.failureText?.includes("Could not resolve host"), "the tail (where the error actually is) survives the cap");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3221,8 +3215,8 @@ test("#247: probe() of a DONE lane surfaces resultText from the jsonl's final st
     assert.equal(p.done, true);
     assert.equal(p.resultText, resultText);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3239,8 +3233,8 @@ test("#601: probe() of a FAILED (non-DONE) lane ALSO populates resultText — th
     assert.equal(p.failed, true);
     assert.equal(p.resultText, "some text");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3267,8 +3261,8 @@ test("#247: resultText is scoped to the CURRENT LEG's jsonl offset — a resumed
     const p = await s.probe(name);
     assert.equal(p.resultText, legTwoResult, "only the SECOND (current) leg's result text — the first leg's is never leaked through");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3574,8 +3568,8 @@ test("#168 P1-3 contractual negative: exact configured signatures inside ASSISTA
       "an ordinary task failure whose assistant text discusses the signatures classifies as a TASK failure",
     );
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3592,8 +3586,8 @@ test("fast non-zero exit writes .failed (exit handler attached before the await)
     const probe = await s.probe(name);
     assert.equal(probe.failed, true);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3636,9 +3630,9 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
     assert.ok(!existsSync(gitLog), "NO git subprocess was spawned during the drain");
     assert.equal(readFileSync(join(worktreePath, "wip.txt"), "utf8"), "uncommitted work\n", "worktree untouched");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     process.env.PATH = oldPath;
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
     rmSync(shimDir, { recursive: true, force: true });
@@ -3791,8 +3785,8 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
     assert.ok(existsSync(join(dir, `${laneName}.failed.json`)), "timeout wins over a pending handoff request");
     assert.ok(!existsSync(join(dir, `${laneName}.handoff.json`)));
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3820,8 +3814,8 @@ test("#69: reclaim RETAINS a worktree with a file written after dispatch (possib
     assert.equal(r.worktreePath, worktreePath); // absolute path, for the conductor's escalation
     assert.ok(existsSync(join(worktreePath, "src", "wip.txt")), "worktree (and its WIP) survives");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -3847,8 +3841,8 @@ test("#69: reclaim DELETES a clean worktree (no file touched since dispatch) —
     assert.equal(r.worktreeRetained, false);
     assert.ok(!existsSync(worktreePath), "clean worktree removed as before");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -3865,8 +3859,8 @@ test("#69: reclaim of a lane with NO worktree on disk -> nothing retained, nothi
     const r = await s.reclaim(name);
     assert.deepEqual(r, { worktreePath: null, worktreeRetained: false });
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3893,9 +3887,9 @@ test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktr
     assert.equal(r.worktreeRetained, true);
     assert.ok(existsSync(join(worktreePath, "wip.txt")), "worktree survives a detached reclaim too");
   } finally {
+    killAnyRunningLanes(s1, s2);
     s2?.dispose();
     s1?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -3958,8 +3952,8 @@ test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP 
     assert.equal(r.worktreeRetained, true, "resumed-then-crashed lane RETAINS its pre-handoff WIP");
     assert.ok(existsSync(join(worktreePath, "wip.txt")), "WIP file survives — not silently deleted");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -3988,8 +3982,8 @@ test("#69 (fable P2b): a file whose mtime is BACKDATED before dispatch still rea
     assert.equal(r.worktreeRetained, true, "ctime still exceeds the baseline -> retained despite backdated mtime");
     assert.ok(existsSync(wip), "backdated WIP survives");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -4030,8 +4024,8 @@ test("#69 (Codex PR #72 round-2): a WIP entry whose mtime EQUALS dispatched_at e
     assert.equal(r.worktreeRetained, true, "mtime == baseline must be treated as dirty (>=), not clean");
     assert.ok(existsSync(wip), "same-tick WIP survives — not deleted as clean");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -4080,9 +4074,9 @@ test("#63/#69: detached handoff-requested lane confirmed dead -> probe() writes 
     // #69: sentinel-only — the worktree was not committed, cleaned, or otherwise touched.
     assert.equal(readFileSync(join(worktreePath, "wip.txt"), "utf8"), "uncommitted work\n");
   } finally {
+    killAnyRunningLanes(s1, s2);
     s2?.dispose();
     s1?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -4120,12 +4114,12 @@ test("#63: a SECOND engine restart before death is confirmed still finalizes —
     assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)));
     assert.ok(!existsSync(join(dir, `${laneName}.running.json`)));
   } finally {
+    killAnyRunningLanes(s1, s2, sMid);
     s2?.dispose();
     sMid?.dispose();
+    s1?.dispose();
     // dispose() is a no-op today, but disposed on principle so a future adoption-path change that
     // DOES register a lane can't silently reopen this file's own amplifier.
-    s1?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4170,9 +4164,9 @@ test("#169: persisted handoff_requested closes the write-before-signal crash win
     assert.doesNotThrow(() => assert.equal(s2?.requestHandoff(name), false));
     assert.equal(signalCount, 1, "in-memory set prevents a second signal from the same supervisor");
   } finally {
+    killAnyRunningLanes(s1, s2);
     s1?.dispose();
     s2?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4194,8 +4188,8 @@ test("#63: wrapperAlive() === -1 (unreadable pid) -> probe() does not throw, doe
     assert.ok(!existsSync(join(dir, "lane-63-c.handoff.json")));
     assert.ok(existsSync(join(dir, "lane-63-c.running.json")), "running marker untouched — still just 'unknown'");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4236,9 +4230,9 @@ test("#63/#69: a lane already reclaim()'d must never also be finalized as .hando
     assert.equal(probe.handoff, false, "a reclaimed lane must never be finalized as resumable");
     assert.ok(!existsSync(join(dir, `${laneName}.handoff.json`)), "no .handoff written");
   } finally {
+    killAnyRunningLanes(s1, s2);
     s2?.dispose();
     s1?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -4278,9 +4272,9 @@ test("#63 F1: a failure persisting handoff_requested onto running.json is swallo
     const running = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8"));
     assert.notEqual(running.handoff_requested, true);
   } finally {
+    killAnyRunningLanes(s1, s2);
     s2?.dispose();
     s1?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4328,9 +4322,9 @@ test("#63 P2: requestHandoff's detached branch persists handoff_requested BEFORE
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "SIGTERM still reached the detached process");
   } finally {
+    killAnyRunningLanes(s1, s2);
     s2?.dispose();
     s1?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4386,7 +4380,6 @@ test("loadWorkerPromptTemplate: promptFile set -> loads that file's raw content"
     const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { promptFile: p } });
     assert.equal(loadWorkerPromptTemplate(scfg), "Custom prompt for #{{issue.number}}");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4410,7 +4403,6 @@ test("loadWorkerPromptTemplate: fails fast when promptFile exists but is unreada
     assert.throws(() => loadWorkerPromptTemplate(scfg), /unreadable/i);
   } finally {
     chmodSync(join(dir, "unreadable.md"), 0o644);
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4434,7 +4426,6 @@ test("buildRenderPrompt: empty/whitespace template throws at build time — neve
     });
     assert.throws(() => buildRenderPrompt(scfg), /empty/i);
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4452,7 +4443,6 @@ test("buildRenderPrompt: substituted config values are literal — a {{issue.bod
     const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: [], body: "SECRET" });
     assert.equal(rendered, "label: {{issue.body}}");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4470,7 +4460,6 @@ test("buildRenderPrompt: config vars substitute at build time — customized lab
     const rendered = buildRenderPrompt(scfg)({ number: 7, title: "t", labels: [] });
     assert.equal(rendered, "skip red/green if labelled no-verify on #7");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4525,7 +4514,6 @@ test("buildRenderFixPrompt: supported vars are issue.number/pr.number/labels.ver
       assert.throws(() => buildRenderFixPrompt(cfg), new RegExp(`unknown variable.*${badVar.replace(".", "\\.")}`, "i"));
     }
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4543,7 +4531,6 @@ test("buildRenderFixPrompt: {{issue.number}}/{{pr.number}}/{{labels.verifyNa}} a
     const rendered = buildRenderFixPrompt(cfg)(9, 99);
     assert.equal(rendered, "fix issue #9 pr #99, skip if verify:custom");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4556,7 +4543,6 @@ test("buildRenderFixPrompt: empty/whitespace template throws at build time — n
     const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { fixPromptFile: p } });
     assert.throws(() => buildRenderFixPrompt(cfg), /empty/i);
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4576,7 +4562,6 @@ test("buildRenderPrompt: with no doctrine.file on disk, {{doctrine}} substitutes
     const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: [] });
     assert.match(rendered, /DOCTRINE: \(No review doctrine file is configured/);
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4596,7 +4581,6 @@ test("buildRenderPrompt: with a doctrine.file present, {{doctrine}} substitutes 
     const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: [] });
     assert.equal(rendered, "DOCTRINE: the disabled-consumer rule matters here");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4619,7 +4603,6 @@ test("buildRenderPrompt: an oversized doctrine.file is deterministically truncat
     assert.ok(rendered.length <= 200, `expected <= 200 chars, got ${rendered.length}`);
     assert.match(rendered, /truncated/i);
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4635,7 +4618,6 @@ test("buildRenderPrompt: unknown {{var}} in the template throws at BUILD time, b
     });
     assert.throws(() => buildRenderPrompt(scfg), /unknown variable.*issue\.url/i);
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4678,8 +4660,8 @@ test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals
     });
     assert.ok(args.includes(expected), `expected the rendered template in the spawned argv, got:\n${args}`);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4764,8 +4746,8 @@ test("dispatch: a proxy opt mints a handle, widens --allowedTools with the handl
     for (let i2 = 0; i2 < 400 && calls.stopped === 0; i2++) await sleep(20);
     assert.equal(calls.stopped, 1, "the proxy is torn down once the lane's process exits (onExit)");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4795,8 +4777,8 @@ test("dispatch: no proxy opt (every ordinary caller today) -> no --mcp-config fl
     assert.doesNotMatch(args, /mcp__forge__/);
     assert.match(args, /Bash\(gh \*\)/, "the code-producing worker's own default --allowedTools is unchanged");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4827,8 +4809,8 @@ test("dispatch (#639): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reac
     assert.ok(i !== -1, "--plugin-dir must reach argv when WorkerDeps.skillsPluginDir is set");
     assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4856,8 +4838,8 @@ test("dispatch (#639): WorkerDeps.skillsPluginDir UNSET (today's default, roles.
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     assert.doesNotMatch(args, /--plugin-dir/);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4887,8 +4869,8 @@ test("dispatch: a proxy mint FAILURE is non-fatal — the lane still dispatches 
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.done.json`)), "lane still completes despite the mint failure");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4922,8 +4904,8 @@ test("dispatch: a spawn failure with a proxy attached still tears down the minte
     assert.equal(calls.minted, 1);
     assert.equal(calls.stopped, 1, "the proxy is torn down even though dispatch() THREW rather than returned");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4956,8 +4938,8 @@ test("dispatch: a spawn failure on a credentialFree leg (mint succeeded, spawn f
     const ghConfigDir = join(dir, "lane-credfree-spawnfail.gh-config-empty");
     assert.ok(!existsSync(ghConfigDir), "GH_CONFIG_DIR scratch directory must not survive a spawn failure");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5060,12 +5042,12 @@ test("dispatch: credentialFree opt strips forge/git credential env vars and seve
     for (let i = 0; i < 400 && existsSync(ghConfigDir); i++) await sleep(20);
     assert.ok(!existsSync(ghConfigDir), "GH_CONFIG_DIR scratch directory must be removed once the lane exits (onExit)");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5179,7 +5161,6 @@ test("probeDeployKeySsh: exit 1 + stderr containing 'successfully authenticated'
     );
     assert.deepEqual(await probeDeployKeySsh("/tmp/fake-deploy-key", 15, bin), { ok: true });
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5191,7 +5172,6 @@ test("probeDeployKeySsh: exit 0 is NOT success — GitHub's SSH endpoint never g
     const r = await probeDeployKeySsh("/tmp/fake-deploy-key", 15, bin);
     assert.equal(r.ok, false);
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5204,7 +5184,6 @@ test("probeDeployKeySsh: exit 1 with an UNRELATED stderr (e.g. permission denied
     assert.equal(r.ok, false);
     assert.match(r.detail ?? "", /Permission denied/);
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5232,7 +5211,6 @@ test("probeDeployKeySsh: a hang past timeoutSec is hard-killed and resolves fail
     // slower than expected still passes; a regression that drops the kill cannot pass.
     assert.ok(Date.now() - start < 10_000, "resolved via the timeout kill, not by waiting out the 30s sleep");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5250,7 +5228,6 @@ test("spawnSshKeygen: generates a real ed25519 keypair (private key 0600, public
     assert.match(pub, /^ssh-ed25519 /);
     assert.doesNotMatch(priv, /Proc-Type: 4,ENCRYPTED/, 'generated with -N "" -> no passphrase, unattended-readable');
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5321,12 +5298,12 @@ test("dispatch: worker.deployKeyPath configured + preflight OK -> L1 active — 
     writeFileSync(release, "");
     for (let i = 0; i < 400 && !existsSync(join(dir, "lane-l1-dispatch.done.json")); i++) await sleep(20);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     if (previous.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previous.GH_TOKEN;
     if (previous.GITHUB_TOKEN === undefined) delete process.env.GITHUB_TOKEN;
     else process.env.GITHUB_TOKEN = previous.GITHUB_TOKEN;
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5369,10 +5346,10 @@ test("dispatch: worker.deployKeyPath UNSET -> L0, byte-identical to today (rever
     assert.match(allowedTools, /Bash\(gh \*\)/, "L0 keeps Bash(gh *) — unchanged from today");
     assert.equal(probeCalled, false, "deployKeyPath unset -> resolveDeployKeyEnv must short-circuit before ever probing");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     if (previous.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previous.GH_TOKEN;
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5403,8 +5380,8 @@ test("dispatch (#554 pattern): deployKeyPath set but preflight auth fails -> gui
     assert.match(warn, /sapwood init/, "the WARN must name the exact re-provision fix");
     assert.match(warn, /L0/);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5437,8 +5414,8 @@ test("dispatch: the deploy-key preflight probe is memoized — TWO dispatches sh
     assert.equal(probeCount, 1, "the SSH-auth preflight must run at most once per supervisor life");
     assert.equal(logs.filter((l) => l.includes("preflight failed")).length, 1, "the WARN must fire exactly once, not once per dispatch");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5466,8 +5443,8 @@ test("checkDeployKeyPreflight: unset deployKeyPath -> undefined, never probes", 
     assert.equal(result, undefined);
     assert.equal(probeCalled, false);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5498,8 +5475,8 @@ test("checkDeployKeyPreflight (#671): seeds the SAME memoized probe a later disp
     await waitFor(() => existsSync(join(dir, "lane-l1-startup-seeded.done.json")), "dispatch did not complete");
     assert.equal(probeCount, 1, "the startup check's probe must be the SAME memoized one dispatch() reuses");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5560,9 +5537,9 @@ test("resume: worker.deployKeyPath configured + preflight OK -> L1 active on a r
     assert.doesNotMatch(allowedTools, /Bash\(gh \*\)/, "L1 resume must drop Bash(gh *) from the grant");
     assert.match(allowedTools, /Bash\(git \*\)/);
   } finally {
+    killAnyRunningLanes(s, s2);
     s?.dispose();
     s2?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5683,8 +5660,8 @@ test("dispatch: credentialFree + mint FAILURE refuses the dispatch outright (fai
     assert.ok(!existsSync(join(dir, "lane-credfree-mintfail.jsonl")), "no jsonl left behind for a refused dispatch");
     assert.ok(!existsSync(join(dir, "lane-credfree-mintfail.running.json")), "no running marker left behind for a refused dispatch");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5738,9 +5715,9 @@ test("dispatch: a mint failure records a durable 'proxy-mint-failed' event (Work
       assert.ok(payload.reason.includes("mint failed"));
     }
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     state.close();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5770,10 +5747,10 @@ test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheri
     await waitForFile(join(dir, "token.seen"), "inherited worker token was not published");
     assert.equal(readFileSync(join(dir, "token.seen"), "utf8").trim(), "worker-forge-token");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     if (previousGhToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previousGhToken;
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5836,9 +5813,9 @@ test("dispatch: a worker leg records a ContextManifest fingerprint via WorkerDep
     assert.equal(manifest.worktree.dirty, true);
     assert.equal(manifest.captureBasis, "init-observed");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     state.close();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5867,9 +5844,9 @@ test("resume: a resumed leg's ContextManifest OVERWRITES the prior leg's row und
     assert.ok(recorded, "expected a context_manifests row for the resumed lane");
     assert.equal(JSON.parse(recorded!.json).model, "resumed-model");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     state.close();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5963,8 +5940,8 @@ test("resume: a proxy opt mints a handle, widens --allowedTools with the handle'
     for (let i = 0; i < 400 && calls.stopped === 0; i++) await sleep(20);
     assert.equal(calls.stopped, 1, "the proxy is torn down once the resumed lane's process exits (onExit)");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5986,8 +5963,8 @@ test("resume (#639): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reache
     assert.ok(i !== -1, "--plugin-dir must reach the resumed leg's argv too");
     assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6042,8 +6019,8 @@ test("resume (#639 gate② round 1): WorkerDeps.skillsPluginDir set -> --plugin-
 
     for (let i2 = 0; i2 < 400 && !existsSync(join(dir, `${name}.done.json`)); i2++) await sleep(20);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6064,8 +6041,8 @@ test("resume: opts.prompt REPLACES the ordinary issue-rendered prompt — the fi
     assert.equal(args[promptIdx + 1], "fix-leg: address PR #42's review findings");
     assert.ok(!args.includes("issue-rendered-prompt"), "the ordinary renderPrompt output must not appear when opts.prompt overrides it");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6086,8 +6063,8 @@ test("resume: no proxy/prompt opt -> byte-identical to pre-#245 behavior (render
     assert.doesNotMatch(args, /mcp__forge__/);
     assert.match(args, /issue-rendered-prompt/);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6108,8 +6085,8 @@ test("resume: a proxy mint FAILURE is non-fatal — the resumed leg still runs, 
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.done.json`)), "resumed leg still completes despite the mint failure");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6139,8 +6116,8 @@ test("resume: credentialFree + mint FAILURE refuses the resume outright (fail-cl
     const retried = await s.resume({ number: 9, title: "t", labels: [] }, name);
     assert.equal(retried.name, name);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6185,10 +6162,10 @@ test("resume: credentialFree strips forge/git credential env vars and narrows --
     for (let i = 0; i < 400 && existsSync(ghConfigDir); i++) await sleep(20);
     assert.ok(!existsSync(ghConfigDir), "GH_CONFIG_DIR scratch directory is cleaned up once the lane exits");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     if (previousGhToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previousGhToken;
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6209,8 +6186,8 @@ test("resume: a non-credentialFree proxy attachment must NOT emit --strict-mcp-c
     assert.ok(!args.trim().split("\n").includes("--strict-mcp-config"), "non-credentialFree resume must not emit --strict-mcp-config");
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6281,9 +6258,9 @@ test("resume: a mint failure records a durable 'proxy-mint-failed' event (Worker
       assert.ok(payload.reason.includes("mint failed"));
     }
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     state.close();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6353,8 +6330,8 @@ test("resume: FIX-LEG ENTRY (opts.sessionId, no .handoff sentinel) — real Work
     const probe = await s.probe(name);
     assert.equal(probe.done, true, "the fix leg reaches its own fresh terminal sentinel");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6440,10 +6417,10 @@ test("resume: FIX-LEG ENTRY (opts.sessionId+prompt) WITH credentialFree AND work
     writeFileSync(release, "");
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
     if (previousGhToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previousGhToken;
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6467,8 +6444,8 @@ test("resume: fix-leg entry fails closed with NO terminal sentinel at all (never
       /no done\/failed terminal sentinel/i,
     );
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6492,8 +6469,8 @@ test("resume: fix-leg entry fails closed when opts.sessionId is set but opts.pro
       /opts\.sessionId .* requires opts\.prompt/i,
     );
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6529,8 +6506,8 @@ test("resume: a failure AFTER a successful mint (intent-write failure) tears dow
     const ghConfigDir = join(dir, `${name}.gh-config-empty`);
     assert.ok(!existsSync(ghConfigDir), "A4: the GH_CONFIG_DIR scratch directory created before the intent-write failure must be removed");
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6578,8 +6555,8 @@ test("resume: FIX-LEG ENTRY consumes the stale prior-leg terminal sentinel on sp
     assert.equal(probe.done, false, "a live, still-sleeping fix child must never be reported done via a stale sentinel");
     await s.reclaim(name);
   } finally {
+    killAnyRunningLanes(s);
     s?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6621,9 +6598,9 @@ test("resume: fix-leg entry does NOT remove the stale terminal sentinel when the
       "the stale sentinel must survive a FAILED spawn attempt — the next retry's entry check needs it",
     );
   } finally {
+    killAnyRunningLanes(s, s2);
     s?.dispose();
     s2?.dispose();
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6637,7 +6614,6 @@ test("resolveWorktreeHead (#490): detached HEAD (raw sha) resolves directly", ()
     writeFileSync(join(dir, ".git", "HEAD"), "AB12cd34ab12cd34ab12cd34ab12cd34ab12cd34\n");
     assert.equal(resolveWorktreeHead(join(dir, ".git")), "ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6656,7 +6632,6 @@ test("resolveWorktreeHead (#490): linked-worktree gitdir file -> symbolic HEAD -
     writeFileSync(join(common, "refs", "heads", "feature"), "1234567890abcdef1234567890abcdef12345678\n");
     assert.equal(resolveWorktreeHead(join(dir, "wt", ".git")), "1234567890abcdef1234567890abcdef12345678");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6672,7 +6647,6 @@ test("resolveWorktreeHead (#490): packed ref (no loose file) resolves through pa
     );
     assert.equal(resolveWorktreeHead(join(dir, ".git")), "feedfacefeedfacefeedfacefeedfacefeedface");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6685,7 +6659,6 @@ test("resolveWorktreeHead (#490): missing/unresolvable shapes return null, never
     writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/gone\n");
     assert.equal(resolveWorktreeHead(join(dir, ".git")), null);
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6706,7 +6679,6 @@ test("resolveWorktreeHead (#490, #509 P2): a stale refs/heads shadow in the WORK
     writeFileSync(join(common, "refs", "heads", "feature"), "1234567890abcdef1234567890abcdef12345678\n");
     assert.equal(resolveWorktreeHead(join(dir, "wt", ".git")), "1234567890abcdef1234567890abcdef12345678");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6727,7 +6699,6 @@ test("resolveWorktreeHead (#490, #509 P2): a worktree-local namespace (refs/bise
     writeFileSync(join(common, "packed-refs"), "ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34 refs/bisect/bad\n");
     assert.equal(resolveWorktreeHead(join(dir, "wt", ".git")), "feedfacefeedfacefeedfacefeedfacefeedface");
   } finally {
-    killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
