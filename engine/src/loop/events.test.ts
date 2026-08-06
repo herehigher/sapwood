@@ -28,7 +28,7 @@ function parseStdout(r: { stdout: string }): any {
 
 // ── parseEventsArgs: pure flag parsing ──────────────────────────────────────────────────────
 
-test("parseEventsArgs: defaults — since-id 0, no kind filter, default limit, text mode", () => {
+test("parseEventsArgs: defaults — since-id 0, no kind filter, default limit, text mode, no --tail", () => {
   const parsed = parseEventsArgs(["node", "sapwood", "events"]);
   assert.deepEqual(parsed, {
     help: false,
@@ -39,6 +39,7 @@ test("parseEventsArgs: defaults — since-id 0, no kind filter, default limit, t
     issue: undefined,
     limit: 100,
     json: false,
+    tail: undefined,
   });
 });
 
@@ -53,7 +54,60 @@ test("parseEventsArgs: --since-id/--kind/--exclude-kind(repeat rejected together
     issue: undefined,
     limit: 10,
     json: true,
+    tail: undefined,
   });
+});
+
+// ── #709: --tail ─────────────────────────────────────────────────────────────────────────
+
+test("parseEventsArgs: --tail parses a non-negative integer, 0 included (the cursor-bootstrap value)", () => {
+  assert.equal(parseEventsArgs(["node", "sapwood", "events", "--tail", "5"]).tail, 5);
+  assert.equal(parseEventsArgs(["node", "sapwood", "events", "--tail", "0"]).tail, 0);
+  assert.equal(parseEventsArgs(["node", "sapwood", "events", "--tail", "0"]).error, undefined);
+});
+
+test("parseEventsArgs: --tail requires a value, and a canonical non-negative-integer one", () => {
+  assert.match(parseEventsArgs(["node", "sapwood", "events", "--tail"]).error ?? "", /--tail requires a value/);
+  assert.match(parseEventsArgs(["node", "sapwood", "events", "--tail", "-1"]).error ?? "", /--tail requires a value/);
+  assert.match(parseEventsArgs(["node", "sapwood", "events", "--tail", "abc"]).error ?? "", /non-negative integer/);
+  assert.match(parseEventsArgs(["node", "sapwood", "events", "--tail", "0x10"]).error ?? "", /--tail requires a non-negative integer/);
+  assert.match(parseEventsArgs(["node", "sapwood", "events", "--tail", "1e3"]).error ?? "", /--tail requires a non-negative integer/);
+});
+
+test("parseEventsArgs: --tail is hard-capped at the same MAX_PAGE_LIMIT as --limit, rejected above cap, not silently clamped", () => {
+  const aboveCap = parseEventsArgs(["node", "sapwood", "events", "--tail", "1001"]);
+  assert.match(aboveCap.error ?? "", /exceeds the hard cap of 1000/);
+  assert.equal(parseEventsArgs(["node", "sapwood", "events", "--tail", "1000"]).error, undefined, "exactly the cap is fine");
+});
+
+test("parseEventsArgs: --tail composes with --kind/--exclude-kind/--issue (no rejection)", () => {
+  const withKind = parseEventsArgs(["node", "sapwood", "events", "--tail", "5", "--kind", "merged"]);
+  assert.equal(withKind.error, undefined);
+  assert.equal(withKind.tail, 5);
+  assert.deepEqual(withKind.kinds, ["merged"]);
+
+  const withIssue = parseEventsArgs(["node", "sapwood", "events", "--tail", "5", "--issue", "7"]);
+  assert.equal(withIssue.error, undefined);
+  assert.equal(withIssue.issue, 7);
+});
+
+test("parseEventsArgs (#709 AC): --tail combined with --since-id is REJECTED — one cursor semantics, not an invented precedence", () => {
+  const parsed = parseEventsArgs(["node", "sapwood", "events", "--tail", "5", "--since-id", "10"]);
+  assert.match(parsed.error ?? "", /--tail cannot combine with --since-id/);
+  // Order-independent: --since-id before --tail is rejected the same way.
+  const reversed = parseEventsArgs(["node", "sapwood", "events", "--since-id", "10", "--tail", "5"]);
+  assert.match(reversed.error ?? "", /--tail cannot combine with --since-id/);
+  // An explicit `--since-id 0` (the same value as the untouched default) still counts as GIVEN —
+  // the conflict is about the FLAG being passed, not its value.
+  const explicitZero = parseEventsArgs(["node", "sapwood", "events", "--tail", "5", "--since-id", "0"]);
+  assert.match(explicitZero.error ?? "", /--tail cannot combine with --since-id/);
+});
+
+test("parseEventsArgs (#709): --tail alone, with --since-id left untouched at its default, is NOT rejected", () => {
+  const parsed = parseEventsArgs(["node", "sapwood", "events", "--tail", "5"]);
+  assert.equal(parsed.error, undefined);
+  assert.equal(parsed.sinceId, 0);
+  assert.equal(parsed.tail, 5);
 });
 
 test("parseEventsArgs: --issue parses and requires a non-negative integer", () => {
@@ -288,6 +342,145 @@ test("events: text mode lists one line per event plus a trailing nextSinceId lin
     assert.match(r.stdout, /#1 {2}.*merged.*"pr":10/);
     assert.match(r.stdout, /nextSinceId: 1/);
   });
+});
+
+// ── runEvents: --tail (#709 AC) ─────────────────────────────────────────────────────────────
+
+test("events --tail (#709 AC): empty ledger — --tail N on a freshly-created (never-written) DB returns no events and nextSinceId 0", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    new State(dbPath).close();
+    const body = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--tail", "5", "--json"]));
+    assert.deepEqual(body.events, []);
+    assert.equal(body.nextSinceId, 0);
+  });
+});
+
+test("events --tail (#709 AC): --tail 0 --json is the cursor-bootstrap idiom — empty events array plus nextSinceId set to the ledger's CURRENT head", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const seed = new State(dbPath);
+    seed.appendEvent("dispatched", { issue: 1 });
+    seed.appendEvent("dispatched", { issue: 2 });
+    seed.appendEvent("merged", { pr: 10 });
+    seed.close();
+
+    const body = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--tail", "0", "--json"]));
+    assert.deepEqual(body.events, []);
+    assert.equal(body.nextSinceId, 3, "the ledger's current head, with zero history read");
+
+    // The bootstrap idiom itself: a follow-up --since-id at that cursor sees nothing yet (no
+    // new event has landed), and once one does, exactly that one event — never a re-show of
+    // anything --tail 0 already implicitly "saw".
+    const followUp = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--since-id", String(body.nextSinceId), "--json"]));
+    assert.deepEqual(followUp.events, []);
+  });
+});
+
+test("events --tail (#709 AC): N larger than the ledger size returns every event, oldest-first, same order as the non-tail path", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const seed = new State(dbPath);
+    seed.appendEvent("dispatched", { issue: 1 });
+    seed.appendEvent("dispatched", { issue: 2 });
+    seed.appendEvent("merged", { pr: 10 });
+    seed.close();
+
+    const body = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--tail", "100", "--json"]));
+    assert.deepEqual(
+      body.events.map((e: { id: number }) => e.id),
+      [1, 2, 3],
+    );
+    assert.equal(body.nextSinceId, 3);
+  });
+});
+
+test("events --tail (#709 AC): returns exactly the newest N events, oldest-first", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const seed = new State(dbPath);
+    seed.appendEvent("dispatched", { issue: 1 });
+    seed.appendEvent("dispatched", { issue: 2 });
+    seed.appendEvent("dispatched", { issue: 3 });
+    seed.appendEvent("merged", { pr: 10 });
+    seed.appendEvent("merged", { pr: 11 });
+    seed.close();
+
+    const body = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--tail", "2", "--json"]));
+    assert.deepEqual(
+      body.events.map((e: { id: number }) => e.id),
+      [4, 5],
+      "the 2 newest ids, in ascending order — never newest-first",
+    );
+    assert.equal(body.nextSinceId, 5);
+  });
+});
+
+test("events --tail (#709 AC): composes with --kind — the newest N MATCHING events, filter applied before the newest-N cut", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const seed = new State(dbPath);
+    seed.appendEvent("merged", { pr: 1 }); // id 1
+    seed.appendEvent("dispatched", { issue: 1 }); // id 2
+    seed.appendEvent("merged", { pr: 2 }); // id 3
+    seed.appendEvent("dispatched", { issue: 2 }); // id 4
+    seed.appendEvent("merged", { pr: 3 }); // id 5
+    seed.close();
+
+    const body = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--kind", "merged", "--tail", "2", "--json"]));
+    assert.deepEqual(
+      body.events.map((e: { id: number }) => e.id),
+      [3, 5],
+      "the 2 newest MERGED events, not the 2 newest raw rows filtered down to fewer",
+    );
+    // #709 hard constraint: nextSinceId is the ledger's TRUE head (5), not the last MATCHING
+    // row's id — here they happen to coincide (id 5 is both), so this also exercises the
+    // non-coincident case below.
+    assert.equal(body.nextSinceId, 5);
+  });
+});
+
+test("events --tail (#709 AC): composes with --exclude-kind", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const seed = new State(dbPath);
+    seed.appendEvent("dispatched", { issue: 1 });
+    seed.appendEvent("merged", { pr: 1 });
+    seed.appendEvent("dispatched", { issue: 2 });
+    seed.close();
+
+    const body = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--exclude-kind", "dispatched", "--tail", "5", "--json"]));
+    assert.deepEqual(
+      body.events.map((e: { kind: string }) => e.kind),
+      ["merged"],
+    );
+  });
+});
+
+test("events --tail (#709 hard constraint): nextSinceId is the ledger's TRUE head, not the last MATCHING row's id, when a newer non-matching event exists past the last match", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const seed = new State(dbPath);
+    seed.appendEvent("merged", { pr: 1 }); // id 1 — the only "merged" row
+    seed.appendEvent("dispatched", { issue: 1 }); // id 2 — newer, but filtered out
+    seed.close();
+
+    const body = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--kind", "merged", "--tail", "5", "--json"]));
+    assert.deepEqual(
+      body.events.map((e: { id: number }) => e.id),
+      [1],
+    );
+    // If nextSinceId had been derived from the last MATCHING row (id 1) instead of the true
+    // ledger head (id 2), a follow-up --since-id 1 would re-scan and could re-show event id 2
+    // under a DIFFERENT filter later — the true-head contract avoids that entirely.
+    assert.equal(body.nextSinceId, 2, "the ledger's true head, not the last matching row's id (1)");
+  });
+});
+
+test("events (#709 AC): --tail combined with --since-id is REJECTED via the full CLI, exit 1, usage shown", () => {
+  const r = runCli(["node", "sapwood", "events", "--tail", "5", "--since-id", "10"]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /--tail cannot combine with --since-id/);
 });
 
 test("events: --kind + --exclude-kind together is rejected via the full CLI, exit 1, usage shown", () => {

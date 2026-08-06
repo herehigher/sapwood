@@ -33,13 +33,25 @@ safe):
 **The poll-cursor recipe.** Keep `nextSinceId` from the previous call and feed it back
 as `--since-id` on the next one — every page (including an empty one) advances the
 cursor to the ledger's current tail, so a poller can never get stuck rescanning the same
-range:
+range. **Bootstrap the cursor with `--tail 0`** (#709) instead of a raw `select max(id)`
+against the sqlite file — a monitor's most common need is "stream from NOW," and
+`--tail 0 --json` returns an empty `events` array plus the ledger's CURRENT head as
+`nextSinceId`, with no history read at all:
 
 ```bash
-sapwood events --since-id 0 --json          # first call: full history from the start
+sapwood events --tail 0 --json              # bootstrap: learn "now" with no history read
 # -> read .nextSinceId from the response, e.g. 482
-sapwood events --since-id 482 --json        # next poll: only what's new since then
+sapwood events --since-id 482 --json        # first poll: only what's new since "now"
 ```
+
+Need full history instead of "from now"? `--since-id 0 --json` still walks the whole
+ledger from the start exactly as before — `--tail 0` only replaces the "where do I
+start watching" bootstrap, it does not remove `--since-id 0`'s full-history mode.
+`--tail N` also answers "show me the last N events" directly for a one-off look (same
+`--kind`/`--exclude-kind`/`--issue` filters as `--since-id`, applied before the N-newest
+cut) — but `--tail` and `--since-id` are one cursor semantics, not two that combine:
+passing both is a rejected argument (exit 1), never an invented precedence between "the
+N newest" and "everything after id X".
 
 Narrow a poll to what you actually need to watch with `--kind`/`--exclude-kind`
 (repeatable, mutually exclusive — combining them is a rejected argument, not an invented
