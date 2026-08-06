@@ -147,6 +147,16 @@ export const DRIVE_EVENT_KINDS = defineKinds({
     meaning: "a gated-reentry lane's issue was found already closed; the lane was collected as done rather than reentered.",
     actionability: "routine",
   },
+  // #685 gate② finding [1] round 3 ("null-pin-anything"): the null-candidate (comment-cursor-
+  // stale) reclaim path's staging tick — no reentry happened yet, so untagged/routine like the
+  // two collection terminals just above.
+  "gated-reentry-candidate-staged": {
+    tags: [],
+    meaning:
+      "a gated-reentry lane whose escalation never pinned a body-hash candidate (comment-cursor-stale) had one staged from the live body on this tick's first observation of the cleared hold; reentry itself waits for a later tick to reconfirm it.",
+    actionability: "routine",
+    see: "#685",
+  },
 
   // Fix legs. The three `fix-leg` tagged kinds carry the journal cursor fix-response.ts reads
   // back — that tag is ALSO what obliges them to a payload type (payloads.ts).
