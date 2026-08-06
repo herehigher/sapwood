@@ -57,7 +57,15 @@ import { EVENT_KIND_NAMES, isKnownEventKind } from "./state/event-kinds/index.js
 // #642: the shared read-model — `status --json`/`events` build their DTOs off this module,
 // the SAME one dashboard/server.ts's routes now import from (read-model.ts's own header
 // comment has the full extraction rationale).
-import { buildStatusDTO, MAX_PAGE_LIMIT, READ_MODEL_FORMAT_VERSION, resolveConfigProvenance } from "./state/read-model.js";
+import {
+  buildLaneAnchors,
+  buildStatusDTO,
+  type LaneAnchorsDTO,
+  MAX_PAGE_LIMIT,
+  probePidAlive,
+  READ_MODEL_FORMAT_VERSION,
+  resolveConfigProvenance,
+} from "./state/read-model.js";
 import {
   DEFAULT_DB_PATH,
   INSTANCE_LOCK_FILENAME,
@@ -572,7 +580,20 @@ export interface StatusSnapshot {
    *  merge-ref CI at once, and before this the only way to learn it was GitHub. DB-only like every
    *  other field here — the live detection runs in the engine's tick, never in `status`. */
   baseCiRed: BaseRedPin | null;
+  /** #705: per-lane runtime anchors (pid/aliveness/worktree/heartbeat age), keyed by lane name —
+   *  one entry per `active` row, built by `buildLaneAnchors` (read-model.ts, the SAME function
+   *  `status --json`'s StatusLaneDTO uses, so the two surfaces can never disagree). OPTIONAL: a
+   *  hand-built snapshot fixture (formatStatus's own unit tests) that doesn't care about this
+   *  feature can omit it entirely — `formatStatus` renders every anchor as unknown for a lane
+   *  with no entry, never a thrown lookup. The real `runStatus` path below always populates it. */
+  laneAnchors?: Record<string, LaneAnchorsDTO>;
 }
+
+/** #705: `formatStatus`'s own "no anchors known" fallback — used both when `laneAnchors` itself
+ *  is absent (a pre-#705 test fixture) and when a specific lane has no entry in it. Never
+ *  fabricates a dead/alive verdict; `pidAlive: "unknown"` is the same honest value `buildLaneAnchors`
+ *  itself reports for a pid-less lane. */
+const UNKNOWN_LANE_ANCHORS: LaneAnchorsDTO = { pid: null, pidAlive: "unknown", worktreePath: null, lastHeartbeat: null };
 
 export function formatStatus(s: StatusSnapshot): string {
   const running = s.active.filter((w) => w.state === "running");
@@ -583,7 +604,24 @@ export function formatStatus(s: StatusSnapshot): string {
   ];
   for (const w of s.active) {
     const pr = w.pr ? `  PR #${w.pr}` : "";
-    lines.push(`  ${w.state.padEnd(8)} ${w.name}   issue #${w.issue}${pr}   started ${w.started_at}`);
+    // #705: per-lane runtime anchors — pid/aliveness, worktree path, newest heartbeat age.
+    const a = s.laneAnchors?.[w.name] ?? UNKNOWN_LANE_ANCHORS;
+    const pidStr =
+      a.pid == null ? "pid unknown" : `pid ${a.pid} (${a.pidAlive === true ? "alive" : a.pidAlive === false ? "DEAD" : "alive: unknown"})`;
+    const worktreeStr = a.worktreePath == null ? "worktree unknown" : `worktree ${a.worktreePath}`;
+    // #705 gate② P1-2: id + ts + ageSec — an operator correlating a stale heartbeat with the
+    // ledger needs the event id/timestamp, not just how old it is.
+    const hbStr =
+      a.lastHeartbeat == null
+        ? "no heartbeat yet"
+        : `heartbeat #${a.lastHeartbeat.id} ${a.lastHeartbeat.ts} (${a.lastHeartbeat.ageSec}s ago)`;
+    // #705 AC3: a lane the LEDGER believes is running/fixing but whose pid is confirmed dead is
+    // the feature — render it visibly distinct, never blended into an ordinary status line.
+    const mismatch = (w.state === "running" || w.state === "fixing") && a.pidAlive === false;
+    const mismatchTag = mismatch ? "  !!! BELIEF-VS-REALITY MISMATCH: ledger says in-flight, pid is DEAD !!!" : "";
+    lines.push(
+      `  ${w.state.padEnd(8)} ${w.name}   issue #${w.issue}${pr}   started ${w.started_at}   ${pidStr}   ${worktreeStr}   ${hbStr}${mismatchTag}`,
+    );
   }
   lines.push("", `gated PRs (awaiting review gate): ${s.driving.length}`);
   for (const w of s.driving) {
@@ -730,13 +768,21 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
           configProvenance: cfg ? resolveConfigProvenance(configPath, existsSync) : undefined,
           now,
           unadjudicatedConcerns: unadjudicated,
+          pidProbe: probePidAlive,
         });
         return { stdout: `${JSON.stringify(dto)}\n`, stderr: "", code: 0 };
       }
+      const active = state.activeWorkers();
+      // #705: one buildLaneAnchors call per active lane — same per-worker read shape
+      // state.spentUsdForWorker already uses inside buildStatusDTO's own lanes.map, not a new
+      // aggregation pattern.
+      const laneAnchors: Record<string, LaneAnchorsDTO> = Object.fromEntries(
+        active.map((w) => [w.name, buildLaneAnchors(state, w.name, w.issue, probePidAlive, now)]),
+      );
       const snapshot: StatusSnapshot = {
         dbPath,
         schemaVersion: dbVersion,
-        active: state.activeWorkers(),
+        active,
         driving: state.drivingWorkers(),
         killSwitchActive: state.isKillSwitchActive(),
         pauseActive: state.isPauseActive(),
@@ -748,6 +794,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
         orphanReport: reconcile ? { orphans: reconcile.orphans, overflow: reconcile.overflow } : null,
         unadjudicatedConcerns: unadjudicated,
         baseCiRed: baseRedPin(state),
+        laneAnchors,
       };
       return { stdout: formatStatus(snapshot), stderr: "", code: 0 };
     });

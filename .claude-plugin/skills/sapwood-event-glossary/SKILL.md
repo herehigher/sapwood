@@ -100,6 +100,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `role-session-exit-lost` — **investigate**: a peripheral role session's process exited without the engine observing its outcome (result lost).
 - `role-session-spawn-timeout` — **investigate**: spawning a peripheral role session timed out before it could start doing work.
 - `role-worktree-retained` — **investigate**: a peripheral role session's worktree was kept on disk (uncommitted edits behind) instead of being deleted.
+- `lane-spawned` — **routine**: a worker lane got a NEW live child process (fresh dispatch, an ordinary/fix-leg resume, or a cross-restart adoption of an already-confirmed spawn) — carries the pid + worktree path `status` folds newest-per-lane. (see #705)
 
 ### PR drive
 

@@ -2116,7 +2116,18 @@ export class WorkerSupervisor implements Supervisor {
     this.removeIfExists(this.path(name, "failed.json"));
   }
 
-  async dispatch(issue: Issue, name?: string, opts?: { proxy?: WorkerProxyOpts }): Promise<{ name: string; sessionId: string }> {
+  /** #705: `pid`/`worktreePath` are the live-process identity `status`'s runtime anchors read
+   *  back off the `lane-spawned` event conductor.ts appends from this return value — `pid` is
+   *  `child.pid` at the moment this method returns (never null on a genuinely successful spawn;
+   *  typed nullable only for defensive symmetry with resume()'s adoption branch), `worktreePath`
+   *  is the SAME `resolve(this.worktreeRoot, laneName)` expression the spawn env
+   *  (`SAPWOOD_WORKTREE_ROOT`) and the pre-spawn manifest capture below already use — one
+   *  convention, not a second derivation that could drift from it. */
+  async dispatch(
+    issue: Issue,
+    name?: string,
+    opts?: { proxy?: WorkerProxyOpts },
+  ): Promise<{ name: string; sessionId: string; pid: number | null; worktreePath: string }> {
     const laneName = name ?? `lane-${issue.number}-${randomUUID().slice(0, 8)}`;
     // #668 (round 6 P1b): wait out any leader-exit reap still in flight for this SAME name before
     // doing anything else — see awaitInFlightLeaderExitReapsFor's own doc. A no-op (resolves
@@ -2416,7 +2427,7 @@ export class WorkerSupervisor implements Supervisor {
       // see Lane.manifestPreSpawnPromise's own doc for why a synchronous field would race.
       lane.manifestPreSpawnPromise = this.capturePreSpawnManifestForLane(laneName, jsonlPath, resolve(this.worktreeRoot, laneName));
     }
-    return { name: laneName, sessionId };
+    return { name: laneName, sessionId, pid: child.pid ?? null, worktreePath: resolve(this.worktreeRoot, laneName) };
   }
 
   resumeIntentState(name: string, issue: number): ResumeIntentState {
@@ -2474,11 +2485,18 @@ export class WorkerSupervisor implements Supervisor {
    *  same "prove a real prior leg actually terminated" invariant the ordinary path enforces via
    *  `.handoff`'s existence) — fail-closed, never silently starts a fix leg with no prior-leg
    *  evidence at all. */
+  /** #705: same `pid`/`worktreePath` contract as dispatch() (see that method's own doc) — TWO
+   *  return points carry it here. The cross-restart adoption branch (line below,
+   *  `matchingResumeIntent && spawn_confirmed`) has no live `child` handle to read a pid off; its
+   *  pid comes from the persisted `running.json` `wrapper_pid` the CONFIRMED spawn already wrote
+   *  (the same field `pidGroupAlive`/`wrapperPidFor` trust elsewhere in this file) — never
+   *  re-derived, never guessed. The ordinary fresh-spawn branch (this method's final return)
+   *  mirrors dispatch() exactly: `child.pid` at return time. */
   async resume(
     issue: Issue,
     name: string,
     opts?: { proxy?: WorkerProxyOpts; prompt?: string; sessionId?: string },
-  ): Promise<{ name: string; sessionId: string }> {
+  ): Promise<{ name: string; sessionId: string; pid: number | null; worktreePath: string }> {
     // #668 (round 6 P1b): resume() is the REALISTIC path for this race — its whole design
     // reuses an existing name (fix-leg entry and handoff-resume both require a terminal sentinel
     // ALREADY on disk for it), which is exactly the shape onExit()'s leader-exit reap leaves
@@ -2503,7 +2521,12 @@ export class WorkerSupervisor implements Supervisor {
     // marker, not about which sentinel authorized the call in the first place.
     if (matchingResumeIntent && running.spawn_confirmed === true) {
       this.removeIfExists(handoffPath);
-      return { name, sessionId: runningSessionId };
+      return {
+        name,
+        sessionId: runningSessionId,
+        pid: typeof running.wrapper_pid === "number" ? running.wrapper_pid : null,
+        worktreePath: resolve(this.worktreeRoot, name),
+      };
     }
     if (matchingResumeIntent && running.spawn_confirmed === false) {
       if (!this.lanes.has(name)) throw new UnresumableLaneError(name, issue.number);
@@ -2831,7 +2854,7 @@ export class WorkerSupervisor implements Supervisor {
       // not a full per-leg history.
       lane.manifestPreSpawnPromise = this.capturePreSpawnManifestForLane(name, jsonlPath, resolve(this.worktreeRoot, name));
     }
-    return { name, sessionId };
+    return { name, sessionId, pid: child.pid ?? null, worktreePath: resolve(this.worktreeRoot, name) };
   }
 
   /** Operator/drain-initiated graceful handoff: SIGTERM (not SIGKILL) so the worker wraps up

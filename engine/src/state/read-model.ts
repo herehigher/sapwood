@@ -353,6 +353,79 @@ export interface StatusLaneDTO {
    *  `0` here would render as a finished, free lane rather than an unknown one (same convention
    *  dashboard/server.ts's laneItem documents for its own `costUsd`). */
   settledUsd: number | null;
+  /** #705: the runtime anchors — pid/aliveness, worktree path, newest heartbeat age. Spread
+   *  from `buildLaneAnchors` (this module, below); see that function's own doc for the read-time
+   *  belief-vs-reality contract these fields exist to serve. */
+  pid: number | null;
+  pidAlive: boolean | "unknown";
+  worktreePath: string | null;
+  lastHeartbeat: { id: number; ts: string; ageSec: number } | null;
+}
+
+/** #705 gate② P2-4: the minimal shape of Node's `process.kill` this module depends on — an
+ *  injection seam, not the real signature (which also accepts a signal NAME). `probePidAlive`
+ *  only ever calls it with signal `0`, so this is all a test's fake needs to implement. */
+type Kill0 = (pid: number, signal: 0) => void;
+
+/** #705: one read-time `process.kill(pid, 0)`-style liveness probe. `true` — signal delivery
+ *  succeeded, the process exists (ESRCH would have thrown); `false` — ESRCH, no such process,
+ *  the ONLY case that means genuinely dead; `"unknown"` — anything else (no pid to probe, EPERM
+ *  meaning the process exists but isn't ours so treated as alive per POSIX kill(2) semantics is
+ *  handled separately below, or a platform/permission surprise this probe can't interpret).
+ *  NEVER coerced to `false` on an inconclusive result (#705 AC2) — a supervisor reconciling
+ *  belief-vs-reality must be able to trust that `false` here means confirmed dead, not "the
+ *  probe didn't work". Reported only; nothing in this module acts on the result.
+ *
+ *  #705 gate② P2-4: `killFn` is INJECTED (default `process.kill`, the production behavior) so a
+ *  test can pin the ESRCH/EPERM/other-errno/success matrix with a synthetic fake instead of a
+ *  real spawned-then-reaped subprocess — a real subprocess makes the dead-pid case a race (pid
+ *  reuse between exit and probe is not excludable in principle) and the no-timing-dependent-
+ *  tests doctrine bans depending on subprocess/OS scheduling behavior for a test's outcome. */
+export function probePidAlive(pid: number, killFn: Kill0 = process.kill.bind(process)): boolean | "unknown" {
+  if (!Number.isInteger(pid) || pid <= 0) return "unknown";
+  try {
+    // Signal 0: no signal is actually sent — the call only validates that the pid exists and is
+    // signalable, Node's documented `process.kill` behavior (mirrors POSIX kill(2)).
+    killFn(pid, 0);
+    return true;
+  } catch (e) {
+    const code = e && typeof e === "object" && "code" in e ? (e as NodeJS.ErrnoException).code : undefined;
+    if (code === "ESRCH") return false; // no such process — confirmed dead
+    if (code === "EPERM") return true; // exists, just not signalable by us — still alive
+    return "unknown"; // anything else: honest unknown, never guessed
+  }
+}
+
+/** #705: the four per-lane runtime-anchor fields, shared by StatusLaneDTO (the `--json` shape)
+ *  and cli.ts's text-status `StatusSnapshot` — named separately so the text path can carry one
+ *  per-lane record without depending on the rest of StatusLaneDTO's (JSON-specific) shape. */
+export type LaneAnchorsDTO = Pick<StatusLaneDTO, "pid" | "pidAlive" | "worktreePath" | "lastHeartbeat">;
+
+/** #705: the per-lane runtime-anchor fields both `status --json` (StatusLaneDTO) and the text
+ *  `status` path build off — one function so the two surfaces can never disagree on what "the
+ *  belief-vs-reality case" means. `pidProbe` is INJECTED (never a bare `process.kill` call
+ *  inline) so tests can pin alive/dead/unknown without a real subprocess — the same clock-
+ *  injection discipline this module's `now: Date` parameter already follows (no timing-dependent
+ *  tests, per repo doctrine). `now` drives `lastHeartbeat.ageSec` for the same reason.
+ *
+ *  #705 gate② P1-1: `issue` scopes BOTH ledger folds (`latestLaneSpawnFact`/
+ *  `latestHeartbeatForWorker`) alongside `worker` — a bare worker-name fold would let a REUSED
+ *  lane name inherit an older issue's stale pid/worktree/heartbeat, the same reuse hazard
+ *  lane-state-label.ts's own (worker, pr) scoping exists to close. See those two State methods'
+ *  own doc for why this is a latent (not live) hazard in production today. */
+export function buildLaneAnchors(
+  state: Pick<State, "latestLaneSpawnFact" | "latestHeartbeatForWorker">,
+  worker: string,
+  issue: number,
+  pidProbe: (pid: number) => boolean | "unknown",
+  now: Date,
+): LaneAnchorsDTO {
+  const spawnFact = state.latestLaneSpawnFact(worker, issue);
+  const pid = spawnFact?.pid ?? null;
+  const pidAlive: boolean | "unknown" = pid == null ? "unknown" : pidProbe(pid);
+  const hb = state.latestHeartbeatForWorker(worker, issue);
+  const lastHeartbeat = hb ? { id: hb.id, ts: hb.ts, ageSec: Math.max(0, Math.round((now.getTime() - Date.parse(hb.ts)) / 1000)) } : null;
+  return { pid, pidAlive, worktreePath: spawnFact?.worktreePath ?? null, lastHeartbeat };
 }
 
 /** #642 AC4: "without --config, the config-derived section is marked unavailable — status
@@ -405,10 +478,14 @@ export interface BuildStatusDTOInput {
   configProvenance: string | undefined;
   now: Date;
   unadjudicatedConcerns: number;
+  /** #705: the read-time pid-liveness probe — `probePidAlive` (this module) in production,
+   *  a fake in tests. Required (not defaulted here) so every caller states its posture
+   *  explicitly; cli.ts's runStatus is the one production call site. */
+  pidProbe: (pid: number) => boolean | "unknown";
 }
 
 export function buildStatusDTO(input: BuildStatusDTOInput): StatusDTO {
-  const { state, dbPath, schemaVersion, cfg, configProvenance, now, unadjudicatedConcerns } = input;
+  const { state, dbPath, schemaVersion, cfg, configProvenance, now, unadjudicatedConcerns, pidProbe } = input;
   const active = state.activeWorkers();
   const inFlight = (w: WorkerRow): boolean => w.state === "running" || w.state === "fixing";
   const ceilingBreach = state.ceilingBreach();
@@ -430,6 +507,7 @@ export function buildStatusDTO(input: BuildStatusDTOInput): StatusDTO {
       startedAt: w.started_at,
       endedAt: w.ended_at,
       settledUsd: inFlight(w) ? null : state.spentUsdForWorker(w.name),
+      ...buildLaneAnchors(state, w.name, w.issue, pidProbe, now),
     })),
     drivingCount: state.drivingWorkers().length,
     killSwitchActive: state.isKillSwitchActive(),

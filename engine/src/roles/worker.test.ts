@@ -2221,9 +2221,15 @@ test("resume: a dead matching running sentinel is durable interrupted-resume pro
         spawn_confirmed: true,
       }),
     );
+    // #705: the adoption branch sources `pid` from the marker's own `wrapper_pid` (there is no
+    // live `child` handle to read it off) and `worktreePath` from the same
+    // `worktreeRoot`/laneName convention every other spawn path uses — proven here against the
+    // default worktreeRoot (no override passed to `sup` above).
     assert.deepEqual(await s.resume({ number: 1, title: "t", labels: [] }, "lane-dead"), {
       name: "lane-dead",
       sessionId: "survivor",
+      pid: 999_999_999,
+      worktreePath: join(process.cwd(), ".claude", "worktrees", "lane-dead"),
     });
   } finally {
     killAnyRunningLanes(s);

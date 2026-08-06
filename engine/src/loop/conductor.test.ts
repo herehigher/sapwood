@@ -8063,6 +8063,59 @@ test("#595 tick DISPATCH: an issue with an empty title omits issueTitle rather t
   st.close();
 });
 
+// ── #705: dispatch/resume record the `lane-spawned` fact status's runtime anchors read ────────
+
+test("#705 tick DISPATCH: a Supervisor reporting pid/worktreePath (the real worker.ts shape) makes the tick append a lane-spawned event carrying them", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  // Simulate the real worker.ts dispatch() contract (#705) — FakeSupervisor's own default
+  // dispatch() omits pid/worktreePath entirely (most fixtures have no opinion on live-process
+  // identity), so this ONE test overrides it to prove the conductor threads the fact through
+  // when a Supervisor DOES report it.
+  sup.dispatch = async (issue) => {
+    sup.dispatched.push(issue);
+    const name = "lane-705";
+    return { name, sessionId: `sess-${name}`, pid: 54321, worktreePath: "/tmp/lane-705" };
+  };
+  forge.ready = [{ number: 11, title: "t", labels: ["prio:3-feature"] }];
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["lane-spawned"]);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0]!.payload, { worker: "lane-705", issue: 11, pid: 54321, worktreePath: "/tmp/lane-705" });
+  st.close();
+});
+
+test("#705 tick DISPATCH: the DEFAULT FakeSupervisor (no pid/worktreePath opinion) makes the tick append NO lane-spawned event — an absent fact is never fabricated", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  forge.ready = [{ number: 12, title: "t", labels: ["prio:3-feature"] }];
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["lane-spawned"]).length, 0);
+  st.close();
+});
+
+test("#705 tick RESUME: a Supervisor reporting pid/worktreePath on resume() also produces a lane-spawned event, superseding the ORIGINAL dispatch's fact for the SAME lane", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  st.upsertWorker({
+    name: "lane-705r",
+    issue: 13,
+    session_id: "orig",
+    state: "handoff",
+    started_at: "2026-08-06T00:00:00.000Z",
+    ended_at: null,
+  });
+  st.appendEvent("handoff", { worker: "lane-705r", issue: 13, session_id: "orig" });
+  st.appendEvent("lane-spawned", { worker: "lane-705r", issue: 13, pid: 111, worktreePath: "/tmp/lane-705r" });
+  sup.resume = async (_issue, worker) => ({ name: worker, sessionId: "resumed-sess", pid: 222, worktreePath: "/tmp/lane-705r" });
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(st.latestLaneSpawnFact("lane-705r", 13), { pid: 222, worktreePath: "/tmp/lane-705r" });
+  st.close();
+});
+
 test("#595 tick RECLAIM: reclaim-done into DRIVING carries the probe's prTitle", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

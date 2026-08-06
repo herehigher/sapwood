@@ -44,6 +44,7 @@ import type {
   BoardStatus,
   CategorizedTokenUsage,
   EscalationCarrier,
+  LaneSpawnFact,
   ModelUsageEntry,
   ParkRow,
   PendingRollback,
@@ -1110,6 +1111,25 @@ conflict-free head.`;
  *  leg is never granted ambient forge credentials — the proxy is its ONLY evidence channel, so
  *  this function refuses to start one without it rather than silently degrading. #246 (the sole
  *  production caller) always supplies a `credentialFree` proxy. */
+/** #705: records the `lane-spawned` fact `status`'s per-lane runtime anchors read — called at
+ *  every point in this file where a `Supervisor.dispatch`/`resume` call just confirmed a NEW
+ *  live child for `worker` (fresh dispatch, ordinary/fix-leg resume, cross-restart adoption).
+ *  A no-op when `r.worktreePath` is `undefined` — the `Supervisor` interface's own doc explains
+ *  why that field is optional (test-double supervisors with no opinion on live-process identity);
+ *  an absent fact must never become a fabricated `worktreePath: null` event, which is exactly
+ *  what `State.latestLaneSpawnFact`'s own `IS NOT NULL`-equivalent read guards against. */
+/** #705 (gate② P2-3 update): a PURE projection from a `Supervisor.dispatch`/`resume` result to
+ *  the `LaneSpawnFact` `State.recordDispatch`/`recordLaneRowAndSpawnFact` append ATOMICALLY with
+ *  the row transition that makes it true — no longer a standalone `appendEvent` call of its own
+ *  (see those methods' own doc for why: a crash between the row commit and a SEPARATE
+ *  `lane-spawned` append left a lane the ledger already believes is running with no fact ever
+ *  coming). `null` when `r.worktreePath` is `undefined` — the `Supervisor` interface's own doc
+ *  explains why that field is optional (test-double supervisors with no opinion on live-process
+ *  identity); an absent fact must never become a fabricated `worktreePath: null` event. */
+function spawnFactFrom(worker: string, issue: number, r: { pid?: number | null; worktreePath?: string }): LaneSpawnFact | null {
+  return r.worktreePath === undefined ? null : { worker, issue, pid: r.pid ?? null, worktreePath: r.worktreePath };
+}
+
 export async function startFixLeg(
   deps: FixLegDeps,
   w: WorkerRow,
@@ -1143,8 +1163,13 @@ export async function startFixLeg(
   const journalCursor = deps.state.maxForgeProxyJournalId(w.name);
   const result = await deps.supervisor.resume(issue, w.name, { prompt, sessionId: w.session_id, proxy });
   const fixRounds = (w.fix_rounds ?? 0) + 1;
-  deps.state.upsertWorker({ ...w, state: "fixing", ended_at: null, fix_rounds: fixRounds });
-  deps.state.appendEvent("fix-leg-started", { worker: w.name, issue: w.issue, pr, fixRounds, journalCursor, at: now().toISOString() });
+  // #705 gate② P2-3: row transition + lifecycle event + lane-spawned fact, one transaction.
+  deps.state.recordLaneRowAndSpawnFact(
+    { ...w, state: "fixing", ended_at: null, fix_rounds: fixRounds },
+    "fix-leg-started",
+    { worker: w.name, issue: w.issue, pr, fixRounds, journalCursor, at: now().toISOString() },
+    spawnFactFrom(w.name, w.issue, result),
+  );
   return result;
 }
 
@@ -1283,10 +1308,17 @@ export interface ReclaimResult {
   worktreeRetained: boolean;
 }
 
-/** The conductor's only handle on workers. worker.ts (M2 #11) implements this. */
+/** The conductor's only handle on workers. worker.ts (M2 #11) implements this.
+ *
+ *  #705: `dispatch`/`resume` both return OPTIONAL `pid`/`worktreePath` — worker.ts's real
+ *  implementation always populates them (see its own doc), but the field is optional here so a
+ *  test-double Supervisor with no opinion on live-process identity (most of this file's own
+ *  fixtures) still satisfies the interface unchanged. `spawnFactFrom` (below, near its call
+ *  sites) is the one place that decides what an absent `worktreePath` means: no `lane-spawned`
+ *  event, not a fabricated null-worktree fact. */
 export interface Supervisor {
   probe(worker: string): Promise<LaneProbe>;
-  dispatch(issue: Issue): Promise<{ name: string; sessionId: string }>;
+  dispatch(issue: Issue): Promise<{ name: string; sessionId: string; pid?: number | null; worktreePath?: string }>;
   /** Re-enter a terminal handoff as a fresh leg in the same session/worktree (#172). `opts`
    *  (#245) is additive: `prompt` overrides the ordinary issue-rendered prompt (the fix-leg's
    *  own fix instruction — see startFixLeg below); `proxy` attaches a forge MCP proxy handle to
@@ -1298,7 +1330,7 @@ export interface Supervisor {
     issue: Issue,
     worker: string,
     opts?: { proxy?: WorkerProxyOpts; prompt?: string; sessionId?: string },
-  ): Promise<{ name: string; sessionId: string }>;
+  ): Promise<{ name: string; sessionId: string; pid?: number | null; worktreePath?: string }>;
   /** Cheap, read-only classification of resume()'s durable spawn-intent marker (#172). */
   resumeIntentState(worker: string, issue: number): ResumeIntentState;
   /** Tear down a dead/stale lane (process-tree kill + worktree retention/cleanup, #69). */
@@ -3295,7 +3327,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     for (const w of state.handoffWorkers()) {
       if (supervisor.resumeIntentState(w.name, w.issue) !== "confirmed") continue;
       const issue: Issue = { number: w.issue, title: "", labels: [] };
-      let result: { name: string; sessionId: string };
+      let result: { name: string; sessionId: string; pid?: number | null; worktreePath?: string };
       try {
         result = await supervisor.resume(issue, w.name);
       } catch (e) {
@@ -3313,15 +3345,20 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // entirely). Landing it in `fixing` makes it visible to THIS SAME tick's drain loop just
       // below (which now scans running+fixing) — no separate requestHandoff needed here, same
       // as the ordinary (non-fix) adoption case.
-      state.upsertWorker({
-        ...w,
-        session_id: result.sessionId,
-        state: w.fixing_handoff === 1 ? "fixing" : "running",
-        started_at: iso(),
-        ended_at: null,
-        resume_attempts: attempt,
-      });
-      state.appendEvent("resumed", { worker: w.name, issue: w.issue, attempt });
+      // #705 gate② P2-3: row transition + resumed event + lane-spawned fact, one transaction.
+      state.recordLaneRowAndSpawnFact(
+        {
+          ...w,
+          session_id: result.sessionId,
+          state: w.fixing_handoff === 1 ? "fixing" : "running",
+          started_at: iso(),
+          ended_at: null,
+          resume_attempts: attempt,
+        },
+        "resumed",
+        { worker: w.name, issue: w.issue, attempt },
+        spawnFactFrom(w.name, w.issue, result),
+      );
       resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt });
     }
     const reclaimed: ReclaimOutcome[] = [];
@@ -5273,7 +5310,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // gracefully rather than bless it as a healthy continuation. `fixing_handoff` STAYS 1 so
       // the NEXT handoff/resume cycle re-mints a genuinely fresh proxy.
       if (decision === "ADOPT") {
-        let adoptResult: { name: string; sessionId: string };
+        let adoptResult: { name: string; sessionId: string; pid?: number | null; worktreePath?: string };
         try {
           adoptResult = await supervisor.resume(issue, w.name);
         } catch (e) {
@@ -5293,16 +5330,22 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         // first and only successful one. Same convergence argument as B3's reordering.
         supervisor.requestHandoff(w.name);
         const adoptAttempt = attempts + 1;
-        state.upsertWorker({
-          ...w,
-          session_id: adoptResult.sessionId,
-          state: "fixing",
-          started_at: iso(),
-          ended_at: null,
-          resume_attempts: adoptAttempt,
-          fixing_handoff: 1,
-        });
-        state.appendEvent("fix-leg-adopted-drained", { worker: w.name, issue: w.issue, pr, attempt: adoptAttempt });
+        // #705 gate② P2-3: row transition + fix-leg-adopted-drained event + lane-spawned fact,
+        // one transaction.
+        state.recordLaneRowAndSpawnFact(
+          {
+            ...w,
+            session_id: adoptResult.sessionId,
+            state: "fixing",
+            started_at: iso(),
+            ended_at: null,
+            resume_attempts: adoptAttempt,
+            fixing_handoff: 1,
+          },
+          "fix-leg-adopted-drained",
+          { worker: w.name, issue: w.issue, pr, attempt: adoptAttempt },
+          spawnFactFrom(w.name, w.issue, adoptResult),
+        );
         resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt: adoptAttempt });
         resumeLanesUsed++;
         continue;
@@ -5313,7 +5356,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // a genuinely FRESH mint/spawn (unlike the ADOPT branch above), so the same "child cannot
       // call before this line runs" guarantee startFixLeg's own capture relies on holds here too.
       const journalCursor = state.maxForgeProxyJournalId(w.name);
-      let fixResult: { name: string; sessionId: string };
+      let fixResult: { name: string; sessionId: string; pid?: number | null; worktreePath?: string };
       try {
         fixResult = await supervisor.resume(issue, w.name, {
           prompt: fixPrompt,
@@ -5332,31 +5375,30 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         throw new Error(`resume returned worker ${fixResult.name}; expected existing lane ${w.name}`);
       }
       const fixAttempt = attempts + 1;
-      state.upsertWorker({
-        ...w,
-        session_id: fixResult.sessionId,
-        state: "fixing",
-        started_at: iso(),
-        ended_at: null,
-        resume_attempts: fixAttempt,
-        fixing_handoff: 0,
-      });
       // fixRounds: this is a CONTINUATION of the same fix round (only resume_attempts bumps
       // above, never fix_rounds) — carried so fixLegJournalCursor can match this event against
       // the SAME (worker, fixRounds) key the round's original fix-leg-started event used.
-      state.appendEvent("fix-leg-resumed", {
-        worker: w.name,
-        issue: w.issue,
-        pr,
-        attempt: fixAttempt,
-        fixRounds: w.fix_rounds ?? 0,
-        journalCursor,
-      });
+      // #705 gate② P2-3: row transition + fix-leg-resumed event + lane-spawned fact, one
+      // transaction.
+      state.recordLaneRowAndSpawnFact(
+        {
+          ...w,
+          session_id: fixResult.sessionId,
+          state: "fixing",
+          started_at: iso(),
+          ended_at: null,
+          resume_attempts: fixAttempt,
+          fixing_handoff: 0,
+        },
+        "fix-leg-resumed",
+        { worker: w.name, issue: w.issue, pr, attempt: fixAttempt, fixRounds: w.fix_rounds ?? 0, journalCursor },
+        spawnFactFrom(w.name, w.issue, fixResult),
+      );
       resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt: fixAttempt });
       resumeLanesUsed++;
       continue;
     }
-    let result: { name: string; sessionId: string };
+    let result: { name: string; sessionId: string; pid?: number | null; worktreePath?: string };
     try {
       result = await supervisor.resume(issue, w.name);
     } catch (e) {
@@ -5372,15 +5414,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       throw new Error(`resume returned worker ${result.name}; expected existing lane ${w.name}`);
     }
     const attempt = attempts + 1;
-    state.upsertWorker({
-      ...w,
-      session_id: result.sessionId,
-      state: "running",
-      started_at: iso(),
-      ended_at: null,
-      resume_attempts: attempt,
-    });
-    state.appendEvent("resumed", { worker: w.name, issue: w.issue, attempt });
+    // #705 gate② P2-3: row transition + resumed event + lane-spawned fact, one transaction.
+    state.recordLaneRowAndSpawnFact(
+      { ...w, session_id: result.sessionId, state: "running", started_at: iso(), ended_at: null, resume_attempts: attempt },
+      "resumed",
+      { worker: w.name, issue: w.issue, attempt },
+      spawnFactFrom(w.name, w.issue, result),
+    );
     resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt });
     resumeLanesUsed++;
   }
@@ -5474,7 +5514,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // untracked worker running while the issue stays dispatchable (Codex P1, PR #30). If
       // the launch fails after the claim, roll the board back to Ready so it's reclaimable.
       await forge.claimIssue(issue.number);
-      let dispatchRes: { name: string; sessionId: string };
+      let dispatchRes: { name: string; sessionId: string; pid?: number | null; worktreePath?: string };
       // #301 review (P1#1/P1#3): hoisted OUTSIDE the try so it's available below to stamp onto
       // the fresh WorkerRow. Built and recorded INSIDE the try (next line) so a build/record
       // failure still rolls the claim back exactly like a dispatch() failure would; definite-
@@ -5557,14 +5597,20 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // P2-A (round 3): worker row + canary assignment + events land in ONE transaction
       // (state.registerCanaryDispatch) — a crash can no longer leave a live canary the
       // restarted engine doesn't know about (which would break "exactly one canary").
+      // #705 gate② P2-3: row transition + dispatched event + lane-spawned fact, one transaction
+      // either way — registerCanaryDispatch bundles its own canary_worker/park-canary writes in
+      // too; recordDispatch is the ordinary path's equivalent. A canary lane is a REAL live
+      // child too (registerCanaryDispatch's own upsertWorker puts it in activeWorkers() exactly
+      // like an ordinary dispatch), so its spawn fact rides the SAME transaction, not a
+      // follow-up call.
+      const spawnFact = spawnFactFrom(name, issue.number, dispatchRes);
       if (parkActive) {
-        state.registerCanaryDispatch(workerRow, "llm", issue.title);
+        state.registerCanaryDispatch(workerRow, "llm", issue.title, spawnFact ?? undefined);
       } else {
-        state.upsertWorker(workerRow);
         // #595: `issueTitle` comes from THIS tick's board row — the same `getReadyIssues` read
         // that selected the issue, never a second query. The dashboard's issue-number tooltips
         // (frontend-design §3 C) read it straight off the ledger, so they work offline/in replay.
-        state.appendEvent("dispatched", { worker: name, issue: issue.number, issueTitle: issue.title });
+        state.recordDispatch(workerRow, issue.title, spawnFact);
       }
       inFlightIssues.add(issue.number);
       lanesUsed++;

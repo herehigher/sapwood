@@ -1114,6 +1114,19 @@ export type WorkerState = "running" | "driving" | "fixing" | "done" | "failed" |
  *  The pure rule that picks one is conductor.ts's `escalationCarrier`. */
 export type EscalationCarrier = "issue" | "pr";
 
+/** #705: the `lane-spawned` event payload shape — a lane's live-process identity at the moment
+ *  worker.ts's `dispatch()`/`resume()` confirmed a NEW child for it. `pid` is `null` for the
+ *  cross-restart-adoption branch's own honest "no wrapper_pid on record" case (worker.ts's
+ *  `resume()` own doc); `worktreePath` is always known once a spawn fact exists at all — a
+ *  `worktreePath: null` fact is never recorded (conductor.ts's `spawnFactFrom` treats an absent
+ *  `worktreePath` from the Supervisor as "no fact", never as a fact with a null field). */
+export interface LaneSpawnFact {
+  worker: string;
+  issue: number;
+  pid: number | null;
+  worktreePath: string;
+}
+
 export interface WorkerRow {
   name: string;
   issue: number;
@@ -3288,7 +3301,18 @@ export class State {
    *  including the case where no `source` episode row exists to attach to (the UPDATE matches
    *  zero rows -> the whole registration, worker row included, rolls back and this throws;
    *  a canary must never exist without the episode it is testing). */
-  registerCanaryDispatch(row: WorkerRow, source: EnvFailureSource, issueTitle?: string): void {
+  registerCanaryDispatch(
+    row: WorkerRow,
+    source: EnvFailureSource,
+    issueTitle?: string,
+    // #705 gate② P2-3: same "row transition + spawn fact commit together" rule this method's
+    // own transaction already enforces for canary_worker/park-canary — a canary lane is a REAL
+    // live child too (read-model.ts's buildStatusDTO includes it via activeWorkers()), so a
+    // missing pid/worktreePath here is the same permanently-null-anchors hazard the ordinary
+    // dispatch path closes via State.recordDispatch. `undefined` (not passed) is a Supervisor
+    // with no opinion on live-process identity — never a fabricated fact.
+    spawnFact?: LaneSpawnFact,
+  ): void {
     this.db.exec("BEGIN");
     try {
       this.upsertWorker(row);
@@ -3301,6 +3325,56 @@ export class State {
       // dashboard never has a tooltip hole on park-canary lanes. Omitted when absent.
       this.appendEvent("dispatched", { worker: row.name, issue: row.issue, ...(issueTitle != null ? { issueTitle } : {}) });
       this.appendEvent("park-canary", { worker: row.name, issue: row.issue });
+      if (spawnFact) this.appendEvent("lane-spawned", spawnFact);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /** #705 gate② P2-3: the ordinary (non-canary) dispatch's worker row, its `dispatched` event,
+   *  and (when the Supervisor reported one) its `lane-spawned` event, in ONE transaction — the
+   *  SAME "the row transition and the fact it enables must commit together" rule
+   *  `registerCanaryDispatch` already enforces for its own canary_worker/park-canary writes, and
+   *  `recordEngineReviewVerdictAndSpend` enforces for verdict+spend. Before this, `conductor.ts`
+   *  wrote the row, then `dispatched`, then `lane-spawned` as THREE separate statements — a crash
+   *  after the first two but before the third left a lane the ledger already believes is
+   *  `running` (so the next tick's dispatch-cap counts it occupied and never retries the spawn)
+   *  with NO `lane-spawned` event ever coming — permanently null runtime anchors, undetectable
+   *  and unrecoverable after the fact. `spawnFact` is `null`/omitted for a Supervisor with no
+   *  opinion on live-process identity (a test double) — never a fabricated fact. */
+  recordDispatch(row: WorkerRow, issueTitle: string | undefined, spawnFact: LaneSpawnFact | null): void {
+    this.db.exec("BEGIN");
+    try {
+      this.upsertWorker(row);
+      this.appendEvent("dispatched", { worker: row.name, issue: row.issue, ...(issueTitle != null ? { issueTitle } : {}) });
+      if (spawnFact) this.appendEvent("lane-spawned", spawnFact);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /** #705 gate② P2-3: the general form of the same "row transition + spawn fact, one
+   *  transaction" rule — used by every RESUME-family call site (ordinary resume, fix-leg
+   *  resume/adoption, cross-restart adoption, `startFixLeg`), each of which already has its own
+   *  distinct lifecycle event (`resumed`/`fix-leg-resumed`/`fix-leg-adopted-drained`/
+   *  `fix-leg-started`) with its own payload shape — hence the generic
+   *  `(lifecycleKind, lifecyclePayload)` pair, same `payload: unknown` seam
+   *  `recordEngineReviewVerdictAndSpend` uses for its own caller-shaped event. */
+  recordLaneRowAndSpawnFact<K extends EventKind>(
+    row: WorkerRow,
+    lifecycleKind: K,
+    lifecyclePayload: EventPayloadFor<K>,
+    spawnFact: LaneSpawnFact | null,
+  ): void {
+    this.db.exec("BEGIN");
+    try {
+      this.upsertWorker(row);
+      this.appendEvent(lifecycleKind, lifecyclePayload);
+      if (spawnFact) this.appendEvent("lane-spawned", spawnFact);
       this.db.exec("COMMIT");
     } catch (e) {
       this.db.exec("ROLLBACK");
@@ -3657,6 +3731,57 @@ export class State {
       | { kind: string; payload: string }
       | undefined;
     return row ? { kind: row.kind, payload: JSON.parse(row.payload) as unknown } : undefined;
+  }
+
+  /** #705: the newest known live-process identity for `worker` — pid + worktree path, read off
+   *  the `lane-spawned` event the conductor appends every time worker.ts's dispatch()/resume()
+   *  confirms a NEW live child for this lane (first dispatch, an ordinary or fix-leg resume, or
+   *  a cross-restart adoption of an already-confirmed spawn — worker.ts's own early-return
+   *  branch in resume() sources the pid from the persisted running.json `wrapper_pid` for that
+   *  last case). Newest wins by event id, the same MAX(id)-per-subject fold
+   *  `unreleasedRetainedWorktrees` above uses — a resumed lane's fresh pid/worktree supersedes
+   *  its prior leg's stale one, which is exactly the belief-vs-reality case #705 exists for.
+   *  `null` when the lane predates #705 or was dispatched through a `Supervisor` that doesn't
+   *  report this fact (a test double) — read-model.ts's `buildLaneAnchors` renders that as
+   *  `pid: null, pidAlive: "unknown", worktreePath: null`, never a fabricated "dead".
+   *
+   *  #705 gate② P1-1: scoped by (worker, issue), not worker name alone. A lane NAME is reused
+   *  only in the LATENT case (an explicit `name` colliding with a stale sentinel) — production
+   *  dispatch() never passes one and refuses reuse via its own stale-sentinel check — but a bare
+   *  worker-name fold would silently hand a reused name an OLDER issue's stale pid/worktree, the
+   *  same reuse hazard lane-state-label.ts's own (worker, pr) scoping exists to close. */
+  latestLaneSpawnFact(worker: string, issue: number): { pid: number | null; worktreePath: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT json_extract(payload, '$.pid') AS pid, json_extract(payload, '$.worktreePath') AS worktreePath
+         FROM events
+         WHERE kind = 'lane-spawned' AND json_extract(payload, '$.worker') = ? AND json_extract(payload, '$.issue') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker, issue) as { pid: number | null; worktreePath: string | null } | undefined;
+    return row && row.worktreePath != null ? { pid: row.pid, worktreePath: row.worktreePath } : null;
+  }
+
+  /** #705: the newest `worker-heartbeat` event for `worker` — its row id plus the EVENTS TABLE'S
+   *  OWN `ts` column (appendEvent's deliberate wall-clock write, not a payload field), for
+   *  read-model.ts's `buildLaneAnchors` to turn into an age-seconds against an INJECTED clock
+   *  (never a `Date.now()` read in here — this stays a pure ledger read). `null` when the lane
+   *  has no heartbeat yet (freshly dispatched; the first cadence tick isn't due).
+   *
+   *  #705 gate② P1-1: scoped by (worker, issue) — same lane-name-reuse hazard
+   *  `latestLaneSpawnFact` above closes. Filters on the payload's OWN `issue` field rather than
+   *  bounding by a `lane-spawned` id cursor: worker.ts's heartbeat emit site
+   *  (`gate.tick("worker-heartbeat", { worker, issue, elapsedSec })`) already carries `issue` on
+   *  every row, so this is the smallest change that closes the hazard — no payload widening. */
+  latestHeartbeatForWorker(worker: string, issue: number): { id: number; ts: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, ts FROM events
+         WHERE kind = 'worker-heartbeat' AND json_extract(payload, '$.worker') = ? AND json_extract(payload, '$.issue') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker, issue) as { id: number; ts: string } | undefined;
+    return row ?? null;
   }
 
   /** #431 rounds 2-3: which side of the entered/cleared pair is newest FOR ONE CEILING REASON —
