@@ -462,9 +462,11 @@ test("createPlanReviewStub (#703 regression — live incident shape, #145/#645 2
   await stub.run({ roundId: 1, phase: "plan_review", marker: null });
   const appliedBody = forge.issueBodies[63]!;
   // Pre-#703, this next check reproduced the live incident: the applied body's marker pointed at
-  // the engine comment (999999), and this same freshness check fired `cursor-targets-engine-comment`
-  // moments later at the dispatch/drive checkpoint, flagging needs-human on an issue whose plan a
-  // human had already, correctly, adjudicated.
+  // the engine comment (999999) — under the pre-v2 validator that fired `cursor-targets-engine-
+  // comment` at the dispatch/drive checkpoint moments later, flagging needs-human on an issue
+  // whose plan a human had already, correctly, adjudicated. Post-#703 (immutability, both v1 and
+  // v2) the engine-id marker never lands at all — the original human marker (77) survives, so
+  // this assertion holds regardless of the v2 validator relaxation too.
   const dispatchCheck = await checkCommentCursorFreshness(forge, 63, appliedBody);
   assert.equal(dispatchCheck.ok, true, "the original, human-adjudicated marker (77) must still validate cleanly");
   if (dispatchCheck.ok) assert.equal(dispatchCheck.cursor, "77");
@@ -1114,6 +1116,23 @@ test("createPlanReviewStub (#652): pre-spend checkpoint — a stale cursor (unad
   const posted = lastComment(forge, 12);
   assert.match(posted, /pending/i);
   assert.match(posted, /#1/);
+  state.close();
+});
+
+test("createPlanReviewStub (#703 v2, refusal arm): the issue's CURRENT body already carries a DUPLICATE adjudication-cursor marker — plan_review refuses entirely at the pre-existing #652 pre-spend checkpoint, never a repair, never a session dispatched (covers BOTH the reviewer approve-with-revision AND drafter write sites — neither is ever reached)", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 65, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[65] = `${NO_PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 1 -->\n\n<!-- sapwood:comments-adjudicated-through: 2 -->`;
+  const runner = new ScriptedRunner([{ result: doneResult("reviewer-0", sapwoodResult({ decision: "approve", issue: 65 }, PLAN_BODY)) }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.equal(runner.calls.length, 0, "no reviewer/drafter session is ever spent while the current marker state is invalid");
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "refused, never repaired");
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 65 && l === "needs-human"));
+  const posted = lastComment(forge, 65);
+  assert.match(posted, /duplicate-marker/);
   state.close();
 });
 

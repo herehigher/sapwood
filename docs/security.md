@@ -1994,16 +1994,66 @@ The mechanism is a deterministic, trust-independent staleness gate, pure code wi
 loop: the issue body carries an adjudication-cursor marker
 `<!-- sapwood:comments-adjudicated-through: <comment-id> -->`, meaning "a maintainer has
 adjudicated every comment at or before this one" (adjudicated = folded into the body, or
-reviewed-and-nothing-to-fold). The marker identifies a concrete NON-engine comment by
-**stream position** in GitHub's oldest-first issue-comment stream, never by numeric id ordering —
-pending comments are the non-engine comments occurring after that position in the fetched stream.
-Cursor `0` denotes the position before the first comment (nothing adjudicated yet). A malformed
-marker, a duplicate marker, a cursor pointing at an engine comment, or a cursor whose target no
-longer exists all fail closed to needs-attention; a deleted PENDING comment simply supplies no
-content, but a deleted CURSOR TARGET requires a maintainer to reset the cursor to an existing
-adjudicated comment. An issue with no marker and zero comments is the one pass-through case —
+reviewed-and-nothing-to-fold). The marker identifies a concrete comment — **any** comment,
+engine-authored ones included (#703 v2, below) — by **stream position** in GitHub's oldest-first
+issue-comment stream, never by numeric id ordering: pending comments are the non-engine comments
+occurring after that position in the fetched stream, regardless of whether the target itself is
+an engine or non-engine comment. Cursor `0` denotes the position before the first comment (nothing
+adjudicated yet). A malformed marker, a duplicate marker, or a cursor whose target no longer
+exists all fail closed to needs-attention; a deleted PENDING comment simply supplies no content,
+but a deleted CURSOR TARGET requires a maintainer to reset the cursor to an existing adjudicated
+comment. An issue with no marker and zero comments is the one pass-through case —
 behavior-identical to pre-#652 behavior (no new writes, labels, or outcome changes for that case;
 the checkpoints themselves DO add comment/actor reads on every other case, see below).
+
+**Position semantics, not a non-engine requirement (#703 v2, 2026-08-06 — supersedes the original
+"engine comment target fails closed" rule).** Live batch-11 evidence (2026-08-06, three
+occurrences in one afternoon: #145's round-340 plan_review housekeeping advice, an independent
+drafter redraft on #645, and a human operator live-reproducing the same mistake on #688 by
+following the pre-v2 recovery-comment wording literally) showed every marker-writing party
+converging on the SAME choice — "the newest comment id" — which the pre-v2 validator then
+rejected outright whenever that newest comment happened to be engine-authored. The design
+diagnosis: the marker's own documented meaning IS a stream position, so rejecting an
+engine-comment target contradicted the mechanism's own model. The fix ships as ONE unit, in this
+order (relaxing the validator alone, first, would open a silent-adjudication hole — see the next
+subsection):
+
+1. **Structural role-marker immutability, first.** No role session may move, create, or delete the
+   marker — see "Role-marker immutability" below. Once this lands, no role can ever choose a
+   marker value at all, so only a HUMAN's own deliberate choice can ever place a marker anywhere,
+   engine-authored target included.
+2. **Validator relaxation, in the same change.** `computeCommentCursor` now accepts a cursor
+   pointing at ANY existing comment — engine or non-engine — as a valid position. Pending is
+   computed identically either way: the non-engine comments strictly after the target's stream
+   index. An engine-comment target sitting after the last human comment is therefore fully
+   adjudicated (zero pending); one sitting before a later human comment correctly leaves that
+   comment pending. Every other fail-closed arm (malformed marker, duplicate marker, unknown
+   target, missing comment id, missing marker with pending comments) is unchanged.
+
+**Role-marker immutability (#703 v2, structural, item 1).** The marker is PO/human-owned state —
+no role session has standing to move, create, or delete it, regardless of what the role's own
+output (or any prompt/plan_review advice feeding it) claims. Enforced at EVERY point a
+role-produced body is about to become the live one, not by trusting the role's text:
+`applyRoleBodyRewrite` (`comment-cursor.ts`) unconditionally strips any marker the role emitted
+from its proposed body, then reattaches the CURRENT body's marker byte-for-byte (its exact
+original line text) if one exists — or attaches none, if the current body had none. Wired into
+every role body-write site: the verification-plan-reviewer's approve-with-revision and the
+verification-plan-drafter's drafted body (`plan-review.ts`), PO triage's redraft — normalized
+BEFORE the write-ahead decision is durably persisted, so the journal and the eventual GitHub write
+carry the IDENTICAL normalized text (`align.ts`) — and a role-proposed BRAND-NEW issue body, which
+can only ever have its own attempted marker stripped (there being no current body to preserve a
+marker from) without disturbing the terminal proposal marker's own position-load-bearing
+`endsWith` trailer (`issue-creation.ts`).
+
+**The refusal arm.** When the CURRENT body's own marker state is already invalid — a human can
+leave a body duplicate-marked or malformed directly, independent of any role — the role write is
+REFUSED entirely, never "repaired" by silently picking a value or dropping the broken marker(s):
+that would be the engine making a human-owned adjudication call on the human's behalf. Both
+`plan-review.ts` write sites get this for free from the pre-existing gate⓪ freshness checkpoint
+(which already fails the malformed-marker/duplicate-marker arms before any write is reached);
+`align.ts`'s PO-triage site, which has no equivalent checkpoint of its own, checks
+`checkMarkerWritePrecondition` explicitly and skips the write (the candidate re-matches next
+round) on failure.
 
 **Marker recognition is standalone-line anchored (round 1 hardening).** A marker counts only when
 it is the ENTIRE trimmed line, and never when that line falls inside a fenced (` ``` `/`~~~`)
@@ -2050,24 +2100,41 @@ a session was actually given:**
 **Degrade is the existing needs-human machinery, no new machinery.** A confirmed stale/invalid
 cursor — or (gate⓪ only, round 1) a confirmed body-drift discard, recorded with a distinct event
 `cause` so the two are never conflated — applies the existing `needsHuman` label and posts ONE
-deduplicated engine comment listing the bounded pending comment ids and the recovery steps
-(record the ruling, rewrite the body, advance the cursor to the last comment adjudicated, remove
-`needs-human`; a body-drift discard names only the label removal — there is no cursor/marker
-action for it). Dedup is a live marker scan keyed on the cursor/pending-set identity — the same
-comment/pending combination never produces a second pointer comment, a genuinely new pending
-comment gets its own fresh post, and (round 1) a cursor corrected from one still-invalid target
-to another (e.g. a marker re-pointed from a deleted comment to a DIFFERENT deleted comment)
-dedupes distinctly rather than being silently suppressed by the earlier target's key. The dedup
-read and the pointer-comment post are themselves CONTAINED (round 1, adopting #659's
-escalation-writer.ts discipline): a failure there is reported in the outcome (`posted: false`,
-`postError`), never thrown past the label write — every checkpoint's durable
-`comment-cursor-stale` event is UNCONDITIONAL, carrying the full label/post outcome in its
-payload, so a dedup-fetch or post failure can no longer strand an issue labeled `needs-human`
-with neither a pointer comment nor a durable event to explain it. A comment or body fetch failure
-performs NO issue write at all and propagates through each checkpoint's own existing
-retry/environment-failure path (dispatch's rollback-on-failure catch, drive's
-queued-and-retried-next-tick stance, gate⓪'s ordinary thrown-error propagation) — network
+deduplicated engine comment listing the bounded pending comment ids and the recovery steps. **The
+recovery text is a copy-paste instruction (#703 v2, item 4 — fixing the exact wording trap a human
+operator live-reproduced on #688 by following the pre-v2 text literally):** it names the EXACT
+standalone marker line to paste verbatim — `<!-- sapwood:comments-adjudicated-through: N -->` —
+where `N` is `pending.at(-1) ?? "0"` (the newest non-engine comment currently on the issue, or `0`
+when none exist), worded "comment id `N`", never `#N` (which reads as a GitHub cross-reference,
+not a comment id). The duplicate-marker case adds an explicit instruction to remove every OTHER
+`sapwood:comments-adjudicated-through` line and keep exactly the one shown. `comment-id-missing`
+gets its own honest text with NO suggested marker target at all — it is a forge-READ failure (some
+comment in the stream came back with no id), not a marker problem, so offering a target would be
+dishonest while the stream itself is incomplete; the recovery is to retry the read. A body-drift
+discard names only the label removal — there is no cursor/marker action for it. Dedup is a live
+marker scan keyed on the cursor/pending-set identity — the same comment/pending combination never
+produces a second pointer comment, a genuinely new pending comment gets its own fresh post, and
+(round 1) a cursor corrected from one still-invalid target to another (e.g. a marker re-pointed
+from a deleted comment to a DIFFERENT deleted comment) dedupes distinctly rather than being
+silently suppressed by the earlier target's key. The dedup read and the pointer-comment post are
+themselves CONTAINED (round 1, adopting #659's escalation-writer.ts discipline): a failure there
+is reported in the outcome (`posted: false`, `postError`), never thrown past the label write —
+every checkpoint's durable `comment-cursor-stale` event is UNCONDITIONAL, carrying the full
+label/post outcome in its payload, so a dedup-fetch or post failure can no longer strand an issue
+labeled `needs-human` with neither a pointer comment nor a durable event to explain it.
+
+A comment or body fetch failure performs NO issue write at all and propagates through each
+checkpoint's own existing retry/environment-failure path (dispatch's rollback-on-failure catch,
+drive's queued-and-retried-next-tick stance, gate⓪'s ordinary thrown-error propagation) — network
 trouble must never turn a candidate into a human adjudication.
+
+**Surfacing when the runnable pool goes empty (#703 v2, item 5 — deliberately minimal: no new hold
+state, no new label, no new event kind).** When a round dispatches nothing AND this round also
+produced one or more `comment-cursor-stale` events, `round.ts` reads those already-appended events
+back over the round's own event window and logs which issue(s) are held back — `"awaiting human on
+#N[, #M]"` — so standby/idle-churn reporting distinguishes "genuinely nothing to do" from "work
+exists, a human needs to act." Purely a read of existing events into a log line; no write of any
+kind.
 
 **Rollout is a one-time backfill, not a migration.** The gate only ever blocks an issue that
 already carries comments as it approaches gate⓪/dispatch — there is no new CLI, no migration

@@ -35,6 +35,7 @@ import { resolveRoundDirective } from "../config/directive.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { extractOrigin, extractVerificationPlan } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
+import { applyRoleBodyRewrite, checkMarkerWritePrecondition } from "../review/comment-cursor.js";
 // po-pool's candidate digest now substitutes the SAME formatCandidate shape the architect
 // phase already substitutes for these same pool members one phase later — see
 // buildPoolCandidateDigest's own doc comment below.
@@ -2307,6 +2308,32 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           expectedHash = contentVersion(issue.body ?? "");
           attempt = triageAttempt;
           bodyAlreadyCommitted = false; // a brand-new attempt can never already have a receipt
+
+          // #703 v2 (ruling item 1a + item 2): structural role-marker immutability for PO triage,
+          // normalized BEFORE this decision is ever persisted — unlike plan-review.ts's two
+          // `applyRoleBodyRewrite` call sites (which inherit a refusal-on-invalid-current-marker
+          // precondition for free from the pre-existing #652 `checkGate0CommentCursor`
+          // checkpoint), triage has no equivalent checkpoint of its own, so both the precondition
+          // AND the normalization are explicit here. `issue.body` (not a fresh re-read) is
+          // deliberately the SAME body `expectedHash` above was derived from — the body this
+          // session actually read — so the journal (persistTriageDecision, just below) and the
+          // eventual GitHub write (updateIssueBodyIfUnchanged) apply the IDENTICAL normalized
+          // text; a resumed decision on a later crash-rerun replays exactly what was normalized
+          // here once, never re-normalizing (its `body` is already the normalized text).
+          if (validated.ok) {
+            const currentBodyForMarker = issue.body ?? "";
+            const precondition = checkMarkerWritePrecondition(currentBodyForMarker);
+            if (!precondition.ok) {
+              (deps.log ?? console.error)(
+                `[sapwood:po] round ${roundId}: triage write refused for #${issue.number} — the issue body's ` +
+                  `adjudication-cursor marker is ${precondition.reason} (${precondition.detail}); a role write ` +
+                  `cannot repair human-owned marker state — fix it directly and this issue re-matches next round`,
+              );
+              alignSummaryTriaged.push({ issue: number, drafted: false });
+              continue;
+            }
+            validated = { ...validated, body: applyRoleBodyRewrite(currentBodyForMarker, validated.body) };
+          }
         }
 
         if (!validated.ok) {

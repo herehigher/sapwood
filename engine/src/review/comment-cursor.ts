@@ -18,14 +18,24 @@
 // numeric comment-id comparison — the marker identifies a CONCRETE comment; everything after it
 // in the fetched stream is pending, regardless of id spacing/gaps.
 //
-// FAIL-CLOSED ARMS (design adjudicated 2026-08-05): a malformed marker, a duplicate marker, a
-// cursor pointing at an engine comment, or a cursor whose target no longer exists in the stream
-// all fail closed — `ok: false`. A missing marker with pending non-engine comments ALSO fails
-// closed (the exact batch-8 shape: an issue that predates this feature, or that a maintainer
-// forgot to stamp, must not silently pass). A missing marker with ZERO comments is the one
-// pass-through case (AC8's reverse test: behavior-identical to today — no new writes, labels, or
-// outcome changes; the checkpoints that consume this module's result DO add comment/actor reads,
-// see docs/security.md).
+// FAIL-CLOSED ARMS (design adjudicated 2026-08-05; revised #703 v2, 2026-08-06): a malformed
+// marker, a duplicate marker, or a cursor whose target no longer exists in the stream all fail
+// closed — `ok: false`. A missing marker with pending non-engine comments ALSO fails closed (the
+// exact batch-8 shape: an issue that predates this feature, or that a maintainer forgot to stamp,
+// must not silently pass). A missing marker with ZERO comments is the one pass-through case
+// (AC8's reverse test: behavior-identical to today — no new writes, labels, or outcome changes;
+// the checkpoints that consume this module's result DO add comment/actor reads, see
+// docs/security.md).
+//
+// #703 v2 (POSITION SEMANTICS, supersedes the pre-v2 engine-comment rejection): a cursor pointing
+// at an ENGINE comment is now a VALID position, exactly like one pointing at a non-engine
+// comment — see `computeCommentCursor`'s own doc at its former rejection site for the full
+// design diagnosis. This relaxation ships ONLY together with structural role-marker immutability
+// (`applyRoleBodyRewrite` and its call sites in plan-review.ts/align.ts/issue-creation.ts) —
+// relaxing the validator alone, before the writers are fixed, would let a role silently
+// "self-adjudicate" past real human comments by choosing an engine id that happens to sit after
+// them; with immutability shipped first (in the same PR/commit), no role can ever choose ANY
+// marker value at all, so this relaxation only ever affects a HUMAN's own deliberate choice.
 //
 // #652 round 1 (finding 4): marker recognition is STANDALONE-LINE anchored — a marker counts
 // only when it is the ENTIRE trimmed line, and never inside a fenced (``` / ~~~) code block. A
@@ -121,36 +131,93 @@ function stripStandaloneMarkerLines(body: string): string {
     .join("\n");
 }
 
-/** #703 (ruling, PO batch-11 2026-08-06: candidate 3 — "engine preserves the marker across role
- *  body-writes"). The adjudication marker `<!-- sapwood:comments-adjudicated-through: N -->` is
- *  PO/human-owned state: no role session (verification-plan-reviewer's approve-with-revision,
- *  verification-plan-drafter's drafted body) has standing to move it, regardless of what the
- *  role's output — or any prompt/plan_review advice feeding it — claims. This is the STRUCTURAL
- *  fix: call it at every point a role-produced body is about to replace the live one via
- *  `forge.updateIssueBody` (plan-review.ts), so the writers CANNOT make the invalid choice the
- *  live batch-11 incident reproduced three times in one afternoon (a role/advice naming an
- *  ENGINE comment id as the new marker target, which `computeCommentCursor` then correctly
- *  fail-closes on as `cursor-targets-engine-comment`).
+/** #703 (ruling v2, PO batch-11 2026-08-06 — supersedes v1's "validator unchanged" stance with
+ *  "structural role-marker immutability, shipped TOGETHER WITH true validator position
+ *  semantics"). The adjudication marker `<!-- sapwood:comments-adjudicated-through: N -->` is
+ *  PO/human-owned state: no role session — verification-plan-reviewer's approve-with-revision
+ *  (plan-review.ts), verification-plan-drafter's drafted body (plan-review.ts), PO triage
+ *  (align.ts), or a role-proposed brand-new issue body (issue-creation.ts) — has standing to
+ *  move, create, or delete it, regardless of what the role's own output (or any prompt/plan_review
+ *  advice feeding it) claims. This is the STRUCTURAL fix: call it at EVERY point a role-produced
+ *  body is about to replace/become the live one, so the writers CANNOT make an invalid choice
+ *  no matter what the validator itself now accepts.
  *
- *  `currentBody` is the live body immediately preceding this write — every call site already
- *  takes this exact fresh read for its own #652 pre-write body-drift checkpoint, so this function
- *  adds no new fetch. `roleBody` is the role's proposed replacement text.
+ *  `currentBody` is the live body immediately preceding this write (every plan-review.ts/align.ts
+ *  call site already takes this exact fresh read for its own #652 pre-write body-drift
+ *  checkpoint, so this function adds no new fetch there); issue-creation.ts's brand-new-issue call
+ *  site passes `""` — a not-yet-existing issue has no current marker by construction, so the
+ *  result is always "strip whatever the role wrote, keep none" (see that call site's own doc).
+ *  `roleBody` is the role's proposed replacement (or, for issue-creation, brand-new) text.
+ *
+ *  PRECONDITION (ruling v2 item 2 — the refusal arm): this function assumes `currentBody`'s own
+ *  marker state is ALREADY known-valid (absent, or exactly one well-formed marker) — callers with
+ *  a body that might carry invalid marker state of its own (duplicate/malformed) MUST check
+ *  `checkMarkerWritePrecondition(currentBody)` first and REFUSE the whole write on failure, never
+ *  call this function and silently "repair" human-owned metadata by picking one, or by treating
+ *  the broken state as absent. plan-review.ts's two call sites get this for free from the
+ *  pre-existing #652 `checkGate0CommentCursor` checkpoint (which already fails closed on
+ *  malformed/duplicate markers before ever reaching a write); align.ts's PO-triage call site has
+ *  no equivalent checkpoint of its own and calls `checkMarkerWritePrecondition` explicitly.
  *
  *  Mechanism: ANY marker the role emitted is unconditionally stripped from `roleBody` — never
  *  trusted, never inspected for validity, since a role has no authority to write one regardless
  *  of what value it chose. The CURRENT body's marker, if one exists, is then reappended
  *  BYTE-FOR-BYTE (its exact original line text, not a re-derived value) onto the stripped body.
  *  If the current body carries no marker, the applied body gets none either — this function only
- *  ever PRESERVES a pre-existing marker, it never manufactures one. `computeCommentCursor`
- *  (comment-cursor.ts) and its validator stance are deliberately UNCHANGED by this fix (ruling:
- *  "Validator unchanged — fail-closed stays fail-closed") — with the writer fixed, there is no
- *  legitimate path to an engine-comment (or otherwise role-authored) target left to forgive. */
+ *  ever PRESERVES a pre-existing marker, it never manufactures one.
+ *
+ *  Validator relaxation (ruling v2 item 3, this file's `computeCommentCursor`): now that no role
+ *  can ever choose a marker value, `computeCommentCursor` in turn accepts a cursor pointing at
+ *  ANY existing comment (engine included) as a valid position — see that function's own doc.
+ *  Shipped in the SAME change as this immutability fix, never the relaxation alone: relaxing the
+ *  validator before the writers are fixed would let a role silently self-adjudicate past real
+ *  human comments by choosing an engine id positioned after them. */
 export function applyRoleBodyRewrite(currentBody: string, roleBody: string): string {
   const currentMarkerLines = findStandaloneMarkerLines(currentBody);
   const strippedRoleBody = stripStandaloneMarkerLines(roleBody);
   if (currentMarkerLines.length === 0) return strippedRoleBody;
   const withoutTrailingWhitespace = strippedRoleBody.replace(/\s+$/, "");
   return `${withoutTrailingWhitespace}\n\n${currentMarkerLines.join("\n")}\n`;
+}
+
+export type MarkerWritePreconditionResult = { ok: true } | { ok: false; reason: "malformed-marker" | "duplicate-marker"; detail: string };
+
+/** #703 v2 (ruling item 2 — the refusal arm): the precondition `applyRoleBodyRewrite`'s callers
+ *  MUST check before calling it, whenever `currentBody`'s own marker state might already be
+ *  invalid (a human can leave a body in this state directly; nothing about role immutability
+ *  prevents THAT). A role write is REFUSED entirely on failure — never "repaired" by picking a
+ *  value or silently dropping the broken marker(s) — because doing either would be the engine
+ *  making a human-owned adjudication call on the human's behalf. This is a PURE TEXT precondition
+ *  only (no comment-stream/target-existence check — that is `computeCommentCursor`'s job, which
+ *  every caller in a position to fetch the comment stream still runs on its own fail-closed
+ *  arms): absent marker, or exactly one marker whose value is `"0"` or a bare digit string, is
+ *  fine to carry forward untouched; more than one marker, or one whose value is neither, refuses.
+ *
+ *  plan-review.ts's two `applyRoleBodyRewrite` call sites never need to call this directly — the
+ *  pre-existing #652 `checkGate0CommentCursor` checkpoint already runs `computeCommentCursor`
+ *  against the SAME live body immediately before either write, and `computeCommentCursor`'s own
+ *  malformed-marker/duplicate-marker arms (unchanged by v2) already block on exactly this
+ *  condition before the write is ever reached. align.ts's PO-triage call site has no such
+ *  pre-existing checkpoint and calls this function explicitly. */
+export function checkMarkerWritePrecondition(currentBody: string): MarkerWritePreconditionResult {
+  const found = scanStandaloneMarkerLines(currentBody);
+  if (found.length === 0) return { ok: true };
+  if (found.length > 1) {
+    return {
+      ok: false,
+      reason: "duplicate-marker",
+      detail: `the issue body carries ${found.length} adjudication-cursor markers — a role write cannot proceed while the cursor is ambiguous`,
+    };
+  }
+  const value = found[0]!.value;
+  if (value !== "0" && !/^\d+$/.test(value)) {
+    return {
+      ok: false,
+      reason: "malformed-marker",
+      detail: `the adjudication-cursor marker's value "${value}" is neither "0" nor a comment id — a role write cannot proceed while the marker is malformed`,
+    };
+  }
+  return { ok: true };
 }
 
 /** One comment in the fetched, oldest-first issue-comment stream. `isEngine` is resolved by the
@@ -170,7 +237,6 @@ export type CursorFailureReason =
   | "missing-marker"
   | "malformed-marker"
   | "duplicate-marker"
-  | "cursor-targets-engine-comment"
   | "cursor-target-not-found"
   | "comment-id-missing"
   // #652 round 1 (finding 1/2): NOT produced by this module's own computation — reserved for
@@ -269,16 +335,20 @@ export function computeCommentCursor(body: string, comments: readonly CommentStr
       target: raw,
     };
   }
-  if (comments[idx]!.isEngine) {
-    return {
-      ok: false,
-      reason: "cursor-targets-engine-comment",
-      detail: `the adjudication cursor points at comment ${raw}, which is an engine comment — the marker must identify a concrete NON-engine comment`,
-      pending: allNonEngineIds,
-      target: raw,
-    };
-  }
-
+  // #703 v2 (ruling: "true position semantics"): a cursor pointing at ANY existing comment —
+  // engine included — is a valid, unambiguous stream position. Rejecting an engine-comment
+  // target (pre-v2's `cursor-targets-engine-comment` arm, deleted here) contradicted this
+  // module's own documented model (the marker identifies a POSITION, see this file's own header
+  // doc): four independent writers (plan_review's housekeeping advice, two drafter redrafts, and
+  // the pre-v2 recovery-comment wording itself) all independently chose "the newest comment id"
+  // — decisive usability evidence that a position IS what a marker naturally means, engine or
+  // not. `pending` below already computes "non-engine comments strictly after the target index"
+  // regardless of the target's own engine status — an engine target sitting AFTER the last human
+  // comment naturally yields zero pending (fully adjudicated); one sitting BEFORE a later human
+  // comment naturally leaves that comment pending. No special-casing needed once the rejection
+  // is gone. Item 1 (structural role-marker immutability, applyRoleBodyRewrite + its call sites)
+  // ships together with this relaxation, never alone — relaxing first (without immutability)
+  // would let a role silently "self-adjudicate" by moving the cursor past real human comments.
   return {
     ok: true,
     cursor: raw,
@@ -336,7 +406,16 @@ export function commentCursorPointerMarker(dedupeKey: string): string {
  *  adjudication cursor is invalid" is simply false for a body-drift discard (the cursor itself
  *  may be perfectly valid; what changed is the body a session's decision was computed against),
  *  and the ordinary recovery steps below (advance the marker) do not apply — a body-drift discard
- *  needs no cursor/marker action, only the label removed. */
+ *  needs no cursor/marker action, only the label removed.
+ *
+ *  #703 v2 (ruling item 4 — "recovery text = a copy-paste instruction"): `comment-id-missing` ALSO
+ *  gets its own wording branch — it is a forge-READ failure (some comment in the stream came back
+ *  with no id at all), not a marker problem, so suggesting a marker target here would be
+ *  dishonest: no id can be vouched for while the stream itself is incomplete. Every other branch
+ *  (valid-but-incomplete, missing/malformed/duplicate marker, deleted target) ends with the EXACT
+ *  standalone marker line a human can copy-paste verbatim, worded "comment id N" — never "#N",
+ *  which reads as a GitHub issue/PR cross-reference, not a comment id (the T7 finding's original
+ *  wording trap, live-reproduced on #688). */
 export function buildCommentCursorPointerComment(result: CommentCursorResult): string {
   const dedupeKey = commentCursorDedupeKey(result);
   if (!result.ok && result.reason === "body-drift") {
@@ -346,30 +425,47 @@ export function buildCommentCursorPointerComment(result: CommentCursorResult): s
       `re-enter plan review normally on its next pass.\n\n${commentCursorPointerMarker(dedupeKey)}`
     );
   }
+  if (!result.ok && result.reason === "comment-id-missing") {
+    return (
+      `sapwood: ${result.detail} This is a forge-READ problem, not something a marker edit can fix ` +
+      `— no comment id can be honestly vouched for while the fetched comment stream is incomplete. ` +
+      `Retry the comment fetch (re-run this checkpoint); if one comment genuinely carries no id on ` +
+      `GitHub itself, that needs to be resolved directly before this issue's adjudication cursor can ` +
+      `be evaluated again. No marker target is suggested here.\n\n${commentCursorPointerMarker(dedupeKey)}`
+    );
+  }
   const shown = result.pending.slice(0, POINTER_COMMENT_ID_CAP);
   const overflow = result.pending.length - shown.length;
   const list = shown.length > 0 ? shown.map((id) => `#${id}`).join(", ") + (overflow > 0 ? ` (+${overflow} more)` : "") : "(none listed)";
-  const reason = result.ok
+  const reasonText = result.ok
     ? "this issue's adjudication cursor is valid but does not yet cover every comment"
     : `this issue's adjudication cursor is invalid (${result.reason}: ${result.detail})`;
-  // #703 (ruling, T7 finding — fixes the exact wording trap a human operator live-reproduced on
-  // #688): `result.pending` is always stream-ordered (oldest-first, the same order
-  // `computeCommentCursor` builds it in on every branch), so its LAST element — when non-empty —
-  // is the newest non-engine comment currently on the issue: the concrete id a fresh marker
-  // pointed at it would be accepted by `computeCommentCursor` right now. Derived straight from
-  // the already-fetched comment stream this result carries, never guessed. An empty `pending`
-  // means no non-engine comment exists at all — the only id `computeCommentCursor` accepts then
-  // is `0` (cursor "0" is valid pass-through with zero comments; see this module's own doc).
-  const acceptedId = result.pending.length > 0 ? result.pending[result.pending.length - 1]! : "0";
+  // `result.pending` is always stream-ordered (oldest-first, the same order `computeCommentCursor`
+  // builds it in on every branch), so its LAST element — when non-empty — is the newest non-engine
+  // comment currently on the issue: the concrete id a fresh marker pointed at it would be accepted
+  // by `computeCommentCursor` right now (v2: ANY existing comment id is a valid position, so this
+  // is a RECOMMENDATION for the least-surprising correct choice, not the only one that would pass
+  // — a human may point the marker at any comment they've actually adjudicated). An empty `pending`
+  // means no non-engine comment exists at all — the marker target then is `0`.
+  const acceptedId = result.pending.at(-1) ?? "0";
+  const acceptedMarkerLine = `<!-- sapwood:comments-adjudicated-through: ${acceptedId} -->`;
   const acceptedText =
     acceptedId === "0"
-      ? "this issue currently has no non-engine comments, so the marker would currently only accept `0`"
-      : `the newest non-engine comment on this issue right now is \`${acceptedId}\` — that is the id the marker would currently accept`;
+      ? "this issue currently has no non-engine comments, so comment id `0` is what the marker below targets"
+      : `the newest non-engine comment on this issue right now carries comment id \`${acceptedId}\` — the marker below targets it`;
+  // Duplicate-marker gets an EXTRA instruction: which of the several existing lines to keep is
+  // ambiguous, so "advance the marker" alone is not enough — the human must also remove every
+  // OTHER cursor-marker line, leaving exactly the one this comment provides.
+  const duplicateNote =
+    !result.ok && result.reason === "duplicate-marker"
+      ? " This issue currently carries more than one adjudication-cursor marker line — remove every " +
+        "OTHER `sapwood:comments-adjudicated-through` line from the body and leave exactly this one."
+      : "";
   return (
-    `sapwood: ${reason}. Pending (non-engine) comment id(s): ${list}.\n\n` +
-    `Recovery steps: record the ruling, rewrite the issue body to reflect it, advance the ` +
-    `\`<!-- sapwood:comments-adjudicated-through: <comment-id> -->\` marker so it identifies a ` +
-    `concrete NON-engine comment — an engine comment's id is never a valid target, even the ` +
-    `newest one; ${acceptedText}. Then remove \`needs-human\`.\n\n${commentCursorPointerMarker(dedupeKey)}`
+    `sapwood: ${reasonText}. Pending (non-engine) comment id(s): ${list}.\n\n` +
+    `Recovery steps: record the ruling, rewrite the issue body to reflect it, and set the ` +
+    `adjudication-cursor marker to EXACTLY this line (copy-paste it verbatim):${duplicateNote}\n\n` +
+    `${acceptedMarkerLine}\n\n` +
+    `${acceptedText}. Then remove \`needs-human\`.\n\n${commentCursorPointerMarker(dedupeKey)}`
   );
 }

@@ -1498,6 +1498,126 @@ test("createAligningStub: triage processes every candidate independently", async
   state.close();
 });
 
+// ── #703 v2 (ruling items 1a + 2): PO triage — structural role-marker immutability, normalized
+// BEFORE persistTriageDecision, and a refusal arm when the CURRENT body's own marker state is
+// already invalid. ──────────────────────────────────────────────────────────────────────────────
+
+test("createAligningStub (#703 v2a): a po-triage redraft carrying a DIFFERENT (engine-id) marker never lands — the issue's ORIGINAL marker survives byte-for-byte, and the JOURNAL (triage-decision-accepted) carries the SAME normalized body as the eventual GitHub write", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [
+    { number: 70, title: "t", labels: [], body: "original body, no plan\n\n<!-- sapwood:comments-adjudicated-through: 10 -->" },
+  ];
+  const cfg = mkCfg();
+  const draftedBodyWithEngineMarker =
+    "original body\n## Verification\n- run npm test\n\n<!-- sapwood:comments-adjudicated-through: 999999 -->";
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-70", triageResultText(70, draftedBodyWithEngineMarker)),
+  ]);
+  const state = new State(":memory:");
+  const logged = tapEvents(state);
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 30, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 1);
+  const appliedBody = forge.updateIssueBodyCalls[0]![1];
+  assert.ok(!appliedBody.includes("999999"), "the role's own (engine-id) marker attempt must never be written");
+  assert.ok(appliedBody.includes("<!-- sapwood:comments-adjudicated-through: 10 -->"), "the original human marker survives byte-for-byte");
+  const accepted = logged.find(([kind]) => kind === "triage-decision-accepted");
+  assert.ok(accepted);
+  const acceptedBody = (accepted![1] as { body: string }).body;
+  assert.equal(acceptedBody, appliedBody, "the journal (write-ahead decision) and the GitHub write carry the IDENTICAL normalized body");
+  state.close();
+});
+
+test("createAligningStub (#703 v2b): a po-triage redraft carrying a marker, but the issue's CURRENT body has none — the applied/persisted body has no marker either", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 71, title: "t", labels: [], body: "original body, no plan, no marker" }];
+  const cfg = mkCfg();
+  const draftedBodyWithMarker = "original body\n## Verification\n- x\n\n<!-- sapwood:comments-adjudicated-through: 5000 -->";
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-71", triageResultText(71, draftedBodyWithMarker)),
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 31, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 1);
+  assert.ok(!forge.updateIssueBodyCalls[0]![1].includes("5000"), "a role cannot CREATE a marker that never existed on this issue");
+  state.close();
+});
+
+test("createAligningStub (#703 v2, refusal arm): the CURRENT body already carries a DUPLICATE cursor marker — the po-triage write is REFUSED entirely (never repaired), no updateIssueBody call, no triage-decision-accepted event, no success comment", async () => {
+  const forge = new FakeForge();
+  const brokenBody =
+    "original body, no plan\n\n<!-- sapwood:comments-adjudicated-through: 1 -->\n\n<!-- sapwood:comments-adjudicated-through: 2 -->";
+  forge.planTriageCandidates = [{ number: 72, title: "t", labels: [], body: brokenBody }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-72", triageResultText(72, "## Verification\n- x")),
+  ]);
+  const state = new State(":memory:");
+  const logged = tapEvents(state);
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  const { marker } = await stub.run({ roundId: 32, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "the write is refused, not repaired");
+  assert.equal(forge.issueBodies[72], brokenBody, "the broken body is left exactly as-is for a human to fix");
+  assert.ok(!forge.issueCommentsPosted.some(([n]) => n === 72), "no success comment for a refused write");
+  assert.ok(
+    !logged.some(([kind]) => kind === "triage-decision-accepted"),
+    "the decision is never even accepted — refused before write-ahead",
+  );
+  assert.equal(marker, alignMarker(32), "degrades open — the round is never wedged");
+  state.close();
+});
+
+test("createAligningStub (#703 v2, refusal arm): the CURRENT body carries a MALFORMED cursor marker value — the po-triage write is REFUSED entirely", async () => {
+  const forge = new FakeForge();
+  const brokenBody = "original body, no plan\n\n<!-- sapwood:comments-adjudicated-through: not-a-number -->";
+  forge.planTriageCandidates = [{ number: 73, title: "t", labels: [], body: brokenBody }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-73", triageResultText(73, "## Verification\n- x")),
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 33, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 0);
+  assert.equal(forge.issueBodies[73], brokenBody);
+  state.close();
+});
+
+// ── #703 v2 (ruling item 1b): role-proposed NEW issue bodies (align-creation -> issue-creation.ts)
+// cannot CREATE an adjudication-cursor marker, and stripping one out must never displace the
+// terminal proposal marker (`hasProposalMarkerTrailer`'s `endsWith` check is position-load-bearing,
+// issue-creation.ts:7). ─────────────────────────────────────────────────────────────────────────
+
+test("createAligningStub (#703 v2c): a role-proposed NEW issue body carrying a cursor marker has it stripped — and the proposal's OWN terminal marker still lands as the exact trailing suffix", async () => {
+  const forge = new FakeForge();
+  const rogueBody = `${PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 42 -->`;
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "Do the thing", body: rogueBody }]))]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 40, phase: "aligning", marker: null });
+  assert.equal(forge.createdIssues.length, 1);
+  const createdBody = forge.createdIssues[0]!.body;
+  assert.ok(!createdBody.includes("comments-adjudicated-through: 42"), "a role cannot CREATE a cursor marker on a brand-new issue");
+  const id = proposalId(40, 0, "Do the thing");
+  const terminalMarker = proposalMarker(id);
+  assert.ok(
+    createdBody.endsWith(`\n\n${terminalMarker}`),
+    "the terminal proposal marker is still the exact trailing suffix — hasProposalMarkerTrailer's endsWith check still holds",
+  );
+  state.close();
+});
+
 test("createAligningStub #374 review (Codex sol-high finding 6): once an earlier triage candidate classifies quota/429 and parks, remaining candidates are SKIPPED — no doomed per-issue sessions", async () => {
   const forge = new FakeForge();
   forge.planTriageCandidates = [

@@ -1,4 +1,5 @@
 import type { IForge, Issue } from "../forge/forge.js";
+import { applyRoleBodyRewrite } from "../review/comment-cursor.js";
 
 export function proposalMarker(id: string): string {
   return `<!-- sapwood:proposal:${id} -->`;
@@ -125,7 +126,15 @@ export async function createIssueProposals(deps: IssueCreationBatchDeps): Promis
       continue;
     }
 
-    const markedBody = `${proposal.body}\n\n${marker}`;
+    // #703 v2 (ruling item 1b): a role-proposed body for a BRAND-NEW issue has no standing to
+    // CREATE an adjudication-cursor marker either — a not-yet-existing issue has no current
+    // marker by construction, so `applyRoleBodyRewrite("", proposal.body)` always resolves to
+    // "strip whatever the role wrote, keep none" (see that function's own doc). Stripping happens
+    // BEFORE the terminal proposal marker is appended below, so `hasProposalMarkerTrailer`'s
+    // `endsWith` check (this file's own doc, line 7) is never at risk — the proposal marker is
+    // always the unconditional literal suffix of `markedBody`, regardless of what got stripped
+    // out of `proposal.body` first.
+    const markedBody = `${applyRoleBodyRewrite("", proposal.body)}\n\n${marker}`;
     const issue = await deps.forge.createIssue(proposal.title, markedBody);
     if (claimedIssues.has(issue)) {
       throw new Error(`issue #${issue} cannot satisfy more than one proposal receipt`);
