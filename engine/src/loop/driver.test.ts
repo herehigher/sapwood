@@ -622,6 +622,28 @@ test("runDriver: a persistently-throwing tick keeps the daemon looping at normal
   deps.state.close();
 });
 
+// ── #669: boundedStop must count failed attempts too, not only successful onTick calls ────────
+
+// (boundedStop itself is defined further down, ahead of its first use — declared with `function`
+// so this hoists; see its own doc comment for the counting fix this regression test proves.)
+
+test("boundedStop (#669 regression): an ALL-THROWING tick still trips the safety net — the net that exists for exactly this scenario can no longer be bypassed by it. Red-verified on a92a76515c642e71dfde66d88d350dc72b508682: pre-fix, boundedStop counted only successful onTick callbacks, which an all-throwing tick() never calls, so this hung indefinitely instead of returning", async () => {
+  const forge = new FakeForge();
+  forge.getReadyIssues = async () => {
+    throw new Error("still down");
+  };
+  const deps = baseDeps({ forge, sleep: async () => {}, tickIntervalSec: 5 });
+  const stopSafety = boundedStop(deps, 10);
+  const result = await runDriver(deps);
+  stopSafety();
+  // The net fired on its own — no test-supplied stop() call anywhere in this test — proving
+  // boundedStop itself detected the all-failing run and stopped it, not some other mechanism.
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.ticks, 0, "every attempt failed — never a successful tick");
+  assert.equal(result.tickErrors, 10, "bounded at exactly maxTicks failed attempts, not a hang");
+  deps.state.close();
+});
+
 // ── #76: goal-based stop conditions ─────────────────────────────────────────────────────────
 
 /** A merge gate whose driveOne outcome is scripted call-by-call (unlike conductor.test.ts's
@@ -641,25 +663,54 @@ class ScriptedMergeGate implements MergeGate {
 /** A bounded safety net so a driver bug (stop condition never detected / never idle) fails the
  *  test instead of hanging the suite — real correct behavior always returns well before this.
  *  #380: LATCHED — a second requestStop call is a genuine second signal now (the immediate hard
- *  exit), so a per-tick net must request the stop once, not on every tick after the bound. */
+ *  exit), so a per-tick net must request the stop once, not on every tick after the bound.
+ *
+ *  #669 regression fix: counting ONLY successful `onTick` callbacks let an all-throwing tick
+ *  bypass this net entirely (onTick is called from inside runDriver's try block, AFTER `tick()`
+ *  resolves — a persistently-rejecting `tick()` never reaches it, so `ticks` stayed 0 forever
+ *  and `stop()` was never requested; the exact scenario that produced the 2026-08-05 7.75GB
+ *  livelock). `interTickWait` (driver.ts), by contrast, calls `deps.sleep` once per loop
+ *  iteration REGARDLESS of whether that iteration's tick succeeded or threw (driver.ts's
+ *  contained catch still falls through to the same sleep call) — so wrapping `sleep` counts
+ *  attempts, not just successes.
+ *
+ *  Exactly ONE bump per loop iteration, whichever hook fires: `onTick` bumps (and clears
+ *  `countedThisIteration`) when the tick succeeded, synchronously before that iteration's
+ *  post-tick return checks — this is what lets a successful run stop on exactly tick N with no
+ *  extra sleep, the behavior every existing exact-tick-count assertion in this file already
+ *  relies on. `sleep`'s bump only fires when `onTick` did NOT already count this iteration
+ *  (a failed tick, which still reaches the sleep call) — without that guard, a successful tick
+ *  would be double-counted (once via onTick, once via the sleep right after it), silently
+ *  halving every calibrated maxTicks bound above. */
 function boundedStop(deps: DriverDeps, maxTicks: number): () => void {
   let stop = () => {};
   deps.registerSignals = (requestStop) => {
     stop = requestStop;
     return () => {};
   };
-  let ticks = 0;
+  let attempts = 0;
   let stopped = false;
+  let countedThisIteration = false;
   const stopOnce = (): void => {
     if (stopped) return;
     stopped = true;
     stop();
   };
+  const bump = (): void => {
+    attempts++;
+    if (attempts >= maxTicks) stopOnce();
+  };
   const prevOnTick = deps.onTick;
   deps.onTick = (r) => {
     prevOnTick?.(r);
-    ticks++;
-    if (ticks >= maxTicks) stopOnce();
+    countedThisIteration = true;
+    bump();
+  };
+  const prevSleep = deps.sleep;
+  deps.sleep = async (ms) => {
+    await prevSleep?.(ms);
+    if (!countedThisIteration) bump();
+    countedThisIteration = false;
   };
   return stopOnce;
 }

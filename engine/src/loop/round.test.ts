@@ -411,7 +411,22 @@ function once(fn: () => void): () => void {
 }
 
 /** Bounded safety net: stop the loop after `maxRounds` peripheral-phase invocations so a
- *  round.ts bug (never closing, never stopping) fails the test instead of hanging the suite. */
+ *  round.ts bug (never closing, never stopping) fails the test instead of hanging the suite.
+ *
+ *  #669: `onRoundPhase` fires ONLY for the 5 peripheral phases (aligning/architecting/
+ *  plan_review/harvesting/retro — runPeripheral's own call site); it is never called from the
+ *  "executing" phase's own dispatch-drain loop, nor from the standby/park-recovery wait loops
+ *  elsewhere in this file. A stall confined to one of THOSE loops (e.g. a tick() that fails on
+ *  every attempt while a lane never goes terminal) would call neither onRoundPhase nor onTick
+ *  on any of its failing iterations, so the `calls` counter above would never move — the exact
+ *  defect class driver.test.ts's `boundedStop` had (#669: it counted only successful `onTick`
+ *  callbacks, so an all-throwing tick bypassed it entirely). None of this file's current
+ *  scenarios exercise that gap (verified: every stuck-loop test here bounds itself some other
+ *  way — a CountdownSupervisor lane that naturally goes terminal, or an explicit onTick-driven
+ *  stop), but the gap is real, so this adds an independent, generously-thresholded backstop on
+ *  `sleep` (every one of those OTHER loops' own waits, called every iteration regardless of
+ *  success) — deliberately a SEPARATE counter/threshold from `calls` above, not merged into it,
+ *  so it never perturbs any of this file's ~76 exactly-calibrated `maxPhaseCalls` call sites. */
 function boundedStopOnPhase(deps: RoundDeps, maxPhaseCalls: number): () => void {
   let stop = () => {};
   deps.registerSignals = (requestStop) => {
@@ -425,8 +440,62 @@ function boundedStopOnPhase(deps: RoundDeps, maxPhaseCalls: number): () => void 
     calls++;
     if (calls >= maxPhaseCalls) stop();
   };
+  if (deps.sleep) {
+    const prevSleep = deps.sleep;
+    const SLEEP_BACKSTOP = 500; // generous: no correctly-behaving test here comes remotely close
+    let sleepCalls = 0;
+    deps.sleep = async (ms) => {
+      await prevSleep(ms);
+      sleepCalls++;
+      if (sleepCalls >= SLEEP_BACKSTOP) stop();
+    };
+  }
   return () => stop();
 }
+
+// ── #669 follow-up (gate② finding): the sleep backstop above had no test of its own — this one
+// drives it for real, through a stall confined entirely to the standby wait loop (the doc
+// comment on boundedStopOnPhase names this exact loop as one of the ones `calls` can never see:
+// onRoundPhase does not fire again once round 1 closes and standby engages). An empty FakeForge
+// board never gives the probe anything to find, so — with standby enabled and no other stop
+// condition configured — NOTHING besides this backstop would ever end this run: it is the sole
+// source of the stop request, isolating exactly the mechanism this test exists to prove.
+test("boundedStopOnPhase (#669 follow-up): a standby stall OUTSIDE onRoundPhase still trips the sleep backstop at EXACTLY its ceiling — asserts the count, not just that the run stopped", async () => {
+  const forge = new FakeForge(); // ready/planReview/triage all [] — round 1 opens (the PO's shot), closes idle, then standby's probe finds nothing, forever
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+  };
+  const phaseLog: Array<{ roundId: number; phase: PeripheralPhase }> = [];
+  const deps = baseDeps({
+    forge,
+    sleep,
+    cfg: mkCfg({ round: { standby: { enabled: true } } }),
+    onRoundPhase: (roundId, phase) => phaseLog.push({ roundId, phase }),
+  });
+  // maxPhaseCalls set far past anything round 1's five peripheral phases could ever reach — the
+  // ONLY path in this test that can request a stop is the sleep backstop's own SLEEP_BACKSTOP
+  // (500), isolating it from boundedStopOnPhase's OTHER counter.
+  const stopSafety = boundedStopOnPhase(deps, 1_000_000);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(
+    result.stoppedBy,
+    "signal",
+    "the sleep backstop's own requestStop is what ended this run — nothing else in this scenario ever would have",
+  );
+  assert.equal(
+    sleepCalls.length,
+    500,
+    "the backstop fires at EXACTLY its 500-call ceiling — one more call would mean the requested stop didn't actually end the loop, one fewer would mean something else (not the backstop) did",
+  );
+  assert.deepEqual(
+    phaseLog.map((p) => p.phase),
+    ["aligning", "architecting", "plan_review", "harvesting", "retro"],
+    "onRoundPhase never fired again after round 1 closed — the entire stall this test exercises happened OUTSIDE it, inside standby's sleep-only wait loop",
+  );
+  deps.state.close();
+});
 
 // ── Phase-transition sequence ────────────────────────────────────────────────────────────────
 
