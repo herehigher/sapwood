@@ -160,6 +160,13 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
   {
     name: "gated-reentry-candidates",
     read: "forge",
+    // #637: align.ts's OWN align-creation skip guard (alignCreationHasNothingToDo) dropped
+    // gated-reentry from ITS carried-lane set — a gated lane awaiting human release cannot
+    // consume anything the skipped align-CREATION session would have produced (#147/#499's
+    // gated-reclaim path never reads align output). That is a DIFFERENT question from this
+    // signal's own (does GATED RECLAIM below still have work to do), so the two "carried lane"
+    // sets are deliberately allowed to diverge from here on — this signal's own semantics below
+    // are unchanged and still accurate for ITS consumer.
     consumer: "conductor.ts tick() GATED RECLAIM (#147) — skipped entirely without a merge gate, so gated on deps.mergeGate",
     // #630 (F32 follow-through, live park batch-7 round 312): a needs-human carrier OUTSIDE the
     // run's `round.milestone` scope is not work this run can ever consume — the aligning/PO and

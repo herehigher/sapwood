@@ -2669,6 +2669,51 @@ test("recordAcSnapshot: re-recording the SAME issue upserts — never a second r
   s.close();
 });
 
+test("recordAcSnapshotAndReclaimWorker (#676 gate② finding [2]): the fresh snapshot, the worker row, and the event land together — a failing event write rolls BOTH back", () => {
+  const s = mem();
+  s.recordAcSnapshot({ issue: 7, bodyHash: "hash-v1", body: "v1 body", manifest: [], snapshottedAt: "t0" });
+  s.upsertWorker({
+    name: "lane-a",
+    issue: 7,
+    session_id: "s",
+    state: "failed",
+    started_at: "t",
+    ended_at: "t",
+    pr: 55,
+    ac_body_hash: "hash-v1",
+    ac_rebaseline_eligible: 1,
+  });
+
+  // Successful reclaim: the snapshot, the row, and the event all advance together.
+  s.recordAcSnapshotAndReclaimWorker(
+    { issue: 7, bodyHash: "hash-v2", body: "v2 body", manifest: [], snapshottedAt: "t1" },
+    { ...s.getWorker("lane-a")!, state: "driving", ac_body_hash: "hash-v2", ac_rebaseline_eligible: 0 },
+    "gated-reentry",
+    { worker: "lane-a", issue: 7, pr: 55, attempt: 1 },
+  );
+  assert.equal(s.getAcSnapshot(7)?.bodyHash, "hash-v2");
+  assert.equal(s.getWorker("lane-a")?.state, "driving");
+  assert.equal(s.getWorker("lane-a")?.ac_body_hash, "hash-v2");
+  assert.equal(s.eventsSince("1970-01-01T00:00:00.000Z", ["gated-reentry"]).length, 1);
+
+  // A payload sqlite cannot store aborts the WHOLE triple: neither the snapshot nor the row may
+  // move without the event that announces it — the exact torn-commit window #676 gate② finding
+  // [2] flagged: `ac_snapshots` landing on the new hash while `workers.ac_body_hash` still holds
+  // the old one, which the ownership guard then reads as a stranger dispatch's snapshot.
+  assert.throws(() =>
+    s.recordAcSnapshotAndReclaimWorker(
+      { issue: 7, bodyHash: "hash-v3", body: "v3 body", manifest: [], snapshottedAt: "t2" },
+      { ...s.getWorker("lane-a")!, state: "driving" },
+      "gated-reentry",
+      { bad: 1n as unknown as number },
+    ),
+  );
+  assert.equal(s.getAcSnapshot(7)?.bodyHash, "hash-v2", "the snapshot never advanced without its event");
+  assert.equal(s.getWorker("lane-a")?.ac_body_hash, "hash-v2", "the worker row never advanced without its event");
+  assert.equal(s.eventsSince("1970-01-01T00:00:00.000Z", ["gated-reentry"]).length, 1, "no second event either");
+  s.close();
+});
+
 // ── #301 review (P3 F7): REAL v22 -> current migration — a populated pre-#283 DB survives ──
 
 test("migration v22->current: a populated v22 DB (predating ac_snapshots/ac_body_hash) opens with data intact, workers.ac_body_hash defaults to NULL, ac_snapshots empty-but-usable, user_version SCHEMA_VERSION, idempotent reopen", () => {
@@ -3233,8 +3278,8 @@ test("migration v25->v26 clears a decisive engine-review pin whose WAL has no ve
     raw.close();
 
     const s = new State(dbPath);
-    assert.equal(SCHEMA_VERSION, 31); // #470: park_state.source CHECK gains 'idle-churn' (30 -> 31)
-    assert.equal(s.userVersion(), 31);
+    assert.equal(SCHEMA_VERSION, 33); // #676: workers.ac_rebaseline_candidate_hash added (32 -> 33)
+    assert.equal(s.userVersion(), 33);
     assert.equal(s.getEngineReviewAttemptPin("lane-v25"), null, "the lane is re-reviewable on its unchanged head");
     const row = s.getWorker("lane-v25");
     assert.equal(row?.engine_review_pin_head, null);
@@ -3265,8 +3310,8 @@ test("migration v26->v27: a populated v26 DB (predating park_state.reset_hint_at
     raw.close();
 
     const s = new State(dbPath);
-    assert.equal(SCHEMA_VERSION, 31); // #470: park_state.source CHECK gains 'idle-churn' (30 -> 31)
-    assert.equal(s.userVersion(), 31);
+    assert.equal(SCHEMA_VERSION, 33); // #676: workers.ac_rebaseline_candidate_hash added (32 -> 33)
+    assert.equal(s.userVersion(), 33);
     const row = s.parkRow("llm");
     assert.equal(row?.reason, "pre-existing v26 episode");
     assert.equal(row?.triggerIssue, 42);

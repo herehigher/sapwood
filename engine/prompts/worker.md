@@ -64,11 +64,15 @@ start: it names failure classes this repo's reviewers have flagged more than onc
    reason (the behavior genuinely doesn't exist yet, not a broken test). Follow the
    existing test patterns/conventions already in this repo — don't introduce a new
    testing style or framework.
-4. **Implement the minimal change to go green.** Write only the code needed to make
+4. **Rerun discipline.** If the same command fails the same way twice, or a test
+   command times out once, do not run it again unchanged: inspect and narrow the
+   failure, change approach, or hand off. A command that never returns is not
+   evidence of flakiness — do not rerun it to find out.
+5. **Implement the minimal change to go green.** Write only the code needed to make
    the red tests pass. Resist scope creep: this issue, not adjacent cleanup.
-5. **Run the full test suite, not just your new tests.** Confirm nothing else broke.
+6. **Run the full test suite, not just your new tests.** Confirm nothing else broke.
    A change that passes its own tests but breaks the existing suite is not done.
-6. **Re-check against the verification plan.** Re-read the acceptance criteria from
+7. **Re-check against the verification plan.** Re-read the acceptance criteria from
    the issue body and confirm your change actually satisfies each one — the same
    check the reviewer will make at gate②.
 

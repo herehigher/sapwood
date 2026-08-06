@@ -31,6 +31,7 @@ import type { WorkerProxyOpts } from "../roles/worker.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
+import { attachAttemptGuard, withHangGuard } from "./hang-guard.test-support.js";
 import {
   buildFixLegResume,
   escalatePoolRemovalFailures,
@@ -371,6 +372,30 @@ const baseDeps = (over: Partial<RoundDeps> = {}): RoundDeps => ({
   ...over,
 });
 
+/** #691 FIX 2: `runRounds` drives `round.ts:1161/1692/1726`'s production `for (;;)` loops with no
+ *  bound of its own -- every test-side stop condition here (`stop()`, `stop.afterIssuesMerged`,
+ *  `boundedStopOnPhase`'s own onRoundPhase count, a FakeForge/FakeSupervisor stub) is exactly the
+ *  kind of thing a missing or wrong stub can leave unmet, and an unmet stop condition means the
+ *  loop spins forever. That is precisely the class that caused the 2026-08-05 incident: a missing
+ *  `getAuthenticatedActor` stub turned a thrown-and-retried dispatch into a full-speed busy-spin
+ *  livelock (7.75GB RSS, zero tests completing) that never even reached another `onRoundPhase`
+ *  call for `boundedStopOnPhase` above to count -- commit 06b7aa8 patched that ONE fixture, never
+ *  this class. See `hang-guard.test-support.ts` (shared with
+ *  driver.test.ts/round-defaults.test.ts/harvest.test.ts/retro.test.ts -- ONE copy, not five) for
+ *  why this needs BOTH `withHangGuard` and `attachAttemptGuard`, and why the earlier revision's
+ *  `requestStop()` call was deleted. */
+async function runRoundsGuarded(deps: RoundDeps): ReturnType<typeof runRounds> {
+  const attemptGuardFired = attachAttemptGuard(deps);
+  const result = await withHangGuard(
+    runRounds(deps),
+    45_000,
+    "runRounds(deps) did not settle within 45000ms — a wedged production for(;;) loop (round.ts:1161/1692/1726), the class that caused the 2026-08-05 livelock (#691)",
+  );
+  const fired = attemptGuardFired();
+  if (fired !== null) throw new Error(fired);
+  return result;
+}
+
 /** #380: `requestStop` is TWO-STAGE now — the second call is a genuine second signal, i.e. the
  *  immediate hard exit (`process.exit`, or an injected RoundDeps.hardExit). Every bail-out net
  *  in this suite fires from a per-phase/per-sleep hook that runs many times, and several also
@@ -386,7 +411,22 @@ function once(fn: () => void): () => void {
 }
 
 /** Bounded safety net: stop the loop after `maxRounds` peripheral-phase invocations so a
- *  round.ts bug (never closing, never stopping) fails the test instead of hanging the suite. */
+ *  round.ts bug (never closing, never stopping) fails the test instead of hanging the suite.
+ *
+ *  #669: `onRoundPhase` fires ONLY for the 5 peripheral phases (aligning/architecting/
+ *  plan_review/harvesting/retro — runPeripheral's own call site); it is never called from the
+ *  "executing" phase's own dispatch-drain loop, nor from the standby/park-recovery wait loops
+ *  elsewhere in this file. A stall confined to one of THOSE loops (e.g. a tick() that fails on
+ *  every attempt while a lane never goes terminal) would call neither onRoundPhase nor onTick
+ *  on any of its failing iterations, so the `calls` counter above would never move — the exact
+ *  defect class driver.test.ts's `boundedStop` had (#669: it counted only successful `onTick`
+ *  callbacks, so an all-throwing tick bypassed it entirely). None of this file's current
+ *  scenarios exercise that gap (verified: every stuck-loop test here bounds itself some other
+ *  way — a CountdownSupervisor lane that naturally goes terminal, or an explicit onTick-driven
+ *  stop), but the gap is real, so this adds an independent, generously-thresholded backstop on
+ *  `sleep` (every one of those OTHER loops' own waits, called every iteration regardless of
+ *  success) — deliberately a SEPARATE counter/threshold from `calls` above, not merged into it,
+ *  so it never perturbs any of this file's ~76 exactly-calibrated `maxPhaseCalls` call sites. */
 function boundedStopOnPhase(deps: RoundDeps, maxPhaseCalls: number): () => void {
   let stop = () => {};
   deps.registerSignals = (requestStop) => {
@@ -400,8 +440,62 @@ function boundedStopOnPhase(deps: RoundDeps, maxPhaseCalls: number): () => void 
     calls++;
     if (calls >= maxPhaseCalls) stop();
   };
+  if (deps.sleep) {
+    const prevSleep = deps.sleep;
+    const SLEEP_BACKSTOP = 500; // generous: no correctly-behaving test here comes remotely close
+    let sleepCalls = 0;
+    deps.sleep = async (ms) => {
+      await prevSleep(ms);
+      sleepCalls++;
+      if (sleepCalls >= SLEEP_BACKSTOP) stop();
+    };
+  }
   return () => stop();
 }
+
+// ── #669 follow-up (gate② finding): the sleep backstop above had no test of its own — this one
+// drives it for real, through a stall confined entirely to the standby wait loop (the doc
+// comment on boundedStopOnPhase names this exact loop as one of the ones `calls` can never see:
+// onRoundPhase does not fire again once round 1 closes and standby engages). An empty FakeForge
+// board never gives the probe anything to find, so — with standby enabled and no other stop
+// condition configured — NOTHING besides this backstop would ever end this run: it is the sole
+// source of the stop request, isolating exactly the mechanism this test exists to prove.
+test("boundedStopOnPhase (#669 follow-up): a standby stall OUTSIDE onRoundPhase still trips the sleep backstop at EXACTLY its ceiling — asserts the count, not just that the run stopped", async () => {
+  const forge = new FakeForge(); // ready/planReview/triage all [] — round 1 opens (the PO's shot), closes idle, then standby's probe finds nothing, forever
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+  };
+  const phaseLog: Array<{ roundId: number; phase: PeripheralPhase }> = [];
+  const deps = baseDeps({
+    forge,
+    sleep,
+    cfg: mkCfg({ round: { standby: { enabled: true } } }),
+    onRoundPhase: (roundId, phase) => phaseLog.push({ roundId, phase }),
+  });
+  // maxPhaseCalls set far past anything round 1's five peripheral phases could ever reach — the
+  // ONLY path in this test that can request a stop is the sleep backstop's own SLEEP_BACKSTOP
+  // (500), isolating it from boundedStopOnPhase's OTHER counter.
+  const stopSafety = boundedStopOnPhase(deps, 1_000_000);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(
+    result.stoppedBy,
+    "signal",
+    "the sleep backstop's own requestStop is what ended this run — nothing else in this scenario ever would have",
+  );
+  assert.equal(
+    sleepCalls.length,
+    500,
+    "the backstop fires at EXACTLY its 500-call ceiling — one more call would mean the requested stop didn't actually end the loop, one fewer would mean something else (not the backstop) did",
+  );
+  assert.deepEqual(
+    phaseLog.map((p) => p.phase),
+    ["aligning", "architecting", "plan_review", "harvesting", "retro"],
+    "onRoundPhase never fired again after round 1 closed — the entire stall this test exercises happened OUTSIDE it, inside standby's sleep-only wait loop",
+  );
+  deps.state.close();
+});
 
 // ── Phase-transition sequence ────────────────────────────────────────────────────────────────
 
@@ -410,7 +504,7 @@ test("runRounds: a round with nothing to dispatch visits every phase in order ex
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
   const deps = baseDeps({ sleep, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 5); // aligning, architecting, plan_review, harvesting, retro
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.deepEqual(
     log.map((l) => l.phase),
@@ -425,7 +519,7 @@ test("runRounds: a fresh phase always gets a null marker (first attempt)", async
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
   const deps = baseDeps({ sleep, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.ok(log.every((l) => l.marker === null));
   deps.state.close();
@@ -435,7 +529,7 @@ test("runRounds #206: a full round leaves a round-phase event trail — every ph
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ sleep });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 1);
   // The replay spine (frontend-design.md §11): rounds.phase is an in-place UPDATE, so this
@@ -473,7 +567,7 @@ test("runRounds #123: a closed round leaves a persisted, schema-valid round arti
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ sleep });
   const stopSafety = boundedStopOnPhase(deps, 5); // exactly round 1's five peripheral phases
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 1);
   const row = deps.state.getRoundArtifact(1);
@@ -506,7 +600,7 @@ test("runRounds roundDispatchCap: only the cap's worth dispatch this round; the 
     onRoundStop: (_id, hit) => hits.push(hit),
   });
   const stopSafety = boundedStopOnPhase(deps, 10); // two rounds' worth of peripheral phases
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(sup.dispatchedIssues.length >= 2, true, "at least the capped batch dispatched");
   assert.deepEqual(sup.dispatchedIssues.slice(0, 2), [1, 2]); // exactly 2 in round 1, priority/number order
@@ -533,7 +627,7 @@ test("runRounds round.milestone: filters dispatch candidates to the configured m
     cfg: mkCfg({ lanes: { max: 3, roundDispatchCap: 3 }, round: { milestone: "M4" } }),
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.deepEqual(sup.dispatchedIssues, [1]); // #2 (no milestone) never dispatched
   deps.state.close();
@@ -549,7 +643,7 @@ test("runRounds idle throttle: an idle round (nothing dispatched) waits tickInte
   const deps = baseDeps({ sleep, tickIntervalSec: 7 });
   deps.onRoundPhase = (roundId, phase) => events.push(`r${roundId}:${phase}`);
   const stopSafety = boundedStopOnPhase(deps, 10); // two idle rounds' worth of phases
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 2);
   const r1retro = events.indexOf("r1:retro");
@@ -584,7 +678,7 @@ test("runRounds idle throttle: a signal during the idle wait exits promptly — 
     stop = single;
     return inner(single);
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1);
@@ -604,7 +698,7 @@ test("runRounds idle throttle: a round that dispatched work is NOT additionally 
   const deps = baseDeps({ forge, supervisor: sup, sleep });
   deps.onRoundPhase = (roundId, phase) => events.push(`r${roundId}:${phase}`);
   const stopSafety = boundedStopOnPhase(deps, 6); // through round 2's first phase
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   const r1retro = events.indexOf("r1:retro");
   const r2aligning = events.indexOf("r2:aligning");
@@ -634,7 +728,7 @@ test("runRounds round.milestone: 0 open issues left skips the batch dispatch ent
     onRoundStop: (_id, hit) => hits.push(hit),
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.deepEqual(sup.dispatchedIssues, []); // never dispatched despite a matching Ready issue
   assert.ok(hits.some((h) => h.name === "milestone" && h.detail === "0 open issues left"));
@@ -675,7 +769,7 @@ test("runRounds #211: opening peripheral spend can exhaust the round budget befo
     },
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
 
   assert.deepEqual(sup.dispatchedIssues, []);
@@ -728,7 +822,7 @@ test("runRounds #211: mixed peripheral and worker entries use one round ledger w
     peripherals,
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
 
   assert.deepEqual(sup.dispatchedIssues, [1], "the $2 peripheral entry permits wave 1; the exact $5 window blocks wave 2");
@@ -761,7 +855,7 @@ test("runRounds cost.roundBudgetUsd: recorded once this round's cumulative worke
     onRoundStop: (_id, hit) => hits.push(hit),
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.ok(hits.some((h) => h.name === "roundBudgetUsd" && h.detail === "spent $999.00"));
   // Harvest + retro still ran (never skipped by a round-level cost condition — only KILL_SWITCH
@@ -795,7 +889,7 @@ test("runRounds #95: every round-stop hit is persisted via appendEvent, not just
     realAppend(kind, payload);
   };
   const stopSafety = boundedStopOnPhase(deps, 5);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   const hit = logged.find(([kind]) => kind === "round-stop");
   assert.ok(hit, "a round-stop event was durably appended");
@@ -846,7 +940,7 @@ test("runRounds #211: a crash-resumed executing phase reuses its persisted spend
       onRoundStop: (_id, hit) => hits.push(hit),
     });
     const stopSafety = boundedStopOnPhase(deps, 2); // harvesting, retro
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
     assert.ok(
       hits.some((h) => h.name === "roundBudgetUsd" && h.detail === "spent $50.00"),
@@ -899,7 +993,7 @@ test("runRounds #211: a crash-resumed executing phase with no spend anchor retai
       onRoundStop: (_id, hit) => hits.push(hit),
     });
     const stopSafety = boundedStopOnPhase(deps, 2);
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
 
     assert.equal(result.rounds, 1);
@@ -931,7 +1025,7 @@ test("runRounds #211: a crash-resumed executing phase with no lanes records an e
       onRoundStop: (_id, hit) => hits.push(hit),
     });
     const stopSafety = boundedStopOnPhase(deps, 2);
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
 
     assert.equal(result.rounds, 1);
@@ -981,7 +1075,7 @@ test("runRounds #172: a resumed handoff is charged to roundSpendUsd and trips th
       onRoundStop: (_id, hit) => hits.push(hit),
     });
     const stopSafety = boundedStopOnPhase(deps, 2); // harvesting, retro
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
 
     assert.equal(result.rounds, 1);
@@ -1017,7 +1111,7 @@ test("runRounds #245 round-2 fix (verifying the A2 adjudication's round.ts:898 c
     sup.probes["lane-fix"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 1, hasPr: true, prNumber: 77 };
     const deps = baseDeps({ forge: new FakeForge(), supervisor: sup, state, sleep, cfg: mkCfg() });
     const stopSafety = boundedStopOnPhase(deps, 2); // harvesting, retro
-    await runRounds(deps);
+    await runRoundsGuarded(deps);
     stopSafety();
 
     // Without the fix, the executing loop breaks straight after wave 1 (recoveryBeatPending
@@ -1050,7 +1144,7 @@ test("runRounds stop.afterIssuesMerged: a round already open finishes harvest+re
     peripherals: allPeripherals(log),
   });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.stoppedBy, "stop-condition");
   assert.deepEqual(result.stopCondition, { name: "afterIssuesMerged", threshold: 1, detail: "merged 1" });
@@ -1077,7 +1171,7 @@ test("runRounds stop.afterSpendUsd: a round already open finishes harvest+retro 
     peripherals: allPeripherals(log),
   });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.stoppedBy, "stop-condition");
   assert.deepEqual(result.stopCondition, { name: "afterSpendUsd", threshold: 20, detail: "spent $25.00" });
@@ -1094,7 +1188,7 @@ test("runRounds stop.afterSpendUsd: anchored to THIS run's start — spend alrea
   state.recordSpend("prior-run-worker", 999, 50, new Date().toISOString(), []); // a prior run's spend
   const deps = baseDeps({ forge, state, sleep, stop: { afterSpendUsd: 10 } });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   // Never fires — this run's own ledgered spend (from its own startup anchor forward) is $0;
   // the pre-existing $50 belongs to an earlier run/process. boundedStopOnPhase's signal is what
@@ -1125,7 +1219,7 @@ test("runRounds stop.afterSpendUsd: spend ledgered by CLOSING peripherals (after
   };
   const deps = baseDeps({ forge, state, sleep, stop: { afterSpendUsd: 20 }, peripherals });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.stoppedBy, "stop-condition");
   assert.deepEqual(result.stopCondition, { name: "afterSpendUsd", threshold: 20, detail: "spent $25.00" });
@@ -1151,7 +1245,7 @@ test("runRounds stop.afterSpendUsd: fired MID-round (worker spend crosses during
     stop: { afterSpendUsd: 20 },
   });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.deepEqual(sup.dispatchedIssues, [1], "waves 2-3 must never dispatch after the run-level spend stop fired");
   assert.equal(result.stoppedBy, "stop-condition");
@@ -1167,7 +1261,7 @@ test("runRounds stop.onMilestoneComplete: checked at round boundaries (never mid
   forge.milestoneOpenCounts = [1, 0]; // round 1: not complete yet; round 2's preemptive check: complete
   const deps = baseDeps({ forge, sleep, stop: { onMilestoneComplete: "M4" } });
   const stopSafety = boundedStopOnPhase(deps, 15);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.stoppedBy, "stop-condition");
   assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
@@ -1189,7 +1283,7 @@ test("runRounds KILL_SWITCH: blocks the very next peripheral phase — harvest/r
     // peripheral phase it would otherwise run is blocked, not just later ones.
     writeFileSync(join(dir, "KILL_SWITCH"), "");
     const deps = baseDeps({ forge, state, sleep, peripherals: allPeripherals(log) });
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     assert.equal(result.stoppedBy, "kill-switch");
     assert.deepEqual(log, []); // no peripheral ever ran
     assert.equal(result.rounds, 0); // the round never closed
@@ -1215,7 +1309,7 @@ test("runRounds: a graceful signal (not KILL_SWITCH) still lets the in-flight ro
   deps.onRoundPhase = (_id, phase) => {
     if (phase === "aligning") stop();
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.deepEqual(
     log.map((l) => l.phase),
@@ -1255,7 +1349,7 @@ test("#380 runRounds: a stop signal freezes dispatch and DRAINS the executing ro
     if (ticks === 2) sup.probes["lane-1-1"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 0, hasPr: false };
   };
 
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
 
   assert.equal(result.stoppedBy, "signal");
   assert.deepEqual(sup.dispatchedIssues, [1], "the second wave never launched — dispatch froze on the signal");
@@ -1289,7 +1383,7 @@ test("#380 runRounds: a SECOND stop signal during the drain hard-exits immediate
     }
   };
 
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
 
   assert.deepEqual(exits, [130], "the second SIGINT hard-exits with 128+SIGINT, without waiting for the drain");
   assert.equal(result.stoppedBy, "signal");
@@ -1317,7 +1411,7 @@ test("runRounds crash-rerun: an in_progress round resumes AT its persisted phase
     const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
     const deps = baseDeps({ forge, state: state2, sleep, peripherals: allPeripherals(log) });
     const stopSafety = boundedStopOnPhase(deps, 3); // plan_review, harvesting, retro
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
     // aligning/architecting are NOT re-run — resumed straight at plan_review.
     assert.deepEqual(
@@ -1350,7 +1444,7 @@ test("runRounds #206 crash-rerun: a re-entered phase appends a DUPLICATE round-p
     const state2 = new State(join(dir, "sapwood.sqlite"));
     const deps = baseDeps({ forge: new FakeForge(), state: state2, sleep });
     const stopSafety = boundedStopOnPhase(deps, 3); // plan_review, harvesting, retro
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
     assert.equal(result.rounds, 1, "the duplicate is tolerated — the round still closed");
     const trail = state2.eventsSince("1970-01-01T00:00:00.000Z", ["round-phase"]).map((e) => (e.payload as { phase: string }).phase);
@@ -1379,7 +1473,7 @@ test("runRounds #206 crash-rerun (gate② P1): a round that crashed between star
     const state2 = new State(join(dir, "sapwood.sqlite"));
     const deps = baseDeps({ forge: new FakeForge(), state: state2, sleep });
     const stopSafety = boundedStopOnPhase(deps, 5);
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
     assert.equal(result.rounds, 1);
     const trail = state2.eventsSince("1970-01-01T00:00:00.000Z", ["round-phase"]).map((e) => (e.payload as { phase: string }).phase);
@@ -1409,7 +1503,7 @@ test("runRounds crash-rerun: resuming directly at 'executing' does NOT re-dispat
     const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
     const deps = baseDeps({ forge, supervisor: sup, state: state2, sleep, peripherals: allPeripherals(log) });
     const stopSafety = boundedStopOnPhase(deps, 2); // harvesting, retro
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
     assert.deepEqual(sup.dispatchedIssues, []); // never dispatched by the resumed pass
     assert.deepEqual(
@@ -1445,7 +1539,7 @@ test("runRounds #124: 6 Ready issues, cap 6, lanes.max 3 -> one round, TWO dispa
     onTick: (r) => dispatchedPerTick.push(r.dispatched.filter((d) => d.kind === "dispatched").map((d) => (d as { issue: number }).issue)),
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.deepEqual(sup.dispatchedIssues, [1, 2, 3, 4, 5, 6]); // all six, in priority/number order
   const waves = dispatchedPerTick.filter((d) => d.length > 0);
@@ -1488,7 +1582,7 @@ test("runRounds #124: cost.roundBudgetUsd hit mid-wave-2 behaves exactly like a 
     onRoundStop: (_id, hit) => hits.push(hit),
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.deepEqual(sup.dispatchedIssues, [1, 2, 3, 4, 5, 6]); // wave 2 fully dispatched before the budget stopped anything NEW
   assert.ok(hits.some((h) => h.name === "roundBudgetUsd" && h.detail === "spent $6.00"));
@@ -1523,7 +1617,7 @@ test("runRounds #124 gate② P1-1: an UNEVEN final wave dispatches exactly the r
     onTick: (r) => dispatchedPerTick.push(r.dispatched.filter((d) => d.kind === "dispatched").map((d) => (d as { issue: number }).issue)),
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   const waves = dispatchedPerTick.filter((d) => d.length > 0);
   assert.deepEqual(waves, [[1, 2, 3], [4]], `wave 2 must dispatch EXACTLY the 1 remaining quota, got ${JSON.stringify(dispatchedPerTick)}`);
@@ -1571,7 +1665,7 @@ test("runRounds #124 gate② P1-2: spend banked by a tick's OWN reclaim blocks t
     },
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   // Issue 2 was never dispatched — not in the reclaim tick (whose own banked spend must gate
   // it) nor by any later wave (the round-level stop hit freezes further dispatch).
@@ -1622,7 +1716,7 @@ test("runRounds #124 crash-rerun: a resumed drain (freshBatch=false) never dispa
       cfg: mkCfg({ lanes: { max: 3, roundDispatchCap: 6 } }),
     });
     const stopSafety = boundedStopOnPhase(deps, 2); // harvesting, retro
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
     assert.deepEqual(sup.dispatchedIssues, []); // nothing new dispatched despite quota + lane room
     assert.equal(result.rounds, 1);
@@ -1730,7 +1824,7 @@ test("runRounds standby: fresh empty board — the FIRST round always opens (the
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   // Round 1 ran ALL five peripherals (the PO got its shot) — and nothing after it: standby.
   assert.equal(result.rounds, 1);
@@ -1780,7 +1874,7 @@ test("runRounds standby: SIGINT during a standby wait exits promptly — the wai
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1); // the idle first round — nothing after it
   assert.deepEqual(sleepCalls, [5000, 5000]); // idle throttle + the FIRST backoff step, aborted immediately
@@ -1810,7 +1904,7 @@ test("runRounds standby: the backoff wait is capped at round.standby.backoffCapS
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   // The cap shows in the standby-wait events' waitSec (uncapped, attempt 2 would be 40): the
   // sleeps themselves are tickIntervalSec slices (kill-switch acknowledgment), never longer.
@@ -1849,7 +1943,7 @@ test("runRounds standby: a KILL_SWITCH created MID-backoff-wait is acknowledged 
       cfg: mkCfg({ round: { standby: { enabled: true } } }),
       peripherals: allPeripherals(log),
     });
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     assert.equal(result.stoppedBy, "kill-switch");
     // Acknowledged after ONE 5s slice of the 10s backoff wait — pre-slicing this third call
     // would have been a single 10000ms sleep with the sentinel unread until it elapsed.
@@ -1899,7 +1993,7 @@ test("runRounds standby (#127 gate② F2): plan-review candidates do NOT count a
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(
@@ -1944,7 +2038,7 @@ test("runRounds standby (#127 gate② F2): plan-TRIAGE candidates do NOT count a
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(
@@ -1988,7 +2082,7 @@ test("runRounds standby (#127 gate② R1): with BOTH gate⓪ roles disabled, ope
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(
@@ -2025,7 +2119,7 @@ test("runRounds standby: a Ready issue appearing mid-backoff is caught by the NE
     peripherals: allPeripherals(log),
   });
   const stopSafety = boundedStopOnPhase(deps, 10); // idle round 1 + the post-standby round 2
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   const waits = events.filter(([kind]) => kind === "standby-wait");
   assert.equal(waits.length, 1, "exactly one backoff step before the new issue was noticed");
@@ -2067,7 +2161,7 @@ test("runRounds standby: KILL_SWITCH bypasses the probe entirely — a round sti
       cfg: mkCfg({ round: { standby: { enabled: true } } }),
       peripherals: allPeripherals(log),
     });
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     assert.equal(result.stoppedBy, "kill-switch");
     assert.deepEqual(log, []); // aligning itself never ran — blocked before the stub
     assert.equal(result.rounds, 0);
@@ -2107,7 +2201,7 @@ test("runRounds standby: round.milestone open issues count as work even with Rea
   // 2 is where the milestone signal must carry — round 2 opening with zero standby-wait events
   // proves it did.
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened straight after the idle round 1 — never entered standby");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
@@ -2152,7 +2246,7 @@ test("runRounds standby (#391 F21): a milestone backlog whose every open issue i
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(
@@ -2183,7 +2277,7 @@ test("runRounds standby: an open PLAN-TRIAGE candidate (plan-less, not Ready, no
   // 2 is where the triage signal must carry — round 2 opening with zero standby-wait events
   // proves it did.
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened straight after the idle round 1 — the triage candidate is work");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "standby never engaged");
@@ -2212,7 +2306,7 @@ test("runRounds standby: an outstanding pending-rollback row counts as work — 
     peripherals: allPeripherals(log),
   });
   const stopSafety = boundedStopOnPhase(deps, 10); // idle round 1 + the rollback-retry round 2
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened straight after the idle round 1 — the rollback row is work");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "standby never engaged");
@@ -2249,7 +2343,7 @@ test("runRounds standby: stop.onMilestoneComplete completing EXTERNALLY before s
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "stop-condition");
   assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
   assert.equal(result.rounds, 1, "only the idle first round — round 2's gate found the hit before standby ever ran");
@@ -2289,7 +2383,7 @@ test("runRounds standby: a round resumed PAST executing (restart mid-harvest) ne
     });
     // Resumed round (harvesting, retro) + the fresh round 2 it must NOT standby away (5 phases).
     const stopSafety = boundedStopOnPhase(deps, 7);
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
     assert.deepEqual(
       log.map((l) => l.phase),
@@ -2343,7 +2437,7 @@ test("runRounds standby: a failing standby-wait/-exit event write is telemetry-o
     peripherals: allPeripherals(log),
   });
   const stopSafety = boundedStopOnPhase(deps, 10); // idle round 1 + the post-standby round 2
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 2, "standby survived the event-write failures and round 2 opened on the new issue");
   assert.deepEqual(sup.dispatchedIssues, [1]);
@@ -2372,7 +2466,7 @@ test("runRounds standby: a throwing probe fails OPEN — tick-error appended, th
     peripherals: allPeripherals(log),
   });
   const stopSafety = boundedStopOnPhase(deps, 10); // idle round 1 + the fail-open round 2
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened despite the probe failure — fail-open");
   assert.deepEqual(log.map((l) => l.phase).slice(5), ["aligning", "architecting", "plan_review", "harvesting", "retro"]);
@@ -2410,7 +2504,7 @@ test("runRounds standby: a truly exhausted round.milestone (0 open issues) contr
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the idle first round — standby withheld round 2, the milestone had nothing left");
   // Sleep 1 = the idle round's throttle wait; sleep 2 = the first standby backoff step.
@@ -2436,7 +2530,7 @@ test("#168: RoundDeps.probeLlmReachable is threaded into every tick — a pre-pa
     },
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.ok(probeCalls >= 1, "the round loop's own tick() calls reached RoundDeps.probeLlmReachable");
   // P1-1: a green ping alone never clears the episode — with no Ready issues there is no
@@ -2451,7 +2545,7 @@ test("#168: RoundDeps.probeLlmReachable omitted -> a pre-parked (llm) episode is
   state.enterPark("llm", "rate_limit_error", 1, "2026-07-01T00:00:00.000Z");
   const deps = baseDeps({ state, sleep }); // no probeLlmReachable
   const stopSafety = boundedStopOnPhase(deps, 5);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(state.isParked(), true, "never probed -> never auto-resumed");
   assert.equal(state.parkRow("llm")?.probeAttempts, 0);
@@ -2780,7 +2874,7 @@ test("runRounds #374: N consecutive degraded, dispatch-empty rounds force a park
       cfg: mkCfg({ round: { emptySpin: { consecutiveDegradedRoundsThreshold: 2 } } }),
       peripherals: degradingPeripherals,
     });
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     assert.equal(result.stoppedBy, "kill-switch");
     assert.equal(result.rounds, 2, "rounds 1-2 degraded and closed; round 3 was withheld, never opened/closed");
     // allPeripherals(log) logs EVERY phase, not just aligning — 2 full rounds x 5 phases each.
@@ -2867,7 +2961,7 @@ test("runRounds #394 (F23, AC3): a weekly-limit storm with an EMPTY pool — arc
     // worth, three times the 2 rounds a HEALTHY run needs to park — so a real regression fails
     // this test's own assertions in well under a second instead of hanging the suite/CI.
     const stopSafety = boundedStopOnPhase(deps, 30);
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
     assert.equal(
       result.stoppedBy,
@@ -2935,7 +3029,7 @@ test("runRounds (#394 gate② round 2, Codex sol-high BLOCK finding, P2): at thr
     // round 2 open. ("executing" itself never calls onRoundPhase — see runPeripheral's own call
     // site — so it doesn't count toward this cap.)
     const stopSafety = boundedStopOnPhase(deps, 2);
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
 
     assert.equal(result.stoppedBy, "signal", "the bounded stop fired after round 1's own two visited peripheral phases, as designed");
@@ -2999,7 +3093,7 @@ test("runRounds #374: the round-opening gate resumes via the EXISTING probe path
       },
     });
     const stopSafety = boundedStopOnPhase(deps, 15); // rounds 1-2 degrade (park), round 3 opens once the probe clears
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
     assert.ok(result.rounds >= 3, `round 3 opened once the probe succeeded (got ${result.rounds})`);
     assert.ok(probeCalls >= 3, "the gate actually re-probed until it got a green light");
@@ -3043,7 +3137,7 @@ test("runRounds #374 review (Codex sol-high verify-pass finding 2, P2): stop.onM
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "stop-condition");
   assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
   assert.equal(result.rounds, 1, "only round 1 closed — round 2 never opened once the milestone was noticed mid-wait");
@@ -3093,7 +3187,7 @@ test("runRounds #374 review (Codex sol-high verify-pass finding 2, P2): a milest
       },
     });
     const stopSafety = boundedStopOnPhase(deps, 15);
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     stopSafety();
     assert.equal(result.stoppedBy, "stop-condition");
     assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
@@ -3125,7 +3219,7 @@ test("runRounds #212: dispatch is restricted to pool-labelled Ready issues — a
   const sup = new AutoCompleteSupervisor();
   const deps = baseDeps({ forge, supervisor: sup, sleep, cfg, poolLabel: cfg.labels.roundPool });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.deepEqual(sup.dispatchedIssues, [1], "only the pool-labelled issue dispatched — #2 was left untouched in Ready");
   deps.state.close();
@@ -3152,7 +3246,7 @@ test("runRounds #379 (gate② P1): a round whose pool-label reconcile TOTALLY fa
     },
   };
   const stopSafety = boundedStopOnPhase(deps, 5);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.deepEqual(sup.dispatchedIssues, [], "the round parked — no dispatch off a pool this round never actually selected");
   deps.state.close();
@@ -3177,7 +3271,7 @@ test("runRounds #379 (gate② P1): the dispatch block is scoped to the round tha
     },
   };
   const stopSafety = boundedStopOnPhase(deps, 11); // ~2 rounds of phases
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.deepEqual(sup.dispatchedIssues, [1], "round 2's dispatch is unaffected by round 1's failure event");
   deps.state.close();
@@ -3194,7 +3288,7 @@ test("runRounds #212: poolLabel unset -> no pool scoping at all, every approved 
   const sup = new AutoCompleteSupervisor();
   const deps = baseDeps({ forge, supervisor: sup, sleep, cfg }); // poolLabel NOT set
   const stopSafety = boundedStopOnPhase(deps, 5);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.deepEqual(sup.dispatchedIssues.sort(), [1, 2], "no pool scoping configured — both dispatch");
   deps.state.close();
@@ -3243,7 +3337,7 @@ test("runRounds #212 (gate② P1-3, superseding gate① F2): round close clears 
   const sup = new AutoCompleteSupervisor();
   const deps = baseDeps({ forge, supervisor: sup, sleep, cfg, poolLabel: cfg.labels.roundPool });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.deepEqual(sup.dispatchedIssues, [1]);
   assert.ok(
@@ -3289,7 +3383,7 @@ test("runRounds #212 (gate② P2-5): a removeLabel failure on ONE issue doesn't 
   const events = spyOnEvents(state);
   const deps = baseDeps({ forge, state, sleep, cfg, poolLabel: cfg.labels.roundPool });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.deepEqual(
     forge.removeLabelCalls.map(([n]) => n).sort((a, b) => a - b),
@@ -3313,7 +3407,7 @@ test("runRounds #212: poolLabel unset -> round close never calls removeLabel at 
   const sup = new AutoCompleteSupervisor();
   const deps = baseDeps({ forge, supervisor: sup, sleep, cfg }); // poolLabel NOT set
   const stopSafety = boundedStopOnPhase(deps, 5);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.deepEqual(forge.removeLabelCalls, []);
   deps.state.close();
@@ -3365,7 +3459,7 @@ test("runRounds standby (#212 probe residual fix): a milestone whose open issues
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(
@@ -3391,7 +3485,7 @@ test("runRounds standby (#212 probe residual fix): a mixed milestone (one held, 
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — never entered standby");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "the one non-held issue was enough to count as work");
@@ -3454,7 +3548,7 @@ test("runRounds standby (#432 F32): a milestone whose open non-Ready issues are 
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(
@@ -3482,7 +3576,7 @@ test("runRounds standby (#432 F32, AC2): a genuinely raw issue (no plan/AC struc
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — the raw issue is still work, no standby");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
@@ -3510,7 +3604,7 @@ test("runRounds standby (#432 F32, MIXED): one fully-specified issue plus one ra
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — never entered standby");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "the one raw issue was enough to count as work");
@@ -3536,7 +3630,7 @@ test("runRounds standby (#432 F32, Codex P1-1 off-board): a fully-specified mile
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — the off-board issue was still seen and counted");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
@@ -3559,7 +3653,7 @@ test("runRounds standby (#432 F32, Codex P1-1 split): a fully-specified mileston
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(
     result.rounds,
@@ -3588,7 +3682,7 @@ test("runRounds standby (#432 F32, Codex P1-1 decomposed): a decomposed parent s
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — the decomposed parent was still counted");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
@@ -3627,7 +3721,7 @@ test("runRounds standby (#432 F32): a Ready-lane issue carrying plan:approved wi
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(
     result.rounds,
@@ -3667,7 +3761,7 @@ test("runRounds standby (#432 round 4): a milestone issue carrying ONLY verify:n
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(
@@ -3702,7 +3796,7 @@ test("runRounds standby (#432 round 4, P1-1 regression pin): the #94 forbidden v
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(
@@ -3743,7 +3837,7 @@ test("runRounds standby (#432 round 4, P1-1 regression pin): a VALID approved is
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(
@@ -3775,7 +3869,7 @@ test("runRounds standby (#432 round 5): a Ready, POOLED issue carrying plan:appr
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(
     result.rounds,
@@ -3813,7 +3907,7 @@ test("runRounds standby (#432 round 5, Codex P1-1, RED vs round 4): a Ready, ELI
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(
@@ -3839,7 +3933,7 @@ test("runRounds standby (#432 round 4, P2-3): a fully-specified milestone issue 
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — the stale roundPool-labeled issue was still counted");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
@@ -3876,7 +3970,7 @@ test("runRounds standby (#432 round 5, P1-2): a durable dissent concern that is 
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 10);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — the still-pending concern was still counted as work");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "no backoff wait ever happened");
@@ -3910,7 +4004,7 @@ test("runRounds standby (#432 round 5, P1-2, the TERMINAL): a durable dissent co
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(
@@ -3964,7 +4058,7 @@ test("runRounds standby (#432 round 5, P2-3): a stale roundPool label that fails
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   // Round 1: round-close's own sweep attempts removal, fails (1st recorded failure, 1 < cap 2) —
   // the label is still on the issue, still fully-specified, still no other consumable signal, so
@@ -4307,7 +4401,7 @@ test("runRounds (#253, #551): cfg.proxy.enabled: true wires a REAL fixLegResume 
     peripherals: allPeripherals(log),
   });
   const stopSafety = boundedStopOnPhase(deps, 20);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.ok(sup.resumeCalls.length >= 1, "expected the FIXABLE gate to dispatch a fix leg via supervisor.resume()");
   const call = sup.resumeCalls[0]!;
@@ -4368,7 +4462,7 @@ test("runRounds (#375 review round 2, P1): round budget crossed after wave 1 doe
     renderFixPrompt,
   });
   const stopSafety = boundedStopOnPhase(deps, 20);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
 
   // Round budget really was crossed (proves this reproduces #375's own F7/F8 scenario, not an
@@ -4415,7 +4509,7 @@ test("runRounds (#551): cfg.proxy left entirely UNSET (the real default) -> fixL
     peripherals: allPeripherals(log),
   });
   const stopSafety = boundedStopOnPhase(deps, 20);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.ok(
     sup.resumeCalls.length >= 1,
@@ -4451,7 +4545,7 @@ test("runRounds (#253, #551): cfg.proxy.enabled: false (explicit opt-out) -> no 
     peripherals: allPeripherals(log),
   });
   const stopSafety = boundedStopOnPhase(deps, 20);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(sup.resumeCalls.length, 0, "no fix leg was ever dispatched — the gate degraded instead");
   assert.ok(
@@ -4533,7 +4627,7 @@ test("runRounds (#395): a healthy fast round never trips the watchdog — a LARG
   const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 10 } });
   const deps = baseDeps({ forge, sleep, cfg, tickIntervalSec: 60, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 1, "the fast fake round completed normally");
   const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);
@@ -4549,7 +4643,7 @@ test("runRounds (#395): a contained tick() THROW during executing settles quickl
   const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 10 } });
   const deps = baseDeps({ forge, cfg, tickIntervalSec: 60 });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);
   assert.equal(stalled.length, 0, "a thrown (settled) tick is a tick-error, never a stall");
@@ -4624,7 +4718,7 @@ test("runRounds (#395 gate② round 4): a WAIT-gated lane (PR on pending CI) nev
     watchdogExit: (code) => exitCalls.push(code),
     stop: { afterIssuesMerged: 1 },
   });
-  const runPromise = runRounds(deps);
+  const runPromise = runRoundsGuarded(deps);
   // Comfortably past where the watchdog's own window (200ms) would have fired under the OLD
   // (event-log-only) design — proves the engine survived a full window (and then some) of a
   // healthy, event-quiet drain.
@@ -4669,7 +4763,7 @@ test("runRounds (#433): a DRIVING lane carried into a round with an EMPTY dispat
   ]);
   const deps = baseDeps({ forge, state, supervisor: sup, sleep, mergeGate: gate, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }) });
   const stopSafety = boundedStopOnPhase(deps, 5); // round 1's five peripheral phases only
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   stopSafety();
   assert.equal(result.rounds, 1, "the merge happened inside the FIRST (empty-pool) round — no later round needed");
   assert.ok(gate.calls >= 3, `the carried lane must be driven every tick of the empty round, not once (drive passes: ${gate.calls})`);
@@ -4699,7 +4793,7 @@ test("runRounds (#433): a carried lane whose fix rounds are EXHAUSTED gets its n
   const gate = new ScriptedMergeGate([{ kind: "fixable", pr: 423, reason: "ci-red" }]);
   const deps = baseDeps({ forge, state, supervisor: sup, sleep, mergeGate: gate, cfg });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.ok(
     events.some(([kind, payload]) => kind === "fix-rounds-capped" && (payload as { issue: number }).issue === 377),
@@ -4752,7 +4846,7 @@ test("runRounds (#433): standby must never withhold the next round while a CARRI
     stop = once(requestStop);
     return () => {};
   };
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   assert.ok(state.getRound(2) != null, "a second round must open — a carried lane is work, so standby must not engage");
   assert.equal(state.getWorker("lane-377")?.state, "done", "the carried lane was reclaimed, re-driven and merged without a human merge");
   state.close();
@@ -4791,7 +4885,7 @@ test("runRounds standby (#630 AC3): a run whose ONLY gated-reentry candidate sit
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it, no idle-churn");
   assert.ok(
@@ -4838,7 +4932,7 @@ test("runRounds (#431 AC3): the ceiling-wait loop announces the breach ONCE — 
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.ok(sleepCalls.length >= 4, "the loop actually sat out multiple ceiling-wait iterations");
   const announced = state.eventsAfterId(0, ["ceiling-breach-entered"]);
@@ -4886,7 +4980,7 @@ test("runRounds (#431 round 2, codex P1): a standby dwell that outlives maxWallC
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "the wake never opened a round on a breached process");
   assert.equal(state.getRound(2), undefined, "no second round exists");
@@ -4954,7 +5048,7 @@ test("runRounds (#431 round 4, codex finding 5): the ROUND-WAIT clear site's wri
     return () => {};
   };
   const stopSafety = boundedStopOnPhase(deps, 8);
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   const clearSeq = writes.filter((w) => w === "append:ceiling-breach-cleared" || w === "row:delete");
   assert.equal(clearSeq.filter((w) => w === "append:ceiling-breach-cleared").length, 1, "exactly one clear transition happened");
@@ -5018,7 +5112,7 @@ test("runRounds (#431 rounds 5-6, codex P1): the round-wait green-light clear re
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.ok(round1ClosedAtEventId !== null, "round 1 ran to its last phase");
   const waitProbes = state
@@ -5069,7 +5163,7 @@ test("runRounds #470: K idle, state-identical rounds trip the idle-churn breaker
       if (state.isParked()) writeFileSync(join(dir, "KILL_SWITCH"), "");
     };
     const deps = mkF32Deps(state, sleep, 3);
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     assert.equal(result.stoppedBy, "kill-switch");
     const detected = state.eventsAfterId(0, ["idle-churn-detected"]);
     assert.equal(detected.length, 1, "the breaker fires EXACTLY once — never again every round after");
@@ -5102,7 +5196,7 @@ test("runRounds #470: the streak is LEDGER-derived — a kill -9 mid-count resum
     const { sleep: sleep1 } = mkSleepSpy();
     const deps1 = mkF32Deps(state1, sleep1, 3);
     const stopSafety = boundedStopOnPhase(deps1, 10); // 2 rounds x 5 peripheral phases
-    const first = await runRounds(deps1);
+    const first = await runRoundsGuarded(deps1);
     stopSafety();
     assert.equal(first.rounds, 2);
     assert.equal(state1.eventsAfterId(0, ["idle-churn-detected"]).length, 0, "two rounds is below the threshold");
@@ -5113,7 +5207,7 @@ test("runRounds #470: the streak is LEDGER-derived — a kill -9 mid-count resum
       if (state2.isParked()) writeFileSync(join(dir, "KILL_SWITCH"), "");
     };
     const deps2 = mkF32Deps(state2, sleep2, 3);
-    const second = await runRounds(deps2);
+    const second = await runRoundsGuarded(deps2);
     assert.equal(second.stoppedBy, "kill-switch");
     const detected = state2.eventsAfterId(0, ["idle-churn-detected"]);
     assert.equal(detected.length, 1);
@@ -5140,7 +5234,7 @@ test("runRounds #470: a round that DISPATCHES never trips the breaker, however m
     cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 }, round: { idleChurn: { consecutiveIdenticalRoundsThreshold: 2 } } }),
   });
   const stopSafety = boundedStopOnPhase(deps, 20); // 4 rounds
-  await runRounds(deps);
+  await runRoundsGuarded(deps);
   stopSafety();
   assert.ok(state.eventsAfterId(0, ["dispatched"]).length >= 3, "the fixture really did dispatch every round");
   assert.equal(state.eventsAfterId(0, ["idle-churn-detected"]).length, 0, "a round that put a lane in flight is never idle");
@@ -5178,7 +5272,7 @@ test("runRounds #470: a legitimate WAIT — a driving lane on pending CI — nev
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.ok(gate.calls >= 8, `the lane really did sit through repeated WAIT passes (drive passes: ${gate.calls})`);
   assert.equal(state.eventsAfterId(0, ["idle-churn-detected"]).length, 0, "a waited-on lane is not idle churn");
   assert.equal(state.isParked(), false);
@@ -5220,7 +5314,7 @@ test("runRounds #470: standby stays the FIRST line — a genuinely empty backlog
     stop = once(requestStop);
     return () => {};
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.rounds, 1, "round 1 (always unconditional) closed idle; standby then withheld every round after it");
   assert.ok(standbyWaits >= 3, "standby genuinely engaged and kept backing off");
   assert.equal(
@@ -5309,7 +5403,7 @@ test("runRounds #381 (F6): a ROUND-STOPPED drain keeps ticking at tickIntervalSe
     events.push("tick");
     stop(); // the signal lands on the very first tick — the whole drain below runs post-signal
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.ok(
     hits.some((h) => h.name === "roundDispatchCap"),
@@ -5349,7 +5443,7 @@ test("runRounds #381 (F6): a KILL_SWITCH wind-down drain keeps ticking at tickIn
       writeFileSync(join(dir, "KILL_SWITCH"), "");
       stop();
     };
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     assert.equal(result.stoppedBy, "kill-switch");
     assert.ok(drainingTicks.length >= 2, `the drain asserted below is the kill-switch wind-down, got ${JSON.stringify(drainingTicks)}`);
     assertPacedWaits(events, 5000, 3);

@@ -101,14 +101,27 @@ Before ending a supervision session:
    result — a batch does not "close" with an unexplained `needs-human` or
    `human-merge-only` item sitting unmentioned. Either it's handled (a decision recorded,
    a follow-up filed) or it's explicitly carried forward, never silently dropped.
-2. **Owner-ruling same-session recording discipline.** A verbal/chat endorsement from the
-   owner that isn't written down as a durable record is not evidence later — the #604
-   incident (an owner's verbal endorsement was never recorded, and a later architect pass
-   treated the issue as unresolved and blocked it) is the direct, paid-for cost of this
-   gap. Any owner ruling that lands during a session — a scope call, a merge
-   authorization, a policy decision — gets recorded **in that same session**, as a
-   comment on the relevant issue/PR, before the session ends. Do not defer "I'll write it
-   up later."
+2. **Owner-ruling recovery ritual.** A ruling recorded ONLY as a comment is not evidence a
+   worker will ever see — workers read the issue body only (`{{issue.body}}`, see
+   [`docs/security.md`](security.md#the-comment-adjudication-cursor-652)), and comments
+   remain audit evidence, never the contract a worker is dispatched against; the body
+   remains the worker contract. Two incidents are the paid-for cost of skipping this: the
+   #604 incident (an owner's verbal endorsement was never recorded, and a later architect
+   pass treated the issue as unresolved and blocked it) and the batch-8 incident (PR #651
+   round 1: a binding owner ruling sat in issue comment #3 while the worker faithfully
+   implemented the stale body — 5 P1s in one PR). Any owner ruling that lands during a
+   session — a scope call, a merge authorization, a policy decision — is closed out with
+   all four steps below, in order, **in that same session**, before the session ends. Do
+   not defer "I'll write it up later," and do not stop partway (recording the ruling
+   without rewriting the body reproduces the exact trap that caused batch-8):
+   1. **Record the ruling** as a comment on the relevant issue/PR.
+   2. **Rewrite the authoritative body** to fold the ruling in — the comment is evidence
+      that a decision was made, not the decision a worker will act on.
+   3. **Advance the [#652 adjudication
+      cursor](security.md#the-comment-adjudication-cursor-652)**
+      (`<!-- sapwood:comments-adjudicated-through: <comment-id> -->`) to the ruling
+      comment or later, so gate⓪ and dispatch see the body as current rather than stale.
+   4. **Remove `needs-human`**, if it was applied for this reason.
 3. **Evidence posting.** Where a decision or intervention isn't self-evident from the
    event ledger alone (a `park clear --reason`, a manual label change, a judgment call
    the ledger can't express), post it as a comment on the issue/PR it concerns. GitHub is
@@ -138,6 +151,17 @@ This section covers the supervision-side placement/removal discipline layered on
   whatever's running. `sapwood status` while draining shows the same active/driving
   lanes you'd see mid-run; watch it (or poll `events`) until active lanes reach zero
   rather than assuming the drain finished the moment you set the sentinel.
+- **Spin/livelock SUSPICION.** An engine PID that stays alive while the event cursor
+  stops advancing across polls, with CPU or RSS still rising, is a reason to look — not
+  a diagnosis, and not on its own a reason to stop the engine. Those same signals are
+  produced by healthy work: a lane's heartbeat can be silent while it is genuinely
+  progressing (#688 — the heartbeat gate can starve one lane while another advances the
+  ledger), and CPU/RSS rise during any real build or test run. Corroborate before acting:
+  check whether OTHER lanes are advancing, whether a lane's `drive-queued` reason has
+  stopped changing, and whether that lane's own worker log has stopped growing. Only once
+  corroborated, capture the PID/process tree and last event page, then follow the Stop
+  ritual—using the second signal if graceful drain cannot complete—verify every lane
+  descendant is gone, and do not restart unchanged.
 - **Sentinel removal.** `data/KILL_SWITCH`/`data/PAUSE` are OUT-OF-BAND controls — the
   engine never removes either one itself. Remove the sentinel only once you intend the
   *next* `sapwood run` (or the next tick, if the process is still alive under a signal
@@ -164,6 +188,44 @@ the matches tells you whether a given expected-noise kind is firing once (ignore
 repeatedly (worth reading the surrounding `investigate`/`intervene` events for what's
 actually wrong upstream). This is a supervisor-side read, not an engine threshold — no
 kind is reclassified by count; you are just choosing where to look next.
+
+## Known blind spot: persistent forge-fetch failure in queued arms
+
+**Adjudicated bounded blind spot (#662, 2026-08-06 ruling, Option B).** Several
+`queued`-outcome arms in the drive family — `ac-drift-check-unavailable`
+(`checkAcDriftBeforeDrive`), `comment-cursor-check-unavailable`
+(`checkCommentCursorBeforeDrive`), and the `*-escalation-write-failed` /
+`fix-leg-dispatch-failed` group — retry forever on a forge fetch that fails on *every*
+attempt, not just a transient one. There is deliberately no consecutive-failure escalation
+cap: distinguishing "permanently broken" from "rate-limited/network-blip" by a bare retry
+count would either escalate a healthy lane on a bad day or need a second knob to avoid
+that, and no dogfood evidence of an actual silent wedge has shown up to justify the
+complexity (marginal-complexity doctrine — see `REVIEW-DOCTRINE.md`'s adjudication
+principles, and #662 for the full ruling record). The containment is honest visibility —
+one `drive-queued` event per reason change (never per-tick spam, #383 dedup) plus this
+watch recipe — not an automatic escalation.
+
+Spot a wedged lane with the same two read-only verbs from
+[Supervising a run](#supervising-a-run):
+
+```bash
+# 1. Which lanes are driving right now, and on which (worker, issue, pr)?
+sapwood status --json
+
+# 2. For a lane that's been driving far longer than this repo's PRs normally take to
+#    clear gate②, has its drive-queued reason stopped changing? These reason strings are
+#    the forge-fetch-failure class:
+#      ac-drift-check-unavailable, comment-cursor-check-unavailable,
+#      review-disputed-escalation-write-failed, review-non-convergent-escalation-write-failed,
+#      fix-rounds-cap-label-failed, fix-rounds-cap-comment-failed, fix-leg-dispatch-failed
+sapwood events --issue <N> --kind drive-queued
+```
+
+If the same reason string keeps recurring across repeated polls with no `merged`,
+`needs-human`, `ac-snapshot-drift`, or `comment-cursor-stale` event ever following it, the
+forge call behind that arm is very likely broken for good, not transient — escalate by
+hand (apply `needs-human`, comment the issue with the evidence) the same as any other
+operator-observed intervention (see [Batch close ritual](#batch-close-ritual)).
 
 ## Queue queries
 

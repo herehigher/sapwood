@@ -19,6 +19,7 @@ import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { LaneProbe, Supervisor } from "./conductor.js";
 import { concernHash } from "./dissent.js";
+import { attachAttemptGuard, withHangGuard } from "./hang-guard.test-support.js";
 import { noopPeripheralStub, type RoundDeps, runRounds } from "./round.js";
 import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
 import { createDefaultPeripherals, renderAlignedGoalsFromSummary, renderLastMergedFromArtifact } from "./round-defaults.js";
@@ -263,6 +264,22 @@ class ScriptedRunner {
     }
     return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: `role-${opts.roleId}-1` };
   }
+}
+
+/** #691: `runRounds` drives `round.ts:1161/1692/1726`'s production `for (;;)` loops with no bound
+ *  of its own -- see `hang-guard.test-support.ts` (shared with
+ *  driver.test.ts/round.test.ts/harvest.test.ts/retro.test.ts -- ONE copy, not five) for why this
+ *  needs BOTH `withHangGuard` and `attachAttemptGuard`. */
+async function runRoundsGuarded(deps: RoundDeps): ReturnType<typeof runRounds> {
+  const attemptGuardFired = attachAttemptGuard(deps);
+  const result = await withHangGuard(
+    runRounds(deps),
+    45_000,
+    "runRounds(deps) did not settle within 45000ms — a wedged production for(;;) loop (round.ts:1161/1692/1726), the class that caused the 2026-08-05 livelock (#691)",
+  );
+  const fired = attemptGuardFired();
+  if (fired !== null) throw new Error(fired);
+  return result;
 }
 
 test("createDefaultPeripherals: every PeripheralPhase key is present and none of them is noopPeripheralStub", () => {
@@ -575,7 +592,7 @@ test("runRounds integration: wired with createDefaultPeripherals's output, a def
     }
   };
 
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1);
   const round = state.getRound(1)!;
@@ -710,7 +727,7 @@ test("runRounds (#379 F2): every pool-label write failing keeps the ENGINE ALIVE
     return () => {};
   };
 
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal", "the loop stopped on its own terms — no crash, no exit(1)");
   assert.equal(result.rounds, 1, "the round completed rather than wedging at aligning");
   const round = state.getRound(1)!;
@@ -941,7 +958,7 @@ test("runRounds integration (#127): a disabled role spawns no session for its ph
     // stopping; only the NEXT round is withheld.
   };
 
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.rounds, 1);
   const round = state.getRound(1)!;
   assert.equal(round.phase, "closed", "the round still closes despite the disabled retro peripheral");
@@ -975,7 +992,7 @@ test("runRounds integration: KILL_SWITCH blocks every real peripheral — none o
       sleep: async () => {},
       peripherals,
     };
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     assert.equal(result.stoppedBy, "kill-switch");
     assert.equal(result.rounds, 0);
     assert.equal(runner.calls.length, 0);
