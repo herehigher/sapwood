@@ -38,5 +38,15 @@ jobs:
       # node:test's own `--test-timeout` (#667) cannot do this — measured 2026-08-05, it
       # prints the verdict on time and the runner keeps running. `timeout` is GNU
       # coreutils, present on ubuntu-latest.
-      - run: timeout 600 npm --workspace engine test
-      - run: timeout 300 npm --workspace dashboard test
+      #
+      # `--kill-after=30s` escalates to SIGKILL when the group survives the initial
+      # SIGTERM. Not hypothetical here: this suite DELIBERATELY spawns SIGTERM-immune
+      # children (worker.test.ts's `leaderExitStub({ ignoreTerm: true })`, the shape #668
+      # round 8 stopped force-killing in production on purpose), which is exactly the case
+      # a TERM-only timeout cannot end. No `--foreground`: without it `timeout` signals the
+      # whole process group, so the `npm` wrapper cannot shield the `node --test`
+      # grandchild — `--foreground` would WEAKEN that (Codex gate② review of PR #692).
+      # Residual, stated honestly: a descendant that detaches into its OWN process group
+      # (setsid) escapes either form — that is the test-side half of #691, not this file's.
+      - run: timeout --kill-after=30s 600 npm --workspace engine test
+      - run: timeout --kill-after=30s 300 npm --workspace dashboard test
