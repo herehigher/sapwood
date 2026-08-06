@@ -1101,32 +1101,36 @@ const waitForHeartbeatTick = async (path: string): Promise<void> => {
   rmSync(path, { force: true });
   await waitForFile(path, "heartbeat tick did not recreate its marker");
 };
-/** #691 Codex round 4: THREE review rounds each found a different hole in the sweep's coverage
- *  (kills-its-own-runner, pid-decays-after-exit, handle-lost-on-a-mid-test restart) — the sweep
- *  is correct where it applies, but its correctness depended on enumerating every coverage point
- *  by hand, and that enumeration kept being incomplete. Termination correctness now does NOT
- *  depend on the sweep at all: it depends on this stub bounding ITSELF.
+/** #691 (owner directive, round 6): a single uniform 600s self-bound, no per-call-site override.
  *
- *  Measured (not guessed) real need: every one of this file's 23 `longRunningStub` call sites is
- *  driven to a terminal state by an explicit SIGTERM (a cooperative `trap 'exit 0' TERM`) or a
- *  SIGKILL escalation (`reclaim()`'s hard-kill path) well inside this file's own poll bounds --
- *  the longest is `for (let i = 0; i < 400 && alive(pid); i++) await sleep(20)`, an 8s hang-guard
- *  ceiling that in every real (non-hung) run resolves in well under a second (observed: ~350ms
- *  median per test across the full suite). No call site seeds a real-clock wait anywhere near
- *  that -- the two `timeoutSec`-driven tests jump a SEEDED clock, never a real one. The prior
- *  `600` (10 minutes) was an arbitrary "long enough to not finish on its own" placeholder, not a
- *  requirement.
+ *  Three review rounds each found a different hole in `killAnyRunningLanes`'s coverage
+ *  (kills-its-own-runner, pid-decays-after-exit, handle-lost-on-a-mid-test-restart) — the sweep
+ *  is correct where it applies (and stays: the handle-based sweep, the restart-site snapshots,
+ *  and the unconditional `s?.dispose()` work are all unchanged), but its correctness always
+ *  depended on enumerating every coverage point by hand.
  *
- *  `selfBoundSec` defaults to 30 -- roughly 4x the observed worst-case poll ceiling, and two
- *  orders of magnitude below the old 600. A stub that escapes every sweep (own-pid refusal,
- *  registry decay, a lost handle across a "restart" -- or a class nobody has found yet) now costs
- *  a bounded ~30s delay instead of blocking the runner for up to 10 minutes: the FAILURE MODE
- *  changes from "hang" to "slow", without needing to enumerate every coverage point. If a FUTURE
- *  test genuinely needs a longer-lived stub, it passes its own `selfBoundSec` here and says why --
- *  none of the current 23 sites do. */
-const longRunningStub = (dir: string, beforeReady = "", readyName = "stub-ready", selfBoundSec = 30): { bin: string; ready: string } => {
+ *  A later attempt to lower this default to 30s (with a per-site `selfBoundSec` override for
+ *  tests that "need" longer) chased the SAME shape of bug into a new place: the override
+ *  decision itself required enumerating every call site's termination mechanism by hand
+ *  (does it end via a synchronous signal, or via `reclaim()`'s `killTree`, which sends SIGTERM
+ *  then `await sleep(200)` -- worker.ts's real, awaited 200ms grace -- before escalating to
+ *  SIGKILL?) and that enumeration was ALSO found incomplete mid-review. Rather than keep
+ *  re-deriving which sites are safe at a lower bound, the owner's ruling: pick one wide,
+ *  side-effect-free value and stop tuning it here -- every test that could otherwise lose a
+ *  real-timer race is covered BY CONSTRUCTION, with no judgement call required, and tuning is
+ *  deferred to real-run data rather than settled by argument.
+ *
+ *  Honest consequence: this stub bound is NOT the termination guarantee -- it is a last-resort
+ *  ceiling on a stray process that escapes `killAnyRunningLanes` (own-pid refusal doesn't apply
+ *  here, a lost handle across a restart, or a class nobody has found yet), and at 600s it is a
+ *  wide one: such a stray process can delay a LOCAL run by up to 10 minutes. Termination
+ *  correctness for CI is `killAnyRunningLanes`'s handle sweep for everything it reaches, plus
+ *  PR #692's CI-side wall clock (job `timeout-minutes` + step `timeout`) as the external
+ *  backstop for whatever it doesn't. That residual is accepted deliberately in exchange for
+ *  zero risk of a lowered bound silently flipping a test's verdict. */
+const longRunningStub = (dir: string, beforeReady = "", readyName = "stub-ready"): { bin: string; ready: string } => {
   const ready = join(dir, readyName);
-  const bin = mkStub(dir, `#!/usr/bin/env bash\n${beforeReady}touch "${ready}"\nfor _ in $(seq 1 ${selfBoundSec}); do sleep 1; done\n`);
+  const bin = mkStub(dir, `#!/usr/bin/env bash\n${beforeReady}touch "${ready}"\nfor _ in $(seq 1 600); do sleep 1; done\n`);
   return { bin, ready };
 };
 const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"success","total_cost_usd":0.0001,"model":"claude-stub","usage":{"input_tokens":12,"output_tokens":34}}'\nexit 0\n`;
@@ -1137,10 +1141,9 @@ const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"succes
  *  reclaim, or a natural exit) leaves its detached wrapper alive, and that ALONE blocks this
  *  file's `node:test` process from exiting until the stub's own self-bound sleep loop ends on its
  *  own (verified empirically; `dispose()` only clears timers/fds -- its own doc says "does not
- *  kill children"). That self-bound defaults to 30s (`longRunningStub`'s own doc has the
- *  measurement) and is overridable per call site via its `selfBoundSec` parameter for the rare
- *  test that structurally depends on the stub outliving that default (see that same doc, and the
- *  "enforces worker timeout" test below, which passes 600).
+ *  kill children"). That self-bound is a UNIFORM 600s for every call site (`longRunningStub`'s
+ *  own doc has the full owner-directed rationale for why this is not tuned per site) -- this
+ *  sweep is what keeps a healthy run's CI runner clean well before that ceiling ever matters.
  *
  *  Codex gate② (a072bb1 review, P1): the FIRST version of this trusted a `*.running.json`
  *  sentinel's `wrapper_pid` field parsed off disk, with no proof this test actually spawned that
@@ -1177,12 +1180,12 @@ const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"succes
  *  in-process lane, so `s2` learns it only from disk) breaks: `s2` never held `s1`'s
  *  `ChildProcess` in the first place, so once `s1` is disposed the handle is unreachable from
  *  EITHER supervisor -- passing both to this function afterwards sees two empty `lanes` maps. The
- *  stub's own `selfBoundSec` (`longRunningStub`'s doc) is what actually bounds that case now; the
- *  8 sites doing this restart additionally SNAPSHOT the handle themselves, immediately before the
- *  `dispose()` that would otherwise strand it, and pass it here directly -- a retained `ChildProcess`
- *  does not decay the way the rejected pid-registry did (the object always addresses its own
- *  child, never a reused pid), so this is not a repeat of that mistake, just accepting a handle
- *  from one more place than "ask the supervisor for its own". */
+ *  stub's own uniform 600s self-bound (`longRunningStub`'s doc) is the last-resort ceiling for
+ *  that case now; the 8 sites doing this restart additionally SNAPSHOT the handle themselves,
+ *  immediately before the `dispose()` that would otherwise strand it, and pass it here directly --
+ *  a retained `ChildProcess` does not decay the way the rejected pid-registry did (the object
+ *  always addresses its own child, never a reused pid), so this is not a repeat of that mistake,
+ *  just accepting a handle from one more place than "ask the supervisor for its own". */
 function killAnyRunningLanes(...targets: Array<WorkerSupervisor | ChildProcess | undefined>): void {
   const children: ChildProcess[] = [];
   for (const t of targets) {
@@ -2715,13 +2718,7 @@ test("enforces worker timeout: a run past timeoutSec is killed and marked failed
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s: WorkerSupervisor | undefined;
   try {
-    // #691 Codex round 5: this test advances a SEEDED clock and then waits for the REAL (fast,
-    // but real) heartbeat timer to independently notice and escalate to SIGKILL -- a genuine
-    // real-wall-clock race against the stub's own self-bound if the event loop ever stalls
-    // longer than that bound (same class the analogous "#69: timeout still tags .failed..." test
-    // below already documents and fixes at 600s). 30s is not safe here; match that test's value
-    // and rationale rather than re-lowering it.
-    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n", "stub-ready", 600); // ignores TERM -> needs the KILL
+    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> needs the KILL
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
     let fakeNowMs = Date.now();
     s = new WorkerSupervisor({
