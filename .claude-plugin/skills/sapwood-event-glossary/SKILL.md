@@ -207,6 +207,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `architect-degraded` — **investigate** [round-artifact]: the architect's batch-review pool-verdict phase degraded/failed this round.
 - `architect-verdict-applied` — **routine**: the architect's pool verdict for an issue (label/board effect) was applied.
 - `architect-verdict-lost` — **investigate**: the architect's pool verdict for an issue failed to persist; an honesty event, not a silent no-op.
+- `architect-repeat-drop-escalated` — **intervene** [escalation-source:payload]: an issue was dropped repeatedly for the same reason with no body edit in between (same-reason re-drop churn, #666); escalated to needs-human via the shared writer instead of a duplicate drop comment, proof of the label write rides in the payload. (see #666)
 - `po-degraded` — **investigate** [round-artifact]: the PO's phase degraded/failed this round.
 - `harvest-degraded` — **investigate** [round-artifact]: the harvest phase degraded/failed this round.
 - `retro-degraded` — **investigate** [round-artifact]: the retro phase degraded/failed this round.

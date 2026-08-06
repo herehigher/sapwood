@@ -123,6 +123,7 @@ test("consumer list: ESCALATION_SOURCES is derived from the escalation-source:* 
  *  does this kind carry an ISSUE and provably apply the needs-human label? If not, it belongs in
  *  that module's DELIBERATELY-ABSENT block instead, not here. */
 const GOLDEN_ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
+  "architect-repeat-drop-escalated": "payload",
   "ceiling-escalated": "never",
   "concern-post-escalated": "payload",
   "drive-needs-human": "payload",

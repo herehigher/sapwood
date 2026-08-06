@@ -55,8 +55,10 @@ import type { SapwoodConfig } from "../config/config.js";
 import { resolveRoundDirective } from "../config/directive.js";
 import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge, Issue } from "../forge/forge.js";
+import { escalateToNeedsHuman } from "../loop/escalation-writer.js";
 import { type PeripheralStub, removeRoundPoolLabel } from "../loop/round.js";
 import { capDigest } from "../retro/retro-digest.js";
+import { hashBody } from "../review/ac-snapshot.js";
 import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 import { extractMarkdownSections } from "../util/markdown.js";
@@ -569,6 +571,27 @@ function architectDegradeReason(
   return v.ok ? "architect output valid" : `architect produced invalid structured output twice: ${v.reason}`;
 }
 
+/** #666: how many times IN A ROW an issue has already been dropped for an UNCHANGED body — the
+ *  ledger fold `createArchitectStub` checks before applying a fresh `drop` verdict, to bound
+ *  same-reason re-drop churn (an issue that stays Ready, re-enters the pool next round, and gets
+ *  dropped again for the identical premise defect — indefinitely, one duplicate comment per
+ *  round, until a human notices). Walks `architect-verdict-applied` events for this issue in
+ *  ledger order and counts the TRAILING run of `drop` verdicts whose recorded `bodyHash` matches
+ *  `bodyHash` — i.e. drops applied since the last time the body actually changed (or since the
+ *  issue's first drop). A body edit between two drops (AC3's reverse test) changes `bodyHash`, so
+ *  the very next drop finds no matching trailing run and the count resets to 0 — the bound never
+ *  suppresses a legitimately re-triaged issue, only a genuinely unchanged repeat. */
+export function consecutiveSameBodyDropCount(state: Pick<State, "eventsAfterId">, issue: number, bodyHash: string): number {
+  const events = state.eventsAfterId(0, ["architect-verdict-applied"]).filter((e) => (e.payload as { issue?: unknown }).issue === issue);
+  let count = 0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const p = events[i]!.payload as { verdict?: unknown; bodyHash?: unknown };
+    if (p.verdict !== "drop" || p.bodyHash !== bodyHash) break;
+    count++;
+  }
+  return count;
+}
+
 /** Builds the `architecting` phase's PeripheralStub. Round-level idempotence (#77 decision 4,
  *  the same coarse "whole phase is one unit of idempotent work" stance plan-review.ts's
  *  createPlanReviewStub documents): a non-null incoming marker means a prior attempt this round
@@ -642,6 +665,9 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // #213: THE POOL-SET INVARIANT's authoritative set — the ANALOGOUS "exactly what the
       // prompt showed as pool members" set, for verdicts.
       const poolNumbers = new Set(poolIssues.map((i) => i.number));
+      // #666: this round's live body per pool member — the SAME body the session was shown —
+      // keyed for the same-reason re-drop check below (consecutiveSameBodyDropCount/hashBody).
+      const poolBodyByIssue = new Map(poolIssues.map((i) => [i.number, i.body ?? ""]));
       // #251: pool-digest is a CHARACTER-count cut (capDigest), unlike align.ts's
       // packDigestRecords (a whole-RECORD pack) — the pre-cap joined text is kept in its own
       // variable so the manifest row below can honestly compare pre/post-cap length, rather than
@@ -867,6 +893,14 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
           // line, then CONTINUE. A transient LABEL-write failure now (post-reorder) leaves NO
           // receipt behind — an IMPROVEMENT over the pre-reorder shape: a future phase rerun this
           // round will retry this exact verdict instead of having it silently swallowed forever.
+          // #666: same-reason re-drop churn — computed BEFORE the write attempt below (a pure
+          // ledger read against history from PRIOR rounds only; this round's own receipt hasn't
+          // landed yet). `bodyHash`/`repeatCount` are only meaningful for `drop` (needs-human
+          // never re-enters the pool to repeat), but computing them unconditionally keeps this
+          // block a single read with no branch on verdict kind.
+          const bodyHash = hashBody(poolBodyByIssue.get(v.issue) ?? "");
+          const repeatCount = consecutiveSameBodyDropCount(deps.state, v.issue, bodyHash);
+          const escalateRepeat = v.verdict === "drop" && repeatCount >= deps.cfg.roles.architect.maxConsecutiveDrops;
           try {
             if (v.verdict === "drop") {
               // #147/#212 containment: the ONLY sanctioned way to remove the pool label — fails
@@ -877,9 +911,38 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
               // needs-human: ADD the label — #147 semantics, only a human ever removes it.
               await deps.forge.addLabel(v.issue, deps.cfg.labels.needsHuman);
             }
-            // The load-bearing label effect landed — NOW the receipt attests to it.
-            deps.state.appendEvent("architect-verdict-applied", { round_id: roundId, issue: v.issue, verdict: v.verdict });
-            await deps.forge.addIssueComment(v.issue, v.reason);
+            // The load-bearing label effect landed — NOW the receipt attests to it. `bodyHash`
+            // rides along for `drop` verdicts only — it is what the NEXT round's
+            // consecutiveSameBodyDropCount compares against (#666).
+            deps.state.appendEvent("architect-verdict-applied", {
+              round_id: roundId,
+              issue: v.issue,
+              verdict: v.verdict,
+              ...(v.verdict === "drop" ? { bodyHash } : {}),
+            });
+            if (escalateRepeat) {
+              // #666 AC1: `repeatCount` consecutive UNCHANGED drops already landed — this one
+              // would be a duplicate reason comment with no escalation, forever. Route to the
+              // shared needs-human writer instead of posting `v.reason` again; its own dedup
+              // marker (needsHumanReasonMarker) means this fires once per issue, not once per
+              // round, even though nothing here re-checks `openEscalations` first (the needsHuman
+              // label this applies structurally excludes the issue from future pools —
+              // getPoolEligibleIssues/isPoolEligible already exclude held issues — so it simply
+              // never reaches this branch again once the label write actually lands).
+              await escalateToNeedsHuman(
+                deps.forge,
+                deps.state,
+                deps.cfg,
+                v.issue,
+                "architect-repeat-drop-escalated",
+                { round_id: roundId, repeat_count: repeatCount + 1 },
+                `sapwood: the architect dropped this issue ${repeatCount + 1} times in a row for the same reason, with no ` +
+                  `body edit in between — held for a human rather than repeat the same drop comment every round. Latest reason: ${v.reason}\n\n` +
+                  `Edit the issue body (or remove \`${deps.cfg.labels.needsHuman}\`) to trigger a fresh architect review.`,
+              );
+            } else {
+              await deps.forge.addIssueComment(v.issue, v.reason);
+            }
           } catch (e) {
             const reason = String(e);
             (deps.log ?? console.error)(
