@@ -2074,14 +2074,20 @@ that would be the engine making a human-owned adjudication call on the human's b
 decision may already be write-ahead accepted per #232's own doctrine, but that accepted text never
 reaches GitHub) on failure.
 
-**The write-boundary race (#703 v2 gate② P1-2).** `plan-review.ts`'s two write sites re-read the
-live body a SECOND time, immediately before the actual `forge.updateIssueBody` call, and re-run
-the SAME gate⓪ freshness checkpoint (drift-only) against that fresh read — closing the gap between
-the moment a body snapshot is taken and the moment the checkpoint's OWN async comment/actor fetch
-resolves. Without this second check, a human editing the marker (or anything else) during that
-async gap would have their edit silently overwritten by a write still using the now-stale earlier
-snapshot — a backward correction re-advanced. Any drift detected here refuses the write via the
-identical needs-human/pointer-comment escalation, never a silent overwrite.
+**The write-boundary race (#703 v2 gate② P1-2, round 2).** `plan-review.ts`'s two write sites
+re-read the live body a SECOND time, immediately before the actual `forge.updateIssueBody` call —
+closing the gap between the moment the first body snapshot is taken and the moment the EARLIER
+gate⓪ checkpoint's own async comment/actor fetch resolves. Round 1 of this fix re-ran the full
+async `checkGate0CommentCursor` as that second check — which itself performs a comment/actor fetch
+whenever no drift is found, reopening the IDENTICAL race one level later (gate② round 2 caught
+this: the finding read as closed but had only moved forward). The FINAL check is now SYNCHRONOUS —
+a pure `checkBodyDrift` string compare, no comment/actor fetch at all — so the write site's call
+sequence is exactly `getIssueBody` → `checkBodyDrift` → `updateIssueBody`, with no I/O of any kind
+between the last read and the write. A human editing the marker (or anything else) up to and
+including that final read is caught; from that read onward there is no remaining async window to
+land an edit into. On drift, the write never happens — the same needs-human/pointer-comment
+escalation the async checkpoints use, invoked directly rather than through a second full
+`checkGate0CommentCursor` pass.
 
 **Marker recognition is standalone-line anchored (round 1 hardening) — and ATTEMPT recognition is
 broader than valid-VALUE parsing (#703 v2 gate② P2-1).** A marker counts only when it is the

@@ -547,12 +547,12 @@ test("createPlanReviewStub: outcome 2 (request draft) end-to-end self-heal — r
   // brief came from the reviewer's structured decision alone. #652 DOES read comments now, but
   // only to check the comment-adjudication cursor (never to derive the brief's content) — one
   // read per checkpoint per cycle: cycle 0 (draft_request) gets pre-spend + pre-apply +
-  // pre-drafter-write + #703 v2 gate② P1-1's new write-boundary drafter recheck (4; the
-  // draft_request decision itself carries no body write, so the reviewer-side write-boundary
-  // check never fires this cycle), cycle 1 (approve WITH NO body revision — this reviewer output
-  // carries no BODY block) gets pre-spend + pre-apply (2; the write-boundary check is guarded on
-  // `decision.body !== undefined`, so it does not fire either) = 6.
-  assert.equal(forge.getIssueCommentsCallCount, 6);
+  // pre-drafter-write (3; #703 v2 gate② R2's write-boundary recheck is SYNCHRONOUS —
+  // `checkBodyDrift` only, no comment/actor fetch — so it adds zero comment reads), cycle 1
+  // (approve WITH NO body revision — this reviewer output carries no BODY block) gets pre-spend +
+  // pre-apply (2; the write-boundary check is guarded on `decision.body !== undefined`, so it
+  // does not fire at all this cycle) = 5.
+  assert.equal(forge.getIssueCommentsCallCount, 5);
   state.close();
 });
 
@@ -1241,18 +1241,27 @@ test("createPlanReviewStub (#652 round 1, finding 1): pre-apply checkpoint — a
   state.close();
 });
 
-// ── #703 v2 gate② (P1-2): the WRITE-BOUNDARY race — `liveBodyPreApply`/`liveBodyPreDrafterWrite`
-// are snapshotted BEFORE the pre-apply/pre-drafter-write checkpoint's OWN async comment/actor
-// fetch (`checkGate0CommentCursor` -> `Promise.all([getIssueComments, getAuthenticatedActor])`).
-// A human editing the marker DURING that fetch — after the snapshot was taken, before the check
-// returns "not blocked" — must never have their edit silently overwritten by a write that still
-// uses the now-stale snapshot. Simulated here by mutating the body as a SIDE EFFECT of the
-// checkpoint's own `getIssueComments` call (the second one for a given cycle: pre-spend's own
-// call is the first) — the exact async gap the finding names. ─────────────────────────────────
+// ── #703 v2 gate② (P1-2, round 1 + R2): the WRITE-BOUNDARY race. Round 1's `liveBodyPreApply`/
+// `liveBodyPreDrafterWrite` were snapshotted BEFORE the pre-apply/pre-drafter-write checkpoint's
+// OWN async comment/actor fetch — closed by re-reading at the write boundary. R2 (gate② review of
+// that fix): the round-1 fix reused the FULL async `checkGate0CommentCursor` as a SECOND
+// checkpoint right at the write boundary — which itself does an async comment/actor fetch
+// whenever no drift is found, reopening the identical race one level later. The R2 fix makes the
+// FINAL check synchronous (`checkBodyDrift` only, no comment/actor fetch) — `getIssueBody` ->
+// `checkBodyDrift` -> `updateIssueBody`, nothing awaited in between on the no-drift path. Two
+// things to prove now: (1) a body that has ALREADY drifted by the time of the final read is still
+// refused (the earlier checkpoint's own async fetch is still a valid injection point for THIS),
+// and (2) the STRUCTURAL pin gate② R2 asked for — the final `getIssueBody`/`updateIssueBody` pair
+// is ADJACENT in the forge call trace, with no `getIssueComments`/`getAuthenticatedActor` call
+// between them (since the async window itself no longer exists, there's nothing left to inject a
+// race into at the final read — the call-order pin is what proves that). ────────────────────────
 
 /** Mutates `issueBodies[issue]` the Nth time `getIssueComments` is called — simulating a human
- *  edit landing exactly inside a checkpoint's own async comment-fetch window, never during the
- *  role session itself (that race is #652 round 1's own, already covered above). */
+ *  edit landing exactly inside an EARLIER checkpoint's own async comment-fetch window (pre-apply/
+ *  pre-drafter-write, which still does a full async cursor check), never during the role session
+ *  itself (that race is #652 round 1's own, already covered above) and never at the FINAL
+ *  write-boundary check (R2 made that one synchronous — there is no async window left there to
+ *  inject into). */
 class MidCheckpointEditForge extends FakeForge {
   constructor(
     private readonly editedBody: string,
@@ -1268,7 +1277,31 @@ class MidCheckpointEditForge extends FakeForge {
   }
 }
 
-test("createPlanReviewStub (#703 v2 gate② P1-2): a marker edit landing DURING the pre-apply checkpoint's own async comment fetch (AFTER liveBodyPreApply was snapshotted, BEFORE the write) refuses the reviewer's approve-with-revision write — never a silent overwrite of the human's edit", async () => {
+/** A full ordered trace across every forge call the write-boundary pin cares about — the
+ *  structural evidence gate② R2 asked for: the final `getIssueBody` and `updateIssueBody` must be
+ *  ADJACENT in this trace, with no `getIssueComments`/`getAuthenticatedActor` call landing between
+ *  them (which would mean an async gap — and so a race window — still exists at the write). */
+class CallTraceForge extends FakeForge {
+  callTrace: string[] = [];
+  override async getIssueBody(issue: number): Promise<string> {
+    this.callTrace.push("getIssueBody");
+    return super.getIssueBody(issue);
+  }
+  override async getIssueComments(issue: number) {
+    this.callTrace.push("getIssueComments");
+    return super.getIssueComments(issue);
+  }
+  override async getAuthenticatedActor(): Promise<string | null> {
+    this.callTrace.push("getAuthenticatedActor");
+    return super.getAuthenticatedActor();
+  }
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
+    this.callTrace.push("updateIssueBody");
+    return super.updateIssueBody(issue, body);
+  }
+}
+
+test("createPlanReviewStub (#703 v2 gate② P1-2): a marker edit that has ALREADY landed by the time of the final write-boundary read refuses the reviewer's approve-with-revision write — never a silent overwrite of the human's edit", async () => {
   const editedBody = "original body, no plan\n\n<!-- sapwood:comments-adjudicated-through: 999 -->";
   const forge = new MidCheckpointEditForge(editedBody, 2); // 1st call: pre-spend; 2nd: pre-apply
   forge.poolEligibleIssues = [{ number: 15, title: "t", labels: [ROUND_POOL_LABEL] }];
@@ -1278,18 +1311,22 @@ test("createPlanReviewStub (#703 v2 gate② P1-2): a marker edit landing DURING 
   const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 1, phase: "plan_review", marker: null });
-  assert.equal(forge.updateIssueBodyCalls.length, 0, "the write is refused — never applied against the now-stale pre-apply snapshot");
+  assert.equal(
+    forge.updateIssueBodyCalls.length,
+    0,
+    "the write is refused — the final synchronous read sees the edit, never the stale snapshot",
+  );
   assert.equal(forge.issueBodies[15], editedBody, "the human's mid-check edit survives untouched — never silently overwritten");
   assert.ok(!forge.issueLabels[15]?.includes("plan:approved"), "never approved off a discarded decision");
   assert.ok(forge.labelsAdded.some(([n, l]) => n === 15 && l === "needs-human"));
   state.close();
 });
 
-test("createPlanReviewStub (#703 v2 gate② P1-2): a marker edit landing DURING the pre-drafter-write checkpoint's own async comment fetch refuses the drafter's write — never a silent overwrite", async () => {
+test("createPlanReviewStub (#703 v2 gate② P1-2): a marker edit that has ALREADY landed by the time of the final write-boundary read refuses the drafter's write — never a silent overwrite", async () => {
   const editedBody = "original body, no plan\n\n<!-- sapwood:comments-adjudicated-through: 999 -->";
   // Cycle 0: pre-spend (1st getIssueComments call) -> reviewer draft_request -> pre-drafter-write
-  // (2nd call, the one this test races) -> drafter session runs -> write-boundary recheck (3rd
-  // call, unaffected here — the edit already landed and gets caught by the EARLIER checkpoint).
+  // (2nd call, the one this test races) -> drafter session runs -> the final write-boundary read
+  // sees the already-landed edit (the synchronous check no longer offers a THIRD async window).
   const forge = new MidCheckpointEditForge(editedBody, 2);
   forge.poolEligibleIssues = [{ number: 16, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[16] = NO_PLAN_BODY;
@@ -1311,6 +1348,50 @@ test("createPlanReviewStub (#703 v2 gate② P1-2): a marker edit landing DURING 
     runner.calls.length,
     2,
     "the reviewer AND drafter sessions both ran (the race is caught at the WRITE, not by skipping the drafter session)",
+  );
+  state.close();
+});
+
+test("createPlanReviewStub (#703 v2 gate② R2, structural pin): the reviewer approve-with-revision's FINAL getIssueBody and updateIssueBody are ADJACENT in the forge call trace — no getIssueComments/getAuthenticatedActor call lands between the write-boundary read and the write itself", async () => {
+  const forge = new CallTraceForge();
+  forge.poolEligibleIssues = [{ number: 17, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[17] = NO_PLAN_BODY;
+  const runner = new ScriptedRunner([{ result: doneResult("reviewer-0", sapwoodResult({ decision: "approve", issue: 17 }, PLAN_BODY)) }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 1, "sanity: the write actually landed (no drift in this run)");
+  const updateIdx = forge.callTrace.lastIndexOf("updateIssueBody");
+  assert.ok(updateIdx > 0, "updateIssueBody must appear in the trace");
+  assert.equal(
+    forge.callTrace[updateIdx - 1],
+    "getIssueBody",
+    `the call immediately preceding updateIssueBody must be getIssueBody — full trace: ${JSON.stringify(forge.callTrace)}`,
+  );
+  state.close();
+});
+
+test("createPlanReviewStub (#703 v2 gate② R2, structural pin): the drafter's FINAL getIssueBody and updateIssueBody are ADJACENT in the forge call trace", async () => {
+  const forge = new CallTraceForge();
+  forge.poolEligibleIssues = [{ number: 18, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[18] = NO_PLAN_BODY;
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 18 }, "missing acceptance criteria")) },
+    { result: doneResult("drafter-0", sapwoodResult({ issue: 18 }, PLAN_BODY)) },
+    { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 18 })) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 1, "sanity: the drafter's write actually landed (no drift in this run)");
+  const updateIdx = forge.callTrace.indexOf("updateIssueBody"); // the drafter's write is the ONLY one this run
+  assert.ok(updateIdx > 0, "updateIssueBody must appear in the trace");
+  assert.equal(
+    forge.callTrace[updateIdx - 1],
+    "getIssueBody",
+    `the call immediately preceding updateIssueBody must be getIssueBody — full trace: ${JSON.stringify(forge.callTrace)}`,
   );
   state.close();
 });

@@ -44,6 +44,7 @@ import { labelsInclude } from "../forge/labels.js";
 import type { PeripheralStub } from "../loop/round.js";
 import { applyRoleBodyRewrite } from "../review/comment-cursor.js";
 import {
+  type CommentCursorResult,
   checkBodyDrift,
   checkCommentCursorFreshnessWithComments,
   commentCursorIsStale,
@@ -515,16 +516,7 @@ async function checkGate0CommentCursor(
   deps: PlanReviewDeps,
   issue: Issue,
   roundId: number,
-  checkpoint:
-    | "gate0-pre-spend"
-    | "gate0-pre-apply"
-    | "gate0-pre-drafter-write"
-    | "gate0-post-confirm"
-    // #703 v2 gate② (P1-2): the LAST possible checkpoint, immediately before the actual
-    // `forge.updateIssueBody` call in the reviewer approve-with-revision / drafter branches —
-    // see those two call sites' own doc for the race window this closes.
-    | "gate0-write-apply"
-    | "gate0-write-drafter",
+  checkpoint: "gate0-pre-spend" | "gate0-pre-apply" | "gate0-pre-drafter-write" | "gate0-post-confirm",
   liveBody: string,
   sessionRenderedBody?: string,
 ): Promise<{ blocked: boolean; comments: readonly PRComment[] }> {
@@ -553,6 +545,43 @@ async function checkGate0CommentCursor(
     /* contained — the forge escalation (label + pointer comment) already landed */
   }
   return { blocked: true, comments };
+}
+
+/** #703 v2 gate② R2 (P1-2, round 2): the FINAL check immediately before `forge.updateIssueBody`
+ *  in the reviewer approve-with-revision / drafter branches — SYNCHRONOUS drift only, no comment/
+ *  actor fetch, so there is NO async I/O of any kind between the write-boundary body read and the
+ *  actual write. Gate②'s own round-1 fix (`checkGate0CommentCursor` reused as a second checkpoint
+ *  right here) still routed through `checkCommentCursorFreshnessWithComments`'s own
+ *  `getIssueComments`/`getAuthenticatedActor` fetch whenever drift was absent — reopening the
+ *  EXACT race one level later (a body edit landing during THAT fetch was, again, evaluated
+ *  against the stale write-time snapshot and silently overwritten). `checkBodyDrift` is a pure
+ *  string compare — call sites structure this as `getIssueBody` -> `checkBodyDrift` (this
+ *  function) -> `updateIssueBody`, with literally nothing awaited in between on the no-drift
+ *  path. On drift, this function itself performs the (necessarily async) escalation and the
+ *  caller returns without ever reaching the write — the SAME contained needs-human/pointer-
+ *  comment/event handling `checkGate0CommentCursor` uses, just invoked from here instead. */
+async function escalateFinalWriteDrift(
+  deps: PlanReviewDeps,
+  issue: Issue,
+  roundId: number,
+  checkpoint: "gate0-write-apply" | "gate0-write-drafter",
+  drift: CommentCursorResult,
+): Promise<void> {
+  const { labeled, posted, labelError, postError } = await escalateCommentCursorStale(deps.forge, deps.cfg, issue.number, drift);
+  try {
+    deps.state.appendEvent("comment-cursor-stale", {
+      round_id: roundId,
+      issue: issue.number,
+      checkpoint,
+      cause: "body-drift",
+      labeled,
+      posted,
+      ...(labelError !== undefined ? { labelError } : {}),
+      ...(postError !== undefined ? { postError } : {}),
+    });
+  } catch {
+    /* contained — the forge escalation (label + pointer comment) already landed */
+  }
 }
 
 /** #374 review (Codex sol-high verify-pass finding 1, P1 — fixes a recovery canary starvation):
@@ -747,16 +776,20 @@ async function reviewOneIssue(
       // any) the session emitted and reattaches the CURRENT body's marker byte-for-byte (or
       // none, if the current body had none) — see that function's own doc for the full ruling.
       if (decision.body !== undefined) {
-        // #703 v2 gate② (P1-2): `liveBodyPreApply` was snapshotted BEFORE the pre-apply
-        // `checkGate0CommentCursor` call's own async comment/actor fetch just above — a human
-        // editing the marker (or anything else) DURING that fetch would otherwise have the
-        // write below still silently use the now-STALE `liveBodyPreApply` snapshot,
+        // #703 v2 gate② R2 (P1-2, round 2): `liveBodyPreApply` was snapshotted BEFORE the
+        // pre-apply `checkGate0CommentCursor` call's own async comment/actor fetch just above —
+        // a human editing the marker (or anything else) DURING that fetch would otherwise have
+        // the write below still silently use the now-STALE `liveBodyPreApply` snapshot,
         // overwriting/re-advancing their edit without ever having re-checked it. Re-read
-        // IMMEDIATELY at the write boundary and re-run the SAME checkpoint (drift-only this
-        // time — `writeTimeBody` vs `liveBodyPreApply`): any change refuses the write via the
-        // identical escalation path (needs-human + pointer comment), never a silent overwrite.
+        // IMMEDIATELY at the write boundary; `checkBodyDrift` (SYNCHRONOUS — see
+        // `escalateFinalWriteDrift`'s own doc for why round 1's reuse of the full async
+        // `checkGate0CommentCursor` here reopened the exact same race one level later) compares
+        // `writeTimeBody` against `liveBodyPreApply` with NO intervening await of any kind: on
+        // equality, the write below follows immediately; on drift, the write never happens.
         const writeTimeBody = await deps.forge.getIssueBody(issue.number);
-        if ((await checkGate0CommentCursor(deps, issue, roundId, "gate0-write-apply", writeTimeBody, liveBodyPreApply)).blocked) {
+        const writeDrift = checkBodyDrift(writeTimeBody, liveBodyPreApply);
+        if (writeDrift != null) {
+          await escalateFinalWriteDrift(deps, issue, roundId, "gate0-write-apply", writeDrift);
           return false;
         }
         await deps.forge.updateIssueBody(issue.number, applyRoleBodyRewrite(writeTimeBody, decision.body));
@@ -921,12 +954,15 @@ async function reviewOneIssue(
     if ((await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-drafter-write", liveBodyPreDrafterWrite, currentBody)).blocked) {
       return false;
     }
-    // #703 v2 gate② (P1-2): same race this checkpoint's own async comment/actor fetch just above
-    // opens as the reviewer's approve-with-revision branch (see its own doc) — re-read
-    // IMMEDIATELY at the write boundary and re-check drift against `liveBodyPreDrafterWrite`
-    // before ever using it to normalize the marker.
+    // #703 v2 gate② R2 (P1-2, round 2): same race this checkpoint's own async comment/actor fetch
+    // just above opens as the reviewer's approve-with-revision branch (see
+    // `escalateFinalWriteDrift`'s own doc) — re-read IMMEDIATELY at the write boundary and
+    // re-check drift SYNCHRONOUSLY (no comment/actor fetch) before ever using it to normalize the
+    // marker; `getIssueBody` -> `checkBodyDrift` -> `updateIssueBody`, nothing awaited between.
     const writeTimeBody = await deps.forge.getIssueBody(issue.number);
-    if ((await checkGate0CommentCursor(deps, issue, roundId, "gate0-write-drafter", writeTimeBody, liveBodyPreDrafterWrite)).blocked) {
+    const writeDrift = checkBodyDrift(writeTimeBody, liveBodyPreDrafterWrite);
+    if (writeDrift != null) {
+      await escalateFinalWriteDrift(deps, issue, roundId, "gate0-write-drafter", writeDrift);
       return false;
     }
     // #703: same marker-preservation rule as the reviewer's approve-with-revision branch above —
