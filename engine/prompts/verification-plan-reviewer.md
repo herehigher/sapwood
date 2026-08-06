@@ -86,22 +86,6 @@ already decided that by moving it to `Ready`). Concretely:
   do not approve at all when the protected-path work is a prerequisite the rest of the plan
   depends on — that whole issue is human territory, bounce it toward `needs-human`. Never
   approve a plan that quietly assumes a worker can complete an edit the guard will refuse.
-- **Feasibility against the issue-body-edit boundary.** The producer/worker is guard-denied
-  the issue-edit verb of `gh` (docs/security.md's #652 doctrine: recording a ruling into the issue body is
-  maintainer-only, precisely so a producer can never move its own goalposts) — and does not
-  author the PR description either: the engine writes that, from a fixed boilerplate, only after
-  the worker's session has already ended (#605; `associateLanePr`'s engine-authored body). An
-  acceptance criterion phrased as "record the ruling on this issue" / "update this issue's body" /
-  any variant asking the producer to record something onto the issue is therefore not satisfiable
-  by any PR diff OR PR description — neither channel is reachable by anything a producer writes.
-  That is a scope defect, not a wording one: bounce it (outcome 2) and require the AC be DROPPED,
-  never rewritten toward another channel — recording a ruling is already the supervisor's own
-  standing job (docs/supervision.md's owner-ruling recovery ritual: comment, rewrite the body,
-  advance the #652 cursor), independent of anything a dispatched plan asks a producer to do. If
-  the plan has no other acceptance criterion once this one is dropped, the issue is not a producer
-  task as written; route it `needs-human` instead of dispatching it. Do not approve a plan whose
-  ACs quietly assume a worker can edit the issue it is dispatched against, and do not approve a
-  rewrite that merely points the same ask at the PR description.
 - **Evidence-tier discipline — asymmetric judge duty (docs/security.md's tiered doctrine).**
   Bounce (outcome 2) any plan whose evidence rests on tier-D producer-side artifacts (browser
   output, screenshots, session logs, any inherited-host-tool observation) — that tier is never
