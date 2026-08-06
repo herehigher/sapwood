@@ -3848,6 +3848,28 @@ export class State {
     return (this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM events").get() as { m: number }).m;
   }
 
+  /** #710: the schema-window-honesty read `status`/`events` fall back to when userVersion()
+   *  disagrees with SCHEMA_VERSION and they refuse to interpret the DB's rows (fail-closed
+   *  stands — this method is the ONLY thing either command reads off a mismatched-schema DB).
+   *  Literally `SELECT COUNT(*)/MAX(id) FROM events` and NOTHING else — no join, no other
+   *  column, no State method that could itself depend on a migration this build doesn't have.
+   *  The `events` table's own `(id)` shape predates every migration recorded in MIGRATIONS, so
+   *  this read is trustworthy across the whole schema window in both directions (older OR
+   *  newer than SCHEMA_VERSION) — degraded, never blind. Returns `null` (never throws) on the
+   *  one case even this can't survive: the `events` table itself missing (a DB so old/corrupt
+   *  there is nothing schema-independent left to report) — callers render that as "no
+   *  degraded read possible", not a crash. */
+  rawEventLedgerSummary(): { count: number; maxId: number } | null {
+    try {
+      const row = this.db.prepare("SELECT COUNT(*) AS cnt, COALESCE(MAX(id), 0) AS maxId FROM events").get() as
+        | { cnt: number; maxId: number }
+        | undefined;
+      return { count: row?.cnt ?? 0, maxId: row?.maxId ?? 0 };
+    } catch {
+      return null;
+    }
+  }
+
   /** #688: the SUBJECT-scoped twin of maxEventId() above — util/heartbeat.ts's createHeartbeatGate
    *  uses this (via worker.ts's per-lane call site) as its spam-suppression progress id instead of
    *  the global MAX(id). Liveness is per-lane: with the global id, two concurrent lanes on the

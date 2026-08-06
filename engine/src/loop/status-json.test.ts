@@ -365,13 +365,25 @@ test("#642 AC4: without --config, the config section is structurally unavailable
   });
 });
 
-test("#642 AC4: an unreadable/invalid --config path also renders the config section unavailable (never a thrown error, matching the text status's own 'unknown on config error' stance)", () => {
+test("#710: an EXPLICIT --config path that is unreadable/invalid now fails CLOSED (exit 1, no JSON body) — supersedes the pre-#710 'renders config section unavailable' stance, which was exactly the silent-degrade trap #710 closes", () => {
   withDir((dir) => {
     const dbPath = join(dir, "sapwood.sqlite");
     new State(dbPath).close();
     const missing = join(dir, "does-not-exist.yaml");
 
     const r = runCli(["node", "sapwood", "status", dbPath, "--config", missing, "--json"]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout, "");
+    assert.match(r.stderr, /sapwood status:/);
+  });
+});
+
+test("#642 AC4 (as narrowed by #710): with NO --config given and nothing at the default probe names, the config section is still structurally unavailable — the best-effort no-flag case is unchanged", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    new State(dbPath).close();
+
+    const r = runCli(["node", "sapwood", "status", dbPath, "--json"]);
     assert.equal(r.code, 0);
     const body = parseStdout(r);
     assert.deepEqual(body.config, { available: false });

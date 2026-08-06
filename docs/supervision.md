@@ -64,7 +64,32 @@ getting before trusting an empty page as "truly nothing new."
 
 `status`/`events` are **DB-only by design** — neither makes a live GitHub call. The
 gated/human-merge/needs-human queues live on GitHub and are read from there; see
-[Queue queries](#queue-queries) below.
+[Queue queries](#queue-queries) below — that split is not incidental, see the next
+section for the general rule it follows.
+
+### Where facts live: GitHub vs the state DB
+
+GitHub (issues, the Project board, PRs) holds cross-actor **process** truth: what's in
+flight, by whom, in what state. Labels are the work queue, adjudications live in issue
+bodies, review verdicts land as PR reviews, and the gated/human-merge/needs-human queues
+above are read from there and nowhere else. Anything a human or another agent must read
+in order to act belongs on GitHub — and on a conflict between the two stores, GitHub is
+authoritative for process state, never the DB.
+
+The sqlite state DB, by contrast, is this ONE engine instance's runtime **belief** — the
+event ledger, lane rows, spend ledger, heartbeats, pids, worktree paths — facts
+meaningful only on the machine the engine actually runs on. `status`/`events` are
+projections of that belief, never an independent read of reality: their job is to
+surface a belief-vs-reality gap to the operator (a dead pid a lane still calls
+"running", a stale heartbeat, a schema this build no longer understands), never to
+arbitrate it — arbitration is a human's or another agent's call, made through GitHub,
+the same as every other decision this page routes there.
+
+Two corollaries follow. Machine-local facts (a pid, a worktree path) never get written
+to GitHub — they mean nothing off the machine that produced them. And the few DB↔GitHub
+mirrors that do exist (the lane-state-label pattern) are one-way projections, DB-belief
+→ GitHub-label, each with its own heal path for when the two drift — never a second
+source of truth, only a cache with a repair story.
 
 ## Batch open ritual
 
@@ -246,7 +271,8 @@ operator-observed intervention (see [Batch close ritual](#batch-close-ritual)).
 
 The gated (awaiting review gate) and human-merge-only/needs-human queues live on
 GitHub, not in the state DB — `status`/`events` are deliberately DB-only (see
-[Supervising a run](#supervising-a-run)). Query them with `gh` directly. Label names
+[Supervising a run](#supervising-a-run), and [Where facts live](#where-facts-live-github-vs-the-state-db)
+for the general rule this is one instance of). Query them with `gh` directly. Label names
 below are the shipped defaults (`labels.prefix: sapwood:`); a repo running a different
 prefix or a fully custom label set needs the equivalent substitution. `blocked`/`hold`
 meaning (and how each differs from `needs-human`) lives in `docs/configuration.md`'s

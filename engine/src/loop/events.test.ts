@@ -4,13 +4,13 @@
 // argument rejection naming valid kinds, an unknown-kind DB ROW passed through opaque, and the
 // hard page cap) plus AC6's busy-DB failure contract.
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { parseEventsArgs, runCli, runEvents } from "../cli.js";
-import { State } from "../state/state.js";
+import { SCHEMA_VERSION, State } from "../state/state.js";
 
 function withDir<T>(fn: (dir: string) => T): T {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-events-"));
@@ -33,6 +33,7 @@ test("parseEventsArgs: defaults — since-id 0, no kind filter, default limit, t
   assert.deepEqual(parsed, {
     help: false,
     dbPath: "data/sapwood.sqlite",
+    configPath: undefined,
     sinceId: 0,
     kinds: [],
     excludeKinds: [],
@@ -48,6 +49,7 @@ test("parseEventsArgs: --since-id/--kind/--exclude-kind(repeat rejected together
   assert.deepEqual(parsed, {
     help: false,
     dbPath: "data/sapwood.sqlite",
+    configPath: undefined,
     sinceId: 42,
     kinds: ["merged"],
     excludeKinds: [],
@@ -200,6 +202,31 @@ test("parseEventsArgs: unknown flag is a fail-closed error", () => {
 
 test("parseEventsArgs: a positional db-path is accepted, same convention as status", () => {
   assert.equal(parseEventsArgs(["node", "sapwood", "events", "/tmp/x.sqlite"]).dbPath, "/tmp/x.sqlite");
+});
+
+// ── #710: --config ──────────────────────────────────────────────────────────────────────────
+
+test("parseEventsArgs (#710): --config parses, same fail-closed value-taking convention as status's --config", () => {
+  const parsed = parseEventsArgs(["node", "sapwood", "events", "--config", "/tmp/cfg.yaml"]);
+  assert.equal(parsed.error, undefined);
+  assert.equal(parsed.configPath, "/tmp/cfg.yaml");
+});
+
+test("parseEventsArgs (#710): --config with no operand is an error, never a silent default-config read", () => {
+  assert.match(parseEventsArgs(["node", "sapwood", "events", "--config"]).error ?? "", /--config requires a path/);
+});
+
+test("parseEventsArgs (#710): --config followed by a flag is an error, never consumed as a path", () => {
+  const parsed = parseEventsArgs(["node", "sapwood", "events", "--config", "--bogus"]);
+  assert.match(parsed.error ?? "", /--config requires a path/);
+});
+
+test("parseEventsArgs (#710): --config interleaves with the other flags without its operand becoming a positional/kind", () => {
+  const parsed = parseEventsArgs(["node", "sapwood", "events", "/tmp/x.sqlite", "--config", "/tmp/cfg.yaml", "--kind", "merged"]);
+  assert.equal(parsed.error, undefined);
+  assert.equal(parsed.dbPath, "/tmp/x.sqlite");
+  assert.equal(parsed.configPath, "/tmp/cfg.yaml");
+  assert.deepEqual(parsed.kinds, ["merged"]);
 });
 
 // ── runEvents: DB-backed behavior ───────────────────────────────────────────────────────────
@@ -524,5 +551,133 @@ test("#642 AC6: events against a locked writer fails with a structured busy erro
       writer.exec("ROLLBACK");
       writer.close();
     }
+  });
+});
+
+// ── #710: --config resolution + config-mismatch regression ─────────────────────────────────
+
+const MINIMAL_CONFIG = "board: { owner: acme, repo: widgets, projectNumber: 7 }\nlanes: { max: 3 }\ncost: { dailyBudgetUsd: 50 }\n";
+
+test("events (#710 AC1): --config loads the named config — --json's config.provenance names it, text stamps the same path on the 'config:' line", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const configPath = join(dir, "sapwood.dogfood.yaml");
+    writeFileSync(configPath, MINIMAL_CONFIG);
+    new State(dbPath).close();
+
+    const jsonResult = runEvents(["node", "sapwood", "events", dbPath, "--config", configPath, "--json"]);
+    assert.equal(jsonResult.code, 0);
+    const body = parseStdout(jsonResult);
+    assert.deepEqual(body.config, { available: true, provenance: configPath });
+
+    const textResult = runEvents(["node", "sapwood", "events", dbPath, "--config", configPath]);
+    assert.equal(textResult.code, 0);
+    assert.match(textResult.stdout, new RegExp(`config: ${configPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  });
+});
+
+test("events (#710): no --config given, none found at the default probe names — config.provenance is absent, exit 0 (best-effort, unchanged)", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    new State(dbPath).close();
+    const body = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--json"]));
+    assert.deepEqual(body.config, { available: false });
+    const textResult = runEvents(["node", "sapwood", "events", dbPath]);
+    assert.match(textResult.stdout, /config: none found/);
+  });
+});
+
+test("events (#710): an EXPLICIT --config naming a missing file fails CLOSED — exit 1, clear error, never a silent degrade", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const missingConfig = join(dir, "does-not-exist.yaml");
+    new State(dbPath).close();
+    const r = runEvents(["node", "sapwood", "events", dbPath, "--config", missingConfig]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout, "");
+    assert.match(r.stderr, /sapwood events:/);
+  });
+});
+
+test("events/status (#710 AC2 — config-mismatch trap regression): with a SECOND (default-named) config file also present, the flagged --config wins — provenance and (for status) the daily cap come from the NAMED file, never the probed default", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    // The probed default (what a bare `status`/`events` with no --config would pick up).
+    writeFileSync(
+      join(dir, "sapwood.config.yaml"),
+      "board: { owner: acme, repo: widgets, projectNumber: 1 }\nlanes: { max: 1 }\ncost: { dailyBudgetUsd: 100 }\n",
+    );
+    // The RUN's actual config — a differently-named file, only reachable via --config.
+    const runConfigPath = join(dir, "sapwood.dogfood.yaml");
+    writeFileSync(
+      runConfigPath,
+      "board: { owner: acme, repo: widgets, projectNumber: 2 }\nlanes: { max: 9 }\ncost: { dailyBudgetUsd: 300 }\n",
+    );
+    new State(dbPath).close();
+
+    const eventsBody = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--config", runConfigPath, "--json"]));
+    assert.deepEqual(eventsBody.config, { available: true, provenance: runConfigPath });
+
+    // Same trap, on `status` --json: the daily cap must be the RUN's $300, never the committed
+    // repo config's $100 — this is the exact live trap batch-11 T1 observed (#710's Why).
+    const statusBody = parseStdout(runCli(["node", "sapwood", "status", dbPath, "--config", runConfigPath, "--json"]));
+    assert.equal(statusBody.config.provenance, runConfigPath);
+    assert.equal(statusBody.spend.dailyBudgetUsd, 300);
+    assert.notEqual(statusBody.spend.dailyBudgetUsd, 100);
+  });
+});
+
+// ── #710: schema-window honesty ─────────────────────────────────────────────────────────────
+
+test("events (#710 AC3): DB schema OLDER than this engine still refuses to interpret rows, but reports both schema versions PLUS the raw event count/max id (degraded, not blind)", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const seed = new State(dbPath);
+    seed.appendEvent("dispatched", { issue: 1 });
+    seed.appendEvent("merged", { pr: 10 });
+    seed.close();
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA user_version = 1");
+    raw.close();
+
+    const r = runEvents(["node", "sapwood", "events", dbPath]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout, "");
+    assert.match(r.stderr, /DB schema v1.*older.*events never migrates/);
+    // The degraded read: 2 events written above, max id 2 — schema-independent, so still honest
+    // even though the schema mismatch means neither event's KIND/PAYLOAD is interpreted here.
+    assert.match(r.stderr, /2 event\(s\) in the ledger, max id 2/);
+
+    const jsonResult = runEvents(["node", "sapwood", "events", dbPath, "--json"]);
+    assert.equal(jsonResult.code, 1);
+    const body = JSON.parse(jsonResult.stderr);
+    assert.equal(body.error.kind, "schema-mismatch");
+    assert.equal(body.error.dbVersion, 1);
+    assert.equal(body.error.expectedVersion, SCHEMA_VERSION);
+    assert.equal(body.error.rawEventCount, 2);
+    assert.equal(body.error.maxEventId, 2);
+  });
+});
+
+test("status (#710 AC3): DB schema OLDER than this engine reports the same degraded schema-independent read", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const seed = new State(dbPath);
+    seed.appendEvent("dispatched", { issue: 1 });
+    seed.appendEvent("dispatched", { issue: 2 });
+    seed.appendEvent("dispatched", { issue: 3 });
+    seed.close();
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA user_version = 1");
+    raw.close();
+
+    const r = runCli(["node", "sapwood", "status", dbPath, "--json"]);
+    assert.equal(r.code, 1);
+    const body = JSON.parse(r.stderr);
+    assert.equal(body.error.kind, "schema-mismatch");
+    assert.equal(body.error.dbVersion, 1);
+    assert.equal(body.error.expectedVersion, SCHEMA_VERSION);
+    assert.equal(body.error.rawEventCount, 3);
+    assert.equal(body.error.maxEventId, 3);
   });
 });

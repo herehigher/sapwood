@@ -99,8 +99,13 @@ Commands:
     --dry-run      Preview what would be dispatched + a cost estimate, then exit
                    (no worker spawned, no state written)
   status [db-path]  Read engine state straight from SQLite (no live session needed)
+    --config PATH  Load config from this path instead of probing the defaults (#710:
+                   authoritative when given — a bad path is a hard error, never a silent
+                   fallback to the probe)
     --json         Machine-readable status (formatVersion 1) instead of the text summary
   events [db-path]  Read the event ledger straight from SQLite (the codified monitor recipe)
+    --config PATH      Load config from this path instead of probing the defaults (#710:
+                       same authoritative posture as status's --config, above)
     --since-id N       Only events with id > N (default 0)
     --kind K           Only this kind (repeatable; not combinable with --exclude-kind)
     --exclude-kind K   Every kind EXCEPT this one (repeatable; not combinable with --kind)
@@ -308,19 +313,30 @@ export function parseMilestoneFlag(argv: string[]): { rest: string[]; milestone?
 }
 
 const STATUS_USAGE = `\
-usage: sapwood status [db-path] [--json]
+usage: sapwood status [db-path] [--config PATH] [--json]
 
 Read the engine's SQLite state DB directly (no live engine session required) and print
 a human-readable summary: active lanes/workers, PRs awaiting the review gate, spend vs
 the daily ceiling, and kill-switch state.
 
 Defaults to data/sapwood.sqlite (the same path \`sapwood run\` writes to). Also loads the
-sapwood config (same default probe order as \`validate\`) for lanes.max and the daily cost
-ceiling; a missing config still prints every DB-derived field, with the config-derived
-ones shown as "unknown".
+sapwood config for lanes.max and the daily cost ceiling: WITHOUT --config, the same
+best-effort default probe order \`validate\` uses (sapwood.config.yaml/.yml/.json) — a
+missing/invalid config there still prints every DB-derived field, with the config-derived
+ones shown as "unknown", and the TEXT summary now stamps which path (if any) it resolved
+on its own "config:" line, so an operator can see at a glance whether the numbers below it
+came from the config they meant (#710 — the live trap this closes: \`status\` silently
+reading the repo's committed config instead of a differently-named run config, rendering
+the WRONG daily budget cap with no visible sign anything was off).
 
 Flags:
-  --config <path>  Load config from this path instead of probing the defaults
+  --config <path>  Load config from THIS path instead of probing the defaults — same
+                    resolution semantics as \`run --config\`. Authoritative once given: a
+                    missing/unreadable/invalid file here is a HARD error (exit 1, before any
+                    DB read), never a silent fallback to the default probe or to "unknown"
+                    fields — the opposite of the no-flag case above, which stays best-effort
+                    on purpose (a config-less cwd is a legitimate, common case for a bare DB
+                    inspection).
   --json           Print a machine-readable DTO (formatVersion 1) instead of the text
                     summary above — a DOCUMENTED PROJECTION (never a raw DB row), additive-
                     only: a future sapwood may add fields to this shape, never remove/rename/
@@ -334,6 +350,12 @@ Flags:
                     on a config error" stance the text summary above already has, now
                     structural (\`{available: false}\`) instead of the string "unknown".
   --help, -h       Print this help and exit
+
+On a DB whose schema version this build does not understand (older OR newer than what it
+migrates to), both status and events REFUSE to interpret rows (never migrate, never guess)
+but still report a schema-independent read: the two schema versions plus the raw event
+ledger's row count and max id (#710) — a SELECT COUNT(*)/MAX(id) FROM events and nothing
+else, so the rebuild -> first-run window is degraded, not blind.
 `;
 
 /** #582: one line (or "") warning that the configured gate② reviewer is priced BELOW the worker
@@ -562,6 +584,13 @@ export interface StatusSnapshot {
   /** null when no config could be loaded — reported as "unknown", never a fabricated default. */
   lanesMax: number | null;
   dailyBudgetUsd: number | null;
+  /** #710: the resolved config path `lanesMax`/`dailyBudgetUsd` above were read from (an explicit
+   *  `--config` or the default probe's find), or undefined when neither found anything — stamped
+   *  on its own "config:" line so a human glancing at the numbers above always knows which file
+   *  produced them. OPTIONAL for the same hand-built-fixture reason `laneAnchors` below is:
+   *  `formatStatus`'s own pre-#710 unit tests construct a `StatusSnapshot` directly and don't
+   *  care about this line; omitting it renders the "none found" line, never a thrown lookup. */
+  configProvenance?: string | undefined;
   /** #168: every open environment-failure park episode (at most one per source — llm/forge),
    *  empty when not parked. Read straight off state.ts's park_state rows
    *  (State.parkedSources()) — same "always live, no caching" property every other
@@ -599,6 +628,8 @@ export function formatStatus(s: StatusSnapshot): string {
   const running = s.active.filter((w) => w.state === "running");
   const lines: string[] = [
     `sapwood status — ${s.dbPath} (schema v${s.schemaVersion})`,
+    // #710: loud config provenance — which file (if any) lanesMax/dailyBudgetUsd below came from.
+    configProvenanceLine(s.configProvenance),
     "",
     `lanes: ${s.active.length}/${s.lanesMax ?? "unknown"} active ` + `(${running.length} running, ${s.driving.length} driving)`,
   ];
@@ -708,6 +739,98 @@ function busyResult(command: string, e: SqliteBusyError, json: boolean): { stdou
   return { stdout: "", stderr: `sapwood ${command}: ${e.message}\n`, code: 1 };
 }
 
+/** #710: `runValidate`'s own load-error rendering, lifted out so `status`/`events` can format an
+ *  explicit-`--config` failure identically — ZodError -> one line per field issue, anything else
+ *  (missing file, unreadable, ...) -> the bare error message (already names the path, same as
+ *  Node's own ENOENT text). */
+function formatConfigLoadError(command: string, e: unknown): string {
+  if (e instanceof ZodError) {
+    const issues = e.issues.map((i) => `  ${i.path.join(".") || "(root)"}: ${i.message}`).join("\n");
+    return `sapwood ${command}: invalid config:\n${issues}\n`;
+  }
+  return `sapwood ${command}: ${(e as Error).message}\n`;
+}
+
+/** #710: `status`/`events`' shared `--config` resolution — mirrors `run --config`'s posture
+ *  (parseRunConfigFlag's own doc: "a missing or flag-shaped operand is always an error, never a
+ *  fallback to cwd probing"), extended to the LOAD itself: an EXPLICIT `--config PATH` is
+ *  authoritative, so its failure (missing/unreadable/invalid) is a HARD error the caller must
+ *  fail closed on — never the silent degrade-to-"unknown" that an OMITTED `--config`'s
+ *  best-effort default probe has always used (and keeps using here: `ok: true` with `cfg`
+ *  undefined is the normal, non-fatal "no config anywhere" case for that path, exactly the
+ *  pre-#710 behavior). `cfg`/`provenance` are always BOTH set or BOTH undefined together — never
+ *  one without the other — so a caller never has to reconcile them separately. */
+function resolveCliConfig(
+  configPath: string | undefined,
+): { ok: true; cfg: SapwoodConfig | undefined; provenance: string | undefined } | { ok: false; error: unknown } {
+  if (configPath !== undefined) {
+    try {
+      return { ok: true, cfg: loadConfig(configPath), provenance: configPath };
+    } catch (e) {
+      return { ok: false, error: e };
+    }
+  }
+  try {
+    return { ok: true, cfg: loadConfig(undefined), provenance: resolveConfigProvenance(undefined, existsSync) };
+  } catch {
+    // Best-effort probe found nothing usable — reported as "unknown" fields downstream, never
+    // fatal (the DB read is the point of `status`/`events` even with no config in sight).
+    return { ok: true, cfg: undefined, provenance: undefined };
+  }
+}
+
+/** #710: the TEXT-output "which config, if any" line both `status` and `events` stamp right
+ *  under their header — the loud provenance the issue asks for (JSON already carries this via
+ *  the `config` DTO field). Deliberately the SAME line shape regardless of whether the path came
+ *  from an explicit `--config` or the default probe: an operator glancing at the numbers below
+ *  it needs to know WHICH file produced them, not how it was found. */
+function configProvenanceLine(provenance: string | undefined): string {
+  return provenance === undefined
+    ? `config: none found (probed ${DEFAULT_CONFIG_PATHS.join(", ")}) — config-derived fields below are unknown`
+    : `config: ${provenance}`;
+}
+
+/** #710: the schema-window-honesty refusal both `status` and `events` render when userVersion()
+ *  disagrees with SCHEMA_VERSION — same refusal text as before (fail-closed stands, neither
+ *  command ever migrates), now WITH the schema-independent read (State.rawEventLedgerSummary's
+ *  own doc) appended: the DB is degraded, not blind. `--json` gets a structured
+ *  `{formatVersion, error: {kind: "schema-mismatch", ...}}` body on stderr, matching busyResult's
+ *  own precedent above; the text path gets one line with the raw count/max-id folded in. */
+function schemaMismatchResult(
+  command: string,
+  dbPath: string,
+  dbVersion: number,
+  raw: { count: number; maxId: number } | null,
+  json: boolean,
+): { stdout: string; stderr: string; code: number } {
+  const hint =
+    dbVersion > SCHEMA_VERSION
+      ? "newer than this sapwood understands — upgrade sapwood"
+      : `older than this sapwood — run the engine (sapwood run) to migrate it; ${command} never migrates`;
+  const message = `DB schema v${dbVersion} at ${dbPath} is ${hint} (engine schema v${SCHEMA_VERSION})`;
+  if (json) {
+    const body = {
+      formatVersion: READ_MODEL_FORMAT_VERSION,
+      error: {
+        kind: "schema-mismatch" as const,
+        dbVersion,
+        expectedVersion: SCHEMA_VERSION,
+        message,
+        // #710: the schema-independent read — null (not 0) when even the events table itself is
+        // missing, so a client can tell "zero events" apart from "nothing to report at all".
+        rawEventCount: raw?.count ?? null,
+        maxEventId: raw?.maxId ?? null,
+      },
+    };
+    return { stdout: "", stderr: `${JSON.stringify(body)}\n`, code: 1 };
+  }
+  const rawLine =
+    raw === null
+      ? "schema-independent read: unavailable (the events table itself is missing)"
+      : `schema-independent read: ${raw.count} event(s) in the ledger, max id ${raw.maxId}`;
+  return { stdout: "", stderr: `sapwood ${command}: ${message} — ${rawLine}\n`, code: 1 };
+}
+
 export function runStatus(argv: string[]): { stdout: string; stderr: string; code: number } {
   const parsed = parseStatusArgs(argv);
   if (parsed.help) return { stdout: STATUS_USAGE, stderr: "", code: 0 };
@@ -715,14 +838,15 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
     return { stdout: "", stderr: `sapwood status: ${parsed.error}\n\n${STATUS_USAGE}`, code: 1 };
   }
   const { dbPath, configPath, json } = parsed;
+  // #710: config resolution happens BEFORE any DB access — an explicit --config's failure is a
+  // hard error that must never depend on (or be masked by) whether the DB itself is readable.
+  const configResult = resolveCliConfig(configPath);
+  if (!configResult.ok) {
+    return { stdout: "", stderr: formatConfigLoadError("status", configResult.error), code: 1 };
+  }
+  const { cfg, provenance: configProvenance } = configResult;
   if (!existsSync(dbPath)) {
     return { stdout: `sapwood status: no state DB at ${dbPath} — engine has never run\n`, stderr: "", code: 0 };
-  }
-  let cfg: SapwoodConfig | undefined;
-  try {
-    cfg = loadConfig(configPath);
-  } catch {
-    cfg = undefined; // reported as "unknown" fields, never fatal — the DB read is the point
   }
   let state: State;
   try {
@@ -743,15 +867,10 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
     return state.withBusyNormalization(() => {
       const dbVersion = state.userVersion();
       if (dbVersion !== SCHEMA_VERSION) {
-        const hint =
-          dbVersion > SCHEMA_VERSION
-            ? "newer than this sapwood understands — upgrade sapwood"
-            : "older than this sapwood — run the engine (sapwood run) to migrate it; status never migrates";
-        return {
-          stdout: "",
-          stderr: `sapwood status: DB schema v${dbVersion} at ${dbPath} is ${hint} (engine schema v${SCHEMA_VERSION})\n`,
-          code: 1,
-        };
+        // #710: fail-closed stands (never migrate/interpret rows), but degrade rather than go
+        // blind — the raw event ledger read is schema-independent (State.rawEventLedgerSummary's
+        // own doc).
+        return schemaMismatchResult("status", dbPath, dbVersion, state.rawEventLedgerSummary(), json);
       }
       const reconcile = parseReconcileCompleted(state.latestEvent("reconcile-completed")?.payload);
       const concernEvents = state.eventsAfterId(0, ["concern-posted", "concern-adjudicated"]);
@@ -765,7 +884,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
           dbPath,
           schemaVersion: dbVersion,
           cfg: cfg ?? null,
-          configProvenance: cfg ? resolveConfigProvenance(configPath, existsSync) : undefined,
+          configProvenance,
           now,
           unadjudicatedConcerns: unadjudicated,
           pidProbe: probePidAlive,
@@ -790,6 +909,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
         dailySpendUsd: state.dailySpendUsd(now),
         lanesMax: cfg?.lanes.max ?? null,
         dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
+        configProvenance,
         parked: state.parkedSources(),
         orphanReport: reconcile ? { orphans: reconcile.orphans, overflow: reconcile.overflow } : null,
         unadjudicatedConcerns: unadjudicated,
@@ -822,7 +942,7 @@ const DEFAULT_EVENTS_LIMIT = 100;
 const EVENTS_BUSY_TIMEOUT_MS = 2000;
 
 const EVENTS_USAGE = `\
-usage: sapwood events [db-path] [options]
+usage: sapwood events [db-path] [--config PATH] [options]
 
 Read the engine's event ledger straight from SQLite (no live engine session required) — the
 codified dogfood "monitor recipe" (#642): the same kind-filtered, id-cursor read a hand-rolled
@@ -832,6 +952,14 @@ polling loop used to reimplement per session, now one contract shared with the d
 Defaults to data/sapwood.sqlite (the same path \`sapwood run\` writes to).
 
 Flags:
+  --config PATH      Load config from THIS path instead of probing the defaults — same
+                     resolution semantics as \`status --config\`/\`run --config\` (#710).
+                     \`events\` itself reads no config-derived value today; this exists so an
+                     operator running \`events --config X\` alongside \`status --config X\` gets
+                     the SAME resolved-config story on both, stamped in the "config:" TEXT
+                     line and the \`--json\` \`config\` field. Authoritative once given: a
+                     missing/unreadable/invalid file here is a HARD error (exit 1, before any
+                     DB read), never a silent fallback to the default probe.
   --since-id N       Only events with id > N (default 0; must be a non-negative integer)
   --kind K           Only events of this kind (repeatable — ORs together). Not combinable
                      with --exclude-kind (ambiguous precedence — pick one). An unknown kind
@@ -881,12 +1009,19 @@ again" failure (exit 1) — never a hang. Reading through a read-only FILESYSTEM
 immutable snapshot that cannot see a currently-running engine's uncommitted-to-main rows; this
 is reported (stderr, and \`snapshot.mode\` under --json), never silently under-reported as if it
 were a live read.
+
+On a DB whose schema version this build does not understand (older OR newer than what it
+migrates to), \`events\` REFUSES to interpret rows (never migrates, never guesses) but still
+reports a schema-independent read: the two schema versions plus the raw event ledger's row
+count and max id (#710) — a SELECT COUNT(*)/MAX(id) FROM events and nothing else, so the
+rebuild -> first-run window is degraded, not blind.
 `;
 
 export interface EventsArgs {
   help: boolean;
   error?: string | undefined;
   dbPath: string;
+  configPath?: string | undefined;
   sinceId: number;
   kinds: string[];
   excludeKinds: string[];
@@ -901,6 +1036,7 @@ export interface EventsArgs {
 
 const EVENTS_DEFAULTS = {
   dbPath: DEFAULT_DB_PATH,
+  configPath: undefined as string | undefined,
   sinceId: 0,
   kinds: [] as string[],
   excludeKinds: [] as string[],
@@ -918,6 +1054,7 @@ export function parseEventsArgs(argv: string[]): EventsArgs {
   const fail = (error: string): EventsArgs => ({ help: false, error, ...EVENTS_DEFAULTS });
 
   const positionals: string[] = [];
+  let configPath: string | undefined;
   let sinceId = 0;
   let sinceIdGiven = false;
   const kinds: string[] = [];
@@ -930,6 +1067,15 @@ export function parseEventsArgs(argv: string[]): EventsArgs {
     const a = args[i]!;
     if (a === "--json") {
       json = true;
+      continue;
+    }
+    if (a === "--config") {
+      // Same fail-closed value-taking parse as status's --config (Codex PR #70 P2): a missing
+      // or flag-shaped operand is always an error, never a silent fallback to the default probe.
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith("-")) return fail("--config requires a path");
+      configPath = next;
+      i++;
       continue;
     }
     if (a === "--since-id") {
@@ -1016,19 +1162,22 @@ export function parseEventsArgs(argv: string[]): EventsArgs {
   if (tail !== undefined && sinceIdGiven) {
     return fail("--tail cannot combine with --since-id (one cursor semantics — pick one)");
   }
-  return { help: false, dbPath: positionals[0] ?? DEFAULT_DB_PATH, sinceId, kinds, excludeKinds, issue, limit, json, tail };
+  return { help: false, dbPath: positionals[0] ?? DEFAULT_DB_PATH, configPath, sinceId, kinds, excludeKinds, issue, limit, json, tail };
 }
 
 /** One event row for `events`' text listing — same fields the `--json` DTO's `events` array
  *  carries, printed one per line. */
 function formatEventsText(
   dbPath: string,
+  configProvenance: string | undefined,
   snapshotMode: "live" | "immutable-fallback",
   rows: { id: number; ts: string; kind: string; payload: unknown }[],
   nextSinceId: number,
 ): string {
   const lines = [
     `sapwood events — ${dbPath}` + (snapshotMode === "immutable-fallback" ? " (immutable snapshot — live WAL frames not visible)" : ""),
+    // #710: same loud provenance line status stamps — see configProvenanceLine's own doc.
+    configProvenanceLine(configProvenance),
   ];
   if (rows.length === 0) {
     lines.push("(no matching events)");
@@ -1050,7 +1199,14 @@ export function runEvents(argv: string[]): { stdout: string; stderr: string; cod
   if (parsed.error) {
     return { stdout: "", stderr: `sapwood events: ${parsed.error}\n\n${EVENTS_USAGE}`, code: 1 };
   }
-  const { dbPath, sinceId, kinds, excludeKinds, issue, limit, json, tail } = parsed;
+  const { dbPath, configPath, sinceId, kinds, excludeKinds, issue, limit, json, tail } = parsed;
+  // #710: same posture as runStatus — config resolution (and an explicit --config's hard
+  // failure) happens BEFORE any DB access.
+  const configResult = resolveCliConfig(configPath);
+  if (!configResult.ok) {
+    return { stdout: "", stderr: formatConfigLoadError("events", configResult.error), code: 1 };
+  }
+  const { cfg, provenance: configProvenance } = configResult;
   if (!existsSync(dbPath)) {
     return { stdout: `sapwood events: no state DB at ${dbPath} — engine has never run\n`, stderr: "", code: 0 };
   }
@@ -1068,15 +1224,8 @@ export function runEvents(argv: string[]): { stdout: string; stderr: string; cod
     return state.withBusyNormalization(() => {
       const dbVersion = state.userVersion();
       if (dbVersion !== SCHEMA_VERSION) {
-        const hint =
-          dbVersion > SCHEMA_VERSION
-            ? "newer than this sapwood understands — upgrade sapwood"
-            : "older than this sapwood — run the engine (sapwood run) to migrate it; events never migrates";
-        return {
-          stdout: "",
-          stderr: `sapwood events: DB schema v${dbVersion} at ${dbPath} is ${hint} (engine schema v${SCHEMA_VERSION})\n`,
-          code: 1,
-        };
+        // #710: same degrade-not-blind refusal as runStatus above.
+        return schemaMismatchResult("events", dbPath, dbVersion, state.rawEventLedgerSummary(), json);
       }
       const kindFilter = kinds.length > 0 ? { kinds } : excludeKinds.length > 0 ? { excludeKinds } : {};
       const filter = issue !== undefined ? { ...kindFilter, issue } : kindFilter;
@@ -1113,11 +1262,24 @@ export function runEvents(argv: string[]): { stdout: string; stderr: string; cod
         nextSinceId = rows.length > 0 ? rows[rows.length - 1]!.id : Math.max(sinceId, pageResult.tailId);
       }
       const snapshotMode: "live" | "immutable-fallback" = state.isImmutableSnapshot() ? "immutable-fallback" : "live";
+      // #710: same availability/provenance shape as status --json's `config` field — see
+      // StatusConfigSection's own doc for the "available iff loadConfig actually succeeded" stance.
+      const config =
+        cfg !== undefined && configProvenance !== undefined
+          ? { available: true as const, provenance: configProvenance }
+          : { available: false as const };
       if (json) {
-        const dto = { formatVersion: READ_MODEL_FORMAT_VERSION, dbPath, snapshot: { mode: snapshotMode }, events: rows, nextSinceId };
+        const dto = {
+          formatVersion: READ_MODEL_FORMAT_VERSION,
+          dbPath,
+          snapshot: { mode: snapshotMode },
+          config,
+          events: rows,
+          nextSinceId,
+        };
         return { stdout: `${JSON.stringify(dto)}\n`, stderr: "", code: 0 };
       }
-      return { stdout: formatEventsText(dbPath, snapshotMode, rows, nextSinceId), stderr: "", code: 0 };
+      return { stdout: formatEventsText(dbPath, configProvenance, snapshotMode, rows, nextSinceId), stderr: "", code: 0 };
     });
   } catch (e) {
     if (e instanceof SqliteBusyError) return busyResult("events", e, json);
