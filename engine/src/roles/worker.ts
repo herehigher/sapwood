@@ -1491,17 +1491,19 @@ export interface WorkerDeps {
   /** #244 (Codex sol-high PR #260 review, P2): the narrow State surface WorkerSupervisor needs
    *  to record a durable `proxy-mint-failed` event when a `dispatch()` caller's `proxy.mint`
    *  throws, and (#395 gate② round 2/3) `heartbeatTick`'s own progress heartbeat (util/
-   *  heartbeat.ts's createHeartbeatGate — `maxEventId` is the gate's "don't speak over other
-   *  progress" check) — kept as a `Pick` (not the whole State class), same convention as every
-   *  other narrow-state-dependency field in this codebase (e.g. peripheral.ts's
-   *  RetriedSession.state). Optional and additive: omitted -> both degrade to zero behavior
-   *  change (mint-failure observability falls back to the existing stderr log line; the
-   *  heartbeat simply never fires) — never a hard requirement for ordinary dispatch.
+   *  heartbeat.ts's createHeartbeatGate — `maxEventIdForWorker` is the gate's "don't speak over
+   *  other progress FOR THIS LANE" check; #688 scoped this from the prior global `maxEventId`,
+   *  which starved every lane but one under concurrent dispatch — see heartbeat.ts's own header
+   *  doc) — kept as a `Pick` (not the whole State class), same convention as every other
+   *  narrow-state-dependency field in this codebase (e.g. peripheral.ts's RetriedSession.state).
+   *  Optional and additive: omitted -> both degrade to zero behavior change (mint-failure
+   *  observability falls back to the existing stderr log line; the heartbeat simply never fires)
+   *  — never a hard requirement for ordinary dispatch.
    *
    *  #617 (seam 3, capability DR #616): widened with `recordContextManifest` — the SAME narrow-
    *  Pick contract, additive. Omitted -> a lane's context manifest is assembled (best-effort) but
    *  never persisted; recordLaneContextManifest's own doc covers the zero-behavior-change case. */
-  state?: Pick<State, "appendEvent" | "maxEventId" | "recordContextManifest">;
+  state?: Pick<State, "appendEvent" | "maxEventIdForWorker" | "recordContextManifest">;
   /** #617 (seam 3): bounded poll of a lane's still-growing jsonl for its own init line, before
    *  capturing the CLAUDE.md-family half of its context manifest — same rationale and same
    *  defaults (100ms/30s) as peripheral.ts's RoleRunnerDeps fields of the same name; see
@@ -2923,22 +2925,28 @@ export class WorkerSupervisor implements Supervisor {
     // exit notification lost. `isAlive` probes `lane.child.pid` directly (`process.kill(pid,
     // 0)`) — deliberately not a progress-content check, so a legitimately quiet-but-working leg
     // keeps heart-beating. createHeartbeatGate also folds in the P2-2 spam fix (skip when
-    // something else already advanced state.maxEventId() this cadence). Optional
-    // (WorkerDeps.state, already used for proxy-mint-failed) — omitted means zero behavior
-    // change, same as before.
+    // something else already advanced THIS LANE's own progress this cadence — #688:
+    // maxEventIdForWorker(name), scoped per lane, not the prior global maxEventId() that starved
+    // every lane but one under concurrent dispatch). Optional (WorkerDeps.state, already used for
+    // proxy-mint-failed) — omitted means zero behavior change, same as before.
     if (this.deps.state) {
       let gate = this.heartbeatGates.get(name);
       if (!gate) {
-        gate = createHeartbeatGate(this.deps.state, () => {
-          const pid = lane.child.pid;
-          if (pid == null) return false;
-          try {
-            process.kill(pid, 0);
-            return true;
-          } catch {
-            return false;
-          }
-        });
+        const state = this.deps.state;
+        gate = createHeartbeatGate(
+          state,
+          () => {
+            const pid = lane.child.pid;
+            if (pid == null) return false;
+            try {
+              process.kill(pid, 0);
+              return true;
+            } catch {
+              return false;
+            }
+          },
+          () => state.maxEventIdForWorker(name),
+        );
         this.heartbeatGates.set(name, gate);
       }
       gate.tick("worker-heartbeat", { worker: name, issue: lane.issue, elapsedSec: Math.round(elapsedSec) });

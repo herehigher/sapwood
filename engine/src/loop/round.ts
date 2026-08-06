@@ -1068,7 +1068,16 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   // comment for exactly what these heartbeats do and do not prove), so only the gate's
   // spam-suppression half is load-bearing: skip the append once something ELSE (a park-probe, a
   // standby-wait, a tick-error, ...) has already proven progress this cadence.
-  const loopHeartbeatGate = createHeartbeatGate(deps.state, () => true);
+  //
+  // #688: deliberately the GLOBAL state.maxEventId(), unlike worker.ts's/peripheral.ts's per-lane/
+  // per-session scoped callers — this heartbeat represents the single process-wide round loop
+  // itself, not one of several concurrent subjects, so there is exactly one subject and global vs
+  // scoped coincide. Scoping this one would be a no-op at best.
+  const loopHeartbeatGate = createHeartbeatGate(
+    deps.state,
+    () => true,
+    () => deps.state.maxEventId(),
+  );
   // #125 standby: consecutive empty probes since the last time a round actually opened — the
   // exponential-backoff exponent. In-memory only (never persisted): a process restart is a fresh
   // start at n=0, same as #109's idle throttle carries no state across restarts either.
