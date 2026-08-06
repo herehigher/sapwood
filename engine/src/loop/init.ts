@@ -348,7 +348,10 @@ function resolveActiveConfigPath(cwd: string, justWritten: string | null): strin
 // remote title may validly belong to a different machine/operator, so a foreign or stale key is
 // only ever surfaced in a WARN for a HUMAN to review, never touched by this file. ---------------
 
-const DEPLOY_KEY_TITLE = "sapwood-worker";
+// Exported (#671): deploy-key-startup-check.ts's "missing/unreadable key file" arm reuses this
+// as the generic title argument to deployKeyProvisioningFailedAction below — the same guidance
+// string `sapwood init` itself would produce for the same failure shape.
+export const DEPLOY_KEY_TITLE = "sapwood-worker";
 
 export interface DeployKeyListEntry {
   id: number;
@@ -468,7 +471,9 @@ export function pickFreshArmAKeySlot(
  *  landing spot for a post-add id-resolution ambiguity (R3-1) — a zero-or-multiple-new-ids
  *  result throws into the same catch block that reaches this function, so it reads and behaves
  *  exactly like any other provisioning failure. */
-function deployKeyProvisioningFailedAction(repo: string, keyPath: string, title: string, e: unknown): string {
+// Exported (#671): deploy-key-startup-check.ts's "missing/unreadable key file" arm reuses this
+// EXACT wording rather than writing a third guidance variant — see that module's own doc.
+export function deployKeyProvisioningFailedAction(repo: string, keyPath: string, title: string, e: unknown): string {
   const reason = (e instanceof Error ? e.message : String(e)).split("\n")[0]?.trim() || "unknown error";
   return (
     `deploy key: WARN — could not provision a write deploy key for ${repo} (${reason}). This usually means the ` +
@@ -484,7 +489,9 @@ function deployKeyProvisioningFailedAction(repo: string, keyPath: string, title:
 /** #606 gate② round 1 guidance-carrying WARN: the preflight-fail arm — the key IS registered (or
  *  was just added) but SSH auth against it didn't succeed (host-key/network/local key-material
  *  issue). Same "never wedge, name the fix" contract as every other #554-pattern WARN here. */
-function deployKeyPreflightFailedAction(keyPath: string, detail: string | undefined): string {
+// Exported (#671): deploy-key-startup-check.ts's "preflight fails" arm reuses this EXACT wording
+// rather than writing a third guidance variant — see that module's own doc.
+export function deployKeyPreflightFailedAction(keyPath: string, detail: string | undefined): string {
   return (
     `deploy key: WARN — SSH auth preflight failed for ${keyPath}${detail ? `: ${detail}` : ""}. Engine stays at ` +
     `L0 (full credentialed worker env) until this passes. Fix: confirm ${keyPath} is a readable private key ` +

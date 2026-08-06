@@ -5138,6 +5138,63 @@ test("dispatch: the deploy-key preflight probe is memoized — TWO dispatches sh
   }
 });
 
+test("checkDeployKeyPreflight: unset deployKeyPath -> undefined, never probes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    let probeCalled = false;
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg, // no worker.deployKeyPath set
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      probeDeployKeySsh: async () => {
+        probeCalled = true;
+        return { ok: true };
+      },
+    });
+    const result = await s.checkDeployKeyPreflight();
+    assert.equal(result, undefined);
+    assert.equal(probeCalled, false);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("checkDeployKeyPreflight (#671): seeds the SAME memoized probe a later dispatch() reuses — startup + first dispatch cost at most one SSH preflight total", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    let probeCount = 0;
+    const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-671-startup");
+    const s = new WorkerSupervisor({
+      now: realClock,
+      cfg: deployKeyCfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      probeDeployKeySsh: async () => {
+        probeCount++;
+        return { ok: true };
+      },
+    });
+    const startupResult = await s.checkDeployKeyPreflight();
+    assert.deepEqual(startupResult, { ok: true });
+    await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-startup-seeded");
+    await waitFor(() => existsSync(join(dir, "lane-l1-startup-seeded.done.json")), "dispatch did not complete");
+    assert.equal(probeCount, 1, "the startup check's probe must be the SAME memoized one dispatch() reuses");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resume: worker.deployKeyPath configured + preflight OK -> L1 active on a resumed leg too (same env/tool-narrowing as dispatch)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

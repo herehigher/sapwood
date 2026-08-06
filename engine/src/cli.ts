@@ -23,6 +23,7 @@ import {
 import { type BaseRedPin, baseRedPin } from "./loop/base-ci.js";
 import { createBranchProtectionDetector } from "./loop/branch-protection-warning.js";
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
+import { detectDeployKeyStartupTier } from "./loop/deploy-key-startup-check.js";
 import { unadjudicatedConcerns } from "./loop/dissent.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
 import { InitError, init, requiredLabels } from "./loop/init.js";
@@ -1966,6 +1967,10 @@ async function runTickEngine(
       // (no-op) whenever `roles.skills.enabled` is false.
       ...(skillsPluginDir !== undefined ? { skillsPluginDir } : {}),
     });
+    // #671: startup deploy-key tier check — immediately after WorkerSupervisor construction so
+    // it shares (seeds, never re-probes) THIS instance's memoized SSH preflight; see
+    // deploy-key-startup-check.ts's own doc for the full placement rationale.
+    await detectDeployKeyStartupTier(supervisor, cfg, state, log);
     const stopMode = parseRunStopMode(argv);
     const stop = resolveStopConfig(argv, cfg);
     // #76: same fail-fast stance as buildRenderPrompt above — a typo'd milestone goal must abort
@@ -2150,6 +2155,10 @@ async function runRoundsEngine(
       // #639: same wiring as runTickEngine's own WorkerSupervisor above.
       ...(skillsPluginDir !== undefined ? { skillsPluginDir } : {}),
     });
+    // #671: same placement/rationale as runTickEngine's own WorkerSupervisor above — immediately
+    // after construction, so it shares (seeds, never re-probes) THIS instance's memoized SSH
+    // preflight. See deploy-key-startup-check.ts's own doc.
+    await detectDeployKeyStartupTier(supervisor, cfg, state, log);
     // #253: a default forge MCP proxy mint, shared by every peripheral role session this
     // RoleRunner instance ever runs across the whole `sapwood run` (round 0 / phase "peripheral"
     // is its own fixed SENTINEL audit identity, informational only — see buildTickFixLegResume's
