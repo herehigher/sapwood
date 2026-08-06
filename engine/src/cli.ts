@@ -21,6 +21,7 @@ import {
   type LanePrRequest,
 } from "./forge/forge.js";
 import { type BaseRedPin, baseRedPin } from "./loop/base-ci.js";
+import { createBranchProtectionDetector } from "./loop/branch-protection-warning.js";
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
 import { unadjudicatedConcerns } from "./loop/dissent.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
@@ -1667,6 +1668,14 @@ export interface EngineOverrides {
    *  Production passes none, so the real `process.kill(pid, 0)` probe
    *  (instance-lock.ts's pidIsAlive) applies. */
   pidLiveness?: (pid: number) => boolean;
+  /** #633: injection seam for the branch-protection startup detector — same "production passes
+   *  none" convention as `pidLiveness` above, but for a DIFFERENT reason: this check is a real
+   *  `gh` network read (unlike every other detector in this neighborhood), so the real one only
+   *  ever builds when BOTH this and `forge` are unset. Every existing test sets `forge`, so none
+   *  of them ever spawns a real `gh` call without needing to know this field exists; a wiring
+   *  test that specifically wants to observe/replace the check sets this directly instead of
+   *  faking a `forge`-side capability. See branch-protection-warning.ts's own doc. */
+  checkBranchProtection?: () => Promise<boolean>;
 }
 
 function createRunLogger(cfg: SapwoodConfig, override?: EngineLogger): { logger: EngineLogger; path: string } {
@@ -1899,6 +1908,19 @@ async function runTickEngine(
     // the run boundary, startup continues either way), but no park/escalation: disclose + WARN
     // only, per the owner ruling. See managed-permission-warning.ts's own doc.
     detectManagedPermissionMode(log);
+    // #633: sibling to detectManagedPermissionMode above — same non-throwing, fail-open,
+    // warn-only stance, extended to the branch-protection precondition DR #616 names (twice) as
+    // the mandatory platform backstop for a producer leg's inherited host tool surface. Unlike
+    // its filesystem-only siblings this is a real network read, so the REAL detector only builds
+    // in true production (overrides.forge/overrides.checkBranchProtection both unset, the only
+    // combination `main()` itself ever passes) — every existing test sets `forge`, so none of
+    // them ever spawns a real `gh` call; overrides.checkBranchProtection is the dedicated seam a
+    // wiring test uses instead, to observe invocation count without faking `forge` at all. See
+    // branch-protection-warning.ts's own doc.
+    const checkBranchProtection =
+      overrides.checkBranchProtection ??
+      (overrides.forge === undefined ? createBranchProtectionDetector(`${cfg.board.owner}/${cfg.board.repo}`, log) : async () => false);
+    await checkBranchProtection();
     // #615: snapshot/hash the operator's user-level settings ONCE, here, at startup — this IS the
     // "engine startup" moment the acceptance criteria describe. The returned closure is called
     // every tick below (onTick) to flag a later divergence; see user-settings-watch.ts's own doc.
@@ -2092,6 +2114,12 @@ async function runRoundsEngine(
     detectConsecutiveStalls(state, cfg, systemClock, log);
     // #554: same placement/rationale as runTickEngine above — see managed-permission-warning.ts.
     detectManagedPermissionMode(log);
+    // #633: same placement/rationale as runTickEngine above — see branch-protection-warning.ts's
+    // own doc.
+    const checkBranchProtection =
+      overrides.checkBranchProtection ??
+      (overrides.forge === undefined ? createBranchProtectionDetector(`${cfg.board.owner}/${cfg.board.repo}`, log) : async () => false);
+    await checkBranchProtection();
     // #615: same placement/rationale as runTickEngine above — see user-settings-watch.ts's own
     // doc. The rounds driver's onTick (below) fires every raw tick exactly like the tick driver's
     // does, so the same closure works unchanged here.
