@@ -1201,9 +1201,23 @@ test("#672: both comment-reading gate⓪ prompts mark the <issue-comments> block
 // still gets a normal status computed from real evidence — a legal `perAC` entry today, with or
 // without this fix. verification-plan-reviewer.md/-confirm.md/-drafter.md carry no #328 content
 // at all (their SNAPSHOT_HASHES above are unchanged from main) — the sole-AC case is untouched by
-// this PR. ───────────────────────────────────────────────────────────────────────────────────────
+// this PR.
+//
+// Third gate② round on this same bullet (still 2026-08-06): the first version told the reviewer
+// to write an advisory `kind: "design"` finding for the sub-clause — but `finding-axes.ts`'s
+// `ADVISORY_ELIGIBLE_KINDS` is `{style, test-coverage}` only; `effectiveSeverity` forces every
+// other kind (including `"design"`) back to `"blocking"`, and `deriveApprovalResult` rejects the
+// WHOLE PR on any blocking finding regardless of `perAC` status — so the mandated finding
+// silently re-blocked the exact AC this bullet exists to unblock (confirmed by reading
+// finding-axes.ts directly). Owner ruling (2026-08-06), superseding a proposed "switch to a
+// non-blocking channel" fix: delete the finding instruction UNCONDITIONALLY, don't look for or
+// switch to any other channel even where one exists — mandating a finding (blocking, advisory, or
+// "optionally note it") strips the reviewing model's own judgment about whether the sub-clause is
+// worth reporting at all. The bullet says nothing about emitting anything; it governs the AC's
+// STATUS only. If the reviewer independently decides the sub-clause is worth a finding, that is
+// its own call, on its own reading — never something this prompt instructs. ────────────────────
 
-test("#328 (re-scoped): engine-reviewer.md's issue-body-edit exception is scoped to the SUB-REQUIREMENT of a mixed AC, and explicitly declines to prescribe an outcome for the AC-is-entirely-unverifiable case", () => {
+test("#328 (re-scoped): engine-reviewer.md's issue-body-edit exception governs the AC's STATUS only — it says nothing about emitting a finding (mandatory, advisory, or optional) for the sub-clause, and explicitly declines to prescribe an outcome for the AC-is-entirely-unverifiable case", () => {
   const body = normalizeWhitespace(readPrompt(defaultEngineReviewerPromptPath()));
   assert.match(body, /SUB-REQUIREMENT/, "the exception is explicitly named as sub-requirement-scoped, not AC-scoped");
   assert.ok(
@@ -1218,6 +1232,19 @@ test("#328 (re-scoped): engine-reviewer.md's issue-body-edit exception is scoped
   assert.ok(
     !/Tier it `claim-accepted` instead when the PR body or diff states the ruling clearly/.test(body),
     "must not promote the issue-edit sub-requirement to claim-accepted — there is no claim to accept, since the producer cannot write to that channel at all",
+  );
+  assert.ok(
+    !/Write an advisory `kind: "design"` finding/.test(body),
+    "must not mandate a finding for the sub-clause — `design` is not in ADVISORY_ELIGIBLE_KINDS, so the engine would force it back to blocking and re-reject the AC this bullet unblocks",
+  );
+  assert.ok(
+    !/findings` entry for the sub-clause/i.test(body) && !/raise a finding/i.test(body) && !/optionally note it/i.test(body),
+    "must say NOTHING about emitting a finding for the sub-clause — required, non-blocking-channel, or optional all strip the reviewing model's own judgment; owner ruling is silence, not a softer instruction",
+  );
+  assert.match(
+    body,
+    /This bullet governs the AC's STATUS only, nothing else about your output for it/i,
+    "must scope the bullet explicitly to AC status, leaving whether to report the sub-clause entirely to the reviewer's own judgment",
   );
   assert.match(
     body,

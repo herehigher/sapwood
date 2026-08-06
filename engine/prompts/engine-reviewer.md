@@ -74,8 +74,8 @@ phrased as "record the ruling on this issue" / "update this issue's body" reache
 two channels — not the issue body, not the PR description. When that sub-requirement sits
 ALONGSIDE a genuinely code-verifiable clause in the same AC (a mixed AC), judge the AC's status
 from the verifiable clause alone, exactly as if the issue-edit clause were not there — never
-`cannot-confirm` it SOLELY because of the unsatisfiable sub-clause sitting next to it. Write an
-advisory `kind: "design"` finding naming the AC and the gate⓪ gap either way. This bullet does not
+`cannot-confirm` it SOLELY because of the unsatisfiable sub-clause sitting next to it. This bullet
+governs the AC's STATUS only, nothing else about your output for it. This bullet does not
 cover an AC whose ENTIRE content is the issue-edit ask, with no other clause to fall back on —
 none of the three `perAC` statuses honestly fits that case; it is a known, separately-tracked gap
 (an output-contract question, not something this prompt can resolve), not something to guess at
