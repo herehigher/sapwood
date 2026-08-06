@@ -178,6 +178,44 @@ repeatedly (worth reading the surrounding `investigate`/`intervene` events for w
 actually wrong upstream). This is a supervisor-side read, not an engine threshold — no
 kind is reclassified by count; you are just choosing where to look next.
 
+## Known blind spot: persistent forge-fetch failure in queued arms
+
+**Adjudicated bounded blind spot (#662, 2026-08-06 ruling, Option B).** Several
+`queued`-outcome arms in the drive family — `ac-drift-check-unavailable`
+(`checkAcDriftBeforeDrive`), `comment-cursor-check-unavailable`
+(`checkCommentCursorBeforeDrive`), and the `*-escalation-write-failed` /
+`fix-leg-dispatch-failed` group — retry forever on a forge fetch that fails on *every*
+attempt, not just a transient one. There is deliberately no consecutive-failure escalation
+cap: distinguishing "permanently broken" from "rate-limited/network-blip" by a bare retry
+count would either escalate a healthy lane on a bad day or need a second knob to avoid
+that, and no dogfood evidence of an actual silent wedge has shown up to justify the
+complexity (marginal-complexity doctrine — see `REVIEW-DOCTRINE.md`'s adjudication
+principles, and #662 for the full ruling record). The containment is honest visibility —
+one `drive-queued` event per reason change (never per-tick spam, #383 dedup) plus this
+watch recipe — not an automatic escalation.
+
+Spot a wedged lane with the same two read-only verbs from
+[Supervising a run](#supervising-a-run):
+
+```bash
+# 1. Which lanes are driving right now, and on which (worker, issue, pr)?
+sapwood status --json
+
+# 2. For a lane that's been driving far longer than this repo's PRs normally take to
+#    clear gate②, has its drive-queued reason stopped changing? These reason strings are
+#    the forge-fetch-failure class:
+#      ac-drift-check-unavailable, comment-cursor-check-unavailable,
+#      review-disputed-escalation-write-failed, review-non-convergent-escalation-write-failed,
+#      fix-rounds-cap-label-failed, fix-rounds-cap-comment-failed, fix-leg-dispatch-failed
+sapwood events --issue <N> --kind drive-queued
+```
+
+If the same reason string keeps recurring across repeated polls with no `merged`,
+`needs-human`, `ac-snapshot-drift`, or `comment-cursor-stale` event ever following it, the
+forge call behind that arm is very likely broken for good, not transient — escalate by
+hand (apply `needs-human`, comment the issue with the evidence) the same as any other
+operator-observed intervention (see [Batch close ritual](#batch-close-ritual)).
+
 ## Queue queries
 
 The gated (awaiting review gate) and human-merge-only/needs-human queues live on
