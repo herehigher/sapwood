@@ -1202,6 +1202,14 @@ export interface LaneProbe {
    *  done/failed/handoff; empty while still running or if unknown. Optional for probe
    *  fixtures that predate #47 — treated as []. */
   modelUsage?: ModelUsageEntry[];
+  /** #645 P2-1: whether `costUsd` came from the pinned-price ESTIMATOR rather than a real
+   *  provider-reported `total_cost_usd` (worker.ts's `writeTerminalSentinel`/
+   *  `terminalCostEstimated` own doc). Absent (not `false`) when unknown — a pre-#645 sentinel,
+   *  the jsonl-fallback path (an engine-restart orphan with no sentinel at all), or a still-KEEP
+   *  lane — never coerced to a guessed boolean. Threaded into `spend_ledger.estimated` at
+   *  terminal settlement (reclaimTerminalLane) so a worker/fix-leg row's provenance is no longer
+   *  permanently NULL. */
+  costEstimated?: boolean;
   /** #155: LIVE per-probe telemetry (priced-cost snapshot + context/composition) — present
    *  only while worker.ts's WorkerSupervisor still holds the lane in-memory (i.e. actually
    *  running; undefined once terminal, for a detached post-restart lane, or for probe fixtures
@@ -2348,6 +2356,9 @@ async function reclaimTerminalLane(
 ): Promise<ReclaimOutcome | null> {
   const costUsd = p.costUsd ?? 0;
   const modelUsage = p.modelUsage ?? [];
+  // #645 P2-1: undefined (never guessed) when the probe never classified the terminal cost's
+  // provenance — see LaneProbe.costEstimated's own doc.
+  const costEstimated = p.costEstimated;
   // #245 round-2 fix A5: computed ONCE, from `w.state` as it stood BEFORE this call (never
   // re-derived after a transition already happened) — spread into every branch below that lands
   // the row in `driving`, in the SAME settleTerminalWorker transaction that writes it, so a crash
@@ -2378,7 +2389,15 @@ async function reclaimTerminalLane(
     const handoffAt = iso();
     state.settleTerminalWorker(
       { ...w, state: "handoff", ended_at: handoffAt, fixing_handoff: fixLegHandoff },
-      { worker: w.name, issue: w.issue, usd: costUsd, at: handoffAt, models: modelUsage, actorKind },
+      {
+        worker: w.name,
+        issue: w.issue,
+        usd: costUsd,
+        at: handoffAt,
+        models: modelUsage,
+        actorKind,
+        ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+      },
     );
     state.appendEvent("handoff", { worker: w.name, issue: w.issue, fixLegHandoff: fixLegHandoff === 1 });
     // #168 P1-1b: a handed-off canary RAN (crossed its soft budget doing real work) — the
@@ -2439,14 +2458,30 @@ async function reclaimTerminalLane(
       // gate resolves it). No requeue, no human escalation.
       state.settleTerminalWorker(
         { ...w, state: "driving", ended_at: doneAt, pr: p.prNumber ?? w.pr ?? null, ...fixingPinClear },
-        { worker: w.name, issue: w.issue, usd: costUsd, at: doneAt, models: modelUsage, actorKind },
+        {
+          worker: w.name,
+          issue: w.issue,
+          usd: costUsd,
+          at: doneAt,
+          models: modelUsage,
+          actorKind,
+          ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+        },
         fixResponse,
       );
     } else {
       // ESCALATE_NOPR: done but no PR -> nothing to drive; free the lane, escalate to human.
       state.settleTerminalWorker(
         { ...w, state: "done", ended_at: doneAt },
-        { worker: w.name, issue: w.issue, usd: costUsd, at: doneAt, models: modelUsage, actorKind },
+        {
+          worker: w.name,
+          issue: w.issue,
+          usd: costUsd,
+          at: doneAt,
+          models: modelUsage,
+          actorKind,
+          ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+        },
       );
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
       // #601 (docs/design/355-worker-refusal-signal.md): the worker's own final-message text —
@@ -2528,7 +2563,15 @@ async function reclaimTerminalLane(
       const failedAt = iso();
       state.settleTerminalWorker(
         { ...w, state: "failed", ended_at: failedAt },
-        { worker: w.name, issue: w.issue, usd: costUsd, at: failedAt, models: modelUsage, actorKind },
+        {
+          worker: w.name,
+          issue: w.issue,
+          usd: costUsd,
+          at: failedAt,
+          models: modelUsage,
+          actorKind,
+          ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+        },
       );
       // SUSPENSION (PR #180 review P1-2): while a FORGE park episode is open, the requeue is
       // NOT attempted — persisting the durable row above is the whole action (zero forge
@@ -2567,7 +2610,15 @@ async function reclaimTerminalLane(
         const preservedAt = iso();
         state.settleTerminalWorker(
           { ...w, state: "failed", ended_at: preservedAt, pr: p.prNumber ?? w.pr ?? null, gated_escalation_labeled: 0 },
-          { worker: w.name, issue: w.issue, usd: costUsd, at: preservedAt, models: modelUsage, actorKind },
+          {
+            worker: w.name,
+            issue: w.issue,
+            usd: costUsd,
+            at: preservedAt,
+            models: modelUsage,
+            actorKind,
+            ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+          },
         );
         state.appendEvent("env-failure-preserved", {
           worker: w.name,
@@ -2583,7 +2634,15 @@ async function reclaimTerminalLane(
       const rescuedAt = iso();
       state.settleTerminalWorker(
         { ...w, state: "driving", ended_at: rescuedAt, pr: p.prNumber ?? w.pr ?? null, ...fixingPinClear },
-        { worker: w.name, issue: w.issue, usd: costUsd, at: rescuedAt, models: modelUsage, actorKind },
+        {
+          worker: w.name,
+          issue: w.issue,
+          usd: costUsd,
+          at: rescuedAt,
+          models: modelUsage,
+          actorKind,
+          ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+        },
       );
       state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next: "DRIVING", ...prTitlePayload(p) });
       return { kind: "failed", worker: w.name, issue: w.issue, next: "DRIVING", costUsd, modelUsage };
@@ -2615,7 +2674,15 @@ async function reclaimTerminalLane(
       // the lane driving for the review gate rather than escalating.
       state.settleTerminalWorker(
         { ...w, state: "driving", ended_at: failedAt, pr: p.prNumber ?? w.pr ?? null, ...fixingPinClear },
-        { worker: w.name, issue: w.issue, usd: costUsd, at: failedAt, models: modelUsage, actorKind },
+        {
+          worker: w.name,
+          issue: w.issue,
+          usd: costUsd,
+          at: failedAt,
+          models: modelUsage,
+          actorKind,
+          ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+        },
       );
     } else {
       // Forge work BEFORE the terminal upsert (parity with the DEAD path's ordering). needs-human
@@ -2638,7 +2705,15 @@ async function reclaimTerminalLane(
       }
       state.settleTerminalWorker(
         { ...w, state: "failed", ended_at: failedAt },
-        { worker: w.name, issue: w.issue, usd: costUsd, at: failedAt, models: modelUsage, actorKind },
+        {
+          worker: w.name,
+          issue: w.issue,
+          usd: costUsd,
+          at: failedAt,
+          models: modelUsage,
+          actorKind,
+          ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+        },
       );
     }
     state.appendEvent("reclaim-failed", {
@@ -3423,6 +3498,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // outcome — computed once so the two never drift apart.
     const costUsd = p.costUsd ?? 0;
     const modelUsage = p.modelUsage ?? [];
+    // #645 P2-1: undefined (never guessed) when unclassified — LaneProbe.costEstimated's own doc.
+    const costEstimated = p.costEstimated;
     const laneClass = classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive, p.dispatchedAgeSec, cfg.worker.timeoutSec);
     if (laneClass === "KEEP") {
       // #155: refresh the lane's LIVE per-probe telemetry (priced-cost snapshot, context
@@ -3502,7 +3579,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       state.settleTerminalWorker(
         { ...w, state: "failed", ended_at: deadAt },
         // #645: this loop iterates state.runningWorkers() — an ordinary (never `fixing`) lane.
-        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage, actorKind: "worker" },
+        {
+          worker: w.name,
+          issue: w.issue,
+          usd: costUsd,
+          at: deadAt,
+          models: modelUsage,
+          actorKind: "worker",
+          ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+        },
       );
       // No requeue to Ready: an open PR must not be raced by a fresh worker, and a no-PR dirty
       // lane is a human-salvage case (needs-human already blocks re-dispatch), not a clean
@@ -3510,12 +3595,28 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     } else if (rescued) {
       state.settleTerminalWorker(
         { ...w, state: "driving", ended_at: deadAt, pr: p.prNumber ?? w.pr ?? null },
-        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage, actorKind: "worker" },
+        {
+          worker: w.name,
+          issue: w.issue,
+          usd: costUsd,
+          at: deadAt,
+          models: modelUsage,
+          actorKind: "worker",
+          ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+        },
       );
     } else {
       state.settleTerminalWorker(
         { ...w, state: "failed", ended_at: deadAt },
-        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage, actorKind: "worker" },
+        {
+          worker: w.name,
+          issue: w.issue,
+          usd: costUsd,
+          at: deadAt,
+          models: modelUsage,
+          actorKind: "worker",
+          ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+        },
       );
       // #31 (finding 2): persist the requeue BEFORE attempting it. The old code awaited this
       // unguarded AFTER the row above already went terminal — a transient forge failure here
@@ -3566,6 +3667,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     }
     const costUsd = p.costUsd ?? 0;
     const modelUsage = p.modelUsage ?? [];
+    // #645 P2-1: undefined (never guessed) when unclassified — LaneProbe.costEstimated's own doc.
+    const costEstimated = p.costEstimated;
     const laneClass = classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive, p.dispatchedAgeSec, cfg.worker.timeoutSec);
     if (laneClass === "KEEP") {
       if (p.liveTelemetry) state.setLiveTelemetry(w.name, p.liveTelemetry);
@@ -3598,7 +3701,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       state.settleTerminalWorker(
         { ...w, state: "failed", ended_at: deadAt },
         // #645: this loop iterates state.fixingWorkers() — always a fix-leg lane.
-        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage, actorKind: "fix-leg" },
+        {
+          worker: w.name,
+          issue: w.issue,
+          usd: costUsd,
+          at: deadAt,
+          models: modelUsage,
+          actorKind: "fix-leg",
+          ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+        },
       );
     } else if (p.hasPr) {
       state.settleTerminalWorker(
@@ -3610,7 +3721,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           review_triggered_head: null,
           review_triggered_at: null,
         },
-        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage, actorKind: "fix-leg" },
+        {
+          worker: w.name,
+          issue: w.issue,
+          usd: costUsd,
+          at: deadAt,
+          models: modelUsage,
+          actorKind: "fix-leg",
+          ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+        },
       );
     } else {
       // Fail-safe only — a fixing lane should never lack a PR; treat like any other no-PR dead
@@ -3618,7 +3737,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
       state.settleTerminalWorker(
         { ...w, state: "failed", ended_at: deadAt },
-        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage, actorKind: "fix-leg" },
+        {
+          worker: w.name,
+          issue: w.issue,
+          usd: costUsd,
+          at: deadAt,
+          models: modelUsage,
+          actorKind: "fix-leg",
+          ...(costEstimated !== undefined ? { estimated: costEstimated } : {}),
+        },
       );
     }
     const rescued = p.hasPr && !r.worktreeRetained;

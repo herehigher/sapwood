@@ -306,16 +306,20 @@ it isn't (`writeTerminalSentinel`'s own doc, `engine/src/roles/worker.ts`; see
 `docs/PLAN.md`'s Security model) — that is a per-lane mechanism, not a supervision one.
 
 `spend_ledger` also carries a per-row `estimated` flag (#645) so the est-vs-real
-divergence above can be queried instead of grepped from logs — populated today only
-where the engine already distinguishes a pinned-price estimate from a real
-provider-reported total at the write site itself (the engine-review site's own
-`ReviewSessionSpend.kind`); a worker/fix-leg/peripheral-role row's `estimated` is
-`NULL` (not `false` — genuinely not yet wired, never guessed) even though
-`writeTerminalSentinel` computes the same distinction internally. The dogfood
-estimator-bias series (opus vs. sonnet, per-leg) this column was meant to retire the
-hand arithmetic for therefore still needs it for worker/fix-leg/peripheral-role rows
-until a later issue threads that same signal through to `recordSpend` for those sites
-too.
+divergence above can be queried instead of grepped from logs — populated where the
+engine distinguishes a pinned-price estimate from a real provider-reported total at
+the write site itself: the engine-review site's own `ReviewSessionSpend.kind`, AND
+(as of #645's spend-attribution work) every worker/fix-leg terminal settlement —
+`writeTerminalSentinel`'s own `costEstimated` computation is now persisted onto the
+terminal sentinel, threaded through `LaneProbe.costEstimated`, and lands in
+`spend_ledger.estimated` at `conductor.ts`'s `settleTerminalWorker` call. A
+worker/fix-leg row's `estimated` is `NULL` only for a lane that predates this change or
+whose sentinel never classified the distinction (still never guessed). A
+`peripheral-role` row's `estimated` is still `NULL` always — `peripheral.ts`'s
+`runSessionWithRetry` does not yet thread this signal through — so the dogfood
+estimator-bias series (opus vs. sonnet, per-leg) can now be run by query for
+worker/fix-leg/engine-review lanes, and still needs peripheral-role rows wired by a
+later issue.
 
 The supervision-side practice is a coarser, session-scoped series: note the dry-run
 preview at batch open, note the settled spend at batch close, and track the two numbers

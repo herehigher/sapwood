@@ -1350,7 +1350,15 @@ export interface RoundRow {
 }
 
 /** One `spend_ledger` row as the dashboard reads it (State.spendPage, #360) — the stored
- *  columns verbatim, token counts camelCased to match the rest of the §8 wire. */
+ *  columns verbatim, token counts camelCased to match the rest of the §8 wire. #645 P2-2:
+ *  `actorKind`/`role`/`estimated` are the SAME three durable-attribution columns
+ *  `SpendActorKind`'s own doc describes — this method's doc already claimed "the ledger's own
+ *  columns, nothing derived" before #645 added them, and that claim was false until now: the raw
+ *  paging transport omitted exactly the columns #645 exists to expose. `actorKind`/`role` are
+ *  `null` for an unattributed row (pre-#645, or a caller that never claimed a kind), same
+ *  never-guess stance as everywhere else; `estimated` is a genuine three-state (`true`/`false`/
+ *  `null` — "unknown/never claimed", not "known to be a real total"), read back off the same
+ *  0/1/NULL storage `recordSpend` writes. */
 export interface SpendLedgerRow {
   id: number;
   ts: string;
@@ -1362,6 +1370,9 @@ export interface SpendLedgerRow {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  actorKind: SpendActorKind | null;
+  role: string | null;
+  estimated: boolean | null;
 }
 
 /** One `rounds` row with its artifact left-joined (State.listRounds, #360). `schemaVersion` and
@@ -2137,6 +2148,61 @@ export class State {
    *  the pin permanent. Same stale-run containment as updateEngineReviewWalManifestHash. */
   recordEngineReviewWalDecisiveOutcome(name: string, runId: string, outcome: "approved" | "rejected"): void {
     this.db.prepare("UPDATE engine_review_wal SET decisive_outcome = ? WHERE worker_name = ? AND run_id = ?").run(outcome, name, runId);
+  }
+
+  /** #645 P1-1: the engine-review decisive verdict's announcing event (production.ts's
+   *  ENGINE_REVIEW_VERDICT), its WAL `decisive_outcome` write, and — when this run captured a
+   *  validated artifact — its review session's settled spend, in ONE sqlite transaction. Same
+   *  shape (and reason) as `settleTerminalWorker`/`upsertWorkerWithEvent` above.
+   *
+   *  Before this, production.ts's `recordWalDecisiveOutcome` did these as separate writes: the
+   *  verdict event FIRST (via `appendEvent`, whose existence `runEventRecorded` reads back as
+   *  "this runId is already handled" — the SAME dedup memory a replay consults), then
+   *  `recordEngineReviewWalDecisiveOutcome`, then (if the artifact was available) `recordSpend`
+   *  LAST. A crash between the first write and the last left the verdict event durably recorded
+   *  while spend_ledger never got its row — and because the event's own existence is what a
+   *  replay reads as "already recorded, do nothing", that missing spend could never be
+   *  recovered: permanently, silently omitted from every ledger-based report (`dailyBudgetUsd`/
+   *  `roundBudgetUsd` alike).
+   *
+   *  Bundling the three writes makes that partial state unrepresentable: either everything here
+   *  lands, or (a thrown error anywhere inside) nothing does — so a replay of the SAME runId is
+   *  either a clean no-op (the caller's own `runEventRecorded` pre-check reads true and skips
+   *  calling this at all) or a fresh, complete attempt, never a half-recorded one.
+   *
+   *  `verdictKind`/`verdictPayload` are the caller's own event shape — this method does not
+   *  interpret them, only appends them atomically with the rest (same `payload: unknown` seam
+   *  `upsertWorkerWithEvent` uses). `spend` is omitted when this run's artifact was never
+   *  captured — production.ts's own never-fabricate stance, unchanged by this refactor. */
+  recordEngineReviewVerdictAndSpend(
+    worker: string,
+    runId: string,
+    outcome: "approved" | "rejected",
+    verdictKind: EventKind,
+    verdictPayload: unknown,
+    spend?: {
+      worker: string;
+      issue: number;
+      usd: number;
+      at: string;
+      models?: ModelUsageEntry[];
+      actorKind?: SpendActorKind;
+      role?: string;
+      estimated?: boolean;
+    },
+  ): void {
+    this.db.exec("BEGIN");
+    try {
+      this.appendEvent(verdictKind, verdictPayload);
+      this.recordEngineReviewWalDecisiveOutcome(worker, runId, outcome);
+      if (spend) {
+        this.recordSpend(spend.worker, spend.issue, spend.usd, spend.at, spend.models ?? [], spend.actorKind, spend.role, spend.estimated);
+      }
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
   }
 
   /** #288: persist the validated artifact and engine-derived decisive outcome before posting.
@@ -3803,31 +3869,42 @@ export class State {
     });
   }
 
-  /** #642 (upgraded by #645): the honest per-day spend split `status --json`'s spend section
-   *  needs. Before #645 this classified purely by NAME HEURISTIC (does `worker` match a
-   *  `workers.name` row?) because `spend_ledger` carried no durable attribution at all. Now the
-   *  split is driven by the `actor_kind` column itself: `byWorker` is every row whose
-   *  `actor_kind` is `worker` or `fix-leg` (a lane's own settled spend, grouped by lane name —
-   *  same key `spentUsdForWorker` reads by), `byRole` is every `peripheral-role` row grouped by
-   *  its `role`, `reviewUsd` is the `engine-review` total (#612's decisive-verdict spend,
-   *  formerly only visible as an opaque `"<lane>:engine-review"` entry in the unclassified
-   *  bucket), and `unclassifiedUsd` is everything with `actor_kind IS NULL` — a row written
-   *  before the #645 migration, or by a caller that never claimed a kind. Deliberately NO
-   *  backfill and NO name-heuristic fallback for NULL rows (pre-v1 doctrine, #645's issue): a
-   *  pre-bump row has no attribution to recover, so it renders `unclassified` forever rather
-   *  than being guessed back into `byWorker` via the old heuristic. `incomplete` (the caller's
-   *  flag, buildSpendSection) is `unclassifiedUsd > 0` — note that even at `unclassifiedUsd ===
-   *  0` this is NOT a claim that 100% of provider spend for the day is captured: a non-decisive
-   *  review attempt (failed/unavailable) is DELIBERATELY never ledgered at all (docs/security.md;
-   *  #645 explicitly keeps that posture, never widens it), so it can never appear as an
-   *  unattributed row to flag — there is structurally no ledger signal for an omission that was
-   *  never written. Same day window as `dailySpendUsd` (ts-prefix match).
+  /** #642 (upgraded by #645, remainder-accounting fix P1-3): the honest per-day spend split
+   *  `status --json`'s spend section needs. Before #645 this classified purely by NAME HEURISTIC
+   *  (does `worker` match a `workers.name` row?) because `spend_ledger` carried no durable
+   *  attribution at all. Now the split is driven by the `actor_kind` column itself: `byWorker` is
+   *  every row whose `actor_kind` is `worker` or `fix-leg` (a lane's own settled spend, grouped
+   *  by lane name — same key `spentUsdForWorker` reads by), `byRole` is every VALIDLY-attributed
+   *  `peripheral-role` row (role IS NOT NULL) grouped by its `role`, and `reviewUsd` is the
+   *  `engine-review` total (#612's decisive-verdict spend, formerly only visible as an opaque
+   *  `"<lane>:engine-review"` entry in the unclassified bucket).
    *
-   *  #642 (Codex gate② round-1 P1 finding 3, preserved through #645): `todayUsd` is derived
-   *  ARITHMETICALLY from the four buckets this call computes in ONE `readTransaction` snapshot
-   *  — never a separate `dailySpendUsd` call — so `todayUsd === sum(byWorker) + sum(byRole) +
-   *  reviewUsd + unclassifiedUsd` holds BY CONSTRUCTION, with no independent fifth read left to
-   *  disagree with the other four. */
+   *  `unclassifiedUsd` is the COMPLEMENT of those three valid buckets, computed as its OWN SQL
+   *  SUM over "everything that does not validly match worker/fix-leg, peripheral-role-with-a-role,
+   *  or engine-review" — not the old `actor_kind IS NULL`-only query. P1-3 (gate② finding): the
+   *  old query let ANY row whose `actor_kind` matched none of the four known values — a
+   *  corrupt/unrecognized string, or a `peripheral-role` row with no `role` at all — match NO
+   *  bucket and vanish from BOTH the classified buckets AND `unclassifiedUsd` (fail-open: a real
+   *  ledgered dollar simply disappeared from every total). The complement query can't have that
+   *  failure mode: every row is `COALESCE(actor_kind, '')`-tested against the SAME three positive
+   *  conditions the other three queries use, so a row lands in the complement bucket if and only
+   *  if it landed in none of the others — there is no third place for it to go. `COALESCE` (not a
+   *  bare `actor_kind IS NULL OR ...`) is deliberate: SQL's three-valued logic would otherwise let
+   *  a NULL `actor_kind` make the whole `NOT (...)` expression evaluate to NULL instead of TRUE,
+   *  silently excluding it from its own WHERE clause. Deliberately NO backfill and NO
+   *  name-heuristic fallback for an unattributed row (pre-v1 doctrine, #645's issue): nothing
+   *  here tries to recover what a row didn't durably claim, it only guarantees the total can
+   *  never lose track of it.
+   *
+   *  `todayUsd` is deliberately the JS-side sum of the four bucket totals — NOT a fifth
+   *  independent "SUM of every row" SQL query — so `todayUsd === sum(byWorker) + sum(byRole) +
+   *  reviewUsd + unclassifiedUsd` holds BY CONSTRUCTION, in EXACT floating-point arithmetic (not
+   *  merely "up to rounding"): a fifth independent total and four partition sums are two
+   *  DIFFERENT floating-point reductions over the same rows and are not guaranteed to agree bit
+   *  for bit (IEEE 754 addition is not associative) even though they partition the same set —
+   *  same identity #642's gate②-round-1 P1 finding 3 pinned, preserved exactly. Same day window
+   *  as `dailySpendUsd` (ts-prefix match), one `readTransaction` snapshot so a concurrent writer
+   *  can never split the reads across two different moments. */
   spendSummaryForDay(now: Date): {
     todayUsd: number;
     byWorker: { worker: string; usd: number }[];
@@ -3845,19 +3922,32 @@ export class State {
            GROUP BY s.worker ORDER BY usd DESC, worker`,
         )
         .all(`${dayPrefix}%`) as unknown as { worker: string; usd: number }[];
+      // #645 P1-3: `role IS NOT NULL` — a malformed `peripheral-role` row with no role is not a
+      // valid attribution (it would otherwise render as a bogus `{ role: null, ... }` entry);
+      // its spend belongs in the complement bucket below, same as an unrecognized actor_kind
+      // value.
       const byRoleRaw = this.db
         .prepare(
           `SELECT s.role AS role, SUM(s.usd) AS usd
            FROM spend_ledger s
-           WHERE s.ts LIKE ? AND s.actor_kind = 'peripheral-role'
+           WHERE s.ts LIKE ? AND s.actor_kind = 'peripheral-role' AND s.role IS NOT NULL
            GROUP BY s.role ORDER BY usd DESC, role`,
         )
         .all(`${dayPrefix}%`) as unknown as { role: string; usd: number }[];
       const reviewRow = this.db
         .prepare(`SELECT COALESCE(SUM(s.usd), 0) AS usd FROM spend_ledger s WHERE s.ts LIKE ? AND s.actor_kind = 'engine-review'`)
         .get(`${dayPrefix}%`) as { usd: number };
+      // #645 P1-3: the COMPLEMENT of the three positive conditions above, tested against the
+      // SAME `COALESCE(actor_kind, '')` value each row is classified by — a NULL, an unknown
+      // string, or a role-less `peripheral-role` row all fall through to here, nothing vanishes.
       const unclassifiedRow = this.db
-        .prepare(`SELECT COALESCE(SUM(s.usd), 0) AS usd FROM spend_ledger s WHERE s.ts LIKE ? AND s.actor_kind IS NULL`)
+        .prepare(
+          `SELECT COALESCE(SUM(s.usd), 0) AS usd
+           FROM spend_ledger s
+           WHERE s.ts LIKE ?
+             AND COALESCE(s.actor_kind, '') NOT IN ('worker', 'fix-leg', 'engine-review')
+             AND NOT (COALESCE(s.actor_kind, '') = 'peripheral-role' AND s.role IS NOT NULL)`,
+        )
         .get(`${dayPrefix}%`) as { usd: number };
       // Re-shaped into ordinary objects — same null-prototype reason spendByModelForDay documents.
       const byWorker = byWorkerRaw.map((r) => ({ worker: r.worker, usd: r.usd }));
@@ -3892,11 +3982,15 @@ export class State {
   /** One ascending page of the RAW spend ledger — §8's `/api/spend` transport (#360), the same
    *  id-cursor paging contract eventsPage gives events, so replay can walk both feeds with one
    *  cursor discipline. Rows are the ledger's own columns, nothing derived: a spend panel that
-   *  wants a total sums these, it never asks the server for a number it cannot re-derive. */
+   *  wants a total sums these, it never asks the server for a number it cannot re-derive. #645
+   *  P2-2: `actor_kind`/`role`/`estimated` are exposed too (SpendLedgerRow's own doc) — this
+   *  method's "the ledger's own columns" claim was false without them; they were added to the
+   *  table by #645 but never threaded through this paging read until now. */
   spendPage(afterId: number, limit: number): SpendLedgerRow[] {
     const rows = this.db
       .prepare(
-        `SELECT id, ts, worker, issue, usd, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+        `SELECT id, ts, worker, issue, usd, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                actor_kind, role, estimated
          FROM spend_ledger WHERE id > ? ORDER BY id LIMIT ?`,
       )
       .all(afterId, limit) as unknown as {
@@ -3910,6 +4004,9 @@ export class State {
       output_tokens: number;
       cache_read_tokens: number;
       cache_creation_tokens: number;
+      actor_kind: string | null;
+      role: string | null;
+      estimated: number | null;
     }[];
     // Re-shaped into ordinary objects for the same null-prototype reason spendByModelForDay
     // documents, and camelCased to match every other token count on the §8 wire.
@@ -3924,6 +4021,13 @@ export class State {
       outputTokens: r.output_tokens,
       cacheReadTokens: r.cache_read_tokens,
       cacheCreationTokens: r.cache_creation_tokens,
+      // #645 P1-3's own "never guess" stance: an unrecognized/legacy `actor_kind` string is
+      // passed through as-is here (this is the RAW paging transport, not the classified
+      // read-model split) rather than silently coerced to null — only a genuinely absent column
+      // renders null.
+      actorKind: (r.actor_kind as SpendActorKind | null) ?? null,
+      role: r.role ?? null,
+      estimated: r.estimated === null ? null : r.estimated === 1,
     }));
   }
 

@@ -1797,21 +1797,27 @@ Two different things are both called "budget," and they behave differently on pu
   never the wall clock. Entering a breach emits a reason-bearing
   `ceiling-breach-entered` event once per episode.
 
-**Engine-agent review-session spend (#612).** Under `reviewer.mode: engine-agent`, gate②'s
-review session is itself a paid Claude session — its cost now reaches `spend_ledger` too,
-recorded once a verdict is decisive (`review/production.ts`'s `recordWalDecisiveOutcome`), so
-`dailyBudgetUsd`/`roundBudgetUsd` (both plain, worker-unfiltered `SUM(usd)` reads) count it like
-any other spend. It is ledgered under a key **distinct** from the reviewed lane's own worker
-name (`<lane>:engine-review`), deliberately: recording it under the lane's own name would make
-`State.getWorkerActualModels(issue)` — keyed on an exact `worker` match — pick up the reviewer's
-own model as one of "the producing lane's actual models," poisoning engine-agent.ts's D5
-same-model check on that lane's next review (a fix-round re-review would then see the reviewer
-overlapping itself and fail closed forever). A review attempt that never reaches a decisive
-verdict (all retries exhausted, a setup failure, a D5 same-model refusal) still records nothing
-to the ledger — its cost is real but stays visible only in that attempt's own WAL artifact; this
-mirrors the #286 whole-logical-review cap, which reads the WAL, never the ledger, for the exact
-same reason. **#645 attributes what IS recorded — it does not widen this**: the deliberate-absence
-posture for non-decisive attempts is unchanged, still no ledger row of any kind for one.
+**Engine-agent review-session spend (#612, atomicity fixed #645 P1-1).** Under
+`reviewer.mode: engine-agent`, gate②'s review session is itself a paid Claude session — its cost
+reaches `spend_ledger` too, recorded once a verdict is decisive
+(`review/production.ts`'s `recordWalDecisiveOutcome`, via `State.recordEngineReviewVerdictAndSpend`),
+so `dailyBudgetUsd`/`roundBudgetUsd` (both plain, worker-unfiltered `SUM(usd)` reads) count it
+like any other spend. The verdict-announcing event, the WAL's `decisive_outcome` write, and this
+spend all land in **one SQLite transaction** — before #645 they were three separate writes (event
+first, spend last), and a crash between them left the verdict durably recorded while the spend
+silently, permanently never landed (the event's own existence is the replay dedup memory, so a
+retry read "already handled" and skipped the spend forever). It is ledgered under a key
+**distinct** from the reviewed lane's own worker name (`<lane>:engine-review`), deliberately:
+recording it under the lane's own name would make `State.getWorkerActualModels(issue)` — keyed
+on an exact `worker` match — pick up the reviewer's own model as one of "the producing lane's
+actual models," poisoning engine-agent.ts's D5 same-model check on that lane's next review (a
+fix-round re-review would then see the reviewer overlapping itself and fail closed forever). A
+review attempt that never reaches a decisive verdict (all retries exhausted, a setup failure, a
+D5 same-model refusal) still records nothing to the ledger — its cost is real but stays visible
+only in that attempt's own WAL artifact; this mirrors the #286 whole-logical-review cap, which
+reads the WAL, never the ledger, for the exact same reason. **#645 attributes what IS recorded —
+it does not widen this**: the deliberate-absence posture for non-decisive attempts is unchanged,
+still no ledger row of any kind for one.
 
 **Durable spend attribution (#645).** `spend_ledger` carries three additional columns, written by
 every real spend site: `actor_kind` (`worker` | `fix-leg` | `peripheral-role` | `engine-review` —
@@ -1819,15 +1825,30 @@ conductor.ts's reclaim path sets the first two from whether the terminal lane wa
 leg; peripheral.ts's shared `runSessionWithRetry` sets `peripheral-role` for every po-align/
 po-triage/architect/plan-review/harvest/retro session; production.ts's decisive-verdict callback
 above sets `engine-review`), `role` (the peripheral role id, `peripheral-role` rows only), and
-`estimated` (0/1, set only where the engine already distinguishes a pinned-price estimate from a
-real provider-reported total — today, only the engine-review site's own `ReviewSessionSpend.kind`).
-Pre-v1, plain schema bump: no migration/backfill for rows written before this — they read
-`actor_kind IS NULL` forever, rendered `unclassified` by the read-model
-(`State.spendSummaryForDay`), same "never guess" stance as every other unattributed row. The
-shared read-model's spend section (`status --json`'s `spend` key) reports the real
+`estimated` (0/1, tri-state — NULL when a caller never classified the distinction). `estimated` is
+populated at every terminal settlement, worker/fix-leg rows included: `worker.ts`'s
+`writeTerminalSentinel` persists which of "a real provider-reported `total_cost_usd`" vs. "the
+pinned-price estimator's substitute" fed the recorded cost, threaded through `LaneProbe.costEstimated`
+into `conductor.ts`'s terminal `settleTerminalWorker` calls, alongside the engine-review site's own
+pre-existing `ReviewSessionSpend.kind` distinction — see docs/supervision.md's Est-vs-real cost
+method for how this feeds the estimator-bias query. Pre-v1, plain schema bump: no
+migration/backfill for rows written before this — they read `actor_kind IS NULL` forever,
+rendered `unclassified` by the read-model (`State.spendSummaryForDay`), same "never guess" stance
+as every other unattributed row. `spendPage` (the raw `/api/spend` paging transport) surfaces all
+three columns verbatim too — its own "the ledger's own columns" doc now matches what it returns.
+
+The shared read-model's spend section (`status --json`'s `spend` key) reports the real
 `lanes`/`roles`/`review` split (`settledByWorker`/`settledByRole`/`reviewUsd`) plus the
-`unclassifiedUsd` leftover bucket and its `incomplete` flag — see `state/read-model.ts`'s
-`StatusSpendDTO` doc for the exact identity `todayUsd` holds by construction.
+`unclassifiedUsd` leftover bucket — now a COMPLEMENT query (every row not validly matching one of
+the three positive buckets, including a corrupt/unrecognized `actor_kind` value or a
+`peripheral-role` row missing its `role`), not an `actor_kind IS NULL`-only query, so a
+malformed row can never silently vanish from every total (#645 P1-3) — and its `incomplete` flag.
+`incomplete` is true whenever `unclassifiedUsd > 0` **or** `reviewer.mode` is `engine-agent`
+(the schema default): the deliberate-absence posture above means a non-decisive review attempt's
+cost can be real yet leave **no ledger row of any kind**, so `unclassifiedUsd` alone can never
+prove the day is complete under that mode — `incomplete: false` is only reachable under a
+non-engine-agent reviewer mode. See `state/read-model.ts`'s `StatusSpendDTO` doc for the exact
+identity `todayUsd` holds by construction.
 
 **Supervisor prerequisite (#431):** operators running unattended under a supervisor
 MUST configure the supervisor's own crash-loop circuit-breaker — e.g. systemd's

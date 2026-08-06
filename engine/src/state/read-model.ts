@@ -281,13 +281,26 @@ export const DEFAULT_PAGE_LIMIT = 500;
  *
  *  `unclassifiedUsd` is now genuinely the LEFTOVER bucket: a row with no durable `actor_kind` at
  *  all — either it predates the #645 migration (never backfilled, never guessed — pre-v1
- *  doctrine) or a write site recorded spend without claiming a kind. `incomplete` is true
- *  exactly when that bucket is non-empty, so a client can never mistake "some spend this DTO
- *  couldn't attribute" for "zero spend happened". Note `incomplete: false` is still NOT a claim
- *  that every dollar the provider billed today is captured: a non-decisive engine-review attempt
- *  (failed/unavailable) is deliberately never written to `spend_ledger` at all (docs/security.md;
- *  #645 keeps that posture, never widens it) — an omission that was never a row can never surface
- *  as an unattributed one either.
+ *  doctrine) or a write site recorded spend without claiming a kind.
+ *
+ *  `incomplete` (#645 P1-2, gate② finding — the original `unclassifiedUsd > 0` rule pinned the
+ *  WRONG behavior) is true whenever EITHER: (a) `unclassifiedUsd` is non-empty, OR (b) the
+ *  engine-agent reviewer's deliberate-absence posture is structurally possible this run
+ *  (`cfg.reviewer.mode === "engine-agent"`, the schema default). (b) exists because a
+ *  non-decisive engine-review attempt (failed/unavailable) is deliberately never written to
+ *  `spend_ledger` at all (docs/security.md) — a real cost with genuinely NO ledger row to ever
+ *  render unclassified. Checking `state.hasNonDecisiveEngineReviewAttempt()`-style evidence
+ *  cannot substitute for the config check: `engine_review_wal`/the lane's own attempt-pin column
+ *  are upsert-by-lane, never append-only (state.ts's own migration doc) — a PAST non-decisive
+ *  attempt superseded by a LATER decisive one leaves literally no durable trace to query after
+ *  the fact, so evidence-based detection can only ever see an attempt CURRENTLY stuck mid-retry,
+ *  never one that already resolved. The config-mode check is therefore the only signal that can
+ *  honestly cover the whole day: `incomplete: false` must never be reachable while a class of
+ *  fundamentally undetectable omission is standing. `cfg` unavailable is treated as the schema's
+ *  own default (`engine-agent`) — an unresolved config can never license the LESS conservative
+ *  branch. Under a non-engine-agent mode (`different-model-codex` / `same-model-trusted` /
+ *  `human`) this posture does not apply, and a fully-attributed day can genuinely report
+ *  `incomplete: false`.
  *
  *  #642 (Codex gate② round-1 P1 finding 3, preserved through #645): `todayUsd` is
  *  `state.spendSummaryForDay`'s OWN `todayUsd` — deliberately NOT a separate
@@ -308,10 +321,13 @@ export interface StatusSpendDTO {
 
 export function buildSpendSection(
   state: Pick<State, "spendSummaryForDay">,
-  cfg: Pick<SapwoodConfig, "cost"> | null,
+  cfg: Pick<SapwoodConfig, "cost" | "reviewer"> | null,
   now: Date,
 ): StatusSpendDTO {
   const summary = state.spendSummaryForDay(now);
+  // #645 P1-2: see StatusSpendDTO's own doc above for why this is config-mode-based rather than
+  // an evidence query over engine_review_wal.
+  const deliberateAbsencePossible = (cfg?.reviewer.mode ?? "engine-agent") === "engine-agent";
   return {
     todayUsd: summary.todayUsd,
     dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
@@ -319,7 +335,7 @@ export function buildSpendSection(
     settledByRole: summary.byRole,
     reviewUsd: summary.reviewUsd,
     unclassifiedUsd: summary.unclassifiedUsd,
-    incomplete: summary.unclassifiedUsd > 0,
+    incomplete: summary.unclassifiedUsd > 0 || deliberateAbsencePossible,
   };
 }
 

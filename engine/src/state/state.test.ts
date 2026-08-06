@@ -1627,6 +1627,112 @@ test("#223: settleTerminalWorker is ATOMIC — the terminal worker row + its set
   s.close();
 });
 
+test("#645 P1-1: recordEngineReviewVerdictAndSpend is ATOMIC — the verdict event + WAL decisive outcome + review spend land together; a failure inside the transaction rolls back ALL THREE (never verdict-recorded-without-spend, the exact crash window production.ts's old two-write sequence could hit)", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 10, session_id: "s1", state: "driving", started_at: "t0", ended_at: null, pr: 7 });
+  s.recordEngineReviewWal("lane-1", { runId: "run-1", head: "deadbeef", base: "base1", diffHash: "diff1", attemptStart: "t0" });
+
+  const spend = {
+    worker: "lane-1:engine-review",
+    issue: 10,
+    usd: 1.5,
+    at: "t1",
+    models: [],
+    actorKind: "engine-review" as const,
+    estimated: false,
+  };
+
+  // Simulated crash: recordSpend throws partway through the transaction — the exact shape a
+  // process death between the old code's separate event-append and recordSpend calls used to
+  // produce, now reproduced as a genuine rollback instead.
+  const realRecordSpend = s.recordSpend.bind(s);
+  s.recordSpend = () => {
+    throw new Error("simulated recordSpend failure");
+  };
+  assert.throws(
+    () =>
+      s.recordEngineReviewVerdictAndSpend(
+        "lane-1",
+        "run-1",
+        "approved",
+        "engine-review-verdict",
+        { worker: "lane-1", runId: "run-1" },
+        spend,
+      ),
+    /simulated recordSpend failure/,
+  );
+  // Unrepresentable partial state: nothing landed — not the event, not the WAL decisive outcome,
+  // not the spend. This is the #645 P1-1 fix: pre-fix, the verdict event was a SEPARATE write
+  // that would have already committed by this point.
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-1", "run-1"), false, "verdict event rolled back too");
+  assert.equal(s.getEngineReviewWal("lane-1")?.decisiveOutcome, null, "WAL decisive outcome rolled back");
+  assert.equal(s.spentUsdForWorker("lane-1:engine-review"), 0, "no partial ledger row either");
+
+  // A clean retry (spend now succeeds) commits all three, exactly once.
+  s.recordSpend = realRecordSpend;
+  s.recordEngineReviewVerdictAndSpend("lane-1", "run-1", "approved", "engine-review-verdict", { worker: "lane-1", runId: "run-1" }, spend);
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-1", "run-1"), true);
+  assert.equal(s.getEngineReviewWal("lane-1")?.decisiveOutcome, "approved");
+  assert.equal(s.spentUsdForWorker("lane-1:engine-review"), 1.5);
+  s.close();
+});
+
+test("#645 P1-1: recordEngineReviewVerdictAndSpend without a `spend` arg records the event + WAL outcome only — the never-fabricate stance when this run's artifact was never captured", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-2", issue: 11, session_id: "s2", state: "driving", started_at: "t0", ended_at: null, pr: 8 });
+  s.recordEngineReviewWal("lane-2", { runId: "run-2", head: "cafebabe", base: "base2", diffHash: "diff2", attemptStart: "t0" });
+
+  s.recordEngineReviewVerdictAndSpend("lane-2", "run-2", "rejected", "engine-review-verdict", { worker: "lane-2", runId: "run-2" });
+
+  assert.equal(s.runEventRecorded("engine-review-verdict", "lane-2", "run-2"), true);
+  assert.equal(s.getEngineReviewWal("lane-2")?.decisiveOutcome, "rejected");
+  assert.equal(s.spentUsdForWorker("lane-2:engine-review"), 0);
+  s.close();
+});
+
+test("#645 P1-3: an unknown non-NULL actor_kind value is still counted — unclassifiedUsd is the COMPLEMENT of the day's total spend, so nothing can vanish (repro: ledger $5 worker + $5 garbage-actor_kind row → previously reported unclassified $0, todayUsd $5)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const s0 = new State(dbPath);
+    s0.upsertWorker({ name: "lane-a", issue: 1, session_id: "s1", state: "done", started_at: "2026-08-04T00:00:00.000Z", ended_at: "t" });
+    s0.recordSpend("lane-a", 1, 5, "2026-08-04T01:00:00.000Z", [], "worker");
+    s0.close();
+
+    // No `recordSpend` caller can write an unrecognized actor_kind (SpendActorKind's own type
+    // closes the set) — a garbage row is exactly the fail-open shape the finding names, so it's
+    // seeded via a direct raw connection to prove the READ side, not the write side, is honest.
+    const raw = new DatabaseSync(dbPath);
+    raw
+      .prepare(
+        `INSERT INTO spend_ledger (ts, worker, issue, usd, model, input_tokens, output_tokens, cache_read_tokens,
+          cache_creation_tokens, actor_kind, role, estimated)
+         VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, ?, NULL, NULL)`,
+      )
+      .run("2026-08-04T01:01:00.000Z", "mystery-lane", 2, 5, "unknown", "bogus-actor-kind");
+    raw.close();
+
+    const s = new State(dbPath);
+    const summary = s.spendSummaryForDay(new Date("2026-08-04T12:00:00.000Z"));
+    assert.deepEqual(summary.byWorker, [{ worker: "lane-a", usd: 5 }]);
+    assert.equal(summary.unclassifiedUsd, 5, "the bogus row's $5 lands in unclassified, never vanishes");
+    assert.equal(summary.todayUsd, 10, "total holds by construction — the bogus row is still in todayUsd");
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#645 P1-3: a malformed peripheral-role row (actor_kind='peripheral-role', role omitted) falls into unclassifiedUsd, not a null-keyed byRole entry", () => {
+  const s = mem();
+  s.recordSpend("role-x", 0, 3, "2026-08-04T01:00:00.000Z", [], "peripheral-role"); // no role passed
+  const summary = s.spendSummaryForDay(new Date("2026-08-04T12:00:00.000Z"));
+  assert.deepEqual(summary.byRole, [], "no null-keyed entry — a role-less peripheral-role row is not a valid attribution");
+  assert.equal(summary.unclassifiedUsd, 3);
+  assert.equal(summary.todayUsd, 3);
+  s.close();
+});
+
 test("park: a fresh episode after clearPark starts with its own clean enteredAt/probeAttempts", () => {
   const s = mem();
   s.enterPark("llm", "first episode", 1, "2026-07-14T00:00:00Z");
@@ -3415,9 +3521,13 @@ test("migration v33->v34 (#645): a populated v33 DB's pre-existing spend_ledger 
     const rows = s.spendPage(0, 10);
     assert.equal(rows.length, 1);
     assert.equal(rows[0]?.worker, "lane-legacy", "pre-existing row survives the migration intact");
-    // spendPage doesn't surface the new columns (out of #645's scope), but the read-model split
-    // does — a pre-migration row with no actor_kind renders unclassified, never guessed back
-    // into byWorker even though its name matches a real `workers` row.
+    // #645 P2-2: spendPage DOES surface the new columns — a pre-migration row renders them null,
+    // never guessed. The read-model split (below) independently renders the same row
+    // `unclassified`, never guessed back into byWorker even though its name matches a real
+    // `workers` row.
+    assert.equal(rows[0]?.actorKind, null);
+    assert.equal(rows[0]?.role, null);
+    assert.equal(rows[0]?.estimated, null);
     s.upsertWorker({ name: "lane-legacy", issue: 144, session_id: "s", state: "done", started_at: "t", ended_at: "t" });
     const summary = s.spendSummaryForDay(new Date("2026-08-05T12:00:00Z"));
     assert.deepEqual(summary.byWorker, []);
@@ -3611,9 +3721,31 @@ test("spendPage pages the ledger ascending by id, rows verbatim", () => {
     outputTokens: 20,
     cacheReadTokens: 900,
     cacheCreationTokens: 40,
+    actorKind: null,
+    role: null,
+    estimated: null,
   });
   assert.equal(s.spendPage(2, 10)[0]?.model, "unknown", "a model-less leg keeps recordSpend's own 'unknown' row");
   assert.deepEqual(s.spendPage(3, 10), [], "past the tail is empty, not an error");
+  s.close();
+});
+
+test("#645 P2-2: spendPage surfaces actorKind/role/estimated verbatim — the raw paging transport's own doc claims 'the ledger's own columns', and #645 added three of them", () => {
+  const s = mem();
+  s.recordSpend("role-po-align-1", 0, 0.5, "2026-07-24T11:30:00.000Z", [], "peripheral-role", "po-align", false);
+  s.recordSpend("lane-a:engine-review", 1, 0.6, "2026-07-24T11:31:00.000Z", [], "engine-review", undefined, true);
+  s.recordSpend("orphan-key", 9, 0.1, "2026-07-24T11:32:00.000Z"); // no attribution claimed at all
+
+  const rows = s.spendPage(0, 10);
+  assert.equal(rows[0]?.actorKind, "peripheral-role");
+  assert.equal(rows[0]?.role, "po-align");
+  assert.equal(rows[0]?.estimated, false);
+  assert.equal(rows[1]?.actorKind, "engine-review");
+  assert.equal(rows[1]?.role, null);
+  assert.equal(rows[1]?.estimated, true);
+  assert.equal(rows[2]?.actorKind, null);
+  assert.equal(rows[2]?.role, null);
+  assert.equal(rows[2]?.estimated, null);
   s.close();
 });
 
