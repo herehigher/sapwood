@@ -1110,6 +1110,23 @@ conflict-free head.`;
  *  leg is never granted ambient forge credentials — the proxy is its ONLY evidence channel, so
  *  this function refuses to start one without it rather than silently degrading. #246 (the sole
  *  production caller) always supplies a `credentialFree` proxy. */
+/** #705: records the `lane-spawned` fact `status`'s per-lane runtime anchors read — called at
+ *  every point in this file where a `Supervisor.dispatch`/`resume` call just confirmed a NEW
+ *  live child for `worker` (fresh dispatch, ordinary/fix-leg resume, cross-restart adoption).
+ *  A no-op when `r.worktreePath` is `undefined` — the `Supervisor` interface's own doc explains
+ *  why that field is optional (test-double supervisors with no opinion on live-process identity);
+ *  an absent fact must never become a fabricated `worktreePath: null` event, which is exactly
+ *  what `State.latestLaneSpawnFact`'s own `IS NOT NULL`-equivalent read guards against. */
+function recordLaneSpawned(
+  state: Pick<State, "appendEvent">,
+  worker: string,
+  issue: number,
+  r: { pid?: number | null; worktreePath?: string },
+): void {
+  if (r.worktreePath === undefined) return;
+  state.appendEvent("lane-spawned", { worker, issue, pid: r.pid ?? null, worktreePath: r.worktreePath });
+}
+
 export async function startFixLeg(
   deps: FixLegDeps,
   w: WorkerRow,
@@ -1145,6 +1162,7 @@ export async function startFixLeg(
   const fixRounds = (w.fix_rounds ?? 0) + 1;
   deps.state.upsertWorker({ ...w, state: "fixing", ended_at: null, fix_rounds: fixRounds });
   deps.state.appendEvent("fix-leg-started", { worker: w.name, issue: w.issue, pr, fixRounds, journalCursor, at: now().toISOString() });
+  recordLaneSpawned(deps.state, w.name, w.issue, result);
   return result;
 }
 
@@ -1283,10 +1301,17 @@ export interface ReclaimResult {
   worktreeRetained: boolean;
 }
 
-/** The conductor's only handle on workers. worker.ts (M2 #11) implements this. */
+/** The conductor's only handle on workers. worker.ts (M2 #11) implements this.
+ *
+ *  #705: `dispatch`/`resume` both return OPTIONAL `pid`/`worktreePath` — worker.ts's real
+ *  implementation always populates them (see its own doc), but the field is optional here so a
+ *  test-double Supervisor with no opinion on live-process identity (most of this file's own
+ *  fixtures) still satisfies the interface unchanged. `recordLaneSpawned` (below, near its call
+ *  sites) is the one place that decides what an absent `worktreePath` means: no `lane-spawned`
+ *  event, not a fabricated null-worktree fact. */
 export interface Supervisor {
   probe(worker: string): Promise<LaneProbe>;
-  dispatch(issue: Issue): Promise<{ name: string; sessionId: string }>;
+  dispatch(issue: Issue): Promise<{ name: string; sessionId: string; pid?: number | null; worktreePath?: string }>;
   /** Re-enter a terminal handoff as a fresh leg in the same session/worktree (#172). `opts`
    *  (#245) is additive: `prompt` overrides the ordinary issue-rendered prompt (the fix-leg's
    *  own fix instruction — see startFixLeg below); `proxy` attaches a forge MCP proxy handle to
@@ -1298,7 +1323,7 @@ export interface Supervisor {
     issue: Issue,
     worker: string,
     opts?: { proxy?: WorkerProxyOpts; prompt?: string; sessionId?: string },
-  ): Promise<{ name: string; sessionId: string }>;
+  ): Promise<{ name: string; sessionId: string; pid?: number | null; worktreePath?: string }>;
   /** Cheap, read-only classification of resume()'s durable spawn-intent marker (#172). */
   resumeIntentState(worker: string, issue: number): ResumeIntentState;
   /** Tear down a dead/stale lane (process-tree kill + worktree retention/cleanup, #69). */
@@ -3295,7 +3320,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     for (const w of state.handoffWorkers()) {
       if (supervisor.resumeIntentState(w.name, w.issue) !== "confirmed") continue;
       const issue: Issue = { number: w.issue, title: "", labels: [] };
-      let result: { name: string; sessionId: string };
+      let result: { name: string; sessionId: string; pid?: number | null; worktreePath?: string };
       try {
         result = await supervisor.resume(issue, w.name);
       } catch (e) {
@@ -3322,6 +3347,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         resume_attempts: attempt,
       });
       state.appendEvent("resumed", { worker: w.name, issue: w.issue, attempt });
+      recordLaneSpawned(state, w.name, w.issue, result);
       resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt });
     }
     const reclaimed: ReclaimOutcome[] = [];
@@ -5273,7 +5299,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // gracefully rather than bless it as a healthy continuation. `fixing_handoff` STAYS 1 so
       // the NEXT handoff/resume cycle re-mints a genuinely fresh proxy.
       if (decision === "ADOPT") {
-        let adoptResult: { name: string; sessionId: string };
+        let adoptResult: { name: string; sessionId: string; pid?: number | null; worktreePath?: string };
         try {
           adoptResult = await supervisor.resume(issue, w.name);
         } catch (e) {
@@ -5303,6 +5329,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           fixing_handoff: 1,
         });
         state.appendEvent("fix-leg-adopted-drained", { worker: w.name, issue: w.issue, pr, attempt: adoptAttempt });
+        recordLaneSpawned(state, w.name, w.issue, adoptResult);
         resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt: adoptAttempt });
         resumeLanesUsed++;
         continue;
@@ -5313,7 +5340,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // a genuinely FRESH mint/spawn (unlike the ADOPT branch above), so the same "child cannot
       // call before this line runs" guarantee startFixLeg's own capture relies on holds here too.
       const journalCursor = state.maxForgeProxyJournalId(w.name);
-      let fixResult: { name: string; sessionId: string };
+      let fixResult: { name: string; sessionId: string; pid?: number | null; worktreePath?: string };
       try {
         fixResult = await supervisor.resume(issue, w.name, {
           prompt: fixPrompt,
@@ -5352,11 +5379,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         fixRounds: w.fix_rounds ?? 0,
         journalCursor,
       });
+      recordLaneSpawned(state, w.name, w.issue, fixResult);
       resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt: fixAttempt });
       resumeLanesUsed++;
       continue;
     }
-    let result: { name: string; sessionId: string };
+    let result: { name: string; sessionId: string; pid?: number | null; worktreePath?: string };
     try {
       result = await supervisor.resume(issue, w.name);
     } catch (e) {
@@ -5381,6 +5409,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       resume_attempts: attempt,
     });
     state.appendEvent("resumed", { worker: w.name, issue: w.issue, attempt });
+    recordLaneSpawned(state, w.name, w.issue, result);
     resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt });
     resumeLanesUsed++;
   }
@@ -5474,7 +5503,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // untracked worker running while the issue stays dispatchable (Codex P1, PR #30). If
       // the launch fails after the claim, roll the board back to Ready so it's reclaimable.
       await forge.claimIssue(issue.number);
-      let dispatchRes: { name: string; sessionId: string };
+      let dispatchRes: { name: string; sessionId: string; pid?: number | null; worktreePath?: string };
       // #301 review (P1#1/P1#3): hoisted OUTSIDE the try so it's available below to stamp onto
       // the fresh WorkerRow. Built and recorded INSIDE the try (next line) so a build/record
       // failure still rolls the claim back exactly like a dispatch() failure would; definite-
@@ -5566,6 +5595,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         // (frontend-design §3 C) read it straight off the ledger, so they work offline/in replay.
         state.appendEvent("dispatched", { worker: name, issue: issue.number, issueTitle: issue.title });
       }
+      // #705: a canary dispatch is a REAL live child too (registerCanaryDispatch's own
+      // upsertWorker puts it in activeWorkers() exactly like an ordinary dispatch) — recorded
+      // unconditionally, not just on the `else` branch above.
+      recordLaneSpawned(state, name, issue.number, dispatchRes);
       inFlightIssues.add(issue.number);
       lanesUsed++;
       dispatchedThisTick++;

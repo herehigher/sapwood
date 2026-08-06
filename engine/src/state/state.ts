@@ -3659,6 +3659,45 @@ export class State {
     return row ? { kind: row.kind, payload: JSON.parse(row.payload) as unknown } : undefined;
   }
 
+  /** #705: the newest known live-process identity for `worker` — pid + worktree path, read off
+   *  the `lane-spawned` event the conductor appends every time worker.ts's dispatch()/resume()
+   *  confirms a NEW live child for this lane (first dispatch, an ordinary or fix-leg resume, or
+   *  a cross-restart adoption of an already-confirmed spawn — worker.ts's own early-return
+   *  branch in resume() sources the pid from the persisted running.json `wrapper_pid` for that
+   *  last case). Newest wins by event id, the same MAX(id)-per-subject fold
+   *  `unreleasedRetainedWorktrees` above uses — a resumed lane's fresh pid/worktree supersedes
+   *  its prior leg's stale one, which is exactly the belief-vs-reality case #705 exists for.
+   *  `null` when the lane predates #705 or was dispatched through a `Supervisor` that doesn't
+   *  report this fact (a test double) — read-model.ts's `buildLaneAnchors` renders that as
+   *  `pid: null, pidAlive: "unknown", worktreePath: null`, never a fabricated "dead". */
+  latestLaneSpawnFact(worker: string): { pid: number | null; worktreePath: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT json_extract(payload, '$.pid') AS pid, json_extract(payload, '$.worktreePath') AS worktreePath
+         FROM events
+         WHERE kind = 'lane-spawned' AND json_extract(payload, '$.worker') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker) as { pid: number | null; worktreePath: string | null } | undefined;
+    return row && row.worktreePath != null ? { pid: row.pid, worktreePath: row.worktreePath } : null;
+  }
+
+  /** #705: the newest `worker-heartbeat` event for `worker` — its row id plus the EVENTS TABLE'S
+   *  OWN `ts` column (appendEvent's deliberate wall-clock write, not a payload field), for
+   *  read-model.ts's `buildLaneAnchors` to turn into an age-seconds against an INJECTED clock
+   *  (never a `Date.now()` read in here — this stays a pure ledger read). `null` when the lane
+   *  has no heartbeat yet (freshly dispatched; the first cadence tick isn't due). */
+  latestHeartbeatForWorker(worker: string): { id: number; ts: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, ts FROM events
+         WHERE kind = 'worker-heartbeat' AND json_extract(payload, '$.worker') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker) as { id: number; ts: string } | undefined;
+    return row ?? null;
+  }
+
   /** #431 rounds 2-3: which side of the entered/cleared pair is newest FOR ONE CEILING REASON —
    *  the id-ordered transition read (the same event-log-as-memory shape
    *  latestHoldVisibilityEvent uses for pr-held/pr-released, #169/#294, and the same

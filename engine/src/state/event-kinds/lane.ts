@@ -221,4 +221,14 @@ export const LANE_EVENT_KINDS = defineKinds({
     meaning: "a peripheral role session's worktree was kept on disk (uncommitted edits behind) instead of being deleted.",
     actionability: "investigate",
   },
+
+  // #705: the live-process identity fact `sapwood status`'s per-lane runtime anchors read.
+  "lane-spawned": {
+    tags: [],
+    meaning:
+      "a worker lane got a NEW live child process (fresh dispatch, an ordinary/fix-leg resume, or a cross-restart " +
+      "adoption of an already-confirmed spawn) — carries the pid + worktree path `status` folds newest-per-lane.",
+    actionability: "routine",
+    see: "#705",
+  },
 });

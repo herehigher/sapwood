@@ -32,6 +32,7 @@ import { ConfigSchema, parseConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import type { LabelSpec } from "../forge/labels.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
+import type { LaneAnchorsDTO } from "../state/read-model.js";
 import { SCHEMA_VERSION, State } from "../state/state.js";
 import { requiredLabels } from "./init.js";
 
@@ -1465,6 +1466,44 @@ test("status: seeded DB with a running worker, a driving/gated PR, spend, and ki
   }
 });
 
+test("status (#705): a real lane-spawned + worker-heartbeat ledger produces pid/worktree/heartbeat in BOTH the text and --json paths, and a dead pid on a running lane renders the text mismatch marker", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-anchors-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  const seed = new State(dbPath);
+  seed.upsertWorker({
+    name: "lane-anchor-1",
+    issue: 42,
+    session_id: "s1",
+    state: "running",
+    started_at: "2026-08-06T00:00:00.000Z",
+    ended_at: null,
+  });
+  // 999_999_999 — same "obviously dead" pid convention worker.test.ts's own adoption test uses.
+  seed.appendEvent("lane-spawned", { worker: "lane-anchor-1", issue: 42, pid: 999_999_999, worktreePath: "/tmp/lane-anchor-1" });
+  seed.appendEvent("worker-heartbeat", { worker: "lane-anchor-1", issue: 42, elapsedSec: 5 });
+  seed.close();
+  try {
+    const textResult = runCli(["node", "sapwood", "status", dbPath]);
+    assert.equal(textResult.code, 0);
+    assert.match(textResult.stdout, /pid 999999999 \(DEAD\)/);
+    assert.match(textResult.stdout, /worktree \/tmp\/lane-anchor-1/);
+    assert.match(textResult.stdout, /heartbeat \d+s ago/);
+    assert.match(textResult.stdout, /BELIEF-VS-REALITY MISMATCH/);
+
+    const jsonResult = runCli(["node", "sapwood", "status", dbPath, "--json"]);
+    assert.equal(jsonResult.code, 0);
+    const body = JSON.parse(jsonResult.stdout);
+    assert.equal(body.lanes.length, 1);
+    assert.equal(body.lanes[0].pid, 999_999_999);
+    assert.equal(body.lanes[0].pidAlive, false);
+    assert.equal(body.lanes[0].worktreePath, "/tmp/lane-anchor-1");
+    assert.equal(body.lanes[0].lastHeartbeat.id > 0, true);
+    assert.equal(typeof body.lanes[0].lastHeartbeat.ageSec, "number");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("status: missing config still prints DB-derived fields, config-derived fields shown as unknown", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
   const dbPath = join(dir, "sapwood.sqlite");
@@ -1523,6 +1562,79 @@ test("formatStatus: PAUSE active renders distinctly from kill switch, both can b
   const out = formatStatus(snapshot);
   assert.match(out, /kill switch: inactive/);
   assert.match(out, /pause: PAUSED/);
+});
+
+// ── #705: per-lane runtime anchors — belief-vs-reality rendering ───────────────────────────
+
+function laneAnchorsSnapshot(state: "running" | "fixing" | "driving", laneAnchors: Record<string, LaneAnchorsDTO>): StatusSnapshot {
+  return {
+    dbPath: "data/sapwood.sqlite",
+    schemaVersion: SCHEMA_VERSION,
+    active: [{ name: "lane-x", issue: 12, session_id: "s1", state, started_at: "2026-08-06T00:00:00.000Z", ended_at: null }],
+    driving: [],
+    killSwitchActive: false,
+    pauseActive: false,
+    ceilingBreach: null,
+    dailySpendUsd: 0,
+    lanesMax: 3,
+    dailyBudgetUsd: 100,
+    unadjudicatedConcerns: 0,
+    baseCiRed: null,
+    parked: [],
+    laneAnchors,
+  };
+}
+
+test("formatStatus (#705 AC3): a `running` lane whose pid is confirmed DEAD renders the belief-vs-reality mismatch marker", () => {
+  const out = formatStatus(
+    laneAnchorsSnapshot("running", { "lane-x": { pid: 999999, pidAlive: false, worktreePath: "/tmp/lane-x", lastHeartbeat: null } }),
+  );
+  assert.match(out, /pid 999999 \(DEAD\)/);
+  assert.match(out, /BELIEF-VS-REALITY MISMATCH/);
+});
+
+test("formatStatus (#705): a `fixing` lane with a dead pid ALSO renders the mismatch — the predicate covers both in-flight states", () => {
+  const out = formatStatus(
+    laneAnchorsSnapshot("fixing", { "lane-x": { pid: 999999, pidAlive: false, worktreePath: "/tmp/lane-x", lastHeartbeat: null } }),
+  );
+  assert.match(out, /BELIEF-VS-REALITY MISMATCH/);
+});
+
+test("formatStatus (#705): a `driving` lane with a dead pid does NOT render the mismatch — the ledger never claimed it was in-flight", () => {
+  const out = formatStatus(
+    laneAnchorsSnapshot("driving", { "lane-x": { pid: 999999, pidAlive: false, worktreePath: "/tmp/lane-x", lastHeartbeat: null } }),
+  );
+  assert.doesNotMatch(out, /BELIEF-VS-REALITY MISMATCH/);
+});
+
+test("formatStatus (#705): a `running` lane with a LIVE pid renders normally, no mismatch marker", () => {
+  const out = formatStatus(
+    laneAnchorsSnapshot("running", { "lane-x": { pid: 4242, pidAlive: true, worktreePath: "/tmp/lane-x", lastHeartbeat: null } }),
+  );
+  assert.match(out, /pid 4242 \(alive\)/);
+  assert.doesNotMatch(out, /BELIEF-VS-REALITY MISMATCH/);
+});
+
+test("formatStatus (#705): no laneAnchors entry for the lane at all (pre-#705 fixture / never-spawned-through-a-Supervisor lane) renders honest unknowns, never a thrown lookup or a fabricated dead", () => {
+  const out = formatStatus(laneAnchorsSnapshot("running", {}));
+  assert.match(out, /pid unknown/);
+  assert.match(out, /worktree unknown/);
+  assert.match(out, /no heartbeat yet/);
+  assert.doesNotMatch(out, /BELIEF-VS-REALITY MISMATCH/);
+});
+
+test("formatStatus (#705): a heartbeat renders its age in seconds", () => {
+  const out = formatStatus(
+    laneAnchorsSnapshot("running", {
+      "lane-x": {
+        pid: 4242,
+        pidAlive: true,
+        worktreePath: "/tmp/lane-x",
+        lastHeartbeat: { id: 7, ts: "2026-08-06T00:00:00.000Z", ageSec: 42 },
+      },
+    }),
+  );
+  assert.match(out, /heartbeat 42s ago/);
 });
 
 // ── #168: sapwood status surfaces the parked state ──────────────────────────────────────────

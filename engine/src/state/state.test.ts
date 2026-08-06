@@ -4199,3 +4199,45 @@ test("withBusyNormalization: a SqliteBusyError raised by a NESTED readTransactio
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── #705: per-lane runtime-anchor reads (latestLaneSpawnFact / latestHeartbeatForWorker) ──────
+
+test("latestLaneSpawnFact: no lane-spawned event for the worker -> null, never a fabricated fact", () => {
+  const st = new State(":memory:");
+  st.appendEvent("lane-spawned", { worker: "lane-other", issue: 1, pid: 111, worktreePath: "/tmp/lane-other" });
+  assert.equal(st.latestLaneSpawnFact("lane-x"), null);
+  st.close();
+});
+
+test("latestLaneSpawnFact: newest event wins by id — a resume's fresh pid/worktree supersedes the original dispatch's", () => {
+  const st = new State(":memory:");
+  st.appendEvent("lane-spawned", { worker: "lane-x", issue: 1, pid: 111, worktreePath: "/tmp/lane-x" });
+  st.appendEvent("lane-spawned", { worker: "lane-x", issue: 1, pid: 222, worktreePath: "/tmp/lane-x" });
+  assert.deepEqual(st.latestLaneSpawnFact("lane-x"), { pid: 222, worktreePath: "/tmp/lane-x" });
+  st.close();
+});
+
+test("latestLaneSpawnFact: a null pid (the adoption branch's own honest 'no wrapper_pid on record' case) is returned as null, distinct from the worktreePath-absent 'no fact at all' case", () => {
+  const st = new State(":memory:");
+  st.appendEvent("lane-spawned", { worker: "lane-x", issue: 1, pid: null, worktreePath: "/tmp/lane-x" });
+  assert.deepEqual(st.latestLaneSpawnFact("lane-x"), { pid: null, worktreePath: "/tmp/lane-x" });
+  st.close();
+});
+
+test("latestHeartbeatForWorker: no worker-heartbeat event for the worker -> null", () => {
+  const st = new State(":memory:");
+  st.appendEvent("worker-heartbeat", { worker: "lane-other", issue: 1, elapsedSec: 5 });
+  assert.equal(st.latestHeartbeatForWorker("lane-x"), null);
+  st.close();
+});
+
+test("latestHeartbeatForWorker: newest event wins by id, carrying the events table's own ts column (not a payload field)", () => {
+  const st = new State(":memory:");
+  st.appendEvent("worker-heartbeat", { worker: "lane-x", issue: 1, elapsedSec: 5 });
+  st.appendEvent("worker-heartbeat", { worker: "lane-x", issue: 1, elapsedSec: 10 });
+  const hb = st.latestHeartbeatForWorker("lane-x");
+  assert.ok(hb);
+  assert.ok(hb.id > 0);
+  assert.ok(typeof hb.ts === "string" && hb.ts.length > 0);
+  st.close();
+});

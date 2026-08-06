@@ -91,6 +91,10 @@ test("#642 AC2: status --json golden shape — formatVersion 1, per-lane detail,
 
     assert.equal(body.lanes.length, 2);
     const [w1, w2] = body.lanes;
+    // #705: neither seeded lane went through a Supervisor.dispatch()/resume() call (they're
+    // hand-seeded WorkerRows), so there is no `lane-spawned`/`worker-heartbeat` event for
+    // either — every runtime anchor reports its own honest "nothing known yet" value, never a
+    // fabricated dead/alive verdict or a guessed worktree path.
     assert.deepEqual(w1, {
       lane: "lane-12-abcd",
       issue: 12,
@@ -99,6 +103,10 @@ test("#642 AC2: status --json golden shape — formatVersion 1, per-lane detail,
       startedAt: "2026-07-06T10:00:00.000Z",
       endedAt: null,
       settledUsd: null, // in flight — never a fabricated $0
+      pid: null,
+      pidAlive: "unknown",
+      worktreePath: null,
+      lastHeartbeat: null,
     });
     assert.deepEqual(w2, {
       lane: "lane-9-efgh",
@@ -108,12 +116,68 @@ test("#642 AC2: status --json golden shape — formatVersion 1, per-lane detail,
       startedAt: "2026-07-05T09:00:00.000Z",
       endedAt: null,
       settledUsd: 12.5,
+      pid: null,
+      pidAlive: "unknown",
+      worktreePath: null,
+      lastHeartbeat: null,
     });
 
     assert.equal(body.config.available, true);
     assert.equal(body.config.provenance, configPath);
     assert.equal(body.config.lanesMax, 3);
     assert.equal(body.config.dailyBudgetUsd, 50);
+  });
+});
+
+// #705 AC5: the per-lane runtime-anchor fields (pid/pidAlive/worktreePath/lastHeartbeat) are an
+// ADDITIVE change under the formatVersion contract (read-model.ts's StatusDTO doc: "a future
+// field is added here, never removed/renamed/retyped, without bumping the version") — pinned
+// here rather than merely asserted in prose, so a future PR that DID bump formatVersion for an
+// additive change, or that silently dropped/renamed one of the pre-#705 lane fields, fails this
+// test.
+test("#705 AC5: status --json stays formatVersion 1 with the new anchor fields present, and every pre-#705 lane field is untouched — proves the addition is additive, not a breaking change", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const configPath = writeConfig(dir);
+    const seed = new State(dbPath);
+    seed.upsertWorker({
+      name: "lane-additive",
+      issue: 5,
+      session_id: "s1",
+      state: "running",
+      started_at: "2026-08-06T00:00:00.000Z",
+      ended_at: null,
+    });
+    seed.close();
+
+    const r = runCli(["node", "sapwood", "status", dbPath, "--config", configPath, "--json"]);
+    assert.equal(r.code, 0);
+    const body = parseStdout(r);
+
+    // formatVersion did NOT move — an additive field is not a contract bump.
+    assert.equal(body.formatVersion, 1);
+
+    // A "legacy" consumer that only ever destructured the pre-#705 fields still gets exactly
+    // the same values it always did — the new keys are additions, not replacements.
+    const { lane, issue, pr, state, startedAt, endedAt, settledUsd } = body.lanes[0];
+    assert.deepEqual(
+      { lane, issue, pr, state, startedAt, endedAt, settledUsd },
+      {
+        lane: "lane-additive",
+        issue: 5,
+        pr: null,
+        state: "running",
+        startedAt: "2026-08-06T00:00:00.000Z",
+        endedAt: null,
+        settledUsd: null,
+      },
+    );
+
+    // The new fields are genuinely present (not merely "didn't break anything").
+    assert.ok("pid" in body.lanes[0]);
+    assert.ok("pidAlive" in body.lanes[0]);
+    assert.ok("worktreePath" in body.lanes[0]);
+    assert.ok("lastHeartbeat" in body.lanes[0]);
   });
 });
 
