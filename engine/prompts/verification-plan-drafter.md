@@ -118,11 +118,16 @@ of silently evaporating with the rewrite.
 
 If the reviewer's brief says an acceptance criterion asks the producer to record something
 INTO the issue body itself (a "ruling", a design decision, an updated checklist — any variant
-of "update/record this on the issue"), do not draft it that way: the producer is guard-denied
-`gh`'s issue-edit verb (docs/security.md's #652 doctrine — recording into the issue body is
-maintainer-only), so no PR diff can ever satisfy that AC. Rewrite it so the producer's
-deliverable is stating the ruling/decision in the PR description instead — a human transcribes
-it into the issue body afterward via the existing #652 recovery ritual.
+of "update/record this on the issue"), do not draft it that way, and do not redirect it to the
+PR description either: the producer is guard-denied `gh`'s issue-edit verb (docs/security.md's
+#652 doctrine — recording into the issue body is maintainer-only), and never authors the PR
+description — the engine writes that itself, from a fixed boilerplate, only after the worker's
+session has already ended (#605). Drop the acceptance criterion instead of rewriting it toward
+either channel: recording a ruling is the supervisor's own standing job (docs/supervision.md's
+owner-ruling recovery ritual — comment, rewrite the body, advance the #652 cursor), never
+something a dispatched plan needs to ask a producer for. If dropping it leaves `## Acceptance
+criteria` with nothing else checkable, say so plainly in the drafted body and in your final
+message, and recommend `needs-human` rather than a plan with no verifiable content left.
 
 ## Non-negotiables
 

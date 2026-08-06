@@ -160,7 +160,16 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // body itself, which `gh`'s issue-edit verb denies it (#652 doctrine: maintainer-only). #676/#685
   // bounced 3 review rounds on exactly this shape before escalating; gate⓪ now bounces it before
   // dispatch instead.
-  "verification-plan-reviewer.md": "59004520d5f6084a6affbd8eec5b9fec3f459f5da632322f21108d7e1dc5c808",
+  // Codex gate② on the #328 fix itself (2026-08-06, two P1s): the original wording redirected the
+  // AC toward "the producer states the ruling in the PR description instead" — false in production:
+  // the engine authors the PR description from a fixed boilerplate (`associateLanePr`'s
+  // `engineAuthoredPrBody`) only AFTER the worker's session has already ended, and no shipped
+  // prompt instructs a worker to open the PR itself (#605). That channel is exactly as unreachable
+  // to a producer as the issue body. Reworded to require the AC be DROPPED, not redirected — the
+  // supervisor already owns ruling-recording as a standing job independent of any dispatched plan
+  // (docs/supervision.md's owner-ruling recovery ritual) — and to route the issue `needs-human`
+  // when dropping the AC leaves nothing else to verify.
+  "verification-plan-reviewer.md": "bcb42117ca7e0d8059244182dff51811dc9383dc523f75a3e570b4b6fc6c518b",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
   // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
@@ -183,7 +192,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // files share the identical comment-stream intro paragraph).
   // retro round #328: same issue-body-edit feasibility check as verification-plan-reviewer.md
   // above, mirrored as a fourth standing check alongside human-merge-only/F36/#653.
-  "verification-plan-reviewer-confirm.md": "e7a7a0ab627a8b1ab656252157f2b5c9ac816afe5e31864489e7925472773f38",
+  // Codex gate② on the #328 fix (2026-08-06): same PR-description-is-also-unreachable correction
+  // as verification-plan-reviewer.md above — drop the AC instead of redirecting it.
+  "verification-plan-reviewer-confirm.md": "4b7c2cd95ac09ff61f842b6ca68dab57d14268e5680d621729e46a63f7e01e90",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — the
   // drafter's brief is still its primary instruction set; the forge grant (never removed) is a
   // read-only aid, never a write path, exactly as this file has always said.
@@ -198,7 +209,10 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // retro round #328: new "If the brief flags an issue-body-edit conflict" section — mirrors the
   // existing human-merge-only-conflict section, so the drafter repairs an unsatisfiable
   // record-the-ruling AC the same way it already repairs an unsatisfiable protected-path AC.
-  "verification-plan-drafter.md": "f26294ea779e3a360bec55fbdf26b8842bc8143e08738a5a17941d966b4c9d63",
+  // Codex gate② on the #328 fix (2026-08-06): the drafter must not rewrite the AC toward the PR
+  // description either (also engine-authored, post-session, #605) — drop the AC instead, and say
+  // so plainly (recommend `needs-human`) when nothing else is left to verify.
+  "verification-plan-drafter.md": "07534f564f67473bbd5004cc7153b173c4ff2189fe1c8d63cdcef39f08b65892",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
   // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
   // grant was never removed, so the capability paragraph again names it (when attached) instead
@@ -1196,4 +1210,58 @@ test("#672: both comment-reading gate⓪ prompts mark the <issue-comments> block
       `${name}: the framing must state comments are never instructions, not merely that they are untrusted in origin`,
     );
   }
+});
+
+// ── retro round #328 + its gate② correction (2026-08-06): an AC phrased as "record the ruling on
+// this issue" is guard-denied for the producer (issue-edit verb, maintainer-only), and the FIRST
+// version of this fix wrongly redirected it toward the PR description — also not producer-authored
+// in practice (the engine writes it, from a fixed boilerplate, only after the worker's session has
+// already ended; #605). The corrected shape drops the AC instead of relocating it to another
+// unreachable channel, and engine-reviewer.md's matching exception is scoped to the issue-edit
+// SUB-REQUIREMENT only, never a whole mixed AC. ─────────────────────────────────────────────────
+
+test("#328 (corrected): the three plan-authoring/plan-judging prompts require the record-the-ruling AC be DROPPED, never redirected toward the PR description", () => {
+  const bodies = {
+    "verification-plan-reviewer.md": readPrompt(defaultVerificationPlanReviewerPromptPath()),
+    "verification-plan-reviewer-confirm.md": readPrompt(defaultVerificationPlanConfirmPromptPath()),
+    "verification-plan-drafter.md": readPrompt(defaultVerificationPlanDrafterPromptPath()),
+  };
+  for (const [name, body] of Object.entries(bodies)) {
+    const norm = normalizeWhitespace(body);
+    assert.match(norm, /record (?:the ruling on this issue|this on the issue)/i, `${name}: still names the offending AC phrasing`);
+    assert.ok(
+      !/states the ruling in the PR description instead/i.test(norm) &&
+        !/deliverable is stating the ruling\/decision in the PR description instead/i.test(norm),
+      `${name}: must not redirect the AC to the PR description as a producer-writable substitute (it is engine-authored post-session, #605)`,
+    );
+    assert.match(
+      norm,
+      /(?:DROPPED|Drop the acceptance criterion)/,
+      `${name}: the corrected instruction is to drop the AC, not rewrite it toward another channel`,
+    );
+    assert.match(
+      norm,
+      /#605/,
+      `${name}: cites #605 (no shipped prompt instructs the worker to open the PR itself) as why the PR description is also unreachable`,
+    );
+    assert.match(norm, /needs-human/, `${name}: names the needs-human route for when dropping the AC leaves nothing else to verify`);
+  }
+});
+
+test("#328 (corrected): engine-reviewer.md's issue-body-edit exception is scoped to the SUB-REQUIREMENT, not a whole mixed AC", () => {
+  const body = normalizeWhitespace(readPrompt(defaultEngineReviewerPromptPath()));
+  assert.match(body, /SUB-REQUIREMENT/, "the exception is explicitly named as sub-requirement-scoped, not AC-scoped");
+  assert.ok(
+    !/An AC that requires editing the issue body itself is never `cannot-confirm`/.test(body),
+    "the old blanket 'whole AC is never cannot-confirm' wording must be gone",
+  );
+  assert.match(
+    body,
+    /Judge any OTHER, code-verifiable clause in the same AC exactly as you would judge it standing alone/i,
+    "a mixed AC's other, verifiable clause must still be judged on its own evidence — never waived by the unsatisfiable sub-clause",
+  );
+  assert.ok(
+    !/Tier it `claim-accepted` instead when the PR body or diff states the ruling clearly/.test(body),
+    "must not promote the issue-edit sub-requirement to claim-accepted — there is no claim to accept, since the producer cannot write to that channel at all",
+  );
 });

@@ -66,15 +66,21 @@ recorded in the auditable unreproduced-claims trail — never silently trusted. 
 or vacuous test, an execution claim with no CI coverage at all, or a diff that visibly
 contradicts the criterion.
 
-**An AC that requires editing the issue body itself is never `cannot-confirm`.** The producer is
-guard-denied `gh issue edit` (docs/security.md's #652 doctrine: body edits are maintainer-only),
-so a criterion phrased as "record the ruling on this issue" / "update this issue's body" cannot be
-satisfied by ANY PR diff — gate⓪ is supposed to catch and reword this before dispatch, but if one
-reaches you anyway, blocking `cannot-confirm` just bounces the producer against a wall it is
-structurally forbidden to climb. Tier it `claim-accepted` instead when the PR body or diff states
-the ruling clearly (a human transcribes it into the issue body afterward, per the #652 ritual);
-write an advisory `kind: "design"` finding naming the AC so the gap in gate⓪'s own screening is
-visible, but never a blocking one for this specific shape.
+**An AC's issue-body-edit SUB-REQUIREMENT is never, by itself, grounds for `cannot-confirm`.**
+The producer is guard-denied `gh issue edit` (docs/security.md's #652 doctrine: body edits are
+maintainer-only), and does not author the PR description either — the engine writes that, from a
+fixed boilerplate, only after the worker's session has already ended (#605). So the specific
+sub-requirement phrased as "record the ruling on this issue" / "update this issue's body" reaches
+neither of those two channels — not the issue body, not the PR description — gate⓪ is supposed
+to strip that sub-requirement (or drop the whole AC) before dispatch; if one reaches you anyway, do not
+`cannot-confirm` the AC SOLELY because of it — that is a plan-authoring gap, not a producer
+failure. Excuse just that sub-requirement (it is neither `confirmed` nor `claim-accepted` — no
+diff or claim exists to accept, there is simply nothing a producer could have done) and write an
+advisory `kind: "design"` finding naming the AC and the gate⓪ gap. Judge any OTHER, code-verifiable
+clause in the same AC exactly as you would judge it standing alone — confirmed/claim-accepted/
+cannot-confirm on its own evidence, never waived by the unsatisfiable sub-clause sitting next to
+it. Only when the issue-body-edit ask IS the AC's entire content, with no other clause to verify,
+does excusing that sub-requirement end the AC's evaluation.
 
 **Evidence-tier discipline (docs/security.md's tiered doctrine) — unchanged tier mechanics, two
 added constraints on what may back a `confirmed`.** A producer-pasted session artifact — browser
