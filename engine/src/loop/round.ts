@@ -2100,14 +2100,17 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
             );
           }
         } catch (e) {
+          // #703 v2 gate② (P2-3): LOG only, never a ledger write — docs/security.md's own "no
+          // write of any kind" claim for this diagnostic path must hold even on its OWN failure
+          // path, not just its success path. `tickErrors` is an in-memory counter (this
+          // function's own local variable, reset every process start), never appended as a
+          // durable event — a durable `tick-error` here would both contradict the "read-only"
+          // claim and perturb idle-churn's own state fingerprint (computed just above, over this
+          // exact event window) with a diagnostic artifact of the diagnostic itself.
           tickErrors++;
-          try {
-            deps.state.appendEvent("tick-error", {
-              error: `round ${round.round_id}: comment-cursor-stale surfacing read failed: ${String(e)}`,
-            });
-          } catch {
-            /* best-effort — a read-only reporting failure must not itself wedge round close */
-          }
+          (deps.log ?? console.error)(
+            `[sapwood:round] round ${round.round_id}: comment-cursor-stale surfacing read failed (non-fatal, no event recorded): ${String(e)}`,
+          );
         }
       }
       // #374 (F16): the empty-spin breaker — independent of error CLASSIFICATION (item 1's

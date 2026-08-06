@@ -78,6 +78,86 @@ test("malformed marker (non-numeric, not '0'): fails closed", () => {
   }
 });
 
+// ── #703 v2 gate② (P2-1): malformed/blank marker ATTEMPTS are recognized as attempts (fence-
+// aware), not silently read as "no marker at all". ──────────────────────────────────────────────
+
+test("#703 v2 gate② P2-1: a BLANK-value marker attempt (nothing between the colon and -->) fails closed as malformed — never read as 'no marker'", () => {
+  const body = "body\n\n<!-- sapwood:comments-adjudicated-through: -->";
+  const result = computeCommentCursor(body, [entry("1")]);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(
+      result.reason,
+      "malformed-marker",
+      "must be malformed-marker, NOT missing-marker — the attempt is recognized, just invalid",
+    );
+    assert.deepEqual(result.pending, ["1"]);
+  }
+});
+
+test("#703 v2 gate② P2-1: a MULTI-TOKEN marker attempt (two ids separated by whitespace) fails closed as malformed", () => {
+  const body = "body\n\n<!-- sapwood:comments-adjudicated-through: 5 6 -->";
+  const result = computeCommentCursor(body, [entry("1")]);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "malformed-marker");
+});
+
+test("#703 v2 gate② P2-1: a whitespace-only value (tabs/spaces, no visible token) fails closed as malformed", () => {
+  const body = "body\n\n<!-- sapwood:comments-adjudicated-through:   \t  -->";
+  const result = computeCommentCursor(body, [entry("1")]);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "malformed-marker");
+});
+
+test("#703 v2 gate② P2-1: a blank-value marker attempt survives CRLF line splitting exactly like an LF body — still malformed, never invisible", () => {
+  const body = "body\r\n\r\n<!-- sapwood:comments-adjudicated-through: -->\r\n";
+  const result = computeCommentCursor(body, [entry("1")]);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "malformed-marker");
+});
+
+test("#703 v2 gate② P2-1: a VALID marker on a CRLF body is still recognized normally (regression — the attempt-widening must not disturb ordinary CRLF handling)", () => {
+  const body = "body\r\n\r\n<!-- sapwood:comments-adjudicated-through: 5 -->\r\n";
+  const result = computeCommentCursor(body, [entry("5"), entry("7")]);
+  assert.deepEqual(result, { ok: true, cursor: "5", pending: ["7"] });
+});
+
+test("#703 v2 gate② P2-1: a blank/malformed marker attempt INSIDE a fenced code block is still NOT recognized — fence-awareness applies to attempt-detection too, not just valid-value parsing", () => {
+  const body = ["an example for a maintainer:", "", "```", "<!-- sapwood:comments-adjudicated-through: -->", "```"].join("\n");
+  const result = computeCommentCursor(body, [entry("1")]);
+  // No standalone attempt found (fenced) -> missing-marker (there IS a pending comment), never
+  // malformed-marker (which would mean the fenced copy was wrongly treated as authoritative).
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "missing-marker");
+});
+
+test("#703 v2 gate② P2-1: checkMarkerWritePrecondition refuses on a blank-value attempt — 'align repairs them' closed", () => {
+  const result = checkMarkerWritePrecondition("body\n\n<!-- sapwood:comments-adjudicated-through: -->");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "malformed-marker");
+});
+
+test("#703 v2 gate② P2-1: checkMarkerWritePrecondition refuses on a multi-token attempt", () => {
+  const result = checkMarkerWritePrecondition("body\n\n<!-- sapwood:comments-adjudicated-through: 5 6 -->");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "malformed-marker");
+});
+
+test("#703 v2 gate② P2-1: applyRoleBodyRewrite STRIPS a role-authored malformed/blank attempt regardless of validity — 'issue-creation leaves them' closed", () => {
+  const roleBody = "A brand-new proposal.\n\n<!-- sapwood:comments-adjudicated-through: -->";
+  const applied = applyRoleBodyRewrite("", roleBody);
+  assert.ok(!applied.includes("comments-adjudicated-through"), "the role's malformed attempt must never survive into the applied body");
+  assert.deepEqual(findStandaloneMarkerLines(applied), []);
+});
+
+test("#703 v2 gate② P2-1: applyRoleBodyRewrite STRIPS a role's malformed attempt even when the CURRENT body has a real marker to preserve instead", () => {
+  const currentBody = "Old plan.\n\n<!-- sapwood:comments-adjudicated-through: 10 -->";
+  const roleBody = "A revised plan.\n\n<!-- sapwood:comments-adjudicated-through: 5 6 -->";
+  const applied = applyRoleBodyRewrite(currentBody, roleBody);
+  assert.deepEqual(findStandaloneMarkerLines(applied), ["<!-- sapwood:comments-adjudicated-through: 10 -->"]);
+  assert.ok(!applied.includes("5 6"));
+});
+
 test("duplicate marker: fails closed even when both instances agree", () => {
   const body = "body\n\n<!-- sapwood:comments-adjudicated-through: 1 -->\n\nmore text\n\n<!-- sapwood:comments-adjudicated-through: 1 -->";
   const result = computeCommentCursor(body, [entry("1"), entry("2")]);
@@ -151,10 +231,11 @@ test("commentCursorDedupeKey: an invalid-cursor reason is part of the key, disti
   assert.notEqual(commentCursorDedupeKey(invalid), commentCursorDedupeKey(valid));
 });
 
-test("buildCommentCursorPointerComment: embeds the dedupe marker and lists pending ids", () => {
+test("buildCommentCursorPointerComment: embeds the dedupe marker and lists pending ids as backticked raw ids, never '#N' (#703 v2 gate② P2-2)", () => {
   const result = computeCommentCursor("<!-- sapwood:comments-adjudicated-through: 0 -->", [entry("42")]);
   const comment = buildCommentCursorPointerComment(result);
-  assert.match(comment, /#42/);
+  assert.match(comment, /`42`/);
+  assert.ok(!comment.includes("#42"), "never '#42' anywhere — that reads as a GitHub cross-reference, not a comment id");
   assert.match(comment, /needs-human/);
   assert.ok(comment.includes(commentCursorPointerMarker(commentCursorDedupeKey(result))));
 });
@@ -373,17 +454,24 @@ test("findStandaloneMarkerLines: fenced-code-quoted markers are NOT returned —
 
 // ── #703 v2: recovery pointer comment is a COPY-PASTE instruction (ruling item 4) ───────────────
 
-test("buildCommentCursorPointerComment (#703d v2): the recovery text is the EXACT copy-paste marker line, worded 'comment id N' — never '#N'", () => {
+test("buildCommentCursorPointerComment (#703d v2, strengthened per gate② P2-2): the recovery text is the EXACT copy-paste marker line, worded 'comment id N' — and '#N' is absent from the ENTIRE rendered comment, for EVERY pending id, not just the accepted-target sentence", () => {
   const result = computeCommentCursor("no marker here", [
     { id: "10", isEngine: false },
     { id: "5204025029", isEngine: true },
     { id: "20", isEngine: false },
   ]);
+  assert.deepEqual(result.pending, ["10", "20"], "fixture sanity: both non-engine ids are pending");
   const comment = buildCommentCursorPointerComment(result);
   // "20" is the newest non-engine comment by stream position.
   assert.match(comment, /<!-- sapwood:comments-adjudicated-through: 20 -->/, "the exact standalone marker line is present, verbatim");
   assert.match(comment, /comment id `20`/, "worded 'comment id', not a GitHub cross-reference");
-  assert.ok(!comment.includes("#20 --"), "never renders the target as a '#N' GitHub reference inside the marker line itself");
+  // #703 v2 gate② P2-2: the pre-fix code rendered the PENDING-id list as `#10, #20` — a substring
+  // check on just "#20 --" (the accepted-marker line) missed that entirely. Assert `#<id>` is
+  // absent for EVERY pending id, across the WHOLE comment (the pending-list sentence included).
+  for (const id of result.pending) {
+    assert.ok(!comment.includes(`#${id}`), `"#${id}" must not appear anywhere in the rendered comment`);
+    assert.match(comment, new RegExp("`" + id + "`"), `comment id ${id} must appear backticked (raw), e.g. in the pending-id list`);
+  }
 });
 
 test("buildCommentCursorPointerComment (#703d v2): names comment id `0` (not a GitHub reference) when no non-engine comments exist at all", () => {

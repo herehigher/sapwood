@@ -46,8 +46,30 @@ import { createHash } from "node:crypto";
 
 /** A marker candidate is recognized only when, after trimming, it is the ENTIRE line — prose or
  *  inline-code backticks anywhere on the same line (`` `<!-- sapwood:... -->` `` or "see `<!--
- *  ... -->` above") fail this anchor by construction, no separate inline-code detection needed. */
-const MARKER_LINE_RE = /^<!--\s*sapwood:comments-adjudicated-through:\s*(\S+?)\s*-->$/;
+ *  ... -->` above") fail this anchor by construction, no separate inline-code detection needed.
+ *
+ *  #703 v2 gate② (P2-1): the captured group is DELIBERATELY unconstrained (`.*`, matching a
+ *  BLANK value, a multi-token value, or anything else) — this is an ATTEMPT recognizer, not a
+ *  valid-value parser. A marker whose payload doesn't validate (not `"0"`, not a bare digit
+ *  string) is still recognized as a marker LINE, its captured (trimmed) text simply failing
+ *  `computeCommentCursor`'s existing malformed-marker check downstream — exactly like a
+ *  single-token gibberish value already did. Before this widening, a BLANK
+ *  (`<!-- sapwood:comments-adjudicated-through: -->`) or multi-token (two ids separated by
+ *  whitespace) attempt matched NOTHING at all (the old `\s*(\S+?)\s*` required ≥1 non-whitespace
+ *  run with nothing else between the colon and `-->`), so the whole line was invisible to every
+ *  consumer of this scan: `computeCommentCursor` read it as "no marker" (silently DROPPING a
+ *  malformed human attempt instead of failing closed on it), `applyRoleBodyRewrite` could not
+ *  preserve it as the current body's marker (silently discarding/"repairing" a broken human
+ *  marker by treating the body as markerless), and a ROLE's OWN malformed attempt survived
+ *  un-stripped into a rewritten body (issue-creation.ts left it sitting there, looking
+ *  authoritative to a casual reader even though nothing ever recognized it as one). Widening
+ *  attempt-recognition while leaving valid-VALUE parsing exactly as strict as before closes all
+ *  three: a malformed CURRENT attempt now correctly fails closed (`malformed-marker`, refusing
+ *  the role write via `checkMarkerWritePrecondition`/gate⓪'s existing checkpoint) instead of
+ *  reading as absent, and a role-authored attempt — valid-shaped or not — is always stripped by
+ *  `stripStandaloneMarkerLines`, since it is now always RECOGNIZED as an attempt in the first
+ *  place. */
+const MARKER_LINE_RE = /^<!--\s*sapwood:comments-adjudicated-through:(.*)-->$/;
 /** Matches a fence-opening/closing run — 3+ backticks OR 3+ tildes, GFM's two fence characters —
  *  at the start of a (already-trimmed) line. Group 1 is the exact run, so the caller can read off
  *  BOTH which character it is and how long it is (#652 round 2, finding 3 — see
@@ -106,7 +128,12 @@ function scanStandaloneMarkerLines(body: string): Array<{ lineIndex: number; raw
     }
     if (fence !== null) continue;
     const m = MARKER_LINE_RE.exec(line);
-    if (m) found.push({ lineIndex: i, raw: rawLine, value: m[1]! });
+    // #703 v2 gate② (P2-1): MARKER_LINE_RE's capture is now unconstrained (see its own doc) —
+    // `.trim()` here is what used to be the regex's own `\s*...\s*` framing, applied AFTER
+    // matching instead of as part of the pattern, so a blank/whitespace-only payload correctly
+    // normalizes to `""` (fails the downstream numeric-or-"0" check) rather than surviving as
+    // literal whitespace.
+    if (m) found.push({ lineIndex: i, raw: rawLine, value: m[1]!.trim() });
   }
   return found;
 }
@@ -436,7 +463,13 @@ export function buildCommentCursorPointerComment(result: CommentCursorResult): s
   }
   const shown = result.pending.slice(0, POINTER_COMMENT_ID_CAP);
   const overflow = result.pending.length - shown.length;
-  const list = shown.length > 0 ? shown.map((id) => `#${id}`).join(", ") + (overflow > 0 ? ` (+${overflow} more)` : "") : "(none listed)";
+  // #703 v2 gate② (P2-2): rendered as backticked RAW ids — never `#${id}` — everywhere in this
+  // comment, not only in the accepted-marker sentence below. `#N` reads as a GitHub issue/PR
+  // cross-reference (the exact wording trap the ruling's "comment id N, never #N" line exists to
+  // avoid), and a comment id has no special GitHub syntax of its own to render as — a plain
+  // backticked number is the unambiguous, copy-paste-safe form.
+  const list =
+    shown.length > 0 ? shown.map((id) => `\`${id}\``).join(", ") + (overflow > 0 ? ` (+${overflow} more)` : "") : "(none listed)";
   const reasonText = result.ok
     ? "this issue's adjudication cursor is valid but does not yet cover every comment"
     : `this issue's adjudication cursor is invalid (${result.reason}: ${result.detail})`;

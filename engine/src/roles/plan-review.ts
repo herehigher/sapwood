@@ -515,7 +515,16 @@ async function checkGate0CommentCursor(
   deps: PlanReviewDeps,
   issue: Issue,
   roundId: number,
-  checkpoint: "gate0-pre-spend" | "gate0-pre-apply" | "gate0-pre-drafter-write" | "gate0-post-confirm",
+  checkpoint:
+    | "gate0-pre-spend"
+    | "gate0-pre-apply"
+    | "gate0-pre-drafter-write"
+    | "gate0-post-confirm"
+    // #703 v2 gate② (P1-2): the LAST possible checkpoint, immediately before the actual
+    // `forge.updateIssueBody` call in the reviewer approve-with-revision / drafter branches —
+    // see those two call sites' own doc for the race window this closes.
+    | "gate0-write-apply"
+    | "gate0-write-drafter",
   liveBody: string,
   sessionRenderedBody?: string,
 ): Promise<{ blocked: boolean; comments: readonly PRComment[] }> {
@@ -735,10 +744,22 @@ async function reviewOneIssue(
     if (decision.decision === "approve") {
       // #703: the reviewer's own body revision is a ROLE-produced rewrite — never trusted to
       // carry the adjudication marker itself. `applyRoleBodyRewrite` strips whatever marker (if
-      // any) the session emitted and reattaches `liveBodyPreApply`'s marker byte-for-byte (or
-      // none, if `liveBodyPreApply` had none) — see that function's own doc for the full ruling.
+      // any) the session emitted and reattaches the CURRENT body's marker byte-for-byte (or
+      // none, if the current body had none) — see that function's own doc for the full ruling.
       if (decision.body !== undefined) {
-        await deps.forge.updateIssueBody(issue.number, applyRoleBodyRewrite(liveBodyPreApply, decision.body));
+        // #703 v2 gate② (P1-2): `liveBodyPreApply` was snapshotted BEFORE the pre-apply
+        // `checkGate0CommentCursor` call's own async comment/actor fetch just above — a human
+        // editing the marker (or anything else) DURING that fetch would otherwise have the
+        // write below still silently use the now-STALE `liveBodyPreApply` snapshot,
+        // overwriting/re-advancing their edit without ever having re-checked it. Re-read
+        // IMMEDIATELY at the write boundary and re-run the SAME checkpoint (drift-only this
+        // time — `writeTimeBody` vs `liveBodyPreApply`): any change refuses the write via the
+        // identical escalation path (needs-human + pointer comment), never a silent overwrite.
+        const writeTimeBody = await deps.forge.getIssueBody(issue.number);
+        if ((await checkGate0CommentCursor(deps, issue, roundId, "gate0-write-apply", writeTimeBody, liveBodyPreApply)).blocked) {
+          return false;
+        }
+        await deps.forge.updateIssueBody(issue.number, applyRoleBodyRewrite(writeTimeBody, decision.body));
       }
       // #214 decision C: WRITE-AHEAD the load-bearing `plan-approved` event BEFORE the label
       // (#232 stance — a durable fact must exist before its externally-visible side effect).
@@ -900,10 +921,18 @@ async function reviewOneIssue(
     if ((await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-drafter-write", liveBodyPreDrafterWrite, currentBody)).blocked) {
       return false;
     }
+    // #703 v2 gate② (P1-2): same race this checkpoint's own async comment/actor fetch just above
+    // opens as the reviewer's approve-with-revision branch (see its own doc) — re-read
+    // IMMEDIATELY at the write boundary and re-check drift against `liveBodyPreDrafterWrite`
+    // before ever using it to normalize the marker.
+    const writeTimeBody = await deps.forge.getIssueBody(issue.number);
+    if ((await checkGate0CommentCursor(deps, issue, roundId, "gate0-write-drafter", writeTimeBody, liveBodyPreDrafterWrite)).blocked) {
+      return false;
+    }
     // #703: same marker-preservation rule as the reviewer's approve-with-revision branch above —
     // the drafter's ENTIRE deliverable is a role-produced body, so its output can never carry an
-    // authoritative marker; `liveBodyPreDrafterWrite`'s marker (or lack of one) wins byte-for-byte.
-    await deps.forge.updateIssueBody(issue.number, applyRoleBodyRewrite(liveBodyPreDrafterWrite, draftValidated.body));
+    // authoritative marker; the CURRENT body's marker (or lack of one) wins byte-for-byte.
+    await deps.forge.updateIssueBody(issue.number, applyRoleBodyRewrite(writeTimeBody, draftValidated.body));
     // Loop back -> re-run the reviewer against the drafter's edit (body refetched above).
   }
   // Unreachable in practice (the loop always returns via one of the branches above before this

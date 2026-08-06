@@ -629,6 +629,34 @@ test("runRounds (#703 v2, ruling item 5): an idle round with NO comment-cursor-s
   deps.state.close();
 });
 
+test("runRounds (#703 v2 gate② P2-3): a READ failure in the empty-pool surfacing path is READ-ONLY even on ITS OWN failure — logged only, ZERO new events appended (docs/security.md's 'no write of any kind' claim must hold on the failure path too, not just the success path)", async () => {
+  const { sleep } = mkSleepSpy();
+  const logLines: string[] = [];
+  const deps = baseDeps({ sleep, log: (msg) => logLines.push(msg) });
+  // Induce a read failure ONLY for the surfacing path's own `eventsAfterId(..., ["comment-
+  // cursor-stale"])` call — every OTHER kinds query (idle-churn's own fingerprint/streak reads,
+  // etc.) is untouched, so this isolates exactly the one read this fix concerns.
+  const realEventsAfterId = deps.state.eventsAfterId.bind(deps.state);
+  deps.state.eventsAfterId = (afterId: number, kinds: string[]) => {
+    if (kinds.includes("comment-cursor-stale")) throw new Error("simulated read failure");
+    return realEventsAfterId(afterId, kinds);
+  };
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRoundsGuarded(deps);
+  stopSafety();
+  assert.equal(result.rounds, 1, "the round still closes — a read-only diagnostic failure never wedges round close");
+  assert.ok(
+    logLines.some((l) => l.includes("comment-cursor-stale surfacing read failed")),
+    "the failure is logged",
+  );
+  assert.equal(
+    deps.state.eventsSince("1970-01-01T00:00:00.000Z", ["tick-error"]).length,
+    0,
+    "ZERO ledger writes from this diagnostic path, even on its own failure — no tick-error event",
+  );
+  deps.state.close();
+});
+
 test("runRounds #123: a closed round leaves a persisted, schema-valid round artifact with endedAt set", async () => {
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ sleep });
