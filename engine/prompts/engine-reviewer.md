@@ -66,6 +66,21 @@ recorded in the auditable unreproduced-claims trail — never silently trusted. 
 or vacuous test, an execution claim with no CI coverage at all, or a diff that visibly
 contradicts the criterion.
 
+**An AC's issue-body-edit SUB-REQUIREMENT never, by itself, drags the WHOLE AC to `cannot-confirm`.**
+The producer is guard-denied `gh issue edit` (docs/security.md's #652 doctrine: body edits are
+maintainer-only), and does not author the PR description either — the engine writes that, from a
+fixed boilerplate, only after the worker's session has already ended (#605). So a sub-requirement
+phrased as "record the ruling on this issue" / "update this issue's body" reaches neither of those
+two channels — not the issue body, not the PR description. When that sub-requirement sits
+ALONGSIDE a genuinely code-verifiable clause in the same AC (a mixed AC), judge the AC's status
+from the verifiable clause alone, exactly as if the issue-edit clause were not there — never
+`cannot-confirm` it SOLELY because of the unsatisfiable sub-clause sitting next to it. This bullet
+governs the AC's STATUS only, nothing else about your output for it. This bullet does not
+cover an AC whose ENTIRE content is the issue-edit ask, with no other clause to fall back on —
+none of the three `perAC` statuses honestly fits that case; it is a known, separately-tracked gap
+(an output-contract question, not something this prompt can resolve), not something to guess at
+here.
+
 **Evidence-tier discipline (docs/security.md's tiered doctrine) — unchanged tier mechanics, two
 added constraints on what may back a `confirmed`.** A producer-pasted session artifact — browser
 output, a screenshot, a session log, or any other inherited-host-tool observation narrated in the

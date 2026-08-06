@@ -1187,3 +1187,86 @@ test("#672: both comment-reading gate⓪ prompts mark the <issue-comments> block
     );
   }
 });
+
+// ── retro round #328, re-scoped after its gate② correction produced a SECOND unrepresentable
+// design (2026-08-06 supervisor ruling): a plan-authoring/plan-judging fix that tells gate⓪/the
+// drafter to "drop" or "reword toward the PR description" a record-the-ruling AC is prompt text
+// prescribing an output the machinery cannot express — validateDrafterOutput rejects a body with
+// zero checkbox ACs, and engine-reviewer.md's `perAC` schema has exactly three statuses, none of
+// which fits an AC whose entire content is unverifiable. Fixing the sole-AC case needs an
+// output-contract change (a real "not producer-verifiable" status, or a real drafter escalation
+// output), not prompt wording — that is tracked as a follow-up, deliberately out of scope here.
+// This PR keeps ONLY the one improvement that needs no new state: engine-reviewer.md's exception
+// is scoped to the issue-edit SUB-REQUIREMENT of a MIXED AC, whose other, code-verifiable clause
+// still gets a normal status computed from real evidence — a legal `perAC` entry today, with or
+// without this fix. verification-plan-reviewer.md/-confirm.md/-drafter.md carry no #328 content
+// at all (their SNAPSHOT_HASHES above are unchanged from main) — the sole-AC case is untouched by
+// this PR.
+//
+// Third gate② round on this same bullet (still 2026-08-06): the first version told the reviewer
+// to write an advisory `kind: "design"` finding for the sub-clause — but `finding-axes.ts`'s
+// `ADVISORY_ELIGIBLE_KINDS` is `{style, test-coverage}` only; `effectiveSeverity` forces every
+// other kind (including `"design"`) back to `"blocking"`, and `deriveApprovalResult` rejects the
+// WHOLE PR on any blocking finding regardless of `perAC` status — so the mandated finding
+// silently re-blocked the exact AC this bullet exists to unblock (confirmed by reading
+// finding-axes.ts directly). Owner ruling (2026-08-06), superseding a proposed "switch to a
+// non-blocking channel" fix: delete the finding instruction UNCONDITIONALLY, don't look for or
+// switch to any other channel even where one exists — mandating a finding (blocking, advisory, or
+// "optionally note it") strips the reviewing model's own judgment about whether the sub-clause is
+// worth reporting at all. The bullet says nothing about emitting anything; it governs the AC's
+// STATUS only. If the reviewer independently decides the sub-clause is worth a finding, that is
+// its own call, on its own reading — never something this prompt instructs. ────────────────────
+
+test("#328 (re-scoped): engine-reviewer.md's issue-body-edit exception governs the AC's STATUS only — it says nothing about emitting a finding (mandatory, advisory, or optional) for the sub-clause, and explicitly declines to prescribe an outcome for the AC-is-entirely-unverifiable case", () => {
+  const body = normalizeWhitespace(readPrompt(defaultEngineReviewerPromptPath()));
+  assert.match(body, /SUB-REQUIREMENT/, "the exception is explicitly named as sub-requirement-scoped, not AC-scoped");
+  assert.ok(
+    !/An AC that requires editing the issue body itself is never `cannot-confirm`/.test(body),
+    "the old blanket 'whole AC is never cannot-confirm' wording must be gone",
+  );
+  assert.match(
+    body,
+    /judge the AC's status from the verifiable clause alone, exactly as if the issue-edit clause were not there/i,
+    "a mixed AC's status must come from its verifiable clause alone — never waived by the unsatisfiable sub-clause, and never a fourth status",
+  );
+  assert.ok(
+    !/Tier it `claim-accepted` instead when the PR body or diff states the ruling clearly/.test(body),
+    "must not promote the issue-edit sub-requirement to claim-accepted — there is no claim to accept, since the producer cannot write to that channel at all",
+  );
+  assert.ok(
+    !/Write an advisory `kind: "design"` finding/.test(body),
+    "must not mandate a finding for the sub-clause — `design` is not in ADVISORY_ELIGIBLE_KINDS, so the engine would force it back to blocking and re-reject the AC this bullet unblocks",
+  );
+  assert.ok(
+    !/findings` entry for the sub-clause/i.test(body) && !/raise a finding/i.test(body) && !/optionally note it/i.test(body),
+    "must say NOTHING about emitting a finding for the sub-clause — required, non-blocking-channel, or optional all strip the reviewing model's own judgment; owner ruling is silence, not a softer instruction",
+  );
+  assert.match(
+    body,
+    /This bullet governs the AC's STATUS only, nothing else about your output for it/i,
+    "must scope the bullet explicitly to AC status, leaving whether to report the sub-clause entirely to the reviewer's own judgment",
+  );
+  assert.match(
+    body,
+    /This bullet does not cover an AC whose ENTIRE content is the issue-edit ask.*none of the three `perAC` statuses honestly fits that case/is,
+    "the sole-AC case must be named as explicitly out of scope, not resolved by inventing a status the schema has no room for",
+  );
+});
+
+test("#328 (re-scoped): verification-plan-reviewer.md, verification-plan-reviewer-confirm.md, and verification-plan-drafter.md carry no #328-era record-the-ruling AC instruction — the sole-AC gap is a machinery follow-up, not prompt wording", () => {
+  const bodies = {
+    "verification-plan-reviewer.md": readPrompt(defaultVerificationPlanReviewerPromptPath()),
+    "verification-plan-reviewer-confirm.md": readPrompt(defaultVerificationPlanConfirmPromptPath()),
+    "verification-plan-drafter.md": readPrompt(defaultVerificationPlanDrafterPromptPath()),
+  };
+  for (const [name, body] of Object.entries(bodies)) {
+    assert.ok(
+      !/record the ruling on this issue/i.test(body),
+      `${name}: must not (re)introduce the record-the-ruling AC instruction without the machinery to represent its outcome`,
+    );
+    assert.ok(
+      !/be DROPPED/.test(body),
+      `${name}: must not instruct that the AC be dropped — a sole-AC drop yields zero checkboxes, which validateDrafterOutput rejects`,
+    );
+  }
+});
