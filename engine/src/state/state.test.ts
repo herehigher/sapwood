@@ -5,7 +5,15 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import type { EventKind } from "./event-kinds/index.js";
-import { backfillLegacyRoundCursors, MIGRATIONS, type ModelUsageEntry, SCHEMA_VERSION, SqliteBusyError, State } from "./state.js";
+import {
+  backfillLegacyRoundCursors,
+  type LaneSpawnFact,
+  MIGRATIONS,
+  type ModelUsageEntry,
+  SCHEMA_VERSION,
+  SqliteBusyError,
+  State,
+} from "./state.js";
 
 // In-memory DB keeps tests hermetic (no disk, no cleanup). WAL pragma is a no-op on
 // :memory: but the migration/version logic is identical.
@@ -4205,7 +4213,7 @@ test("withBusyNormalization: a SqliteBusyError raised by a NESTED readTransactio
 test("latestLaneSpawnFact: no lane-spawned event for the worker -> null, never a fabricated fact", () => {
   const st = new State(":memory:");
   st.appendEvent("lane-spawned", { worker: "lane-other", issue: 1, pid: 111, worktreePath: "/tmp/lane-other" });
-  assert.equal(st.latestLaneSpawnFact("lane-x"), null);
+  assert.equal(st.latestLaneSpawnFact("lane-x", 1), null);
   st.close();
 });
 
@@ -4213,21 +4221,34 @@ test("latestLaneSpawnFact: newest event wins by id — a resume's fresh pid/work
   const st = new State(":memory:");
   st.appendEvent("lane-spawned", { worker: "lane-x", issue: 1, pid: 111, worktreePath: "/tmp/lane-x" });
   st.appendEvent("lane-spawned", { worker: "lane-x", issue: 1, pid: 222, worktreePath: "/tmp/lane-x" });
-  assert.deepEqual(st.latestLaneSpawnFact("lane-x"), { pid: 222, worktreePath: "/tmp/lane-x" });
+  assert.deepEqual(st.latestLaneSpawnFact("lane-x", 1), { pid: 222, worktreePath: "/tmp/lane-x" });
   st.close();
 });
 
 test("latestLaneSpawnFact: a null pid (the adoption branch's own honest 'no wrapper_pid on record' case) is returned as null, distinct from the worktreePath-absent 'no fact at all' case", () => {
   const st = new State(":memory:");
   st.appendEvent("lane-spawned", { worker: "lane-x", issue: 1, pid: null, worktreePath: "/tmp/lane-x" });
-  assert.deepEqual(st.latestLaneSpawnFact("lane-x"), { pid: null, worktreePath: "/tmp/lane-x" });
+  assert.deepEqual(st.latestLaneSpawnFact("lane-x", 1), { pid: null, worktreePath: "/tmp/lane-x" });
+  st.close();
+});
+
+// #705 gate② P1-1: a lane NAME reused for a different issue must not inherit the older issue's
+// fact — the same reuse hazard lane-state-label.ts's own (worker, pr) scoping exists to close.
+// LATENT in production today (dispatch() never passes an explicit name and refuses stale-
+// sentinel reuse), but pinned here as a structural guarantee of the read, not the write path.
+test("latestLaneSpawnFact (#705 gate② P1-1 regression): a lane name carrying an OLDER issue's spawn fact yields null under a DIFFERENT issue number, never the stale fact", () => {
+  const st = new State(":memory:");
+  st.appendEvent("lane-spawned", { worker: "lane-x", issue: 1, pid: 111, worktreePath: "/tmp/issue-1" });
+  assert.equal(st.latestLaneSpawnFact("lane-x", 2), null);
+  // The original issue's fact is still there, untouched, when queried under its OWN issue.
+  assert.deepEqual(st.latestLaneSpawnFact("lane-x", 1), { pid: 111, worktreePath: "/tmp/issue-1" });
   st.close();
 });
 
 test("latestHeartbeatForWorker: no worker-heartbeat event for the worker -> null", () => {
   const st = new State(":memory:");
   st.appendEvent("worker-heartbeat", { worker: "lane-other", issue: 1, elapsedSec: 5 });
-  assert.equal(st.latestHeartbeatForWorker("lane-x"), null);
+  assert.equal(st.latestHeartbeatForWorker("lane-x", 1), null);
   st.close();
 });
 
@@ -4235,9 +4256,134 @@ test("latestHeartbeatForWorker: newest event wins by id, carrying the events tab
   const st = new State(":memory:");
   st.appendEvent("worker-heartbeat", { worker: "lane-x", issue: 1, elapsedSec: 5 });
   st.appendEvent("worker-heartbeat", { worker: "lane-x", issue: 1, elapsedSec: 10 });
-  const hb = st.latestHeartbeatForWorker("lane-x");
+  const hb = st.latestHeartbeatForWorker("lane-x", 1);
   assert.ok(hb);
   assert.ok(hb.id > 0);
   assert.ok(typeof hb.ts === "string" && hb.ts.length > 0);
+  st.close();
+});
+
+// #705 gate② P1-1 regression, heartbeat side: same lane-reuse hazard, same fix.
+test("latestHeartbeatForWorker (#705 gate② P1-1 regression): a lane name carrying an OLDER issue's heartbeat yields null under a DIFFERENT issue number, never the stale beat", () => {
+  const st = new State(":memory:");
+  st.appendEvent("worker-heartbeat", { worker: "lane-x", issue: 1, elapsedSec: 5 });
+  assert.equal(st.latestHeartbeatForWorker("lane-x", 2), null);
+  assert.ok(st.latestHeartbeatForWorker("lane-x", 1) != null);
+  st.close();
+});
+
+// ── #705 gate② P2-3: recordDispatch / recordLaneRowAndSpawnFact / registerCanaryDispatch commit
+// the worker-row transition and the lane-spawned fact atomically ────────────────────────────
+
+test("recordDispatch: the worker row, the dispatched event, AND the lane-spawned event all land — one call, one fact set", () => {
+  const st = new State(":memory:");
+  st.recordDispatch(
+    { name: "lane-a", issue: 1, session_id: "s1", state: "running", started_at: "2026-08-06T00:00:00.000Z", ended_at: null },
+    "some title",
+    { worker: "lane-a", issue: 1, pid: 4242, worktreePath: "/tmp/lane-a" },
+  );
+  assert.ok(st.getWorker("lane-a") != null);
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["dispatched"]).length, 1);
+  assert.deepEqual(st.latestLaneSpawnFact("lane-a", 1), { pid: 4242, worktreePath: "/tmp/lane-a" });
+  st.close();
+});
+
+test("recordDispatch: spawnFact null (a Supervisor with no opinion on live-process identity) commits the row + dispatched event with NO lane-spawned event", () => {
+  const st = new State(":memory:");
+  st.recordDispatch(
+    { name: "lane-a", issue: 1, session_id: "s1", state: "running", started_at: "2026-08-06T00:00:00.000Z", ended_at: null },
+    "some title",
+    null,
+  );
+  assert.ok(st.getWorker("lane-a") != null);
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["lane-spawned"]).length, 0);
+  st.close();
+});
+
+// A circular-reference payload is the cleanest way to force appendEvent's own JSON.stringify to
+// throw MID-TRANSACTION (no DB-level fault injection needed) — proving recordDispatch/
+// recordLaneRowAndSpawnFact roll back the row transition too, rather than leaving it committed
+// with no lane-spawned event ever able to follow (the exact permanently-null-anchors hazard
+// #705 gate② P2-3 exists to close).
+function circularPayload(): Record<string, unknown> {
+  const p: Record<string, unknown> = { worker: "lane-a", issue: 1 };
+  p.self = p;
+  return p;
+}
+
+test("recordDispatch: a throw appending the lane-spawned event (circular payload) rolls back the row + dispatched-event writes too — no half-committed state", () => {
+  const st = new State(":memory:");
+  const circularSpawnFact = circularPayload() as unknown as LaneSpawnFact;
+  assert.throws(() =>
+    st.recordDispatch(
+      { name: "lane-a", issue: 1, session_id: "s1", state: "running", started_at: "2026-08-06T00:00:00.000Z", ended_at: null },
+      "title",
+      circularSpawnFact,
+    ),
+  );
+  // Nothing committed: not the row, not the dispatched event.
+  assert.equal(st.getWorker("lane-a"), undefined);
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["dispatched"]).length, 0);
+  st.close();
+});
+
+test("recordLaneRowAndSpawnFact: row + lifecycle event + lane-spawned event all land in ONE call", () => {
+  const st = new State(":memory:");
+  st.upsertWorker({
+    name: "lane-b",
+    issue: 2,
+    session_id: "orig",
+    state: "handoff",
+    started_at: "2026-08-06T00:00:00.000Z",
+    ended_at: null,
+  });
+  st.recordLaneRowAndSpawnFact(
+    { name: "lane-b", issue: 2, session_id: "s2", state: "running", started_at: "2026-08-06T00:05:00.000Z", ended_at: null },
+    "resumed",
+    { worker: "lane-b", issue: 2, attempt: 1 },
+    { worker: "lane-b", issue: 2, pid: 555, worktreePath: "/tmp/lane-b" },
+  );
+  assert.equal(st.getWorker("lane-b")?.state, "running");
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["resumed"]).length, 1);
+  assert.deepEqual(st.latestLaneSpawnFact("lane-b", 2), { pid: 555, worktreePath: "/tmp/lane-b" });
+  st.close();
+});
+
+test("recordLaneRowAndSpawnFact: a throw appending the lifecycle event (circular payload) rolls back the row transition too — no half-committed state", () => {
+  const st = new State(":memory:");
+  st.upsertWorker({
+    name: "lane-c",
+    issue: 3,
+    session_id: "orig",
+    state: "handoff",
+    started_at: "2026-08-06T00:00:00.000Z",
+    ended_at: null,
+  });
+  assert.throws(() =>
+    st.recordLaneRowAndSpawnFact(
+      { name: "lane-c", issue: 3, session_id: "s3", state: "running", started_at: "2026-08-06T00:05:00.000Z", ended_at: null },
+      "resumed",
+      circularPayload(),
+      { worker: "lane-c", issue: 3, pid: 1, worktreePath: "/tmp/lane-c" },
+    ),
+  );
+  // The row transition never committed — still the ORIGINAL handoff row, not the new "running" one.
+  assert.equal(st.getWorker("lane-c")?.state, "handoff");
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["resumed"]).length, 0);
+  assert.equal(st.latestLaneSpawnFact("lane-c", 3), null);
+  st.close();
+});
+
+test("registerCanaryDispatch: the worker row, canary_worker assignment, AND (when reported) the lane-spawned event all land in ONE call", () => {
+  const st = new State(":memory:");
+  st.enterPark("llm", "rate_limit_error", 42, "2026-08-06T00:00:00.000Z");
+  st.registerCanaryDispatch(
+    { name: "lane-canary", issue: 1, session_id: "s1", state: "running", started_at: "2026-08-06T00:00:00.000Z", ended_at: null },
+    "llm",
+    "title",
+    { worker: "lane-canary", issue: 1, pid: 999, worktreePath: "/tmp/lane-canary" },
+  );
+  assert.ok(st.getWorker("lane-canary") != null);
+  assert.deepEqual(st.latestLaneSpawnFact("lane-canary", 1), { pid: 999, worktreePath: "/tmp/lane-canary" });
   st.close();
 });

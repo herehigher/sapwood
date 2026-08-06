@@ -1487,7 +1487,8 @@ test("status (#705): a real lane-spawned + worker-heartbeat ledger produces pid/
     assert.equal(textResult.code, 0);
     assert.match(textResult.stdout, /pid 999999999 \(DEAD\)/);
     assert.match(textResult.stdout, /worktree \/tmp\/lane-anchor-1/);
-    assert.match(textResult.stdout, /heartbeat \d+s ago/);
+    // #705 gate② P1-2: id + ts + ageSec all render, not just the age.
+    assert.match(textResult.stdout, /heartbeat #\d+ \S+ \(\d+s ago\)/);
     assert.match(textResult.stdout, /BELIEF-VS-REALITY MISMATCH/);
 
     const jsonResult = runCli(["node", "sapwood", "status", dbPath, "--json"]);
@@ -1634,7 +1635,8 @@ test("formatStatus (#705): a heartbeat renders its age in seconds", () => {
       },
     }),
   );
-  assert.match(out, /heartbeat 42s ago/);
+  // #705 gate② P1-2: id + ts + ageSec all render, not just the age.
+  assert.match(out, /heartbeat #7 2026-08-06T00:00:00\.000Z \(42s ago\)/);
 });
 
 // ── #168: sapwood status surfaces the parked state ──────────────────────────────────────────

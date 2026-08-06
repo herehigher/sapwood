@@ -609,7 +609,12 @@ export function formatStatus(s: StatusSnapshot): string {
     const pidStr =
       a.pid == null ? "pid unknown" : `pid ${a.pid} (${a.pidAlive === true ? "alive" : a.pidAlive === false ? "DEAD" : "alive: unknown"})`;
     const worktreeStr = a.worktreePath == null ? "worktree unknown" : `worktree ${a.worktreePath}`;
-    const hbStr = a.lastHeartbeat == null ? "no heartbeat yet" : `heartbeat ${a.lastHeartbeat.ageSec}s ago`;
+    // #705 gate② P1-2: id + ts + ageSec — an operator correlating a stale heartbeat with the
+    // ledger needs the event id/timestamp, not just how old it is.
+    const hbStr =
+      a.lastHeartbeat == null
+        ? "no heartbeat yet"
+        : `heartbeat #${a.lastHeartbeat.id} ${a.lastHeartbeat.ts} (${a.lastHeartbeat.ageSec}s ago)`;
     // #705 AC3: a lane the LEDGER believes is running/fixing but whose pid is confirmed dead is
     // the feature — render it visibly distinct, never blended into an ordinary status line.
     const mismatch = (w.state === "running" || w.state === "fixing") && a.pidAlive === false;
@@ -772,7 +777,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
       // state.spentUsdForWorker already uses inside buildStatusDTO's own lanes.map, not a new
       // aggregation pattern.
       const laneAnchors: Record<string, LaneAnchorsDTO> = Object.fromEntries(
-        active.map((w) => [w.name, buildLaneAnchors(state, w.name, probePidAlive, now)]),
+        active.map((w) => [w.name, buildLaneAnchors(state, w.name, w.issue, probePidAlive, now)]),
       );
       const snapshot: StatusSnapshot = {
         dbPath,

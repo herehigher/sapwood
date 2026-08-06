@@ -8112,7 +8112,7 @@ test("#705 tick RESUME: a Supervisor reporting pid/worktreePath on resume() also
   st.appendEvent("lane-spawned", { worker: "lane-705r", issue: 13, pid: 111, worktreePath: "/tmp/lane-705r" });
   sup.resume = async (_issue, worker) => ({ name: worker, sessionId: "resumed-sess", pid: 222, worktreePath: "/tmp/lane-705r" });
   await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
-  assert.deepEqual(st.latestLaneSpawnFact("lane-705r"), { pid: 222, worktreePath: "/tmp/lane-705r" });
+  assert.deepEqual(st.latestLaneSpawnFact("lane-705r", 13), { pid: 222, worktreePath: "/tmp/lane-705r" });
   st.close();
 });
 

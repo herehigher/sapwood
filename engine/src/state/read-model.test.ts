@@ -5,53 +5,96 @@
 // no-heartbeat-yet matrix the issue's AC calls for, with an INJECTED pidProbe throughout — never
 // a bare `process.kill` call in a test (no timing/subprocess-speed dependence, repo doctrine).
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { buildLaneAnchors, probePidAlive } from "./read-model.js";
 
 // ── probePidAlive ───────────────────────────────────────────────────────────────────────────
+//
+// #705 gate② P2-4: every case below drives `probePidAlive` through an INJECTED `killFn` — a
+// synthetic errno fake, never a real spawned subprocess. A real subprocess made the "dead" case
+// a race (pid reuse between exit and probe is not excludable in principle) and violated the
+// repo's no-timing-dependent-tests doctrine (subprocess/OS scheduling behavior deciding a test's
+// outcome). Every branch of the real `process.kill` errno matrix is pinned deterministically.
 
-test("probePidAlive: the CURRENT process's own pid -> true (a real, live, signalable process)", () => {
+function errno(code: string): () => never {
+  return () => {
+    const e = new Error(code) as NodeJS.ErrnoException;
+    e.code = code;
+    throw e;
+  };
+}
+
+test("probePidAlive: killFn succeeds -> true (the process exists and is signalable)", () => {
+  assert.equal(
+    probePidAlive(4242, () => {
+      /* signal 0 delivered successfully */
+    }),
+    true,
+  );
+});
+
+test("probePidAlive: killFn throws ESRCH -> false — the ONLY case that means confirmed dead", () => {
+  assert.equal(probePidAlive(4242, errno("ESRCH")), false);
+});
+
+test("probePidAlive: killFn throws EPERM -> true — the process exists, just isn't signalable by us (POSIX kill(2) semantics)", () => {
+  assert.equal(probePidAlive(4242, errno("EPERM")), true);
+});
+
+test('probePidAlive: killFn throws an unrecognized errno (e.g. EACCES) -> "unknown", never coerced to false', () => {
+  assert.equal(probePidAlive(4242, errno("EACCES")), "unknown");
+});
+
+test('probePidAlive: killFn throws something with no `code` at all -> "unknown"', () => {
+  assert.equal(
+    probePidAlive(4242, () => {
+      throw new Error("platform surprise, no errno code");
+    }),
+    "unknown",
+  );
+});
+
+test('probePidAlive: a non-positive or non-integer pid -> "unknown", never coerced to false, and the probe is never called', () => {
+  let calls = 0;
+  const killFn = () => {
+    calls++;
+  };
+  assert.equal(probePidAlive(0, killFn), "unknown");
+  assert.equal(probePidAlive(-1, killFn), "unknown");
+  assert.equal(probePidAlive(1.5, killFn), "unknown");
+  assert.equal(calls, 0);
+});
+
+test("probePidAlive: with no killFn argument, defaults to the real process.kill (production behavior) — self pid is alive", () => {
   assert.equal(probePidAlive(process.pid), true);
-});
-
-test("probePidAlive: a pid that just exited -> false (confirmed dead, ESRCH) — a real subprocess, no timer/sleep involved", () => {
-  // Deterministic, not timing-dependent: spawnSync BLOCKS until the child has fully exited, so
-  // there is no race window to wait out — by the time spawnSync returns, `pid` is guaranteed
-  // reaped. Re-use of that exact pid by an unrelated process in the instant between exit and
-  // this assertion is not excludable in principle, but is the same accepted-negligible risk
-  // worker.test.ts's own `wrapper_pid: 999_999_999` "obviously dead" convention exists to avoid
-  // — unlike that hard-coded literal, this test wants a pid PROVEN dead by a real exit, so it
-  // accepts the same real-world assumption every "spawn, wait, probe" liveness check makes.
-  const { pid } = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
-  assert.ok(typeof pid === "number" && pid > 0);
-  assert.equal(probePidAlive(pid), false);
-});
-
-test('probePidAlive: a non-positive or non-integer pid -> "unknown", never coerced to false', () => {
-  assert.equal(probePidAlive(0), "unknown");
-  assert.equal(probePidAlive(-1), "unknown");
-  assert.equal(probePidAlive(1.5), "unknown");
 });
 
 // ── buildLaneAnchors ────────────────────────────────────────────────────────────────────────
 
-function fakeState(spawnFact: { pid: number | null; worktreePath: string } | null, heartbeat: { id: number; ts: string } | null) {
+/** #705 gate② P1-1: the fake honors the SAME (worker, issue) scoping the real State methods do
+ *  — `facts`/`heartbeats` are keyed by `${worker}#${issue}`, so a test can seed a fact for one
+ *  issue and prove it is invisible under a different issue number for the SAME worker name
+ *  (the lane-reuse regression the reviewer asked for). */
+function fakeState(
+  facts: Record<string, { pid: number | null; worktreePath: string }>,
+  heartbeats: Record<string, { id: number; ts: string }>,
+) {
   return {
-    latestLaneSpawnFact: (_worker: string) => spawnFact,
-    latestHeartbeatForWorker: (_worker: string) => heartbeat,
+    latestLaneSpawnFact: (worker: string, issue: number) => facts[`${worker}#${issue}`] ?? null,
+    latestHeartbeatForWorker: (worker: string, issue: number) => heartbeats[`${worker}#${issue}`] ?? null,
   };
 }
 
 test("buildLaneAnchors: no spawn fact, no heartbeat -> every anchor reports its own honest 'nothing known', never a guess", () => {
-  const anchors = buildLaneAnchors(fakeState(null, null), "lane-x", () => true, new Date("2026-08-06T00:00:00.000Z"));
+  const anchors = buildLaneAnchors(fakeState({}, {}), "lane-x", 1, () => true, new Date("2026-08-06T00:00:00.000Z"));
   assert.deepEqual(anchors, { pid: null, pidAlive: "unknown", worktreePath: null, lastHeartbeat: null });
 });
 
 test("buildLaneAnchors: a known pid probed ALIVE -> pidAlive true, worktreePath carried through", () => {
   const anchors = buildLaneAnchors(
-    fakeState({ pid: 4242, worktreePath: "/tmp/lane-x" }, null),
+    fakeState({ "lane-x#1": { pid: 4242, worktreePath: "/tmp/lane-x" } }, {}),
     "lane-x",
+    1,
     () => true,
     new Date("2026-08-06T00:00:00.000Z"),
   );
@@ -60,8 +103,9 @@ test("buildLaneAnchors: a known pid probed ALIVE -> pidAlive true, worktreePath 
 
 test("buildLaneAnchors: a known pid probed DEAD -> pidAlive false — the belief-vs-reality case #705 exists for", () => {
   const anchors = buildLaneAnchors(
-    fakeState({ pid: 4242, worktreePath: "/tmp/lane-x" }, null),
+    fakeState({ "lane-x#1": { pid: 4242, worktreePath: "/tmp/lane-x" } }, {}),
     "lane-x",
+    1,
     () => false,
     new Date("2026-08-06T00:00:00.000Z"),
   );
@@ -70,8 +114,9 @@ test("buildLaneAnchors: a known pid probed DEAD -> pidAlive false — the belief
 
 test('buildLaneAnchors: a known pid whose probe is INCONCLUSIVE -> pidAlive "unknown", never coerced to false', () => {
   const anchors = buildLaneAnchors(
-    fakeState({ pid: 4242, worktreePath: "/tmp/lane-x" }, null),
+    fakeState({ "lane-x#1": { pid: 4242, worktreePath: "/tmp/lane-x" } }, {}),
     "lane-x",
+    1,
     () => "unknown",
     new Date("2026-08-06T00:00:00.000Z"),
   );
@@ -81,8 +126,9 @@ test('buildLaneAnchors: a known pid whose probe is INCONCLUSIVE -> pidAlive "unk
 test('buildLaneAnchors: no pid on record -> pidAlive "unknown" WITHOUT ever calling the probe (nothing to probe)', () => {
   let probeCalls = 0;
   const anchors = buildLaneAnchors(
-    fakeState({ pid: null, worktreePath: "/tmp/lane-x" }, null),
+    fakeState({ "lane-x#1": { pid: null, worktreePath: "/tmp/lane-x" } }, {}),
     "lane-x",
+    1,
     () => {
       probeCalls++;
       return true;
@@ -96,8 +142,9 @@ test('buildLaneAnchors: no pid on record -> pidAlive "unknown" WITHOUT ever call
 
 test("buildLaneAnchors: no heartbeat yet -> lastHeartbeat null (freshly dispatched, first cadence tick not due)", () => {
   const anchors = buildLaneAnchors(
-    fakeState({ pid: 4242, worktreePath: "/tmp/lane-x" }, null),
+    fakeState({ "lane-x#1": { pid: 4242, worktreePath: "/tmp/lane-x" } }, {}),
     "lane-x",
+    1,
     () => true,
     new Date("2026-08-06T00:00:00.000Z"),
   );
@@ -106,10 +153,33 @@ test("buildLaneAnchors: no heartbeat yet -> lastHeartbeat null (freshly dispatch
 
 test("buildLaneAnchors: a heartbeat's ageSec is computed against the INJECTED `now`, never a real wall-clock read", () => {
   const anchors = buildLaneAnchors(
-    fakeState(null, { id: 7, ts: "2026-08-06T00:00:00.000Z" }),
+    fakeState({}, { "lane-x#1": { id: 7, ts: "2026-08-06T00:00:00.000Z" } }),
     "lane-x",
+    1,
     () => true,
     new Date("2026-08-06T00:00:42.000Z"),
   );
   assert.deepEqual(anchors.lastHeartbeat, { id: 7, ts: "2026-08-06T00:00:00.000Z", ageSec: 42 });
+});
+
+// #705 gate② P1-1 regression: a lane NAME carrying an older spawn/heartbeat fact for a DIFFERENT
+// issue must yield fresh (null) anchors under the new issue, never the stale facts — the
+// lane-reuse hazard the (worker, issue) scoping exists to close.
+test("buildLaneAnchors (#705 gate② P1-1 regression): a lane name reused for a NEW issue never inherits the OLD issue's spawn fact or heartbeat", () => {
+  const state = fakeState(
+    { "lane-x#1": { pid: 111, worktreePath: "/tmp/issue-1" } },
+    { "lane-x#1": { id: 5, ts: "2026-08-06T00:00:00.000Z" } },
+  );
+  // Same worker NAME, a DIFFERENT issue number — must see nothing from issue #1's facts.
+  const anchors = buildLaneAnchors(state, "lane-x", 2, () => true, new Date("2026-08-06T00:01:00.000Z"));
+  assert.deepEqual(anchors, { pid: null, pidAlive: "unknown", worktreePath: null, lastHeartbeat: null });
+});
+
+test("buildLaneAnchors (#705 gate② P1-1 regression): the SAME (worker, issue) pair still resolves correctly — scoping doesn't break the ordinary case", () => {
+  const state = fakeState(
+    { "lane-x#1": { pid: 111, worktreePath: "/tmp/issue-1" }, "lane-x#2": { pid: 222, worktreePath: "/tmp/issue-2" } },
+    {},
+  );
+  assert.equal(buildLaneAnchors(state, "lane-x", 1, () => true, new Date()).pid, 111);
+  assert.equal(buildLaneAnchors(state, "lane-x", 2, () => true, new Date()).pid, 222);
 });
