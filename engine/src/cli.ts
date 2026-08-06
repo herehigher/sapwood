@@ -1342,6 +1342,28 @@ export function runExitCode(result: Pick<DriverResult, "ticks" | "tickErrors">, 
   return stopMode === "once" && result.ticks === 0 && result.tickErrors > 0 ? 1 : 0;
 }
 
+/** #668 gate② finding (2026-08-05): reapAll()'s own outcome must never be silently discarded —
+ *  an unconfirmed death (a process group that survived even SIGKILL, `ReapOutcome.confirmedDead
+ *  === false`) is exactly the orphan-process-group defect AC4 forbids, not something a normal
+ *  successful exit should paper over just because the run itself otherwise completed cleanly.
+ *  Named and called from ONE place per run (both cli.ts run paths' success tail, immediately
+ *  before their own exit-code return) so the failure is visible in the run's own exit status —
+ *  never a blocking retry loop (that would trade a stranded-child defect for a hung-engine one,
+ *  against the very "no engine-side resource watchdog" ruling #668 itself was scoped under) and
+ *  never silently logged-only (the gap the finding named). `supervisor` undefined (no run ever
+ *  constructed one) is the common, unremarkable case — resolves to `false` with no log line. */
+async function reapAndSurfaceOrphans(supervisor: WorkerSupervisor | undefined, log: (message: string) => void): Promise<boolean> {
+  const outcomes = await supervisor?.reapAll();
+  const orphaned = outcomes?.filter((o) => !o.confirmedDead) ?? [];
+  if (orphaned.length > 0) {
+    log(
+      `[sapwood:run] reap: ${orphaned.length} lane(s) still alive after grace period + SIGKILL — ` +
+        `${orphaned.map((o) => o.name).join(", ")} (forcing a failed exit code; see worker.ts's reapChildren doc)`,
+    );
+  }
+  return orphaned.length > 0;
+}
+
 /** #76/#154: the resolved StopConfig for a real `sapwood run` — cfg.stop.* as the base, each
  *  field individually overridden by its CLI --stop-* flag when present. Pure + exported for
  *  testing, same split as parseRunStopMode/runExitCode above. `argv` may be the full
@@ -1877,6 +1899,15 @@ async function runTickEngine(
   const skillsPluginDir = resolveSkillsPluginDir(cfg);
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg);
+  // #668: hoisted above the try so the `finally` below can reap it regardless of which of the
+  // try block's own exits ran — undefined until the try body actually constructs one (a
+  // fail-fast startup throw before that point has nothing to reap).
+  let supervisor: WorkerSupervisor | undefined;
+  // #668 gate② finding: the success tail below reaps explicitly (to surface an unconfirmed
+  // death in the exit code, see reapAndSurfaceOrphans) — this flag stops the `finally` from
+  // reaping a second time on that path; on the catch/throw path it's still false, so `finally`
+  // performs the (best-effort, exit-code-already-nonzero-via-the-throw) reap exactly once.
+  let reaped = false;
   // #407 (item 1, gate② P2): the run boundary is OPEN — every controlled exit from here to
   // process exit must close it with exactly one `run-ended`, so the bracket opens IMMEDIATELY
   // after the successful run-started append (P2: the takeover append used to sit before it,
@@ -1947,7 +1978,7 @@ async function runTickEngine(
     // which case MergeDriver.driveOne behaves exactly as before this existed.
     const fallbackReviewers = makeFallbackReviewers(cfg);
     const mergeGate = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers });
-    const supervisor = new WorkerSupervisor({
+    supervisor = new WorkerSupervisor({
       cfg,
       log,
       now: systemClock,
@@ -2055,7 +2086,12 @@ async function runTickEngine(
       { stoppedBy: result.stoppedBy, ...(result.stopCondition !== undefined ? { stopCondition: result.stopCondition.name } : {}) },
       log,
     );
-    return runExitCode(result, stopMode);
+    // #668 gate② finding: reap BEFORE computing the exit code, not after — an unconfirmed
+    // orphan must be able to flip an otherwise-clean run to a failed exit code (see
+    // reapAndSurfaceOrphans's own doc for why this beats a blocking retry or a log-only report).
+    const orphaned = await reapAndSurfaceOrphans(supervisor, log);
+    reaped = true;
+    return orphaned ? 1 : runExitCode(result, stopMode);
   } catch (error) {
     // #407 (item 1): a thrown startup pass / driver error still exits THROUGH the process's own
     // control (main()'s catch -> exit 1) — a controlled failure, not a crash, so it closes the
@@ -2063,6 +2099,12 @@ async function runTickEngine(
     // real error below.
     appendRunEnded(state, { stoppedBy: "error", error: String(error) }, log);
     throw error;
+  } finally {
+    // #668: the controlled-exit reap — covers the rethrow above (the success path already
+    // reaped explicitly, see the `reaped` guard) so a lane still alive when the driver stopped
+    // (normal completion OR a thrown error) never strands its child process. No-op when
+    // `supervisor` never got constructed (a fail-fast startup throw before that line).
+    if (!reaped) await supervisor?.reapAll();
   }
 }
 
@@ -2100,6 +2142,12 @@ async function runRoundsEngine(
   const skillsPluginDir = resolveSkillsPluginDir(cfg);
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg);
+  // #668: same hoist-above-the-try as runTickEngine's own comment above — the `finally` below
+  // reaps it regardless of exit path; undefined if a fail-fast startup throw runs before the
+  // try body constructs one.
+  let supervisor: WorkerSupervisor | undefined;
+  // #668 gate② finding: same reap-once guard as runTickEngine's own comment above.
+  let reaped = false;
   // #407 (item 1, gate② P2): the run boundary's closing bracket — same contract as
   // runTickEngine's own comment above: the bracket opens IMMEDIATELY after the successful
   // run-started append, so every write of this run (takeover event included) sits inside it and
@@ -2142,7 +2190,7 @@ async function runRoundsEngine(
     const reviewer = engineAgent?.reviewer ?? makeReviewer(cfg);
     const fallbackReviewers = makeFallbackReviewers(cfg);
     const mergeGate = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers });
-    const supervisor = new WorkerSupervisor({
+    supervisor = new WorkerSupervisor({
       cfg,
       log,
       now: systemClock,
@@ -2285,11 +2333,18 @@ async function runRoundsEngine(
       { stoppedBy: result.stoppedBy, ...(result.stopCondition !== undefined ? { stopCondition: result.stopCondition.name } : {}) },
       log,
     );
-    return roundsExitCode(result);
+    // #668 gate② finding: same explicit reap-before-exit-code as runTickEngine's own success
+    // tail above — see reapAndSurfaceOrphans's doc.
+    const orphaned = await reapAndSurfaceOrphans(supervisor, log);
+    reaped = true;
+    return orphaned ? 1 : roundsExitCode(result);
   } catch (error) {
     // #407 (item 1): same controlled-failure bracket as runTickEngine's own catch.
     appendRunEnded(state, { stoppedBy: "error", error: String(error) }, log);
     throw error;
+  } finally {
+    // #668: same reap-once guard as runTickEngine's own finally above.
+    if (!reaped) await supervisor?.reapAll();
   }
 }
 

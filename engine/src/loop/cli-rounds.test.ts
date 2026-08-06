@@ -8,15 +8,18 @@
 // (zero token) drives the real spawn/sentinel/cost-parse path — createDefaultPeripherals's
 // stubs are never faked themselves.
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import { type EngineOverrides, runCli, runDryRun, runEngine, tickOnlyFlagError } from "../cli.js";
 import { ConfigSchema, configHash, dashboardConfigSubset, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus, StartupReconcileData } from "../forge/forge.js";
 import type { LabelSpec } from "../forge/labels.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+import { WorkerSupervisor } from "../roles/worker.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import type { PeripheralPhase } from "./round.js";
@@ -1023,6 +1026,291 @@ test("sapwood run: engine.driver: tick still reaches the M4 tick-driver escape h
   assert.ok(logged.some((line) => line.startsWith("[sapwood:run] stopped after 1 tick(s)")));
   assert.ok(logged.every((line) => /^\[sapwood:[^\]]+\]/.test(line)));
   assert.equal(observedTicks, 1, "logger tick summaries compose with the caller's existing onTick hook");
+});
+
+// ── #668: controlled-exit child reaping — BOTH cli.ts run paths must reap every child their own
+// WorkerSupervisor still tracks, on normal completion AND when the run path throws. worker.ts's
+// own test suite covers reapChildren's escalation mechanics (fake children) and
+// WorkerSupervisor.reapAll()'s real-subprocess adapter wiring exhaustively; these tests prove
+// the missing half — that cli.ts's OWN two run paths (runTickEngine, runRoundsEngine) actually
+// call it in their `finally`, against the REAL production WorkerSupervisor instance each path
+// constructs internally (never exposed via EngineOverrides). Since neither path exposes that
+// instance, WorkerSupervisor.prototype.reapAll is patched for the span of one test to inject a
+// REAL, still-alive, detached child into the live instance's own lane map at the exact moment
+// production code is about to reap it — proving the wiring without re-deriving the whole
+// dispatch/worktree/git pipeline (already covered elsewhere).
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const waitForDead = async (pid: number, timeoutMs = 10_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (alive(pid)) {
+    if (Date.now() > deadline) throw new Error(`hang guard (${timeoutMs}ms): pid ${pid} never died`);
+    await sleep(20);
+  }
+};
+/** Spawns a real, detached, cooperative (`trap 'exit 0' TERM`) child and waits for its own
+ *  ready marker before returning — the same handshake worker.test.ts's longRunningStub uses, so
+ *  the reap below never races the trap's own installation. */
+const spawnCooperativeChild = async (dir: string): Promise<{ child: ReturnType<typeof spawn>; pid: number }> => {
+  const ready = join(dir, `reap-ready-${Math.random().toString(36).slice(2)}`);
+  const child = spawn("bash", ["-c", `trap 'exit 0' TERM\ntouch '${ready}'\nfor _ in $(seq 1 600); do sleep 1; done`], {
+    detached: true,
+    stdio: "ignore",
+  });
+  await new Promise<void>((res, reject) => {
+    child.once("spawn", () => res());
+    child.once("error", reject);
+  });
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(ready)) {
+    if (Date.now() > deadline) throw new Error("hang guard (10000ms): cooperative stub never installed its TERM trap");
+    await sleep(20);
+  }
+  return { child, pid: child.pid! };
+};
+/** Patches WorkerSupervisor.prototype.reapAll (for the span of one test) to inject `child` into
+ *  the REAL instance's own private lane map the instant production code calls reapAll on it —
+ *  the map is otherwise unreachable from outside cli.ts, which never exposes the supervisor it
+ *  constructs. Returns the restore function; ALWAYS call it, success or throw. */
+const injectLaneOnNextReapAll = (name: string, child: ReturnType<typeof spawn>): (() => void) => {
+  const original = WorkerSupervisor.prototype.reapAll;
+  let injected = false;
+  WorkerSupervisor.prototype.reapAll = function (this: WorkerSupervisor, ...args: Parameters<typeof original>) {
+    if (!injected) {
+      injected = true;
+      (this as unknown as { lanes: Map<string, unknown> }).lanes.set(name, {
+        child,
+        issue: 668,
+        sessionId: "s",
+        jsonlFd: -1,
+        jsonlPath: "",
+        hb: undefined,
+        handoffRequested: false,
+        reclaiming: false,
+        startedMs: 0,
+        timedOut: false,
+        estimatedCostUsd: 0,
+        estimateBaselineUsd: 0,
+        jsonlLegOffset: 0,
+        prompt: "",
+      });
+    }
+    return original.apply(this, args);
+  };
+  return () => {
+    WorkerSupervisor.prototype.reapAll = original;
+  };
+};
+
+test("sapwood run (#668, tick driver): a supervisor-tracked child still alive when the run completes normally is reaped before runEngine returns — no orphan process group (AC1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-reap-tick-"));
+  try {
+    const { child, pid } = await spawnCooperativeChild(dir);
+    const restore = injectLaneOnNextReapAll("lane-668-tick-ok", child);
+    try {
+      const code = await runEngine(["node", "sapwood", "run", "--once"], {
+        cfg: mkCfg({ engine: { driver: "tick" } }),
+        forge: new FakeForge(),
+        state: new State(":memory:"),
+        logger: silentLogger,
+      });
+      assert.equal(code, 0);
+    } finally {
+      restore();
+    }
+    await waitForDead(pid);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sapwood run (#668, tick driver): reap ALSO runs when the run path throws — the finally covers the catch's rethrow too, not just the success return (AC2)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-reap-tick-throw-"));
+  try {
+    const { child, pid } = await spawnCooperativeChild(dir);
+    const restore = injectLaneOnNextReapAll("lane-668-tick-throw", child);
+    try {
+      // Same fail-fast throw AFTER supervisor construction as the existing #407 terminal-table
+      // test above (an unknown --milestone name) — assertStopMilestoneExists runs after both
+      // run paths construct their WorkerSupervisor, so this reaches the finally with a real
+      // still-live lane to reap, then rejects exactly as that test already proves.
+      await assert.rejects(
+        () =>
+          runEngine(["node", "sapwood", "run", "--once", "--milestone", "M4"], {
+            cfg: mkCfg({ engine: { driver: "tick" } }),
+            forge: new FakeForge(),
+            state: new State(":memory:"),
+            logger: silentLogger,
+          }),
+        /no milestone titled "M4"/,
+      );
+    } finally {
+      restore();
+    }
+    await waitForDead(pid);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sapwood run (#668, default/rounds driver): a supervisor-tracked child still alive when a round completes normally is reaped before runEngine returns — no orphan process group (AC1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-reap-rounds-"));
+  try {
+    const { child, pid } = await spawnCooperativeChild(dir);
+    const restore = injectLaneOnNextReapAll("lane-668-rounds-ok", child);
+    try {
+      const bin = mkStub(dir, FAST_STUB);
+      let stop = (): void => {};
+      const code = await runEngine(["node", "sapwood", "run"], {
+        cfg: mkCfg({ roles: { retro: { enabled: false } }, round: { standby: { enabled: false } } }),
+        forge: new FakeForge(),
+        state: new State(":memory:"),
+        logger: silentLogger,
+        roleRunnerDeps: {
+          stateDir: dir,
+          worktreeRoot: join(dir, "worktrees"),
+          claudeBin: bin,
+          heartbeatMs: 50,
+          guardHookPath: mkHook(dir),
+          preSpawnCaptureTimeoutMs: 150,
+          preSpawnCapturePollMs: 10,
+        },
+        sleep: async () => {},
+        registerSignals: (requestStop) => {
+          stop = requestStop;
+          return () => {};
+        },
+        onRoundPhase: (_roundId, phase: PeripheralPhase) => {
+          if (phase === "aligning") stop();
+        },
+      });
+      assert.equal(code, 0);
+    } finally {
+      restore();
+    }
+    await waitForDead(pid);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sapwood run (#668, default/rounds driver): reap ALSO runs when the run path throws (AC2)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-reap-rounds-throw-"));
+  try {
+    const { child, pid } = await spawnCooperativeChild(dir);
+    const restore = injectLaneOnNextReapAll("lane-668-rounds-throw", child);
+    try {
+      class NamedMilestoneForge extends FakeForge {
+        override async listMilestoneTitles(): Promise<string[]> {
+          return ["M4 — UX surface + CLI"];
+        }
+      }
+      await assert.rejects(
+        () =>
+          runEngine(["node", "sapwood", "run", "--milestone", "M4"], {
+            cfg: mkCfg({ roles: { retro: { enabled: false } }, round: { standby: { enabled: false } } }),
+            forge: new NamedMilestoneForge(),
+            state: new State(":memory:"),
+            logger: silentLogger,
+          }),
+        /no milestone titled "M4"/,
+      );
+    } finally {
+      restore();
+    }
+    await waitForDead(pid);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #668 gate② finding [0] (2026-08-05): reapAll()'s own outcome must never be silently
+// discarded — an unconfirmed death (confirmedDead: false, the orphan-process-group case AC4
+// forbids) has to flip an otherwise-clean run's exit code, not vanish into a log line while the
+// run reports success. A REAL unconfirmed death can't be manufactured with an actual subprocess
+// (nothing in userspace outruns SIGKILL) — reapChildren's own "never dies" fake-child test
+// already proves reapAll CAN return that outcome; these tests prove cli.ts's OWN handling of it
+// by stubbing WorkerSupervisor.prototype.reapAll to return a fixed outcome array directly. ──────
+const stubReapAllReturning = (
+  outcomes: readonly { name: string; alreadyDead: boolean; escalated: boolean; confirmedDead: boolean }[],
+): (() => void) => {
+  const original = WorkerSupervisor.prototype.reapAll;
+  WorkerSupervisor.prototype.reapAll = async () => [...outcomes];
+  return () => {
+    WorkerSupervisor.prototype.reapAll = original;
+  };
+};
+
+test("sapwood run (#668 gate② finding [0], tick driver): an unconfirmed orphan flips an otherwise-clean run's exit code to 1 — never silently discarded", async () => {
+  const restore = stubReapAllReturning([{ name: "lane-orphan", alreadyDead: false, escalated: true, confirmedDead: false }]);
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge: new FakeForge(),
+      state: new State(":memory:"),
+      logger: silentLogger,
+    });
+    assert.equal(code, 1, "an unconfirmed orphan must force a failed exit code even though the tick itself succeeded");
+  } finally {
+    restore();
+  }
+});
+
+test("sapwood run (#668 gate② finding [0], tick driver): reverse — every outcome confirmedDead:true leaves the exit code exactly as runExitCode would have computed it (no false failure)", async () => {
+  const restore = stubReapAllReturning([{ name: "lane-ok", alreadyDead: false, escalated: false, confirmedDead: true }]);
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge: new FakeForge(),
+      state: new State(":memory:"),
+      logger: silentLogger,
+    });
+    assert.equal(code, 0, "a fully-confirmed reap must not itself fail an otherwise-clean run");
+  } finally {
+    restore();
+  }
+});
+
+test("sapwood run (#668 gate② finding [0], default/rounds driver): an unconfirmed orphan flips an otherwise-clean run's exit code to 1 — never silently discarded", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-reap-orphan-rounds-"));
+  const restore = stubReapAllReturning([{ name: "lane-orphan", alreadyDead: false, escalated: true, confirmedDead: false }]);
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    let stop = (): void => {};
+    const code = await runEngine(["node", "sapwood", "run"], {
+      cfg: mkCfg({ roles: { retro: { enabled: false } }, round: { standby: { enabled: false } } }),
+      forge: new FakeForge(),
+      state: new State(":memory:"),
+      logger: silentLogger,
+      roleRunnerDeps: {
+        stateDir: dir,
+        worktreeRoot: join(dir, "worktrees"),
+        claudeBin: bin,
+        heartbeatMs: 50,
+        guardHookPath: mkHook(dir),
+        preSpawnCaptureTimeoutMs: 150,
+        preSpawnCapturePollMs: 10,
+      },
+      sleep: async () => {},
+      registerSignals: (requestStop) => {
+        stop = requestStop;
+        return () => {};
+      },
+      onRoundPhase: (_roundId, phase: PeripheralPhase) => {
+        if (phase === "aligning") stop();
+      },
+    });
+    assert.equal(code, 1, "an unconfirmed orphan must force a failed exit code even though the round itself completed");
+  } finally {
+    restore();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── #382 (F9): single-instance lock on the data dir, wired through runEngine — acquired before

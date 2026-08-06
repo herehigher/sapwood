@@ -1922,6 +1922,27 @@ export class WorkerSupervisor implements Supervisor {
   // A missing/malformed configured file throws HERE, at startup, before any dispatch.
   private readonly pricing: PricingTable;
   private readonly lanes = new Map<string, Lane>();
+  // #668 (round 5 pivot; keying fixed round 6 P1b): tracks reap operations onExit() kicks off,
+  // fire-and-forget from its OWN synchronous perspective, for a leader that just exited while its
+  // process GROUP was still alive (a descendant outliving it) — see onExit's own doc for why
+  // reaping happens THERE now, immediately, instead of in a durable registry checked later at
+  // engine exit (the design rounds 2-4 tried and retired). An entry exists only while its reap is
+  // still running, deleted the instant reapDescendantsOnLeaderExit's own promise settles.
+  // reapAll() (the engine-exit path) awaits every entry still present here before it can itself
+  // return — an in-flight reap started moments before shutdown must still be allowed to finish,
+  // never abandoned just because the engine is on its way out (AC4: no orphan group on exit).
+  //
+  // Keyed by `${laneName}#${pid}`, NEVER bare lane name (round 6 P1b, Codex): a lane name can be
+  // RESPAWNED under the same name (resume()'s entire fix-leg/handoff-resume design — its
+  // precondition is literally "a terminal sentinel already exists for this name") while an
+  // EARLIER leg's own leader-exit reap for that SAME name is still running. A bare-name key would
+  // let the fresh spawn's `.set(name, ...)` silently REPLACE (and thereby abandon, from
+  // reapAll()'s perspective) the still-in-flight prior promise — the exact same class of bug this
+  // round's own predecessor (the pgidRegistry) was retired for creating. The pid disambiguates:
+  // each real spawn gets a genuinely fresh OS pid, so two legs sharing a name can never share a
+  // key. `dispatch()`/`resume()` both await any matching (same-name-prefixed) in-flight entry
+  // before spawning a replacement — see `awaitInFlightLeaderExitReapsFor`'s own doc.
+  private readonly inFlightLeaderExitReaps = new Map<string, Promise<ReapOutcome>>();
   // #395 (gate② round 3): one liveness-gated heartbeat per live lane, keyed by lane name —
   // persisted across setInterval ticks (util/heartbeat.ts's createHeartbeatGate needs its own
   // "id seen at the last check" cursor to remember). Created lazily in heartbeatTick, removed in
@@ -2095,6 +2116,11 @@ export class WorkerSupervisor implements Supervisor {
 
   async dispatch(issue: Issue, name?: string, opts?: { proxy?: WorkerProxyOpts }): Promise<{ name: string; sessionId: string }> {
     const laneName = name ?? `lane-${issue.number}-${randomUUID().slice(0, 8)}`;
+    // #668 (round 6 P1b): wait out any leader-exit reap still in flight for this SAME name before
+    // doing anything else — see awaitInFlightLeaderExitReapsFor's own doc. A no-op (resolves
+    // immediately) for the overwhelmingly common case (a freshly-generated, never-before-seen
+    // name); only matters for an explicitly caller-supplied `name` colliding with one.
+    await this.awaitInFlightLeaderExitReapsFor(laneName);
     // Refuse name reuse — a stale sentinel under this name means a concurrent/old lane; a
     // second worker would clobber its jsonl/sentinels (0day Codex #4).
     for (const ext of SENTINEL_EXTS) {
@@ -2451,6 +2477,12 @@ export class WorkerSupervisor implements Supervisor {
     name: string,
     opts?: { proxy?: WorkerProxyOpts; prompt?: string; sessionId?: string },
   ): Promise<{ name: string; sessionId: string }> {
+    // #668 (round 6 P1b): resume() is the REALISTIC path for this race — its whole design
+    // reuses an existing name (fix-leg entry and handoff-resume both require a terminal sentinel
+    // ALREADY on disk for it), which is exactly the shape onExit()'s leader-exit reap leaves
+    // behind (sentinel written, reap for a live descendant possibly still running). Wait it out
+    // before touching anything else — see awaitInFlightLeaderExitReapsFor's own doc.
+    await this.awaitInFlightLeaderExitReapsFor(name);
     const handoffPath = this.path(name, "handoff.json");
     const runningPath = this.path(name, "running.json");
     const running = this.readJson(runningPath);
@@ -3052,6 +3084,111 @@ export class WorkerSupervisor implements Supervisor {
     // place its cursor ever needs clearing; never left to grow unboundedly over a long-running
     // engine process's lifetime.
     this.heartbeatGates.delete(name);
+    // #668 (round 5 pivot — reap at the moment the pgid is FRESH, not when it's stale): the
+    // DIRECT child exiting is not proof its process GROUP is empty — a detached descendant
+    // sharing the same pgid can outlive its own leader (the confirmed stranded-fix-leg incident
+    // class this whole issue exists to close). Earlier rounds (r2[0]/r3) answered this with a
+    // durable pgidRegistry that outlived `this.lanes`, re-verified by an ownership fingerprint at
+    // reap time — round 5 (Codex, marginal-complexity ruling): that design kept sprouting new
+    // edges (comm-fallback false-negatives/positives, an awaited-fingerprint spawn race, pruning
+    // that only fired inside reapAll) because it deferred reaping to engine exit, by which time
+    // the pgid could be ANYTHING. The fix is to stop deferring: reap the group RIGHT HERE, while
+    // the pid is still definitively ours (its leader exited THIS INSTANT, inside this very
+    // handler) — no registry, no fingerprint, no re-verification machinery at all.
+    //
+    // Fire-and-forget FROM onExit's OWN synchronous perspective (this method returns immediately
+    // either way), but the resulting promise is tracked in `inFlightLeaderExitReaps` so
+    // reapAll()'s own engine-exit path can await it — see that field's and reapAll()'s own docs
+    // for why an in-flight reap must never be abandoned just because the engine is shutting down.
+    //
+    // RESIDUALS, FINAL FORM (round 8, Codex REQUEST_CHANGES on 43ebdf3 — supervisor ruling: stop
+    // narrowing, delete the exposure instead where narrowing can't close it; see
+    // signalOnceAndReport's own doc for the full reasoning behind deleting the escalation loop
+    // this path used to have). Stated with NO numeric window claims — rounds 6-7 tried bounding
+    // the gap in milliseconds and kept finding a smaller residual gap underneath, because
+    // `setTimeout` is a LOWER bound on a poll interval, never an upper one; a host/event-loop
+    // stall can put an ARBITRARY amount of real time between any two observations, so no duration
+    // number here would ever be honest:
+    //
+    // (a) An INHERENT TOCTOU instant between the `pidGroupAlive` check below and the single
+    //     SIGTERM `reapDescendantsOnLeaderExit` sends — the same unavoidable check-then-signal
+    //     gap every process manager on POSIX has; nothing closes it, and no amount of re-checking
+    //     would either. A stray SIGTERM landing on a since-recycled, unrelated process is the
+    //     accepted, survivable cost (a process not expecting SIGTERM is generally unaffected by
+    //     or ignores it) — this is why the signal sent here is SIGTERM, never anything stronger.
+    // (b) A descendant GROUP that ignores that SIGTERM is REPORTED — logged, and surfaced through
+    //     reapAll()'s existing orphan-surfacing path (cli.ts's reapAndSurfaceOrphans) whenever
+    //     this reap is still in flight at engine-exit time — but never force-killed. It survives,
+    //     visibly, until an operator acts on it. This repo's own degrade-to-human policy, applied
+    //     deliberately: the alternative (escalating to SIGKILL) risks a wrongly-killed stranger,
+    //     which is worse than a leaked descendant process.
+    // (c) An ENGINE CRASH between "leader exits, reap starts" and "reap completes" can still
+    //     leave a descendant alive with no durable record for the next engine start to recover
+    //     from — unchanged from round 5's own fuller statement of this residual (see the PR
+    //     description's "Engine crash..." bullet); round 8 doesn't change this one at all.
+    const pid = lane.child.pid;
+    if (pid != null && this.pidGroupAlive(pid)) {
+      const alreadySignaled = lane.handoffRequested; // an earlier drain may have already SIGTERM'd the whole group
+      // #668 (round 6 P1b): `${name}#${pid}` — see inFlightLeaderExitReaps' own doc for why a
+      // bare lane name would let a same-name respawn's fresh entry silently replace (and abandon)
+      // this one.
+      const key = `${name}#${pid}`;
+      const reapPromise = this.reapDescendantsOnLeaderExit(name, pid, alreadySignaled);
+      this.inFlightLeaderExitReaps.set(key, reapPromise);
+      void reapPromise.finally(() => {
+        if (this.inFlightLeaderExitReaps.get(key) === reapPromise) this.inFlightLeaderExitReaps.delete(key);
+      });
+    }
+  }
+
+  /** #668 (round 5 pivot; escalation REMOVED round 8 — see signalOnceAndReport's own doc for the
+   *  full reasoning): reaps a group whose LEADER just exited (inside onExit(), this instant) but
+   *  which is still alive — a descendant outliving its leader, the actual stranded-child incident
+   *  class #668 exists to close. Uses `signalOnceAndReport` — SIGTERM once, one bounded liveness
+   *  observation, REPORT if still alive, never SIGKILL — against a single synthetic child bound to
+   *  the raw pid (no `ChildProcess`/`Lane` object exists for a descendant, only
+   *  `signalGroup`/`pidGroupAlive`, which is all `ReapableChild` ever needed). `alreadySignaled`
+   *  mirrors reapAll()'s own r1[1] invariant: if an earlier drain already sent the group a SIGTERM
+   *  (killGroup signals the WHOLE group, so a descendant may already have received it), this reap
+   *  must not send a second one. Never throws (signalOnceAndReport's own contract). */
+  private async reapDescendantsOnLeaderExit(name: string, pid: number, alreadySignaled: boolean): Promise<ReapOutcome> {
+    return signalOnceAndReport(
+      {
+        name,
+        alreadySignaled,
+        isAlive: () => this.pidGroupAlive(pid),
+        signal: (sig: NodeJS.Signals) => this.signalGroup(pid, sig),
+      },
+      {
+        ...(this.deps.sleep !== undefined ? { sleep: this.deps.sleep } : {}),
+        log: (m) => this.log(m),
+      },
+    );
+  }
+
+  /** #668 (round 6 P1b): dispatch()/resume() both call this FIRST, before doing any other work,
+   *  when about to spawn under `name` — waits for every leader-exit reap still in flight FOR THAT
+   *  SAME NAME (see inFlightLeaderExitReaps' own doc for why the key is `${name}#${pid}`, not the
+   *  bare name, and why this wait matters beyond just avoiding an abandoned promise). Two real
+   *  reasons this matters: (1) worktree overlap — a respawn under the same name (resume()'s entire
+   *  design: its precondition IS "a terminal sentinel already exists for this name") reuses the
+   *  SAME worktree directory; a stale descendant from the prior leg could still be touching files
+   *  there the instant the new leg starts writing to it. (2) keeping exactly one reap in flight
+   *  per name at a time, so a second overlapping reap for the same name (a further respawn while
+   *  THIS one is still draining) can never happen either.
+   *
+   *  Bounded automatically, never a new hang risk: each awaited promise is `reapChildren`'s own
+   *  SIGTERM -> grace -> SIGKILL -> verify sequence, which already has a hard bound (the grace
+   *  window plus the fixed SIGKILL-verify timeout) baked into `reapChildren` itself — this method
+   *  adds no additional timeout because it doesn't need one. Deliberately does NOT delay sentinel
+   *  publication — the prior leg's `.done`/`.failed`/`.handoff` sentinel is written synchronously
+   *  inside onExit() well before this reap even starts, so a caller polling for that sentinel
+   *  (e.g. the conductor) is never held up by this wait; only the NEXT spawn under the same name
+   *  is. */
+  private async awaitInFlightLeaderExitReapsFor(name: string): Promise<void> {
+    const prefix = `${name}#`;
+    const matching = [...this.inFlightLeaderExitReaps.entries()].filter(([key]) => key.startsWith(prefix)).map(([, p]) => p);
+    if (matching.length > 0) await Promise.all(matching);
   }
 
   /** #617 (seam 3, capability DR #616): the FILESYSTEM-derived half of a worker/producer leg's
@@ -3652,7 +3789,8 @@ export class WorkerSupervisor implements Supervisor {
     return null;
   }
 
-  /** Clear timers/fds so a host process can exit cleanly (tests). Does not kill children. */
+  /** Clear timers/fds so a host process can exit cleanly (tests). Does not kill children —
+   *  callers that also need every child dead (production shutdown) call reapAll(). */
   dispose(): void {
     for (const lane of this.lanes.values()) {
       clearInterval(lane.hb);
@@ -3663,6 +3801,87 @@ export class WorkerSupervisor implements Supervisor {
       }
     }
     this.lanes.clear();
+  }
+
+  /** #668: production shutdown reap — every child this supervisor still tracks in `this.lanes`
+   *  at the moment cli.ts's run path is about to return/throw. Neither cli.ts run path had a
+   *  supervisor cleanup `finally` before this (Codex final review, 2026-08-05); dispose() above
+   *  deliberately never kills children, so a lane still `running`/`fixing` when the engine
+   *  exits was left alive — the confirmed stranded-fix-leg incident this issue exists to close.
+   *
+   *  Composes with, never replaces, the existing drain paths (conductor.ts's ceiling/kill-switch
+   *  drain, checkSoftBudget's handoff): a lane already `handoffRequested` (an earlier drain
+   *  already sent its SIGTERM) is marked `alreadySignaled` below, so reapChildren skips ITS OWN
+   *  initial SIGTERM for that lane — exactly ONE SIGTERM ever reaches a live lane across the
+   *  whole reap, never a second one stacked on top of an in-progress TERM handler (gate②
+   *  finding, 2026-08-05: the previous version called requestHandoff() — itself a SIGTERM — AND
+   *  then unconditionally let reapChildren's own initial SIGTERM fire too, double-signaling
+   *  every freshly-reaped lane). A lane that was NEVER asked to hand off (the common case — the
+   *  engine simply reached its stop condition or threw while legs were still live) gets that one
+   *  SIGTERM from reapChildren itself; either way, reapChildren then applies the shared grace-
+   *  then-group-SIGKILL escalation, verifying death before resolving — see reapChildren's own doc
+   *  for why this needs a death PROOF, not just an assumption. Never throws (mirrors dispose()'s
+   *  own best-effort stance): a lane that somehow survives SIGKILL is logged and reported in the
+   *  returned outcome — see cli.ts's callers for how an unconfirmed death there is surfaced as a
+   *  failed run rather than silently discarded.
+   *
+   *  #668 (gate② round 2, r2[1]): `lane.handoffRequested` is flipped to `true` INSIDE the
+   *  `signal` closure below — i.e. only the instant THIS reap actually sends a real signal to a
+   *  lane it found still alive — never speculatively for every lane up front. The earlier version
+   *  set the flag unconditionally before reapChildren even ran, so a lane whose child had already
+   *  exited on its own (isAlive() false — reapChildren never calls `signal` for it at all, per
+   *  AC5) still got tagged as if it had been asked to hand off; that lane's already-pending
+   *  onExit() then read `handoffRequested === true` and wrote a FABRICATED `.handoff` sentinel in
+   *  place of the real `.done`/`.failed` its actual exit code earned. Deferring the write into
+   *  `signal` makes the bookkeeping and the real SIGTERM/SIGKILL delivery the SAME event — a lane
+   *  reapChildren never signals can never end up mistagged.
+   *
+   *  #668 (round 5 pivot): this method ONLY handles lanes `this.lanes` still tracks — i.e. whose
+   *  leader process has NOT yet exited. That's deliberate, not an oversight: a still-tracked
+   *  leader's pid/pgid categorically cannot have been recycled (Node hasn't called waitpid for it
+   *  yet — that's WHY it's still in `this.lanes`), so signaling it needs no ownership check at
+   *  all, and `reapChildren`'s full SIGTERM->grace->SIGKILL escalation is SAFE for it (see
+   *  `reapChildren`'s own "SCOPE" doc paragraph — this is the ONE production caller that
+   *  guarantee applies to). A lane whose leader ALREADY exited, leaving a live descendant behind,
+   *  is a completely different problem — its pid HAS been waitpid'd, so escalating to SIGKILL is
+   *  UNSAFE for it (see `signalOnceAndReport`'s own doc for the full asymmetry this design turns
+   *  on) — handled THERE, at the moment the pgid is fresh, instead of here at engine-exit time
+   *  (rounds 2-4 tried a durable registry re-checked here; retired per the repo's
+   *  marginal-complexity ruling). This method's OWN remaining duty toward that class is simply
+   *  not to abandon one already in flight: it awaits every entry in `inFlightLeaderExitReaps` (a
+   *  reap onExit() kicked off, possibly mere milliseconds before this call started) before it can
+   *  itself return, so AC4 ("no orphan group on exit") holds even for that race — by
+   *  construction, not by re-verification machinery. */
+  async reapAll(opts: { graceMs?: number } = {}): Promise<ReapOutcome[]> {
+    const lanes = [...this.lanes.entries()];
+    const laneChildren: ReapableChild[] = lanes.map(([name, lane]) => {
+      const alreadySignaled = lane.handoffRequested;
+      return {
+        name,
+        alreadySignaled,
+        isAlive: () => this.pidGroupAlive(lane.child.pid),
+        signal: (sig: NodeJS.Signals) => {
+          lane.handoffRequested = true; // r2[1]: only true once a signal is ACTUALLY sent
+          this.killGroup(lane.child, sig);
+        },
+      };
+    });
+    const liveOutcomes =
+      laneChildren.length === 0
+        ? []
+        : await reapChildren(laneChildren, {
+            ...(opts.graceMs !== undefined ? { graceMs: opts.graceMs } : {}),
+            ...(this.deps.sleep !== undefined ? { sleep: this.deps.sleep } : {}),
+            log: (m) => this.log(m),
+          });
+    // #668 (round 5 pivot): a reap onExit() already kicked off for a leader that exited moments
+    // ago (possibly WHILE this very call was starting) must still be allowed to finish — never
+    // abandoned just because the engine is shutting down. Snapshot the values BEFORE awaiting:
+    // `inFlightLeaderExitReaps` mutates itself as each promise settles (see onExit's own doc), so
+    // iterating the live map across an await would be iterating a moving target.
+    const inFlight = [...this.inFlightLeaderExitReaps.values()];
+    const leaderExitOutcomes = inFlight.length === 0 ? [] : await Promise.all(inFlight);
+    return [...liveOutcomes, ...leaderExitOutcomes];
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────
@@ -3688,6 +3907,21 @@ export class WorkerSupervisor implements Supervisor {
       } catch {
         /* already gone */
       }
+    }
+  }
+  /** #668: is the WHOLE process group (negative pid) still alive? Used by reapAll's own death
+   *  verification, and by onExit() to decide whether a just-exited leader left a live descendant
+   *  behind worth reaping right there (see onExit's own doc) — `killGroup`/`signalGroup` above
+   *  already fall back to a direct-pid signal when the group send fails, but verification checks
+   *  the group specifically, since a detached worker child is its own pgid leader and an orphaned
+   *  group is exactly what this issue's acceptance criteria (AC4) forbid. */
+  private pidGroupAlive(pid: number | null | undefined): boolean {
+    if (pid == null) return false;
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -3865,6 +4099,181 @@ export class WorkerSupervisor implements Supervisor {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** #668: the minimal surface reapChildren needs to SIGTERM/SIGKILL and verify death — never
+ *  `ChildProcess`, so a unit test can exercise the full grace/escalation/verify state machine
+ *  against a FAKE child (per this repo's test doctrine: no real subprocess, no real timer,
+ *  deterministic) instead of a spawned process. WorkerSupervisor.reapAll() adapts its real lanes
+ *  to this shape via pidGroupAlive/killGroup. */
+export interface ReapableChild {
+  /** Lane name, for logging/outcome-reporting only — never used to look anything up. */
+  name: string;
+  /** True when this child already received its graceful SIGTERM from an earlier, independent
+   *  caller (e.g. a ceiling/kill-switch drain already in progress) — reapChildren then skips
+   *  ITS OWN initial SIGTERM for this child and goes straight to waiting out the grace window
+   *  (then escalating like any other child), so a lane never receives two SIGTERMs across one
+   *  reap. Omitted/false -> reapChildren sends the one and only SIGTERM itself, today's
+   *  behavior for a lane no one has signaled yet. */
+  alreadySignaled?: boolean;
+  /** True while the process group is presumed alive. Never throws. */
+  isAlive: () => boolean;
+  /** Send `sig` to the whole process group. Never throws. */
+  signal: (sig: NodeJS.Signals) => void;
+}
+
+export interface ReapOutcome {
+  name: string;
+  /** The child had already exited before reapChildren sent anything. */
+  alreadyDead: boolean;
+  /** SIGTERM alone did not end it within the grace period — SIGKILL was sent. */
+  escalated: boolean;
+  /** Death was observed before this call returned. False is the orphan-process-group case
+   *  AC4 forbids in every production path; reapAll logs this rather than retrying forever, so
+   *  an engine exit is never blocked indefinitely by one wedged (e.g. D-state) process. */
+  confirmedDead: boolean;
+}
+
+const REAP_GRACE_MS = 3_000; // #668: SIGTERM->SIGKILL grace period at production shutdown
+const REAP_VERIFY_POLL_MS = 25;
+const REAP_VERIFY_TIMEOUT_MS = 500; // generous vs. a real SIGKILL's near-instant OS-level death
+
+/** Poll `candidates` (whatever signal was already sent) until every one's `isAlive()` reports
+ *  dead, or `boundMs` elapses — whichever comes first. Never a flat block: the poll interval is
+ *  `REAP_VERIFY_POLL_MS`, so a candidate that dies early ends the wait for it immediately rather
+ *  than holding the whole batch hostage to the full bound. The filter is MONOTONIC — once a
+ *  candidate's `isAlive()` observes it dead, it is removed from `pending` and never reappears
+ *  there, no matter how many further poll ticks run (`pending = pending.filter(...)` only ever
+ *  narrows across iterations; nothing re-adds a prior entry) — so a child, once seen dead, is
+ *  never signaled again by anything downstream of that observation. Shared by `reapChildren`
+ *  (`this.lanes`' own full SIGTERM->grace->SIGKILL escalation) and `signalOnceAndReport` (the
+ *  leader-exit descendant path, SIGTERM + one bounded observation, no escalation) — ONE poll
+ *  implementation, not two. */
+async function pollUntilDeadOrTimeout(
+  candidates: ReapableChild[],
+  boundMs: number,
+  sleepFn: (ms: number) => Promise<void>,
+): Promise<ReapableChild[]> {
+  let pending = candidates.filter((c) => c.isAlive());
+  let waited = 0;
+  while (pending.length > 0 && waited < boundMs) {
+    await sleepFn(REAP_VERIFY_POLL_MS);
+    waited += REAP_VERIFY_POLL_MS;
+    pending = pending.filter((c) => c.isAlive());
+  }
+  return pending; // whatever is still alive once the bound is hit
+}
+
+/** #668: SIGTERM every still-alive child, then POLL (never a flat block) for up to `graceMs`
+ *  (default REAP_GRACE_MS) so a cooperative leg's own exit ends the wait the moment it happens —
+ *  production shutdown is never held hostage to the full grace period just because one lane
+ *  happened to be live. Any survivor past that bound is escalated to SIGKILL, then polled again
+ *  (bounded by REAP_VERIFY_TIMEOUT_MS) until death is confirmed or that bound is hit — the
+ *  "verify group death before the engine exits" half of the acceptance criteria, not just an
+ *  assumed kill. `sleep` defaults to a real, cancelable `setTimeout` (module-level `sleep`);
+ *  tests inject an immediately-resolving one so the whole state machine runs with zero real
+ *  wall-clock time (this repo's no-timing-dependent-assertions doctrine — a seam, not a bigger
+ *  margin). A child already dead when this is called is never signaled at all (AC5: reap must
+ *  not manufacture work against a leg that already exited on its own, e.g. via a completed
+ *  graceful handoff), and a child flagged `alreadySignaled` skips this SIGTERM specifically —
+ *  it already got its one SIGTERM from whoever set that flag — so no live child is ever
+ *  SIGTERM'd twice by one reap (gate② finding, 2026-08-05). The extra `isAlive()` check
+ *  immediately before the SIGKILL send below (round 6 P1a) is the same monotonic-filter habit
+ *  from `pollUntilDeadOrTimeout`, applied once more at the one transition that matters most (an
+ *  unrecoverable signal) — a survivor that died in that last synchronous gap is never signaled,
+ *  and correctly not counted as `escalated` below (its own contract: "SIGKILL was sent").
+ *
+ *  SCOPE (round 8, Codex REQUEST_CHANGES on 43ebdf3 — supervisor ruling: stop narrowing, delete
+ *  the exposure where it can't be closed): escalating to SIGKILL is sound here ONLY because this
+ *  function's one production caller (`reapAll()`, over `this.lanes`) guarantees every pid it hands
+ *  in has NOT yet been `waitpid`'d — the OS categorically cannot have recycled it (see `reapAll()`'s
+ *  own doc). That guarantee does NOT generalize. A raw pid whose owning process HAS already been
+ *  reaped (the leader-exited-descendant shape `onExit()` handles) is a strictly weaker liveness
+ *  signal: no amount of re-checking closes a check-then-signal gap that a host/event-loop stall
+ *  can stretch arbitrarily wide (`setTimeout` is a LOWER bound on the poll interval, never an
+ *  upper one), and unlike a courtesy SIGTERM, a wrongly-delivered SIGKILL is unrecoverable. This
+ *  function's own escalation loop must therefore NEVER be reused for that shape —
+ *  `signalOnceAndReport` (below) is the separate, deliberately non-escalating primitive that
+ *  shape uses instead. */
+export async function reapChildren(
+  children: ReapableChild[],
+  opts: { graceMs?: number; sleep?: (ms: number) => Promise<void>; log?: (message: string) => void } = {},
+): Promise<ReapOutcome[]> {
+  const sleepFn = opts.sleep ?? sleep;
+  const graceMs = opts.graceMs ?? REAP_GRACE_MS;
+  const log = opts.log ?? (() => {});
+
+  const outcomes: ReapOutcome[] = [];
+  const live: ReapableChild[] = [];
+  for (const c of children) {
+    if (c.isAlive()) live.push(c);
+    else outcomes.push({ name: c.name, alreadyDead: true, escalated: false, confirmedDead: true });
+  }
+  if (live.length === 0) return outcomes;
+
+  for (const c of live) {
+    if (!c.alreadySignaled) c.signal("SIGTERM");
+  }
+  const survivors = await pollUntilDeadOrTimeout(live, graceMs, sleepFn);
+  const stillAliveAtEscalation = survivors.filter((c) => c.isAlive());
+  for (const c of stillAliveAtEscalation) c.signal("SIGKILL");
+  await pollUntilDeadOrTimeout(stillAliveAtEscalation, REAP_VERIFY_TIMEOUT_MS, sleepFn);
+
+  const survivorNames = new Set(stillAliveAtEscalation.map((c) => c.name));
+  for (const c of live) {
+    const confirmedDead = !c.isAlive();
+    if (!confirmedDead) {
+      log(`[sapwood:reap] ${c.name}: still alive after grace period + SIGKILL — possible orphan process group`);
+    }
+    outcomes.push({ name: c.name, alreadyDead: false, escalated: survivorNames.has(c.name), confirmedDead });
+  }
+  return outcomes;
+}
+
+/** #668 (round 8, Codex REQUEST_CHANGES on 43ebdf3): the leader-exited-descendant reap path
+ *  (`reapDescendantsOnLeaderExit`) operates on a pid whose owning process has ALREADY been
+ *  `waitpid`'d by the time this runs (that's what let `onExit()`'s own `'exit'` handler fire at
+ *  all) — the OS is free to recycle that exact pid/pgid number at any point afterward.
+ *  `reapChildren`'s SIGTERM->grace->SIGKILL escalation is UNSAFE for this shape: rounds 6-7 tried
+ *  narrowing the check-then-signal gap before the SIGKILL send, and kept finding a smaller
+ *  residual gap underneath — because `setTimeout` is a LOWER bound on the poll interval, not an
+ *  upper one (host suspension / event-loop stall can put an ARBITRARY amount of real wall-clock
+ *  time between any two observations, no matter how tight the nominal interval), the gap can
+ *  never be closed by re-checking more often. TOCTOU is unavoidable here on POSIX; the fix is to
+ *  stop taking the UNRECOVERABLE action, not to keep narrowing the window in front of it.
+ *
+ *  So: exactly ONE signal (SIGTERM, skipped if `alreadySignaled` — an earlier drain already sent
+ *  the whole group one), exactly ONE bounded liveness observation afterward (the existing grace
+ *  wait, reused via the SAME `pollUntilDeadOrTimeout` `reapChildren` itself uses — a cooperative
+ *  descendant that dies from the TERM still ends the wait immediately), and NO escalation past
+ *  that: a survivor is REPORTED (logged here, and returned with `confirmedDead: false`, which
+ *  flows into `reapAll()`'s own aggregate outcome array whenever this reap is still tracked in
+ *  `inFlightLeaderExitReaps` at the moment `reapAll()` runs — the SAME orphan-surfacing path
+ *  `cli.ts`'s `reapAndSurfaceOrphans` already forces a failed exit code from) — never force-killed.
+ *  This is a deliberate degrade-to-human (this repo's own doctrine): a stubborn descendant
+ *  survives, visibly, until an operator acts on it, never silently and never at the cost of
+ *  risking a wrongly-killed stranger. A single courtesy SIGTERM landing on a recycled stranger is
+ *  the accepted, survivable residual (a process not expecting SIGTERM typically just ignores or
+ *  is unaffected by it); SIGKILL is not survivable, which is exactly why it's gone from this
+ *  path. */
+export async function signalOnceAndReport(
+  child: ReapableChild,
+  opts: { graceMs?: number; sleep?: (ms: number) => Promise<void>; log?: (message: string) => void } = {},
+): Promise<ReapOutcome> {
+  const sleepFn = opts.sleep ?? sleep;
+  const graceMs = opts.graceMs ?? REAP_GRACE_MS;
+  const log = opts.log ?? (() => {});
+
+  if (!child.isAlive()) return { name: child.name, alreadyDead: true, escalated: false, confirmedDead: true };
+  if (!child.alreadySignaled) child.signal("SIGTERM");
+  const survivors = await pollUntilDeadOrTimeout([child], graceMs, sleepFn);
+  const confirmedDead = survivors.length === 0;
+  if (!confirmedDead) {
+    log(
+      `[sapwood:reap] ${child.name}: descendant(s) survived a post-leader-exit SIGTERM — reported, never force-killed (round 8: no SIGKILL escalation on this path) — needs an operator to look`,
+    );
+  }
+  return { name: child.name, alreadyDead: false, escalated: false, confirmedDead };
 }
 
 /** POSIX single-quote escaping: wrap in '...' and replace each ' with '\'' so no shell
