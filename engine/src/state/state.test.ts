@@ -750,6 +750,83 @@ test("events append in order", () => {
   s.close();
 });
 
+// ── #710: rawEventLedgerSummary — the schema-window-honesty degraded read ──────────────────
+
+test("rawEventLedgerSummary (#710): empty ledger reports {count: 0, maxId: 0}, never null", () => {
+  const s = mem();
+  assert.deepEqual(s.rawEventLedgerSummary(), { count: 0, maxId: 0 });
+  s.close();
+});
+
+test("rawEventLedgerSummary (#710): counts every row and reports the true MAX(id), independent of kind/payload shape", () => {
+  const s = mem();
+  s.appendEvent("dispatched", { issue: 1 });
+  s.appendEvent("merged", { pr: 10 });
+  s.appendEvent("dispatched", { issue: 2 });
+  assert.deepEqual(s.rawEventLedgerSummary(), { count: 3, maxId: 3 });
+  s.close();
+});
+
+test("rawEventLedgerSummary (#710): survives a DB whose user_version disagrees with SCHEMA_VERSION — the read is schema-independent by construction", () => {
+  const s = mem();
+  s.appendEvent("dispatched", { issue: 1 });
+  s.appendEvent("dispatched", { issue: 2 });
+  const db = (s as unknown as { db: DatabaseSync }).db;
+  db.exec("PRAGMA user_version = 1"); // simulate an older-schema DB (userVersion() would now read 1)
+  assert.equal(s.userVersion(), 1);
+  assert.deepEqual(s.rawEventLedgerSummary(), { count: 2, maxId: 2 });
+  s.close();
+});
+
+test("rawEventLedgerSummary (#710): returns null, never throws, when the events table itself is missing (a DB so old/corrupt there is nothing schema-independent left to report)", () => {
+  const s = mem();
+  const db = (s as unknown as { db: DatabaseSync }).db;
+  db.exec("DROP TABLE events");
+  assert.equal(s.rawEventLedgerSummary(), null);
+  s.close();
+});
+
+test("rawEventLedgerSummary (#710 gate② P2-1 fix): a non-missing-table failure (a SYNTHETIC injected error) PROPAGATES — never silently swallowed into null as if the table were merely missing", () => {
+  const s = mem();
+  const db = (s as unknown as { db: DatabaseSync }).db;
+  const originalPrepare = db.prepare.bind(db);
+  // Inject a failure on the exact query rawEventLedgerSummary issues, shaped like a REAL non-
+  // missing-table SQLite failure (e.g. corruption) — never a message rawEventLedgerSummary's
+  // own missing-events-table matcher could mistake for "table missing".
+  (db as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+    if (sql.includes("FROM events")) throw new Error("database disk image is malformed");
+    return originalPrepare(sql);
+  };
+  try {
+    assert.throws(() => s.rawEventLedgerSummary(), /database disk image is malformed/);
+  } finally {
+    (db as unknown as { prepare: typeof originalPrepare }).prepare = originalPrepare;
+    s.close();
+  }
+});
+
+test("rawEventLedgerSummary (#710 gate② P2-1 fix): a REAL SQLITE_BUSY from another connection's held lock PROPAGATES uncaught (deterministic real-SQLite-locking fixture, no sleep/timer) — the exact case the old catch-everything shape used to mask as 'table missing'", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-raw-ledger-busy-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  new State(dbPath).close();
+  switchToRollbackJournal(dbPath); // WAL lets readers proceed alongside a writer — see the AC6 fixture's own comment for why this fixture needs rollback-journal mode instead.
+
+  const reader = new State(dbPath, { readOnly: true, busyTimeoutMs: 50 });
+  const writer = new DatabaseSync(dbPath);
+  writer.exec("BEGIN EXCLUSIVE");
+  try {
+    // rawEventLedgerSummary itself does NOT busy-normalize (that is the CALLER's job, via
+    // withBusyNormalization, the same as every other bare State read) — so the raw node:sqlite
+    // busy error surfaces here unwrapped, proving it is no longer swallowed into a false null.
+    assert.throws(() => reader.rawEventLedgerSummary(), /database is locked|busy/i);
+  } finally {
+    writer.exec("ROLLBACK");
+    writer.close();
+    reader.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("re-opening an already-migrated DB is a no-op (idempotent)", () => {
   // A second migrate() pass over the same in-memory handle would re-run; instead prove
   // the guard: opening when user_version == SCHEMA_VERSION applies nothing.

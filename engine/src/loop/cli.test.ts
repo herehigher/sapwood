@@ -1505,7 +1505,23 @@ test("status (#705): a real lane-spawned + worker-heartbeat ledger produces pid/
   }
 });
 
-test("status: missing config still prints DB-derived fields, config-derived fields shown as unknown", () => {
+test("status: no --config given and none found at the default probe names still prints DB-derived fields, config-derived fields shown as unknown, exit 0 (the best-effort no-flag case, unchanged by #710)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  const seed = new State(dbPath);
+  seed.close();
+  try {
+    const r = runCli(["node", "sapwood", "status", dbPath]);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /0\/unknown active/);
+    assert.match(r.stdout, /unknown \(no config found\) daily ceiling/);
+    assert.match(r.stdout, /config: none found/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("status (#710): an EXPLICIT --config naming a missing file fails CLOSED — exit 1, clear error, never a silent degrade to 'unknown' fields the way an omitted --config does", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
   const dbPath = join(dir, "sapwood.sqlite");
   const missingConfig = join(dir, "does-not-exist.yaml");
@@ -1513,9 +1529,29 @@ test("status: missing config still prints DB-derived fields, config-derived fiel
   seed.close();
   try {
     const r = runCli(["node", "sapwood", "status", dbPath, "--config", missingConfig]);
-    assert.equal(r.code, 0);
-    assert.match(r.stdout, /0\/unknown active/);
-    assert.match(r.stdout, /unknown \(no config found\) daily ceiling/);
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout, "");
+    assert.match(r.stderr, /sapwood status:/);
+    assert.match(r.stderr, new RegExp(missingConfig.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    // Never rendered the degraded/unknown text summary — a hard-fail config error must not also
+    // print a (misleadingly complete-looking) DB snapshot.
+    assert.doesNotMatch(r.stdout, /active/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("status (#710): an EXPLICIT --config naming an INVALID config also fails closed, exit 1, with the ZodError issues (mirrors runValidate's own rendering)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  const badConfig = join(dir, "bad.yaml");
+  writeFileSync(badConfig, "board: { owner: acme, repo: widgets, projectNumber: -1 }\n"); // projectNumber must be positive
+  const seed = new State(dbPath);
+  seed.close();
+  try {
+    const r = runCli(["node", "sapwood", "status", dbPath, "--config", badConfig]);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /sapwood status: invalid config:/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1770,7 +1806,10 @@ test("runStatus #237: reports the count of unadjudicated PO-dissent concerns —
   state.appendEvent("concern-adjudicated", { issue: 7, hash: "def", outcome: "closed" });
   state.close();
   try {
-    const result = runStatus(["node", "sapwood", "status", dbPath, "--config", join(dir, "missing.yaml")]);
+    // #710: no --config here (an explicit --config naming a missing file now fails closed,
+    // exit 1 — see the dedicated fail-closed test above) — this test is about the concerns
+    // count, not config resolution, so it relies on the ordinary no-config-found-anywhere probe.
+    const result = runStatus(["node", "sapwood", "status", dbPath]);
     assert.equal(result.code, 0);
     assert.match(result.stdout, /PO-dissent concerns awaiting adjudication: 1/);
   } finally {
@@ -1796,7 +1835,8 @@ test("runStatus sources orphans from the latest reconcile-completed event", () =
   });
   state.close();
   try {
-    const result = runStatus(["node", "sapwood", "status", dbPath, "--config", join(dir, "missing.yaml")]);
+    // #710: no --config here — see the comment on the #237 test above for why.
+    const result = runStatus(["node", "sapwood", "status", dbPath]);
     assert.equal(result.code, 0);
     assert.match(result.stdout, /open engine PR #200/);
     assert.doesNotMatch(result.stdout, /issue #170/);
@@ -1993,17 +2033,28 @@ test("status: DB schema NEWER than this engine -> clear upgrade message, exit 1,
   }
 });
 
-test("status: DB schema OLDER than this engine -> clear 'run the engine to migrate' message, exit 1, still not migrated by status", () => {
+test("status: DB schema OLDER than this engine -> clear 'run the engine to migrate' message, exit 1, still not migrated by status (#710 gate② P2-3: the TEXT refusal also pins the degraded schema-independent read — schema versions AND event count/max id, not just the refusal)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
   const dbPath = join(dir, "sapwood.sqlite");
-  new State(dbPath).close();
+  const seed = new State(dbPath);
+  // #710: seed a few events so count/maxId are non-trivial — proves the TEXT refusal line
+  // actually reflects the ledger, not just a hardcoded 0/0.
+  seed.appendEvent("dispatched", { issue: 1 });
+  seed.appendEvent("dispatched", { issue: 2 });
+  seed.appendEvent("merged", { pr: 10 });
+  seed.close();
   const raw = new DatabaseSync(dbPath);
   raw.exec("PRAGMA user_version = 1");
   raw.close();
   try {
     const r = runStatus(["node", "sapwood", "status", dbPath]);
     assert.equal(r.code, 1);
+    assert.equal(r.stdout, "");
     assert.match(r.stderr, /DB schema v1.*older.*status never migrates/);
+    assert.match(r.stderr, new RegExp(`engine schema v${SCHEMA_VERSION}`));
+    // #710 gate② P2-3: the degraded schema-independent read — both schema versions were already
+    // asserted above; this pins the raw event count/max id ALSO present in the same text line.
+    assert.match(r.stderr, /3 event\(s\) in the ledger, max id 3/);
     // status must have left the old version exactly as it found it.
     const check = new DatabaseSync(dbPath, { readOnly: true });
     assert.equal((check.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 1);

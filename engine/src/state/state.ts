@@ -3848,6 +3848,51 @@ export class State {
     return (this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM events").get() as { m: number }).m;
   }
 
+  /** #710 (gate② P2-1 fix): true ONLY for SQLite's own "no such table: events" error — the one
+   *  case rawEventLedgerSummary below may honestly report as "nothing schema-independent to
+   *  read" rather than propagate. Message-matched (SQLITE_ERROR's primary code, 1, is far too
+   *  generic to gate on numerically — isBusyError/isReadOnlyFsError above both have a NARROW,
+   *  specific extended-code family to check; a missing-table error has none, so an exact
+   *  message match is the precise signal here), and deliberately scoped to the literal table
+   *  name `events` — never a bare `/no such table/` that would also swallow an unrelated
+   *  missing-table error as if it meant this one. */
+  private static isMissingEventsTableError(e: unknown): boolean {
+    return /no such table:\s*events\b/i.test(String((e as { message?: unknown }).message ?? ""));
+  }
+
+  /** #710: the schema-window-honesty read `status`/`events` fall back to when userVersion()
+   *  disagrees with SCHEMA_VERSION and they refuse to interpret the DB's rows (fail-closed
+   *  stands — this method is the ONLY thing either command reads off a mismatched-schema DB).
+   *  Literally `SELECT COUNT(*)/MAX(id) FROM events` and NOTHING else — no join, no other
+   *  column, no State method that could itself depend on a migration this build doesn't have.
+   *  The `events` table's own `(id)` shape predates every migration recorded in MIGRATIONS, so
+   *  this read is trustworthy across the whole schema window in both directions (older OR
+   *  newer than SCHEMA_VERSION) — degraded, never blind.
+   *
+   *  #710 (gate② P2-1 fix): returns `null` (never throws) on EXACTLY ONE case — the `events`
+   *  table itself missing (a DB so old/corrupt there is nothing schema-independent left to
+   *  report), matched via `isMissingEventsTableError` above. Every OTHER failure — SQLITE_BUSY
+   *  (a writer's lock landing after `userVersion()` already succeeded, a second contention
+   *  window the same shape eventsPageFiltered/spendSummaryForDay's own doc describes),
+   *  corruption, or any other query error — now PROPAGATES uncaught, exactly like every other
+   *  State read. The original all-errors-become-null shape silently masked a locked-writer
+   *  failure as "table missing", which would have rendered the WRONG refusal reason and, worse,
+   *  skipped the caller's own busy-error handling (withBusyNormalization/busyResult) entirely —
+   *  the schema-mismatch branch that calls this runs INSIDE withBusyNormalization specifically
+   *  so a busy error here still gets normalized into the structured SqliteBusyError the CLI
+   *  already renders correctly, the same as any other read. */
+  rawEventLedgerSummary(): { count: number; maxId: number } | null {
+    try {
+      const row = this.db.prepare("SELECT COUNT(*) AS cnt, COALESCE(MAX(id), 0) AS maxId FROM events").get() as
+        | { cnt: number; maxId: number }
+        | undefined;
+      return { count: row?.cnt ?? 0, maxId: row?.maxId ?? 0 };
+    } catch (e) {
+      if (State.isMissingEventsTableError(e)) return null;
+      throw e;
+    }
+  }
+
   /** #688: the SUBJECT-scoped twin of maxEventId() above — util/heartbeat.ts's createHeartbeatGate
    *  uses this (via worker.ts's per-lane call site) as its spam-suppression progress id instead of
    *  the global MAX(id). Liveness is per-lane: with the global id, two concurrent lanes on the
