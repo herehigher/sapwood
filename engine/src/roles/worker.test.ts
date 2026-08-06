@@ -5178,22 +5178,55 @@ function reapPollSleep(opts: { held?: boolean } = {}): { sleep: (ms: number) => 
  *  enough that a test holding `reapPollSleep`'s gate can reliably observe "still alive" right
  *  after the SIGTERM was sent, proving a GENUINELY in-flight reap, not one that raced past
  *  observation. `opts.ignoreTerm: true` makes it never die from SIGTERM at all — the shape round
- *  8's "reported, never force-killed" tests need. */
-function leaderExitStub(dir: string, descendantReadyFile: string, opts: { ignoreTerm?: boolean } = {}): string {
+ *  8's "reported, never force-killed" tests need.
+ *
+ *  `opts.stopFile` (Codex gate② final on 85d220c, #691-class fix): a SECOND, pid-free exit door,
+ *  orthogonal to the SIGTERM handling above — the descendant polls for this file and exits 0 the
+ *  instant it appears, regardless of whether it also ignores SIGTERM. This exists so a test that
+ *  needs to tear the descendant down in its OWN cleanup never has to sign a pid as kill authority:
+ *  once the leader that pid belonged to has been waitpid'd (which every one of these tests forces,
+ *  by design), neither a `typeof` guard nor a `wrapper_pid` re-read off disk proves the test still
+ *  owns that pid — pid reuse would mean signalling a completely unrelated process group, exactly
+ *  #691's own class. A file the test itself wrote and the descendant itself polls needs no such
+ *  proof. It does NOT change what "ignores SIGTERM" means for this stub — a `stopFile`-equipped,
+ *  `ignoreTerm: true` descendant still never dies from SIGTERM; the file is a wholly separate
+ *  channel, so every test asserting "SIGTERM does NOT end it" keeps that assertion's meaning
+ *  intact. Omitted (the default): the descendant has no such door and lives out its own uniform
+ *  600s self-bound (`longRunningStub`'s own doc) — unchanged from before this fix, for every
+ *  call site that doesn't need file-based teardown. */
+function leaderExitStub(dir: string, descendantReadyFile: string, opts: { ignoreTerm?: boolean; stopFile?: string } = {}): string {
   const sigtermHandler = opts.ignoreTerm
     ? "process.on('SIGTERM',()=>{});"
     : "process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),100));";
+  const idleLoop = opts.stopFile
+    ? `setInterval(()=>{if(require('fs').existsSync('${opts.stopFile}'))process.exit(0);},50);`
+    : "setInterval(()=>{},1000);";
   return mkStub(
     dir,
     [
       "#!/usr/bin/env bash",
-      `( exec node -e "${sigtermHandler}require('fs').writeFileSync('${descendantReadyFile}','1');setInterval(()=>{},1000);" ) &`,
+      `( exec node -e "${sigtermHandler}require('fs').writeFileSync('${descendantReadyFile}','1');${idleLoop}" ) &`,
       `while [ ! -f "${descendantReadyFile}" ]; do sleep 0.01; done`,
       "exit 0",
       "",
     ].join("\n"),
   );
 }
+
+/** #691-class fix (Codex gate② final on 85d220c): best-effort, NEVER-THROWING wait for a process
+ *  GROUP to actually go away after a test asked it to leave through its own pid-free door (a
+ *  `leaderExitStub`-style stop-file, never a signal) — this is cleanup code, called from `finally`,
+ *  so a straggler here must never mask whatever the try block's own assertions already decided by
+ *  throwing over them. READ-ONLY the whole way: `groupAlive` is a `process.kill(-pid, 0)` signal-0
+ *  probe, never a signal that can affect a live process. If the process never actually goes (the
+ *  stop-file write raced a hard test-process death, or landed on a since-recycled pgid that never
+ *  had the file-polling loop at all), this simply gives up at the deadline — the honest residual is
+ *  the SAME bounded straggler `longRunningStub`'s own doc already accepts for a lane no test drives
+ *  to a terminal state: it lives out its own uniform 600s self-bound, nothing more. */
+const waitBrieflyForGroupDeath = async (pid: number, timeoutMs = 5_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (groupAlive(pid) && Date.now() < deadline) await sleep(20);
+};
 
 test("WorkerSupervisor onExit (#668 round 8): a leader that exits ON ITS OWN while a live COOPERATIVE DESCENDANT shares its process group is reaped RIGHT THERE by the SINGLE SIGTERM alone — no escalation needed, no reapAll() call anywhere in this test, just onExit()'s own fire-and-forget signal", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
@@ -5354,6 +5387,7 @@ test("WorkerSupervisor.resume (#668 round 6 P1b, rebased round 8): a same-name r
   let s: WorkerSupervisor | undefined;
   let firstLeaderPid: number | undefined;
   let name: string | undefined;
+  const stopFile = join(dir, "stop-descendant"); // #691-class fix: the pid-free door both descendants below exit through in `finally`
   try {
     const descendantReadyFile = join(dir, "descendant.ready");
     // TERM-ignoring on purpose: this test is about the RESPAWN GATE (does resume() wait for the
@@ -5361,7 +5395,7 @@ test("WorkerSupervisor.resume (#668 round 6 P1b, rebased round 8): a same-name r
     // round 8 never escalates on this path, so an ignore-TERM descendant lets the held gate stay
     // fully deterministic (no real subprocess timing dependency at all) rather than needing a
     // real internal delay to race against.
-    const bin = leaderExitStub(dir, descendantReadyFile, { ignoreTerm: true });
+    const bin = leaderExitStub(dir, descendantReadyFile, { ignoreTerm: true, stopFile });
     const { sleep, release } = reapPollSleep({ held: true });
     s = new WorkerSupervisor({
       now: realClock,
@@ -5419,24 +5453,29 @@ test("WorkerSupervisor.resume (#668 round 6 P1b, rebased round 8): a same-name r
       "round 8: an ignore-TERM descendant is reported, never force-killed — it's still alive, by design",
     );
   } finally {
-    // Clean up directly with SIGKILL — round 8 deliberately leaves an ignore-TERM descendant for
-    // an operator, but THIS test still must not leak live processes. Both the first leg's own
-    // (still-alive) descendant AND whatever the resumed (second) leg's own leader-exit reap left
-    // behind (same ignore-TERM shape, same bin) need it. In `finally` (not the try body) so a
-    // failed assertion above still leaves neither process behind.
-    if (typeof firstLeaderPid === "number") {
-      try {
-        process.kill(-firstLeaderPid, "SIGKILL");
-      } catch {
-        /* already gone */
-      }
+    // #691-class fix (Codex gate② final on 85d220c): NO process.kill(-pid, ...) here anymore. Once
+    // a leader has been waitpid'd (which the whole test above forces), neither a `typeof` guard nor
+    // a `wrapper_pid` re-read off disk proves this test still CURRENTLY owns that pid — pid reuse
+    // would mean signalling a completely unrelated process group, exactly #691's own class this
+    // repo has now hit three times. Instead: ask both descendants to leave through their own
+    // pid-free door — the first leg's and the resumed second leg's descendant share the SAME `bin`
+    // (leaderExitStub's own doc), hence the SAME stopFile path, so ONE write reaches both — then
+    // wait, READ-ONLY (waitBrieflyForGroupDeath is a signal-0 probe, never a kill), for them to
+    // actually go. In `finally` (not the try body) so a failed assertion above still triggers this.
+    // Round 8's own "reported, never force-killed" meaning is untouched: the file poll is a
+    // SEPARATE channel from SIGTERM handling, so "ignores SIGTERM" still means exactly that.
+    try {
+      writeFileSync(stopFile, "1");
+    } catch {
+      /* dir already gone */
     }
+    if (typeof firstLeaderPid === "number") await waitBrieflyForGroupDeath(firstLeaderPid);
     if (name) {
       try {
         const secondRunning = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")) as { wrapper_pid?: number };
-        if (typeof secondRunning.wrapper_pid === "number") process.kill(-secondRunning.wrapper_pid, "SIGKILL");
+        if (typeof secondRunning.wrapper_pid === "number") await waitBrieflyForGroupDeath(secondRunning.wrapper_pid);
       } catch {
-        /* running.json already gone (its own onExit already ran), or the pgid is already gone */
+        /* running.json already gone (its own onExit already ran), or unreadable */
       }
     }
     s?.dispose();
@@ -5628,7 +5667,8 @@ test("signalOnceAndReport (#668 round 8): a COOPERATIVE descendant that dies fro
 test("WorkerSupervisor onExit + reapAll (#668 round 8, real end-to-end): a leader-exited descendant that IGNORES SIGTERM is REPORTED — surfaced through reapAll()'s existing orphan path (confirmedDead: false) while still in flight — and is left completely alive, never force-killed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
   const descendantReadyFile = join(dir, "descendant.ready");
-  const bin = leaderExitStub(dir, descendantReadyFile, { ignoreTerm: true });
+  const stopFile = join(dir, "stop-descendant"); // #691-class fix: the pid-free door the descendant exits through in `finally`
+  const bin = leaderExitStub(dir, descendantReadyFile, { ignoreTerm: true, stopFile });
   const { sleep, release } = reapPollSleep({ held: true }); // deterministic: no real timing dependency needed since this descendant never dies either way
   const s = new WorkerSupervisor({
     now: realClock,
@@ -5666,11 +5706,17 @@ test("WorkerSupervisor onExit + reapAll (#668 round 8, real end-to-end): a leade
       "the descendant is left completely alive — reported, never force-killed, exactly as round 8 specifies",
     );
   } finally {
+    // #691-class fix (Codex gate② final on 85d220c): NO process.kill(-pid, ...) here anymore — see
+    // the sibling resume test's finally (above) for the full reasoning. Ask the descendant to leave
+    // through its own pid-free door (the stop-file it polls for) and wait, READ-ONLY, for it to
+    // actually go; round 8's own "reported, never force-killed" meaning is untouched since the file
+    // poll is a channel wholly separate from SIGTERM handling.
     try {
-      if (leaderPid !== -1) process.kill(-leaderPid, "SIGKILL"); // test cleanup only — never part of production behavior
+      writeFileSync(stopFile, "1");
     } catch {
-      /* already gone */
+      /* dir already gone */
     }
+    if (leaderPid !== -1) await waitBrieflyForGroupDeath(leaderPid);
     s.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
