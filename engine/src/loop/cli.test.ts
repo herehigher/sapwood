@@ -2033,17 +2033,28 @@ test("status: DB schema NEWER than this engine -> clear upgrade message, exit 1,
   }
 });
 
-test("status: DB schema OLDER than this engine -> clear 'run the engine to migrate' message, exit 1, still not migrated by status", () => {
+test("status: DB schema OLDER than this engine -> clear 'run the engine to migrate' message, exit 1, still not migrated by status (#710 gate② P2-3: the TEXT refusal also pins the degraded schema-independent read — schema versions AND event count/max id, not just the refusal)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
   const dbPath = join(dir, "sapwood.sqlite");
-  new State(dbPath).close();
+  const seed = new State(dbPath);
+  // #710: seed a few events so count/maxId are non-trivial — proves the TEXT refusal line
+  // actually reflects the ledger, not just a hardcoded 0/0.
+  seed.appendEvent("dispatched", { issue: 1 });
+  seed.appendEvent("dispatched", { issue: 2 });
+  seed.appendEvent("merged", { pr: 10 });
+  seed.close();
   const raw = new DatabaseSync(dbPath);
   raw.exec("PRAGMA user_version = 1");
   raw.close();
   try {
     const r = runStatus(["node", "sapwood", "status", dbPath]);
     assert.equal(r.code, 1);
+    assert.equal(r.stdout, "");
     assert.match(r.stderr, /DB schema v1.*older.*status never migrates/);
+    assert.match(r.stderr, new RegExp(`engine schema v${SCHEMA_VERSION}`));
+    // #710 gate② P2-3: the degraded schema-independent read — both schema versions were already
+    // asserted above; this pins the raw event count/max id ALSO present in the same text line.
+    assert.match(r.stderr, /3 event\(s\) in the ledger, max id 3/);
     // status must have left the old version exactly as it found it.
     const check = new DatabaseSync(dbPath, { readOnly: true });
     assert.equal((check.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 1);

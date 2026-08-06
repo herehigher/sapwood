@@ -599,32 +599,69 @@ test("events (#710): an EXPLICIT --config naming a missing file fails CLOSED —
   });
 });
 
-test("events/status (#710 AC2 — config-mismatch trap regression): with a SECOND (default-named) config file also present, the flagged --config wins — provenance and (for status) the daily cap come from the NAMED file, never the probed default", () => {
-  withDir((dir) => {
-    const dbPath = join(dir, "sapwood.sqlite");
-    // The probed default (what a bare `status`/`events` with no --config would pick up).
-    writeFileSync(
-      join(dir, "sapwood.config.yaml"),
-      "board: { owner: acme, repo: widgets, projectNumber: 1 }\nlanes: { max: 1 }\ncost: { dailyBudgetUsd: 100 }\n",
-    );
-    // The RUN's actual config — a differently-named file, only reachable via --config.
-    const runConfigPath = join(dir, "sapwood.dogfood.yaml");
-    writeFileSync(
-      runConfigPath,
-      "board: { owner: acme, repo: widgets, projectNumber: 2 }\nlanes: { max: 9 }\ncost: { dailyBudgetUsd: 300 }\n",
-    );
-    new State(dbPath).close();
+test("events/status (#710 AC2 — config-mismatch trap regression, gate② P2-2 fix): with a SECOND (default-named) config file GENUINELY reachable by the cwd probe, the flagged --config wins on every surface — provenance, the daily cap, AND the probe-only warning never leak from the probed file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-events-config-mismatch-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  // The probed default (what a bare `status`/`events` with no --config would pick up). Leaves
+  // ci.requiredChecks empty under the default reviewer.mode: engine-agent — config.ts's own
+  // parse-boundary warning fires for exactly this shape, giving this file a DISTINCT, assertable
+  // fingerprint beyond just its own dailyBudgetUsd.
+  writeFileSync(
+    join(dir, "sapwood.config.yaml"),
+    "board: { owner: acme, repo: widgets, projectNumber: 1 }\nlanes: { max: 1 }\ncost: { dailyBudgetUsd: 100 }\n",
+  );
+  // The RUN's actual config — a differently-named file, only reachable via --config. Sets
+  // ci.requiredChecks non-empty specifically so it does NOT trigger that warning — the two
+  // configs are now distinguishable on BOTH dailyBudgetUsd and warning behavior.
+  const runConfigPath = join(dir, "sapwood.dogfood.yaml");
+  writeFileSync(
+    runConfigPath,
+    "board: { owner: acme, repo: widgets, projectNumber: 2 }\nlanes: { max: 9 }\ncost: { dailyBudgetUsd: 300 }\nci: { requiredChecks: [{ name: build }] }\n",
+  );
+  new State(dbPath).close();
 
+  const previousCwd = process.cwd();
+  const originalWarn = console.warn;
+  const warnCalls: string[] = [];
+  const warnedAboutRequiredChecks = () => warnCalls.some((w) => w.includes("ci.requiredChecks is empty"));
+  try {
+    // #710 gate② P2-2: chdir INTO dir — `loadConfig`'s/`resolveConfigProvenance`'s probe checks
+    // DEFAULT_CONFIG_PATHS' relative names against the CURRENT WORKING DIRECTORY (config.ts's own
+    // `DEFAULT_CONFIG_PATHS.find(existsSync)`), so without this the probed-default fixture above
+    // is never actually reachable and this test would pass even if a leak existed.
+    process.chdir(dir);
+    console.warn = ((...args: unknown[]) => {
+      warnCalls.push(args.map(String).join(" "));
+    }) as typeof console.warn;
+
+    // Precondition: prove the probed default is a REAL, live temptation — WITHOUT --config, a
+    // bare `events` genuinely finds and loads it (relative provenance, its own $100 cap's config,
+    // and its warning fires). If this fails, the fixture below proves nothing.
+    warnCalls.length = 0;
+    const probedBody = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--json"]));
+    assert.equal(probedBody.config.provenance, "sapwood.config.yaml", "precondition: the probe found the default-named file");
+    assert.ok(warnedAboutRequiredChecks(), "precondition: the probed default's own ci.requiredChecks warning actually fires");
+
+    // The regression itself: --config names the RUN's file — provenance, caps, AND the probed
+    // default's warning must all come from (or reflect) the FLAGGED file, never the probed one.
+    warnCalls.length = 0;
     const eventsBody = parseStdout(runEvents(["node", "sapwood", "events", dbPath, "--config", runConfigPath, "--json"]));
     assert.deepEqual(eventsBody.config, { available: true, provenance: runConfigPath });
+    assert.ok(!warnedAboutRequiredChecks(), "the probed default's warning must never fire when --config points elsewhere");
 
     // Same trap, on `status` --json: the daily cap must be the RUN's $300, never the committed
     // repo config's $100 — this is the exact live trap batch-11 T1 observed (#710's Why).
+    warnCalls.length = 0;
     const statusBody = parseStdout(runCli(["node", "sapwood", "status", dbPath, "--config", runConfigPath, "--json"]));
     assert.equal(statusBody.config.provenance, runConfigPath);
     assert.equal(statusBody.spend.dailyBudgetUsd, 300);
     assert.notEqual(statusBody.spend.dailyBudgetUsd, 100);
-  });
+    assert.ok(!warnedAboutRequiredChecks(), "status --config must not leak the probed default's warning either");
+  } finally {
+    console.warn = originalWarn;
+    process.chdir(previousCwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── #710: schema-window honesty ─────────────────────────────────────────────────────────────

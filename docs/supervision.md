@@ -69,12 +69,12 @@ section for the general rule it follows.
 
 ### Where facts live: GitHub vs the state DB
 
-GitHub (issues, the Project board, PRs) holds cross-actor **process** truth: what's in
-flight, by whom, in what state. Labels are the work queue, adjudications live in issue
-bodies, review verdicts land as PR reviews, and the gated/human-merge/needs-human queues
-above are read from there and nowhere else. Anything a human or another agent must read
-in order to act belongs on GitHub — and on a conflict between the two stores, GitHub is
-authoritative for process state, never the DB.
+GitHub (issues, the Project board, PRs) holds cross-actor **process** truth for anything
+a human or another agent must read in order to act: what's in flight, by whom, the
+needs-human/gated/hold queues above, and adjudications recorded in issue bodies — labels
+are the work queue, review verdicts land as PR reviews. For that class of fact — a
+human-decision queue, an adjudication — GitHub is authoritative on a conflict, never the
+DB.
 
 The sqlite state DB, by contrast, is this ONE engine instance's runtime **belief** — the
 event ledger, lane rows, spend ledger, heartbeats, pids, worktree paths — facts
@@ -85,11 +85,17 @@ surface a belief-vs-reality gap to the operator (a dead pid a lane still calls
 arbitrate it — arbitration is a human's or another agent's call, made through GitHub,
 the same as every other decision this page routes there.
 
-Two corollaries follow. Machine-local facts (a pid, a worktree path) never get written
-to GitHub — they mean nothing off the machine that produced them. And the few DB↔GitHub
-mirrors that do exist (the lane-state-label pattern) are one-way projections, DB-belief
-→ GitHub-label, each with its own heal path for when the two drift — never a second
-source of truth, only a cache with a repair story.
+Two corollaries follow, and they are not symmetric. Machine-local facts (a pid, a
+worktree path) never get written to GitHub at all — they mean nothing off the machine
+that produced them. The DB→GitHub mirrors that DO exist (the lane-state-label pattern:
+a `driving`/`fixing` lane belief projects to a PR visibility label) are meant to heal on
+drift, but at least one has a documented, bounded blind spot rather than a full heal
+path: a crash in the apply window leaves the lane permanently unlabelled — nothing
+retries, because the belief already says "labelled" (`lane-state-label.ts`'s own header
+doc, "THE RESIDUAL BLIND SPOT"). A mirrored label's **absence is therefore never proof a
+lane is inactive** — that is exactly backwards from the authority rule above: for lane
+activity, the DB belief (read via `status`) is the honest check, GitHub's label is only
+ever a best-effort, occasionally-lagging cache of it.
 
 ## Batch open ritual
 
