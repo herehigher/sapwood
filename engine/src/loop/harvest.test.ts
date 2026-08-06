@@ -23,6 +23,7 @@ import { ROLE_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } f
 import { State } from "../state/state.js";
 import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { LaneProbe, Supervisor } from "./conductor.js";
+import { attachAttemptGuard, withHangGuard } from "./hang-guard.test-support.js";
 import {
   createHarvestStub,
   defaultHarvestPromptPath,
@@ -181,6 +182,22 @@ const failedResult = (name: string): RoleSessionResult => ({
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...over });
+
+/** #691: `runRounds` drives `round.ts:1161/1692/1726`'s production `for (;;)` loops with no bound
+ *  of its own -- see `hang-guard.test-support.ts` (shared with
+ *  driver.test.ts/round.test.ts/round-defaults.test.ts/retro.test.ts -- ONE copy, not five) for
+ *  why this needs BOTH `withHangGuard` and `attachAttemptGuard`. */
+async function runRoundsGuarded(deps: RoundDeps): ReturnType<typeof runRounds> {
+  const attemptGuardFired = attachAttemptGuard(deps);
+  const result = await withHangGuard(
+    runRounds(deps),
+    45_000,
+    "runRounds(deps) did not settle within 45000ms — a wedged production for(;;) loop (round.ts:1161/1692/1726), the class that caused the 2026-08-05 livelock (#691)",
+  );
+  const fired = attemptGuardFired();
+  if (fired !== null) throw new Error(fired);
+  return result;
+}
 
 test("defaultHarvestPromptPath: resolves to the shipped prompts/harvest.md, which exists, mentions the round-fact vars, and instructs the #110 structured-output format", () => {
   const p = defaultHarvestPromptPath();
@@ -670,7 +687,7 @@ test("runRounds integration: the real harvest stub runs during a normal round cl
       stop();
     }
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1);
   assert.equal(runner.calls.length, 1); // the harvest session actually ran — on a GRACEFUL stop
@@ -688,7 +705,7 @@ test("runRounds integration: KILL_SWITCH blocks harvesting entirely — the stub
     const runner = new ScriptedRunner(doneResult("role-harvest-int"));
     const harvestStub = createHarvestStub({ now: realClock, forge: new MinimalForge(), state, cfg: mkCfg(), runner });
     const deps = baseIntegrationDeps(state, { harvesting: harvestStub });
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     assert.equal(result.stoppedBy, "kill-switch");
     assert.equal(runner.calls.length, 0); // harvest never dispatched a session
     assert.equal(result.rounds, 0); // the round never closed

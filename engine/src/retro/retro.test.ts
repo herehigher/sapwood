@@ -19,6 +19,7 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { LaneProbe, Supervisor } from "../loop/conductor.js";
+import { attachAttemptGuard, withHangGuard } from "../loop/hang-guard.test-support.js";
 import { type PeripheralPhase, type PeripheralStub, type RoundDeps, runRounds } from "../loop/round.js";
 import type { ContextManifest } from "../roles/context-manifest.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
@@ -108,6 +109,22 @@ const mkFakeManifest = (tag: string): ContextManifest => ({
   readPaths: [],
   recordedAt: "2026-07-17T00:00:01Z",
 });
+
+/** #691: `runRounds` drives `round.ts:1161/1692/1726`'s production `for (;;)` loops with no bound
+ *  of its own -- see `hang-guard.test-support.ts` (shared with
+ *  driver.test.ts/round.test.ts/round-defaults.test.ts/harvest.test.ts -- ONE copy, not five) for
+ *  why this needs BOTH `withHangGuard` and `attachAttemptGuard`. */
+async function runRoundsGuarded(deps: RoundDeps): ReturnType<typeof runRounds> {
+  const attemptGuardFired = attachAttemptGuard(deps);
+  const result = await withHangGuard(
+    runRounds(deps),
+    45_000,
+    "runRounds(deps) did not settle within 45000ms — a wedged production for(;;) loop (round.ts:1161/1692/1726), the class that caused the 2026-08-05 livelock (#691)",
+  );
+  const fired = attemptGuardFired();
+  if (fired !== null) throw new Error(fired);
+  return result;
+}
 
 // ── Write-scope: "proposals appear as branches/PRs only" ────────────────────────────────────
 
@@ -860,7 +877,7 @@ test("runRounds integration: the real retro stub runs during a normal round clos
   deps.onRoundPhase = (_roundId, phase) => {
     if (phase === "aligning") stop();
   };
-  const result = await runRounds(deps);
+  const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1);
   assert.equal(runner.calls.length, 1); // retro ran this round — on a GRACEFUL stop
@@ -877,7 +894,7 @@ test("runRounds integration: KILL_SWITCH blocks retro entirely — the stub neve
     const runner = new ScriptedRunner(doneResult("role-retro-int"));
     const retroStub = createRetroStub({ now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() });
     const deps = baseIntegrationDeps(state, { retro: retroStub });
-    const result = await runRounds(deps);
+    const result = await runRoundsGuarded(deps);
     assert.equal(result.stoppedBy, "kill-switch");
     assert.equal(runner.calls.length, 0);
     assert.equal(result.rounds, 0);
