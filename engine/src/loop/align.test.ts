@@ -1498,6 +1498,213 @@ test("createAligningStub: triage processes every candidate independently", async
   state.close();
 });
 
+// ── #703 v2 (ruling items 1a + 2, gate② P1-1 revision): PO triage — structural role-marker
+// immutability, normalized ONLY at the WRITE boundary (never pre-persist) so both a fresh
+// decision's first write AND a crash-RESUMED (journal-replayed) decision's write share the
+// IDENTICAL normalization primitive — see `updateIssueBodyIfUnchanged`'s own doc in align.ts for
+// the full P1-1 design (a pre-#703 journaled decision must never write its role-embedded marker
+// verbatim just because it happens to be replayed after a deploy upgrade). The
+// `triage-decision-accepted` journal event therefore carries the RAW role text (role's own marker
+// attempt still embedded, if any) — only the actual GitHub write is normalized. ─────────────────
+
+test("createAligningStub (#703 v2a, gate② P1-1): a po-triage redraft carrying a DIFFERENT (engine-id) marker never lands — the issue's ORIGINAL marker survives byte-for-byte on GitHub, even though the JOURNAL keeps the role's raw (un-normalized) text verbatim", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [
+    { number: 70, title: "t", labels: [], body: "original body, no plan\n\n<!-- sapwood:comments-adjudicated-through: 10 -->" },
+  ];
+  const cfg = mkCfg();
+  const draftedBodyWithEngineMarker =
+    "original body\n## Verification\n- run npm test\n\n<!-- sapwood:comments-adjudicated-through: 999999 -->";
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-70", triageResultText(70, draftedBodyWithEngineMarker)),
+  ]);
+  const state = new State(":memory:");
+  const logged = tapEvents(state);
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 30, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 1);
+  const appliedBody = forge.updateIssueBodyCalls[0]![1];
+  assert.ok(!appliedBody.includes("999999"), "the role's own (engine-id) marker attempt must never be WRITTEN");
+  assert.ok(appliedBody.includes("<!-- sapwood:comments-adjudicated-through: 10 -->"), "the original human marker survives byte-for-byte");
+  const accepted = logged.find(([kind]) => kind === "triage-decision-accepted");
+  assert.ok(accepted);
+  const journaledBody = (accepted![1] as { body: string }).body;
+  assert.equal(
+    journaledBody,
+    draftedBodyWithEngineMarker,
+    "#703 v2 gate② P1-1: the journal is RAW (never pre-normalized) — normalization happens exactly once, at the write boundary, so it applies uniformly to fresh AND replayed decisions alike",
+  );
+  state.close();
+});
+
+// ── #703 v2 gate② (P1-1): the REPLAY shape itself — a `triage-decision-accepted` record persisted
+// by a PRE-#703 engine (its `body` carries a role-set marker verbatim, un-normalized, because
+// that engine version never normalized anything), resumed by a POST-#703 engine after a mid-round
+// deploy upgrade (same round_id — triageProgress only ever resumes WITHIN the same round). ──────
+
+test("createAligningStub (#703 v2, gate② P1-1 — the live finding's own shape): a journaled PRE-v2-shaped triage decision with an embedded engine-id marker, replayed after a deploy, never writes the journaled marker — the write carries the LIVE body's marker instead", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 74, title: "t", labels: [], body: "no plan yet" }];
+  // The issue's CURRENT (live) body carries a human-adjudicated marker — unrelated to whatever
+  // the pre-#703 session embedded in its journaled decision below.
+  forge.issueBodies[74] = "no plan yet\n\n<!-- sapwood:comments-adjudicated-through: 55 -->";
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  // Simulate a PRE-#703 engine's write-ahead decision: `body` embeds an ENGINE-id marker the
+  // role chose, exactly the shape the old (pre-immutability) engine would have journaled
+  // verbatim — `expectedHash` matches the CURRENT live body's hash unmodified (contentVersion of
+  // the exact live body above), so the #232 concurrent-edit guard sees no drift and would have
+  // let a pre-#703 engine write this marker straight through.
+  const journaledBodyWithEngineMarker =
+    "no plan yet\n## Verification\n- run npm test\n\n<!-- sapwood:comments-adjudicated-through: 999999999 -->";
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 40,
+    issue: 74,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:74",
+    attempt: 1,
+    body: journaledBodyWithEngineMarker,
+    expected_hash: contentVersionForTest(forge.issueBodies[74]!),
+  });
+  // Only an align-pass step: a po-triage dispatch here would prove the resume path is broken
+  // (it should replay the persisted decision directly, zero new sessions).
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 40, phase: "aligning", marker: null });
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align"],
+    "zero po-triage sessions — replayed directly from the journal",
+  );
+  assert.equal(forge.updateIssueBodyCalls.length, 1);
+  const written = forge.updateIssueBodyCalls[0]![1];
+  assert.ok(!written.includes("999999999"), "the journaled (pre-v2, role-set) engine marker must NEVER be written");
+  assert.ok(
+    written.includes("<!-- sapwood:comments-adjudicated-through: 55 -->"),
+    "the LIVE body's marker wins — 'whatever marker is live at write time'",
+  );
+  state.close();
+});
+
+test("createAligningStub (#703 v2, gate② P1-1 — the accepted fallback): a journaled PRE-v2-shaped decision whose LIVE body has since drifted (concurrent edit) refuses the write entirely — never the journaled marker, never a blind overwrite either", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 75, title: "t", labels: [], body: "no plan yet" }];
+  // The live body has moved on SINCE the (simulated pre-#703) session read it — a genuine
+  // concurrent edit, unrelated to the marker fix.
+  forge.issueBodies[75] = "a human rewrote this issue entirely, no marker at all";
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const journaledBodyWithEngineMarker =
+    "no plan yet\n## Verification\n- run npm test\n\n<!-- sapwood:comments-adjudicated-through: 999999999 -->";
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 41,
+    issue: 75,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:75",
+    attempt: 1,
+    body: journaledBodyWithEngineMarker,
+    // Hash of the ORIGINAL (pre-#703) body the session actually read — deliberately NOT the
+    // current live body's hash, reproducing "the live body has moved on since a pre-deploy
+    // session read it."
+    expected_hash: contentVersionForTest("no plan yet"),
+  });
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 41, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "refused — never the journaled marker, never a blind overwrite of the human's edit");
+  assert.equal(forge.issueBodies[75], "a human rewrote this issue entirely, no marker at all", "the live (human-edited) body is untouched");
+  state.close();
+});
+
+test("createAligningStub (#703 v2b): a po-triage redraft carrying a marker, but the issue's CURRENT body has none — the applied/persisted body has no marker either", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 71, title: "t", labels: [], body: "original body, no plan, no marker" }];
+  const cfg = mkCfg();
+  const draftedBodyWithMarker = "original body\n## Verification\n- x\n\n<!-- sapwood:comments-adjudicated-through: 5000 -->";
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-71", triageResultText(71, draftedBodyWithMarker)),
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 31, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 1);
+  assert.ok(!forge.updateIssueBodyCalls[0]![1].includes("5000"), "a role cannot CREATE a marker that never existed on this issue");
+  state.close();
+});
+
+test("createAligningStub (#703 v2, gate② P1-1 revision — refusal arm): the CURRENT body already carries a DUPLICATE cursor marker — the po-triage WRITE is REFUSED entirely (never repaired): no updateIssueBody call, no success comment. The decision IS write-ahead accepted per #232's own doctrine (the refusal happens at the write boundary, not before), but that accepted text never reaches GitHub", async () => {
+  const forge = new FakeForge();
+  const brokenBody =
+    "original body, no plan\n\n<!-- sapwood:comments-adjudicated-through: 1 -->\n\n<!-- sapwood:comments-adjudicated-through: 2 -->";
+  forge.planTriageCandidates = [{ number: 72, title: "t", labels: [], body: brokenBody }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-72", triageResultText(72, "## Verification\n- x")),
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  const { marker } = await stub.run({ roundId: 32, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "the write is refused, not repaired");
+  assert.equal(forge.issueBodies[72], brokenBody, "the broken body is left exactly as-is for a human to fix");
+  assert.ok(!forge.issueCommentsPosted.some(([n]) => n === 72), "no success comment for a refused write");
+  assert.equal(marker, alignMarker(32), "degrades open — the round is never wedged");
+  state.close();
+});
+
+test("createAligningStub (#703 v2, refusal arm): the CURRENT body carries a MALFORMED cursor marker value — the po-triage write is REFUSED entirely", async () => {
+  const forge = new FakeForge();
+  const brokenBody = "original body, no plan\n\n<!-- sapwood:comments-adjudicated-through: not-a-number -->";
+  forge.planTriageCandidates = [{ number: 73, title: "t", labels: [], body: brokenBody }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-73", triageResultText(73, "## Verification\n- x")),
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 33, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 0);
+  assert.equal(forge.issueBodies[73], brokenBody);
+  state.close();
+});
+
+// ── #703 v2 (ruling item 1b): role-proposed NEW issue bodies (align-creation -> issue-creation.ts)
+// cannot CREATE an adjudication-cursor marker, and stripping one out must never displace the
+// terminal proposal marker (`hasProposalMarkerTrailer`'s `endsWith` check is position-load-bearing,
+// issue-creation.ts:7). ─────────────────────────────────────────────────────────────────────────
+
+test("createAligningStub (#703 v2c): a role-proposed NEW issue body carrying a cursor marker has it stripped — and the proposal's OWN terminal marker still lands as the exact trailing suffix", async () => {
+  const forge = new FakeForge();
+  const rogueBody = `${PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 42 -->`;
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "Do the thing", body: rogueBody }]))]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 40, phase: "aligning", marker: null });
+  assert.equal(forge.createdIssues.length, 1);
+  const createdBody = forge.createdIssues[0]!.body;
+  assert.ok(!createdBody.includes("comments-adjudicated-through: 42"), "a role cannot CREATE a cursor marker on a brand-new issue");
+  const id = proposalId(40, 0, "Do the thing");
+  const terminalMarker = proposalMarker(id);
+  assert.ok(
+    createdBody.endsWith(`\n\n${terminalMarker}`),
+    "the terminal proposal marker is still the exact trailing suffix — hasProposalMarkerTrailer's endsWith check still holds",
+  );
+  state.close();
+});
+
 test("createAligningStub #374 review (Codex sol-high finding 6): once an earlier triage candidate classifies quota/429 and parks, remaining candidates are SKIPPED — no doomed per-issue sessions", async () => {
   const forge = new FakeForge();
   forge.planTriageCandidates = [

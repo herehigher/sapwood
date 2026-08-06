@@ -19,6 +19,8 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+import { findStandaloneMarkerLines } from "../review/comment-cursor.js";
+import { checkCommentCursorFreshness } from "../review/comment-cursor-gate.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { ContextManifest } from "./context-manifest.js";
@@ -372,6 +374,105 @@ test("createPlanReviewStub: outcome 1 (approve WITH a body revision) — the rev
   state.close();
 });
 
+// ── #703 (ruling, PO batch-11 2026-08-06): engine preserves the adjudication marker across
+// role body-writes — a role session (reviewer's approve-with-revision, drafter's drafted body)
+// has no standing to move `<!-- sapwood:comments-adjudicated-through: N -->`, no matter what
+// value its own output carries. ──────────────────────────────────────────────────────────────
+
+test("createPlanReviewStub (#703a): a reviewer approve-with-revision whose BODY block carries a DIFFERENT (engine-id) marker never lands — the issue's ORIGINAL marker survives byte-for-byte", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 60, title: "t", labels: [ROUND_POOL_LABEL] }];
+  // The issue's CURRENT body already carries a valid, human-adjudicated marker — the comment it
+  // targets (10) is present in the stream, so the #652 pre-spend/pre-apply checkpoints see a
+  // valid, fully-adjudicated cursor and never block this write.
+  forge.issueBodies[60] = `${NO_PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 10 -->`;
+  forge.issueComments[60] = [{ id: "10", login: "a-human", createdAt: "t", body: "please add acceptance criteria" }];
+  const cfg = mkCfg();
+  // The reviewer's revised body reproduces the exact live batch-11 shape (#145, round 340):
+  // "non-blocking housekeeping" advice tells it to advance the marker to an ENGINE comment id.
+  const revisedBodyWithEngineMarker = `${PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 999999 -->`;
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 60 }, revisedBodyWithEngineMarker)) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  const applied = forge.issueBodies[60]!;
+  assert.ok(!applied.includes("999999"), "the role's own marker attempt must never be written");
+  assert.deepEqual(findStandaloneMarkerLines(applied), ["<!-- sapwood:comments-adjudicated-through: 10 -->"]);
+  assert.ok(applied.includes("## Acceptance criteria"), "the role's real content revision still applies");
+  state.close();
+});
+
+test("createPlanReviewStub (#703b): a drafter session's drafted body carries a marker, but the issue's CURRENT body has none — the applied body has no marker either", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 61, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[61] = NO_PLAN_BODY; // no marker at all on this issue
+  const cfg = mkCfg();
+  const draftedBodyWithMarker = `${PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 5000 -->`;
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 61 }, "add a verification plan")) },
+    { result: doneResult("drafter-0", sapwoodResult({ issue: 61 }, draftedBodyWithMarker)) },
+    { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 61 })) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  const applied = forge.issueBodies[61]!;
+  assert.ok(!applied.includes("5000"), "the drafter has no standing to introduce a marker that never existed");
+  assert.deepEqual(findStandaloneMarkerLines(applied), []);
+  state.close();
+});
+
+test("createPlanReviewStub (#703c): no marker anywhere (current body or role output) — the applied body is exactly the role's body, unchanged behavior", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 62, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[62] = NO_PLAN_BODY;
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([{ result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 62 }, PLAN_BODY)) }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.deepEqual(forge.updateIssueBodyCalls, [[62, PLAN_BODY]]);
+  state.close();
+});
+
+test("createPlanReviewStub (#703 regression — live incident shape, #145/#645 2026-08-06: plan_review housekeeping-advice engine-id marker survives to a same-round dispatch/drive checkpoint): after the engine applies a reviewer's approve-with-revision carrying an engine-comment marker, a downstream comment-cursor freshness re-check (simulating dispatch, moments later) no longer flags cursor-targets-engine-comment", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 63, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[63] = `${NO_PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 77 -->`;
+  // The stream: a real, human-authored comment (77, already adjudicated) plus the round's own
+  // ENGINE bookkeeping notice (999999) — the exact id plan_review's housekeeping advice pointed
+  // at in the live #145 incident.
+  forge.issueComments[63] = [
+    { id: "77", login: "a-human", createdAt: "t", body: "please tighten the AC wording" },
+    { id: "999999", login: forge.authenticatedActor!, createdAt: "t", body: "round bookkeeping notice <!-- sapwood:engine -->" },
+  ];
+  const cfg = mkCfg();
+  const revisedBodyWithEngineMarker = `${PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 999999 -->`;
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 63 }, revisedBodyWithEngineMarker)) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  const appliedBody = forge.issueBodies[63]!;
+  // Pre-#703, this next check reproduced the live incident: the applied body's marker pointed at
+  // the engine comment (999999) — under the pre-v2 validator that fired `cursor-targets-engine-
+  // comment` at the dispatch/drive checkpoint moments later, flagging needs-human on an issue
+  // whose plan a human had already, correctly, adjudicated. Post-#703 (immutability, both v1 and
+  // v2) the engine-id marker never lands at all — the original human marker (77) survives, so
+  // this assertion holds regardless of the v2 validator relaxation too.
+  const dispatchCheck = await checkCommentCursorFreshness(forge, 63, appliedBody);
+  assert.equal(dispatchCheck.ok, true, "the original, human-adjudicated marker (77) must still validate cleanly");
+  if (dispatchCheck.ok) assert.equal(dispatchCheck.cursor, "77");
+  state.close();
+});
+
 test("createPlanReviewStub: outcome 3 (propose verify:n/a) — engine applies verify:n/a + needs-human together and posts the explanation as a comment", async () => {
   const forge = new FakeForge();
   forge.poolEligibleIssues = [{ number: 11, title: "t", labels: [ROUND_POOL_LABEL] }];
@@ -446,8 +547,11 @@ test("createPlanReviewStub: outcome 2 (request draft) end-to-end self-heal — r
   // brief came from the reviewer's structured decision alone. #652 DOES read comments now, but
   // only to check the comment-adjudication cursor (never to derive the brief's content) — one
   // read per checkpoint per cycle: cycle 0 (draft_request) gets pre-spend + pre-apply +
-  // #652-round-1's new pre-drafter-write checkpoint (3), cycle 1 (approve) gets pre-spend +
-  // pre-apply (2) = 5.
+  // pre-drafter-write (3; #703 v2 gate② R2's write-boundary recheck is SYNCHRONOUS —
+  // `checkBodyDrift` only, no comment/actor fetch — so it adds zero comment reads), cycle 1
+  // (approve WITH NO body revision — this reviewer output carries no BODY block) gets pre-spend +
+  // pre-apply (2; the write-boundary check is guarded on `decision.body !== undefined`, so it
+  // does not fire at all this cycle) = 5.
   assert.equal(forge.getIssueCommentsCallCount, 5);
   state.close();
 });
@@ -1014,7 +1118,26 @@ test("createPlanReviewStub (#652): pre-spend checkpoint — a stale cursor (unad
   assert.ok(!forge.issueLabels[12]?.includes("plan:approved"), "never approved");
   const posted = lastComment(forge, 12);
   assert.match(posted, /pending/i);
-  assert.match(posted, /#1/);
+  // #703 v2 gate② (P2-2): pending ids render as backticked raw ids, never '#N'.
+  assert.match(posted, /`1`/);
+  assert.ok(!posted.includes("#1"));
+  state.close();
+});
+
+test("createPlanReviewStub (#703 v2, refusal arm): the issue's CURRENT body already carries a DUPLICATE adjudication-cursor marker — plan_review refuses entirely at the pre-existing #652 pre-spend checkpoint, never a repair, never a session dispatched (covers BOTH the reviewer approve-with-revision AND drafter write sites — neither is ever reached)", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 65, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[65] = `${NO_PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 1 -->\n\n<!-- sapwood:comments-adjudicated-through: 2 -->`;
+  const runner = new ScriptedRunner([{ result: doneResult("reviewer-0", sapwoodResult({ decision: "approve", issue: 65 }, PLAN_BODY)) }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.equal(runner.calls.length, 0, "no reviewer/drafter session is ever spent while the current marker state is invalid");
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "refused, never repaired");
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 65 && l === "needs-human"));
+  const posted = lastComment(forge, 65);
+  assert.match(posted, /duplicate-marker/);
   state.close();
 });
 
@@ -1118,6 +1241,161 @@ test("createPlanReviewStub (#652 round 1, finding 1): pre-apply checkpoint — a
   state.close();
 });
 
+// ── #703 v2 gate② (P1-2, round 1 + R2): the WRITE-BOUNDARY race. Round 1's `liveBodyPreApply`/
+// `liveBodyPreDrafterWrite` were snapshotted BEFORE the pre-apply/pre-drafter-write checkpoint's
+// OWN async comment/actor fetch — closed by re-reading at the write boundary. R2 (gate② review of
+// that fix): the round-1 fix reused the FULL async `checkGate0CommentCursor` as a SECOND
+// checkpoint right at the write boundary — which itself does an async comment/actor fetch
+// whenever no drift is found, reopening the identical race one level later. The R2 fix makes the
+// FINAL check synchronous (`checkBodyDrift` only, no comment/actor fetch) — `getIssueBody` ->
+// `checkBodyDrift` -> `updateIssueBody`, nothing awaited in between on the no-drift path. Two
+// things to prove now: (1) a body that has ALREADY drifted by the time of the final read is still
+// refused (the earlier checkpoint's own async fetch is still a valid injection point for THIS),
+// and (2) the STRUCTURAL pin gate② R2 asked for — the final `getIssueBody`/`updateIssueBody` pair
+// is ADJACENT in the forge call trace, with no `getIssueComments`/`getAuthenticatedActor` call
+// between them (since the async window itself no longer exists, there's nothing left to inject a
+// race into at the final read — the call-order pin is what proves that). ────────────────────────
+
+/** Mutates `issueBodies[issue]` the Nth time `getIssueComments` is called — simulating a human
+ *  edit landing exactly inside an EARLIER checkpoint's own async comment-fetch window (pre-apply/
+ *  pre-drafter-write, which still does a full async cursor check), never during the role session
+ *  itself (that race is #652 round 1's own, already covered above) and never at the FINAL
+ *  write-boundary check (R2 made that one synchronous — there is no async window left there to
+ *  inject into). */
+class MidCheckpointEditForge extends FakeForge {
+  constructor(
+    private readonly editedBody: string,
+    private readonly onCallNumber: number,
+  ) {
+    super();
+  }
+  private calls = 0;
+  override async getIssueComments(issue: number) {
+    this.calls++;
+    if (this.calls === this.onCallNumber) this.issueBodies[issue] = this.editedBody;
+    return super.getIssueComments(issue);
+  }
+}
+
+/** A full ordered trace across every forge call the write-boundary pin cares about — the
+ *  structural evidence gate② R2 asked for: the final `getIssueBody` and `updateIssueBody` must be
+ *  ADJACENT in this trace, with no `getIssueComments`/`getAuthenticatedActor` call landing between
+ *  them (which would mean an async gap — and so a race window — still exists at the write). */
+class CallTraceForge extends FakeForge {
+  callTrace: string[] = [];
+  override async getIssueBody(issue: number): Promise<string> {
+    this.callTrace.push("getIssueBody");
+    return super.getIssueBody(issue);
+  }
+  override async getIssueComments(issue: number) {
+    this.callTrace.push("getIssueComments");
+    return super.getIssueComments(issue);
+  }
+  override async getAuthenticatedActor(): Promise<string | null> {
+    this.callTrace.push("getAuthenticatedActor");
+    return super.getAuthenticatedActor();
+  }
+  override async updateIssueBody(issue: number, body: string): Promise<void> {
+    this.callTrace.push("updateIssueBody");
+    return super.updateIssueBody(issue, body);
+  }
+}
+
+test("createPlanReviewStub (#703 v2 gate② P1-2): a marker edit that has ALREADY landed by the time of the final write-boundary read refuses the reviewer's approve-with-revision write — never a silent overwrite of the human's edit", async () => {
+  const editedBody = "original body, no plan\n\n<!-- sapwood:comments-adjudicated-through: 999 -->";
+  const forge = new MidCheckpointEditForge(editedBody, 2); // 1st call: pre-spend; 2nd: pre-apply
+  forge.poolEligibleIssues = [{ number: 15, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[15] = NO_PLAN_BODY;
+  const runner = new ScriptedRunner([{ result: doneResult("reviewer-0", sapwoodResult({ decision: "approve", issue: 15 }, PLAN_BODY)) }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.equal(
+    forge.updateIssueBodyCalls.length,
+    0,
+    "the write is refused — the final synchronous read sees the edit, never the stale snapshot",
+  );
+  assert.equal(forge.issueBodies[15], editedBody, "the human's mid-check edit survives untouched — never silently overwritten");
+  assert.ok(!forge.issueLabels[15]?.includes("plan:approved"), "never approved off a discarded decision");
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 15 && l === "needs-human"));
+  state.close();
+});
+
+test("createPlanReviewStub (#703 v2 gate② P1-2): a marker edit that has ALREADY landed by the time of the final write-boundary read refuses the drafter's write — never a silent overwrite", async () => {
+  const editedBody = "original body, no plan\n\n<!-- sapwood:comments-adjudicated-through: 999 -->";
+  // Cycle 0: pre-spend (1st getIssueComments call) -> reviewer draft_request -> pre-drafter-write
+  // (2nd call, the one this test races) -> drafter session runs -> the final write-boundary read
+  // sees the already-landed edit (the synchronous check no longer offers a THIRD async window).
+  const forge = new MidCheckpointEditForge(editedBody, 2);
+  forge.poolEligibleIssues = [{ number: 16, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[16] = NO_PLAN_BODY;
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 16 }, "missing acceptance criteria")) },
+    { result: doneResult("drafter-0", sapwoodResult({ issue: 16 }, PLAN_BODY)) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.equal(
+    forge.updateIssueBodyCalls.length,
+    0,
+    "the drafter's write is refused — the edit landed before the pre-drafter-write checkpoint even returned",
+  );
+  assert.equal(forge.issueBodies[16], editedBody, "the human's mid-check edit survives untouched");
+  assert.equal(
+    runner.calls.length,
+    2,
+    "the reviewer AND drafter sessions both ran (the race is caught at the WRITE, not by skipping the drafter session)",
+  );
+  state.close();
+});
+
+test("createPlanReviewStub (#703 v2 gate② R2, structural pin): the reviewer approve-with-revision's FINAL getIssueBody and updateIssueBody are ADJACENT in the forge call trace — no getIssueComments/getAuthenticatedActor call lands between the write-boundary read and the write itself", async () => {
+  const forge = new CallTraceForge();
+  forge.poolEligibleIssues = [{ number: 17, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[17] = NO_PLAN_BODY;
+  const runner = new ScriptedRunner([{ result: doneResult("reviewer-0", sapwoodResult({ decision: "approve", issue: 17 }, PLAN_BODY)) }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 1, "sanity: the write actually landed (no drift in this run)");
+  const updateIdx = forge.callTrace.lastIndexOf("updateIssueBody");
+  assert.ok(updateIdx > 0, "updateIssueBody must appear in the trace");
+  assert.equal(
+    forge.callTrace[updateIdx - 1],
+    "getIssueBody",
+    `the call immediately preceding updateIssueBody must be getIssueBody — full trace: ${JSON.stringify(forge.callTrace)}`,
+  );
+  state.close();
+});
+
+test("createPlanReviewStub (#703 v2 gate② R2, structural pin): the drafter's FINAL getIssueBody and updateIssueBody are ADJACENT in the forge call trace", async () => {
+  const forge = new CallTraceForge();
+  forge.poolEligibleIssues = [{ number: 18, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[18] = NO_PLAN_BODY;
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 18 }, "missing acceptance criteria")) },
+    { result: doneResult("drafter-0", sapwoodResult({ issue: 18 }, PLAN_BODY)) },
+    { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 18 })) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 1, "sanity: the drafter's write actually landed (no drift in this run)");
+  const updateIdx = forge.callTrace.indexOf("updateIssueBody"); // the drafter's write is the ONLY one this run
+  assert.ok(updateIdx > 0, "updateIssueBody must appear in the trace");
+  assert.equal(
+    forge.callTrace[updateIdx - 1],
+    "getIssueBody",
+    `the call immediately preceding updateIssueBody must be getIssueBody — full trace: ${JSON.stringify(forge.callTrace)}`,
+  );
+  state.close();
+});
+
 test("createPlanReviewStub (#652 round 1, finding 2): a LATE COMMENT arriving during the drafter session discards its output — never written via updateIssueBody", async () => {
   const forge = new FakeForge();
   forge.poolEligibleIssues = [{ number: 14, title: "t", labels: [ROUND_POOL_LABEL] }];
@@ -1148,7 +1426,9 @@ test("createPlanReviewStub (#652 round 1, finding 2): a LATE COMMENT arriving du
   assert.ok(!forge.issueLabels[14]?.includes("plan:approved"));
   assert.ok(forge.labelsAdded.some(([n, l]) => n === 14 && l === "needs-human"));
   const posted = lastComment(forge, 14);
-  assert.match(posted, /#1/, "the pointer comment names the late comment as pending");
+  // #703 v2 gate② (P2-2): pending ids render as backticked raw ids, never '#N'.
+  assert.match(posted, /`1`/, "the pointer comment names the late comment as pending");
+  assert.ok(!posted.includes("#1"));
   const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["comment-cursor-stale"]);
   assert.equal(events.length, 1);
   const payload = events[0]!.payload as { checkpoint: string; cause: string };

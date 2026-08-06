@@ -35,6 +35,7 @@ import { resolveRoundDirective } from "../config/directive.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { extractOrigin, extractVerificationPlan } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
+import { applyRoleBodyRewrite, checkMarkerWritePrecondition } from "../review/comment-cursor.js";
 // po-pool's candidate digest now substitutes the SAME formatCandidate shape the architect
 // phase already substitutes for these same pool members one phase later — see
 // buildPoolCandidateDigest's own doc comment below.
@@ -890,28 +891,60 @@ function persistTriageDecision(
   }
 }
 
-type BodyWriteGuardResult = { applied: true } | { applied: false; actualHash: string };
+type BodyWriteGuardResult =
+  | { applied: true }
+  | { applied: false; reason: "hash-mismatch"; actualHash: string }
+  | { applied: false; reason: "invalid-marker"; detail: string };
 
-/** The #232 concurrent-edit guard: re-reads the LIVE issue body immediately before writing and
- *  compares its hash to `expectedHash` (the hash of the body the session actually read, captured
- *  at candidate-fetch time). Match -> the write proceeds. Mismatch -> REFUSED, `actualHash`
- *  returned for the caller's honesty event — the old body is kept, human amendment wins.
+/** The #232 concurrent-edit guard, extended by #703 v2 gate② (P1-1) to be the ONE place a
+ *  triage body-write is normalized against the adjudication marker — for BOTH a fresh decision's
+ *  first write AND a crash-RESUMED (replayed) decision's write, since both funnel through this
+ *  single call site (round.ts:2389-ish). `roleBody` is the RAW role-produced text (the session's
+ *  own output, or a journaled decision's `body` field, unmodified) — this function is the ONLY
+ *  place that normalizes it, never a value pre-normalized elsewhere.
  *
- *  Resume-safe by construction: if `current === newBody` (this exact write already landed on an
- *  earlier, crashed attempt at the SAME accepted decision), it is treated as already-applied
- *  WITHOUT comparing hashes or re-issuing the write — a body matching what we're about to write
- *  is indistinguishable from "we already wrote it," and re-checking against the (now-stale)
- *  ORIGINAL expected hash would misread our own prior success as a concurrent edit. */
+ *  #703 v2 gate② P1-1 finding: a `triage-decision-accepted` record persisted by a PRE-#703 engine
+ *  (mid-round deploy upgrade — `triageProgress` scopes strictly to the CURRENT round_id, so this
+ *  is a same-round crash-resume, not a cross-round replay) could carry a role-set marker (e.g. an
+ *  engine comment id) straight through to a verbatim write once the validator was relaxed to
+ *  accept it. PO-adjudicated fix (overriding the reviewer's "version journal records" suggestion,
+ *  per the pre-v1 no-migration doctrine): do NOT version anything — always re-derive the marker
+ *  HERE, against whatever is live right now, so "whatever marker is live at write time wins" is
+ *  true for every decision regardless of which engine version produced its journal record.
+ *
+ *  Order of operations, in this exact sequence:
+ *   1. `checkMarkerWritePrecondition(current)` — the refusal arm (ruling item 2): a `current`
+ *      body whose OWN marker state is already invalid (duplicate/malformed — independent of any
+ *      role, a human can leave a body in this state directly) refuses the ENTIRE write, never
+ *      "repairs" it. Checked BEFORE any normalization or hash comparison.
+ *   2. `applyRoleBodyRewrite(current, roleBody)` — strips any marker `roleBody` carries and
+ *      reattaches `current`'s marker byte-for-byte (or none, if `current` has none).
+ *   3. `current === newBody` short-circuit — resume-safe by construction: idempotent by
+ *      `applyRoleBodyRewrite`'s own doc (re-normalizing an ALREADY-normalized `current` against
+ *      the SAME `roleBody` reproduces `current` byte-for-byte), so a genuine crash-resume where
+ *      the write already landed on an earlier attempt still hits this short-circuit — #232's
+ *      resume-safety holds regardless of which engine version wrote it.
+ *   4. The EXISTING hash guard, UNCHANGED: `expectedHash` is the hash of the RAW body a session
+ *      actually read (candidate-fetch time); a `current` that no longer hashes to it refuses the
+ *      write — "human amendment wins, the old body is kept." This is also the P1-1 finding's own
+ *      accepted fallback ("or the write is refused"): a replayed decision whose live body has
+ *      moved on since a (possibly pre-deploy) session read it fails this same check, exactly like
+ *      an ordinary concurrent edit. */
 async function updateIssueBodyIfUnchanged(
   forge: IForge,
   issue: number,
-  newBody: string,
+  roleBody: string,
   expectedHash: string,
 ): Promise<BodyWriteGuardResult> {
   const current = await forge.getIssueBody(issue);
+  const precondition = checkMarkerWritePrecondition(current);
+  if (!precondition.ok) {
+    return { applied: false, reason: "invalid-marker", detail: precondition.detail };
+  }
+  const newBody = applyRoleBodyRewrite(current, roleBody);
   if (current === newBody) return { applied: true };
   const actualHash = contentVersion(current);
-  if (actualHash !== expectedHash) return { applied: false, actualHash };
+  if (actualHash !== expectedHash) return { applied: false, reason: "hash-mismatch", actualHash };
   await forge.updateIssueBody(issue, newBody);
   return { applied: true };
 }
@@ -2307,6 +2340,16 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           expectedHash = contentVersion(issue.body ?? "");
           attempt = triageAttempt;
           bodyAlreadyCommitted = false; // a brand-new attempt can never already have a receipt
+          // #703 v2 gate② (P1-1): role-marker normalization/precondition is deliberately NOT
+          // applied here, at decision time — `validated.body` is persisted into the
+          // `triage-decision-accepted` journal RAW, exactly as the session produced it (roles
+          // have no standing over the marker, but that is enforced at the WRITE boundary, not by
+          // pre-editing what gets journaled). See `updateIssueBodyIfUnchanged`'s own doc for why:
+          // normalizing HERE (against `issue.body`) and AGAIN at write time would be redundant in
+          // the common case, but WRONG for a crash-resumed decision from a pre-#703 engine —
+          // "whatever marker is live at write time wins" must hold for every decision regardless
+          // of which engine version produced its journal record, so there is exactly ONE
+          // normalization point: the write itself, applied uniformly to fresh and resumed alike.
         }
 
         if (!validated.ok) {
@@ -2359,8 +2402,30 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         // for THIS EXACT attempt already exists — the write already landed; re-running the guard
         // would just re-read the (now matching) live body for no benefit.
         if (!bodyAlreadyCommitted) {
+          // #703 v2 gate② (P1-1): `validated.body` here is the RAW role/journal text, fresh OR
+          // resumed alike — `updateIssueBodyIfUnchanged` is now the ONE place that normalizes it
+          // against whatever marker is actually live, and the ONE place that can refuse the
+          // write over an invalid CURRENT marker. See that function's own doc for the full design
+          // (including why this fixes a pre-#703-journaled decision replayed after a mid-round
+          // deploy, without any journal-versioning machinery).
           const guard = await updateIssueBodyIfUnchanged(deps.forge, number, validated.body, expectedHash);
           if (!guard.applied) {
+            if (guard.reason === "invalid-marker") {
+              // #703 v2 gate② (P1-1 + item 2, the refusal arm): the CURRENT live body's own
+              // marker state is already invalid (duplicate/malformed) — refused, never "repaired."
+              // No forge write of any kind happens on this branch, so — unlike the concurrent-
+              // edit case below — there is nothing here for a same-round crash-resume to need a
+              // terminal receipt to avoid re-doing: re-hitting this exact branch again is a no-op
+              // repeat of the same refusal, harmless. `getIssuesNeedingPlanTriage` naturally
+              // re-offers this issue every future round until a human fixes the marker directly.
+              (deps.log ?? console.error)(
+                `[sapwood:po] round ${roundId}: triage write refused for #${number} — the issue body's ` +
+                  `adjudication-cursor marker is invalid (${guard.detail}); a role write cannot repair ` +
+                  `human-owned marker state — fix it directly, this issue re-matches every future round`,
+              );
+              alignSummaryTriaged.push({ issue: number, drafted: false });
+              continue;
+            }
             // Concurrent edit detected: refuse the write, keep the old body, record a durable
             // honesty event (terminal for this round — see triageProgress's `terminalAttempts`
             // map), and degrade open. The candidate's body is untouched, so a FRESH round-start

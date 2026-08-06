@@ -2090,6 +2090,38 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // that lets standby engage at the top of the next iteration (see lastRoundIdle's comment).
       // A resumed round that skipped executing is NOT idle-evidence (see ranExecuting above).
       lastRoundIdle = ranExecuting && workersThisRound === 0;
+      // #703 v2 (ruling item 5 — minimal surfacing, explicitly NO new hold state/label/event
+      // kind): an idle round (the runnable pool was empty) that ALSO produced one or more
+      // `comment-cursor-stale` flags this round is not silently indistinguishable from an
+      // ordinary empty backlog — name the held-back issue(s) in the round's own log line, so an
+      // operator watching standby/idle-churn reporting sees "awaiting human on #N" instead of a
+      // bare "nothing to do." Read-only: filters the EXISTING `comment-cursor-stale` events
+      // (plan-review.ts's #652 checkpoints already append these) over this round's own event
+      // window (`round.start_event_id`, the same id-cursor idle-churn's fingerprint read above
+      // uses) — no new event is appended, no label/hold state changes.
+      if (idleRound) {
+        try {
+          const staleEvents = deps.state.eventsAfterId(round.start_event_id ?? 0, ["comment-cursor-stale"]);
+          const awaitingHuman = [...new Set(staleEvents.map((e) => (e.payload as { issue: number }).issue))];
+          if (awaitingHuman.length > 0) {
+            (deps.log ?? console.error)(
+              `[sapwood:round] round ${round.round_id}: awaiting human on ${awaitingHuman.map((n) => `#${n}`).join(", ")}`,
+            );
+          }
+        } catch (e) {
+          // #703 v2 gate② (P2-3): LOG only, never a ledger write — docs/security.md's own "no
+          // write of any kind" claim for this diagnostic path must hold even on its OWN failure
+          // path, not just its success path. `tickErrors` is an in-memory counter (this
+          // function's own local variable, reset every process start), never appended as a
+          // durable event — a durable `tick-error` here would both contradict the "read-only"
+          // claim and perturb idle-churn's own state fingerprint (computed just above, over this
+          // exact event window) with a diagnostic artifact of the diagnostic itself.
+          tickErrors++;
+          (deps.log ?? console.error)(
+            `[sapwood:round] round ${round.round_id}: comment-cursor-stale surfacing read failed (non-fatal, no event recorded): ${String(e)}`,
+          );
+        }
+      }
       // #374 (F16): the empty-spin breaker — independent of error CLASSIFICATION (item 1's
       // env-park wiring may simply not recognize an unfamiliar systemic failure's text). A round
       // that dispatched nothing AND was FULLY degraded (isRoundFullyDegraded's own doc — issue

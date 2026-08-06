@@ -563,6 +563,100 @@ test("runRounds #206: a full round leaves a round-phase event trail — every ph
   deps.state.close();
 });
 
+test("runRounds (#703 v2, ruling item 5 — minimal surfacing): an idle round that also flagged comment-cursor-stale issues names them in the round log ('awaiting human on #N, #M'), deduped, read-only — no new event kind, label, or hold state", async () => {
+  const { sleep } = mkSleepSpy();
+  const logLines: string[] = [];
+  const deps = baseDeps({ sleep, log: (msg) => logLines.push(msg) });
+  // Simulate plan_review's #652 checkpoints flagging two issues this round (#42 twice, at two
+  // different checkpoints — the exact "same issue, multiple flags" shape a real round can
+  // produce — and #43 once) by appending the SAME `comment-cursor-stale` events plan-review.ts
+  // already appends, via the plan_review phase's own observability hook — no new machinery, this
+  // is exactly what the real checkpoint's escalateCommentCursorStale path already does.
+  const priorOnRoundPhase = deps.onRoundPhase;
+  deps.onRoundPhase = (roundId, phase) => {
+    priorOnRoundPhase?.(roundId, phase);
+    if (phase === "plan_review") {
+      deps.state.appendEvent("comment-cursor-stale", {
+        round_id: roundId,
+        issue: 42,
+        checkpoint: "gate0-pre-spend",
+        cause: "comment-cursor",
+        labeled: true,
+        posted: true,
+      });
+      deps.state.appendEvent("comment-cursor-stale", {
+        round_id: roundId,
+        issue: 43,
+        checkpoint: "gate0-pre-apply",
+        cause: "comment-cursor",
+        labeled: true,
+        posted: true,
+      });
+      deps.state.appendEvent("comment-cursor-stale", {
+        round_id: roundId,
+        issue: 42,
+        checkpoint: "gate0-pre-drafter-write",
+        cause: "comment-cursor",
+        labeled: true,
+        posted: true,
+      });
+    }
+  };
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRoundsGuarded(deps);
+  stopSafety();
+  assert.equal(result.rounds, 1);
+  const line = logLines.find((l) => l.includes("awaiting human"));
+  assert.ok(line, "the round's own log names the held-back issue(s)");
+  assert.match(line!, /#42/);
+  assert.match(line!, /#43/);
+  assert.equal((line!.match(/#42/g) ?? []).length, 1, "deduped — #42 flagged at two checkpoints still names it exactly once");
+  // Read-only: the ONLY comment-cursor-stale events are the three this test itself injected —
+  // the surfacing logic appends nothing of its own, no label write, no new hold state.
+  assert.equal(deps.state.eventsAfterId(0, ["comment-cursor-stale"]).length, 3);
+  deps.state.close();
+});
+
+test("runRounds (#703 v2, ruling item 5): an idle round with NO comment-cursor-stale events this round logs nothing extra — the reverse test", async () => {
+  const { sleep } = mkSleepSpy();
+  const logLines: string[] = [];
+  const deps = baseDeps({ sleep, log: (msg) => logLines.push(msg) });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRoundsGuarded(deps);
+  stopSafety();
+  assert.equal(result.rounds, 1);
+  assert.ok(!logLines.some((l) => l.includes("awaiting human")), "nothing to surface — no line emitted");
+  deps.state.close();
+});
+
+test("runRounds (#703 v2 gate② P2-3): a READ failure in the empty-pool surfacing path is READ-ONLY even on ITS OWN failure — logged only, ZERO new events appended (docs/security.md's 'no write of any kind' claim must hold on the failure path too, not just the success path)", async () => {
+  const { sleep } = mkSleepSpy();
+  const logLines: string[] = [];
+  const deps = baseDeps({ sleep, log: (msg) => logLines.push(msg) });
+  // Induce a read failure ONLY for the surfacing path's own `eventsAfterId(..., ["comment-
+  // cursor-stale"])` call — every OTHER kinds query (idle-churn's own fingerprint/streak reads,
+  // etc.) is untouched, so this isolates exactly the one read this fix concerns.
+  const realEventsAfterId = deps.state.eventsAfterId.bind(deps.state);
+  deps.state.eventsAfterId = (afterId: number, kinds: string[]) => {
+    if (kinds.includes("comment-cursor-stale")) throw new Error("simulated read failure");
+    return realEventsAfterId(afterId, kinds);
+  };
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRoundsGuarded(deps);
+  stopSafety();
+  assert.equal(result.rounds, 1, "the round still closes — a read-only diagnostic failure never wedges round close");
+  assert.ok(
+    logLines.some((l) => l.includes("comment-cursor-stale surfacing read failed")),
+    "the failure is logged",
+  );
+  assert.equal(
+    deps.state.eventsSince("1970-01-01T00:00:00.000Z", ["tick-error"]).length,
+    0,
+    "ZERO ledger writes from this diagnostic path, even on its own failure — no tick-error event",
+  );
+  deps.state.close();
+});
+
 test("runRounds #123: a closed round leaves a persisted, schema-valid round artifact with endedAt set", async () => {
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ sleep });
