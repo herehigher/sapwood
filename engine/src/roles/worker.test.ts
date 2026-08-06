@@ -1101,9 +1101,32 @@ const waitForHeartbeatTick = async (path: string): Promise<void> => {
   rmSync(path, { force: true });
   await waitForFile(path, "heartbeat tick did not recreate its marker");
 };
-const longRunningStub = (dir: string, beforeReady = "", readyName = "stub-ready"): { bin: string; ready: string } => {
+/** #691 Codex round 4: THREE review rounds each found a different hole in the sweep's coverage
+ *  (kills-its-own-runner, pid-decays-after-exit, handle-lost-on-a-mid-test restart) — the sweep
+ *  is correct where it applies, but its correctness depended on enumerating every coverage point
+ *  by hand, and that enumeration kept being incomplete. Termination correctness now does NOT
+ *  depend on the sweep at all: it depends on this stub bounding ITSELF.
+ *
+ *  Measured (not guessed) real need: every one of this file's 23 `longRunningStub` call sites is
+ *  driven to a terminal state by an explicit SIGTERM (a cooperative `trap 'exit 0' TERM`) or a
+ *  SIGKILL escalation (`reclaim()`'s hard-kill path) well inside this file's own poll bounds --
+ *  the longest is `for (let i = 0; i < 400 && alive(pid); i++) await sleep(20)`, an 8s hang-guard
+ *  ceiling that in every real (non-hung) run resolves in well under a second (observed: ~350ms
+ *  median per test across the full suite). No call site seeds a real-clock wait anywhere near
+ *  that -- the two `timeoutSec`-driven tests jump a SEEDED clock, never a real one. The prior
+ *  `600` (10 minutes) was an arbitrary "long enough to not finish on its own" placeholder, not a
+ *  requirement.
+ *
+ *  `selfBoundSec` defaults to 30 -- roughly 4x the observed worst-case poll ceiling, and two
+ *  orders of magnitude below the old 600. A stub that escapes every sweep (own-pid refusal,
+ *  registry decay, a lost handle across a "restart" -- or a class nobody has found yet) now costs
+ *  a bounded ~30s delay instead of blocking the runner for up to 10 minutes: the FAILURE MODE
+ *  changes from "hang" to "slow", without needing to enumerate every coverage point. If a FUTURE
+ *  test genuinely needs a longer-lived stub, it passes its own `selfBoundSec` here and says why --
+ *  none of the current 23 sites do. */
+const longRunningStub = (dir: string, beforeReady = "", readyName = "stub-ready", selfBoundSec = 30): { bin: string; ready: string } => {
   const ready = join(dir, readyName);
-  const bin = mkStub(dir, `#!/usr/bin/env bash\n${beforeReady}touch "${ready}"\nfor _ in $(seq 1 600); do sleep 1; done\n`);
+  const bin = mkStub(dir, `#!/usr/bin/env bash\n${beforeReady}touch "${ready}"\nfor _ in $(seq 1 ${selfBoundSec}); do sleep 1; done\n`);
   return { bin, ready };
 };
 const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"success","total_cost_usd":0.0001,"model":"claude-stub","usage":{"input_tokens":12,"output_tokens":34}}'\nexit 0\n`;
@@ -1146,27 +1169,42 @@ const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"succes
  *  same authority `worker.ts`'s own `onExit` handler relies on. No registry, no self-report, no
  *  identity refusal list: none of that is needed once the check is against the handle itself.
  *  Every caller must invoke this BEFORE disposing the same supervisor(s) -- `dispose()` clears
- *  `this.lanes`, which is the only place these handles are reachable from. */
-function killAnyRunningLanes(...supervisors: Array<WorkerSupervisor | undefined>): void {
-  for (const s of supervisors) {
-    if (!s) continue;
-    const lanes = (s as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes;
-    for (const lane of lanes.values()) {
-      const child = lane.child;
-      if (child.exitCode !== null || child.signalCode !== null) continue; // already exited -- nothing to do
-      const pid = child.pid;
-      if (typeof pid === "number") {
-        try {
-          process.kill(-pid, "SIGKILL"); // whole detached group -- covers a foreground `sleep` grandchild
-        } catch {
-          /* ESRCH -- already gone, or never became its own group leader */
-        }
-      }
+ *  `this.lanes`, which is the only place these handles are reachable from. That is exactly what a
+ *  mid-test "simulated restart" (`s1.dispose()` standing in for the engine forgetting the
+ *  in-process lane, so `s2` learns it only from disk) breaks: `s2` never held `s1`'s
+ *  `ChildProcess` in the first place, so once `s1` is disposed the handle is unreachable from
+ *  EITHER supervisor -- passing both to this function afterwards sees two empty `lanes` maps. The
+ *  stub's own `selfBoundSec` (`longRunningStub`'s doc) is what actually bounds that case now; the
+ *  8 sites doing this restart additionally SNAPSHOT the handle themselves, immediately before the
+ *  `dispose()` that would otherwise strand it, and pass it here directly -- a retained `ChildProcess`
+ *  does not decay the way the rejected pid-registry did (the object always addresses its own
+ *  child, never a reused pid), so this is not a repeat of that mistake, just accepting a handle
+ *  from one more place than "ask the supervisor for its own". */
+function killAnyRunningLanes(...targets: Array<WorkerSupervisor | ChildProcess | undefined>): void {
+  const children: ChildProcess[] = [];
+  for (const t of targets) {
+    if (!t) continue;
+    if (t instanceof WorkerSupervisor) {
+      const lanes = (t as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes;
+      for (const lane of lanes.values()) children.push(lane.child);
+    } else {
+      children.push(t);
+    }
+  }
+  for (const child of children) {
+    if (child.exitCode !== null || child.signalCode !== null) continue; // already exited -- nothing to do
+    const pid = child.pid;
+    if (typeof pid === "number") {
       try {
-        child.kill("SIGKILL"); // belt-and-braces: Node addressing its OWN handle directly
+        process.kill(-pid, "SIGKILL"); // whole detached group -- covers a foreground `sleep` grandchild
       } catch {
-        /* already gone */
+        /* ESRCH -- already gone, or never became its own group leader */
       }
+    }
+    try {
+      child.kill("SIGKILL"); // belt-and-braces: Node addressing its OWN handle directly
+    } catch {
+      /* already gone */
     }
   }
 }
@@ -1961,6 +1999,7 @@ test("requestHandoff reaches a RESTARTED-engine lane via the persisted pid (Code
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s1: WorkerSupervisor | undefined;
   let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     // A cooperative worker that exits 0 on TERM. Dispatch with supervisor #1, then simulate
     // an engine restart: dispose() #1 (clears its in-memory lane map — its exit handler
@@ -1973,6 +2012,7 @@ test("requestHandoff reaches a RESTARTED-engine lane via the persisted pid (Code
     await waitForFile(ready, "stub installed its TERM trap before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
     assert.equal(alive(pid), true);
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose(); // "restart": the new supervisor knows this lane only from disk
     s2 = sup(dir, bin);
     assert.equal(s2.requestHandoff(name), true); // persisted-pid fallback fires
@@ -1981,7 +2021,7 @@ test("requestHandoff reaches a RESTARTED-engine lane via the persisted pid (Code
     assert.equal(s2.requestHandoff(name), false); // idempotent: second request is a no-op
     assert.equal(s2.requestHandoff("lane-unknown"), false); // no persisted lane -> false, no throw
   } finally {
-    killAnyRunningLanes(s1, s2);
+    killAnyRunningLanes(s1, s2, ...s1Children);
     s2?.dispose();
     s1?.dispose();
     rmSync(dir, { recursive: true, force: true });
@@ -3870,6 +3910,7 @@ test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktr
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
   let s1: WorkerSupervisor | undefined;
   let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     const name = "lane-69-det";
     const worktreePath = join(worktreeRoot, name);
@@ -3880,6 +3921,7 @@ test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktr
     const { name: laneName } = await s1.dispatch({ number: 73, title: "t", labels: [] }, name);
     await sleep(50);
     writeFileSync(join(worktreePath, "wip.txt"), "post-dispatch work\n"); // dirty
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
 
     s2 = sup(dir, bin, worktreeRoot);
@@ -3887,7 +3929,7 @@ test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktr
     assert.equal(r.worktreeRetained, true);
     assert.ok(existsSync(join(worktreePath, "wip.txt")), "worktree survives a detached reclaim too");
   } finally {
-    killAnyRunningLanes(s1, s2);
+    killAnyRunningLanes(s1, s2, ...s1Children);
     s2?.dispose();
     s1?.dispose();
     rmSync(dir, { recursive: true, force: true });
@@ -4040,6 +4082,7 @@ test("#63/#69: detached handoff-requested lane confirmed dead -> probe() writes 
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
   let s1: WorkerSupervisor | undefined;
   let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     const name = "lane-63-a";
     const worktreePath = join(worktreeRoot, name);
@@ -4053,6 +4096,7 @@ test("#63/#69: detached handoff-requested lane confirmed dead -> probe() writes 
     await waitForFile(ready, "stub reached its running state before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
     assert.equal(alive(pid), true);
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose(); // "restart": s2 has no in-memory lane handle for this name — only the persisted file
 
     s2 = sup(dir, bin, worktreeRoot);
@@ -4074,7 +4118,7 @@ test("#63/#69: detached handoff-requested lane confirmed dead -> probe() writes 
     // #69: sentinel-only — the worktree was not committed, cleaned, or otherwise touched.
     assert.equal(readFileSync(join(worktreePath, "wip.txt"), "utf8"), "uncommitted work\n");
   } finally {
-    killAnyRunningLanes(s1, s2);
+    killAnyRunningLanes(s1, s2, ...s1Children);
     s2?.dispose();
     s1?.dispose();
     rmSync(dir, { recursive: true, force: true });
@@ -4086,6 +4130,7 @@ test("#63: a SECOND engine restart before death is confirmed still finalizes —
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s1: WorkerSupervisor | undefined;
   let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   let sMid: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir); // no trap -> dies on SIGTERM
@@ -4093,6 +4138,7 @@ test("#63: a SECOND engine restart before death is confirmed still finalizes —
     const { name: laneName } = await s1.dispatch({ number: 64, title: "t", labels: [] });
     await waitForFile(ready, "stub reached its running state before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose(); // restart #1: engine forgets the in-process lane
 
     sMid = sup(dir, bin);
@@ -4114,7 +4160,7 @@ test("#63: a SECOND engine restart before death is confirmed still finalizes —
     assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)));
     assert.ok(!existsSync(join(dir, `${laneName}.running.json`)));
   } finally {
-    killAnyRunningLanes(s1, s2, sMid);
+    killAnyRunningLanes(s1, s2, sMid, ...s1Children);
     s2?.dispose();
     sMid?.dispose();
     s1?.dispose();
@@ -4128,6 +4174,7 @@ test("#169: persisted handoff_requested closes the write-before-signal crash win
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s1: WorkerSupervisor | undefined;
   let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
     s1 = sup(dir, bin);
@@ -4140,6 +4187,7 @@ test("#169: persisted handoff_requested closes the write-before-signal crash win
 
     // Simulate: running.json flag persisted, then the engine died before sending SIGTERM.
     writeFileSync(runningPath, `${JSON.stringify({ ...running, handoff_requested: true })}\n`);
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose();
     s1 = undefined;
 
@@ -4164,7 +4212,7 @@ test("#169: persisted handoff_requested closes the write-before-signal crash win
     assert.doesNotThrow(() => assert.equal(s2?.requestHandoff(name), false));
     assert.equal(signalCount, 1, "in-memory set prevents a second signal from the same supervisor");
   } finally {
-    killAnyRunningLanes(s1, s2);
+    killAnyRunningLanes(s1, s2, ...s1Children);
     s1?.dispose();
     s2?.dispose();
     rmSync(dir, { recursive: true, force: true });
@@ -4199,6 +4247,7 @@ test("#63/#69: a lane already reclaim()'d must never also be finalized as .hando
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
   let s1: WorkerSupervisor | undefined;
   let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     const name = "lane-63-d";
     const worktreePath = join(worktreeRoot, name);
@@ -4212,6 +4261,7 @@ test("#63/#69: a lane already reclaim()'d must never also be finalized as .hando
     await waitForFile(ready, "stub installed its TERM trap before engine restart");
     writeFileSync(join(worktreePath, "wip.txt"), "uncommitted\n"); // post-dispatch WIP -> dirty
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose();
 
     s2 = sup(dir, bin, worktreeRoot);
@@ -4230,7 +4280,7 @@ test("#63/#69: a lane already reclaim()'d must never also be finalized as .hando
     assert.equal(probe.handoff, false, "a reclaimed lane must never be finalized as resumable");
     assert.ok(!existsSync(join(dir, `${laneName}.handoff.json`)), "no .handoff written");
   } finally {
-    killAnyRunningLanes(s1, s2);
+    killAnyRunningLanes(s1, s2, ...s1Children);
     s2?.dispose();
     s1?.dispose();
     rmSync(dir, { recursive: true, force: true });
@@ -4242,12 +4292,14 @@ test("#63 F1: a failure persisting handoff_requested onto running.json is swallo
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s1: WorkerSupervisor | undefined;
   let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
     s1 = sup(dir, bin);
     const { name } = await s1.dispatch({ number: 66, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
 
     s2 = sup(dir, bin);
@@ -4272,7 +4324,7 @@ test("#63 F1: a failure persisting handoff_requested onto running.json is swallo
     const running = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8"));
     assert.notEqual(running.handoff_requested, true);
   } finally {
-    killAnyRunningLanes(s1, s2);
+    killAnyRunningLanes(s1, s2, ...s1Children);
     s2?.dispose();
     s1?.dispose();
     rmSync(dir, { recursive: true, force: true });
@@ -4283,12 +4335,14 @@ test("#63 P2: requestHandoff's detached branch persists handoff_requested BEFORE
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s1: WorkerSupervisor | undefined;
   let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
     s1 = sup(dir, bin);
     const { name } = await s1.dispatch({ number: 67, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
 
     s2 = sup(dir, bin);
@@ -4322,7 +4376,7 @@ test("#63 P2: requestHandoff's detached branch persists handoff_requested BEFORE
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "SIGTERM still reached the detached process");
   } finally {
-    killAnyRunningLanes(s1, s2);
+    killAnyRunningLanes(s1, s2, ...s1Children);
     s2?.dispose();
     s1?.dispose();
     rmSync(dir, { recursive: true, force: true });
