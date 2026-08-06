@@ -2706,7 +2706,8 @@ test("dispatch (#395 gate② round 3, P1): a LIVE worker leg heart-beats against
     });
     const { name } = await s.dispatch({ number: 11, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before we start observing heartbeats");
-    const pid = (s as unknown as { lanes: Map<string, { child: { pid?: number } }> }).lanes.get(name)!.child.pid!;
+    const child = (s as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.get(name)!.child;
+    const pid = child.pid!;
     // While genuinely alive: at least one heartbeat lands (the lane does nothing else
     // state-worthy while just sleeping, so this is a direct test of the liveness guard passing).
     await waitFor(() => state.eventsAfterId(0, ["worker-heartbeat"]).length > 0, "no worker-heartbeat while the child was genuinely alive");
@@ -2715,7 +2716,13 @@ test("dispatch (#395 gate② round 3, P1): a LIVE worker leg heart-beats against
     // same shape as this issue's live incident: the process is gone, but the engine's own
     // bookkeeping doesn't know yet (a lost exit notification). heartbeatTick keeps firing on its
     // setInterval regardless; only the liveness guard can tell the difference.
-    process.kill(pid, "SIGKILL");
+    // #691-class fix (Codex gate② follow-up on a1723bd): the `await waitFor` just above is a REAL
+    // async gap, so `pid` alone is a HISTORICAL value by the time we get here — not same-tick, and
+    // not proof this test still owns it. Kill through the LIVE `child` handle instead, gated on its
+    // own exitCode/signalCode (Node's dedicated per-child watch, immune to unrelated pid reuse —
+    // the same proof `killAnyRunningLanes` uses) checked immediately before signalling, closing the
+    // gap to a single synchronous check-then-kill rather than trusting a pid captured tests ago.
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     await waitFor(() => {
       try {
         process.kill(pid, 0);
@@ -5191,9 +5198,17 @@ function reapPollSleep(opts: { held?: boolean } = {}): { sleep: (ms: number) => 
  *  proof. It does NOT change what "ignores SIGTERM" means for this stub — a `stopFile`-equipped,
  *  `ignoreTerm: true` descendant still never dies from SIGTERM; the file is a wholly separate
  *  channel, so every test asserting "SIGTERM does NOT end it" keeps that assertion's meaning
- *  intact. Omitted (the default): the descendant has no such door and lives out its own uniform
- *  600s self-bound (`longRunningStub`'s own doc) — unchanged from before this fix, for every
- *  call site that doesn't need file-based teardown. */
+ *  intact.
+ *
+ *  Self-bound (Codex gate② follow-up on a1723bd): EVERY variant — `stopFile` or not, `ignoreTerm`
+ *  or not — also installs a real `setTimeout(...,600000)` ceiling, the SAME uniform 600s
+ *  `longRunningStub` uses. Before this, both the plain-idle and the `stopFile`-polling branches
+ *  used only a bare, unbounded `setInterval` with no ceiling at all — a claim this doc used to make
+ *  ("lives out its own uniform 600s self-bound") that the code did not actually back, caught by
+ *  review rather than by anyone verifying the mechanism first. Now it is genuinely bounded: a hard
+ *  test-process death (or a stop-file write that never lands) leaves the descendant running for at
+ *  most 600s, never indefinitely — the same bounded-straggler ceiling every other stub in this file
+ *  already carries. */
 function leaderExitStub(dir: string, descendantReadyFile: string, opts: { ignoreTerm?: boolean; stopFile?: string } = {}): string {
   const sigtermHandler = opts.ignoreTerm
     ? "process.on('SIGTERM',()=>{});"
@@ -5201,11 +5216,12 @@ function leaderExitStub(dir: string, descendantReadyFile: string, opts: { ignore
   const idleLoop = opts.stopFile
     ? `setInterval(()=>{if(require('fs').existsSync('${opts.stopFile}'))process.exit(0);},50);`
     : "setInterval(()=>{},1000);";
+  const selfBound = "setTimeout(()=>process.exit(0),600000);"; // real 600s ceiling — see this function's own doc
   return mkStub(
     dir,
     [
       "#!/usr/bin/env bash",
-      `( exec node -e "${sigtermHandler}require('fs').writeFileSync('${descendantReadyFile}','1');${idleLoop}" ) &`,
+      `( exec node -e "${sigtermHandler}require('fs').writeFileSync('${descendantReadyFile}','1');${idleLoop}${selfBound}" ) &`,
       `while [ ! -f "${descendantReadyFile}" ]; do sleep 0.01; done`,
       "exit 0",
       "",
@@ -5314,7 +5330,10 @@ test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is
       [
         "#!/usr/bin/env bash",
         'if echo "$*" | grep -q LEADER_EXIT_MARKER; then',
-        `  ( exec node -e "process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),100));require('fs').writeFileSync('${descendantReadyFile}','1');setInterval(()=>{},1000);" ) &`,
+        // Same real 600s self-bound as leaderExitStub's own (setTimeout(()=>process.exit(0),600000))
+        // — this descendant dies from the cooperative SIGTERM in the normal case, but a bare
+        // setInterval alone has no ceiling if that signal is ever somehow lost.
+        `  ( exec node -e "process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),100));require('fs').writeFileSync('${descendantReadyFile}','1');setInterval(()=>{},1000);setTimeout(()=>process.exit(0),600000);" ) &`,
         `  while [ ! -f "${descendantReadyFile}" ]; do sleep 0.01; done`,
         "  exit 0",
         "else",
