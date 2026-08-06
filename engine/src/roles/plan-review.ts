@@ -42,6 +42,7 @@ import type { IForge, Issue, PRComment } from "../forge/forge.js";
 import { extractAcceptanceCriteria, extractVerificationPlan, extractVerificationSection } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 import type { PeripheralStub } from "../loop/round.js";
+import { applyRoleBodyRewrite } from "../review/comment-cursor.js";
 import {
   checkBodyDrift,
   checkCommentCursorFreshnessWithComments,
@@ -732,7 +733,13 @@ async function reviewOneIssue(
     if ((await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-apply", liveBodyPreApply, sessionInputBody)).blocked) return false;
 
     if (decision.decision === "approve") {
-      if (decision.body !== undefined) await deps.forge.updateIssueBody(issue.number, decision.body);
+      // #703: the reviewer's own body revision is a ROLE-produced rewrite — never trusted to
+      // carry the adjudication marker itself. `applyRoleBodyRewrite` strips whatever marker (if
+      // any) the session emitted and reattaches `liveBodyPreApply`'s marker byte-for-byte (or
+      // none, if `liveBodyPreApply` had none) — see that function's own doc for the full ruling.
+      if (decision.body !== undefined) {
+        await deps.forge.updateIssueBody(issue.number, applyRoleBodyRewrite(liveBodyPreApply, decision.body));
+      }
       // #214 decision C: WRITE-AHEAD the load-bearing `plan-approved` event BEFORE the label
       // (#232 stance — a durable fact must exist before its externally-visible side effect).
       // Both crash orderings are benign: event-without-label (this append lands, the label
@@ -893,7 +900,10 @@ async function reviewOneIssue(
     if ((await checkGate0CommentCursor(deps, issue, roundId, "gate0-pre-drafter-write", liveBodyPreDrafterWrite, currentBody)).blocked) {
       return false;
     }
-    await deps.forge.updateIssueBody(issue.number, draftValidated.body);
+    // #703: same marker-preservation rule as the reviewer's approve-with-revision branch above —
+    // the drafter's ENTIRE deliverable is a role-produced body, so its output can never carry an
+    // authoritative marker; `liveBodyPreDrafterWrite`'s marker (or lack of one) wins byte-for-byte.
+    await deps.forge.updateIssueBody(issue.number, applyRoleBodyRewrite(liveBodyPreDrafterWrite, draftValidated.body));
     // Loop back -> re-run the reviewer against the drafter's edit (body refetched above).
   }
   // Unreachable in practice (the loop always returns via one of the branches above before this

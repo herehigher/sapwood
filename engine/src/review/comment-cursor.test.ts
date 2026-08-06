@@ -6,12 +6,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  applyRoleBodyRewrite,
   buildCommentCursorPointerComment,
   type CommentStreamEntry,
   commentCursorDedupeKey,
   commentCursorIsStale,
   commentCursorPointerMarker,
   computeCommentCursor,
+  findStandaloneMarkerLines,
 } from "./comment-cursor.js";
 
 function entry(id: string, isEngine = false): CommentStreamEntry {
@@ -287,4 +289,96 @@ test("an id-less comment that IS an engine comment still fails closed — engine
   const result = computeCommentCursor(body, [{ id: null, isEngine: true }]);
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.reason, "comment-id-missing");
+});
+
+// ── #703: engine preserves the adjudication marker across role body-writes (ruling, PO batch-11
+// 2026-08-06, candidate 3) — the marker is PO/human-owned state; a role has no standing to move
+// it, no matter what value its own output carries. ────────────────────────────────────────────
+
+test("applyRoleBodyRewrite (#703a): current body has an existing marker — the applied body carries the ORIGINAL marker byte-for-byte even when the role's own output carries a DIFFERENT (engine-id) marker", () => {
+  const currentBody = "Some plan.\n\n<!-- sapwood:comments-adjudicated-through: 123 -->\n";
+  // The exact live batch-11 shape: plan_review's housekeeping advice told the drafter to advance
+  // the marker to an ENGINE comment id (5204025029, #145's round-340 incident) — the role text
+  // below reproduces that, plus rewritten body prose.
+  const roleBody = "A revised plan, rewritten by the drafter.\n\n<!-- sapwood:comments-adjudicated-through: 5204025029 -->\n";
+  const applied = applyRoleBodyRewrite(currentBody, roleBody);
+  assert.deepEqual(findStandaloneMarkerLines(applied), ["<!-- sapwood:comments-adjudicated-through: 123 -->"]);
+  assert.ok(!applied.includes("5204025029"), "the role's own (engine-id) marker attempt must not survive");
+  assert.ok(applied.includes("A revised plan, rewritten by the drafter."), "the role's real content is preserved");
+  // computeCommentCursor now sees the ORIGINAL marker, not the role's discarded one.
+  const result = computeCommentCursor(applied, [
+    { id: "123", isEngine: false },
+    { id: "5204025029", isEngine: true },
+  ]);
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.cursor, "123");
+});
+
+test("applyRoleBodyRewrite (#703b): role output carries a marker, but the CURRENT body has none — the applied body has no marker either", () => {
+  const currentBody = "Some plan with no marker at all.";
+  const roleBody = "A revised plan.\n\n<!-- sapwood:comments-adjudicated-through: 999 -->\n";
+  const applied = applyRoleBodyRewrite(currentBody, roleBody);
+  assert.deepEqual(findStandaloneMarkerLines(applied), []);
+  assert.ok(!applied.includes("999"));
+  assert.ok(applied.includes("A revised plan."));
+});
+
+test("applyRoleBodyRewrite (#703c): no marker anywhere (current or role output) — behavior is unchanged, the role body passes through verbatim", () => {
+  const currentBody = "Some plan with no marker.";
+  const roleBody = "A revised plan, still with no marker.";
+  const applied = applyRoleBodyRewrite(currentBody, roleBody);
+  assert.equal(applied, roleBody);
+});
+
+test("applyRoleBodyRewrite: current body's marker is preserved even when the role's redraft is ENTIRELY unrelated prose with no marker of its own", () => {
+  const currentBody = "Old plan.\n\n<!-- sapwood:comments-adjudicated-through: 42 -->";
+  const roleBody = "A completely rewritten plan section.";
+  const applied = applyRoleBodyRewrite(currentBody, roleBody);
+  assert.deepEqual(findStandaloneMarkerLines(applied), ["<!-- sapwood:comments-adjudicated-through: 42 -->"]);
+  assert.ok(applied.includes("A completely rewritten plan section."));
+});
+
+test("findStandaloneMarkerLines: returns the RAW (untrimmed) line text, not just the parsed value", () => {
+  const body = "body\n  <!-- sapwood:comments-adjudicated-through: 7 -->  \nmore";
+  assert.deepEqual(findStandaloneMarkerLines(body), ["  <!-- sapwood:comments-adjudicated-through: 7 -->  "]);
+});
+
+test("findStandaloneMarkerLines: fenced-code-quoted markers are NOT returned — same fence-aware rule as the value-only scan", () => {
+  const body = ["```", "<!-- sapwood:comments-adjudicated-through: 5 -->", "```"].join("\n");
+  assert.deepEqual(findStandaloneMarkerLines(body), []);
+});
+
+// ── #703: recovery pointer comment names the acceptable target (ruling T7 finding) ─────────────
+
+test("buildCommentCursorPointerComment (#703d): names the newest NON-engine comment id as the id the marker would currently accept", () => {
+  const result = computeCommentCursor("no marker here", [
+    { id: "10", isEngine: false },
+    { id: "5204025029", isEngine: true },
+    { id: "20", isEngine: false },
+  ]);
+  const comment = buildCommentCursorPointerComment(result);
+  assert.match(comment, /concrete NON-engine comment/);
+  assert.match(comment, /engine comment's id is never a valid target/);
+  // "20" is the newest non-engine comment by stream position — never the engine comment, and
+  // never simply "the last comment" (which would be the engine one, the exact live-incident bug).
+  assert.match(comment, /`20`/);
+  assert.ok(!comment.includes("would currently accept `5204025029`"));
+});
+
+test("buildCommentCursorPointerComment (#703d): names `0` as the accepted target when no non-engine comments exist at all", () => {
+  const result = computeCommentCursor("<!-- sapwood:comments-adjudicated-through: bogus -->", [{ id: "1", isEngine: true }]);
+  const comment = buildCommentCursorPointerComment(result);
+  assert.match(comment, /only accept `0`/);
+});
+
+test("buildCommentCursorPointerComment (#703d): the cursor-targets-engine-comment case itself (the exact live #688/#645 shape) names the real non-engine id, not the rejected engine one", () => {
+  const result = computeCommentCursor("<!-- sapwood:comments-adjudicated-through: 5203999519 -->", [
+    { id: "5203999519", isEngine: true },
+    { id: "88", isEngine: false },
+  ]);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "cursor-targets-engine-comment");
+  const comment = buildCommentCursorPointerComment(result);
+  assert.match(comment, /`88`/);
+  assert.ok(!comment.includes("accept `5203999519`"));
 });

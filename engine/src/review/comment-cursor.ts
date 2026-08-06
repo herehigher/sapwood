@@ -59,9 +59,22 @@ const FENCE_RE = /^(`{3,}|~{3,})/;
  *  stray `` `` `` inside a ```` ```` ````-opened fence) is, by the same rule, just fence content
  *  too — never a close, and never a new open either (a fence cannot nest). */
 function findStandaloneMarkerValues(body: string): string[] {
-  const values: string[] = [];
+  return scanStandaloneMarkerLines(body).map((m) => m.value);
+}
+
+/** #703: the SAME fence-aware standalone-marker walk `findStandaloneMarkerValues` used to do
+ *  inline, factored out so it can hand back the RAW (untrimmed, byte-for-byte) line text and its
+ *  0-indexed line position too — `findStandaloneMarkerValues` above (computeCommentCursor's own
+ *  read path) still only needs the parsed VALUE, but #703's writer-side helpers below
+ *  (`findStandaloneMarkerLines`, `stripStandaloneMarkerLines`, `applyRoleBodyRewrite`) need the
+ *  exact original text and its line so they can preserve/remove whole lines verbatim. One walk,
+ *  never two independent copies that could drift apart. */
+function scanStandaloneMarkerLines(body: string): Array<{ lineIndex: number; raw: string; value: string }> {
+  const lines = body.split(/\r?\n/);
+  const found: Array<{ lineIndex: number; raw: string; value: string }> = [];
   let fence: { char: string; len: number } | null = null;
-  for (const rawLine of body.split(/\r?\n/)) {
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i]!;
     const line = rawLine.trim();
     const fenceMatch = FENCE_RE.exec(line);
     if (fenceMatch) {
@@ -83,9 +96,61 @@ function findStandaloneMarkerValues(body: string): string[] {
     }
     if (fence !== null) continue;
     const m = MARKER_LINE_RE.exec(line);
-    if (m) values.push(m[1]!);
+    if (m) found.push({ lineIndex: i, raw: rawLine, value: m[1]! });
   }
-  return values;
+  return found;
+}
+
+/** #703: the RAW (untrimmed, byte-for-byte) text of every standalone adjudication-marker line in
+ *  `body`, fence-aware exactly like `findStandaloneMarkerValues`. Used by `applyRoleBodyRewrite`
+ *  to carry the CURRENT body's marker over verbatim across a role-produced rewrite. */
+export function findStandaloneMarkerLines(body: string): string[] {
+  return scanStandaloneMarkerLines(body).map((m) => m.raw);
+}
+
+/** #703: `body` with every standalone adjudication-marker line REMOVED (fence-aware, same rule
+ *  as above). A role session has no standing to introduce or move the marker — see
+ *  `applyRoleBodyRewrite`, the only caller. Not exported: the marker-strip is meaningless on its
+ *  own without also restoring the current body's marker (or not), which is that function's job. */
+function stripStandaloneMarkerLines(body: string): string {
+  const markerLineIndices = new Set(scanStandaloneMarkerLines(body).map((m) => m.lineIndex));
+  if (markerLineIndices.size === 0) return body;
+  return body
+    .split(/\r?\n/)
+    .filter((_, i) => !markerLineIndices.has(i))
+    .join("\n");
+}
+
+/** #703 (ruling, PO batch-11 2026-08-06: candidate 3 — "engine preserves the marker across role
+ *  body-writes"). The adjudication marker `<!-- sapwood:comments-adjudicated-through: N -->` is
+ *  PO/human-owned state: no role session (verification-plan-reviewer's approve-with-revision,
+ *  verification-plan-drafter's drafted body) has standing to move it, regardless of what the
+ *  role's output — or any prompt/plan_review advice feeding it — claims. This is the STRUCTURAL
+ *  fix: call it at every point a role-produced body is about to replace the live one via
+ *  `forge.updateIssueBody` (plan-review.ts), so the writers CANNOT make the invalid choice the
+ *  live batch-11 incident reproduced three times in one afternoon (a role/advice naming an
+ *  ENGINE comment id as the new marker target, which `computeCommentCursor` then correctly
+ *  fail-closes on as `cursor-targets-engine-comment`).
+ *
+ *  `currentBody` is the live body immediately preceding this write — every call site already
+ *  takes this exact fresh read for its own #652 pre-write body-drift checkpoint, so this function
+ *  adds no new fetch. `roleBody` is the role's proposed replacement text.
+ *
+ *  Mechanism: ANY marker the role emitted is unconditionally stripped from `roleBody` — never
+ *  trusted, never inspected for validity, since a role has no authority to write one regardless
+ *  of what value it chose. The CURRENT body's marker, if one exists, is then reappended
+ *  BYTE-FOR-BYTE (its exact original line text, not a re-derived value) onto the stripped body.
+ *  If the current body carries no marker, the applied body gets none either — this function only
+ *  ever PRESERVES a pre-existing marker, it never manufactures one. `computeCommentCursor`
+ *  (comment-cursor.ts) and its validator stance are deliberately UNCHANGED by this fix (ruling:
+ *  "Validator unchanged — fail-closed stays fail-closed") — with the writer fixed, there is no
+ *  legitimate path to an engine-comment (or otherwise role-authored) target left to forgive. */
+export function applyRoleBodyRewrite(currentBody: string, roleBody: string): string {
+  const currentMarkerLines = findStandaloneMarkerLines(currentBody);
+  const strippedRoleBody = stripStandaloneMarkerLines(roleBody);
+  if (currentMarkerLines.length === 0) return strippedRoleBody;
+  const withoutTrailingWhitespace = strippedRoleBody.replace(/\s+$/, "");
+  return `${withoutTrailingWhitespace}\n\n${currentMarkerLines.join("\n")}\n`;
 }
 
 /** One comment in the fetched, oldest-first issue-comment stream. `isEngine` is resolved by the
@@ -287,10 +352,24 @@ export function buildCommentCursorPointerComment(result: CommentCursorResult): s
   const reason = result.ok
     ? "this issue's adjudication cursor is valid but does not yet cover every comment"
     : `this issue's adjudication cursor is invalid (${result.reason}: ${result.detail})`;
+  // #703 (ruling, T7 finding — fixes the exact wording trap a human operator live-reproduced on
+  // #688): `result.pending` is always stream-ordered (oldest-first, the same order
+  // `computeCommentCursor` builds it in on every branch), so its LAST element — when non-empty —
+  // is the newest non-engine comment currently on the issue: the concrete id a fresh marker
+  // pointed at it would be accepted by `computeCommentCursor` right now. Derived straight from
+  // the already-fetched comment stream this result carries, never guessed. An empty `pending`
+  // means no non-engine comment exists at all — the only id `computeCommentCursor` accepts then
+  // is `0` (cursor "0" is valid pass-through with zero comments; see this module's own doc).
+  const acceptedId = result.pending.length > 0 ? result.pending[result.pending.length - 1]! : "0";
+  const acceptedText =
+    acceptedId === "0"
+      ? "this issue currently has no non-engine comments, so the marker would currently only accept `0`"
+      : `the newest non-engine comment on this issue right now is \`${acceptedId}\` — that is the id the marker would currently accept`;
   return (
     `sapwood: ${reason}. Pending (non-engine) comment id(s): ${list}.\n\n` +
     `Recovery steps: record the ruling, rewrite the issue body to reflect it, advance the ` +
-    `\`<!-- sapwood:comments-adjudicated-through: <comment-id> -->\` marker to the last comment ` +
-    `you've adjudicated (or to \`0\` if none apply), then remove \`needs-human\`.\n\n${commentCursorPointerMarker(dedupeKey)}`
+    `\`<!-- sapwood:comments-adjudicated-through: <comment-id> -->\` marker so it identifies a ` +
+    `concrete NON-engine comment — an engine comment's id is never a valid target, even the ` +
+    `newest one; ${acceptedText}. Then remove \`needs-human\`.\n\n${commentCursorPointerMarker(dedupeKey)}`
   );
 }

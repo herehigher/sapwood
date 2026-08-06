@@ -19,6 +19,8 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+import { findStandaloneMarkerLines } from "../review/comment-cursor.js";
+import { checkCommentCursorFreshness } from "../review/comment-cursor-gate.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { ContextManifest } from "./context-manifest.js";
@@ -369,6 +371,103 @@ test("createPlanReviewStub: outcome 1 (approve WITH a body revision) — the rev
   assert.deepEqual(forge.updateIssueBodyCalls, [[50, PLAN_BODY]]);
   assert.equal(forge.issueBodies[50], PLAN_BODY);
   assert.ok(forge.issueLabels[50]!.includes("plan:approved"));
+  state.close();
+});
+
+// ── #703 (ruling, PO batch-11 2026-08-06): engine preserves the adjudication marker across
+// role body-writes — a role session (reviewer's approve-with-revision, drafter's drafted body)
+// has no standing to move `<!-- sapwood:comments-adjudicated-through: N -->`, no matter what
+// value its own output carries. ──────────────────────────────────────────────────────────────
+
+test("createPlanReviewStub (#703a): a reviewer approve-with-revision whose BODY block carries a DIFFERENT (engine-id) marker never lands — the issue's ORIGINAL marker survives byte-for-byte", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 60, title: "t", labels: [ROUND_POOL_LABEL] }];
+  // The issue's CURRENT body already carries a valid, human-adjudicated marker — the comment it
+  // targets (10) is present in the stream, so the #652 pre-spend/pre-apply checkpoints see a
+  // valid, fully-adjudicated cursor and never block this write.
+  forge.issueBodies[60] = `${NO_PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 10 -->`;
+  forge.issueComments[60] = [{ id: "10", login: "a-human", createdAt: "t", body: "please add acceptance criteria" }];
+  const cfg = mkCfg();
+  // The reviewer's revised body reproduces the exact live batch-11 shape (#145, round 340):
+  // "non-blocking housekeeping" advice tells it to advance the marker to an ENGINE comment id.
+  const revisedBodyWithEngineMarker = `${PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 999999 -->`;
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 60 }, revisedBodyWithEngineMarker)) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  const applied = forge.issueBodies[60]!;
+  assert.ok(!applied.includes("999999"), "the role's own marker attempt must never be written");
+  assert.deepEqual(findStandaloneMarkerLines(applied), ["<!-- sapwood:comments-adjudicated-through: 10 -->"]);
+  assert.ok(applied.includes("## Acceptance criteria"), "the role's real content revision still applies");
+  state.close();
+});
+
+test("createPlanReviewStub (#703b): a drafter session's drafted body carries a marker, but the issue's CURRENT body has none — the applied body has no marker either", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 61, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[61] = NO_PLAN_BODY; // no marker at all on this issue
+  const cfg = mkCfg();
+  const draftedBodyWithMarker = `${PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 5000 -->`;
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 61 }, "add a verification plan")) },
+    { result: doneResult("drafter-0", sapwoodResult({ issue: 61 }, draftedBodyWithMarker)) },
+    { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 61 })) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  const applied = forge.issueBodies[61]!;
+  assert.ok(!applied.includes("5000"), "the drafter has no standing to introduce a marker that never existed");
+  assert.deepEqual(findStandaloneMarkerLines(applied), []);
+  state.close();
+});
+
+test("createPlanReviewStub (#703c): no marker anywhere (current body or role output) — the applied body is exactly the role's body, unchanged behavior", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 62, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[62] = NO_PLAN_BODY;
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([{ result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 62 }, PLAN_BODY)) }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.deepEqual(forge.updateIssueBodyCalls, [[62, PLAN_BODY]]);
+  state.close();
+});
+
+test("createPlanReviewStub (#703 regression — live incident shape, #145/#645 2026-08-06: plan_review housekeeping-advice engine-id marker survives to a same-round dispatch/drive checkpoint): after the engine applies a reviewer's approve-with-revision carrying an engine-comment marker, a downstream comment-cursor freshness re-check (simulating dispatch, moments later) no longer flags cursor-targets-engine-comment", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 63, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[63] = `${NO_PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 77 -->`;
+  // The stream: a real, human-authored comment (77, already adjudicated) plus the round's own
+  // ENGINE bookkeeping notice (999999) — the exact id plan_review's housekeeping advice pointed
+  // at in the live #145 incident.
+  forge.issueComments[63] = [
+    { id: "77", login: "a-human", createdAt: "t", body: "please tighten the AC wording" },
+    { id: "999999", login: forge.authenticatedActor!, createdAt: "t", body: "round bookkeeping notice <!-- sapwood:engine -->" },
+  ];
+  const cfg = mkCfg();
+  const revisedBodyWithEngineMarker = `${PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 999999 -->`;
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 63 }, revisedBodyWithEngineMarker)) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  const appliedBody = forge.issueBodies[63]!;
+  // Pre-#703, this next check reproduced the live incident: the applied body's marker pointed at
+  // the engine comment (999999), and this same freshness check fired `cursor-targets-engine-comment`
+  // moments later at the dispatch/drive checkpoint, flagging needs-human on an issue whose plan a
+  // human had already, correctly, adjudicated.
+  const dispatchCheck = await checkCommentCursorFreshness(forge, 63, appliedBody);
+  assert.equal(dispatchCheck.ok, true, "the original, human-adjudicated marker (77) must still validate cleanly");
+  if (dispatchCheck.ok) assert.equal(dispatchCheck.cursor, "77");
   state.close();
 });
 
