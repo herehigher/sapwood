@@ -3366,6 +3366,13 @@ export class WorkerSupervisor implements Supervisor {
       parseAssistantUsageDeltas(jsonl).reduce((sum, d) => sum + estimateUsd(d, this.pricing), 0) - baseline,
     );
     const reportedCost = parseCostUsd(legJsonl);
+    // #645 P2-1: which of the two branches fed `cost` — a REAL provider-reported total, or the
+    // pinned-price estimator's substitute — is the same provenance the log line right below
+    // already computes and then discards. Persisted here (never derived a second time) so
+    // conductor.ts's terminal settlement can thread it into `spend_ledger.estimated` instead of
+    // leaving every worker/fix-leg row's `estimated` permanently NULL (docs/supervision.md's
+    // est-vs-real bias query needs this to be real, not aspirational prose).
+    const costEstimated = reportedCost <= 0;
     const cost = reportedCost > 0 ? reportedCost : estimatedLegCost;
     const modelUsage = parseModelUsage(legJsonl);
     // #33: reconcile the leg estimate against the REAL per-leg total_cost_usd and log the gap
@@ -3395,6 +3402,10 @@ export class WorkerSupervisor implements Supervisor {
       issue,
       session_id: sessionId,
       total_cost_usd: cost,
+      // #645 P2-1: the same estimator-vs-provider provenance the log line above already computed
+      // — carried onto the sentinel so probe()/terminalCostEstimated can recover it without
+      // re-reading/re-parsing the jsonl a third time.
+      total_cost_estimated: costEstimated,
       model_usage: modelUsage,
       ended_at: this.now().toISOString(),
       ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
@@ -3510,6 +3521,7 @@ export class WorkerSupervisor implements Supervisor {
     }
     const costUsd = this.terminalCostUsd({ done, failed, handoff }, name);
     const modelUsage = this.terminalModelUsage({ done, failed, handoff }, name);
+    const costEstimated = this.terminalCostEstimated({ done, failed, handoff }, name);
     // #155: LIVE telemetry only for a lane THIS supervisor still holds in-memory (this.lanes —
     // i.e. actually running; onExit deletes the entry the instant the process exits, terminal
     // or not). A DETACHED lane (persisted running.json, no in-memory handle — the engine
@@ -3564,6 +3576,7 @@ export class WorkerSupervisor implements Supervisor {
       hasPr,
       costUsd,
       modelUsage,
+      ...(costEstimated != null ? { costEstimated } : {}),
       ...(prNumber != null ? { prNumber } : {}),
       ...(prTitle != null ? { prTitle } : {}),
       ...(liveTelemetry ? { liveTelemetry } : {}),
@@ -3615,6 +3628,22 @@ export class WorkerSupervisor implements Supervisor {
       if (typeof r?.total_cost_usd === "number") return r.total_cost_usd;
     }
     return parseCostUsd(this.currentLegJsonl(name));
+  }
+
+  /** #645 P2-1: same terminal-sentinel-only shape as terminalCostUsd, reading the provenance
+   *  `writeTerminalSentinel` now persists alongside `total_cost_usd` (its own `costEstimated`
+   *  doc explains the estimator-vs-provider distinction). `null`, not `false`, when there is no
+   *  sentinel field to read — a pre-#645 sentinel, or the jsonl-fallback path (an engine-restart
+   *  orphan with no sentinel at all, terminalCostUsd's own doc) never computed an estimate to
+   *  report one way or the other, and this must never fabricate "known to be real" for a cost it
+   *  never actually classified. */
+  private terminalCostEstimated(flags: { done: boolean; failed: boolean; handoff: boolean }, name: string): boolean | null {
+    const ext = flags.done ? "done.json" : flags.failed ? "failed.json" : flags.handoff ? "handoff.json" : null;
+    if (ext) {
+      const r = this.readJson(this.path(name, ext));
+      if (typeof r?.total_cost_estimated === "boolean") return r.total_cost_estimated;
+    }
+    return null;
   }
 
   /** #47: same terminal-sentinel-first, jsonl-fallback shape as terminalCostUsd (see its

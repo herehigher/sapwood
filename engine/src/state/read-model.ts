@@ -267,44 +267,75 @@ export const MAX_PAGE_LIMIT = 1000;
  *  want different defaults, and the CAP (not the default) is what the semantic contract fixes. */
 export const DEFAULT_PAGE_LIMIT = 500;
 
-// ── spend (#642 AC3: honest settled + unclassified + incompleteness) ────────────────────────
+// ── spend (#642 AC3: honest settled + unclassified + incompleteness; #645: real lanes/roles/
+//    review split, replacing the interim name-heuristic) ────────────────────────────────────
 
 /** `status --json`'s spend section. `settledByWorker` is the SAME exact-name match
- *  `state.spentUsdForWorker` uses, one row per worker `spend_ledger` actually has settled rows
- *  for today (never every currently-active lane — a lane with zero settled spend today simply
- *  has no row, rather than a fabricated 0 entry cluttering the list). `unclassifiedUsd` is
- *  everything else `todayUsd` counts that ISN'T attributable to a known worker name — #612's
- *  `"<lane>:engine-review"` review-session spend keys land here today (state.ts's
- *  spendSummaryForDay doc) — and `incomplete` is true exactly when that bucket is non-empty, so
- *  a client can never mistake "some spend this DTO couldn't attribute" for "zero spend
- *  happened".
+ *  `state.spentUsdForWorker` uses, one row per worker/fix-leg lane `spend_ledger` actually has
+ *  settled `actor_kind`-attributed rows for today (never every currently-active lane — a lane
+ *  with zero settled spend today simply has no row, rather than a fabricated 0 entry cluttering
+ *  the list). `settledByRole` is the same shape for peripheral-role sessions (po-align,
+ *  architect, harvest, ...), keyed by role id. `reviewUsd` is #612's engine-agent
+ *  decisive-verdict review spend, now its OWN named total rather than an opaque
+ *  `"<lane>:engine-review"` entry buried in `unclassifiedUsd`.
  *
- *  #642 (Codex gate② round-1 P1 finding 3): `todayUsd` is `state.spendSummaryForDay`'s OWN
- *  `todayUsd` — deliberately NOT a separate `state.dailySpendUsd(now)` call. The three numbers
- *  now all come out of `spendSummaryForDay`'s single call (itself one read transaction,
- *  state.ts's own doc), so `todayUsd === sum(settledByWorker) + unclassifiedUsd` holds BY
- *  CONSTRUCTION — there is no independent third read left that a live settlement landing
- *  mid-computation could make disagree with the other two. */
+ *  `unclassifiedUsd` is now genuinely the LEFTOVER bucket: a row with no durable `actor_kind` at
+ *  all — either it predates the #645 migration (never backfilled, never guessed — pre-v1
+ *  doctrine) or a write site recorded spend without claiming a kind.
+ *
+ *  `incomplete` (#645 P1-2, gate② finding — the original `unclassifiedUsd > 0` rule pinned the
+ *  WRONG behavior) is true whenever EITHER: (a) `unclassifiedUsd` is non-empty, OR (b) the
+ *  engine-agent reviewer's deliberate-absence posture is structurally possible this run
+ *  (`cfg.reviewer.mode === "engine-agent"`, the schema default). (b) exists because a
+ *  non-decisive engine-review attempt (failed/unavailable) is deliberately never written to
+ *  `spend_ledger` at all (docs/security.md) — a real cost with genuinely NO ledger row to ever
+ *  render unclassified. Checking `state.hasNonDecisiveEngineReviewAttempt()`-style evidence
+ *  cannot substitute for the config check: `engine_review_wal`/the lane's own attempt-pin column
+ *  are upsert-by-lane, never append-only (state.ts's own migration doc) — a PAST non-decisive
+ *  attempt superseded by a LATER decisive one leaves literally no durable trace to query after
+ *  the fact, so evidence-based detection can only ever see an attempt CURRENTLY stuck mid-retry,
+ *  never one that already resolved. The config-mode check is therefore the only signal that can
+ *  honestly cover the whole day: `incomplete: false` must never be reachable while a class of
+ *  fundamentally undetectable omission is standing. `cfg` unavailable is treated as the schema's
+ *  own default (`engine-agent`) — an unresolved config can never license the LESS conservative
+ *  branch. Under a non-engine-agent mode (`different-model-codex` / `same-model-trusted` /
+ *  `human`) this posture does not apply, and a fully-attributed day can genuinely report
+ *  `incomplete: false`.
+ *
+ *  #642 (Codex gate② round-1 P1 finding 3, preserved through #645): `todayUsd` is
+ *  `state.spendSummaryForDay`'s OWN `todayUsd` — deliberately NOT a separate
+ *  `state.dailySpendUsd(now)` call. All five numbers come out of `spendSummaryForDay`'s single
+ *  call (itself one read transaction, state.ts's own doc), so `todayUsd === sum(settledByWorker)
+ *  + sum(settledByRole) + reviewUsd + unclassifiedUsd` holds BY CONSTRUCTION — there is no
+ *  independent extra read left that a live settlement landing mid-computation could make
+ *  disagree with the rest. */
 export interface StatusSpendDTO {
   todayUsd: number;
   dailyBudgetUsd: number | null;
   settledByWorker: { worker: string; usd: number }[];
+  settledByRole: { role: string; usd: number }[];
+  reviewUsd: number;
   unclassifiedUsd: number;
   incomplete: boolean;
 }
 
 export function buildSpendSection(
   state: Pick<State, "spendSummaryForDay">,
-  cfg: Pick<SapwoodConfig, "cost"> | null,
+  cfg: Pick<SapwoodConfig, "cost" | "reviewer"> | null,
   now: Date,
 ): StatusSpendDTO {
   const summary = state.spendSummaryForDay(now);
+  // #645 P1-2: see StatusSpendDTO's own doc above for why this is config-mode-based rather than
+  // an evidence query over engine_review_wal.
+  const deliberateAbsencePossible = (cfg?.reviewer.mode ?? "engine-agent") === "engine-agent";
   return {
     todayUsd: summary.todayUsd,
     dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
     settledByWorker: summary.byWorker,
+    settledByRole: summary.byRole,
+    reviewUsd: summary.reviewUsd,
     unclassifiedUsd: summary.unclassifiedUsd,
-    incomplete: summary.unclassifiedUsd > 0,
+    incomplete: summary.unclassifiedUsd > 0 || deliberateAbsencePossible,
   };
 }
 

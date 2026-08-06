@@ -298,14 +298,31 @@ be `driving` in the DB and simultaneously carry a human hold label on GitHub.
 
 `sapwood run --dry-run` prices a batch BEFORE it starts (`previewUsd` — candidate count
 × the configured soft per-worker budget). `sapwood status --json`'s `spend` section
-prices what actually happened (`todayUsd`, `settledByWorker`, plus `unclassifiedUsd` +
-an `incomplete` flag so a client can never mistake attribution gaps for zero spend). The
+prices what actually happened: `todayUsd`, split by real attribution
+(`settledByWorker`/`settledByRole`/`reviewUsd`, #645) plus `unclassifiedUsd` + an
+`incomplete` flag so a client can never mistake attribution gaps for zero spend. The
 engine itself already reconciles ITS OWN per-lane estimate against the real terminal
 `total_cost_usd` at terminal settlement (done/failed/handoff alike, not just a clean
 finish), when a positive terminal cost is actually available — logging the divergence
 when it is, and logging the estimate as the recorded spend (never a fabricated $0) when
 it isn't (`writeTerminalSentinel`'s own doc, `engine/src/roles/worker.ts`; see
 `docs/PLAN.md`'s Security model) — that is a per-lane mechanism, not a supervision one.
+
+`spend_ledger` also carries a per-row `estimated` flag (#645) so the est-vs-real
+divergence above can be queried instead of grepped from logs — populated where the
+engine distinguishes a pinned-price estimate from a real provider-reported total at
+the write site itself: the engine-review site's own `ReviewSessionSpend.kind`, AND
+(as of #645's spend-attribution work) every worker/fix-leg terminal settlement —
+`writeTerminalSentinel`'s own `costEstimated` computation is now persisted onto the
+terminal sentinel, threaded through `LaneProbe.costEstimated`, and lands in
+`spend_ledger.estimated` at `conductor.ts`'s `settleTerminalWorker` call. A
+worker/fix-leg row's `estimated` is `NULL` only for a lane that predates this change or
+whose sentinel never classified the distinction (still never guessed). A
+`peripheral-role` row's `estimated` is still `NULL` always — `peripheral.ts`'s
+`runSessionWithRetry` does not yet thread this signal through — so the dogfood
+estimator-bias series (opus vs. sonnet, per-leg) can now be run by query for
+worker/fix-leg/engine-review lanes, and still needs peripheral-role rows wired by a
+later issue.
 
 The supervision-side practice is a coarser, session-scoped series: note the dry-run
 preview at batch open, note the settled spend at batch close, and track the two numbers

@@ -33,6 +33,11 @@ async function driveVerdictSeam(opts: {
   runId: string;
   acStatuses: ("confirmed" | "cannot-confirm" | "claim-accepted")[];
   findings: Record<string, unknown>[];
+  /** #645 reverse test: force EngineAgentReviewer.evaluate()'s materialize step to fail, the
+   *  cheapest seam that produces a NON-decisive ("unavailable") ApprovalResult without touching
+   *  the runner at all — recordWalDecisiveOutcome is never called on this path (drive.ts's own
+   *  `unavailable`/`pending` early return), so no spend_ledger row should ever land. */
+  materializeFail?: boolean;
 }): Promise<{ state: State; production: ReturnType<typeof makeProductionEngineAgent>; cleanup: () => void }> {
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 1 },
@@ -106,12 +111,15 @@ async function driveVerdictSeam(opts: {
     now: () => new Date("2026-01-01T00:00:00Z"),
     newRunId: () => opts.runId,
     reviewTreeRoot: join(gcParent, "trees"),
-    materializeOverride: async (head) => ({
-      kind: "materialized",
-      treeDir: "/private/tree",
-      oid: head,
-      manifest: [{ path: "x", contentHash: "c" }],
-    }),
+    materializeOverride: async (head) =>
+      opts.materializeFail
+        ? { kind: "failure", reason: "#645 reverse-test forced materialize failure" }
+        : {
+            kind: "materialized",
+            treeDir: "/private/tree",
+            oid: head,
+            manifest: [{ path: "x", contentHash: "c" }],
+          },
   });
   const driver = new MergeDriver({ forge, reviewer: production.reviewer, cfg, fallbackReviewers: [] });
   await driver.driveOne(
@@ -213,6 +221,22 @@ test("#612 a decisive engine-agent verdict records the review session's own spen
   }
 });
 
+test("#645: a decisive engine-agent verdict's ledgered spend is attributed actor_kind='engine-review' — the read-model split's reviewUsd bucket sees it directly, no longer folded into unclassifiedUsd", async () => {
+  const seam = await driveVerdictSeam({
+    tag: "verdict-spend-attributed",
+    runId: "run-645-attributed",
+    acStatuses: ["confirmed", "confirmed"],
+    findings: [],
+  });
+  try {
+    const summary = seam.state.spendSummaryForDay(new Date("2026-01-01T00:00:00Z"));
+    assert.equal(summary.reviewUsd, 0.1);
+    assert.equal(summary.unclassifiedUsd, 0);
+  } finally {
+    seam.cleanup();
+  }
+});
+
 test("#612 review-session spend lands under a DIFFERENT ledger key than the lane's own name — never contaminates D5's getWorkerActualModels read", async () => {
   const seam = await driveVerdictSeam({
     tag: "verdict-spend-no-contaminate",
@@ -242,6 +266,28 @@ test("#612 cost ceilings (roundBudgetUsd/dailyBudgetUsd) see the review session'
   });
   try {
     assert.equal(seam.state.spentUsdAfterId(0), 0.1);
+  } finally {
+    seam.cleanup();
+  }
+});
+
+test("#645 reverse test: a NON-decisive (unavailable) engine-agent attempt records ZERO spend_ledger rows — the deliberate-absence posture for non-decisive review attempts is unchanged by #645's attribution work", async () => {
+  const seam = await driveVerdictSeam({
+    tag: "verdict-spend-non-decisive",
+    runId: "run-645-non-decisive",
+    acStatuses: ["confirmed", "confirmed"],
+    findings: [],
+    materializeFail: true,
+  });
+  try {
+    assert.equal(
+      seam.state.spentUsdForWorker("lane-12:engine-review"),
+      0,
+      "an unavailable attempt is never ledgered, not even as a zero-cost row",
+    );
+    assert.equal(seam.state.spendPage(0, 10).filter((r) => r.worker === "lane-12:engine-review").length, 0);
+    // The read-model split (#645) must never see a phantom review-spend row either.
+    assert.equal(seam.state.spendSummaryForDay(new Date("2026-01-01T00:00:00Z")).reviewUsd, 0);
   } finally {
     seam.cleanup();
   }

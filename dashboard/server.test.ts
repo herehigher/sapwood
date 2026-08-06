@@ -368,6 +368,12 @@ test("#642 AC1: /api/loop/state, /api/events, /api/spend are byte-identical to t
           outputTokens: 5,
           cacheReadTokens: 0,
           cacheCreationTokens: 0,
+          // #645 (gate② R2 APPROVED): actor_kind/role/estimated ride the raw /api/spend
+          // transport verbatim now, same as state.ts's own spendPage — null here because this
+          // fixture's recordSpend call never claims a kind (an unattributed row, never guessed).
+          actorKind: null,
+          role: null,
+          estimated: null,
         },
       ],
       lastId: 1,
@@ -591,6 +597,11 @@ test("/api/spend pages ascending by id and reports lastId, rows verbatim", async
       outputTokens: 10,
       cacheReadTokens: 5,
       cacheCreationTokens: 7,
+      // #645 (gate② R2 APPROVED): see the AC1 test's own comment above — seedSpend's
+      // recordSpend calls never claim a kind either.
+      actorKind: null,
+      role: null,
+      estimated: null,
     });
 
     const next = await getJson(fx, `/api/spend?after=${first.lastId}&limit=2`);

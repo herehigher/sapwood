@@ -227,52 +227,6 @@ export function makeProductionEngineAgent(
     },
   });
 
-  /** #489: the decisive gate② verdict, announced in the durable event stream. Under
-   *  `reviewer.mode: engine-agent` the verdict used to live ONLY in the WAL + the PR audit comment,
-   *  so a supervisor watching the event log saw a PR open and then merge with nothing in between —
-   *  reconstructing gate② meant joining three sources by hand. Emitted from the ONE site where a
-   *  WAL row gets its `decisive_outcome`, so there is no second place a verdict can be born.
-   *
-   *  SUMMARY only (counts, never the findings themselves): the full artifact keeps its one home in
-   *  the WAL row / audit comment.
-   *
-   *  LOG-FIRST, before the WAL write (the same ordering the audit path uses), with the log itself
-   *  as the dedup memory (#169/#294) keyed by runId: a crash anywhere around the pair replays into
-   *  exactly ONE event for that run, while the lane's NEXT attempt — a different runId — still gets
-   *  its own. Best-effort like every other observability write here: a failed append is logged, and
-   *  never turns the event log into a gate on the review. */
-  const appendVerdictEvent = (worker: WorkerRow, pr: number, runId: string, outcome: "approved" | "rejected"): void => {
-    try {
-      if (state.runEventRecorded(ENGINE_REVIEW_VERDICT, worker.name, runId)) return;
-      const wal = state.getEngineReviewWal(worker.name);
-      if (!wal || wal.runId !== runId) {
-        // The WAL update below is runId-guarded too and would be a no-op for this run — say so
-        // rather than emitting a verdict event carrying a head this attempt cannot vouch for.
-        log(`[sapwood:engine-review-verdict] lane ${worker.name} has no WAL row for run ${runId} — verdict event not emitted`);
-        return;
-      }
-      const artifact = artifacts.get(wal.head);
-      state.appendEvent(ENGINE_REVIEW_VERDICT, {
-        worker: worker.name,
-        issue: worker.issue,
-        pr,
-        head: wal.head,
-        runId,
-        outcome,
-        // null, not 0: "this composition never saw the artifact" is not "the review found nothing"
-        // (the same never-fabricate stance `treeManifestHash` takes when unobserved).
-        findingCount: artifact ? artifact.findings.length : null,
-        perAC: artifact ? countPerAcStatuses(artifact.perAC) : null,
-      });
-    } catch (err) {
-      try {
-        log(`[sapwood:engine-review-verdict] event append failed (non-fatal): ${String(err)}`);
-      } catch {
-        // A broken logger cannot turn observability into a gate either.
-      }
-    }
-  };
-
   const driveDepsForLane = (worker: WorkerRow, pr: number): Omit<EngineAgentDriveDeps, "forge" | "cfg" | "reviewerAdapter"> => {
     activeWorker = worker.name;
     const deliver = async () => {
@@ -295,42 +249,89 @@ export function makeProductionEngineAgent(
       recordAttemptPin: (pin) => state.recordEngineReviewAttemptPin(worker.name, pin),
       getWal: () => state.getEngineReviewWal(worker.name),
       recordWal: (wal) => state.recordEngineReviewWal(worker.name, wal),
+      /** #489: the decisive gate② verdict, announced in the durable event stream. Under
+       *  `reviewer.mode: engine-agent` the verdict used to live ONLY in the WAL + the PR audit
+       *  comment, so a supervisor watching the event log saw a PR open and then merge with
+       *  nothing in between — reconstructing gate② meant joining three sources by hand. Emitted
+       *  from the ONE site where a WAL row gets its `decisive_outcome`, so there is no second
+       *  place a verdict can be born.
+       *
+       *  #645 P1-1: the verdict event, the WAL `decisive_outcome` write, and (#612) the review
+       *  session's own settled spend now land together in ONE sqlite transaction
+       *  (`state.recordEngineReviewVerdictAndSpend` — see its own doc for the crash window this
+       *  closes: the old two-write sequence appended the event FIRST, whose existence
+       *  `runEventRecorded` reads as "already handled" on replay, then recorded the spend LAST —
+       *  a crash between them left the verdict durably recorded with the spend permanently,
+       *  silently missing). The pre-check below (`runEventRecorded`) is what makes a genuine
+       *  REPEAT call (this exact runId, already fully committed by a prior call) a clean no-op:
+       *  post-fix, that check can ONLY read true once the atomic transaction has actually
+       *  committed everything, so there is no longer a state where it reads true with the spend
+       *  still missing. */
       recordWalDecisiveOutcome: (runId, outcome) => {
-        // #612: read BEFORE appendVerdictEvent flips this same marker — a same-process replay of
-        // this exact runId (the crash shape appendVerdictEvent's own doc describes: the engine
-        // died between the event append and the WAL write) must record the review session's
-        // spend ONCE, not once per replay. spend_ledger has no runId column of its own to dedupe
-        // against directly, so this reuses the SAME durable dedup memory the verdict event
-        // already relies on.
-        const spendAlreadyRecorded = state.runEventRecorded(ENGINE_REVIEW_VERDICT, worker.name, runId);
-        appendVerdictEvent(worker, pr, runId, outcome);
-        state.recordEngineReviewWalDecisiveOutcome(worker.name, runId, outcome);
-        if (!spendAlreadyRecorded) {
-          // #612: fold the review session's own cost into spend_ledger here — the ONE call site
-          // where a WAL row becomes decisive, same rationale appendVerdictEvent's doc gives for
-          // being the one place a verdict is born. Previously this spend lived ONLY inside
-          // engine_review_wal.review_artifact_json.sessionSpends, invisible to
-          // cost.roundBudgetUsd/dailyBudgetUsd and every ledger-based report.
-          const walForSpend = state.getEngineReviewWal(worker.name);
-          const artifactForSpend = walForSpend?.runId === runId ? artifacts.get(walForSpend.head) : undefined;
-          if (artifactForSpend) {
-            const usd = artifactForSpend.sessionSpends.reduce((sum, s) => sum + (s.kind === "unknown" ? 0 : s.usd), 0);
-            const identity = artifactForSpend.sessionActualIdentities[0];
-            state.recordSpend(reviewSpendWorkerKey(worker.name), worker.issue, usd, now().toISOString(), [
-              {
-                model: identity ? formatIdentity(identity) : "unknown",
-                inputTokens: 0,
-                outputTokens: 0,
-                cacheCreationTokens: 0,
-                cacheReadTokens: 0,
-              },
-            ]);
-          }
+        if (state.runEventRecorded(ENGINE_REVIEW_VERDICT, worker.name, runId)) return;
+        const wal = state.getEngineReviewWal(worker.name);
+        if (!wal || wal.runId !== runId) {
+          // The WAL update is runId-guarded too and would be a no-op for this run — say so rather
+          // than emitting a verdict event carrying a head this attempt cannot vouch for.
+          log(`[sapwood:engine-review-verdict] lane ${worker.name} has no WAL row for run ${runId} — verdict event not emitted`);
+          return;
         }
+        const artifact = artifacts.get(wal.head);
+        state.recordEngineReviewVerdictAndSpend(
+          worker.name,
+          runId,
+          outcome,
+          ENGINE_REVIEW_VERDICT,
+          {
+            worker: worker.name,
+            issue: worker.issue,
+            pr,
+            head: wal.head,
+            runId,
+            outcome,
+            // null, not 0: "this composition never saw the artifact" is not "the review found
+            // nothing" (the same never-fabricate stance `treeManifestHash` takes when unobserved).
+            findingCount: artifact ? artifact.findings.length : null,
+            perAC: artifact ? countPerAcStatuses(artifact.perAC) : null,
+          },
+          // #612: fold the review session's own cost into spend_ledger atomically with the
+          // verdict — the ONE engine-review write site, firing exactly once per decisive WAL row,
+          // never per non-decisive attempt (the deliberate-absence posture #645 keeps). Omitted
+          // (undefined) when this run's artifact was never captured — production.ts's own
+          // never-fabricate stance, unchanged.
+          artifact
+            ? {
+                worker: reviewSpendWorkerKey(worker.name),
+                issue: worker.issue,
+                // `usd` is already ReviewSessionSpend's `known`+`estimated` sum (audit.ts's own
+                // known/estimated/unknown split).
+                usd: artifact.sessionSpends.reduce((sum, s) => sum + (s.kind === "unknown" ? 0 : s.usd), 0),
+                at: now().toISOString(),
+                models: [
+                  {
+                    model: artifact.sessionActualIdentities[0] ? formatIdentity(artifact.sessionActualIdentities[0]) : "unknown",
+                    inputTokens: 0,
+                    outputTokens: 0,
+                    cacheCreationTokens: 0,
+                    cacheReadTokens: 0,
+                  },
+                ],
+                actorKind: "engine-review",
+                // true when ANY summed attempt came from the pinned-price estimator rather than a
+                // real provider-reported total — the same "mixing in even one estimated attempt
+                // makes the sum inexact" stance audit.ts's own subtotal-labelling doc already takes.
+                estimated: artifact.sessionSpends.some((s) => s.kind === "estimated"),
+              }
+            : undefined,
+        );
         try {
-          const wal = state.getEngineReviewWal(worker.name);
-          if (wal?.runId === runId && wal.decisiveOutcome === outcome && !state.getLiveEngineReviewHeads().includes(wal.head))
-            deleteReviewTreesForHead(treeRoot, wal.head, log);
+          const walAfter = state.getEngineReviewWal(worker.name);
+          if (
+            walAfter?.runId === runId &&
+            walAfter.decisiveOutcome === outcome &&
+            !state.getLiveEngineReviewHeads().includes(walAfter.head)
+          )
+            deleteReviewTreesForHead(treeRoot, walAfter.head, log);
         } catch (err) {
           gcWarning(log, `resolve decisive WAL head for worker ${worker.name}`, err);
         }

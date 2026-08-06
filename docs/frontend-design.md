@@ -810,10 +810,12 @@ by `id`; live mode polls with the last seen id, replay mode pages from
 
 **`GET /api/spend?after=<id>&limit=<n>`** — the append-only `spend_ledger`,
 same paging contract as `/api/events`; replay's cost source (§11). Rows are
-served verbatim (`id, ts, worker, issue, usd, model`, token counts); the
-replay cursor maps event → spend position by timestamp
-(`spend_ledger.ts <= current event's ts`) — display-grade alignment, no
-cross-table join.
+served verbatim (`id, ts, worker, issue, usd, model`, token counts, and —
+since #645 — `actorKind`/`role`/`estimated`, the durable attribution
+columns; `null` on a row that never claimed one, same never-guess stance
+as everywhere else this triple appears); the replay cursor maps event →
+spend position by timestamp (`spend_ledger.ts <= current event's ts`) —
+display-grade alignment, no cross-table join.
 
 **Phase bucketing** (the §3 E "by phase" bars): a spend row belongs to the
 phase whose `round-phase` window (#206's full trail — initial `aligning`,
