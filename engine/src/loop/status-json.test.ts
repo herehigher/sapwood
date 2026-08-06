@@ -115,26 +115,31 @@ test("#642 AC2: status --json golden shape — formatVersion 1, per-lane detail,
   });
 });
 
-test("#642 AC3: spend section reports settled-by-worker + unclassified + incomplete — review-attempt spend (a key with no matching workers row) is NEVER folded into a fabricated zero", () => {
+test("#642/#645 AC3: spend section reports settled-by-worker + settled-by-role + review + unclassified + incomplete — a row with no actor_kind at all is NEVER folded into a fabricated zero", () => {
   withDir((dir) => {
     const dbPath = join(dir, "sapwood.sqlite");
     const configPath = writeConfig(dir);
     const seed = new State(dbPath);
     seed.upsertWorker({ name: "lane-a", issue: 1, session_id: "s1", state: "done", started_at: "2026-08-04T00:00:00.000Z", ended_at: "t" });
     const now = new Date();
-    seed.recordSpend("lane-a", 1, 3, now.toISOString());
-    // #612's own review-spend key — deliberately never a `workers.name` row.
-    seed.recordSpend("lane-a:engine-review", 1, 0.6, now.toISOString());
+    seed.recordSpend("lane-a", 1, 3, now.toISOString(), [], "worker");
+    // #612's own review-spend key — deliberately never a `workers.name` row; now its own bucket.
+    seed.recordSpend("lane-a:engine-review", 1, 0.6, now.toISOString(), [], "engine-review");
+    seed.recordSpend("role-po-align-1", 0, 0.5, now.toISOString(), [], "peripheral-role", "po-align");
+    // No actor_kind claimed at all — the genuinely unattributed case.
+    seed.recordSpend("nobody-owns-this-key", 9, 0.1, now.toISOString());
     seed.close();
 
     const r = runCli(["node", "sapwood", "status", dbPath, "--config", configPath, "--json"]);
     assert.equal(r.code, 0);
     const body = parseStdout(r);
 
-    assert.equal(body.spend.todayUsd, 3.6);
+    assert.equal(body.spend.todayUsd, 3 + 0.6 + 0.5 + 0.1);
     assert.equal(body.spend.dailyBudgetUsd, 50);
     assert.deepEqual(body.spend.settledByWorker, [{ worker: "lane-a", usd: 3 }]);
-    assert.equal(body.spend.unclassifiedUsd, 0.6);
+    assert.deepEqual(body.spend.settledByRole, [{ role: "po-align", usd: 0.5 }]);
+    assert.equal(body.spend.reviewUsd, 0.6);
+    assert.equal(body.spend.unclassifiedUsd, 0.1);
     assert.equal(body.spend.incomplete, true);
   });
 });
@@ -145,7 +150,7 @@ test("#642 AC3: an all-attributed day reports incomplete: false and unclassified
     const configPath = writeConfig(dir);
     const seed = new State(dbPath);
     seed.upsertWorker({ name: "lane-a", issue: 1, session_id: "s1", state: "done", started_at: "2026-08-04T00:00:00.000Z", ended_at: "t" });
-    seed.recordSpend("lane-a", 1, 2, new Date().toISOString());
+    seed.recordSpend("lane-a", 1, 2, new Date().toISOString(), [], "worker");
     seed.close();
 
     const body = parseStdout(runCli(["node", "sapwood", "status", dbPath, "--config", configPath, "--json"]));
@@ -154,7 +159,25 @@ test("#642 AC3: an all-attributed day reports incomplete: false and unclassified
   });
 });
 
-test("#642 (Codex gate② round-1 P1 finding 3): the spend section's own identity — todayUsd === sum(settledByWorker) + unclassifiedUsd — always holds, over a fixture mixing known-worker, review-key, and orphan-key spend", () => {
+test("#645: engine-review spend (#612's `<lane>:engine-review` key) is no longer folded into unclassifiedUsd now that it is attributed — it lands in reviewUsd, and the day is fully attributed", () => {
+  withDir((dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const configPath = writeConfig(dir);
+    const seed = new State(dbPath);
+    seed.upsertWorker({ name: "lane-a", issue: 1, session_id: "s1", state: "done", started_at: "2026-08-04T00:00:00.000Z", ended_at: "t" });
+    const now = new Date().toISOString();
+    seed.recordSpend("lane-a", 1, 3, now, [], "worker");
+    seed.recordSpend("lane-a:engine-review", 1, 0.6, now, [], "engine-review");
+    seed.close();
+
+    const body = parseStdout(runCli(["node", "sapwood", "status", dbPath, "--config", configPath, "--json"]));
+    assert.equal(body.spend.reviewUsd, 0.6);
+    assert.equal(body.spend.unclassifiedUsd, 0);
+    assert.equal(body.spend.incomplete, false);
+  });
+});
+
+test("#642 (Codex gate② round-1 P1 finding 3, preserved through #645): the spend section's own identity — todayUsd === sum(settledByWorker) + sum(settledByRole) + reviewUsd + unclassifiedUsd — always holds, over a fixture mixing lane, role, review, and orphan-key spend", () => {
   withDir((dir) => {
     const dbPath = join(dir, "sapwood.sqlite");
     const configPath = writeConfig(dir);
@@ -162,16 +185,19 @@ test("#642 (Codex gate② round-1 P1 finding 3): the spend section's own identit
     seed.upsertWorker({ name: "lane-a", issue: 1, session_id: "s1", state: "done", started_at: "2026-08-04T00:00:00.000Z", ended_at: "t" });
     seed.upsertWorker({ name: "lane-b", issue: 2, session_id: "s2", state: "done", started_at: "2026-08-04T00:00:00.000Z", ended_at: "t" });
     const now = new Date().toISOString();
-    seed.recordSpend("lane-a", 1, 1.1, now);
-    seed.recordSpend("lane-b", 2, 2.2, now);
-    seed.recordSpend("lane-a:engine-review", 1, 0.3, now); // #612's review-spend key
+    seed.recordSpend("lane-a", 1, 1.1, now, [], "worker");
+    seed.recordSpend("lane-b", 2, 2.2, now, [], "fix-leg");
+    seed.recordSpend("lane-a:engine-review", 1, 0.3, now, [], "engine-review"); // #612's review-spend key
+    seed.recordSpend("role-architect-1", 0, 0.5, now, [], "peripheral-role", "architect");
     seed.recordSpend("nobody-owns-this-key", 9, 0.4, now); // a genuinely orphaned row
     seed.close();
 
     const body = parseStdout(runCli(["node", "sapwood", "status", dbPath, "--config", configPath, "--json"]));
-    const settledSum = body.spend.settledByWorker.reduce((sum: number, r: { usd: number }) => sum + r.usd, 0);
-    assert.equal(body.spend.todayUsd, settledSum + body.spend.unclassifiedUsd);
-    assert.equal(body.spend.unclassifiedUsd, 0.7); // 0.3 (review) + 0.4 (orphan)
+    const settledSum =
+      body.spend.settledByWorker.reduce((sum: number, r: { usd: number }) => sum + r.usd, 0) +
+      body.spend.settledByRole.reduce((sum: number, r: { usd: number }) => sum + r.usd, 0);
+    assert.equal(body.spend.todayUsd, settledSum + body.spend.reviewUsd + body.spend.unclassifiedUsd);
+    assert.equal(body.spend.unclassifiedUsd, 0.4); // only the genuinely orphaned row
     assert.equal(body.spend.incomplete, true);
   });
 });

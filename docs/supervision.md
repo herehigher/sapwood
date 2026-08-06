@@ -295,14 +295,27 @@ be `driving` in the DB and simultaneously carry a human hold label on GitHub.
 
 `sapwood run --dry-run` prices a batch BEFORE it starts (`previewUsd` — candidate count
 × the configured soft per-worker budget). `sapwood status --json`'s `spend` section
-prices what actually happened (`todayUsd`, `settledByWorker`, plus `unclassifiedUsd` +
-an `incomplete` flag so a client can never mistake attribution gaps for zero spend). The
+prices what actually happened: `todayUsd`, split by real attribution
+(`settledByWorker`/`settledByRole`/`reviewUsd`, #645) plus `unclassifiedUsd` + an
+`incomplete` flag so a client can never mistake attribution gaps for zero spend. The
 engine itself already reconciles ITS OWN per-lane estimate against the real terminal
 `total_cost_usd` at terminal settlement (done/failed/handoff alike, not just a clean
 finish), when a positive terminal cost is actually available — logging the divergence
 when it is, and logging the estimate as the recorded spend (never a fabricated $0) when
 it isn't (`writeTerminalSentinel`'s own doc, `engine/src/roles/worker.ts`; see
 `docs/PLAN.md`'s Security model) — that is a per-lane mechanism, not a supervision one.
+
+`spend_ledger` also carries a per-row `estimated` flag (#645) so the est-vs-real
+divergence above can be queried instead of grepped from logs — populated today only
+where the engine already distinguishes a pinned-price estimate from a real
+provider-reported total at the write site itself (the engine-review site's own
+`ReviewSessionSpend.kind`); a worker/fix-leg/peripheral-role row's `estimated` is
+`NULL` (not `false` — genuinely not yet wired, never guessed) even though
+`writeTerminalSentinel` computes the same distinction internally. The dogfood
+estimator-bias series (opus vs. sonnet, per-leg) this column was meant to retire the
+hand arithmetic for therefore still needs it for worker/fix-leg/peripheral-role rows
+until a later issue threads that same signal through to `recordSpend` for those sites
+too.
 
 The supervision-side practice is a coarser, session-scoped series: note the dry-run
 preview at batch open, note the settled spend at batch close, and track the two numbers

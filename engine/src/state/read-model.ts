@@ -267,28 +267,41 @@ export const MAX_PAGE_LIMIT = 1000;
  *  want different defaults, and the CAP (not the default) is what the semantic contract fixes. */
 export const DEFAULT_PAGE_LIMIT = 500;
 
-// ── spend (#642 AC3: honest settled + unclassified + incompleteness) ────────────────────────
+// ── spend (#642 AC3: honest settled + unclassified + incompleteness; #645: real lanes/roles/
+//    review split, replacing the interim name-heuristic) ────────────────────────────────────
 
 /** `status --json`'s spend section. `settledByWorker` is the SAME exact-name match
- *  `state.spentUsdForWorker` uses, one row per worker `spend_ledger` actually has settled rows
- *  for today (never every currently-active lane — a lane with zero settled spend today simply
- *  has no row, rather than a fabricated 0 entry cluttering the list). `unclassifiedUsd` is
- *  everything else `todayUsd` counts that ISN'T attributable to a known worker name — #612's
- *  `"<lane>:engine-review"` review-session spend keys land here today (state.ts's
- *  spendSummaryForDay doc) — and `incomplete` is true exactly when that bucket is non-empty, so
- *  a client can never mistake "some spend this DTO couldn't attribute" for "zero spend
- *  happened".
+ *  `state.spentUsdForWorker` uses, one row per worker/fix-leg lane `spend_ledger` actually has
+ *  settled `actor_kind`-attributed rows for today (never every currently-active lane — a lane
+ *  with zero settled spend today simply has no row, rather than a fabricated 0 entry cluttering
+ *  the list). `settledByRole` is the same shape for peripheral-role sessions (po-align,
+ *  architect, harvest, ...), keyed by role id. `reviewUsd` is #612's engine-agent
+ *  decisive-verdict review spend, now its OWN named total rather than an opaque
+ *  `"<lane>:engine-review"` entry buried in `unclassifiedUsd`.
  *
- *  #642 (Codex gate② round-1 P1 finding 3): `todayUsd` is `state.spendSummaryForDay`'s OWN
- *  `todayUsd` — deliberately NOT a separate `state.dailySpendUsd(now)` call. The three numbers
- *  now all come out of `spendSummaryForDay`'s single call (itself one read transaction,
- *  state.ts's own doc), so `todayUsd === sum(settledByWorker) + unclassifiedUsd` holds BY
- *  CONSTRUCTION — there is no independent third read left that a live settlement landing
- *  mid-computation could make disagree with the other two. */
+ *  `unclassifiedUsd` is now genuinely the LEFTOVER bucket: a row with no durable `actor_kind` at
+ *  all — either it predates the #645 migration (never backfilled, never guessed — pre-v1
+ *  doctrine) or a write site recorded spend without claiming a kind. `incomplete` is true
+ *  exactly when that bucket is non-empty, so a client can never mistake "some spend this DTO
+ *  couldn't attribute" for "zero spend happened". Note `incomplete: false` is still NOT a claim
+ *  that every dollar the provider billed today is captured: a non-decisive engine-review attempt
+ *  (failed/unavailable) is deliberately never written to `spend_ledger` at all (docs/security.md;
+ *  #645 keeps that posture, never widens it) — an omission that was never a row can never surface
+ *  as an unattributed one either.
+ *
+ *  #642 (Codex gate② round-1 P1 finding 3, preserved through #645): `todayUsd` is
+ *  `state.spendSummaryForDay`'s OWN `todayUsd` — deliberately NOT a separate
+ *  `state.dailySpendUsd(now)` call. All five numbers come out of `spendSummaryForDay`'s single
+ *  call (itself one read transaction, state.ts's own doc), so `todayUsd === sum(settledByWorker)
+ *  + sum(settledByRole) + reviewUsd + unclassifiedUsd` holds BY CONSTRUCTION — there is no
+ *  independent extra read left that a live settlement landing mid-computation could make
+ *  disagree with the rest. */
 export interface StatusSpendDTO {
   todayUsd: number;
   dailyBudgetUsd: number | null;
   settledByWorker: { worker: string; usd: number }[];
+  settledByRole: { role: string; usd: number }[];
+  reviewUsd: number;
   unclassifiedUsd: number;
   incomplete: boolean;
 }
@@ -303,6 +316,8 @@ export function buildSpendSection(
     todayUsd: summary.todayUsd,
     dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
     settledByWorker: summary.byWorker,
+    settledByRole: summary.byRole,
+    reviewUsd: summary.reviewUsd,
     unclassifiedUsd: summary.unclassifiedUsd,
     incomplete: summary.unclassifiedUsd > 0,
   };

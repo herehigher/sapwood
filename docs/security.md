@@ -1810,7 +1810,24 @@ overlapping itself and fail closed forever). A review attempt that never reaches
 verdict (all retries exhausted, a setup failure, a D5 same-model refusal) still records nothing
 to the ledger — its cost is real but stays visible only in that attempt's own WAL artifact; this
 mirrors the #286 whole-logical-review cap, which reads the WAL, never the ledger, for the exact
-same reason.
+same reason. **#645 attributes what IS recorded — it does not widen this**: the deliberate-absence
+posture for non-decisive attempts is unchanged, still no ledger row of any kind for one.
+
+**Durable spend attribution (#645).** `spend_ledger` carries three additional columns, written by
+every real spend site: `actor_kind` (`worker` | `fix-leg` | `peripheral-role` | `engine-review` —
+conductor.ts's reclaim path sets the first two from whether the terminal lane was a `fixing`-origin
+leg; peripheral.ts's shared `runSessionWithRetry` sets `peripheral-role` for every po-align/
+po-triage/architect/plan-review/harvest/retro session; production.ts's decisive-verdict callback
+above sets `engine-review`), `role` (the peripheral role id, `peripheral-role` rows only), and
+`estimated` (0/1, set only where the engine already distinguishes a pinned-price estimate from a
+real provider-reported total — today, only the engine-review site's own `ReviewSessionSpend.kind`).
+Pre-v1, plain schema bump: no migration/backfill for rows written before this — they read
+`actor_kind IS NULL` forever, rendered `unclassified` by the read-model
+(`State.spendSummaryForDay`), same "never guess" stance as every other unattributed row. The
+shared read-model's spend section (`status --json`'s `spend` key) reports the real
+`lanes`/`roles`/`review` split (`settledByWorker`/`settledByRole`/`reviewUsd`) plus the
+`unclassifiedUsd` leftover bucket and its `incomplete` flag — see `state/read-model.ts`'s
+`StatusSpendDTO` doc for the exact identity `todayUsd` holds by construction.
 
 **Supervisor prerequisite (#431):** operators running unattended under a supervisor
 MUST configure the supervisor's own crash-loop circuit-breaker — e.g. systemd's

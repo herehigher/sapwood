@@ -316,15 +316,33 @@ export function makeProductionEngineAgent(
           if (artifactForSpend) {
             const usd = artifactForSpend.sessionSpends.reduce((sum, s) => sum + (s.kind === "unknown" ? 0 : s.usd), 0);
             const identity = artifactForSpend.sessionActualIdentities[0];
-            state.recordSpend(reviewSpendWorkerKey(worker.name), worker.issue, usd, now().toISOString(), [
-              {
-                model: identity ? formatIdentity(identity) : "unknown",
-                inputTokens: 0,
-                outputTokens: 0,
-                cacheCreationTokens: 0,
-                cacheReadTokens: 0,
-              },
-            ]);
+            // #645: this decisive-verdict recordSpend is the ONE engine-review write site — see
+            // this callback's own doc above for why it fires exactly once per decisive WAL row,
+            // never per non-decisive attempt (the deliberate-absence posture #645 keeps). `usd`
+            // is already ReviewSessionSpend's `known`+`estimated` sum (audit.ts's own
+            // known/estimated/unknown split); `estimated` is true when ANY summed attempt came
+            // from the pinned-price estimator rather than a real provider-reported total — the
+            // same "mixing in even one estimated attempt makes the sum inexact" stance audit.ts's
+            // own subtotal-labelling doc already takes.
+            const estimated = artifactForSpend.sessionSpends.some((s) => s.kind === "estimated");
+            state.recordSpend(
+              reviewSpendWorkerKey(worker.name),
+              worker.issue,
+              usd,
+              now().toISOString(),
+              [
+                {
+                  model: identity ? formatIdentity(identity) : "unknown",
+                  inputTokens: 0,
+                  outputTokens: 0,
+                  cacheCreationTokens: 0,
+                  cacheReadTokens: 0,
+                },
+              ],
+              "engine-review",
+              undefined,
+              estimated,
+            );
           }
         }
         try {

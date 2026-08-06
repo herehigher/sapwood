@@ -94,7 +94,7 @@ Payloads are event-specific JSON objects. Stable conventions are identifiers suc
 
 #### `spend_ledger`
 
-Append-only settled spend, one row per worker/model usage record: `id`, `ts`, `worker`, `issue`, `usd`, `model`, and input/output/cache-read/cache-creation token counts. `recordSpend()` and atomic terminal settlement write it after a worker leg ends; ceiling evaluation, CLI status, per-worker totals, stop conditions, round artifacts, and future dashboard readers aggregate it. Rows are never updated; unknown/uncaptured model data uses the schema defaults.
+Append-only settled spend, one row per worker/model usage record: `id`, `ts`, `worker`, `issue`, `usd`, `model`, input/output/cache-read/cache-creation token counts, and (#645) `actor_kind` (`worker`/`fix-leg`/`peripheral-role`/`engine-review`, nullable), `role` (peripheral role id, `peripheral-role` rows only), and `estimated` (0/1, nullable — set only where the engine already distinguishes a pinned-price estimate from a real total). `recordSpend()` and atomic terminal settlement write it after a worker leg ends, peripheral role sessions, and decisive engine-review verdicts; ceiling evaluation, CLI status, per-worker totals, stop conditions, round artifacts, and the read-model's lanes/roles/review spend split aggregate it. Rows are never updated; unknown/uncaptured model data uses the schema defaults, and a row written before the #645 migration has `actor_kind IS NULL` forever (no backfill — pre-v1 doctrine) and renders `unclassified`.
 
 ### Engine controls and recovery
 

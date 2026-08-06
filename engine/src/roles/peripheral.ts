@@ -1635,7 +1635,10 @@ export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSes
   const iso = (): string => opts.now().toISOString();
   const attempt = async (n: number): Promise<RoleSessionResult> => {
     const result = await opts.runner.run(opts.session);
-    opts.state.recordSpend(result.name, opts.issue, result.costUsd, iso(), result.modelUsage);
+    // #645: every peripheral role session (po-align/po-triage/architect/plan-review/harvest/
+    // retro, ...) is attributed the same way through this ONE shared helper — actor_kind
+    // "peripheral-role", role = the session's own roleId.
+    opts.state.recordSpend(result.name, opts.issue, result.costUsd, iso(), result.modelUsage, "peripheral-role", opts.session.roleId);
     // #236: persist THIS attempt's context manifest, if the caller opted in and the runner
     // produced one (a fake runner in tests typically won't — RoleSessionResult.contextManifest
     // is optional exactly for that reason, see its own doc). Contained: a persist failure is
