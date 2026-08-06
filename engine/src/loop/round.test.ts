@@ -31,6 +31,7 @@ import type { WorkerProxyOpts } from "../roles/worker.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
+import { attachAttemptGuard, withHangGuard } from "./hang-guard.test-support.js";
 import {
   buildFixLegResume,
   escalatePoolRemovalFailures,
@@ -379,100 +380,10 @@ const baseDeps = (over: Partial<RoundDeps> = {}): RoundDeps => ({
  *  `getAuthenticatedActor` stub turned a thrown-and-retried dispatch into a full-speed busy-spin
  *  livelock (7.75GB RSS, zero tests completing) that never even reached another `onRoundPhase`
  *  call for `boundedStopOnPhase` above to count -- commit 06b7aa8 patched that ONE fixture, never
- *  this class.
- *
- *  TWO GUARDS, because they catch DIFFERENT failure shapes and neither alone is sufficient:
- *
- *  1. `withHangGuard` (materializer.test.ts's shape, reused not reinvented) -- a `setTimeout` race.
- *     Correct for a GENUINE hang: an awaited promise that never settles at all, or a retry loop
- *     paced by real wall-clock delays. INSUFFICIENT for a busy-spin, and proven so empirically
- *     (this issue's own sabotage run): a `for(;;)` loop whose only `await` is a zero-delay fake
- *     `sleep()` (this file's `mkSleepSpy`, `async (ms) => {}` with no real await inside) resolves
- *     purely via the MICROTASK queue. V8/Node only drains macrotasks (which is where `setTimeout`
- *     lives) BETWEEN turns of the microtask queue -- a loop that keeps re-enqueueing microtasks
- *     forever never yields a turn, so the timer backing `withHangGuard` is starved and NEVER
- *     fires. Measured directly: ~38.7M such iterations in 1500ms with a 50ms timer racing them,
- *     timer never fired. This is exactly the 2026-08-05 shape (a caught-and-retried tick error
- *     racing this file's own zero-delay sleep), which is why the first version of this fix (a
- *     `withHangGuard`-only wrap) itself hung for the full sabotage-run alarm instead of failing
- *     fast -- corrected here rather than shipped.
- *  2. `attachAttemptGuard` -- the ACTUAL fix for the busy-spin class: a plain in-process COUNTER,
- *     immune to microtask starvation because incrementing an integer costs no macrotask at all.
- *     Same shape as this file's own `boundedStopOnPhase`/driver.test.ts's `boundedStop` (extended,
- *     not duplicated): wrap `registerSignals` to capture the real `requestStop`, wrap `sleep`
- *     (called once per loop iteration by `interTickWait` REGARDLESS of whether that iteration's
- *     tick succeeded or threw -- round.ts:1268/1824/2158 -- so it is a strict superset of counting
- *     `onTick`/`onRoundPhase`, which only fire on a SUCCESSFUL step) and `onTick`/`onRoundPhase`
- *     (belt-and-braces) to count attempts, and once a generous ceiling is crossed (10,000 -- orders
- *     of magnitude above any real test's tick count), request the SAME stop the loop already knows
- *     how to honor, then fail the awaited result by name once `runRounds` actually returns (which
- *     it now can, because the signal is real). Composes with a test's OWN
- *     `registerSignals`/`onTick`/`onRoundPhase`/`boundedStopOnPhase` rather than clobbering them
- *     (each wrapper calls through to whatever was there before it).
- *     Only wraps `sleep` when the test supplied one: with no fake sleep, `interTickWait` falls
- *     back to a REAL `setTimeout` -- genuine wall-clock pacing, not microtask-only, so guard 1
- *     above already covers it and there is nothing to starve. */
-function withHangGuard<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    );
-  });
-}
-const ATTEMPT_CEILING = 10_000;
-function attachAttemptGuard(deps: RoundDeps): () => string | null {
-  let attempts = 0;
-  let firedMessage: string | null = null;
-  let requestStop: (() => void) | undefined;
-  const prevRegisterSignals = deps.registerSignals;
-  deps.registerSignals = (rs) => {
-    requestStop = rs;
-    return prevRegisterSignals ? prevRegisterSignals(rs) : () => {};
-  };
-  const trip = (): void => {
-    attempts++;
-    if (attempts >= ATTEMPT_CEILING && firedMessage === null) {
-      firedMessage = `bounded-attempt guard fired: ${attempts} tick/sleep attempts without settling — a likely busy-spin livelock racing a zero-delay fake sleep, immune to a timer-based hang guard (#691)`;
-      requestStop?.();
-    }
-  };
-  const prevOnTick = deps.onTick;
-  deps.onTick = (r) => {
-    prevOnTick?.(r);
-    trip();
-  };
-  const prevOnRoundPhase = deps.onRoundPhase;
-  deps.onRoundPhase = (roundId, phase) => {
-    prevOnRoundPhase?.(roundId, phase);
-    trip();
-  };
-  const prevSleep = deps.sleep;
-  if (prevSleep) {
-    // Deliberately NOT `async`: a synchronous throw here happens INSIDE `interTickWait`'s
-    // `new Promise((resolve) => { ...; void deps.sleep(ms).then(finish); })` executor, and a
-    // throw inside a Promise executor is caught by the Promise constructor and turned into a
-    // rejection, standard JS semantics (verified empirically: a 3-line repro proves the
-    // rejection propagates cleanly through an `await interTickWait(...)` sitting outside a
-    // try/catch). This is the actual hard stop: `requestStop()` in `trip()` above is only
-    // honored once the loop's own signal+drain check passes -- a fixture whose lanes never
-    // drain would leave that check permanently false and the softer signal alone would never
-    // end the loop, even after the ceiling fires.
-    deps.sleep = (ms) => {
-      trip();
-      if (firedMessage !== null) throw new Error(firedMessage);
-      return prevSleep(ms);
-    };
-  }
-  return () => firedMessage;
-}
+ *  this class. See `hang-guard.test-support.ts` (shared with
+ *  driver.test.ts/round-defaults.test.ts/harvest.test.ts/retro.test.ts -- ONE copy, not five) for
+ *  why this needs BOTH `withHangGuard` and `attachAttemptGuard`, and why the earlier revision's
+ *  `requestStop()` call was deleted. */
 async function runRoundsGuarded(deps: RoundDeps): ReturnType<typeof runRounds> {
   const attemptGuardFired = attachAttemptGuard(deps);
   const result = await withHangGuard(

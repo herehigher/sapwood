@@ -1033,9 +1033,27 @@ test("claudeArgs (#285, Codex sol-high PR #300 review, P1): strictMcpConfig -> -
 });
 
 // ── Integration: stub `claude` (zero token) drives the real spawn/sentinel/probe path ──
+/** #691 (Codex gate② hardening): the filename `killAnyRunningLanes` reads its kill-list from —
+ *  see `mkStub`'s doc for why this is populated by a SELF-REPORT from the real spawned process,
+ *  never by trusting a `*.running.json` sentinel's `wrapper_pid` field on faith. */
+const SPAWNED_PIDS_FILE = ".spawned-pids";
 const mkStub = (dir: string, body: string): string => {
   const p = join(dir, "claude-stub");
-  writeFileSync(p, body, { mode: 0o755 });
+  // #691 (Codex gate② hardening, replacing a design that trusted `wrapper_pid` out of
+  // `*.running.json` files): `killAnyRunningLanes` must never signal a pid it cannot prove this
+  // TEST actually spawned — a `*.running.json` is just JSON a test is free to fabricate, and one
+  // does (the #294 contested-branch test below writes `wrapper_pid: process.pid` to a hand-rolled
+  // marker for a lane that was never spawned at all; killing that pid would SIGKILL the test
+  // runner's own process group). `$$` inside a REAL running shell is unfalsifiable — only a
+  // genuinely-spawned process can append its own pid here, so this file is the trusted spawn
+  // registry `killAnyRunningLanes` reads from instead. Inserted right after the shebang line (the
+  // convention every body passed to this helper already follows), so it announces before any of
+  // the body's own logic runs.
+  const nl = body.indexOf("\n");
+  const shebangLine = nl === -1 ? body : body.slice(0, nl + 1);
+  const rest = nl === -1 ? "" : body.slice(nl + 1);
+  const announced = `${shebangLine}echo "$$" >> "${join(dir, SPAWNED_PIDS_FILE)}"\n${rest}`;
+  writeFileSync(p, announced, { mode: 0o755 });
   chmodSync(p, 0o755);
   return p;
 };
@@ -1116,28 +1134,73 @@ const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"succes
  *  reclaim, or a natural exit) leaves its detached wrapper alive, and that ALONE blocks this
  *  file's `node:test` process from exiting until the stub's up-to-600s sleep loop ends on its
  *  own (verified empirically; `dispose()` only clears timers/fds -- its own doc says "does not
- *  kill children"). A terminal lane already removed its own `<name>.running.json` (see
- *  `WorkerSupervisor.reclaim`/`probe`'s "running marker cleared" contract, exercised throughout
- *  this file), so for those this is a genuine no-op: only a lane still alive at test end has a
- *  `*.running.json` left to find. Best-effort and silent -- this is CLEANUP, never a assertion --
- *  a pid already dead (ESRCH) or an already-removed `dir` is exactly the common case, not an
- *  error. */
+ *  kill children").
+ *
+ *  Codex gate② (a072bb1 review): the FIRST version of this trusted a `*.running.json`
+ *  sentinel's `wrapper_pid` field, parsed off disk, with no proof this test actually spawned
+ *  that pid -- the exact class #668/PR#677 spent eight review rounds on (never signal a pid you
+ *  cannot prove you own). Concretely wrong: this file's own #294 contested-branch test writes
+ *  `wrapper_pid: process.pid` into a hand-rolled `*.running.json` for a lane that was NEVER
+ *  spawned, purely to exercise `probe()`'s branch-contention logic -- the old code would have
+ *  read that marker and issued `process.kill(-process.pid, "SIGKILL")`, killing the test
+ *  runner's own process group. Fixed by never trusting sentinel JSON for identity: `mkStub`
+ *  (this file) now has every REAL spawned process self-report its own pid via `$$` (unfalsifiable
+ *  -- only a genuinely-running shell can append it) into `SPAWNED_PIDS_FILE`, and this function
+ *  reads ONLY that registry. A terminal lane's process already exited on its own (ESRCH on kill,
+ *  tolerated) -- this is CLEANUP, never an assertion, so best-effort and silent throughout.
+ *
+ *  Hard, unconditional refusals on top of the registry (defense in depth, not the primary
+ *  mechanism): never signal this test runner's own pid or its parent's pid. */
 function killAnyRunningLanes(dir: string): void {
-  let entries: string[];
+  let raw: string;
   try {
-    entries = readdirSync(dir).filter((f) => f.endsWith(".running.json"));
+    raw = readFileSync(join(dir, SPAWNED_PIDS_FILE), "utf8");
   } catch {
-    return; // dir already gone -- nothing to do
+    return; // no registry -- nothing was ever spawned (or the dir is already gone)
   }
-  for (const entry of entries) {
+  for (const line of raw.split("\n")) {
+    const pid = Number.parseInt(line.trim(), 10);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    // Hard, unconditional refusals -- no `process.getpgid` in Node's `process` API (portably
+    // reaching for one, e.g. by shelling out to `ps`, is exactly the platform-fragile pattern
+    // that produced #691's OWN root cause upstream, PR #690's `ps -o lstart=`), so ownership is
+    // proved by the SPAWNED_PIDS_FILE registry alone (only a genuinely-running shell can have
+    // appended its own `$$` there) plus these two cheap, portable identity checks.
+    if (pid === process.pid) continue; // never this test runner's own pid
+    if (pid === process.ppid) continue; // never this test runner's own parent
     try {
-      const pid = (JSON.parse(readFileSync(join(dir, entry), "utf8")) as { wrapper_pid?: unknown }).wrapper_pid;
-      if (typeof pid === "number") process.kill(-pid, "SIGKILL"); // negative pid -> the whole detached process group
+      process.kill(-pid, "SIGKILL"); // negative pid -> the whole detached process group
     } catch {
-      /* already dead (ESRCH), or the marker was unreadable/malformed -- best-effort only */
+      /* already dead (ESRCH) -- best-effort only */
     }
   }
 }
+
+// #691 Codex gate② P1 (a072bb1 review): a spawned-pids registry entry equal to `process.pid` must
+// be REFUSED, unconditionally -- red-before against the FIRST version of this fix, which trusted
+// `*.running.json`'s `wrapper_pid` field directly and would have called
+// `process.kill(-process.pid, "SIGKILL")` for this file's own #294 contested-branch test (its
+// hand-rolled `wrapper_pid: process.pid` marker). That version only survived by accident --
+// `node --test`'s worker isn't its own process-group leader on this host, so the negative-pid
+// signal happened to ESRCH -- not by design. `process.kill` is spied here (never a REAL signal
+// sent) so this proof cannot itself take down the runner if the refusal ever regresses.
+test("killAnyRunningLanes (#691 Codex gate② P1): a spawned-pids entry equal to process.pid is REFUSED -- the runner's own pid is never signalled, in any form", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const killCalls: Array<{ pid: number; signal: unknown }> = [];
+  const realKill = process.kill.bind(process);
+  process.kill = ((pid: number, signal?: unknown) => {
+    killCalls.push({ pid, signal });
+    return true;
+  }) as typeof process.kill;
+  try {
+    writeFileSync(join(dir, SPAWNED_PIDS_FILE), `${process.pid}\n`);
+    killAnyRunningLanes(dir);
+    assert.deepEqual(killCalls, [], "the runner's own pid must never reach process.kill in any form (positive or negated)");
+  } finally {
+    process.kill = realKill;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // A present (dummy) guard hook so hard-mode dispatch doesn't fail closed; the stub `claude`
 // ignores --settings, so its contents don't matter here (the hook mode is unit-tested separately).
@@ -5443,11 +5506,12 @@ test("checkDeployKeyPreflight (#671): seeds the SAME memoized probe a later disp
 
 test("resume: worker.deployKeyPath configured + preflight OK -> L1 active on a resumed leg too (same env/tool-narrowing as dispatch)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   let s2: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606-resume");
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: deployKeyCfg,
       stateDir: dir,
@@ -5496,6 +5560,7 @@ test("resume: worker.deployKeyPath configured + preflight OK -> L1 active on a r
     assert.doesNotMatch(allowedTools, /Bash\(gh \*\)/, "L1 resume must drop Bash(gh *) from the grant");
     assert.match(allowedTools, /Bash\(git \*\)/);
   } finally {
+    s?.dispose();
     s2?.dispose();
     killAnyRunningLanes(dir);
     rmSync(dir, { recursive: true, force: true });
