@@ -3898,6 +3898,74 @@ export class State {
     });
   }
 
+  /** #709: `sapwood events --tail N`'s pager — the newest N events matching `filter`, returned
+   *  in the same ASCENDING (oldest-first) row order eventsPageFiltered above uses: the query
+   *  itself runs `ORDER BY id DESC LIMIT ?` to pick the newest N ROWS cheaply (an index walk from
+   *  the tail, not a full scan), then the JS side reverses that batch back to ascending — the
+   *  --tail output must read top-to-bottom identically to every other events call, never
+   *  newest-first.
+   *
+   *  Same filter shape and the same "kinds/excludeKinds mutually exclusive by construction
+   *  (enforced by the CLI parse layer, not here), --issue ANDed on top with a json_valid guard so
+   *  one corrupt payload can't abort the whole query, corrupt-payload rows served as null, an
+   *  unrecognized kind passed through opaque" contract eventsPageFiltered's own doc spells out in
+   *  full — duplicated here rather than factored into a shared helper because the two pagers
+   *  differ in the one place that matters (ORDER BY direction, and no `afterId` floor at all), so
+   *  each stays a single self-contained read the caller can reason about without cross-referencing
+   *  the other.
+   *
+   *  `tailId` is the ledger's true head (MAX(id)), read in the SAME transaction/snapshot as the
+   *  page query — never derived from the returned rows' own ids, and this is the load-bearing
+   *  reason a --tail caller gets a correct cursor: a --kind-filtered --tail page's LAST row is not
+   *  necessarily the ledger's newest event at all (a non-matching event can sit newer than every
+   *  matching row this page returned), so `nextSinceId = rows[last].id` would let a follow-up
+   *  `--since-id nextSinceId` silently re-show whatever unfiltered event landed between that last
+   *  matching row and the true tail. Handing back the actual tail instead means "everything as of
+   *  this snapshot has already been accounted for" stays true regardless of what the filter did.
+   *  `--tail 0` is the degenerate case this whole method exists for (cli.ts's #709 cursor-
+   *  bootstrap contract): `LIMIT 0` returns zero rows and `tailId` alone becomes the bootstrap
+   *  value — "learn where NOW is" with no history read at all. */
+  eventsTailFiltered(
+    filter: { kinds?: readonly string[]; excludeKinds?: readonly string[]; issue?: number },
+    n: number,
+  ): { rows: { id: number; ts: string; kind: string; payload: unknown }[]; tailId: number } {
+    let clause = "";
+    const params: (string | number)[] = [];
+    if (filter.kinds && filter.kinds.length > 0) {
+      clause += ` AND kind IN (${filter.kinds.map(() => "?").join(",")})`;
+      params.push(...filter.kinds);
+    } else if (filter.excludeKinds && filter.excludeKinds.length > 0) {
+      clause += ` AND kind NOT IN (${filter.excludeKinds.map(() => "?").join(",")})`;
+      params.push(...filter.excludeKinds);
+    }
+    if (filter.issue !== undefined) {
+      clause += ` AND json_valid(payload) AND json_extract(payload, '$.issue') = ?`;
+      params.push(filter.issue);
+    }
+    params.push(n);
+    return this.readTransaction(() => {
+      const rawRows = this.db
+        .prepare(`SELECT id, ts, kind, payload FROM events WHERE 1=1${clause} ORDER BY id DESC LIMIT ?`)
+        .all(...params) as { id: number; ts: string; kind: string; payload: string }[];
+      // Same transaction/snapshot as the page query above — see this method's own doc for why
+      // that is exactly what keeps `tailId` honest against the filtered page it was read beside.
+      const tailRow = this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM events").get() as { m: number };
+      const rows = rawRows.reverse().map((r) => {
+        let payload: unknown = null;
+        try {
+          payload = JSON.parse(r.payload);
+        } catch {
+          /* corrupt row — served as null, never a throw for the whole page (eventsPage's/
+             eventsPageFiltered's same stance) */
+        }
+        // #709 (same stance as eventsPageFiltered AC5): a row's `kind` is passed through OPAQUE,
+        // never checked against this binary's own event-kinds registry.
+        return { id: r.id, ts: r.ts, kind: r.kind, payload };
+      });
+      return { rows, tailId: tailRow.m };
+    });
+  }
+
   /** #642 (upgraded by #645, remainder-accounting fix P1-3): the honest per-day spend split
    *  `status --json`'s spend section needs. Before #645 this classified purely by NAME HEURISTIC
    *  (does `worker` match a `workers.name` row?) because `spend_ledger` carried no durable

@@ -800,6 +800,16 @@ Flags:
                      hard-capped at ${MAX_PAGE_LIMIT} — a request above the cap is REJECTED
                      (not silently clamped): a script that asked for N and silently got fewer
                      is a worse failure mode than a clear error naming the cap.
+  --tail N           The newest N events (same --kind/--exclude-kind/--issue filters as
+                     above), instead of paging forward from --since-id — a non-negative
+                     integer, hard-capped at ${MAX_PAGE_LIMIT} same as --limit. \`--tail 0
+                     --json\` returns an empty \`events\` array plus \`nextSinceId\` set to the
+                     ledger's CURRENT head: the canonical monitor cursor BOOTSTRAP (#709) —
+                     \`sapwood events --tail 0 --json\` once to learn where "now" is, with no
+                     history read at all, then poll \`sapwood events --since-id <nextSinceId>\`
+                     from there, instead of a raw \`select max(id)\` against the sqlite file.
+                     REJECTED together with --since-id (exit 1) — one cursor semantics, not an
+                     invented interaction between "the N newest" and "everything after id X".
   --json             Print a machine-readable DTO (formatVersion 1) instead of the text
                      listing below — same additive-only/clients-ignore-unknown contract as
                      \`status --json\` (#642). Includes \`nextSinceId\`: the cursor for the NEXT
@@ -809,8 +819,15 @@ Flags:
                      see below).
   --help, -h         Print this help and exit
 
-The kind filter is applied to the SQL WHERE clause BEFORE \`--limit\` — \`--kind merged --limit
-50\` returns up to 50 MERGED events, never up to 50 raw events filtered down to fewer.
+The kind filter is applied to the SQL WHERE clause BEFORE \`--limit\`/\`--tail\` — \`--kind merged
+--limit 50\` returns up to 50 MERGED events, never up to 50 raw events filtered down to fewer;
+\`--tail 5\` after the same filter returns the 5 newest MERGED events, not the 5 newest raw
+events filtered down to fewer.
+
+Under --tail, \`nextSinceId\` is always the ledger's CURRENT head, never the last shown row's
+id — a --kind-filtered --tail page's last row is not necessarily the newest event in the whole
+ledger, so a follow-up --since-id must never risk re-showing (or skipping) whatever happened in
+between.
 
 A writer holding the DB locked past a short, finite timeout is reported as a clear "busy, try
 again" failure (exit 1) — never a hang. Reading through a read-only FILESYSTEM falls back to an
@@ -829,6 +846,10 @@ export interface EventsArgs {
   issue?: number | undefined;
   limit: number;
   json: boolean;
+  /** #709: the newest-N read mode. `undefined` means the pre-#709 --since-id paging shape is
+   *  unchanged; a number (0 included) means runEvents takes the eventsTailFiltered path instead
+   *  of eventsPageFiltered — see EVENTS_USAGE's --tail doc for the --tail-0 bootstrap contract. */
+  tail?: number | undefined;
 }
 
 const EVENTS_DEFAULTS = {
@@ -839,6 +860,7 @@ const EVENTS_DEFAULTS = {
   issue: undefined as number | undefined,
   limit: DEFAULT_EVENTS_LIMIT,
   json: false,
+  tail: undefined as number | undefined,
 };
 
 export function parseEventsArgs(argv: string[]): EventsArgs {
@@ -850,11 +872,13 @@ export function parseEventsArgs(argv: string[]): EventsArgs {
 
   const positionals: string[] = [];
   let sinceId = 0;
+  let sinceIdGiven = false;
   const kinds: string[] = [];
   const excludeKinds: string[] = [];
   let issue: number | undefined;
   let limit = DEFAULT_EVENTS_LIMIT;
   let json = false;
+  let tail: number | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === "--json") {
@@ -875,6 +899,25 @@ export function parseEventsArgs(argv: string[]): EventsArgs {
       const n = Number(next);
       if (!Number.isSafeInteger(n)) return fail(`--since-id requires a non-negative integer, got: ${next}`);
       sinceId = n;
+      // #709: tracked SEPARATELY from `sinceId` itself — the default (0) is indistinguishable
+      // from an explicit `--since-id 0`, but the --tail/--since-id conflict below must reject the
+      // latter and never the former (a caller who never touched --since-id must not be blocked
+      // from --tail by the flag's own zero-value default).
+      sinceIdGiven = true;
+      i++;
+      continue;
+    }
+    if (a === "--tail") {
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith("-")) return fail("--tail requires a value");
+      // Same canonical-decimal-only stance as --since-id/--limit/--issue above (Codex P2 finding
+      // 4). Unlike --limit (positive-integer-only), 0 is a valid --tail value BY DESIGN — EVENTS_
+      // USAGE's --tail doc: `--tail 0 --json` is the #709 cursor-bootstrap idiom, not an error.
+      if (!/^\d+$/.test(next)) return fail(`--tail requires a non-negative integer, got: ${next}`);
+      const n = Number(next);
+      if (!Number.isSafeInteger(n)) return fail(`--tail requires a non-negative integer, got: ${next}`);
+      if (n > MAX_PAGE_LIMIT) return fail(`--tail ${n} exceeds the hard cap of ${MAX_PAGE_LIMIT}`);
+      tail = n;
       i++;
       continue;
     }
@@ -920,7 +963,13 @@ export function parseEventsArgs(argv: string[]): EventsArgs {
   if (kinds.length > 0 && excludeKinds.length > 0) {
     return fail("--kind and --exclude-kind cannot combine (ambiguous precedence — pick one)");
   }
-  return { help: false, dbPath: positionals[0] ?? DEFAULT_DB_PATH, sinceId, kinds, excludeKinds, issue, limit, json };
+  // #709: --tail + --since-id together is REJECTED the same way — one cursor semantics, not an
+  // invented interaction between "the N newest" and "everything after id X" (which would win,
+  // and does the answer even mean anything for both at once?).
+  if (tail !== undefined && sinceIdGiven) {
+    return fail("--tail cannot combine with --since-id (one cursor semantics — pick one)");
+  }
+  return { help: false, dbPath: positionals[0] ?? DEFAULT_DB_PATH, sinceId, kinds, excludeKinds, issue, limit, json, tail };
 }
 
 /** One event row for `events`' text listing — same fields the `--json` DTO's `events` array
@@ -954,7 +1003,7 @@ export function runEvents(argv: string[]): { stdout: string; stderr: string; cod
   if (parsed.error) {
     return { stdout: "", stderr: `sapwood events: ${parsed.error}\n\n${EVENTS_USAGE}`, code: 1 };
   }
-  const { dbPath, sinceId, kinds, excludeKinds, issue, limit, json } = parsed;
+  const { dbPath, sinceId, kinds, excludeKinds, issue, limit, json, tail } = parsed;
   if (!existsSync(dbPath)) {
     return { stdout: `sapwood events: no state DB at ${dbPath} — engine has never run\n`, stderr: "", code: 0 };
   }
@@ -984,20 +1033,38 @@ export function runEvents(argv: string[]): { stdout: string; stderr: string; cod
       }
       const kindFilter = kinds.length > 0 ? { kinds } : excludeKinds.length > 0 ? { excludeKinds } : {};
       const filter = issue !== undefined ? { ...kindFilter, issue } : kindFilter;
-      // #642 (Codex gate② round-1 P1 finding 1): `tailId` comes back from the SAME call, the
-      // SAME transaction/snapshot as `rows` — never a separate later `state.maxEventId()` call,
-      // which is what let a matching event committed between the two reads get silently skipped
-      // (eventsPageFiltered's own doc has the full race). `nextSinceId` on an empty page is that
-      // shared tail, not a fresh independent read.
-      const { rows, tailId } = state.eventsPageFiltered(sinceId, filter, limit);
-      // #642 AC5: an EMPTY filtered page still advances the cursor — a filtered `WHERE...LIMIT`
-      // query with zero rows means (SQL evaluates the whole predicate, LIMIT only bounds OUTPUT)
-      // that literally no matching event exists anywhere after sinceId, AS OF THE SAME SNAPSHOT
-      // `tailId` was read from — so jumping the cursor to `tailId` never skips a real event: any
-      // event that could match was either already in that snapshot (and would have matched) or
-      // committed AFTER it (and is therefore still ahead of `tailId`, so a later call with
-      // sinceId=tailId will see it).
-      const nextSinceId = rows.length > 0 ? rows[rows.length - 1]!.id : Math.max(sinceId, tailId);
+      let rows: { id: number; ts: string; kind: string; payload: unknown }[];
+      let nextSinceId: number;
+      if (tail !== undefined) {
+        // #709: the newest-N read. `nextSinceId` is ALWAYS the returned `tailId` (the ledger's
+        // true head, read in the same transaction as the page) — never `rows[last].id` the way
+        // the --since-id branch below computes it on a non-empty page. eventsTailFiltered's own
+        // doc has the full reason: a --kind-filtered --tail page's last row is not necessarily
+        // the newest event in the whole ledger, so anchoring the cursor to that row instead of
+        // the true tail could let a follow-up --since-id re-show (or skip) whatever unfiltered
+        // event landed newer than the last MATCHING row this page returned. `--tail 0` (LIMIT 0,
+        // zero rows) is exactly the cursor-bootstrap case this makes correct: `nextSinceId` comes
+        // back as the current head with no history read at all.
+        const tailResult = state.eventsTailFiltered(filter, tail);
+        rows = tailResult.rows;
+        nextSinceId = tailResult.tailId;
+      } else {
+        // #642 (Codex gate② round-1 P1 finding 1): `tailId` comes back from the SAME call, the
+        // SAME transaction/snapshot as `rows` — never a separate later `state.maxEventId()` call,
+        // which is what let a matching event committed between the two reads get silently skipped
+        // (eventsPageFiltered's own doc has the full race). `nextSinceId` on an empty page is that
+        // shared tail, not a fresh independent read.
+        const pageResult = state.eventsPageFiltered(sinceId, filter, limit);
+        rows = pageResult.rows;
+        // #642 AC5: an EMPTY filtered page still advances the cursor — a filtered `WHERE...LIMIT`
+        // query with zero rows means (SQL evaluates the whole predicate, LIMIT only bounds OUTPUT)
+        // that literally no matching event exists anywhere after sinceId, AS OF THE SAME SNAPSHOT
+        // `tailId` was read from — so jumping the cursor to `tailId` never skips a real event: any
+        // event that could match was either already in that snapshot (and would have matched) or
+        // committed AFTER it (and is therefore still ahead of `tailId`, so a later call with
+        // sinceId=tailId will see it).
+        nextSinceId = rows.length > 0 ? rows[rows.length - 1]!.id : Math.max(sinceId, pageResult.tailId);
+      }
       const snapshotMode: "live" | "immutable-fallback" = state.isImmutableSnapshot() ? "immutable-fallback" : "live";
       if (json) {
         const dto = { formatVersion: READ_MODEL_FORMAT_VERSION, dbPath, snapshot: { mode: snapshotMode }, events: rows, nextSinceId };
