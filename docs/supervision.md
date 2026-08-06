@@ -101,14 +101,27 @@ Before ending a supervision session:
    result — a batch does not "close" with an unexplained `needs-human` or
    `human-merge-only` item sitting unmentioned. Either it's handled (a decision recorded,
    a follow-up filed) or it's explicitly carried forward, never silently dropped.
-2. **Owner-ruling same-session recording discipline.** A verbal/chat endorsement from the
-   owner that isn't written down as a durable record is not evidence later — the #604
-   incident (an owner's verbal endorsement was never recorded, and a later architect pass
-   treated the issue as unresolved and blocked it) is the direct, paid-for cost of this
-   gap. Any owner ruling that lands during a session — a scope call, a merge
-   authorization, a policy decision — gets recorded **in that same session**, as a
-   comment on the relevant issue/PR, before the session ends. Do not defer "I'll write it
-   up later."
+2. **Owner-ruling recovery ritual.** A ruling recorded ONLY as a comment is not evidence a
+   worker will ever see — workers read the issue body only (`{{issue.body}}`, see
+   [`docs/security.md`](security.md#the-comment-adjudication-cursor-652)), and comments
+   remain audit evidence, never the contract a worker is dispatched against; the body
+   remains the worker contract. Two incidents are the paid-for cost of skipping this: the
+   #604 incident (an owner's verbal endorsement was never recorded, and a later architect
+   pass treated the issue as unresolved and blocked it) and the batch-8 incident (PR #651
+   round 1: a binding owner ruling sat in issue comment #3 while the worker faithfully
+   implemented the stale body — 5 P1s in one PR). Any owner ruling that lands during a
+   session — a scope call, a merge authorization, a policy decision — is closed out with
+   all four steps below, in order, **in that same session**, before the session ends. Do
+   not defer "I'll write it up later," and do not stop partway (recording the ruling
+   without rewriting the body reproduces the exact trap that caused batch-8):
+   1. **Record the ruling** as a comment on the relevant issue/PR.
+   2. **Rewrite the authoritative body** to fold the ruling in — the comment is evidence
+      that a decision was made, not the decision a worker will act on.
+   3. **Advance the [#652 adjudication
+      cursor](security.md#the-comment-adjudication-cursor-652)**
+      (`<!-- sapwood:comments-adjudicated-through: <comment-id> -->`) to the ruling
+      comment or later, so gate⓪ and dispatch see the body as current rather than stale.
+   4. **Remove `needs-human`**, if it was applied for this reason.
 3. **Evidence posting.** Where a decision or intervention isn't self-evident from the
    event ledger alone (a `park clear --reason`, a manual label change, a judgment call
    the ledger can't express), post it as a comment on the issue/PR it concerns. GitHub is

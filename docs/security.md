@@ -2072,6 +2072,44 @@ is accepted, not hidden — do not read "the cursor is current" as "every commen
 seen," only as "every comment CREATED at or before the cursor's target was adjudicated at some
 point in its history."
 
+### Residual notes for this doc package (#654)
+
+- **The worker prompt surface is unchanged.** Workers are dispatched with the issue body
+  only (`{{issue.body}}`, `worker.ts`); nothing in the cursor mechanism above, in
+  [`docs/supervision.md`](supervision.md)'s owner-ruling recovery ritual, or anywhere else
+  in this doc package adds, removes, or otherwise touches what a dispatched worker session
+  is shown. The cursor gates gate⓪ approval spend and dispatch, both engine-side, before a
+  worker is ever dispatched — it does not reach into the worker's own prompt.
+- **"No issue-comment tools" is a proxy-grant claim, not a Bash claim.** The cursor closes
+  the engine's own forge-proxy comment-reading tools available to gate⓪ roles
+  (`PROXY_ROLE_TOOL_MATRIX`) — that is the scope of "no issue-comment tools" here. It is
+  not a claim that a worker leg cannot read comments at all: an **L0** worker still holds
+  the `Bash(gh *)` grant (see [Worker credential tiers](#worker-credential-tiers-351-606)
+  above) and could run `gh issue view --comments` (or equivalent) on its own initiative,
+  same as any other `gh` read command that grant permits — nothing about #652 removes it.
+  **L1** (#606) is what actually closes this channel: it strips the forge credential and
+  the `Bash(gh *)` grant together (`WORKER_ALLOWED_TOOLS_NO_GH`), so there is no credential
+  left to read comments through even if a leg tried.
+- **The public/private threat-model split.** In a private repo, everyone who can comment is
+  a collaborator carrying roughly the trust sapwood already extends to the issue body —
+  comment trust ≈ body trust — which is part of why the cursor above can treat
+  "adjudicated" as a deterministic staleness check rather than a provenance check. Once a
+  repo goes public, comments become world-writable while the body stays maintainer-writable,
+  and the two are no longer comparable in trust. This package does not close that gap:
+  comment PROVENANCE filtering (distinguishing a maintainer's comment from an arbitrary
+  public commenter's) is deferred to the v0.3.0 go-public entrance criterion recorded on
+  #329. Editing an already-cursored comment is the separate, already-documented "v1
+  residual: edits are out of scope" case above — this note does not reopen or widen it.
+- **#653 and `docs/security.md` itself both ride #292.** #653's prompt edits
+  (`engine/prompts/**`, the gate⓪ contract-vs-discussion veto duty) and any PR touching
+  this file are standing-instruction / reviewer-carrier changes under [Instruction-path
+  changes escalate to human review (#292)](#instruction-path-changes-escalate-to-human-review-292)
+  — `engine/prompts/**` and `docs/security.md` are both entries in
+  `escalation.instructionPaths` (the latter since #539, [above](#the-mechanisms-own-carriers-join-the-escalation-surface-too-539)).
+  Both are expected to route `sapwood:human-merge-only`; that is the mechanism working as
+  designed, not a defect in either PR. `docs/supervision.md` is not on that list, so its
+  own edits are not affected by this note.
+
 ## See also
 
 - [`configuration.md`](configuration.md) — the `guard`, `reviewer`, `merge`, `ci`,
