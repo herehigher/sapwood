@@ -1135,9 +1135,12 @@ const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"succes
  *  deliberately NOT `.unref()`'d -- production wants the child's handle referenced -- so a
  *  `longRunningStub` lane a test doesn't drive to a terminal state (requestHandoff+drain,
  *  reclaim, or a natural exit) leaves its detached wrapper alive, and that ALONE blocks this
- *  file's `node:test` process from exiting until the stub's up-to-600s sleep loop ends on its
+ *  file's `node:test` process from exiting until the stub's own self-bound sleep loop ends on its
  *  own (verified empirically; `dispose()` only clears timers/fds -- its own doc says "does not
- *  kill children").
+ *  kill children"). That self-bound defaults to 30s (`longRunningStub`'s own doc has the
+ *  measurement) and is overridable per call site via its `selfBoundSec` parameter for the rare
+ *  test that structurally depends on the stub outliving that default (see that same doc, and the
+ *  "enforces worker timeout" test below, which passes 600).
  *
  *  Codex gate② (a072bb1 review, P1): the FIRST version of this trusted a `*.running.json`
  *  sentinel's `wrapper_pid` field parsed off disk, with no proof this test actually spawned that
@@ -2712,7 +2715,13 @@ test("enforces worker timeout: a run past timeoutSec is killed and marked failed
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s: WorkerSupervisor | undefined;
   try {
-    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> needs the KILL
+    // #691 Codex round 5: this test advances a SEEDED clock and then waits for the REAL (fast,
+    // but real) heartbeat timer to independently notice and escalate to SIGKILL -- a genuine
+    // real-wall-clock race against the stub's own self-bound if the event loop ever stalls
+    // longer than that bound (same class the analogous "#69: timeout still tags .failed..." test
+    // below already documents and fixes at 600s). 30s is not safe here; match that test's value
+    // and rationale rather than re-lowering it.
+    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n", "stub-ready", 600); // ignores TERM -> needs the KILL
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
     let fakeNowMs = Date.now();
     s = new WorkerSupervisor({
