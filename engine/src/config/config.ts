@@ -677,6 +677,16 @@ const Roles = z
       // candidates.summary), a very different size profile than lastMergedMaxChars's
       // numbers-only render.
       poolDigestMaxChars: z.number().int().positive().default(20_000),
+      // #666: consecutive same-issue `drop` verdicts with an UNCHANGED issue body (this many, in
+      // a row, no body edit in between) before the architect escalates to needs-human instead of
+      // applying another `drop` — same-reason re-drop churn. A `drop` is deliberately
+      // this-round-only (removeRoundPoolLabel), which is right for an issue that gets fixed
+      // between rounds, but an issue that stays Ready UNCHANGED just re-enters the pool and gets
+      // dropped again for the identical premise defect, forever — unbounded spend plus a
+      // duplicate drop comment every round, with no escalation. Same bound-then-degrade paradigm
+      // as maxPoolRemovalAttempts above; positive int only, same "0 defeats the retry it's meant
+      // to bound" rationale.
+      maxConsecutiveDrops: z.number().int().positive().default(2),
       // #127: false -> round-defaults.ts omits the architecting stub; the phase no-ops via
       // round.ts's existing noopPeripheralStub default (see roles.verificationPlanReviewer.enabled above
       // for the shared rationale).

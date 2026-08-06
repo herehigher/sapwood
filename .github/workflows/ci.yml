@@ -3,9 +3,24 @@ on:
   pull_request:
   push:
     branches: [main]
+
+# #691: a superseded run is pure cost. On 2026-08-05 a wedged `engine test` ran 6h on
+# worktree-lane-668-634a903e while THREE newer commits landed on the same branch, each
+# starting its own run; cancel-in-progress alone would have capped that incident at ~40
+# minutes. `main` is excluded from cancellation (its runs are the merge record, not a
+# preview) — see the group expression.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    # #691: GitHub's default job ceiling is 360 minutes. The whole suite runs in ~3.5
+    # minutes, so that default is not a ceiling — it is six hours of billable runner time
+    # for one wedged test (which is exactly what it cost). 20 minutes is ~5x the real
+    # worst case and still bounds a hang to a rounding error.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -17,5 +32,21 @@ jobs:
       - run: npm --workspace engine run typecheck
       - run: npm --workspace dashboard run typecheck
       - run: npm run lint
-      - run: npm --workspace engine test
-      - run: npm --workspace dashboard test
+      # #691: the per-step wall clock is NOT redundant with timeout-minutes. `timeout`
+      # kills the command and the step fails RED with its output intact, so the log names
+      # what wedged; a job-level timeout cancels the run and reports nothing useful.
+      # node:test's own `--test-timeout` (#667) cannot do this — measured 2026-08-05, it
+      # prints the verdict on time and the runner keeps running. `timeout` is GNU
+      # coreutils, present on ubuntu-latest.
+      #
+      # `--kill-after=30s` escalates to SIGKILL when the group survives the initial
+      # SIGTERM. Not hypothetical here: this suite DELIBERATELY spawns SIGTERM-immune
+      # children (worker.test.ts's `leaderExitStub({ ignoreTerm: true })`, the shape #668
+      # round 8 stopped force-killing in production on purpose), which is exactly the case
+      # a TERM-only timeout cannot end. No `--foreground`: without it `timeout` signals the
+      # whole process group, so the `npm` wrapper cannot shield the `node --test`
+      # grandchild — `--foreground` would WEAKEN that (Codex gate② review of PR #692).
+      # Residual, stated honestly: a descendant that detaches into its OWN process group
+      # (setsid) escapes either form — that is the test-side half of #691, not this file's.
+      - run: timeout --kill-after=30s 600 npm --workspace engine test
+      - run: timeout --kill-after=30s 300 npm --workspace dashboard test

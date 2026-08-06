@@ -257,6 +257,59 @@ test("sapwood run startup reconcile emits board/PR orphans without forge writes,
   }
 });
 
+test("#633: the branch-protection detector is invoked exactly once per engine start on the tick driver path", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  let calls = 0;
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge,
+      state,
+      logger: silentLogger,
+      checkBranchProtection: async () => {
+        calls++;
+        return false;
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(calls, 1);
+  } finally {
+    state.close();
+  }
+});
+
+test("#633: the branch-protection detector is invoked exactly once per engine start on the rounds driver path", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  let calls = 0;
+  try {
+    const code = await runEngine(["node", "sapwood", "run"], {
+      cfg: mkCfg(), // engine.driver unset -> defaults to "rounds"
+      forge,
+      state,
+      logger: silentLogger,
+      sleep: async () => {},
+      // Same immediate-stop shape as the #407 terminal-table signal test (this file, "a graceful
+      // signal stop appends run-ended {stoppedBy: signal}"): the signal arrives before the first
+      // round opens, so the loop winds down without ever dispatching — this only needs to prove
+      // the startup detector fired, not drive a real round.
+      registerSignals: (requestStop) => {
+        requestStop();
+        return () => {};
+      },
+      checkBranchProtection: async () => {
+        calls++;
+        return false;
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(calls, 1);
+  } finally {
+    state.close();
+  }
+});
+
 test("sapwood run startup reconcile is quiet when rows match and forge-down is non-fatal", async () => {
   const cfg = mkCfg({ engine: { driver: "tick" } });
   const healthyState = new State(":memory:");

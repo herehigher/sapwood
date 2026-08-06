@@ -14,6 +14,7 @@ import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
 import { type DriverDeps, runDriver } from "./driver.js";
+import { attachAttemptGuard, withHangGuard } from "./hang-guard.test-support.js";
 
 class FakeForge extends UnstubbedForge implements IForge {
   // #379: repo-level label provisioning — no test in this file exercises it.
@@ -220,6 +221,28 @@ const baseDeps = (over: Partial<DriverDeps> = {}): DriverDeps => ({
   ...over,
 });
 
+/** #691 FIX 2: `runDriver` drives `driver.ts:287`'s production `for (;;)` loop with no bound of
+ *  its own -- every test-side stop condition here (`stop()`, `stopMode`, `stop.afterIssuesMerged`,
+ *  a FakeForge/FakeSupervisor stub) is exactly the kind of thing a missing or wrong stub can leave
+ *  unmet, and an unmet stop condition means the loop spins forever. That is precisely the class
+ *  that caused the 2026-08-05 incident: a missing `getAuthenticatedActor` stub turned a thrown-and-
+ *  retried dispatch into a full-speed busy-spin livelock (7.75GB RSS, zero tests completing) --
+ *  commit 06b7aa8 patched that ONE fixture, never this class. See `hang-guard.test-support.ts`
+ *  (shared with round.test.ts/round-defaults.test.ts/harvest.test.ts/retro.test.ts -- ONE copy,
+ *  not five) for why this needs BOTH `withHangGuard` and `attachAttemptGuard`, and why the
+ *  earlier revision's `requestStop()` call was deleted. */
+async function runDriverGuarded(deps: DriverDeps): ReturnType<typeof runDriver> {
+  const attemptGuardFired = attachAttemptGuard(deps);
+  const result = await withHangGuard(
+    runDriver(deps),
+    45_000,
+    "runDriver(deps) did not settle within 45000ms — a wedged production for(;;) loop (driver.ts:287), the class that caused the 2026-08-05 livelock (#691)",
+  );
+  const fired = attemptGuardFired();
+  if (fired !== null) throw new Error(fired);
+  return result;
+}
+
 test("runDriver: ticks at least once, sleeping the configured tickIntervalSec between ticks (forever mode)", async () => {
   const { sleep, calls } = mkSleepSpy();
   const forge = new FakeForge();
@@ -235,7 +258,7 @@ test("runDriver: ticks at least once, sleeping the configured tickIntervalSec be
     ticks++;
     if (ticks >= 3) stop();
   };
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.ticks, 3);
   // Slept between ticks 1->2 and 2->3 at the configured cadence (in ms); the loop must not
@@ -254,7 +277,7 @@ test("runDriver: TickDeps.tickIntervalSec is threaded into tick() (wall-clock ce
     // actually passed to tick() — the SAME object runDriver was given.
     seenIntervalSec = deps.tickIntervalSec;
   };
-  await runDriver(deps);
+  await runDriverGuarded(deps);
   assert.equal(seenIntervalSec, 42);
   deps.state.close();
 });
@@ -262,7 +285,7 @@ test("runDriver: TickDeps.tickIntervalSec is threaded into tick() (wall-clock ce
 test("runDriver --once: runs exactly one tick and stops, without sleeping", async () => {
   const { sleep, calls } = mkSleepSpy();
   const deps = baseDeps({ sleep, stopMode: "once" });
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   assert.deepEqual(result, { ticks: 1, tickErrors: 0, stoppedBy: "once" });
   assert.deepEqual(calls, []); // no inter-tick sleep — the driver stops immediately after tick 1
   deps.state.close();
@@ -273,7 +296,7 @@ test("runDriver --until-idle: stops once a tick leaves nothing in flight and dis
   const forge = new FakeForge();
   forge.ready = []; // empty Ready queue -> nothing to dispatch, nothing running -> idle immediately
   const deps = baseDeps({ forge, sleep, stopMode: "until-idle" });
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   assert.deepEqual(result, { ticks: 1, tickErrors: 0, stoppedBy: "idle" });
   deps.state.close();
 });
@@ -287,7 +310,7 @@ test("runDriver --until-idle (#172): a just-reclaimed handoff gets its next RESU
   sup.probes["lane-ho"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 0, hasPr: false };
   const deps = baseDeps({ forge, supervisor: sup, state, sleep, stopMode: "until-idle", cfg: mkCfg({ worker: { maxResumes: 0 } }) });
 
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   assert.deepEqual(result, { ticks: 2, tickErrors: 0, stoppedBy: "idle" });
   assert.equal(state.getWorker("lane-ho")?.resume_capped, 1); // tick 2 ran the cap path
   assert.deepEqual(calls, [5000]);
@@ -306,7 +329,7 @@ test("runDriver --until-idle (#245 round-2 fix, verifying the A2 adjudication's 
   sup.probes["lane-fix"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 0, hasPr: true, prNumber: 77 };
   const deps = baseDeps({ forge, supervisor: sup, state, sleep, stopMode: "until-idle" });
 
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   // Without the fix this would be `{ ticks: 1, ... }` — the handoff earning a next RESUME beat
   // (tick 2, which finds no fixLegResume dep configured and leaves the row as-is) proves isIdle
   // saw the fixingReclaimed handoff on tick 1.
@@ -352,7 +375,7 @@ test("runDriver --until-idle: keeps ticking while a dispatched lane is still act
     clock = new Date(clock.getTime() + 1000);
     if (ticks === 3) stop(); // exactly once — a second call is a second signal (hard exit)
   };
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   assert.equal(result.stoppedBy, "signal"); // never reached "idle" — the lane stayed active
   assert.equal(ticks, 5, "3 ordinary ticks, then a drain-request tick and the hard-kill tick that ends the never-terminal lane");
   deps.state.close();
@@ -370,7 +393,7 @@ test("runDriver: a signal mid-sleep stops the loop before the next tick starts (
     requestStopRef = requestStop;
     return () => {};
   };
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.ticks, 1); // exactly one (completed) tick — the signal fired during the sleep, not mid-tick
   assert.deepEqual(calls, [5000]);
@@ -408,7 +431,7 @@ test("#380 runDriver: a stop signal freezes dispatch and DRAINS the running lane
     if (ticks === 2) sup.probes["lane-run"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 0, hasPr: false };
   };
 
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
 
   assert.equal(result.stoppedBy, "signal");
   assert.equal(ticks, 3, "tick 2 requested the drain, tick 3 reclaimed the drained lane — then the loop exited");
@@ -443,7 +466,7 @@ test("#380 runDriver: a SECOND stop signal during the drain hard-exits immediate
     }
   };
 
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
 
   assert.deepEqual(exits, [143], "the second SIGTERM hard-exits with 128+SIGTERM, without waiting for the drain");
   assert.equal(result.stoppedBy, "signal");
@@ -460,7 +483,7 @@ test("runDriver: registerSignals teardown is invoked exactly once when the loop 
       unregisterCalls++;
     },
   });
-  await runDriver(deps);
+  await runDriverGuarded(deps);
   assert.equal(unregisterCalls, 1);
   deps.state.close();
 });
@@ -469,7 +492,7 @@ test("runDriver: onTick is called once per completed tick with that tick's TickR
   const { sleep } = mkSleepSpy();
   const results: unknown[] = [];
   const deps = baseDeps({ sleep, stopMode: "once", onTick: (r) => results.push(r) });
-  await runDriver(deps);
+  await runDriverGuarded(deps);
   assert.equal(results.length, 1);
   assert.ok(Array.isArray((results[0] as { dispatched: unknown[] }).dispatched));
   deps.state.close();
@@ -492,7 +515,7 @@ test("runDriver: a signal during the inter-tick sleep wakes it immediately — s
     // modeling a real SIGTERM landing mid-sleep.
     setTimeout(() => stop(), 10);
   };
-  const result = await runDriver(deps); // resolves promptly only if the signal aborts the wait
+  const result = await runDriverGuarded(deps); // resolves promptly only if the signal aborts the wait
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.ticks, 1); // the completed tick, then an aborted sleep — never a second tick
   deps.state.close();
@@ -513,7 +536,7 @@ test("runDriver: a signal arriving between the post-tick check and the sleep arm
     stop = requestStop;
     return () => {};
   };
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.ticks, 1);
   deps.state.close();
@@ -543,7 +566,7 @@ test("runDriver: a tick() throw is contained — logged as a tick-error event, n
   };
   // Stop after the first SUCCESSFUL tick — which must be the attempt AFTER the contained throw.
   deps.onTick = () => stop();
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.tickErrors, 1); // the blip was counted...
   assert.equal(result.ticks, 1); // ...and the daemon survived to complete the next tick
@@ -566,7 +589,7 @@ test("runDriver: the contained tick() throw is recorded as a structured tick-err
     logged.push([kind, payload]);
     realAppend(kind, payload);
   };
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   assert.deepEqual(result, { ticks: 0, tickErrors: 1, stoppedBy: "once" }); // --once: one ATTEMPT, then stop
   assert.ok(
     logged.some(([kind, payload]) => kind === "tick-error" && /HTTP 502/.test(String((payload as { error: string }).error))),
@@ -591,7 +614,7 @@ test("runDriver: a persistently-throwing tick keeps the daemon looping at normal
     stop = requestStop;
     return () => {};
   };
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.ticks, 0);
   assert.equal(result.tickErrors, 3); // three contained failures, three normal-cadence sleeps
@@ -662,7 +685,7 @@ test("runDriver stop.afterIssuesMerged: hitting it winds the run down (no kill) 
     for (const d of r.dispatched) if (d.kind === "dispatched") forge.ready = [];
   };
   const stopSafety = boundedStop(deps, 10);
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   stopSafety();
   assert.equal(result.stoppedBy, "stop-condition");
   assert.deepEqual(result.stopCondition, { name: "afterIssuesMerged", threshold: 1, detail: "merged 1" });
@@ -692,7 +715,7 @@ test("runDriver stop.afterPRsOpened: fires the moment a lane's PR is first disco
     for (const d of r.dispatched) if (d.kind === "dispatched") forge.ready = [];
   };
   const stopSafety = boundedStop(deps, 10);
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   stopSafety();
   assert.equal(result.stoppedBy, "stop-condition");
   assert.deepEqual(result.stopCondition, { name: "afterPRsOpened", threshold: 1, detail: "opened 1" });
@@ -707,7 +730,7 @@ test("runDriver stop.onMilestoneComplete: evaluated at tick boundaries, fires on
   forge.milestoneOpenCounts = [2, 1, 0];
   const deps = baseDeps({ forge, sleep, stop: { onMilestoneComplete: "M4" } });
   const stopSafety = boundedStop(deps, 10);
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   stopSafety();
   assert.equal(result.stoppedBy, "stop-condition");
   assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
@@ -724,7 +747,7 @@ test("runDriver stop.onMilestoneComplete: a THROWING forge read is contained —
   forge.milestoneOpenCounts = [0]; // tick 2's read succeeds and reports complete
   const deps = baseDeps({ forge, sleep, stop: { onMilestoneComplete: "M4" } });
   const stopSafety = boundedStop(deps, 10);
-  const result = await runDriver(deps); // must NOT reject
+  const result = await runDriverGuarded(deps); // must NOT reject
   stopSafety();
   assert.equal(result.stoppedBy, "stop-condition"); // survived the failure, stopped on the retry
   assert.equal(result.ticks, 2);
@@ -738,7 +761,7 @@ test("runDriver stop conditions: --once still NAMES a condition that fired on it
   forge.ready = [];
   forge.milestoneOpenCounts = [0];
   const deps = baseDeps({ forge, sleep, stopMode: "once" as const, stop: { onMilestoneComplete: "M4" } });
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   assert.equal(result.stoppedBy, "once");
   assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
   deps.state.close();
@@ -783,7 +806,7 @@ test("runDriver stop conditions: OR semantics — whichever fires FIRST wins and
     if (prJustOpened) forge.ready.push({ number: 2, title: "t2", labels: ["prio:3-feature"] });
   };
   const stopSafety = boundedStop(deps, 15);
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   stopSafety();
   assert.equal(result.stoppedBy, "stop-condition");
   // afterPRsOpened won — even though a merge (which would satisfy afterIssuesMerged too)
@@ -816,7 +839,7 @@ test("runDriver stop.afterSpendUsd: hitting the ledgered run-spend threshold win
     for (const d of r.dispatched) if (d.kind === "dispatched") forge.ready = [];
   };
   const stopSafety = boundedStop(deps, 10);
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   stopSafety();
   assert.equal(result.stoppedBy, "stop-condition");
   assert.deepEqual(result.stopCondition, { name: "afterSpendUsd", threshold: 20, detail: "spent $25.00" });
@@ -833,7 +856,7 @@ test("runDriver stop.afterSpendUsd: anchored to THIS run's start — spend alrea
   state.recordSpend("prior-run-worker", 999, 50, new Date().toISOString(), []);
   const deps = baseDeps({ forge, state, sleep, stop: { afterSpendUsd: 10 } });
   const stopSafety = boundedStop(deps, 5);
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   stopSafety();
   // Never fired: this run's OWN ledgered spend (summed from its own startup anchor forward) is
   // $0 — the pre-existing $50 belongs to an earlier run/process and must not carry over.
@@ -849,7 +872,7 @@ test("runDriver stop.afterSpendUsd: configured-but-uncrossed NEVER swallows the 
   forge.milestoneOpenCounts = [1, 0]; // tick 1: not complete; tick 2: completes mid-run
   const deps = baseDeps({ forge, sleep, stop: { afterSpendUsd: 100, onMilestoneComplete: "M5" } });
   const stopSafety = boundedStop(deps, 10);
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   stopSafety();
   // The broken else-if chain would terminate at the uncrossed spend branch every tick and
   // never evaluate the milestone at all (boundedStop's signal would end the run instead).
@@ -879,7 +902,7 @@ test("runDriver stop.afterSpendUsd: a long quiet gap mid-run never resets the ru
     }
   };
   const stopSafety = boundedStop(deps, 10);
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   stopSafety();
   assert.equal(result.stoppedBy, "stop-condition");
   // $6 (tick 1) + $5 (tick 2) = $11, summed straight through the quiet gap — the run-spend
@@ -918,7 +941,7 @@ test("runDriver (#431 AC1/AC2): two runDriver 'restarts' over one durable DB get
         },
       });
       const stop1 = boundedStop(deps1, 2);
-      await runDriver(deps1);
+      await runDriverGuarded(deps1);
       stop1();
       assert.deepEqual(breached, [false, true], "run 1 really breached its own wall clock on its second tick");
       state1.close();
@@ -940,7 +963,7 @@ test("runDriver (#431 AC1/AC2): two runDriver 'restarts' over one durable DB get
           firstTickBreached ??= r.ceilingBreached;
         },
       });
-      await runDriver(deps2);
+      await runDriverGuarded(deps2);
       assert.equal(firstTickBreached, false, `gap ${gapSec}s: the restart's first tick sees a FRESH clock, no inherited breach`);
       state2.close();
     } finally {
@@ -958,7 +981,7 @@ test("runDriver (#295): a no-clear escalation resolved externally (PR merged) ge
   forge.getPRStatus = async (n: number) => ({ number: n, headOid: "x", state: "MERGED", mergeable: "MERGEABLE", ciGreen: true });
   const deps = baseDeps({ forge, stopMode: "once" });
   deps.state.appendEvent("drive-needs-human", { worker: "lane-9", issue: 9, pr: 90, reason: "fix-rounds-capped:2/2", labeled: 1 });
-  await runDriver(deps);
+  await runDriverGuarded(deps);
   const resolved = deps.state.eventsAfterId(0, ["escalation-resolved"]);
   assert.equal(resolved.length, 1, "the tick driver swept and resolved the open escalation");
   assert.deepEqual(resolved[0]!.payload, { issue: 9, pr: 90, source: "drive-needs-human", via: "merged" });
@@ -977,7 +1000,7 @@ test("runDriver (#441): the sweep NEVER touches a label the engine cannot prove 
   // needs-human on that issue is a human's and stays a human's.
   deps.state.appendEvent("dispatched", { worker: "lane-9", issue: 9 });
   deps.state.appendEvent("merged", { worker: "lane-9", issue: 9, pr: 90 });
-  await runDriver(deps);
+  await runDriverGuarded(deps);
   assert.deepEqual(forge.labelsRemoved, []);
   assert.equal(deps.state.eventsAfterId(0, ["needs-human-swept"]).length, 0);
   deps.state.close();
@@ -1055,7 +1078,7 @@ test("runDriver (#395): a healthy fast tick never trips the watchdog — a LARGE
   // test flaky under CI load the way a tight, race-dependent window could (P2-4).
   const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 10 } });
   const deps = baseDeps({ forge, sleep, cfg, tickIntervalSec: 60, stopMode: "once" });
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   assert.equal(result.stoppedBy, "once");
   assert.equal(result.ticks, 1);
   const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);
@@ -1070,7 +1093,7 @@ test("runDriver (#395): a contained tick() THROW settles quickly (a plain tick-e
   };
   const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 10 } });
   const deps = baseDeps({ forge, cfg, tickIntervalSec: 60, stopMode: "once" });
-  const result = await runDriver(deps);
+  const result = await runDriverGuarded(deps);
   assert.deepEqual(result, { ticks: 0, tickErrors: 1, stoppedBy: "once" });
   const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);
   assert.equal(stalled.length, 0, "a thrown (settled) tick is a tick-error, never a stall");

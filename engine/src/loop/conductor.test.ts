@@ -1410,6 +1410,7 @@ test("tick reclaim: DEAD lane no-PR requeue succeeding on the first try leaves n
 // terminal sentinel) into the REAL associateLanePr and out through the conductor's reclaim.
 test("#377 F15 end-to-end: real probe -> real associateLanePr -> conductor reclaim lands on the lane's OWN branch PR, never the prose PR", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-f15-"));
+  let supervisor: WorkerSupervisor | undefined;
   try {
     const stateDir = join(dir, "state");
     const worktreeRoot = join(dir, "worktrees");
@@ -1453,7 +1454,7 @@ test("#377 F15 end-to-end: real probe -> real associateLanePr -> conductor recla
       },
     };
 
-    const supervisor = new WorkerSupervisor({
+    supervisor = new WorkerSupervisor({
       now: realClock,
       cfg: mkCfg(),
       stateDir,
@@ -1479,8 +1480,8 @@ test("#377 F15 end-to-end: real probe -> real associateLanePr -> conductor recla
     assert.deepEqual(readPrOwner(openPrs.find((pr) => pr.number === 372)!.body), { lane, issue: 294 });
     assert.deepEqual(forge.labelsAdded, [], "no needs-human escalation");
     st.close();
-    supervisor.dispose();
   } finally {
+    supervisor?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });

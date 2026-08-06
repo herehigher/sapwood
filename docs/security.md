@@ -147,7 +147,14 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
   from writing to the repository outside the reviewed PR path; a protected default branch
   (no direct pushes, required reviews/checks) is documented as mandatory, not optional,
   precisely because the in-engine capability boundary was deliberately not built for producer
-  legs.
+  legs. **#633: this backstop's presence is now detected, not just documented.** Once per
+  engine start, `engine/src/loop/branch-protection-warning.ts` reads the target repo's default
+  branch protection state (classic branch-protection endpoint, then — only on a 404 — whether
+  an active ruleset covers the branch) and logs one warning naming the branch and both operator
+  exits when the branch is POSITIVELY VERIFIED unprotected. This is warn-only observation, same
+  #554 stance as the [managed-settings exception](#managed-settings-allowmanagedpermissionrulesonly-exception-554)
+  below: no startup refusal, no label, no gate, and an inconclusive read never fires the
+  warning — it never enforces the backstop it names.
 - **(b′) server-granularity MCP deny vs. `allowManagedPermissionRulesOnly` (#554).** The
   server-granularity deny for producer legs (known forge-authority/github-class and
   known write/exec/filesystem-class MCP servers appended to `WORKER_DISALLOWED_TOOLS`,
@@ -502,6 +509,19 @@ best-effort (a WARN, never a reason to fail init, if `.gitignore` itself can't b
 appends a last-position ignore rule so an ordinary `git add -A` will not stage the worker deploy
 key(s); a deliberate `git add -f` still can.
 
+**Startup visibility, not a gate (#671).** `sapwood init` provisions and preflights the key, but
+a RUNNING engine used to discover key problems only lazily, at the first dispatch's own memoized
+SSH preflight — an operator could run a whole batch at L0 with no indication until they went
+digging in a single leg's logs. At engine startup (`cli.ts`, right after `WorkerSupervisor`
+construction, sharing that SAME instance's memoized preflight so this costs no extra SSH probe)
+the engine now checks which of four shapes applies — `deployKeyPath` unset, the path set but the
+key file missing/unreadable, the path set with the preflight failing, or the preflight passing —
+and reports the effective tier (L0/L1) and why in both the log and a `deploy-key-tier-detected`
+event. The two degrade shapes reuse the SAME guidance WARNs `sapwood init` itself emits
+(`deployKeyProvisioningFailedAction`/`deployKeyPreflightFailedAction`) rather than a third
+variant. This is disclosure only — L0 is a legal, fully-functional mode, and no arm blocks
+startup or dispatch.
+
 **Honest residuals — what L1 does NOT close:**
 
 - **Cross-lane clobber, accepted.** A GitHub deploy key is a REPO-wide credential, not a
@@ -674,7 +694,11 @@ The asymmetry is compensated, but not erased, by several independent controls:
   interaction**: `allowManagedPermissionRulesOnly` discards `--disallowedTools`
   wholesale (see the paragraph above) — a host with that managed-settings mode on
   drops these MCP denies (and every other entry in `WORKER_DISALLOWED_TOOLS`) too,
-  which is exactly why branch protection, not this list, is the backstop of record.
+  which is exactly why branch protection, not this list, is the backstop of record — and (#633)
+  its presence, not just its documentation, is now checked once per engine start; see the
+  [Accepted blind spots](#accepted-blind-spots) section above for what that detector does and
+  does not do. Warn-only observation, same as everything else in this paragraph — it never
+  enforces the backstop.
 - `engine/src/roles/worker.ts` does not add the engine `data/` directory as a Claude tool
   root (there is no `--add-dir data`), so the tool layer does not offer a path into it.
   This is not Bash containment: worker Bash can reach `../../data`, exactly the residual
@@ -2060,6 +2084,44 @@ deliberately narrow (trusted-repo deployment only, design adjudicated 2026-08-05
 is accepted, not hidden — do not read "the cursor is current" as "every comment's current text was
 seen," only as "every comment CREATED at or before the cursor's target was adjudicated at some
 point in its history."
+
+### Residual notes for this doc package (#654)
+
+- **The worker prompt surface is unchanged.** Workers are dispatched with the issue body
+  only (`{{issue.body}}`, `worker.ts`); nothing in the cursor mechanism above, in
+  [`docs/supervision.md`](supervision.md)'s owner-ruling recovery ritual, or anywhere else
+  in this doc package adds, removes, or otherwise touches what a dispatched worker session
+  is shown. The cursor gates gate⓪ approval spend and dispatch, both engine-side, before a
+  worker is ever dispatched — it does not reach into the worker's own prompt.
+- **"No issue-comment tools" is a proxy-grant claim, not a Bash claim.** The cursor closes
+  the engine's own forge-proxy comment-reading tools available to gate⓪ roles
+  (`PROXY_ROLE_TOOL_MATRIX`) — that is the scope of "no issue-comment tools" here. It is
+  not a claim that a worker leg cannot read comments at all: an **L0** worker still holds
+  the `Bash(gh *)` grant (see [Worker credential tiers](#worker-credential-tiers-351-606)
+  above) and could run `gh issue view --comments` (or equivalent) on its own initiative,
+  same as any other `gh` read command that grant permits — nothing about #652 removes it.
+  **L1** (#606) is what actually closes this channel: it strips the forge credential and
+  the `Bash(gh *)` grant together (`WORKER_ALLOWED_TOOLS_NO_GH`), so there is no credential
+  left to read comments through even if a leg tried.
+- **The public/private threat-model split.** In a private repo, everyone who can comment is
+  a collaborator carrying roughly the trust sapwood already extends to the issue body —
+  comment trust ≈ body trust — which is part of why the cursor above can treat
+  "adjudicated" as a deterministic staleness check rather than a provenance check. Once a
+  repo goes public, comments become world-writable while the body stays maintainer-writable,
+  and the two are no longer comparable in trust. This package does not close that gap:
+  comment PROVENANCE filtering (distinguishing a maintainer's comment from an arbitrary
+  public commenter's) is deferred to the v0.3.0 go-public entrance criterion recorded on
+  #329. Editing an already-cursored comment is the separate, already-documented "v1
+  residual: edits are out of scope" case above — this note does not reopen or widen it.
+- **#653 and `docs/security.md` itself both ride #292.** #653's prompt edits
+  (`engine/prompts/**`, the gate⓪ contract-vs-discussion veto duty) and any PR touching
+  this file are standing-instruction / reviewer-carrier changes under [Instruction-path
+  changes escalate to human review (#292)](#instruction-path-changes-escalate-to-human-review-292)
+  — `engine/prompts/**` and `docs/security.md` are both entries in
+  `escalation.instructionPaths` (the latter since #539, [above](#the-mechanisms-own-carriers-join-the-escalation-surface-too-539)).
+  Both are expected to route `sapwood:human-merge-only`; that is the mechanism working as
+  designed, not a defect in either PR. `docs/supervision.md` is not on that list, so its
+  own edits are not affected by this note.
 
 ## See also
 

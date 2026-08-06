@@ -207,6 +207,13 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
     meaning: "the architect's pool verdict for an issue failed to persist; an honesty event, not a silent no-op.",
     actionability: "investigate",
   },
+  "architect-repeat-drop-escalated": {
+    tags: ["escalation-source:payload"],
+    meaning:
+      "an issue was dropped repeatedly for the same reason with no body edit in between (same-reason re-drop churn, #666); escalated to needs-human via the shared writer instead of a duplicate drop comment, proof of the label write rides in the payload.",
+    actionability: "intervene",
+    see: "#666",
+  },
 
   // Harvest + retro.
   "po-degraded": {

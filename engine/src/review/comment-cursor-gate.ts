@@ -24,7 +24,7 @@
 // retried next tick) — see each call site for its own handling.
 
 import type { SapwoodConfig } from "../config/config.js";
-import { ENGINE_COMMENT_MARKER, type IForge } from "../forge/forge.js";
+import { ENGINE_COMMENT_MARKER, type IForge, type PRComment } from "../forge/forge.js";
 import { hashBody } from "./ac-snapshot.js";
 import {
   buildCommentCursorPointerComment,
@@ -37,6 +37,43 @@ import {
 
 export type { CommentCursorResult } from "./comment-cursor.js";
 export { commentCursorIsStale } from "./comment-cursor.js";
+
+/** #665: `checkCommentCursorFreshness`'s own fetch, WITH the raw comment stream it already paid
+ *  for exposed alongside the computed cursor result — never a second `getIssueComments` call.
+ *  gate⓪'s pre-spend checkpoint (`checkGate0CommentCursor`, plan-review.ts) uses this instead of
+ *  `checkCommentCursorFreshness` so it can thread the already-fetched comments (author, id, body)
+ *  into the rendered reviewer/confirm prompt — making the #653 comment-contradiction veto duty
+ *  judge evidence it actually received, rather than prose about a tool call nothing dispatches
+ *  (the #665 root cause: the pre-#665 checkpoint fetched comments only to decide staleness, then
+ *  discarded the bodies). */
+export interface CommentStreamFetch {
+  result: CommentCursorResult;
+  comments: readonly PRComment[];
+}
+
+async function fetchCommentStream(
+  forge: Pick<IForge, "getIssueComments" | "getAuthenticatedActor">,
+  issue: number,
+  body: string,
+): Promise<CommentStreamFetch> {
+  const [comments, actor] = await Promise.all([forge.getIssueComments(issue), forge.getAuthenticatedActor()]);
+  const stream: CommentStreamEntry[] = comments.map((c): CommentStreamEntry => {
+    const isEngine = actor != null && c.login === actor && c.body.includes(ENGINE_COMMENT_MARKER);
+    // #652 round 1 (finding 5): an EXPLICIT `null` when the forge returned no id — never a
+    // silently-coerced `""` (computeCommentCursor's own `comment-id-missing` arm is what decides
+    // what an id-less comment means; this call site's only job is to report the fact honestly).
+    return { id: c.id ?? null, isEngine };
+  });
+  return { result: computeCommentCursor(body, stream), comments };
+}
+
+export async function checkCommentCursorFreshnessWithComments(
+  forge: Pick<IForge, "getIssueComments" | "getAuthenticatedActor">,
+  issue: number,
+  body: string,
+): Promise<CommentStreamFetch> {
+  return fetchCommentStream(forge, issue, body);
+}
 
 /** Fetch the issue's comment stream + the authenticated forge actor, resolve each comment's
  *  engine-exemption flag, and compute the cursor result against `body` (the caller's own
@@ -54,15 +91,7 @@ export async function checkCommentCursorFreshness(
   issue: number,
   body: string,
 ): Promise<CommentCursorResult> {
-  const [comments, actor] = await Promise.all([forge.getIssueComments(issue), forge.getAuthenticatedActor()]);
-  const stream: CommentStreamEntry[] = comments.map((c): CommentStreamEntry => {
-    const isEngine = actor != null && c.login === actor && c.body.includes(ENGINE_COMMENT_MARKER);
-    // #652 round 1 (finding 5): an EXPLICIT `null` when the forge returned no id — never a
-    // silently-coerced `""` (computeCommentCursor's own `comment-id-missing` arm is what decides
-    // what an id-less comment means; this call site's only job is to report the fact honestly).
-    return { id: c.id ?? null, isEngine };
-  });
-  return computeCommentCursor(body, stream);
+  return (await fetchCommentStream(forge, issue, body)).result;
 }
 
 /** #652 round 1 (finding 1/2): a distinct discard CAUSE from ordinary comment-cursor staleness —

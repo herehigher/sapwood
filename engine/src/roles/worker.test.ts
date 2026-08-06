@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -83,12 +83,14 @@ const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", 
 
 test("WorkerSupervisor: default guard hook resolves the compiled hook in the guard directory", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let supervisor: WorkerSupervisor | undefined;
   try {
-    const supervisor = new WorkerSupervisor({ now: realClock, cfg, stateDir: dir, claudeBin: "claude" });
+    supervisor = new WorkerSupervisor({ now: realClock, cfg, stateDir: dir, claudeBin: "claude" });
     const guardHookPath = (supervisor as unknown as { guardHookPath: string }).guardHookPath;
     assert.equal(guardHookPath, fileURLToPath(new URL("../guard/guard-hook.js", import.meta.url)));
-    supervisor.dispose();
   } finally {
+    killAnyRunningLanes(supervisor);
+    supervisor?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1104,12 +1106,174 @@ const waitForHeartbeatTick = async (path: string): Promise<void> => {
   rmSync(path, { force: true });
   await waitForFile(path, "heartbeat tick did not recreate its marker");
 };
+/** #691 (owner directive, round 6): a single uniform 600s self-bound, no per-call-site override.
+ *
+ *  Three review rounds each found a different hole in `killAnyRunningLanes`'s coverage
+ *  (kills-its-own-runner, pid-decays-after-exit, handle-lost-on-a-mid-test-restart) — the sweep
+ *  is correct where it applies (and stays: the handle-based sweep, the restart-site snapshots,
+ *  and the unconditional `s?.dispose()` work are all unchanged), but its correctness always
+ *  depended on enumerating every coverage point by hand.
+ *
+ *  A later attempt to lower this default to 30s (with a per-site `selfBoundSec` override for
+ *  tests that "need" longer) chased the SAME shape of bug into a new place: the override
+ *  decision itself required enumerating every call site's termination mechanism by hand
+ *  (does it end via a synchronous signal, or via `reclaim()`'s `killTree`, which sends SIGTERM
+ *  then `await sleep(200)` -- worker.ts's real, awaited 200ms grace -- before escalating to
+ *  SIGKILL?) and that enumeration was ALSO found incomplete mid-review. Rather than keep
+ *  re-deriving which sites are safe at a lower bound, the owner's ruling: pick one wide,
+ *  side-effect-free value and stop tuning it here -- every test that could otherwise lose a
+ *  real-timer race is covered BY CONSTRUCTION, with no judgement call required, and tuning is
+ *  deferred to real-run data rather than settled by argument.
+ *
+ *  Honest consequence: this stub bound is NOT the termination guarantee -- it is a last-resort
+ *  ceiling on a stray process that escapes `killAnyRunningLanes` (own-pid refusal doesn't apply
+ *  here, a lost handle across a restart, or a class nobody has found yet), and at 600s it is a
+ *  wide one: such a stray process can delay a LOCAL run by up to 10 minutes. Termination
+ *  correctness for CI is `killAnyRunningLanes`'s handle sweep for everything it reaches, plus
+ *  PR #692's CI-side wall clock (job `timeout-minutes` + step `timeout`) as the external
+ *  backstop for whatever it doesn't. That residual is accepted deliberately in exchange for
+ *  zero risk of a lowered bound silently flipping a test's verdict. */
 const longRunningStub = (dir: string, beforeReady = "", readyName = "stub-ready"): { bin: string; ready: string } => {
   const ready = join(dir, readyName);
   const bin = mkStub(dir, `#!/usr/bin/env bash\n${beforeReady}touch "${ready}"\nfor _ in $(seq 1 600); do sleep 1; done\n`);
   return { bin, ready };
 };
 const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"success","total_cost_usd":0.0001,"model":"claude-stub","usage":{"input_tokens":12,"output_tokens":34}}'\nexit 0\n`;
+
+/** #691 FIX 3: `spawnClaudeSession`'s `spawn(bin, args, { detached: true, ... })` (worker.ts) is
+ *  deliberately NOT `.unref()`'d -- production wants the child's handle referenced -- so a
+ *  `longRunningStub` lane a test doesn't drive to a terminal state (requestHandoff+drain,
+ *  reclaim, or a natural exit) leaves its detached wrapper alive, and that ALONE blocks this
+ *  file's `node:test` process from exiting until the stub's own self-bound sleep loop ends on its
+ *  own (verified empirically; `dispose()` only clears timers/fds -- its own doc says "does not
+ *  kill children"). That self-bound is a UNIFORM 600s for every call site (`longRunningStub`'s
+ *  own doc has the full owner-directed rationale for why this is not tuned per site) -- this
+ *  sweep is what keeps a healthy run's CI runner clean well before that ceiling ever matters.
+ *
+ *  Codex gate② (a072bb1 review, P1): the FIRST version of this trusted a `*.running.json`
+ *  sentinel's `wrapper_pid` field parsed off disk, with no proof this test actually spawned that
+ *  pid -- the exact class #668/PR#677 spent eight review rounds on (never signal a pid you cannot
+ *  prove you own). Concretely wrong: this file's own #294 contested-branch test writes
+ *  `wrapper_pid: process.pid` into a hand-rolled marker for a lane that was NEVER spawned; the old
+ *  code would have called `process.kill(-process.pid, "SIGKILL")`, killing the test runner's own
+ *  process group.
+ *
+ *  Codex gate② round 2 (ffa3c46 re-review, P2 downgraded from P1): the FIRST fix replaced the
+ *  sentinel with a persistent self-reported pid registry (`$$` appended to a `.spawned-pids` file
+ *  by every real spawned process) -- an improvement (unfalsifiable identity) but still wrong in
+ *  the same FAMILY of bug: it proved a pid was HISTORICALLY spawned by this test, never that it is
+ *  CURRENTLY still that same process. Three concrete holes: (a) a child exists before its first
+ *  shell command appends `$$`, so immediate-failure cleanup could miss it; (b) entries were never
+ *  removed after exit, so a LATER sweep would still try to signal a pid the test spawned an HOUR
+ *  ago and that already exited -- and after pid reuse, `kill(-pid)` lands on a brand-new, wholly
+ *  unrelated process group; (c) the `process.pid`/`ppid` refusals didn't cover this runner's own
+ *  actual process group.
+ *
+ *  Final design -- kill by LIVE HANDLE, never by persisted text, closing the whole family at once:
+ *  each `WorkerSupervisor.lanes` entry already holds the real `ChildProcess` object
+ *  (`worker.ts`'s `Lane.child`) for as long as that lane is tracked -- the same object `dispose()`
+ *  clears intervals from, read here via the SAME unsafe-cast-to-private-field pattern this file
+ *  already uses throughout (`guardHookPath`, `signalGroup`, `writeJsonAtomic`, ...), so this needs
+ *  NO production-code change. `child.exitCode`/`child.signalCode` is Node's own live/dead
+ *  determination for THIS EXACT handle -- not a snapshot, not a name, not reusable by an unrelated
+ *  process -- so "is this pid still mine and still alive" is answered by the runtime itself, the
+ *  same authority `worker.ts`'s own `onExit` handler relies on. No registry, no self-report, no
+ *  identity refusal list: none of that is needed once the check is against the handle itself.
+ *  Every caller must invoke this BEFORE disposing the same supervisor(s) -- `dispose()` clears
+ *  `this.lanes`, which is the only place these handles are reachable from. That is exactly what a
+ *  mid-test "simulated restart" (`s1.dispose()` standing in for the engine forgetting the
+ *  in-process lane, so `s2` learns it only from disk) breaks: `s2` never held `s1`'s
+ *  `ChildProcess` in the first place, so once `s1` is disposed the handle is unreachable from
+ *  EITHER supervisor -- passing both to this function afterwards sees two empty `lanes` maps. The
+ *  stub's own uniform 600s self-bound (`longRunningStub`'s doc) is the last-resort ceiling for
+ *  that case now; the 8 sites doing this restart additionally SNAPSHOT the handle themselves,
+ *  immediately before the `dispose()` that would otherwise strand it, and pass it here directly --
+ *  a retained `ChildProcess` does not decay the way the rejected pid-registry did (the object
+ *  always addresses its own child, never a reused pid), so this is not a repeat of that mistake,
+ *  just accepting a handle from one more place than "ask the supervisor for its own". */
+function killAnyRunningLanes(...targets: Array<WorkerSupervisor | ChildProcess | undefined>): void {
+  const children: ChildProcess[] = [];
+  for (const t of targets) {
+    if (!t) continue;
+    if (t instanceof WorkerSupervisor) {
+      const lanes = (t as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes;
+      for (const lane of lanes.values()) children.push(lane.child);
+    } else {
+      children.push(t);
+    }
+  }
+  for (const child of children) {
+    if (child.exitCode !== null || child.signalCode !== null) continue; // already exited -- nothing to do
+    const pid = child.pid;
+    if (typeof pid === "number") {
+      try {
+        process.kill(-pid, "SIGKILL"); // whole detached group -- covers a foreground `sleep` grandchild
+      } catch {
+        /* ESRCH -- already gone, or never became its own group leader */
+      }
+    }
+    try {
+      child.kill("SIGKILL"); // belt-and-braces: Node addressing its OWN handle directly
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+// #691 Codex gate② round 2 (ffa3c46 re-review, P2): retargeted from the pid-registry version --
+// proves the sweep does NOT signal a lane whose CHILD HAS ALREADY EXITED, even though its lane
+// record is still present in the supervisor (the exact shape ffa3c46's persistent-registry design
+// got wrong: it never removed a pid after exit, so a later sweep would still try to signal it).
+// `process.kill` is spied (never a real signal sent) so this proof is safe to run unconditionally.
+test("killAnyRunningLanes (#691 Codex gate② round 2): a lane whose child has already exited produces ZERO process.kill calls -- liveness is proved against the live ChildProcess handle, never a persisted record", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  const killCalls: Array<{ pid: number; signal: unknown }> = [];
+  const realKill = process.kill.bind(process);
+  process.kill = ((pid: number, signal?: unknown) => {
+    killCalls.push({ pid, signal });
+    return true;
+  }) as typeof process.kill;
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 1, title: "t", labels: [] });
+    const lanes = (s as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes;
+    const lane = lanes.get(name);
+    assert.ok(lane, "the lane record must still be present -- this proof is about a STALE-but-present record, not a missing one");
+    // Wait for the REAL child to actually exit (not just the .done.json sentinel landing -- the
+    // sentinel can be written a tick before the wrapper process itself is reaped by the OS).
+    await waitFor(() => lane.child.exitCode !== null || lane.child.signalCode !== null, "the dispatched child never exited");
+    // #668 (semantic collision with this pre-#668 spy, discovered rebasing PR #677 onto main):
+    // onExit() ITSELF calls process.kill(-pid, 0) the instant this exact leader exits (its own
+    // pidGroupAlive TOCTOU check, worker.ts's own documented "accepted, survivable cost" residual
+    // -- see onExit's doc), and on this exact stub (a bare `echo+exit 0`, no real descendant) that
+    // check can still race true, chaining into a real SIGTERM + one more liveness check -- ALL of
+    // which land on the SAME global `process.kill` this spy captures, entirely independent of
+    // `killAnyRunningLanes` below. That's real, intentional #668 production behavior, not a bug --
+    // this proof is about `killAnyRunningLanes`'s OWN liveness check, not onExit's, so wait for
+    // onExit's own leader-exit reap (if the race fired one) to fully settle and DISCARD whatever it
+    // recorded before measuring `killAnyRunningLanes`'s marginal contribution.
+    await waitFor(
+      () =>
+        ![...(s as unknown as { inFlightLeaderExitReaps: Map<string, unknown> }).inFlightLeaderExitReaps.keys()].some((k) =>
+          k.startsWith(`${name}#`),
+        ),
+      "onExit's own leader-exit reap (if the pidGroupAlive race fired one) never settled",
+    );
+    killCalls.length = 0;
+    killAnyRunningLanes(s);
+    assert.deepEqual(
+      killCalls,
+      [],
+      "an already-exited child's still-present lane record must never reach process.kill FROM killAnyRunningLanes",
+    );
+  } finally {
+    process.kill = realKill;
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // A present (dummy) guard hook so hard-mode dispatch doesn't fail closed; the stub `claude`
 // ignores --settings, so its contents don't matter here (the hook mode is unit-tested separately).
@@ -1274,9 +1438,10 @@ const sup = (dir: string, claudeBin: string, worktreeRoot?: string) =>
 
 test("dispatch -> stub claude runs -> .done sentinel + parsed cost; probe sees DONE", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(dir, FAST_STUB);
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name, sessionId } = await s.dispatch({ number: 7, title: "t", labels: [] });
     assert.ok(name && sessionId);
     // wait for the stub to exit and the sentinel to land
@@ -1297,8 +1462,9 @@ test("dispatch -> stub claude runs -> .done sentinel + parsed cost; probe sees D
     assert.deepEqual(probe.modelUsage, [
       { model: "claude-stub", inputTokens: 12, outputTokens: 34, cacheReadTokens: 0, cacheCreationTokens: 0 },
     ]);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1306,11 +1472,12 @@ test("dispatch -> stub claude runs -> .done sentinel + parsed cost; probe sees D
 test("#304 wiring: a completed lane records one egress-suspect event through the existing state path", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let state: State | undefined;
+  let s: WorkerSupervisor | undefined;
   try {
     const toolLine = bashToolUseLine("curl https://example.invalid/upload");
     const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${toolLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
     state = new State(join(dir, "state.sqlite"));
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -1329,8 +1496,9 @@ test("#304 wiring: a completed lane records one egress-suspect event through the
       },
     ]);
     assert.equal((await s.probe(name)).done, true);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     state?.close();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1339,6 +1507,7 @@ test("#304 wiring: a completed lane records one egress-suspect event through the
 test("#341 wiring: a completed lane writes at most the per-leg egress cap and logs truncation once", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let state: State | undefined;
+  let s: WorkerSupervisor | undefined;
   try {
     const toolLines = Array.from({ length: MAX_EGRESS_SUSPECTS_PER_LEG + 5 }, (_, i) =>
       bashToolUseLine(`curl https://example.invalid/${i}`),
@@ -1347,7 +1516,7 @@ test("#341 wiring: a completed lane writes at most the per-leg egress cap and lo
     const bin = mkStub(dir, `#!/usr/bin/env bash\n${transcript}\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
     const logs: string[] = [];
     state = new State(join(dir, "state.sqlite"));
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       log: (line) => logs.push(line),
@@ -1370,8 +1539,9 @@ test("#341 wiring: a completed lane writes at most the per-leg egress cap and lo
       1,
     );
     assert.equal((await s.probe(name)).done, true);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     state?.close();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1379,11 +1549,12 @@ test("#341 wiring: a completed lane writes at most the per-leg egress cap and lo
 
 test("#304 fail-safe: an egress event write failure is logged but cannot change a completed lane's outcome", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const toolLine = bashToolUseLine("curl https://example.invalid/upload");
     const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${toolLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
     const logs: string[] = [];
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       log: (line) => logs.push(line),
@@ -1406,17 +1577,19 @@ test("#304 fail-safe: an egress event write failure is logged but cannot change 
     assert.equal(probe.done, true);
     assert.equal(probe.failed, false);
     assert.ok(logs.some((line) => line.includes("egress tripwire failed (non-fatal)") && line.includes("events unavailable")));
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("probe: #377 lanePr supplies prNumber and derives hasPr from it (the lane's own PR, not the issue's)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(dir, FAST_STUB);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -1431,17 +1604,19 @@ test("probe: #377 lanePr supplies prNumber and derives hasPr from it (the lane's
     const probe = await s.probe(name);
     assert.equal(probe.hasPr, true);
     assert.equal(probe.prNumber, 42);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("probe: #595 lanePr's outcome.title rides onto LaneProbe.prTitle (the SAME association read, no extra call)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(dir, FAST_STUB);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -1457,17 +1632,19 @@ test("probe: #595 lanePr's outcome.title rides onto LaneProbe.prTitle (the SAME 
     const probe = await s.probe(name);
     assert.equal(probe.prNumber, 42);
     assert.equal(probe.prTitle, "feat: the lane's PR");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("probe: #595 lanePr's outcome without a title omits LaneProbe.prTitle rather than writing undefined/null", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(dir, FAST_STUB);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -1483,17 +1660,19 @@ test("probe: #595 lanePr's outcome without a title omits LaneProbe.prTitle rathe
     assert.equal(probe.prNumber, 42);
     assert.equal(probe.prTitle, undefined);
     assert.ok(!Object.hasOwn(probe, "prTitle"));
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("probe: #377 lanePr returning null -> hasPr false, prNumber undefined (fail closed, never a guessed PR)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(dir, FAST_STUB);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -1508,8 +1687,9 @@ test("probe: #377 lanePr returning null -> hasPr false, prNumber undefined (fail
     const probe = await s.probe(name);
     assert.equal(probe.hasPr, false);
     assert.equal(probe.prNumber, undefined);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1517,12 +1697,13 @@ test("probe: #377 lanePr returning null -> hasPr false, prNumber undefined (fail
 test("probe: #377 passes the lane's OWN branch (read from its worktree git HEAD, no git subprocess) and gates PR creation on the lane having terminated", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = join(dir, "worktrees");
+  let s: WorkerSupervisor | undefined;
   try {
     // A long-running stub keeps the lane RUNNING for the first probe; the terminal sentinel is
     // written by hand for the second, so neither probe races the child's own exit.
     const { bin, ready } = longRunningStub(dir);
     const seen: { name: string; issue: number; branch: string | null; sessionOver: boolean }[] = [];
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -1559,17 +1740,19 @@ test("probe: #377 passes the lane's OWN branch (read from its worktree git HEAD,
     assert.equal(seen.at(-1)!.branch, null);
 
     await s.reclaim(name);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("probe: #377 gate② P1 — a CONFIRMED-DEAD wrapper with no sentinel still permits the engine-authored PR (a pushed branch must not be requeued as unPRed)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const seen: { name: string; issue: number; branch: string | null; sessionOver: boolean }[] = [];
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -1592,16 +1775,18 @@ test("probe: #377 gate② P1 — a CONFIRMED-DEAD wrapper with no sentinel still
     assert.equal(probe.failed, false);
     assert.equal(probe.handoff, false);
     assert.equal(seen.at(-1)!.sessionOver, true, "nothing is left alive to race the engine's own `gh pr create`");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("probe: #377 gate② round 3 (P1) — an INCONCLUSIVE association (forge write failed) is surfaced, so the conductor defers instead of settling the lane as no-PR", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -1616,17 +1801,19 @@ test("probe: #377 gate② round 3 (P1) — an INCONCLUSIVE association (forge wr
     assert.equal(probe.hasPr, false);
     assert.equal(probe.prNumber, undefined);
     assert.equal(probe.prAssociationInconclusive, true, "UNKNOWN is not the same claim as 'this lane has no PR'");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("probe: #377 gate② round 3 (P1) — the inconclusive deferral is BOUNDED: after the cap the lane settles by the ordinary no-PR rules", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const logs: string[] = [];
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       log: (line) => logs.push(line),
@@ -1647,17 +1834,19 @@ test("probe: #377 gate② round 3 (P1) — the inconclusive deferral is BOUNDED:
     assert.equal(settled.prAssociationInconclusive, undefined, "retry budget spent -> the lane settles rather than wedging a slot");
     assert.equal(settled.hasPr, false);
     assert.ok(logs.some((l) => l.includes("lane-wedge") && l.includes("PR association still unknown")));
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("probe: #377 gate② round 3 (P1) — a CONCLUSIVE answer resets the retry budget (a later blip gets its own full allowance)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     let inconclusive = true;
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -1673,8 +1862,9 @@ test("probe: #377 gate② round 3 (P1) — a CONCLUSIVE answer resets the retry 
     assert.equal((await s.probe("lane-blip2")).prNumber, 42, "the forge recovered within the budget");
     inconclusive = true;
     assert.equal((await s.probe("lane-blip2")).prAssociationInconclusive, true, "budget reset by the conclusive answer");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1682,9 +1872,10 @@ test("probe: #377 gate② round 3 (P1) — a CONCLUSIVE answer resets the retry 
 test("probe: #377 gate② round 5 (P1) — a branch another LIVE lane is sitting on is never used for association (a worker can `git checkout` its way onto one)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = join(dir, "worktrees");
+  let s: WorkerSupervisor | undefined;
   try {
     const seen: { branch: string | null }[] = [];
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -1721,17 +1912,19 @@ test("probe: #377 gate② round 5 (P1) — a branch another LIVE lane is sitting
     rmSync(join(dir, "lane-thief.done.json"), { force: true });
     await s.probe("lane-victim");
     assert.equal(seen.at(-1)!.branch, "feat/294-hold");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("probe: costUsd is 0 while a lane is still running (no terminal sentinel yet)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir);
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 4, title: "t", labels: [] });
     await waitForFile(ready);
     const probe = await s.probe(name);
@@ -1740,17 +1933,19 @@ test("probe: costUsd is 0 while a lane is still running (no terminal sentinel ye
     assert.ok(Number.isFinite(probe.dispatchedAgeSec));
     assert.ok(probe.dispatchedAgeSec! >= 0, "probe surfaces age from persisted dispatched_at");
     await s.reclaim(name);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("probe: recovers costUsd from the jsonl when a restart-orphaned lane has NO terminal sentinel (Codex PR #41 R3 P1)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(dir, FAST_STUB);
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     // Simulate a lane orphaned by an engine restart: claude finished and wrote its terminal
     // result line to the jsonl, but no attached onExit handler existed to write a sentinel.
     // The probe must not report 0 — that would omit real spend from the daily-cap ledger.
@@ -1767,31 +1962,35 @@ test("probe: recovers costUsd from the jsonl when a restart-orphaned lane has NO
     assert.deepEqual(probe.modelUsage, [
       { model: "claude-opus-4-6", inputTokens: 7, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
     ]);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("dispatch rejects a name already in use (no concurrent same-name clobber)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(dir, FAST_STUB);
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     writeFileSync(join(dir, "lane-x.running.json"), "{}"); // pretend a lane is occupying the name
-    await assert.rejects(() => s.dispatch({ number: 1, title: "t", labels: [] }, "lane-x"), /in use|occupied|exists/i);
-    s.dispose();
+    await assert.rejects(() => s!.dispatch({ number: 1, title: "t", labels: [] }, "lane-x"), /in use|occupied|exists/i);
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("reclaim kills a stubborn (ignores TERM) claude subtree via SIGKILL", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     // Stubborn stub: ignore TERM -> only a process-group KILL stops it.
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n");
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 2, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before reclaim");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
@@ -1799,19 +1998,21 @@ test("reclaim kills a stubborn (ignores TERM) claude subtree via SIGKILL", async
     await s.reclaim(name);
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "process group killed");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("requestHandoff -> graceful SIGTERM -> .handoff sentinel (resumable, not killed)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     // A COOPERATIVE worker: catches SIGTERM and exits 0 (it checkpointed/committed). Only a
     // clean exit-0 after a handoff request counts as a resumable .handoff.
     const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 3, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before handoff");
     assert.equal(s.requestHandoff(name), true);
@@ -1820,14 +2021,18 @@ test("requestHandoff -> graceful SIGTERM -> .handoff sentinel (resumable, not ki
     assert.ok(!existsSync(join(dir, `${name}.done.json`)) && !existsSync(join(dir, `${name}.failed.json`)));
     const probe = await s.probe(name);
     assert.equal(probe.handoff, true);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("requestHandoff reaches a RESTARTED-engine lane via the persisted pid (Codex PR #41 P1)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s1: WorkerSupervisor | undefined;
+  let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     // A cooperative worker that exits 0 on TERM. Dispatch with supervisor #1, then simulate
     // an engine restart: dispose() #1 (clears its in-memory lane map — its exit handler
@@ -1835,37 +2040,42 @@ test("requestHandoff reaches a RESTARTED-engine lane via the persisted pid (Code
     // handle, only the persisted running.json — the ceiling drain must still reach the
     // process group via the persisted pid instead of silently no-opping.
     const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
-    const s1 = sup(dir, bin);
+    s1 = sup(dir, bin);
     const { name } = await s1.dispatch({ number: 8, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
     assert.equal(alive(pid), true);
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose(); // "restart": the new supervisor knows this lane only from disk
-    const s2 = sup(dir, bin);
+    s2 = sup(dir, bin);
     assert.equal(s2.requestHandoff(name), true); // persisted-pid fallback fires
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "SIGTERM reached the detached process group");
     assert.equal(s2.requestHandoff(name), false); // idempotent: second request is a no-op
     assert.equal(s2.requestHandoff("lane-unknown"), false); // no persisted lane -> false, no throw
-    s2.dispose();
   } finally {
+    killAnyRunningLanes(s1, s2, ...s1Children);
+    s2?.dispose();
+    s1?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("requestHandoff, worker dies by signal (no clean wrap-up), and no worktree exists on disk -> STILL .handoff, never .failed (#60 supersedes Codex R3 P2: the real CLI never exits 0 on SIGTERM, so gating .handoff on code===0 made it unreachable; the supervisor now guarantees resumability itself, tag-agnostic to exit code)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir); // no TERM trap -> SIGTERM kills it (code null)
-    const s = sup(dir, bin); // no worktreeRoot override -> the lane's worktree path never exists
+    s = sup(dir, bin); // no worktreeRoot override -> the lane's worktree path never exists
     const { name } = await s.dispatch({ number: 9, title: "t", labels: [] });
     await waitForFile(ready, "stub reached its running state before handoff");
     s.requestHandoff(name);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handoff-requested + signal-killed is .handoff, not .failed");
     assert.ok(!existsSync(join(dir, `${name}.failed.json`)));
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1889,6 +2099,7 @@ test("#172: resumed no-result SIGTERM ignores leg 1's result and ledgers its bas
   });
   const logs: string[] = [];
   const state = new State(":memory:");
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(
       dir,
@@ -1904,7 +2115,7 @@ test("#172: resumed no-result SIGTERM ignores leg 1's result and ledgers its bas
         "",
       ].join("\n"),
     );
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -1940,8 +2151,9 @@ test("#172: resumed no-result SIGTERM ignores leg 1's result and ledgers its bas
     state.recordSpend(name, 172, resumedCost, new Date().toISOString());
     assert.ok(Math.abs(state.spentUsdForWorker(name) - (1 + resumedExpected)) < 1e-12);
     assert.equal(logs.filter((line) => line.includes("source=assistant-usage-estimate")).length, 1);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     state.close();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1951,8 +2163,9 @@ test("#172: resumed no-result SIGTERM ignores leg 1's result and ledgers its bas
 
 test("resumeIntentState: reads only matching resume-authored confirmed/unconfirmed markers", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const s = sup(dir, mkStub(dir, FAST_STUB));
+    s = sup(dir, mkStub(dir, FAST_STUB));
     const marker = join(dir, "lane-intent.running.json");
     assert.equal(s.resumeIntentState("lane-intent", 172), "none");
     writeFileSync(
@@ -1968,31 +2181,35 @@ test("resumeIntentState: reads only matching resume-authored confirmed/unconfirm
     assert.equal(s.resumeIntentState("lane-intent", 172), "confirmed");
     writeFileSync(marker, JSON.stringify({ name: "lane-intent", issue: 172, spawn_confirmed: false }));
     assert.equal(s.resumeIntentState("lane-intent", 172), "none", "dispatch markers are not resume intents");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume: fails closed when the lane has no .handoff sentinel (nothing to resume)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(dir, FAST_STUB);
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     await assert.rejects(
-      () => s.resume({ number: 1, title: "t", labels: [] }, "lane-never-handed-off"),
+      () => s!.resume({ number: 1, title: "t", labels: [] }, "lane-never-handed-off"),
       /no \.handoff sentinel|nothing to resume/i,
     );
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume: a dead matching running sentinel is durable interrupted-resume proof and is adopted", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const s = sup(dir, mkStub(dir, FAST_STUB));
+    s = sup(dir, mkStub(dir, FAST_STUB));
     writeFileSync(
       join(dir, "lane-dead.running.json"),
       JSON.stringify({
@@ -2008,33 +2225,37 @@ test("resume: a dead matching running sentinel is durable interrupted-resume pro
       name: "lane-dead",
       sessionId: "survivor",
     });
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume: spawn error removes the unconfirmed intent and leaves handoff retryable", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const s = sup(dir, join(dir, "missing-claude"));
+    s = sup(dir, join(dir, "missing-claude"));
     writeFileSync(
       join(dir, "lane-spawn-error.handoff.json"),
       JSON.stringify({ name: "lane-spawn-error", issue: 2, session_id: "retry-session" }),
     );
     writeFileSync(join(dir, "lane-spawn-error.jsonl"), "");
 
-    await assert.rejects(() => s.resume({ number: 2, title: "t", labels: [] }, "lane-spawn-error"), /resume-spawn failed/i);
+    await assert.rejects(() => s!.resume({ number: 2, title: "t", labels: [] }, "lane-spawn-error"), /resume-spawn failed/i);
     assert.equal(existsSync(join(dir, "lane-spawn-error.running.json")), false);
     assert.equal(existsSync(join(dir, "lane-spawn-error.handoff.json")), true);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume (#395 PM follow-up): resume()'s OWN spawn confirmation await — a separate call site from dispatch()'s, missed in the first pass — is bounded too. A never-arriving notification is killed and reported, never hangs forever", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const worktreeRoot = join(dir, "worktrees");
     mkdirSync(worktreeRoot, { recursive: true });
@@ -2052,7 +2273,7 @@ test("resume (#395 PM follow-up): resume()'s OWN spawn confirmation await — a 
       board: { owner: "o", repo: "r", projectNumber: 4 },
       liveness: { spawnConfirmTimeoutMs: 1 },
     });
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: liveCfg,
       stateDir: dir,
@@ -2066,16 +2287,18 @@ test("resume (#395 PM follow-up): resume()'s OWN spawn confirmation await — a 
            own #395 regression test above */
       },
     });
-    await assert.rejects(() => s.resume({ number: 5, title: "t", labels: [] }, "lane-resume-timeout"), /spawn confirmation timed out/i);
+    await assert.rejects(() => s!.resume({ number: 5, title: "t", labels: [] }, "lane-resume-timeout"), /spawn confirmation timed out/i);
     assert.equal(existsSync(join(dir, "lane-resume-timeout.running.json")), false, "no bogus running marker left behind");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume (#395 gate② P2-2): a merely-DELAYED (not lost) real spawn event racing the timeout must NOT resurrect running.json after the failure path already removed it", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const worktreeRoot = join(dir, "worktrees");
     mkdirSync(worktreeRoot, { recursive: true });
@@ -2090,7 +2313,7 @@ test("resume (#395 gate② P2-2): a merely-DELAYED (not lost) real spawn event r
       board: { owner: "o", repo: "r", projectNumber: 4 },
       liveness: { spawnConfirmTimeoutMs: 1 },
     });
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: liveCfg,
       stateDir: dir,
@@ -2103,7 +2326,7 @@ test("resume (#395 gate② P2-2): a merely-DELAYED (not lost) real spawn event r
         /* resolves immediately — wins the timeout race before the real 'spawn' event arrives */
       },
     });
-    await assert.rejects(() => s.resume({ number: 6, title: "t", labels: [] }, "lane-race"), /spawn confirmation timed out/i);
+    await assert.rejects(() => s!.resume({ number: 6, title: "t", labels: [] }, "lane-race"), /spawn confirmation timed out/i);
     assert.equal(existsSync(join(dir, "lane-race.running.json")), false, "removed by the failure path");
     // Give the real (merely delayed, not lost) 'spawn' event time to actually fire its late
     // handler. Before the #395 gate② P2-2 fix, that handler unconditionally re-wrote
@@ -2115,14 +2338,16 @@ test("resume (#395 gate② P2-2): a merely-DELAYED (not lost) real spawn event r
       false,
       "the late spawn handler must not resurrect running.json once the race already settled on timed-out",
     );
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume: --resume reuses the ORIGINAL session id, clears .handoff, and the resumed run's terminal cost is probed normally", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const ready = join(dir, "stub-ready");
     // Cooperative stub: a fresh dispatch sleeps and hands off cleanly on TERM. A --resume
@@ -2142,7 +2367,7 @@ test("resume: --resume reuses the ORIGINAL session id, clears .handoff, and the 
         "",
       ].join("\n"),
     );
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name, sessionId } = await s.dispatch({ number: 3, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before handoff");
     assert.equal(s.requestHandoff(name), true);
@@ -2161,14 +2386,16 @@ test("resume: --resume reuses the ORIGINAL session id, clears .handoff, and the 
     // probe() surfaces the resumed leg's raw per-leg reported cost as-is (0.05); #172 records
     // that value directly in State.recordSpend.
     assert.equal(probe.costUsd, 0.05);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume: also sets SAPWOOD_WORKTREE_ROOT to the same lane's resolved worktree path (#235 PR-A) — a resumed leg keeps Read containment too", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const worktreeRoot = join(dir, "worktrees");
     const ready = join(dir, "stub-ready");
@@ -2188,7 +2415,7 @@ test("resume: also sets SAPWOOD_WORKTREE_ROOT to the same lane's resolved worktr
         "",
       ].join("\n"),
     );
-    const s = sup(dir, bin, worktreeRoot);
+    s = sup(dir, bin, worktreeRoot);
     const { name } = await s.dispatch({ number: 4, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before handoff");
     assert.equal(s.requestHandoff(name), true);
@@ -2196,33 +2423,37 @@ test("resume: also sets SAPWOOD_WORKTREE_ROOT to the same lane's resolved worktr
     await s.resume({ number: 4, title: "t", labels: [] }, name);
     await waitForFile(join(dir, "resume-root.seen"), "resumed worktree root was not published");
     assert.equal(readFileSync(join(dir, "resume-root.seen"), "utf8").trim(), join(worktreeRoot, name));
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume: fails closed in hard mode when the guard hook is missing (no unguarded resume)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  let s2: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 3, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before handoff");
     s.requestHandoff(name);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     // A supervisor whose guard hook path doesn't exist, same as dispatch()'s hard-mode guard.
-    const s2 = new WorkerSupervisor({
+    s2 = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
       claudeBin: bin,
       guardHookPath: join(dir, "nonexistent-hook.js"),
     });
-    await assert.rejects(() => s2.resume({ number: 3, title: "t", labels: [] }, name), /guard hook not found|unguarded/i);
-    s.dispose();
-    s2.dispose();
+    await assert.rejects(() => s2!.resume({ number: 3, title: "t", labels: [] }, name), /guard hook not found|unguarded/i);
   } finally {
+    killAnyRunningLanes(s, s2);
+    s?.dispose();
+    s2?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2272,6 +2503,7 @@ test("guard hook wrapper fails closed: a crashing hook exits 2 in hard mode, 0 i
 test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_GUARD_MODE in the worker env (#26)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const previousGhToken = process.env.GH_TOKEN;
+  let s: WorkerSupervisor | undefined;
   try {
     process.env.GH_TOKEN = "worker-forge-token";
     const hook = mkHook(dir);
@@ -2282,7 +2514,7 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho "$GH_TOKEN" > "${join(dir, "token.seen.tmp")}"\nmv "${join(dir, "token.seen.tmp")}" "${join(dir, "token.seen")}"\necho "$SAPWOOD_GUARD_MODE" > "${join(dir, "mode.seen.tmp")}"\nmv "${join(dir, "mode.seen.tmp")}" "${join(dir, "mode.seen")}"\nexit 0\n`,
     );
     const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: scfg,
       stateDir: dir,
@@ -2302,8 +2534,9 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
     assert.match(args, /disableAllHooks/);
     assert.equal(readFileSync(join(dir, "mode.seen"), "utf8").trim(), "soft"); // env reached the worker
     assert.equal(readFileSync(join(dir, "token.seen"), "utf8").trim(), "worker-forge-token");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     if (previousGhToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previousGhToken;
     rmSync(dir, { recursive: true, force: true });
@@ -2316,6 +2549,7 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
 // fresh dispatch() and on resume() (a resumed leg must keep the same containment).
 test("dispatch sets SAPWOOD_WORKTREE_ROOT to the resolved absolute worktree path (#235 PR-A)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const worktreeRoot = join(dir, "worktrees");
@@ -2324,7 +2558,7 @@ test("dispatch sets SAPWOOD_WORKTREE_ROOT to the resolved absolute worktree path
       `#!/usr/bin/env bash\necho "$SAPWOOD_WORKTREE_ROOT" > "${join(dir, "root.seen.tmp")}"\nmv "${join(dir, "root.seen.tmp")}" "${join(dir, "root.seen")}"\nexit 0\n`,
     );
     const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "hard" } });
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: scfg,
       stateDir: dir,
@@ -2337,17 +2571,19 @@ test("dispatch sets SAPWOOD_WORKTREE_ROOT to the resolved absolute worktree path
     const { name } = await s.dispatch({ number: 9, title: "t", labels: [] });
     await waitForFile(join(dir, "root.seen"), "worker worktree root was not published");
     assert.equal(readFileSync(join(dir, "root.seen"), "utf8").trim(), join(worktreeRoot, name));
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("dispatch fails closed in hard mode when the guard hook is missing (no unguarded worker)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(dir, FAST_STUB);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -2355,36 +2591,40 @@ test("dispatch fails closed in hard mode when the guard hook is missing (no ungu
       renderPrompt: () => "p",
       guardHookPath: join(dir, "nonexistent-hook.js"),
     });
-    await assert.rejects(() => s.dispatch({ number: 1, title: "t", labels: [] }), /guard hook not found|unguarded/i);
-    s.dispose();
+    await assert.rejects(() => s!.dispatch({ number: 1, title: "t", labels: [] }), /guard hook not found|unguarded/i);
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("dispatch rejects (and cleans up) when claude can't spawn — bad CLAUDE_BIN", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const s = sup(dir, join(dir, "does-not-exist-claude"));
-    await assert.rejects(() => s.dispatch({ number: 4, title: "t", labels: [] }, "lane-bad"), /spawn failed/i);
+    s = sup(dir, join(dir, "does-not-exist-claude"));
+    await assert.rejects(() => s!.dispatch({ number: 4, title: "t", labels: [] }, "lane-bad"), /spawn failed/i);
     // no bogus running marker / jsonl left behind for the conductor to misread
     assert.ok(!existsSync(join(dir, "lane-bad.running.json")));
     assert.ok(!existsSync(join(dir, "lane-bad.jsonl")));
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("dispatch (#395): cfg.liveness.spawnConfirmTimeoutMs is threaded through — a generous bound never fires on a normally-spawning worker (regression: the new plumbing doesn't disturb the healthy path)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(dir, FAST_STUB);
     const liveCfg = ConfigSchema.parse({
       board: { owner: "o", repo: "r", projectNumber: 4 },
       liveness: { spawnConfirmTimeoutMs: 5_000 },
     });
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: liveCfg,
       stateDir: dir,
@@ -2396,14 +2636,16 @@ test("dispatch (#395): cfg.liveness.spawnConfirmTimeoutMs is threaded through �
     const { name } = await s.dispatch({ number: 8, title: "t", labels: [] });
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.done.json`)), "done sentinel written — the configured timeout never fired");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("dispatch (#395 PM follow-up): a spawn confirmation that never arrives is bounded, killed, AND its (already-provisioned) worktree is removed — a fresh lane never gets tracked, so nothing else would ever sweep it", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const worktreeRoot = join(dir, "worktrees");
     mkdirSync(worktreeRoot, { recursive: true });
@@ -2412,7 +2654,7 @@ test("dispatch (#395 PM follow-up): a spawn confirmation that never arrives is b
       board: { owner: "o", repo: "r", projectNumber: 4 },
       liveness: { spawnConfirmTimeoutMs: 1 },
     });
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: liveCfg,
       stateDir: dir,
@@ -2436,11 +2678,12 @@ test("dispatch (#395 PM follow-up): a spawn confirmation that never arrives is b
     const laneWorktree = join(worktreeRoot, "lane-timeout-wt");
     mkdirSync(laneWorktree, { recursive: true });
     writeFileSync(join(laneWorktree, "marker.txt"), "partially provisioned");
-    await assert.rejects(() => s.dispatch({ number: 9, title: "t", labels: [] }, "lane-timeout-wt"), /spawn confirmation timed out/i);
+    await assert.rejects(() => s!.dispatch({ number: 9, title: "t", labels: [] }, "lane-timeout-wt"), /spawn confirmation timed out/i);
     assert.ok(!existsSync(laneWorktree), "the orphaned worktree was removed — nothing else ever tracks this never-registered lane");
     assert.ok(!existsSync(join(dir, "lane-timeout-wt.running.json")));
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2448,9 +2691,10 @@ test("dispatch (#395 PM follow-up): a spawn confirmation that never arrives is b
 test("dispatch (#395 gate② round 3, P1): a LIVE worker leg heart-beats against a real State, and heartbeats STOP the instant the child is no longer alive — end-to-end through heartbeatTick's real wiring, not just the isolated createHeartbeatGate unit tests", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const state = new State(":memory:");
+  let s: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> only SIGKILL ends it
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -2489,8 +2733,9 @@ test("dispatch (#395 gate② round 3, P1): a LIVE worker leg heart-beats against
       countAtDeath,
       "no FURTHER worker-heartbeat events were appended once the child was confirmed dead, even though the setInterval kept firing",
     );
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     state.close();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2498,11 +2743,12 @@ test("dispatch (#395 gate② round 3, P1): a LIVE worker leg heart-beats against
 
 test("enforces worker timeout: a run past timeoutSec is killed and marked failed (Codex R2 P1)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> needs the KILL
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
     let fakeNowMs = Date.now();
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
@@ -2519,8 +2765,9 @@ test("enforces worker timeout: a run past timeoutSec is killed and marked failed
     assert.ok(existsSync(join(dir, `${name}.failed.json`)), "timed-out worker marked failed");
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "timed-out worker process killed");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2529,6 +2776,7 @@ test("enforces worker timeout: a run past timeoutSec is killed and marked failed
 
 test("#33: crossing worker.budgetUsdSoft mid-run triggers requestHandoff exactly once, and the lane ends up .handoff (graceful), never .failed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     // Emits one streamed assistant usage line big enough to cross a tiny budget, then sleeps
     // with no TERM trap (the empirically-confirmed real CLI shape, #60) so the SIGTERM the
@@ -2548,7 +2796,7 @@ test("#33: crossing worker.budgetUsdSoft mid-run triggers requestHandoff exactly
       board: { owner: "o", repo: "r", projectNumber: 4 },
       worker: { budgetUsdSoft: 0.01 },
     });
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: tcfg,
       stateDir: dir,
@@ -2569,14 +2817,16 @@ test("#33: crossing worker.budgetUsdSoft mid-run triggers requestHandoff exactly
     assert.ok(!existsSync(join(dir, `${name}.failed.json`)), "never a hard-kill .failed for a budget-triggered handoff");
     // The terminal sentinel means onExit cleared the heartbeat interval, so the count is final.
     assert.equal(handoffCalls, 1, "requestHandoff fired exactly once for the soft-budget crossing");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("#33: a cache-heavy stream under budget does NOT trigger a handoff -- cache reads are priced at the cache-read rate, not the input rate", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     // 1,000,000 cache-read tokens at opus's cache-read rate (~$0.50/MTok) is ~$0.50 --
     // comfortably under a $2 budget. Priced (WRONGLY) at the input rate ($5/MTok) it would be
@@ -2588,7 +2838,7 @@ test("#33: a cache-heavy stream under budget does NOT trigger a handoff -- cache
       board: { owner: "o", repo: "r", projectNumber: 4 },
       worker: { budgetUsdSoft: 2 },
     });
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: tcfg,
       stateDir: dir,
@@ -2604,14 +2854,16 @@ test("#33: a cache-heavy stream under budget does NOT trigger a handoff -- cache
     assert.ok(!existsSync(join(dir, `${name}.handoff.json`)), "cache-heavy run under budget must NOT hand off");
     assert.ok(!existsSync(join(dir, `${name}.failed.json`)));
     await s.reclaim(name);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONSTRUCTION (fail-closed, before any dispatch), naming the path — and a valid custom file's rates actually drive the budget check", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     // Fail-closed: constructing the supervisor with a missing pricingFile throws immediately.
     const badCfg = ConfigSchema.parse({
@@ -2642,7 +2894,7 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
       board: { owner: "o", repo: "r", projectNumber: 4 },
       worker: { budgetUsdSoft: 1, pricingFile: ratesPath },
     });
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: cfgCustom,
       stateDir: dir,
@@ -2654,14 +2906,16 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
     const { name } = await s.dispatch({ number: 35, title: "t", labels: [] });
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "custom pricingFile rates drove the soft-budget handoff");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NOT instantly re-handoff — the soft budget bounds spend PER RUN; new post-resume usage crossing it again MUST", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-33-resume";
     // Fabricate a budget-triggered handed-off lane: a .handoff sentinel + a preserved jsonl
@@ -2693,7 +2947,7 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
       board: { owner: "o", repo: "r", projectNumber: 4 },
       worker: { budgetUsdSoft: 0.01 },
     });
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: tcfg,
       stateDir: dir,
@@ -2711,8 +2965,9 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "new post-resume spend crossing the budget triggers a fresh graceful handoff");
     assert.ok(!existsSync(join(dir, `${name}.failed.json`)));
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2721,6 +2976,7 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
 
 test("#155: probe() persists the live telemetry trio (estCostUsd, contextTokens, tokenComposition) computed from the jsonl-so-far", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(
       dir,
@@ -2732,7 +2988,7 @@ test("#155: probe() persists the live telemetry trio (estCostUsd, contextTokens,
         ``,
       ].join("\n"),
     );
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 155, title: "t", labels: [] });
     // No heartbeat wait needed — probe() re-derives the trio fresh from the jsonl on every call.
     // Poll until BOTH streamed lines have landed (contextTokens reflects only the newest one).
@@ -2757,8 +3013,9 @@ test("#155: probe() persists the live telemetry trio (estCostUsd, contextTokens,
       cacheReadTokens: 2000,
     });
     await s.reclaim(name);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2767,6 +3024,7 @@ test("#155: probe() persists the live telemetry trio (estCostUsd, contextTokens,
 
 test("#287: probe() reports actualModel from the session-init line's own self-report, as soon as it's observed — the earliest available signal, well before any terminal reclaim", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(
       dir,
@@ -2777,7 +3035,7 @@ test("#287: probe() reports actualModel from the session-init line's own self-re
         ``,
       ].join("\n"),
     );
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 287, title: "t", labels: [] });
     let p = await s.probe(name);
     for (let i = 0; i < 200 && p.actualModel == null; i++) {
@@ -2786,29 +3044,33 @@ test("#287: probe() reports actualModel from the session-init line's own self-re
     }
     assert.equal(p.actualModel, "claude-opus-4-8");
     await s.reclaim(name);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("#287: probe() reports no actualModel before the init line has landed (honest 'not yet observed', never a guess)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(dir, [`#!/usr/bin/env bash`, `for _ in $(seq 1 600); do sleep 1; done`, ``].join("\n"));
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 288, title: "t", labels: [] });
     const p = await s.probe(name);
     assert.equal(p.actualModel, undefined);
     await s.reclaim(name);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("#155: contextTokens is deliberately NON-monotonic — a later, smaller assistant message (an auto-compact) drops it, never a running max", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const marker = join(dir, "emit-second");
     const bin = mkStub(
@@ -2825,7 +3087,7 @@ test("#155: contextTokens is deliberately NON-monotonic — a later, smaller ass
         ``,
       ].join("\n"),
     );
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 156, title: "t", labels: [] });
     let p = await s.probe(name);
     for (let i = 0; i < 200 && p.liveTelemetry?.contextTokens !== 50000; i++) {
@@ -2840,14 +3102,16 @@ test("#155: contextTokens is deliberately NON-monotonic — a later, smaller ass
     }
     assert.equal(p.liveTelemetry?.contextTokens, 500, "smaller second turn DROPS contextTokens — never smoothed into a running max");
     await s.reclaim(name);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("#155: a resumed lane's persisted estCostUsd covers only the CURRENT leg (reuses the #33 baseline) — pre-handoff usage alone must not show as live cost", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-155-resume";
     writeFileSync(
@@ -2872,7 +3136,7 @@ test("#155: a resumed lane's persisted estCostUsd covers only the CURRENT leg (r
         ``,
       ].join("\n"),
     );
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     await s.resume({ number: 157, title: "t", labels: [] }, name);
     // Right after resume, before the stub emits anything new: the whole-file total already
     // includes the pre-handoff line, but the baseline snapshot cancels it out.
@@ -2903,14 +3167,16 @@ test("#155: a resumed lane's persisted estCostUsd covers only the CURRENT leg (r
       cacheReadTokens: 0,
     });
     await s.reclaim(name);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("#155: a DETACHED lane (no in-memory handle) carries no live telemetry — never invents a second baseline", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-155-detached";
     writeFileSync(
@@ -2921,11 +3187,12 @@ test("#155: a DETACHED lane (no in-memory handle) carries no live telemetry — 
       join(dir, `${name}.jsonl`),
       `{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n`,
     );
-    const s = sup(dir, "claude"); // no dispatch/resume -> no in-memory Lane for this name
+    s = sup(dir, "claude"); // no dispatch/resume -> no in-memory Lane for this name
     const p = await s.probe(name);
     assert.equal(p.liveTelemetry, undefined, "a detached lane has no known baseline -> no live telemetry, never a guessed one");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2935,6 +3202,7 @@ test("#155: a DETACHED lane (no in-memory handle) carries no live telemetry — 
 
 test("#168: probe() of a FAILED lane surfaces failureText from the jsonl (stdout+stderr merged)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-168-failed";
     writeFileSync(join(dir, `${name}.failed.json`), JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0, exit_code: 1 }));
@@ -2944,19 +3212,21 @@ test("#168: probe() of a FAILED lane surfaces failureText from the jsonl (stdout
         `API Error: 429 too many requests — rate_limit_error\n` + // raw stderr, non-JSON line
         `{"type":"result","subtype":"error","is_error":true,"result":"request failed"}\n`,
     );
-    const s = sup(dir, "claude"); // no live process — a static terminal sentinel + jsonl is enough
+    s = sup(dir, "claude"); // no live process — a static terminal sentinel + jsonl is enough
     const p = await s.probe(name);
     assert.equal(p.failed, true);
     assert.ok(p.failureText?.includes("429 too many requests"), "raw non-JSON stderr lines are captured, not just parsed JSON fields");
     assert.ok(p.failureText?.includes("rate_limit_error"));
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("#168: probe() of a DONE (non-failed) lane never populates failureText", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-168-done";
     writeFileSync(
@@ -2964,29 +3234,32 @@ test("#168: probe() of a DONE (non-failed) lane never populates failureText", as
       JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0.01, exit_code: 0 }),
     );
     writeFileSync(join(dir, `${name}.jsonl`), `{"type":"result","subtype":"success","total_cost_usd":0.01}\n`);
-    const s = sup(dir, "claude");
+    s = sup(dir, "claude");
     const p = await s.probe(name);
     assert.equal(p.done, true);
     assert.equal(p.failureText, undefined);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("#168: failureText is tail-capped for a large jsonl — the classifiable error near the end still comes through", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-168-tail";
     writeFileSync(join(dir, `${name}.failed.json`), JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0 }));
     const padding = "x".repeat(10_000);
     writeFileSync(join(dir, `${name}.jsonl`), `${padding}\nCould not resolve host: github.com\n`);
-    const s = sup(dir, "claude");
+    s = sup(dir, "claude");
     const p = await s.probe(name);
     assert.ok(p.failureText && p.failureText.length <= 4000, "capped, not the whole 10k+ jsonl");
     assert.ok(p.failureText?.includes("Could not resolve host"), "the tail (where the error actually is) survives the cap");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2998,6 +3271,7 @@ test("#168: failureText is tail-capped for a large jsonl — the classifiable er
 
 test("#247: probe() of a DONE lane surfaces resultText from the jsonl's final structured result line", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-247-done";
     writeFileSync(
@@ -3009,34 +3283,38 @@ test("#247: probe() of a DONE lane surfaces resultText from the jsonl's final st
       join(dir, `${name}.jsonl`),
       `{"type":"system","subtype":"init"}\n{"type":"result","subtype":"success","total_cost_usd":0.01,"result":${JSON.stringify(resultText)}}\n`,
     );
-    const s = sup(dir, "claude");
+    s = sup(dir, "claude");
     const p = await s.probe(name);
     assert.equal(p.done, true);
     assert.equal(p.resultText, resultText);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("#601: probe() of a FAILED (non-DONE) lane ALSO populates resultText — the worker's own stated reason, same as a DONE lane", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-247-failed";
     writeFileSync(join(dir, `${name}.failed.json`), JSON.stringify({ name, issue: 247, session_id: "s", total_cost_usd: 0 }));
     writeFileSync(join(dir, `${name}.jsonl`), `{"type":"result","subtype":"error","is_error":true,"result":"some text"}\n`);
-    const s = sup(dir, "claude");
+    s = sup(dir, "claude");
     const p = await s.probe(name);
     assert.equal(p.failed, true);
     assert.equal(p.resultText, "some text");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("#247: resultText is scoped to the CURRENT LEG's jsonl offset — a resumed fix leg's own final message, never an earlier leg's superseded result line", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-247-leg";
     const legOneLine = `{"type":"result","subtype":"success","total_cost_usd":0.01,"result":"leg one final message — stale"}\n`;
@@ -3052,11 +3330,12 @@ test("#247: resultText is scoped to the CURRENT LEG's jsonl offset — a resumed
       join(dir, `${name}.done.json`),
       JSON.stringify({ name, issue: 247, session_id: "s", total_cost_usd: 0.02, exit_code: 0 }),
     );
-    const s = sup(dir, "claude");
+    s = sup(dir, "claude");
     const p = await s.probe(name);
     assert.equal(p.resultText, legTwoResult, "only the SECOND (current) leg's result text — the first leg's is never leaked through");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3338,6 +3617,7 @@ test("#394 gate② round 3: the negative counterpart — an errored result with 
 
 test("#168 P1-3 contractual negative: exact configured signatures inside ASSISTANT text + a non-env failure -> task failure, no env classification, no park", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-168-neg";
     writeFileSync(join(dir, `${name}.failed.json`), JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0 }));
@@ -3348,7 +3628,7 @@ test("#168 P1-3 contractual negative: exact configured signatures inside ASSISTA
       `{"type":"assistant","message":{"content":[{"type":"text","text":"Testing the retry path for rate_limit_error, 429 too many requests, usage limit reached, and Could not resolve host"}]}}\n` +
         `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"AssertionError: retry test failed — expected 3 retries, got 0"}\n`,
     );
-    const s = sup(dir, "claude");
+    s = sup(dir, "claude");
     const p = await s.probe(name);
     assert.equal(p.failed, true);
     assert.ok(!p.failureText?.includes("rate_limit_error"), "the assistant's signature strings never reach failureText");
@@ -3360,24 +3640,27 @@ test("#168 P1-3 contractual negative: exact configured signatures inside ASSISTA
       null,
       "an ordinary task failure whose assistant text discusses the signatures classifies as a TASK failure",
     );
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("fast non-zero exit writes .failed (exit handler attached before the await) — Codex R2 P2", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(dir, `#!/usr/bin/env bash\nexit 3\n`); // exits immediately, like the CLI rejecting args
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 8, title: "t", labels: [] }, "lane-fast");
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.failed.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.failed.json`)), "fast exit still recorded a .failed sentinel");
     const probe = await s.probe(name);
     assert.equal(probe.failed, true);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3392,6 +3675,7 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
   const shimDir = mkdtempSync(join(tmpdir(), "sapwood-gitshim-"));
   const gitLog = join(shimDir, "git-invocations.log");
   const oldPath = process.env.PATH;
+  let s: WorkerSupervisor | undefined;
   try {
     // Exec spy: a `git` shim FIRST on PATH — any git subprocess the supervisor (or anything
     // it spawns) launches during the drain would append here. The invariant: it never does.
@@ -3405,7 +3689,7 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
 
     // The empirically-confirmed real CLI shape (#60): no SIGTERM trap -> dies by signal.
     const { bin, ready } = longRunningStub(dir);
-    const s = sup(dir, bin, worktreeRoot);
+    s = sup(dir, bin, worktreeRoot);
     const { name: laneName, sessionId } = await s.dispatch({ number: 69, title: "t", labels: [] }, name);
     await waitForFile(ready, "stub reached its running state before drain");
     assert.equal(s.requestHandoff(laneName), true);
@@ -3418,9 +3702,9 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
 
     assert.ok(!existsSync(gitLog), "NO git subprocess was spawned during the drain");
     assert.equal(readFileSync(join(worktreePath, "wip.txt"), "utf8"), "uncommitted work\n", "worktree untouched");
-
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     process.env.PATH = oldPath;
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
@@ -3513,6 +3797,7 @@ test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285, #443): the
 
 test("#69: timeout still tags .failed even if a handoff was already requested (timeout is a distinct, non-drain hard-kill path)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     // Ignores TERM so it survives requestHandoff's SIGTERM; only the timeout's SIGKILL stops it.
     // #241 (same class of race as #229/PR #240): touch a ready-sentinel immediately after the
@@ -3547,7 +3832,7 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
     const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\ntouch "${trapReady}"\nfor _ in $(seq 1 600); do sleep 1; done\n`);
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
     let fakeNowMs = Date.now();
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
@@ -3572,8 +3857,9 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
     for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.failed.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${laneName}.failed.json`)), "timeout wins over a pending handoff request");
     assert.ok(!existsSync(join(dir, `${laneName}.handoff.json`)));
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3584,13 +3870,14 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
 test("#69: reclaim RETAINS a worktree with a file written after dispatch (possibly dirty) — left on disk for human salvage", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-69-dirty";
     const worktreePath = join(worktreeRoot, name);
     mkdirSync(join(worktreePath, "src"), { recursive: true });
 
     const { bin } = longRunningStub(dir);
-    const s = sup(dir, bin, worktreeRoot);
+    s = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 70, title: "t", labels: [] }, name);
     await sleep(50); // ensure the WIP write lands strictly after the recorded lane start
     writeFileSync(join(worktreePath, "src", "wip.txt"), "uncommitted work\n");
@@ -3599,8 +3886,9 @@ test("#69: reclaim RETAINS a worktree with a file written after dispatch (possib
     assert.equal(r.worktreeRetained, true);
     assert.equal(r.worktreePath, worktreePath); // absolute path, for the conductor's escalation
     assert.ok(existsSync(join(worktreePath, "src", "wip.txt")), "worktree (and its WIP) survives");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -3609,6 +3897,7 @@ test("#69: reclaim RETAINS a worktree with a file written after dispatch (possib
 test("#69: reclaim DELETES a clean worktree (no file touched since dispatch) — no retention noise", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-69-clean";
     const worktreePath = join(worktreeRoot, name);
@@ -3617,15 +3906,16 @@ test("#69: reclaim DELETES a clean worktree (no file touched since dispatch) —
     await sleep(20); // strictly before the lane's recorded start
 
     const { bin, ready } = longRunningStub(dir);
-    const s = sup(dir, bin, worktreeRoot);
+    s = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 71, title: "t", labels: [] }, name);
     await waitForFile(ready);
 
     const r = await s.reclaim(laneName);
     assert.equal(r.worktreeRetained, false);
     assert.ok(!existsSync(worktreePath), "clean worktree removed as before");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -3633,15 +3923,17 @@ test("#69: reclaim DELETES a clean worktree (no file touched since dispatch) —
 
 test("#69: reclaim of a lane with NO worktree on disk -> nothing retained, nothing to report", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir);
-    const s = sup(dir, bin); // default worktreeRoot -> the lane's worktree path never exists
+    s = sup(dir, bin); // default worktreeRoot -> the lane's worktree path never exists
     const { name } = await s.dispatch({ number: 72, title: "t", labels: [] });
     await waitForFile(ready);
     const r = await s.reclaim(name);
     assert.deepEqual(r, { worktreePath: null, worktreeRetained: false });
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3649,24 +3941,30 @@ test("#69: reclaim of a lane with NO worktree on disk -> nothing retained, nothi
 test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktree using running.json's dispatched_at as the baseline", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s1: WorkerSupervisor | undefined;
+  let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     const name = "lane-69-det";
     const worktreePath = join(worktreeRoot, name);
     mkdirSync(worktreePath, { recursive: true });
 
     const { bin } = longRunningStub(dir);
-    const s1 = sup(dir, bin, worktreeRoot);
+    s1 = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s1.dispatch({ number: 73, title: "t", labels: [] }, name);
     await sleep(50);
     writeFileSync(join(worktreePath, "wip.txt"), "post-dispatch work\n"); // dirty
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
 
-    const s2 = sup(dir, bin, worktreeRoot);
+    s2 = sup(dir, bin, worktreeRoot);
     const r = await s2.reclaim(laneName);
     assert.equal(r.worktreeRetained, true);
     assert.ok(existsSync(join(worktreePath, "wip.txt")), "worktree survives a detached reclaim too");
-    s2.dispose();
   } finally {
+    killAnyRunningLanes(s1, s2, ...s1Children);
+    s2?.dispose();
+    s1?.dispose();
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -3675,6 +3973,7 @@ test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktr
 test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP — the retention baseline is the immutable first-dispatch time, not the resume-time started_at", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-69-resume-wip";
     const ready = join(dir, "stub-ready");
@@ -3696,7 +3995,7 @@ test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP 
         "",
       ].join("\n"),
     );
-    const s = sup(dir, bin, worktreeRoot);
+    s = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 74, title: "t", labels: [] }, name);
     await sleep(50);
     // Pre-handoff WIP: written DURING the first run, mtime after first dispatch.
@@ -3727,8 +4026,9 @@ test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP 
     const r = await s.reclaim(laneName);
     assert.equal(r.worktreeRetained, true, "resumed-then-crashed lane RETAINS its pre-handoff WIP");
     assert.ok(existsSync(join(worktreePath, "wip.txt")), "WIP file survives — not silently deleted");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -3737,13 +4037,14 @@ test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP 
 test("#69 (fable P2b): a file whose mtime is BACKDATED before dispatch still reads dirty via ctime — mtime-backdating cannot defeat retention", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-69-backdate";
     const worktreePath = join(worktreeRoot, name);
     mkdirSync(worktreePath, { recursive: true });
 
     const { bin } = longRunningStub(dir);
-    const s = sup(dir, bin, worktreeRoot);
+    s = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 75, title: "t", labels: [] }, name);
     await sleep(50);
     const wip = join(worktreePath, "wip.txt");
@@ -3755,8 +4056,9 @@ test("#69 (fable P2b): a file whose mtime is BACKDATED before dispatch still rea
     const r = await s.reclaim(laneName);
     assert.equal(r.worktreeRetained, true, "ctime still exceeds the baseline -> retained despite backdated mtime");
     assert.ok(existsSync(wip), "backdated WIP survives");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -3765,13 +4067,14 @@ test("#69 (fable P2b): a file whose mtime is BACKDATED before dispatch still rea
 test("#69 (Codex PR #72 round-2): a WIP entry whose mtime EQUALS dispatched_at exactly (same coarse-fs tick) reads dirty -> RETAINED, never deleted as clean (inclusive >= boundary)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const name = "lane-69-sametick";
     const worktreePath = join(worktreeRoot, name);
     mkdirSync(worktreePath, { recursive: true });
 
     const { bin } = longRunningStub(dir);
-    const s = sup(dir, bin, worktreeRoot);
+    s = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 76, title: "t", labels: [] }, name);
     await sleep(50);
     const wip = join(worktreePath, "wip.txt");
@@ -3795,8 +4098,9 @@ test("#69 (Codex PR #72 round-2): a WIP entry whose mtime EQUALS dispatched_at e
     const r = await s.reclaim(laneName);
     assert.equal(r.worktreeRetained, true, "mtime == baseline must be treated as dirty (>=), not clean");
     assert.ok(existsSync(wip), "same-tick WIP survives — not deleted as clean");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -3809,6 +4113,9 @@ test("#69 (Codex PR #72 round-2): a WIP entry whose mtime EQUALS dispatched_at e
 test("#63/#69: detached handoff-requested lane confirmed dead -> probe() writes .handoff (session_id intact), clears running.json, leaves the worktree untouched", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s1: WorkerSupervisor | undefined;
+  let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     const name = "lane-63-a";
     const worktreePath = join(worktreeRoot, name);
@@ -3817,14 +4124,15 @@ test("#63/#69: detached handoff-requested lane confirmed dead -> probe() writes 
 
     // No TERM trap -> the real CLI's empirically-confirmed shape (#60): dies by signal.
     const { bin, ready } = longRunningStub(dir);
-    const s1 = sup(dir, bin, worktreeRoot);
+    s1 = sup(dir, bin, worktreeRoot);
     const { name: laneName, sessionId } = await s1.dispatch({ number: 63, title: "t", labels: [] }, name);
     await waitForFile(ready, "stub reached its running state before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
     assert.equal(alive(pid), true);
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose(); // "restart": s2 has no in-memory lane handle for this name — only the persisted file
 
-    const s2 = sup(dir, bin, worktreeRoot);
+    s2 = sup(dir, bin, worktreeRoot);
     assert.equal(s2.requestHandoff(laneName), true); // detached branch: SIGTERM via the persisted pid
     const runningAfterRequest = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8"));
     assert.equal(runningAfterRequest.handoff_requested, true, "request persisted onto running.json");
@@ -3842,9 +4150,10 @@ test("#63/#69: detached handoff-requested lane confirmed dead -> probe() writes 
     assert.equal(sentinel.session_id, sessionId, "resumable session_id carried through the detached path");
     // #69: sentinel-only — the worktree was not committed, cleaned, or otherwise touched.
     assert.equal(readFileSync(join(worktreePath, "wip.txt"), "utf8"), "uncommitted work\n");
-
-    s2.dispose();
   } finally {
+    killAnyRunningLanes(s1, s2, ...s1Children);
+    s2?.dispose();
+    s1?.dispose();
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -3852,19 +4161,24 @@ test("#63/#69: detached handoff-requested lane confirmed dead -> probe() writes 
 
 test("#63: a SECOND engine restart before death is confirmed still finalizes — the persisted running.json handoff_requested field survives even though the fresh instance's in-memory set is empty", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s1: WorkerSupervisor | undefined;
+  let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
+  let sMid: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir); // no trap -> dies on SIGTERM
-    const s1 = sup(dir, bin);
+    s1 = sup(dir, bin);
     const { name: laneName } = await s1.dispatch({ number: 64, title: "t", labels: [] });
     await waitForFile(ready, "stub reached its running state before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose(); // restart #1: engine forgets the in-process lane
 
-    const sMid = sup(dir, bin);
+    sMid = sup(dir, bin);
     assert.equal(sMid.requestHandoff(laneName), true); // detached SIGTERM sent + persisted
     // Simulate restart #2 landing before anyone ever calls probe() on sMid (i.e. before death
     // is confirmed): a brand-new instance whose in-memory detachedHandoffRequested is empty.
-    const s2 = sup(dir, bin);
+    s2 = sup(dir, bin);
     assert.equal(
       s2.requestHandoff(laneName),
       false,
@@ -3878,9 +4192,13 @@ test("#63: a SECOND engine restart before death is confirmed still finalizes —
     assert.equal(probe.handoff, true, "persisted handoff_requested field alone is enough to finalize");
     assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)));
     assert.ok(!existsSync(join(dir, `${laneName}.running.json`)));
-
-    s2.dispose();
   } finally {
+    killAnyRunningLanes(s1, s2, sMid, ...s1Children);
+    s2?.dispose();
+    sMid?.dispose();
+    s1?.dispose();
+    // dispose() is a no-op today, but disposed on principle so a future adoption-path change that
+    // DOES register a lane can't silently reopen this file's own amplifier.
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3889,6 +4207,7 @@ test("#169: persisted handoff_requested closes the write-before-signal crash win
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s1: WorkerSupervisor | undefined;
   let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
     s1 = sup(dir, bin);
@@ -3901,6 +4220,7 @@ test("#169: persisted handoff_requested closes the write-before-signal crash win
 
     // Simulate: running.json flag persisted, then the engine died before sending SIGTERM.
     writeFileSync(runningPath, `${JSON.stringify({ ...running, handoff_requested: true })}\n`);
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose();
     s1 = undefined;
 
@@ -3925,6 +4245,7 @@ test("#169: persisted handoff_requested closes the write-before-signal crash win
     assert.doesNotThrow(() => assert.equal(s2?.requestHandoff(name), false));
     assert.equal(signalCount, 1, "in-memory set prevents a second signal from the same supervisor");
   } finally {
+    killAnyRunningLanes(s1, s2, ...s1Children);
     s1?.dispose();
     s2?.dispose();
     rmSync(dir, { recursive: true, force: true });
@@ -3933,9 +4254,10 @@ test("#169: persisted handoff_requested closes the write-before-signal crash win
 
 test("#63: wrapperAlive() === -1 (unreadable pid) -> probe() does not throw, does not finalize, lane stays as-is", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const bin = mkStub(dir, FAST_STUB);
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     // A persisted lane that claims a handoff was requested but carries no readable wrapper_pid
     // (garbage/missing) -> persistedPid() is null -> wrapperAlive() is -1 (unknown), not 0.
     writeFileSync(join(dir, "lane-63-c.running.json"), JSON.stringify({ issue: 1, session_id: "s", handoff_requested: true }));
@@ -3946,8 +4268,9 @@ test("#63: wrapperAlive() === -1 (unreadable pid) -> probe() does not throw, doe
     assert.equal(probe.failed, false);
     assert.ok(!existsSync(join(dir, "lane-63-c.handoff.json")));
     assert.ok(existsSync(join(dir, "lane-63-c.running.json")), "running marker untouched — still just 'unknown'");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3955,6 +4278,9 @@ test("#63: wrapperAlive() === -1 (unreadable pid) -> probe() does not throw, doe
 test("#63/#69: a lane already reclaim()'d must never also be finalized as .handoff — and its dirty worktree is RETAINED by that reclaim", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s1: WorkerSupervisor | undefined;
+  let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     const name = "lane-63-d";
     const worktreePath = join(worktreeRoot, name);
@@ -3963,14 +4289,15 @@ test("#63/#69: a lane already reclaim()'d must never also be finalized as .hando
     // Ignores TERM -> survives requestHandoff's SIGTERM; only reclaim()'s SIGKILL stops it —
     // mirroring the "reclaim kills a stubborn claude subtree via SIGKILL" pattern above.
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n");
-    const s1 = sup(dir, bin, worktreeRoot);
+    s1 = sup(dir, bin, worktreeRoot);
     const { name: laneName } = await s1.dispatch({ number: 65, title: "t", labels: [] }, name);
     await waitForFile(ready, "stub installed its TERM trap before engine restart");
     writeFileSync(join(worktreePath, "wip.txt"), "uncommitted\n"); // post-dispatch WIP -> dirty
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose();
 
-    const s2 = sup(dir, bin, worktreeRoot);
+    s2 = sup(dir, bin, worktreeRoot);
     assert.equal(s2.requestHandoff(laneName), true); // detached SIGTERM sent (ignored by the stub)
     assert.equal(alive(pid), true, "stub ignores TERM — still alive right after the drain request");
 
@@ -3985,9 +4312,10 @@ test("#63/#69: a lane already reclaim()'d must never also be finalized as .hando
     const probe = await s2.probe(laneName);
     assert.equal(probe.handoff, false, "a reclaimed lane must never be finalized as resumable");
     assert.ok(!existsSync(join(dir, `${laneName}.handoff.json`)), "no .handoff written");
-
-    s2.dispose();
   } finally {
+    killAnyRunningLanes(s1, s2, ...s1Children);
+    s2?.dispose();
+    s1?.dispose();
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }
@@ -3995,15 +4323,19 @@ test("#63/#69: a lane already reclaim()'d must never also be finalized as .hando
 
 test("#63 F1: a failure persisting handoff_requested onto running.json is swallowed — requestHandoff still returns true and the SIGTERM still lands (Codex second-opinion review, PR #67: it's called unguarded from the conductor's CEILING drain loop, which must never abort mid-tick)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s1: WorkerSupervisor | undefined;
+  let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
-    const s1 = sup(dir, bin);
+    s1 = sup(dir, bin);
     const { name } = await s1.dispatch({ number: 66, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
 
-    const s2 = sup(dir, bin);
+    s2 = sup(dir, bin);
     // Force the persist write to fail exactly like an ENOSPC/EACCES/EROFS would — stubbing
     // the private writeJsonAtomic is the most portable way to force this (a chmod-based
     // fixture would be a no-op when the test runs as root). requestHandoff must swallow it.
@@ -4013,7 +4345,7 @@ test("#63 F1: a failure persisting handoff_requested onto running.json is swallo
 
     let result: boolean | undefined;
     assert.doesNotThrow(() => {
-      result = s2.requestHandoff(name);
+      result = s2!.requestHandoff(name);
     });
     assert.equal(result, true, "SIGTERM still gets sent even though the persist write failed");
 
@@ -4024,24 +4356,29 @@ test("#63 F1: a failure persisting handoff_requested onto running.json is swallo
     // never landed, because the stubbed writeJsonAtomic threw instead of writing.
     const running = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8"));
     assert.notEqual(running.handoff_requested, true);
-
-    s2.dispose();
   } finally {
+    killAnyRunningLanes(s1, s2, ...s1Children);
+    s2?.dispose();
+    s1?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("#63 P2: requestHandoff's detached branch persists handoff_requested BEFORE sending the SIGTERM, not after (Codex second-opinion review, PR #67 — closes the gap where the engine could die between 'signal sent' and 'flag persisted', losing the very record the flag exists to survive)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s1: WorkerSupervisor | undefined;
+  let s2: WorkerSupervisor | undefined;
+  let s1Children: ChildProcess[] = [];
   try {
     const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
-    const s1 = sup(dir, bin);
+    s1 = sup(dir, bin);
     const { name } = await s1.dispatch({ number: 67, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
     s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
 
-    const s2 = sup(dir, bin);
+    s2 = sup(dir, bin);
     // A shared call-order log — wrap (not replace) the real private writeJsonAtomic/signalGroup
     // so the actual persist + actual SIGTERM still happen (this test also verifies the
     // end-to-end outcome), while recording which one ran first.
@@ -4071,9 +4408,10 @@ test("#63 P2: requestHandoff's detached branch persists handoff_requested BEFORE
 
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "SIGTERM still reached the detached process");
-
-    s2.dispose();
   } finally {
+    killAnyRunningLanes(s1, s2, ...s1Children);
+    s2?.dispose();
+    s1?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4373,6 +4711,7 @@ test("buildRenderPrompt: unknown {{var}} in the template throws at BUILD time, b
 
 test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals the rendered template file (fake supervisor)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const templatePath = join(dir, "e2e-worker.md");
     writeFileSync(templatePath, 'Do issue #{{issue.number}} ("{{issue.title}}"):\n{{issue.body}}');
@@ -4388,7 +4727,7 @@ test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals
       dir,
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nexit 0\n`,
     );
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: scfg,
       stateDir: dir,
@@ -4407,8 +4746,9 @@ test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals
       body: "wire promptFile through renderPrompt",
     });
     assert.ok(args.includes(expected), `expected the rendered template in the spawned argv, got:\n${args}`);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4556,21 +4896,24 @@ test("reapChildren (#668 gate② finding [1]): a mixed batch — a fresh lane ge
 
 test("WorkerSupervisor.reapAll (#668): no live lanes -> resolves to [] immediately, no-op", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const s = sup(dir, "claude"); // never dispatches -> this.lanes is empty
+    s = sup(dir, "claude"); // never dispatches -> this.lanes is empty
     assert.deepEqual(await s.reapAll(), []);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("WorkerSupervisor.reapAll (#668): a lane that hands off cleanly on SIGTERM is reaped WITHOUT ever needing SIGKILL — reap composes with graceful handoff instead of overriding it (AC5)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  let s: WorkerSupervisor | undefined;
   try {
     // Cooperative: catches SIGTERM and exits 0, exactly like an ordinary graceful handoff.
     const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 668, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before reap");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
@@ -4580,17 +4923,19 @@ test("WorkerSupervisor.reapAll (#668): a lane that hands off cleanly on SIGTERM 
 
     assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: false, confirmedDead: true }]);
     assert.equal(alive(pid), false, "the process group is actually dead, not just assumed");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("WorkerSupervisor.reapAll (#668): a lane that IGNORES SIGTERM is escalated to a whole-process-group SIGKILL, and group death is proven before reapAll resolves — AC3/AC4", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> only SIGKILL ends it
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 669, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM-ignoring trap before reap");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
@@ -4602,8 +4947,9 @@ test("WorkerSupervisor.reapAll (#668): a lane that IGNORES SIGTERM is escalated 
 
     assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: true, confirmedDead: true }]);
     assert.equal(alive(pid), false, "the whole process group (negative pid) is dead, not just the leader");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4615,9 +4961,10 @@ test("WorkerSupervisor.reapAll (#668 gate② finding [1]): a lane ALREADY mid-dr
   // `process.kill`, which is too fragile against this suite's own heavy concurrent real-child
   // usage. This test proves the REAL adapter still reaches the same end state end-to-end.
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> can ONLY die via reapAll's own SIGKILL
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 670, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM-ignoring trap before drain");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
@@ -4629,8 +4976,9 @@ test("WorkerSupervisor.reapAll (#668 gate② finding [1]): a lane ALREADY mid-dr
 
     assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: true, confirmedDead: true }]);
     assert.equal(alive(pid), false, "reapAll still reaps a lane an earlier drain already signaled");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4674,8 +5022,9 @@ function peekSupervisor(s: WorkerSupervisor): {
 
 test("WorkerSupervisor.reapAll (#668 r2[1]): a lane whose child is ALREADY dead at reapAll() time is never marked handoffRequested — the exact bookkeeping onExit reads to choose .handoff vs .done/.failed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const s = sup(dir, "claude"); // dispatch() never called — this.lanes is populated directly below
+    s = sup(dir, "claude"); // dispatch() never called — this.lanes is populated directly below
     // A REAL, detached, already-exited process group — confirmed dead via the SAME group check
     // reapAll's own isAlive() uses, so this is a genuine "already dead" fact, not a guessed pid.
     const trivial = spawn(mkStub(dir, "#!/usr/bin/env bash\nexit 0\n"), [], { detached: true, stdio: "ignore" });
@@ -4698,21 +5047,24 @@ test("WorkerSupervisor.reapAll (#668 r2[1]): a lane whose child is ALREADY dead 
       false,
       "an already-dead lane must never be marked handoffRequested — a later/pending onExit() must still see false and write .done/.failed honestly, never a fabricated .handoff",
     );
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("WorkerSupervisor.reapAll (#668 r2[1], gate② round 3 P2 rework — DISCRIMINATING mixed batch): in ONE reapAll() call, an alive+signaled lane's handoffRequested flips true while an already-dead lane's stays false — an outcome the pre-fix unconditional-set code (which flipped EVERY this.lanes entry's flag up front, before checking liveness) could never produce", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  let s: WorkerSupervisor | undefined;
+  let aliveChild: ChildProcess | undefined;
   try {
-    const s = sup(dir, "claude"); // dispatch() never called — both lanes are injected directly
+    s = sup(dir, "claude"); // dispatch() never called — both lanes are injected directly
 
     // Lane A: genuinely alive, cooperatively dies on SIGTERM (proves the flag DOES flip when a
     // real signal is actually sent — the positive half of the discrimination).
     const { bin: aliveBin, ready: aliveReady } = longRunningStub(dir, "trap 'exit 0' TERM\n");
-    const aliveChild = spawn(aliveBin, [], { detached: true, stdio: "ignore" });
+    aliveChild = spawn(aliveBin, [], { detached: true, stdio: "ignore" });
     await waitForFile(aliveReady, "lane-alive stub did not install its TERM trap");
     const aliveLane = { child: { pid: aliveChild.pid! }, handoffRequested: false };
 
@@ -4738,17 +5090,19 @@ test("WorkerSupervisor.reapAll (#668 r2[1], gate② round 3 P2 rework — DISCRI
     assert.equal(byName.get("lane-dead")?.alreadyDead, true);
     assert.equal(aliveLane.handoffRequested, true, "the genuinely alive, actually-signaled lane's flag DOES flip");
     assert.equal(deadLane.handoffRequested, false, "the already-dead, never-signaled lane's flag stays false — the differential proof");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s, aliveChild);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("WorkerSupervisor.reapAll (#668 r2[1], real end-to-end outcome integrity): a genuinely alive, reap-signaled lane still lands the REAL .handoff sentinel via a full dispatch()+onExit() round trip — the fix's mechanism produces the correct file, not just the correct in-memory flag", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n"); // cooperative graceful handoff
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 673, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before reap");
 
@@ -4758,8 +5112,9 @@ test("WorkerSupervisor.reapAll (#668 r2[1], real end-to-end outcome integrity): 
     await waitForFile(join(dir, `${name}.handoff.json`), "a genuinely alive, reap-signaled lane must land .handoff, not .done/.failed");
     assert.equal(existsSync(join(dir, `${name}.done.json`)), false);
     assert.equal(existsSync(join(dir, `${name}.failed.json`)), false);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4842,10 +5197,11 @@ function leaderExitStub(dir: string, descendantReadyFile: string, opts: { ignore
 
 test("WorkerSupervisor onExit (#668 round 8): a leader that exits ON ITS OWN while a live COOPERATIVE DESCENDANT shares its process group is reaped RIGHT THERE by the SINGLE SIGTERM alone — no escalation needed, no reapAll() call anywhere in this test, just onExit()'s own fire-and-forget signal", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const descendantReadyFile = join(dir, "descendant.ready");
     const bin = leaderExitStub(dir, descendantReadyFile); // cooperative — dies from the one SIGTERM after its own REAL internal delay
-    const s = sup(dir, bin); // real default sleep — the descendant's own internal delay is the timing source, not an injected seam
+    s = sup(dir, bin); // real default sleep — the descendant's own internal delay is the timing source, not an injected seam
     const { name } = await s.dispatch({ number: 675, title: "t", labels: [] });
     const leaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
 
@@ -4858,18 +5214,25 @@ test("WorkerSupervisor onExit (#668 round 8): a leader that exits ON ITS OWN whi
     // the whole job by itself (round 8: no SIGKILL escalation exists on this path at all). Bounded
     // wait (never a fixed sleep) for the descendant to actually die from the single signal.
     await waitFor(() => !groupAlive(leaderPid), "onExit's own single SIGTERM never actually killed the cooperative descendant");
-    s.dispose();
   } finally {
+    // killAnyRunningLanes(s) is a no-op here by construction (the LEADER's own ChildProcess handle
+    // already shows exitCode !== null the instant onExit() has run, which the waitFor above already
+    // waited for) — it's still called for the same reason every other site in this file does: this
+    // is a real detached leader whose descendant died from the plain SIGTERM above, so there is
+    // nothing left alive for either mechanism to reach.
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("WorkerSupervisor.reapAll (#668 round 8): an in-flight leader-exit reap (onExit()'s single SIGTERM already sent, the cooperative descendant still mid-death on its own real internal delay) is AWAITED by reapAll(), never abandoned — the group is confirmed dead by the time reapAll() resolves, and its outcome is included", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const descendantReadyFile = join(dir, "descendant.ready");
     const bin = leaderExitStub(dir, descendantReadyFile); // cooperative — its own REAL internal delay is the timing source here
-    const s = sup(dir, bin); // real default sleep — an artificial gate would race PAST the descendant's real delay every time (round 8's own lesson: instant-resolving sleep exhausts the WHOLE virtual grace budget in microseconds, never giving a real subprocess timer a chance to fire)
+    s = sup(dir, bin); // real default sleep — an artificial gate would race PAST the descendant's real delay every time (round 8's own lesson: instant-resolving sleep exhausts the WHOLE virtual grace budget in microseconds, never giving a real subprocess timer a chance to fire)
     const { name } = await s.dispatch({ number: 676, title: "t", labels: [] });
     const leaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
 
@@ -4896,14 +5259,16 @@ test("WorkerSupervisor.reapAll (#668 round 8): an in-flight leader-exit reap (on
       false,
       "the settled entry is removed, never left registered",
     );
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s); // no-op by construction — reapAll() above already confirmed group death
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is completely untouched by another lane's leader-exit reap — the new machinery never reaches beyond the exiting lane's own pgid", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const descendantReadyFile = join(dir, "descendant.ready");
     const healthyReadyFile = join(dir, "healthy.ready");
@@ -4930,7 +5295,7 @@ test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is
     // Real default sleep (no injected seam here — round 8's own lesson: an instant-resolving
     // sleep would exhaust the WHOLE virtual grace budget in microseconds, never giving the
     // leader-exit lane's cooperative descendant's own real internal delay a chance to fire).
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -4959,8 +5324,9 @@ test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is
     // catches up — a bounded poll, never an immediate assertion, is this suite's own established
     // way to observe that without asserting on any specific wall-clock duration.
     await waitFor(() => !alive(healthyPid), "sanity: reapAll() itself can still reach the healthy lane once actually asked to");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s); // no-op by construction — the healthy lane was already reaped to death above
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -4985,6 +5351,9 @@ test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is
 
 test("WorkerSupervisor.resume (#668 round 6 P1b, rebased round 8): a same-name respawn (fix-leg entry) while an EARLIER leg's leader-exit reap is still in flight WAITS for it — the old reap is never abandoned (it can SETTLE either way — confirmed dead or merely reported — the respawn gate only needs it to finish, not to succeed)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  let s: WorkerSupervisor | undefined;
+  let firstLeaderPid: number | undefined;
+  let name: string | undefined;
   try {
     const descendantReadyFile = join(dir, "descendant.ready");
     // TERM-ignoring on purpose: this test is about the RESPAWN GATE (does resume() wait for the
@@ -4994,7 +5363,7 @@ test("WorkerSupervisor.resume (#668 round 6 P1b, rebased round 8): a same-name r
     // real internal delay to race against.
     const bin = leaderExitStub(dir, descendantReadyFile, { ignoreTerm: true });
     const { sleep, release } = reapPollSleep({ held: true });
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -5005,9 +5374,9 @@ test("WorkerSupervisor.resume (#668 round 6 P1b, rebased round 8): a same-name r
       sleep,
     });
     const laneName = "lane-668-p1b-fixed";
-    const { name } = await s.dispatch({ number: 678, title: "t", labels: [] }, laneName);
+    ({ name } = await s.dispatch({ number: 678, title: "t", labels: [] }, laneName));
     assert.equal(name, laneName);
-    const firstLeaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    firstLeaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
 
     await waitForFile(join(dir, `${name}.done.json`), "the first leg never exited / onExit never ran");
     assert.equal(groupAlive(firstLeaderPid), true, "sanity: the first leg's descendant is still alive — its reap hasn't been released yet");
@@ -5049,24 +5418,28 @@ test("WorkerSupervisor.resume (#668 round 6 P1b, rebased round 8): a same-name r
       true,
       "round 8: an ignore-TERM descendant is reported, never force-killed — it's still alive, by design",
     );
-
+  } finally {
     // Clean up directly with SIGKILL — round 8 deliberately leaves an ignore-TERM descendant for
     // an operator, but THIS test still must not leak live processes. Both the first leg's own
     // (still-alive) descendant AND whatever the resumed (second) leg's own leader-exit reap left
-    // behind (same ignore-TERM shape, same bin) need it.
-    try {
-      process.kill(-firstLeaderPid, "SIGKILL");
-    } catch {
-      /* already gone */
+    // behind (same ignore-TERM shape, same bin) need it. In `finally` (not the try body) so a
+    // failed assertion above still leaves neither process behind.
+    if (typeof firstLeaderPid === "number") {
+      try {
+        process.kill(-firstLeaderPid, "SIGKILL");
+      } catch {
+        /* already gone */
+      }
     }
-    try {
-      const secondRunning = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")) as { wrapper_pid?: number };
-      if (typeof secondRunning.wrapper_pid === "number") process.kill(-secondRunning.wrapper_pid, "SIGKILL");
-    } catch {
-      /* running.json already gone (its own onExit already ran), or the pgid is already gone */
+    if (name) {
+      try {
+        const secondRunning = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")) as { wrapper_pid?: number };
+        if (typeof secondRunning.wrapper_pid === "number") process.kill(-secondRunning.wrapper_pid, "SIGKILL");
+      } catch {
+        /* running.json already gone (its own onExit already ran), or the pgid is already gone */
+      }
     }
-    s.dispose();
-  } finally {
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5104,8 +5477,9 @@ test("WorkerSupervisor.resume (#668 round 6 P1b, RED-BEFORE differential): with 
 
 test("WorkerSupervisor.reapAll (#668 round 6 P1b): TWO in-flight leader-exit reaps registered under the SAME lane name (different pids/keys) are BOTH awaited — reapAll() never returns early on just the first, and its outcome set includes both", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const s = sup(dir, "claude"); // dispatch() never called — both reaps are injected directly
+    s = sup(dir, "claude"); // dispatch() never called — both reaps are injected directly
     const name = "lane-668-p1b-two";
     let resolve1!: (o: ReapOutcome) => void;
     let resolve2!: (o: ReapOutcome) => void;
@@ -5147,8 +5521,9 @@ test("WorkerSupervisor.reapAll (#668 round 6 P1b): TWO in-flight leader-exit rea
       2,
       "reapAll()'s outcome set must include BOTH same-name reaps, never just the latest under a collapsed key",
     );
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5290,22 +5665,23 @@ test("WorkerSupervisor onExit + reapAll (#668 round 8, real end-to-end): a leade
       true,
       "the descendant is left completely alive — reported, never force-killed, exactly as round 8 specifies",
     );
-    s.dispose();
   } finally {
     try {
       if (leaderPid !== -1) process.kill(-leaderPid, "SIGKILL"); // test cleanup only — never part of production behavior
     } catch {
       /* already gone */
     }
+    s.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("WorkerSupervisor.reapAll (#668 round 8, unchanged-behavior pin): a lane STILL IN this.lanes (leader not yet waitpid'd) that IGNORES SIGTERM is STILL escalated to a whole-process-group SIGKILL — this.lanes' own full escalation path is untouched by round 8's descendant-path change", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> only SIGKILL ends it
-    const s = sup(dir, bin);
+    s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 680, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM-ignoring trap before reap");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
@@ -5319,8 +5695,9 @@ test("WorkerSupervisor.reapAll (#668 round 8, unchanged-behavior pin): a lane ST
       false,
       "this.lanes' own path still escalates to SIGKILL and confirms death — round 8 did not touch this path at all",
     );
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5354,13 +5731,14 @@ function fakeWorkerProxyHandle(over: Partial<{ mcpConfigJson: string; toolNames:
 
 test("dispatch: a proxy opt mints a handle, widens --allowedTools with the handle's own tool names, and injects --mcp-config inline JSON", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(
       dir,
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -5394,21 +5772,23 @@ test("dispatch: a proxy opt mints a handle, widens --allowedTools with the handl
     for (let i2 = 0; i2 < 400 && !existsSync(join(dir, `${name}.done.json`)); i2++) await sleep(20);
     for (let i2 = 0; i2 < 400 && calls.stopped === 0; i2++) await sleep(20);
     assert.equal(calls.stopped, 1, "the proxy is torn down once the lane's process exits (onExit)");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("dispatch: no proxy opt (every ordinary caller today) -> no --mcp-config flag, --allowedTools unchanged — byte-identical to pre-#244 behavior", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(
       dir,
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -5423,21 +5803,23 @@ test("dispatch: no proxy opt (every ordinary caller today) -> no --mcp-config fl
     assert.doesNotMatch(args, /--mcp-config/);
     assert.doesNotMatch(args, /mcp__forge__/);
     assert.match(args, /Bash\(gh \*\)/, "the code-producing worker's own default --allowedTools is unchanged");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("dispatch (#639): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reaches argv (fresh dispatch is YES per the injection policy table)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(
       dir,
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -5453,21 +5835,23 @@ test("dispatch (#639): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reac
     const i = args.indexOf("--plugin-dir");
     assert.ok(i !== -1, "--plugin-dir must reach argv when WorkerDeps.skillsPluginDir is set");
     assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("dispatch (#639): WorkerDeps.skillsPluginDir UNSET (today's default, roles.skills.enabled: false) -> no --plugin-dir flag at all — the disabled-path byte-identical-argv regression", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(
       dir,
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -5480,18 +5864,20 @@ test("dispatch (#639): WorkerDeps.skillsPluginDir UNSET (today's default, roles.
     await waitForFile(join(dir, "args.seen"), "ordinary dispatch argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     assert.doesNotMatch(args, /--plugin-dir/);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("dispatch: a proxy mint FAILURE is non-fatal — the lane still dispatches and runs, unattached (mirrors peripheral.ts's RoleRunner stance)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -5509,17 +5895,19 @@ test("dispatch: a proxy mint FAILURE is non-fatal — the lane still dispatches 
     });
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.done.json`)), "lane still completes despite the mint failure");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("dispatch: a spawn failure with a proxy attached still tears down the minted proxy (never leaks a live listener/token)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -5530,7 +5918,7 @@ test("dispatch: a spawn failure with a proxy attached still tears down the minte
     const { calls, handle } = fakeWorkerProxyHandle();
     await assert.rejects(
       () =>
-        s.dispatch({ number: 1, title: "t", labels: [] }, "lane-bad-proxy", {
+        s!.dispatch({ number: 1, title: "t", labels: [] }, "lane-bad-proxy", {
           proxy: {
             mint: async () => {
               calls.minted++;
@@ -5542,8 +5930,9 @@ test("dispatch: a spawn failure with a proxy attached still tears down the minte
     );
     assert.equal(calls.minted, 1);
     assert.equal(calls.stopped, 1, "the proxy is torn down even though dispatch() THREW rather than returned");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5554,9 +5943,10 @@ test("dispatch: a spawn failure with a proxy attached still tears down the minte
 // every time a credentialFree leg fails to spawn.
 test("dispatch: a spawn failure on a credentialFree leg (mint succeeded, spawn failed) removes the GH_CONFIG_DIR scratch directory it already created", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -5567,15 +5957,16 @@ test("dispatch: a spawn failure on a credentialFree leg (mint succeeded, spawn f
     const { handle } = fakeWorkerProxyHandle();
     await assert.rejects(
       () =>
-        s.dispatch({ number: 1, title: "t", labels: [] }, "lane-credfree-spawnfail", {
+        s!.dispatch({ number: 1, title: "t", labels: [] }, "lane-credfree-spawnfail", {
           proxy: { mint: async () => handle as never, credentialFree: true },
         }),
       /spawn failed/i,
     );
     const ghConfigDir = join(dir, "lane-credfree-spawnfail.gh-config-empty");
     assert.ok(!existsSync(ghConfigDir), "GH_CONFIG_DIR scratch directory must not survive a spawn failure");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5605,6 +5996,7 @@ test("dispatch: credentialFree opt strips forge/git credential env vars and seve
     ANTHROPIC_API_KEY: "preserved-anthropic-auth",
   } as const;
   const previous = Object.fromEntries(Object.keys(poisoned).map((key) => [key, process.env[key]]));
+  let s: WorkerSupervisor | undefined;
   try {
     Object.assign(process.env, poisoned);
     const hook = mkHook(dir);
@@ -5612,7 +6004,7 @@ test("dispatch: credentialFree opt strips forge/git credential env vars and seve
       dir,
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen.tmp")}"\nmv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\nfor _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -5676,8 +6068,9 @@ test("dispatch: credentialFree opt strips forge/git credential env vars and seve
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     for (let i = 0; i < 400 && existsSync(ghConfigDir); i++) await sleep(20);
     assert.ok(!existsSync(ghConfigDir), "GH_CONFIG_DIR scratch directory must be removed once the lane exits (onExit)");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -5882,6 +6275,7 @@ test("dispatch: worker.deployKeyPath configured + preflight OK -> L1 active — 
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const previous = { GH_TOKEN: process.env.GH_TOKEN, GITHUB_TOKEN: process.env.GITHUB_TOKEN };
   const release = join(dir, "release-l1-dispatch");
+  let s: WorkerSupervisor | undefined;
   try {
     process.env.GH_TOKEN = "poison-gh-token";
     process.env.GITHUB_TOKEN = "poison-github-token";
@@ -5895,7 +6289,7 @@ test("dispatch: worker.deployKeyPath configured + preflight OK -> L1 active — 
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen.tmp")}"\nmv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\nfor _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606");
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: deployKeyCfg,
       stateDir: dir,
@@ -5930,8 +6324,9 @@ test("dispatch: worker.deployKeyPath configured + preflight OK -> L1 active — 
     assert.match(allowedTools, /Bash\(git \*\)/, "git stays — L1 pushes via git, not gh");
     writeFileSync(release, "");
     for (let i = 0; i < 400 && !existsSync(join(dir, "lane-l1-dispatch.done.json")); i++) await sleep(20);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     if (previous.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previous.GH_TOKEN;
     if (previous.GITHUB_TOKEN === undefined) delete process.env.GITHUB_TOKEN;
@@ -5943,6 +6338,7 @@ test("dispatch: worker.deployKeyPath configured + preflight OK -> L1 active — 
 test("dispatch: worker.deployKeyPath UNSET -> L0, byte-identical to today (reverse test) — GH_TOKEN inherited, Bash(gh *) present, the injected probeDeployKeySsh dep is never even called", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const previous = { GH_TOKEN: process.env.GH_TOKEN };
+  let s: WorkerSupervisor | undefined;
   try {
     process.env.GH_TOKEN = "real-token-606";
     const hook = mkHook(dir);
@@ -5951,7 +6347,7 @@ test("dispatch: worker.deployKeyPath UNSET -> L0, byte-identical to today (rever
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen.tmp")}"\nmv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     let probeCalled = false;
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg, // no worker.deployKeyPath set — the shared, default test cfg
       stateDir: dir,
@@ -5976,8 +6372,9 @@ test("dispatch: worker.deployKeyPath UNSET -> L0, byte-identical to today (rever
     const allowedTools = argLines[argLines.indexOf("--allowedTools") + 1]!;
     assert.match(allowedTools, /Bash\(gh \*\)/, "L0 keeps Bash(gh *) — unchanged from today");
     assert.equal(probeCalled, false, "deployKeyPath unset -> resolveDeployKeyEnv must short-circuit before ever probing");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     if (previous.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previous.GH_TOKEN;
     rmSync(dir, { recursive: true, force: true });
@@ -5986,12 +6383,13 @@ test("dispatch: worker.deployKeyPath UNSET -> L0, byte-identical to today (rever
 
 test("dispatch (#554 pattern): deployKeyPath set but preflight auth fails -> guidance-carrying WARN naming the re-provision fix, dispatch continues at L0 (never wedges)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const logs: string[] = [];
     const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606-preflight-fail");
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: deployKeyCfg,
       stateDir: dir,
@@ -6008,21 +6406,23 @@ test("dispatch (#554 pattern): deployKeyPath set but preflight auth fails -> gui
     assert.match(warn, /Permission denied \(publickey\)/);
     assert.match(warn, /sapwood init/, "the WARN must name the exact re-provision fix");
     assert.match(warn, /L0/);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("dispatch: the deploy-key preflight probe is memoized — TWO dispatches share ONE probe call and ONE WARN log line, never re-probed per lane", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     const logs: string[] = [];
     let probeCount = 0;
     const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606-memo");
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: deployKeyCfg,
       stateDir: dir,
@@ -6040,18 +6440,82 @@ test("dispatch: the deploy-key preflight probe is memoized — TWO dispatches sh
     await waitFor(() => existsSync(join(dir, "lane-l1-memo-2.done.json")), "second dispatch did not complete");
     assert.equal(probeCount, 1, "the SSH-auth preflight must run at most once per supervisor life");
     assert.equal(logs.filter((l) => l.includes("preflight failed")).length, 1, "the WARN must fire exactly once, not once per dispatch");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("checkDeployKeyPreflight: unset deployKeyPath -> undefined, never probes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    let probeCalled = false;
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg, // no worker.deployKeyPath set
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      probeDeployKeySsh: async () => {
+        probeCalled = true;
+        return { ok: true };
+      },
+    });
+    const result = await s.checkDeployKeyPreflight();
+    assert.equal(result, undefined);
+    assert.equal(probeCalled, false);
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("checkDeployKeyPreflight (#671): seeds the SAME memoized probe a later dispatch() reuses — startup + first dispatch cost at most one SSH preflight total", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    let probeCount = 0;
+    const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-671-startup");
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg: deployKeyCfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      probeDeployKeySsh: async () => {
+        probeCount++;
+        return { ok: true };
+      },
+    });
+    const startupResult = await s.checkDeployKeyPreflight();
+    assert.deepEqual(startupResult, { ok: true });
+    await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-startup-seeded");
+    await waitFor(() => existsSync(join(dir, "lane-l1-startup-seeded.done.json")), "dispatch did not complete");
+    assert.equal(probeCount, 1, "the startup check's probe must be the SAME memoized one dispatch() reuses");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume: worker.deployKeyPath configured + preflight OK -> L1 active on a resumed leg too (same env/tool-narrowing as dispatch)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  let s2: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606-resume");
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: deployKeyCfg,
       stateDir: dir,
@@ -6067,7 +6531,7 @@ test("resume: worker.deployKeyPath configured + preflight OK -> L1 active on a r
       dir,
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args2.seen.tmp")}"\nmv "${join(dir, "args2.seen.tmp")}" "${join(dir, "args2.seen")}"\nenv > "${join(dir, "env2.seen.tmp")}"\nmv "${join(dir, "env2.seen.tmp")}" "${join(dir, "env2.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
-    const s2 = new WorkerSupervisor({
+    s2 = new WorkerSupervisor({
       now: realClock,
       cfg: deployKeyCfg,
       stateDir: dir,
@@ -6099,8 +6563,10 @@ test("resume: worker.deployKeyPath configured + preflight OK -> L1 active on a r
     const allowedTools = argLines[argLines.indexOf("--allowedTools") + 1]!;
     assert.doesNotMatch(allowedTools, /Bash\(gh \*\)/, "L1 resume must drop Bash(gh *) from the grant");
     assert.match(allowedTools, /Bash\(git \*\)/);
-    s2.dispose();
   } finally {
+    killAnyRunningLanes(s, s2);
+    s?.dispose();
+    s2?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6193,10 +6659,11 @@ test("WORKER_DISALLOWED_TOOLS: Agent/Task are NOT denied — the coding worker k
 // degraded (distinct from the non-credentialFree mint-failure case above, which stays non-fatal).
 test("dispatch: credentialFree + mint FAILURE refuses the dispatch outright (fail-closed) — no lane created, no sentinel written", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -6207,7 +6674,7 @@ test("dispatch: credentialFree + mint FAILURE refuses the dispatch outright (fai
     });
     await assert.rejects(
       () =>
-        s.dispatch({ number: 1, title: "t", labels: [] }, "lane-credfree-mintfail", {
+        s!.dispatch({ number: 1, title: "t", labels: [] }, "lane-credfree-mintfail", {
           proxy: {
             mint: async () => {
               throw new Error("mint failed");
@@ -6219,8 +6686,9 @@ test("dispatch: credentialFree + mint FAILURE refuses the dispatch outright (fai
     );
     assert.ok(!existsSync(join(dir, "lane-credfree-mintfail.jsonl")), "no jsonl left behind for a refused dispatch");
     assert.ok(!existsSync(join(dir, "lane-credfree-mintfail.running.json")), "no running marker left behind for a refused dispatch");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6231,10 +6699,11 @@ test("dispatch: credentialFree + mint FAILURE refuses the dispatch outright (fai
 test("dispatch: a mint failure records a durable 'proxy-mint-failed' event (WorkerDeps.state) — both the non-fatal and the fail-closed branch", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const state = new State(":memory:");
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -6254,7 +6723,7 @@ test("dispatch: a mint failure records a durable 'proxy-mint-failed' event (Work
     });
     // Branch 2: fail-closed (credentialFree) — dispatch is refused.
     await assert.rejects(() =>
-      s.dispatch({ number: 2, title: "t", labels: [] }, "lane-mintfail-failclosed", {
+      s!.dispatch({ number: 2, title: "t", labels: [] }, "lane-mintfail-failclosed", {
         proxy: {
           mint: async () => {
             throw new Error("mint failed #2");
@@ -6272,8 +6741,9 @@ test("dispatch: a mint failure records a durable 'proxy-mint-failed' event (Work
       assert.equal(payload.role, "worker");
       assert.ok(payload.reason.includes("mint failed"));
     }
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     state.close();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -6282,6 +6752,7 @@ test("dispatch: a mint failure records a durable 'proxy-mint-failed' event (Work
 test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheritance — a worker leg legitimately keeps GH_TOKEN unless it explicitly opts into credentialFree", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const previousGhToken = process.env.GH_TOKEN;
+  let s: WorkerSupervisor | undefined;
   try {
     process.env.GH_TOKEN = "worker-forge-token";
     const hook = mkHook(dir);
@@ -6289,7 +6760,7 @@ test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheri
       dir,
       `#!/usr/bin/env bash\necho "$GH_TOKEN" > "${join(dir, "token.seen.tmp")}"\nmv "${join(dir, "token.seen.tmp")}" "${join(dir, "token.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -6302,8 +6773,9 @@ test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheri
     await s.dispatch({ number: 1, title: "t", labels: [] }, undefined, { proxy: { mint: async () => handle as never } });
     await waitForFile(join(dir, "token.seen"), "inherited worker token was not published");
     assert.equal(readFileSync(join(dir, "token.seen"), "utf8").trim(), "worker-forge-token");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     if (previousGhToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previousGhToken;
     rmSync(dir, { recursive: true, force: true });
@@ -6316,6 +6788,7 @@ test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheri
 test("dispatch: a worker leg records a ContextManifest fingerprint via WorkerDeps.state.recordContextManifest", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const state = new State(":memory:");
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const initLine = JSON.stringify({
@@ -6327,7 +6800,7 @@ test("dispatch: a worker leg records a ContextManifest fingerprint via WorkerDep
       mcp_servers: [{ name: "server-filesystem", status: "pending" }],
     });
     const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${initLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -6366,8 +6839,9 @@ test("dispatch: a worker leg records a ContextManifest fingerprint via WorkerDep
     assert.equal(manifest.worktree.dirtyBasis, "worktree-missing");
     assert.equal(manifest.worktree.dirty, true);
     assert.equal(manifest.captureBasis, "init-observed");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     state.close();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -6376,12 +6850,18 @@ test("dispatch: a worker leg records a ContextManifest fingerprint via WorkerDep
 test("resume: a resumed leg's ContextManifest OVERWRITES the prior leg's row under the same (lane-name-keyed) identity", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const state = new State(":memory:");
+  let s: WorkerSupervisor | undefined;
   try {
-    const { s, name } = await mkHandoffLane(dir, `  echo '{"type":"system","subtype":"init","model":"resumed-model"}'\n  ${RESULT_LINE}`, {
-      state,
-      preSpawnCaptureTimeoutMs: 2_000,
-      preSpawnCapturePollMs: 20,
-    });
+    const { s: sLane, name } = await mkHandoffLane(
+      dir,
+      `  echo '{"type":"system","subtype":"init","model":"resumed-model"}'\n  ${RESULT_LINE}`,
+      {
+        state,
+        preSpawnCaptureTimeoutMs: 2_000,
+        preSpawnCapturePollMs: 20,
+      },
+    );
+    s = sLane;
     await s.resume({ number: 9, title: "t", labels: [] }, name);
     let recorded: { recordedAt: string; json: string } | undefined;
     for (let i = 0; i < 200 && !recorded; i++) {
@@ -6390,8 +6870,9 @@ test("resume: a resumed leg's ContextManifest OVERWRITES the prior leg's row und
     }
     assert.ok(recorded, "expected a context_manifests row for the resumed lane");
     assert.equal(JSON.parse(recorded!.json).model, "resumed-model");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     state.close();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -6451,11 +6932,13 @@ const RESULT_LINE =
 
 test("resume: a proxy opt mints a handle, widens --allowedTools with the handle's own tool names, and injects --mcp-config inline JSON", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const { s, name } = await mkHandoffLane(
+    const { s: sLane, name } = await mkHandoffLane(
       dir,
       `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`,
     );
+    s = sLane;
     const { calls, handle } = fakeWorkerProxyHandle();
     const resumed = await s.resume({ number: 9, title: "t", labels: [] }, name, {
       proxy: {
@@ -6483,34 +6966,39 @@ test("resume: a proxy opt mints a handle, widens --allowedTools with the handle'
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     for (let i = 0; i < 400 && calls.stopped === 0; i++) await sleep(20);
     assert.equal(calls.stopped, 1, "the proxy is torn down once the resumed lane's process exits (onExit)");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume (#639): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reaches the RESUMED leg's argv too (resume/fix legs are YES per the injection policy table)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const { s, name } = await mkHandoffLane(
+    const { s: sLane, name } = await mkHandoffLane(
       dir,
       `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`,
       { skillsPluginDir: "/data/generated/role-skills/deadbeef" },
     );
+    s = sLane;
     await s.resume({ number: 9, title: "t", labels: [] }, name);
     await waitForFile(join(dir, "args.seen"), "skills-plugin resume argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8").trim().split("\n");
     const i = args.indexOf("--plugin-dir");
     assert.ok(i !== -1, "--plugin-dir must reach the resumed leg's argv too");
     assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume (#639 gate② round 1): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reaches a genuine FIX-ENTRY resumed leg's argv too (opts.sessionId, no .handoff sentinel — mirrors the A1 fix-leg-entry test above, the gate found the #639 coverage above only exercised ordinary handoff-resume)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(
@@ -6526,7 +7014,7 @@ test("resume (#639 gate② round 1): WorkerDeps.skillsPluginDir set -> --plugin-
         "exit 0",
       ].join("\n"),
     );
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -6557,54 +7045,63 @@ test("resume (#639 gate② round 1): WorkerDeps.skillsPluginDir set -> --plugin-
     assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
 
     for (let i2 = 0; i2 < 400 && !existsSync(join(dir, `${name}.done.json`)); i2++) await sleep(20);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume: opts.prompt REPLACES the ordinary issue-rendered prompt — the fix leg's own fix instruction — and is the exact string passed to claude -p", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const { s, name } = await mkHandoffLane(
+    const { s: sLane, name } = await mkHandoffLane(
       dir,
       `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`,
     );
+    s = sLane;
     await s.resume({ number: 9, title: "t", labels: [] }, name, { prompt: "fix-leg: address PR #42's review findings" });
     await waitForFile(join(dir, "args.seen"), "prompt-override resume argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8").trim().split("\n");
     const promptIdx = args.indexOf("-p");
     assert.equal(args[promptIdx + 1], "fix-leg: address PR #42's review findings");
     assert.ok(!args.includes("issue-rendered-prompt"), "the ordinary renderPrompt output must not appear when opts.prompt overrides it");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume: no proxy/prompt opt -> byte-identical to pre-#245 behavior (renderPrompt output, no --mcp-config)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const { s, name } = await mkHandoffLane(
+    const { s: sLane, name } = await mkHandoffLane(
       dir,
       `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`,
     );
+    s = sLane;
     await s.resume({ number: 9, title: "t", labels: [] }, name);
     await waitForFile(join(dir, "args.seen"), "ordinary resume argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     assert.doesNotMatch(args, /--mcp-config/);
     assert.doesNotMatch(args, /mcp__forge__/);
     assert.match(args, /issue-rendered-prompt/);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume: a proxy mint FAILURE is non-fatal — the resumed leg still runs, unattached", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const { s, name } = await mkHandoffLane(dir, `  ${RESULT_LINE}`);
+    const { s: sLane, name } = await mkHandoffLane(dir, `  ${RESULT_LINE}`);
+    s = sLane;
     await s.resume({ number: 9, title: "t", labels: [] }, name, {
       proxy: {
         mint: async () => {
@@ -6614,20 +7111,23 @@ test("resume: a proxy mint FAILURE is non-fatal — the resumed leg still runs, 
     });
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.done.json`)), "resumed leg still completes despite the mint failure");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume: credentialFree + mint FAILURE refuses the resume outright (fail-closed) — .handoff sentinel and prior jsonl are left INTACT (never destroyed, unlike dispatch()'s fresh-lane cleanup)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const { s, name } = await mkHandoffLane(dir, `  ${RESULT_LINE}`);
+    const { s: sLane, name } = await mkHandoffLane(dir, `  ${RESULT_LINE}`);
+    s = sLane;
     const priorJsonl = readFileSync(join(dir, `${name}.jsonl`), "utf8");
     await assert.rejects(
       () =>
-        s.resume({ number: 9, title: "t", labels: [] }, name, {
+        s!.resume({ number: 9, title: "t", labels: [] }, name, {
           proxy: {
             mint: async () => {
               throw new Error("mint failed");
@@ -6642,8 +7142,9 @@ test("resume: credentialFree + mint FAILURE refuses the resume outright (fail-cl
     // A genuine retry (no credentialFree, or a working mint) must still be possible afterward.
     const retried = await s.resume({ number: 9, title: "t", labels: [] }, name);
     assert.equal(retried.name, name);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6652,12 +7153,14 @@ test("resume: credentialFree strips forge/git credential env vars and narrows --
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const release = join(dir, "release-resumed-stub");
   const previousGhToken = process.env.GH_TOKEN;
+  let s: WorkerSupervisor | undefined;
   try {
     process.env.GH_TOKEN = "poison-gh-token";
-    const { s, name } = await mkHandoffLane(
+    const { s: sLane, name } = await mkHandoffLane(
       dir,
       `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  env > "${join(dir, "env.seen.tmp")}"\n  mv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\n  for _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done\n  ${RESULT_LINE}`,
     );
+    s = sLane;
     const { handle } = fakeWorkerProxyHandle();
     await s.resume({ number: 9, title: "t", labels: [] }, name, { proxy: { mint: async () => handle as never, credentialFree: true } });
     await waitForFile(join(dir, "env.seen"), "credential-free resume env was not published");
@@ -6685,8 +7188,9 @@ test("resume: credentialFree strips forge/git credential env vars and narrows --
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     for (let i = 0; i < 400 && existsSync(ghConfigDir); i++) await sleep(20);
     assert.ok(!existsSync(ghConfigDir), "GH_CONFIG_DIR scratch directory is cleaned up once the lane exits");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     if (previousGhToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previousGhToken;
     rmSync(dir, { recursive: true, force: true });
@@ -6695,19 +7199,22 @@ test("resume: credentialFree strips forge/git credential env vars and narrows --
 
 test("resume: a non-credentialFree proxy attachment must NOT emit --strict-mcp-config — the seal is scoped to credentialFree alone", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const { s, name } = await mkHandoffLane(
+    const { s: sLane, name } = await mkHandoffLane(
       dir,
       `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`,
     );
+    s = sLane;
     const { handle } = fakeWorkerProxyHandle();
     await s.resume({ number: 9, title: "t", labels: [] }, name, { proxy: { mint: async () => handle as never } });
     await waitForFile(join(dir, "args.seen"), "resume argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     assert.ok(!args.trim().split("\n").includes("--strict-mcp-config"), "non-credentialFree resume must not emit --strict-mcp-config");
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6715,6 +7222,7 @@ test("resume: a non-credentialFree proxy attachment must NOT emit --strict-mcp-c
 test("resume: a mint failure records a durable 'proxy-mint-failed' event (WorkerDeps.state) — both the non-fatal and the fail-closed branch", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const state = new State(":memory:");
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const ready = join(dir, "stub-ready");
@@ -6731,7 +7239,7 @@ test("resume: a mint failure records a durable 'proxy-mint-failed' event (Worker
         "",
       ].join("\n"),
     );
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -6759,7 +7267,7 @@ test("resume: a mint failure records a durable 'proxy-mint-failed' event (Worker
     s.requestHandoff(name2);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name2}.handoff.json`)); i++) await sleep(20);
     await assert.rejects(() =>
-      s.resume({ number: 2, title: "t", labels: [] }, name2, {
+      s!.resume({ number: 2, title: "t", labels: [] }, name2, {
         proxy: {
           mint: async () => {
             throw new Error("mint failed #2");
@@ -6776,8 +7284,9 @@ test("resume: a mint failure records a durable 'proxy-mint-failed' event (Worker
       assert.equal(payload.role, "worker");
       assert.ok(payload.reason.includes("mint failed"));
     }
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     state.close();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -6793,6 +7302,7 @@ test("resume: a mint failure records a durable 'proxy-mint-failed' event (Worker
 
 test("resume: FIX-LEG ENTRY (opts.sessionId, no .handoff sentinel) — real WorkerSupervisor integration: dispatch -> done (driving precondition) -> resume -> a second leg reusing the SAME session (A1)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(
@@ -6808,7 +7318,7 @@ test("resume: FIX-LEG ENTRY (opts.sessionId, no .handoff sentinel) — real Work
         "exit 0",
       ].join("\n"),
     );
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -6846,8 +7356,9 @@ test("resume: FIX-LEG ENTRY (opts.sessionId, no .handoff sentinel) — real Work
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     const probe = await s.probe(name);
     assert.equal(probe.done, true, "the fix leg reaches its own fresh terminal sentinel");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6867,6 +7378,7 @@ test("resume: FIX-LEG ENTRY (opts.sessionId+prompt) WITH credentialFree AND work
   // (onExit removes it as soon as the child exits; same release-gate pattern the credentialFree
   // tests above already use).
   const release = join(dir, "release-fix-p14");
+  let s: WorkerSupervisor | undefined;
   try {
     process.env.GH_TOKEN = "poison-gh-token-p14";
     const hook = mkHook(dir);
@@ -6887,7 +7399,7 @@ test("resume: FIX-LEG ENTRY (opts.sessionId+prompt) WITH credentialFree AND work
       ].join("\n"),
     );
     const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606-p14");
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg: deployKeyCfg,
       stateDir: dir,
@@ -6931,8 +7443,9 @@ test("resume: FIX-LEG ENTRY (opts.sessionId+prompt) WITH credentialFree AND work
 
     writeFileSync(release, "");
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     if (previousGhToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previousGhToken;
     rmSync(dir, { recursive: true, force: true });
@@ -6941,10 +7454,11 @@ test("resume: FIX-LEG ENTRY (opts.sessionId+prompt) WITH credentialFree AND work
 
 test("resume: fix-leg entry fails closed with NO terminal sentinel at all (never starts a fix leg with no prior-leg evidence)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -6953,21 +7467,23 @@ test("resume: fix-leg entry fails closed with NO terminal sentinel at all (never
       guardHookPath: hook,
     });
     await assert.rejects(
-      () => s.resume({ number: 1, title: "t", labels: [] }, "lane-never-existed", { sessionId: "sess-x", prompt: "fix it" }),
+      () => s!.resume({ number: 1, title: "t", labels: [] }, "lane-never-existed", { sessionId: "sess-x", prompt: "fix it" }),
       /no done\/failed terminal sentinel/i,
     );
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume: fix-leg entry fails closed when opts.sessionId is set but opts.prompt is missing (caller bug, not a runtime condition)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -6976,11 +7492,12 @@ test("resume: fix-leg entry fails closed when opts.sessionId is set but opts.pro
       guardHookPath: hook,
     });
     await assert.rejects(
-      () => s.resume({ number: 1, title: "t", labels: [] }, "lane-x", { sessionId: "sess-x" }),
+      () => s!.resume({ number: 1, title: "t", labels: [] }, "lane-x", { sessionId: "sess-x" }),
       /opts\.sessionId .* requires opts\.prompt/i,
     );
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -6990,8 +7507,10 @@ test("resume: fix-leg entry fails closed when opts.sessionId is set but opts.pro
 // GH_CONFIG_DIR already created — not just a credentialFree mint-failure's own throw.
 test("resume: a failure AFTER a successful mint (intent-write failure) tears down the minted proxy and removes any created GH_CONFIG_DIR (A4)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
-    const { s, name } = await mkHandoffLane(dir, `  ${RESULT_LINE}`);
+    const { s: sLane, name } = await mkHandoffLane(dir, `  ${RESULT_LINE}`);
+    s = sLane;
     const runningPath = join(dir, `${name}.running.json`);
     // Force writeJsonAtomic's internal rename to fail deterministically: pre-create the EXACT
     // tmp path it will try to write to as a DIRECTORY (EISDIR on writeFileSync) — no reliance
@@ -6999,7 +7518,7 @@ test("resume: a failure AFTER a successful mint (intent-write failure) tears dow
     mkdirSync(`${runningPath}.tmp.${process.pid}`, { recursive: true });
     const { calls, handle } = fakeWorkerProxyHandle();
     await assert.rejects(() =>
-      s.resume({ number: 9, title: "t", labels: [] }, name, {
+      s!.resume({ number: 9, title: "t", labels: [] }, name, {
         proxy: {
           mint: async () => {
             calls.minted++;
@@ -7013,8 +7532,9 @@ test("resume: a failure AFTER a successful mint (intent-write failure) tears dow
     assert.equal(calls.stopped, 1, "A4: the minted proxy must be torn down even though the failure happened AFTER mint, not at mint time");
     const ghConfigDir = join(dir, `${name}.gh-config-empty`);
     assert.ok(!existsSync(ghConfigDir), "A4: the GH_CONFIG_DIR scratch directory created before the intent-write failure must be removed");
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -7028,6 +7548,7 @@ test("resume: a failure AFTER a successful mint (intent-write failure) tears dow
 
 test("resume: FIX-LEG ENTRY consumes the stale prior-leg terminal sentinel on spawn confirmation — a live fix child is never mistaken for already-terminal (B1)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(
@@ -7041,7 +7562,7 @@ test("resume: FIX-LEG ENTRY consumes the stale prior-leg terminal sentinel on sp
         RESULT_LINE,
       ].join("\n"),
     );
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -7060,18 +7581,21 @@ test("resume: FIX-LEG ENTRY consumes the stale prior-leg terminal sentinel on sp
     const probe = await s.probe(name);
     assert.equal(probe.done, false, "a live, still-sleeping fix child must never be reported done via a stale sentinel");
     await s.reclaim(name);
-    s.dispose();
   } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("resume: fix-leg entry does NOT remove the stale terminal sentinel when the spawn attempt itself fails — the next retry's entry check must still pass (B1)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  let s2: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
-    const s = new WorkerSupervisor({
+    s = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -7084,7 +7608,7 @@ test("resume: fix-leg entry does NOT remove the stale terminal sentinel when the
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.done.json`)));
 
-    const s2 = new WorkerSupervisor({
+    s2 = new WorkerSupervisor({
       now: realClock,
       cfg,
       stateDir: dir,
@@ -7093,16 +7617,17 @@ test("resume: fix-leg entry does NOT remove the stale terminal sentinel when the
       guardHookPath: hook,
     });
     await assert.rejects(
-      () => s2.resume({ number: 31, title: "t", labels: [] }, name, { sessionId, prompt: "fix it" }),
+      () => s2!.resume({ number: 31, title: "t", labels: [] }, name, { sessionId, prompt: "fix it" }),
       /resume-spawn failed/i,
     );
     assert.ok(
       existsSync(join(dir, `${name}.done.json`)),
       "the stale sentinel must survive a FAILED spawn attempt — the next retry's entry check needs it",
     );
-    s.dispose();
-    s2.dispose();
   } finally {
+    killAnyRunningLanes(s, s2);
+    s?.dispose();
+    s2?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -25,6 +25,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `run-ended` — **routine**: the engine process shut down (normal exit or drain).
 - `tick-error` — **investigate**: an uncaught error surfaced during one tick-loop iteration; the loop itself kept running.
 - `instance-lock-taken-over` — **investigate**: a stale instance lock from a dead PID was taken over so this run could proceed (#382).
+- `deploy-key-tier-detected` — **routine**: startup recorded the effective worker-credential tier (L0/L1) and which deploy-key arm produced it — visibility, not a gate (#671). (see #671)
 - `engine-stalled` — **investigate**: the liveness watchdog observed the engine make no progress.
 - `engine-restart-after-stall` — **expected-noise**: the engine restarted itself after a detected stall.
 - `rapid-restart-detected` — **intervene**: the crash-loop breaker tripped on restart cadence; enters a probe-less "rapid-restart" park episode that clears only when a later start observes the birth window drained, or a human clears it. (see #431)
@@ -207,6 +208,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `architect-degraded` — **investigate** [round-artifact]: the architect's batch-review pool-verdict phase degraded/failed this round.
 - `architect-verdict-applied` — **routine**: the architect's pool verdict for an issue (label/board effect) was applied.
 - `architect-verdict-lost` — **investigate**: the architect's pool verdict for an issue failed to persist; an honesty event, not a silent no-op.
+- `architect-repeat-drop-escalated` — **intervene** [escalation-source:payload]: an issue was dropped repeatedly for the same reason with no body edit in between (same-reason re-drop churn, #666); escalated to needs-human via the shared writer instead of a duplicate drop comment, proof of the label write rides in the payload. (see #666)
 - `po-degraded` — **investigate** [round-artifact]: the PO's phase degraded/failed this round.
 - `harvest-degraded` — **investigate** [round-artifact]: the harvest phase degraded/failed this round.
 - `retro-degraded` — **investigate** [round-artifact]: the retro phase degraded/failed this round.

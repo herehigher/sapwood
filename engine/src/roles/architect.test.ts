@@ -29,6 +29,7 @@ import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START 
 import {
   type ArchitectDeps,
   architectMarker,
+  consecutiveSameBodyDropCount,
   createArchitectStub,
   defaultArchitectPromptPath,
   extractArchitectureChapter,
@@ -1696,5 +1697,158 @@ test("createArchitectStub #213 P1 fix (Codex review round 2): a TRANSIENT label-
     1,
     "the reason comment is posted exactly once, on the successful retry",
   );
+  state.close();
+});
+
+// ── #666: same-reason re-drop churn ─────────────────────────────────────────────────────────
+
+test("createArchitectStub #666 AC1: an issue dropped twice in a row for an UNCHANGED body does not receive a third duplicate drop comment — the third pass escalates to needs-human instead", async () => {
+  const cfg = mkCfg();
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 1, title: "candidate", labels: [] }]; // keeps the design-note comment off #55
+  const body = "the same premise defect, unchanged across rounds";
+  const poolIssues: Issue[] = [{ number: 55, title: "t", body, labels: [cfg.labels.roundPool] }];
+  const text = architectResult("Design note.", [], [{ issue: 55, verdict: "drop", reason: "premise defect." }]);
+  const runner = new ScriptedRunner([
+    { result: doneResult("architect-1", text) },
+    { result: doneResult("architect-2", text) },
+    { result: doneResult("architect-3", text) },
+  ]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const stub = createArchitectStub(deps);
+
+  // Round 1 — first drop, no history yet: ordinary drop, one reason comment.
+  await stub.run({ roundId: 1, phase: "architecting", marker: null });
+  assert.equal(forge.issueCommentsPosted.filter(([n]) => n === 55).length, 1);
+  assert.equal(forge.labelsAdded.filter(([n]) => n === 55).length, 0, "not yet escalated");
+
+  // Round 2 — second drop, SAME body: still under the threshold (maxConsecutiveDrops default 2
+  // means the THIRD repeat escalates, not the second) — a second, distinct reason comment lands.
+  await stub.run({ roundId: 2, phase: "architecting", marker: null });
+  assert.equal(forge.issueCommentsPosted.filter(([n]) => n === 55).length, 2);
+  assert.equal(forge.labelsAdded.filter(([n]) => n === 55).length, 0, "still not escalated");
+
+  // Round 3 — third drop, SAME body again: AC1 — no third duplicate drop-reason comment. Escalated
+  // to needs-human instead, via the shared writer (which posts its OWN, distinct courtesy comment
+  // — so the total comment count on #55 goes to 3, but only 2 of them are the literal `v.reason`).
+  await stub.run({ roundId: 3, phase: "architecting", marker: null });
+  const commentsOn55 = forge.issueCommentsPosted.filter(([n]) => n === 55).map(([, b]) => b);
+  assert.equal(
+    commentsOn55.filter((b) => b === "premise defect.").length,
+    2,
+    "no third repost of the raw drop reason — the repeat was escalated instead",
+  );
+  assert.equal(commentsOn55.length, 3, "the escalation's own courtesy comment still lands, as a DIFFERENT comment");
+  assert.deepEqual(
+    forge.labelsAdded.filter(([n]) => n === 55).map(([, l]) => l),
+    [cfg.labels.needsHuman],
+  );
+  const escalations = state.eventsAfterId(0, ["architect-repeat-drop-escalated"]);
+  assert.equal(escalations.length, 1);
+  const payload = escalations[0]!.payload as { issue: number; round_id: number; repeat_count: number; labeled: number };
+  assert.equal(payload.issue, 55);
+  assert.equal(payload.round_id, 3);
+  assert.equal(payload.repeat_count, 3);
+  assert.equal(payload.labeled, 1);
+  // The dedup marker courtesy comment from escalateToNeedsHuman IS a comment on #55, but it is
+  // NOT a repost of `v.reason` — distinguish by content rather than raw count.
+  assert.ok(
+    forge.issueCommentsPosted.some(([n, b]) => n === 55 && b.includes("dropped this issue 3 times in a row")),
+    "the escalation reason comment names the repeat count",
+  );
+  state.close();
+});
+
+test("createArchitectStub #666 AC3 (reverse test): an issue EDITED between drops is re-reviewed/re-dropped normally — a body change resets the repeat count, so it never escalates", async () => {
+  const cfg = mkCfg();
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 1, title: "candidate", labels: [] }];
+  const text = architectResult("Design note.", [], [{ issue: 55, verdict: "drop", reason: "premise defect." }]);
+  const state = new State(":memory:");
+
+  // Round 1: drop with body A.
+  const poolIssuesA: Issue[] = [{ number: 55, title: "t", body: "body A", labels: [cfg.labels.roundPool] }];
+  const runnerA = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
+  await createArchitectStub({
+    now: realClock,
+    forge,
+    state,
+    cfg,
+    runner: runnerA,
+    planMdPath: "/nonexistent/PLAN.md",
+    poolIssues: poolIssuesA,
+  }).run({
+    roundId: 1,
+    phase: "architecting",
+    marker: null,
+  });
+
+  // Round 2: same body A again (one repeat, still under threshold).
+  const runnerA2 = new ScriptedRunner([{ result: doneResult("architect-2", text) }]);
+  await createArchitectStub({
+    now: realClock,
+    forge,
+    state,
+    cfg,
+    runner: runnerA2,
+    planMdPath: "/nonexistent/PLAN.md",
+    poolIssues: poolIssuesA,
+  }).run({
+    roundId: 2,
+    phase: "architecting",
+    marker: null,
+  });
+
+  // Round 3: the issue body was EDITED (body B) — a human/PO changed it between rounds. Even
+  // though this is the third consecutive drop, the body no longer matches the recorded history,
+  // so this must be treated as a FRESH drop, not an escalation.
+  const poolIssuesB: Issue[] = [{ number: 55, title: "t", body: "body B — edited", labels: [cfg.labels.roundPool] }];
+  const runnerB = new ScriptedRunner([{ result: doneResult("architect-3", text) }]);
+  await createArchitectStub({
+    now: realClock,
+    forge,
+    state,
+    cfg,
+    runner: runnerB,
+    planMdPath: "/nonexistent/PLAN.md",
+    poolIssues: poolIssuesB,
+  }).run({
+    roundId: 3,
+    phase: "architecting",
+    marker: null,
+  });
+
+  assert.equal(
+    forge.issueCommentsPosted.filter(([n]) => n === 55).length,
+    3,
+    "all three drops posted their own reason comment — the body edit reset the repeat count",
+  );
+  assert.equal(
+    forge.labelsAdded.filter(([n]) => n === 55).length,
+    0,
+    "never escalated — the bound must not suppress a legitimate re-triage",
+  );
+  assert.equal(state.eventsAfterId(0, ["architect-repeat-drop-escalated"]).length, 0);
+  state.close();
+});
+
+test("consecutiveSameBodyDropCount #666 AC4: pure ledger fold, no timing dependence — counts the trailing run of SAME-hash drop verdicts and stops at the first mismatch or non-drop verdict", () => {
+  const state = new State(":memory:");
+  const hashA = "hash-a";
+  const hashB = "hash-b";
+  state.appendEvent("architect-verdict-applied", { round_id: 1, issue: 55, verdict: "drop", bodyHash: hashA });
+  state.appendEvent("architect-verdict-applied", { round_id: 2, issue: 55, verdict: "drop", bodyHash: hashA });
+  assert.equal(consecutiveSameBodyDropCount(state, 55, hashA), 2);
+  assert.equal(consecutiveSameBodyDropCount(state, 55, hashB), 0, "a different hash never matches the recorded trailing run");
+
+  // A body edit (hashB) breaks the run — the NEXT same-hash count starts fresh from there.
+  state.appendEvent("architect-verdict-applied", { round_id: 3, issue: 55, verdict: "drop", bodyHash: hashB });
+  assert.equal(consecutiveSameBodyDropCount(state, 55, hashB), 1);
+  assert.equal(consecutiveSameBodyDropCount(state, 55, hashA), 0);
+
+  // An unrelated issue's history never contaminates this issue's count.
+  state.appendEvent("architect-verdict-applied", { round_id: 4, issue: 999, verdict: "drop", bodyHash: hashB });
+  assert.equal(consecutiveSameBodyDropCount(state, 55, hashB), 1);
   state.close();
 });
