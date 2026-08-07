@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { LoopEvent } from "./api/types.ts";
 import { COPY, type EventKind } from "./copy.ts";
+import type { KnownDomainEvent } from "./domain-event.ts";
 
 /**
  * Compile-time proof of the §7 contract ("adding an event kind without a copy entry is a type
@@ -19,22 +19,31 @@ import { COPY, type EventKind } from "./copy.ts";
 const _rejectedKind: EventKind = "a-kind-nobody-registered-in-copy-ts";
 
 /**
- * #715 gate② round 4 [0]: the round-3 proof above only showed that a value explicitly ANNOTATED
- * as `EventKind` rejects an unknown string — it never proved that the events FIXTURES the rest of
- * this suite builds (ActivityFeed.test.tsx's `ev`, entities.test.ts's `event`, api.test.ts's
- * `evt`) are themselves wired to that closed union. This mirrors those builders' exact shape —
- * `kind: EventKind`, not a bare `string` — so it IS "the feed's kind type", connected. A real,
- * mapped kind must still compile fine; an unmapped one must not.
+ * #715 gate② round 5 [0] (Codex REJECT on the round-4 attempt): a bare `EventKind`-annotated
+ * const, or a LOCAL test helper whose parameter is typed `EventKind`, only proves that THAT
+ * annotation/helper is closed — it proves nothing about the real data path, where the wire
+ * `LoopEvent.kind` is honestly `string` (a newer engine may emit a kind this build doesn't know
+ * yet — §8's contract). The real connection is `domain-event.ts`'s `toDomainEvent`, the ONE parse
+ * boundary (called from `queries.ts`'s `accumulateEventsPage`) that classifies a wire kind against
+ * `copy.ts`'s closed union, producing a `KnownDomainEvent` whose `kind: EventKind` for real. This
+ * asserts against THAT type directly — not a local helper's parameter — and
+ * `domain-event.test.ts` / `api.test.ts` exercise the boundary FUNCTION itself at runtime (a real
+ * fold-path call, not a type-only proof).
  */
-const fixtureEvent = (kind: EventKind): LoopEvent => ({ id: 1, ts: "2026-01-01T00:00:00.000Z", kind, payload: {} });
 
-fixtureEvent("dispatched"); // sanity: a real, mapped kind still compiles
+const _fakeKnownEvent: KnownDomainEvent = {
+  known: true,
+  id: 1,
+  ts: "2026-01-01T00:00:00.000Z",
+  // @ts-expect-error — the DOMAIN type itself rejects an unmapped kind: `KnownDomainEvent.kind` is
+  // `EventKind`, so a fake kind here fails typecheck exactly where the app's real event objects
+  // are typed, not just in an isolated fixture helper's signature.
+  kind: "a-kind-nobody-registered-in-copy-ts",
+  payload: {},
+};
 
-// @ts-expect-error — the verification plan's promised negative compile fixture (issue #145): a
-// fake, unmapped event kind added to an events fixture must fail typecheck, not silently reach
-// `copyFor`'s runtime fallback. If this stops erroring, the fixture builders across the test
-// suite (or this one) have been silently widened back to `kind: string`.
-fixtureEvent("a-kind-nobody-registered-in-copy-ts");
+// Sanity: a real, mapped kind still compiles fine as a KnownDomainEvent.
+const _realKnownEvent: KnownDomainEvent = { known: true, id: 1, ts: "2026-01-01T00:00:00.000Z", kind: "dispatched", payload: {} };
 
 test("EventKind is a closed union, not a bare string", () => {
   // The interesting assertion already happened above, at compile time. This just keeps the file
@@ -42,8 +51,6 @@ test("EventKind is a closed union, not a bare string", () => {
   assert.equal(typeof COPY.dispatched, "object");
 });
 
-test("an events fixture's kind is the closed EventKind union, connected end to end", () => {
-  // Same point as above, but through the fixture builder itself, not a bare annotated const —
-  // proving the connection the reviewer asked for, not just the union's own closedness.
-  assert.equal(fixtureEvent("dispatched").kind, "dispatched");
+test("a KnownDomainEvent's kind is a real, mapped EventKind", () => {
+  assert.equal(_realKnownEvent.kind, "dispatched");
 });

@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { LoopEvent } from "./api/types.ts";
 import type { EventKind } from "./copy.ts";
+import type { DomainEvent, KnownDomainEvent, UnknownDomainEvent } from "./domain-event.ts";
 import { foldEntityTitles, foldOpenAttention } from "./entities.ts";
 
-// `kind: EventKind`, not a bare `string` — #715 gate② round 4 [0], same rationale as
+// `kind: EventKind`, not a bare `string` — #715 gate② round 4 [0] / round 5 [0]: `entities.ts`
+// consumes `DomainEvent`, so its fixtures are `KnownDomainEvent`s directly (the shape
+// `domain-event.ts`'s `toDomainEvent` produces for any real, mapped wire kind), same rationale as
 // ActivityFeed.test.tsx's `ev`.
-const event = (id: number, kind: EventKind, payload: Record<string, unknown>): LoopEvent => ({
+const event = (id: number, kind: EventKind, payload: Record<string, unknown>): KnownDomainEvent => ({
+  known: true,
   id,
   ts: new Date(2026, 0, 1, 0, 0, id).toISOString(),
   kind,
@@ -60,13 +63,13 @@ test("events with no issue number are skipped without throwing", () => {
 // ── #715 gate② round 4 [4]: a corrupt legacy row's payload is served as `null`, never an object ──
 
 test("foldEntityTitles: a null-payload row (corrupt legacy JSON) is skipped without throwing", () => {
-  const corrupt: LoopEvent = { id: 1, ts: "2026-08-06T00:00:00Z", kind: "dispatched", payload: null };
+  const corrupt: KnownDomainEvent = { known: true, id: 1, ts: "2026-08-06T00:00:00Z", kind: "dispatched", payload: null };
   assert.doesNotThrow(() => foldEntityTitles([corrupt]));
   assert.deepEqual(foldEntityTitles([corrupt]), {});
 });
 
 test("foldEntityTitles: a null-payload row does not block a LATER real title from folding", () => {
-  const corrupt: LoopEvent = { id: 1, ts: "2026-08-06T00:00:00Z", kind: "dispatched", payload: null };
+  const corrupt: KnownDomainEvent = { known: true, id: 1, ts: "2026-08-06T00:00:00Z", kind: "dispatched", payload: null };
   const titles = foldEntityTitles([corrupt, event(2, "dispatched", { issue: 86, issueTitle: "Fix the thing" })]);
   assert.equal(titles[86]?.issueTitle, "Fix the thing");
 });
@@ -242,7 +245,7 @@ test("foldOpenAttention: `worktree-released` clears the worktree-retained entry 
 // ── #715 gate② round 4 [4]: a corrupt legacy row's payload is served as `null`, never an object ──
 
 test("foldOpenAttention: a null-payload row (corrupt legacy JSON) never throws — an unconditional-attention kind still opens, keyed by kind alone (no issue to key by)", () => {
-  const corrupt: LoopEvent = { id: 1, ts: "2026-08-06T00:00:00Z", kind: "drive-needs-human", payload: null };
+  const corrupt: KnownDomainEvent = { known: true, id: 1, ts: "2026-08-06T00:00:00Z", kind: "drive-needs-human", payload: null };
   assert.doesNotThrow(() => foldOpenAttention([corrupt]));
   const open = foldOpenAttention([corrupt]);
   assert.equal(Object.keys(open).length, 1);
@@ -250,16 +253,43 @@ test("foldOpenAttention: a null-payload row (corrupt legacy JSON) never throws �
 });
 
 test("foldOpenAttention: a null-payload row for a routine (non-attention) kind is skipped without throwing", () => {
-  const corrupt: LoopEvent = { id: 1, ts: "2026-08-06T00:00:00Z", kind: "dispatched", payload: null };
+  const corrupt: KnownDomainEvent = { known: true, id: 1, ts: "2026-08-06T00:00:00Z", kind: "dispatched", payload: null };
   assert.doesNotThrow(() => foldOpenAttention([corrupt]));
   assert.deepEqual(foldOpenAttention([corrupt]), {});
 });
 
 test("foldOpenAttention: a null-payload `escalation-resolved`/`worktree-released` row does not throw while sweeping open entries", () => {
   const open = foldOpenAttention([event(1, "drive-needs-human", { issue: 5, pr: 50 })]);
-  const corruptResolve: LoopEvent = { id: 2, ts: "2026-08-06T00:00:01Z", kind: "escalation-resolved", payload: null };
-  const corruptRelease: LoopEvent = { id: 3, ts: "2026-08-06T00:00:02Z", kind: "worktree-released", payload: null };
+  const corruptResolve: KnownDomainEvent = { known: true, id: 2, ts: "2026-08-06T00:00:01Z", kind: "escalation-resolved", payload: null };
+  const corruptRelease: KnownDomainEvent = { known: true, id: 3, ts: "2026-08-06T00:00:02Z", kind: "worktree-released", payload: null };
   assert.doesNotThrow(() => foldOpenAttention([corruptResolve, corruptRelease], open));
   // Neither corrupt row names anything to clear, so the original open entry survives.
   assert.equal(Object.keys(foldOpenAttention([corruptResolve, corruptRelease], open)).length, 1);
+});
+
+// ── #715 gate② round 5 [0]: an UnknownDomainEvent (a wire kind newer than this client's copy map)
+//    flows through the same folds harmlessly — never attention, never clears anything, never throws.
+
+test("foldEntityTitles: an unknown-kind event with an `issue` payload field still folds normally (title-folding never checked kind)", () => {
+  const unknown: UnknownDomainEvent = {
+    known: false,
+    id: 1,
+    ts: "2026-08-06T00:00:00Z",
+    kind: "a-kind-from-a-newer-engine",
+    payload: { issue: 86, issueTitle: "Fix the thing" },
+  };
+  const titles = foldEntityTitles([unknown]);
+  assert.equal(titles[86]?.issueTitle, "Fix the thing");
+});
+
+test("foldOpenAttention: an unknown-kind event never opens an attention entry (hasAttention is false for any unmapped kind)", () => {
+  const unknown: DomainEvent = {
+    known: false,
+    id: 1,
+    ts: "2026-08-06T00:00:00Z",
+    kind: "a-kind-from-a-newer-engine",
+    payload: { issue: 5 },
+  };
+  assert.doesNotThrow(() => foldOpenAttention([unknown]));
+  assert.deepEqual(foldOpenAttention([unknown]), {});
 });

@@ -436,8 +436,18 @@ export const COPY: Record<EventKind, CopyEntry> = {
  *  one-source-of-truth shape `event-kinds/index.ts` uses on the engine side. */
 export const EVENT_KINDS: EventKind[] = Object.keys(COPY) as EventKind[];
 
+/** #715 gate② round 5 [0]: the ONE source of truth for "is this wire kind one the client actually
+ *  knows how to render" — a real type guard (`kind is EventKind`), not just a runtime boolean,
+ *  so a caller can narrow a `string`-typed wire value to the closed `EventKind` union at the spot
+ *  it needs to. `domain-event.ts`'s `toDomainEvent` is the ONE place in the app that calls this —
+ *  every other kind check downstream trusts the classification it already made, rather than
+ *  re-deriving it. */
+export function isKnownKind(kind: string): kind is EventKind {
+  return Object.hasOwn(COPY, kind);
+}
+
 export function copyFor(kind: string): CopyEntry | undefined {
-  return Object.hasOwn(COPY, kind) ? COPY[kind as EventKind] : undefined;
+  return isKnownKind(kind) ? COPY[kind] : undefined;
 }
 
 export function hasAttention(kind: string, payload: Payload | null): boolean {

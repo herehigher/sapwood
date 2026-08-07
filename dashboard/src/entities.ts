@@ -1,5 +1,5 @@
-import type { LoopEvent } from "./api/types.ts";
 import { hasAttention } from "./copy.ts";
+import type { DomainEvent } from "./domain-event.ts";
 
 /** An entity's remembered title, keyed by ISSUE number (frontend-design.md §3 C). Every event
  *  that carries a PR number also carries that PR's issue number in the same payload (`merged`,
@@ -24,7 +24,7 @@ export type EntityTitles = Record<number, { issueTitle?: string; prTitle?: strin
  * instead of within one array. Never mutates `seed` — a fresh object is always returned, safe to
  * use as React state.
  */
-export function foldEntityTitles(events: readonly LoopEvent[], seed: EntityTitles = {}): EntityTitles {
+export function foldEntityTitles(events: readonly DomainEvent[], seed: EntityTitles = {}): EntityTitles {
   const ordered = [...events].sort((a, b) => a.id - b.id);
   const titles: EntityTitles = Object.fromEntries(Object.entries(seed).map(([issue, entry]) => [issue, { ...entry }]));
   for (const event of ordered) {
@@ -49,7 +49,7 @@ export function foldEntityTitles(events: readonly LoopEvent[], seed: EntityTitle
 }
 
 /** An open (unresolved) attention-class event, keyed for supersede/eviction tracking. */
-export type OpenAttention = Record<string, LoopEvent>;
+export type OpenAttention = Record<string, DomainEvent>;
 
 /** §3's own "clears when a later event moves that issue" list — `dispatched`, `merged`,
  *  `gated-reentry`, `lane-revived` — mirrored here (matching the engine's `escalation-clear` tag
@@ -63,7 +63,7 @@ const ISSUE_CLEAR_KINDS = new Set(["dispatched", "merged", "gated-reentry", "lan
  *  its own `merged` event when the post-merge Done-board write fails, so `merged`'s own arrival is
  *  not evidence the board got fixed (§3: "an operation's own effects are not evidence it was
  *  resolved"). No other kind/reason pair carries this exemption in the engine today. */
-function clearedBySameOperation(clearKind: string, openEvent: LoopEvent): boolean {
+function clearedBySameOperation(clearKind: string, openEvent: DomainEvent): boolean {
   return clearKind === "merged" && openEvent.kind === "rollback-escalated" && openEvent.payload?.reason === "merged-board-done";
 }
 
@@ -104,7 +104,7 @@ function openAttentionKey(kind: string, payload: Record<string, unknown>): strin
  * `merged`, `gated-reentry`, `lane-revived` closes EVERY open entry sharing that event's `issue`,
  * except one an operation's own effects produced (`clearedBySameOperation`). Never mutates `seed`.
  */
-export function foldOpenAttention(events: readonly LoopEvent[], seed: OpenAttention = {}): OpenAttention {
+export function foldOpenAttention(events: readonly DomainEvent[], seed: OpenAttention = {}): OpenAttention {
   const ordered = [...events].sort((a, b) => a.id - b.id);
   const open: OpenAttention = { ...seed };
   for (const event of ordered) {

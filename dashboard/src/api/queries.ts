@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
+import { type DomainEvent, toDomainEvent } from "../domain-event.ts";
 import { type EntityTitles, foldEntityTitles, foldOpenAttention, type OpenAttention } from "../entities.ts";
 import { fetchEvents, fetchLoopState, fetchSpend } from "./client.ts";
-import type { EventsPage, LoopEvent, LoopState, SpendPage, SpendRow } from "./types.ts";
+import type { EventsPage, LoopState, SpendPage, SpendRow } from "./types.ts";
 
 /** §2 Transport: HTTP polling at 3 s. No WebSocket — that row is the acceptance bar. */
 export const POLL_MS = 3000;
@@ -41,8 +42,12 @@ export const useLoopState = () => useQuery(loopStateQuery());
 
 export interface EventHistory {
   after: number;
-  /** Bounded recent window — the routine/display tail (`maxHistory` entries, oldest dropped). */
-  events: LoopEvent[];
+  /** Bounded recent window — the routine/display tail (`maxHistory` entries, oldest dropped).
+   *  `DomainEvent[]`, not the raw wire `LoopEvent[]` (#715 gate② round 5 [0]): `accumulateEventsPage`
+   *  below is the parse boundary that classifies each fresh wire event through `toDomainEvent`
+   *  the instant it enters accumulated history, so nothing past this point ever sees the wire
+   *  `kind: string` again. */
+  events: DomainEvent[];
   /** Durable, NEVER bounded by `maxHistory` — folded incrementally per page (`foldEntityTitles`'s
    *  own doc explains why: a title from an event that ages out of `events` must not be forgotten). */
   titles: EntityTitles;
@@ -69,9 +74,14 @@ export const EMPTY_EVENT_HISTORY: EventHistory = { after: 0, events: [], titles:
  */
 export function accumulateEventsPage(history: EventHistory, page: EventsPage, maxHistory = MAX_EVENT_HISTORY): EventHistory {
   const seen = new Set(history.events.map((e) => e.id));
-  const fresh = page.events.filter((e) => !seen.has(e.id));
+  const freshWire = page.events.filter((e) => !seen.has(e.id));
   const after = Math.max(history.after, page.lastId);
-  if (fresh.length === 0) return after === history.after ? history : { ...history, after };
+  if (freshWire.length === 0) return after === history.after ? history : { ...history, after };
+  // #715 gate② round 5 [0]: THE parse boundary — every fresh wire event is classified against
+  // copy.ts's closed EventKind union right here, once, via toDomainEvent. Everything downstream
+  // (the slice below, foldEntityTitles, foldOpenAttention, and eventually ActivityFeed's render)
+  // consumes the resulting DomainEvent, never the raw wire `kind: string` again.
+  const fresh = freshWire.map(toDomainEvent);
   return {
     after,
     events: [...history.events, ...fresh].slice(-maxHistory),
@@ -87,9 +97,9 @@ export function accumulateEventsPage(history: EventHistory, page: EventsPage, ma
  * for, and for why `titles`/`openAttention` are exposed separately from the bounded `events` tail.
  */
 export function useEventHistory(): {
-  events: LoopEvent[];
+  events: DomainEvent[];
   titles: EntityTitles;
-  openAttention: LoopEvent[];
+  openAttention: DomainEvent[];
   error: unknown;
   isPending: boolean;
 } {

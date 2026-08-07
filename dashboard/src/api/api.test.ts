@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import type { EventKind } from "../copy.ts";
+import { toDomainEvent } from "../domain-event.ts";
 import { fetchEvents, fetchLoopState, fetchSpend } from "./client.ts";
 import {
   accumulateEventsPage,
@@ -129,7 +130,10 @@ test("accumulateEventsPage deduplicates by id when a page overlaps the accumulat
 test("accumulateEventsPage caps history at maxHistory, dropping the oldest first", () => {
   const history: EventHistory = {
     after: 10,
-    events: Array.from({ length: 10 }, (_, i) => evt(i + 1)),
+    // `EventHistory.events` is `DomainEvent[]`, not the raw wire `LoopEvent[]` this fixture
+    // hand-assembles a page/history from elsewhere — run each through the same parse boundary
+    // `accumulateEventsPage` itself uses (#715 gate② round 5 [0]).
+    events: Array.from({ length: 10 }, (_, i) => toDomainEvent(evt(i + 1))),
     titles: {},
     openAttention: {},
   };
@@ -144,6 +148,37 @@ test("accumulateEventsPage is a no-op when the page carries no events and no cur
   const history = accumulateEventsPage(EMPTY_EVENT_HISTORY, page([evt(1)], 1));
   const same = accumulateEventsPage(history, page([], 1));
   assert.equal(same, history);
+});
+
+// ── #715 gate② round 5 [0]: accumulateEventsPage IS the parse boundary ──────────────────────────
+//
+// This is the real fold-path proof the finding asked for: not a local test helper narrowed to
+// EventKind, but the actual function that turns a wire page into accumulated history, exercised
+// with a wire kind this client's copy map has never heard of — same as a genuinely newer engine
+// would send. It must classify (never crash, never drop the row), and a real mapped kind must
+// classify the other way.
+
+test("accumulateEventsPage classifies an unmapped wire kind as an UnknownDomainEvent — rendered later, never dropped or thrown on", () => {
+  const fromANewerEngine: LoopEvent = {
+    id: 1,
+    ts: "2026-08-06T00:00:00Z",
+    kind: "a-kind-nobody-registered-in-copy-ts",
+    payload: { anything: "at all" },
+  };
+  const history = accumulateEventsPage(EMPTY_EVENT_HISTORY, page([fromANewerEngine], 1));
+  assert.equal(history.events.length, 1);
+  const [classified] = history.events;
+  assert.equal(classified?.known, false);
+  assert.equal(classified?.kind, "a-kind-nobody-registered-in-copy-ts");
+  // Never opened as an attention item — an unmapped kind has no COPY entry to carry that marker.
+  assert.deepEqual(history.openAttention, {});
+});
+
+test("accumulateEventsPage classifies a real, mapped wire kind as a KnownDomainEvent", () => {
+  const history = accumulateEventsPage(EMPTY_EVENT_HISTORY, page([evt(1, "dispatched")], 1));
+  const [classified] = history.events;
+  assert.equal(classified?.known, true);
+  assert.equal(classified?.kind, "dispatched");
 });
 
 // ── #715 gate② [0]: titles/openAttention are durable, never bounded by maxHistory ───────────────
