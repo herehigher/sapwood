@@ -149,6 +149,10 @@ function play(
   if (animating.length === 0) return null;
 
   const tl = createTimeline({ defaults: { ease: EASE } });
+  // #716 gate② round 3 P2: every ring this pass masks with an inline `stroke-dasharray`/
+  // `stroke-dashoffset` (below) — tracked so `cleanup` can strip those inline styles back
+  // off, the same way it already strips the gates' `is-merged` class.
+  const maskedRings: SVGCircleElement[] = [];
 
   for (const step of animating) {
     const { transition, offset, from, to, laneChannel, duration } = step;
@@ -224,8 +228,16 @@ function play(
         const ring = root.querySelector<SVGCircleElement>(`.hero-ring[data-ring="${transition.ring}"]`);
         if (ring) {
           const circumference = 2 * Math.PI * ring.r.baseVal.value;
+          // #716 gate② round 3 P2: this `utils.set` runs synchronously, BEFORE the timeline
+          // segment below ever plays — it masks the ring fully offset (invisible) as the
+          // tween's start point. `Timeline.revert()` only knows how to undo properties IT
+          // animated; a cancel that lands before the tween starts (or mid-tween) leaves this
+          // imperative pre-set mask in place, rendering the newest ring invisible — exactly
+          // the reduced-motion-instant-final-scene AC this stage promises never to violate.
+          // `maskedRings` lets `cleanup` strip the mask back off, same as the gate classes.
           utils.set(ring, { strokeDasharray: circumference, strokeDashoffset: circumference });
           tl.add(ring, { strokeDashoffset: [circumference, 0], duration: RING_STROKE }, offset + TRAVEL - BEAT);
+          maskedRings.push(ring);
         }
         const count = root.querySelector<SVGTextElement>(".hero-ring-count");
         if (count) tl.add(count, { opacity: [0.3, 1], duration: BEAT }, offset + TRAVEL);
@@ -255,13 +267,21 @@ function play(
     }
   }
 
-  // #716 gate② round 2 P2-4: the gate `classList` mutations above happen OUTSIDE anime.js —
-  // `Timeline.revert()` has no idea they exist, so cancelling mid-merge (reduced motion
-  // flipping on, or a fresh scene landing) used to leave the gates stuck permanently
-  // `--moss`/✓. This cleanup — idempotent, safe to call whether or not a merge ever actually
-  // ran — is handed to `AnimationController.start()` and always runs on `cancel()`.
+  // #716 gate② round 2 P2-4 + round 3 P2: two side effects above happen OUTSIDE anime.js's
+  // own tracked properties — the gate `classList` mutation, and the ring's imperative
+  // pre-tween `stroke-dasharray`/`stroke-dashoffset` mask. `Timeline.revert()` has no idea
+  // either exists, so cancelling mid-merge (reduced motion flipping on, or a fresh scene
+  // landing) used to leave the gates stuck permanently `--moss`/✓ AND the newest ring stuck
+  // fully dash-offset (invisible) — the second one a direct AC violation (reduced motion
+  // promises an instant, fully-visible final scene). This cleanup — idempotent, safe to call
+  // whether or not a merge ever actually ran — is handed to `AnimationController.start()`
+  // and always runs on `cancel()`.
   const cleanup = () => {
     for (const g of root.querySelectorAll<SVGGElement>(".hero-gate.is-merged")) g.classList.remove("is-merged");
+    for (const ring of maskedRings) {
+      ring.style.removeProperty("stroke-dasharray");
+      ring.style.removeProperty("stroke-dashoffset");
+    }
   };
 
   return { timeline: tl, cleanup };

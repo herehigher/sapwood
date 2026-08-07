@@ -8,11 +8,18 @@
  * #716 gate② round 2 P2-4: `revert()` alone wasn't the whole contract — the "ring"
  * transition's gate-flash `classList` mutation (`Hero.tsx`) happens OUTSIDE anime.js, so
  * cancelling mid-merge used to leave the gates stuck `--moss`/✓ forever. `start()` now takes
- * an optional `cleanup` alongside the handle, and `cancel()` always runs it. The tests below
- * simulate Hero's actual gate-class side effect with a plain mock "gates" collection — no DOM
- * required, since the contract under test is "cleanup runs on cancel", not "querySelector
- * finds the right elements" (that half is inherently DOM-only, see the PR's documented
- * coverage boundary).
+ * an optional `cleanup` alongside the handle, and `cancel()` always runs it.
+ *
+ * #716 gate② round 3 P2: a SECOND instance of the same class — the ring's own
+ * `stroke-dasharray`/`stroke-dashoffset` mask (`utils.set`, applied synchronously BEFORE the
+ * tween that animates it away) is also outside anything `revert()` tracks. Cancelling before
+ * or during that tween used to leave the newest ring permanently fully dash-offset —
+ * invisible — which is a direct violation of the reduced-motion AC ("the scene remains fully
+ * legible — motion is commentary, never the only carrier of state"). `Hero.tsx`'s `cleanup`
+ * strips BOTH side effects; the tests below simulate each (and the combination) with plain
+ * mock objects — no DOM required, since the contract under test is "cleanup runs on cancel",
+ * not "querySelector finds the right elements" (that half is inherently DOM-only, see the
+ * PR's documented coverage boundary).
  */
 
 import assert from "node:assert/strict";
@@ -127,6 +134,73 @@ test("Hero's actual gate-flash scenario: cancelling mid-merge restores the gates
     gates.every((g) => !g.classes.has("is-merged")),
     "cancelling mid-merge must restore the gates, not leave them stuck moss/✓",
   );
+});
+
+test("#716 gate② round 3 P2: cancelling mid-ring-stroke restores the ring's visible state, no dashoffset residue", () => {
+  // Simulates `Hero.tsx`'s "ring" case exactly: `utils.set` masks the ring fully
+  // dash-offset (invisible) SYNCHRONOUSLY, before the tween that would animate it back to
+  // visible ever plays — a raw inline-style mutation `Timeline.revert()` has no idea about,
+  // same class of gap as the gate classList. The registered `cleanup` is what strips the
+  // mask back off.
+  const ring = { style: new Map<string, string>() };
+  const circumference = 44; // 2π·7, this stage's innermost ring radius
+  const maskRing = () => {
+    ring.style.set("stroke-dasharray", String(circumference));
+    ring.style.set("stroke-dashoffset", String(circumference)); // fully offset = invisible
+  };
+  const unmaskRing = () => {
+    ring.style.delete("stroke-dasharray");
+    ring.style.delete("stroke-dashoffset");
+  };
+
+  const controller = new AnimationController<{ revert: () => void }>();
+  maskRing(); // the synchronous `utils.set` having already run before the tween starts
+  controller.start({ revert: () => {} }, unmaskRing);
+  assert.equal(ring.style.get("stroke-dashoffset"), String(circumference), "precondition: mid-stroke, the ring is masked invisible");
+
+  // Reduced motion flips on (or a fresh scene lands) before the stroke tween ever completes.
+  controller.cancel();
+
+  assert.equal(ring.style.has("stroke-dasharray"), false, "the dasharray mask must be cleared — no residue");
+  assert.equal(
+    ring.style.has("stroke-dashoffset"),
+    false,
+    "the dashoffset mask must be cleared — the ring renders fully visible, not stuck invisible",
+  );
+});
+
+test("#716 gate② round 3 P2: Hero's REAL cleanup restores BOTH the gate flash and the ring mask together, mirroring play()'s single combined callback", () => {
+  // `Hero.tsx`'s actual `cleanup` closure does both jobs in one function — this pins that
+  // combination specifically, not just each side effect in isolation.
+  const gates = [{ classes: new Set<string>() }];
+  const ring = { style: new Map<string, string>() };
+  const circumference = 21; // 2π·(TRUNK.step·3) — an outer, later-added ring
+
+  const applyMergedFlash = () => {
+    for (const g of gates) g.classes.add("is-merged");
+  };
+  const maskRing = () => {
+    ring.style.set("stroke-dasharray", String(circumference));
+    ring.style.set("stroke-dashoffset", String(circumference));
+  };
+  const combinedCleanup = () => {
+    for (const g of gates) g.classes.delete("is-merged");
+    ring.style.delete("stroke-dasharray");
+    ring.style.delete("stroke-dashoffset");
+  };
+
+  const controller = new AnimationController<{ revert: () => void }>();
+  applyMergedFlash();
+  maskRing();
+  controller.start({ revert: () => {} }, combinedCleanup);
+
+  controller.cancel();
+
+  assert.ok(
+    gates.every((g) => !g.classes.has("is-merged")),
+    "gate flash restored",
+  );
+  assert.equal(ring.style.size, 0, "ring mask fully cleared");
 });
 
 test("start() cancels the PREVIOUS handle's cleanup too, not just its revert()", () => {
