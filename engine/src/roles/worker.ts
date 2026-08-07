@@ -1090,29 +1090,42 @@ export const WORKER_ALLOWED_TOOLS_NO_GH = WORKER_ALLOWED_TOOLS.split(",")
  *  legitimate use for backgrounding, so this closes it at the TOOL-SURFACE layer rather than the
  *  prompt layer alone (design-first per the issue: audit before fix).
  *
- *  LIVE-VERIFIED (claude 2.1.223, `claude -p --model haiku --setting-sources ""`, mimicking this
- *  module's own claudeArgs flag shape — WORKER_ALLOWED_TOOLS/WORKER_DISALLOWED_TOOLS, `--permission-mode
- *  auto`): setting `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the spawned process's env removes
- *  `run_in_background` from the Bash tool's OWN input schema — an explicit attempt fails
- *  `InputValidationError: ... An unexpected parameter \`run_in_background\` was provided` instead
- *  of backgrounding, and the tool-description text that advertises the parameter is suppressed
- *  too, so the model is never even offered it. This is STRICTLY WIDER than a
- *  `--disallowedTools Bash(run_in_background:true*)` permission rule (also live-verified to work,
- *  see #708 PR body for the transcript) — that rule only intercepts an EXPLICIT
- *  `run_in_background: true` tool call; it cannot reach the CLI's own timeout-triggered
- *  auto-backgrounding of an ordinary FOREGROUND command (a separate code path gated only by this
- *  same env var, never by the permission engine), which every worker-issued long verification
- *  command is otherwise eligible for. Not a CLI flag — `claude --help` (2.1.223) has no
- *  background-disabling flag; this env var is the one working knob.
+ *  LIVE-VERIFIED for the BUILT-IN Bash tool's own schema (claude 2.1.223, `claude -p --model
+ *  haiku --setting-sources ""`, mimicking this module's own claudeArgs flag shape —
+ *  WORKER_ALLOWED_TOOLS/WORKER_DISALLOWED_TOOLS, `--permission-mode auto`): setting
+ *  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the spawned process's env removes
+ *  `run_in_background` from that schema — an explicit attempt fails `InputValidationError: ...
+ *  An unexpected parameter \`run_in_background\` was provided` instead of backgrounding, and the
+ *  tool-description text that advertises the parameter is suppressed too, so the model is never
+ *  even offered it. This is STRICTLY WIDER than a `--disallowedTools
+ *  Bash(run_in_background:true*)` permission rule (also live-verified to work, see #708 PR body
+ *  for the transcript) — that rule only intercepts an EXPLICIT `run_in_background: true` tool
+ *  call; it cannot reach the CLI's own timeout-triggered auto-backgrounding of an ordinary
+ *  FOREGROUND command (a separate code path gated only by this same env var, never by the
+ *  permission engine), which every worker-issued long verification command is otherwise eligible
+ *  for. Not a CLI flag — `claude --help` (2.1.223) has no background-disabling flag; this env var
+ *  is the one working knob.
  *
- *  Accepted residual (named, not closed here): a command STRING containing shell-level
- *  backgrounding (`... &`, `nohup ... &disown`) is untouched by this — the CLI never sees it as
- *  a `run_in_background` request, so no schema/permission layer can catch it. `prompts/worker.md`
- *  carries one negative-form sentence against exactly this gap (belt-and-suspenders, not the
- *  primary mechanism).
+ *  The `--setting-sources ""` probe deliberately sealed off user/project/local settings so the
+ *  measurement isolates the BUILT-IN tool, not this repo's actual dispatch shape: production
+ *  `dispatch()`/`resume()` (below) do NOT pass `settingSources` at all, so a real worker session
+ *  loads user/project/local settings as it always has — unchanged by this fix, and changing that
+ *  is a separate surface question, out of #708's scope. Two accepted residuals follow from that,
+ *  named here rather than assumed closed: (1) a command STRING containing shell-level
+ *  backgrounding (`... &`, `nohup ... &disown`) is untouched — the CLI never sees it as a
+ *  `run_in_background` request, so no schema/permission layer can catch it; (2) a
+ *  settings-sourced tool, hook, or plugin the operator's own environment contributes could offer
+ *  an async/backgrounding path this constant never reaches, since it only closes the BUILT-IN
+ *  Bash tool's own parameter. Both residuals are the same class and carried the same way:
+ *  `prompts/worker.md`'s one negative-form sentence (belt-and-suspenders, not the primary
+ *  mechanism) plus ordinary operator supervision — neither is a machinery fix.
  *
- *  Scoped to WORKER LEGS ONLY (WorkerSupervisor.dispatch/resume spawn env, below) — never applied
- *  to the guard hook subprocess or any peripheral/review session, both out of scope for #708. */
+ *  Scoped to WORKER LEGS ONLY: the engine only ever SETS this env var for WorkerSupervisor's own
+ *  `dispatch()`/`resume()` spawns (below) — never for a peripheral/review session
+ *  (`spawnClaudeSession`) or a park-probe. Like any spawn env var, it is inherited by descendants
+ *  of the worker process, including the guard hook subprocess — but that inheritance is
+ *  semantically inert: the guard hook never reads `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, so its
+ *  presence there changes nothing. */
 export const WORKER_DISABLE_BACKGROUND_TASKS_ENV: NodeJS.ProcessEnv = { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" };
 
 /** The full `claude -p` argv. Pure, so every flag is testable without spawning. NOTE: no
