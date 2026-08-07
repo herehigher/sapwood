@@ -5,6 +5,7 @@
  */
 @import "./tokens.css";
 @import "./panels.css";
+@import "./hero/hero.css";
 
 *,
 *::before,

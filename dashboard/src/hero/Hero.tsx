@@ -11,7 +11,10 @@ import { createTimeline, utils } from "animejs";
 import { useEffect, useRef, useState } from "react";
 import type { EngineState } from "../api/types.ts";
 import type { DomainEvent } from "../domain-event.ts";
-import "./hero.css";
+// hero.css is pulled in via app.css's @import (same pattern as panels.css) rather than a
+// direct module-level import here: a direct `import "./hero.css"` only resolves under Vite's
+// bundler and breaks the plain `node --import tsx --test` runner App.test.tsx (and any other
+// module that transitively imports this file) runs under, which has no CSS loader.
 import { dropletPoint, HeroStage } from "./stage.tsx";
 import {
   foldEvents,
