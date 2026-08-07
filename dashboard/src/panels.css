@@ -1,0 +1,119 @@
+/*
+ * Lane board / activity feed / cost strip / config drawer (frontend-design.md §3 C/D/E).
+ * Plain CSS only — no CSS-in-JS, no framework (scaffold.test.ts's banned-package check).
+ */
+
+.lane-board-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--space-2);
+}
+
+.lane-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 72px;
+}
+
+.lane-card-empty {
+  border: 1px dashed color-mix(in srgb, var(--bark) 40%, transparent);
+  border-radius: var(--radius-card);
+  align-items: center;
+  justify-content: center;
+}
+
+.lane-card-head,
+.lane-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.entity-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.entity-ref:hover {
+  text-decoration: underline;
+}
+
+.feed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.feed-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.feed-entry-attention {
+  font-weight: 600;
+}
+
+.feed-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  display: inline-block;
+}
+
+.feed-ts {
+  margin-left: auto;
+}
+
+.feed-details summary {
+  cursor: pointer;
+}
+
+.cost-strip-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-4);
+}
+
+.cost-bar-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.cost-bar-row {
+  display: grid;
+  grid-template-columns: 5em 1fr 4em;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.cost-bar {
+  width: 100%;
+  height: 10px;
+}
+
+.config-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.config-drawer-row {
+  display: grid;
+  grid-template-columns: minmax(160px, auto) auto 1fr;
+  gap: var(--space-2);
+  padding-block: 2px;
+}

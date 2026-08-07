@@ -9,7 +9,7 @@
     "dev": "vite",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json",
     "build": "vite build",
-    "test": "node --import tsx --test --test-timeout=60000 \"*.test.ts\" \"src/**/*.test.ts\"",
+    "test": "node --import tsx --test --test-timeout=60000 \"*.test.ts\" \"src/**/*.test.ts\" \"src/**/*.test.tsx\"",
     "contrast": "node --import tsx src/contrast.ts"
   },
   "dependencies": {
