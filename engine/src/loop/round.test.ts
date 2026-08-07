@@ -29,10 +29,11 @@ import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { WorkerProxyOpts } from "../roles/worker.js";
+import { KILL_SIGNAL_GRACE_MS } from "../roles/worker.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
-import { ESCALATION_SOURCE_KINDS } from "./escalation-reconcile.js";
+import { ESCALATION_SOURCE_KINDS, ESCALATION_SOURCES } from "./escalation-reconcile.js";
 import { attachAttemptGuard, withHangGuard } from "./hang-guard.test-support.js";
 import {
   buildFixLegResume,
@@ -304,24 +305,32 @@ class FakeSupervisor implements Supervisor {
     return true;
   }
   clearStaleFixEntrySentinel(): void {}
-  /** #724 gate② round 3, P1-1: a pid-liveness fake — set per-worker (default false, i.e. "no
-   *  opinion" — the same stance every OTHER unset field on this fake takes) to simulate a
-   *  confirmed-alive durable pid. This is the shape the E-STOP sweep actually checks now
-   *  (durablePidAlive/signalDurablePid), never probe()/reclaim(). Deliberately does NOT
-   *  auto-flip to false when SIGKILL is recorded below — a test that wants a CONFIRMED-dead
-   *  outcome sets it explicitly after asserting the signal sequence, so the fixture never hides
-   *  which of the two post-signal outcomes (confirmed dead vs. orphaned) a given test exercises. */
+  /** #724 gate② round 3, P1-1: a pid-liveness fake — set per-worker (default false) to simulate
+   *  a confirmed-alive durable pid, once `enableDurablePidCapability()` below has attached the
+   *  reader. Deliberately does NOT auto-flip to false when SIGKILL is recorded — a test that
+   *  wants a CONFIRMED-dead outcome sets it explicitly after asserting the signal sequence, so
+   *  the fixture never hides which of the two post-signal outcomes (confirmed dead vs. orphaned)
+   *  a given test exercises. */
   durablePids: Record<string, boolean> = {};
-  durablePidAlive(w: string): boolean {
-    return this.durablePids[w] ?? false;
-  }
-  /** #724 gate② round 3, P1-1: the signal recorder — every (worker, signal) pair
-   *  signalDurablePid was called for, in order. The durable-pid sweep tests' proof that a
-   *  confirmed-alive row actually got the TERM-then-KILL sequence, replacing the retired
-   *  reclaimedNames-based assertion for this path. */
+  /** #724 gate② round 4, P2-3: every (worker, signal) pair signalDurablePid was called for, in
+   *  order. The durable-pid sweep tests' proof that a confirmed-alive row actually got the
+   *  TERM-then-KILL sequence, replacing the retired reclaimedNames-based assertion for this path. */
   signalsSent: Array<{ worker: string; signal: "SIGTERM" | "SIGKILL" }> = [];
-  signalDurablePid(w: string, signal: "SIGTERM" | "SIGKILL"): void {
-    this.signalsSent.push({ worker: w, signal });
+  /** #724 gate② round 4, P2-3: BOTH left genuinely unset (never assigned, not even to
+   *  `undefined` — `exactOptionalPropertyTypes` forbids that explicitly) by default — "no
+   *  opinion," the SAME stance `dispatch`/`resume`'s own optional `pid`/`worktreePath` already
+   *  take, matching the vast majority of this fixture's existing callers that never touch
+   *  durable-pid behavior at all. `enableDurablePidCapability()` attaches BOTH together, since
+   *  the pair IS one capability (conductor.ts's own P2-3 doc); a test exercising the FAIL-CLOSED
+   *  half-capable path instead assigns exactly ONE directly (`sup.durablePidAlive = (w) =>
+   *  true;`), leaving the other genuinely absent. */
+  durablePidAlive?: (w: string) => boolean;
+  signalDurablePid?: (w: string, signal: "SIGTERM" | "SIGKILL") => void;
+  enableDurablePidCapability(): void {
+    this.durablePidAlive = (w) => this.durablePids[w] ?? false;
+    this.signalDurablePid = (w, signal) => {
+      this.signalsSent.push({ worker: w, signal });
+    };
   }
 }
 
@@ -1563,6 +1572,7 @@ test("runRounds executing-phase durable-pid sweep: a crash-resumed batch's hando
     const forge = new FakeForge();
     forge.ready = []; // no new dispatch — isolates the handoff row as the drain loop's only occupant
     const sup = new FakeSupervisor();
+    sup.enableDurablePidCapability();
     // The fake-ALIVE durable pid: this crash-resumed process's supervisor has NO in-memory
     // handle for this lane (a brand-new `this.lanes` map — it was spawned by the now-dead PRIOR
     // process), but its DURABLE persisted process identity (running.json wrapper_pid) reads
@@ -1588,23 +1598,31 @@ test("runRounds executing-phase durable-pid sweep: a crash-resumed batch's hando
       { worker: "lane-ho", signal: "SIGTERM" },
       { worker: "lane-ho", signal: "SIGKILL" },
     ]);
-    // The short grace between TERM and KILL — the SAME 200ms constant killByPid/killTree
+    // The short grace between TERM and KILL — the SAME named constant killByPid/killTree
     // (worker.ts) use — is the ONLY wait this whole run performs.
-    assert.deepEqual(sleepCalls, [200], "the grace wait is real and singular — no other waiting happens on this run");
-    // P1-2: settled TERMINALLY in the same step — never left `handoff` with a durable resume
-    // intent a later reconciliation pass could adopt.
+    assert.deepEqual(sleepCalls, [KILL_SIGNAL_GRACE_MS], "the grace wait is real and singular — no other waiting happens on this run");
+    // P1-2: settled TERMINALLY in the same atomic step — never left `handoff` with a durable
+    // resume intent a later reconciliation pass could adopt.
     assert.equal(state2.getWorker("lane-ho")?.state, "failed");
+    // P1-1 crash-rerun safety: the durable PRE-KILL intent marker lands BEFORE the completion
+    // event — both present, in order, proving the sweep actually wrote the marker before ever
+    // signaling (not just at settlement time).
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "estop-lane-sweep-started" || kind === "estop-lane-swept"),
+      [
+        ["estop-lane-sweep-started", { worker: "lane-ho", issue: 42 }],
+        ["estop-lane-swept", { worker: "lane-ho", issue: 42, confirmedDead: false }],
+      ],
+    );
     // Outcome evented, never silent: FakeSupervisor's signalDurablePid doesn't actually kill
     // anything (durablePids stays true), so the post-signal check still reads alive — an honest
     // "could not confirm death" trail, not swallowed into a false "confirmed dead".
-    assert.deepEqual(
-      events.filter(([kind]) => kind === "estop-lane-swept"),
-      [["estop-lane-swept", { worker: "lane-ho", issue: 42, confirmedDead: false }]],
-    );
-    // needs-human, always proven by presence (#404) — the event kind itself carries
-    // escalation-source:always (event-kinds/lane.ts), never a forge label (P1-1's "zero forge
-    // calls" applies to the settlement step too).
+    // needs-human, but NEVER label-proven (#724 gate② round 4, P1-2 — round 3's own
+    // `escalation-source:always` tagging was a false label-ownership claim; this sweep never
+    // calls addLabel). Still a registered escalation source (surfaces on the dashboard), just
+    // under the "never" proof mode env-failure-preserved/ceiling-escalated also use.
     assert.ok(ESCALATION_SOURCE_KINDS.includes("estop-lane-swept"), "estop-lane-swept must be a registered escalation source");
+    assert.equal(ESCALATION_SOURCES["estop-lane-swept"], "never", "must never claim label ownership — this path writes no forge label");
     // The activation event itself still lands exactly once, from runPeripheral's own gate
     // (finding [0]) — the sweep is a SEPARATE concern from announcing the sentinel's activation.
     assert.deepEqual(
@@ -1624,6 +1642,61 @@ test("runRounds executing-phase durable-pid sweep: a crash-resumed batch's hando
       state2.drivingWorkers().map((w) => w.name),
       [],
     );
+    state2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #724 gate② round 4, P2-3: durablePidAlive/signalDurablePid are ONE capability, not two
+// independently-optional ones. A Supervisor implementing only `durablePidAlive` (reporting a
+// lane ALIVE) but not `signalDurablePid` used to let the sweep silently no-op the missing
+// signal (optional chaining) and then settle the row `failed` anyway — a fabricated "swept"
+// outcome over a child nobody ever touched, still alive when the run exits. This test proves
+// the fail-closed fix: no settlement, no fake event, an honest "incapable" trail instead.
+test("runRounds durable-pid sweep, half-capable Supervisor: durablePidAlive alone (no signalDurablePid) never settles or signals — fails closed and events the incapacity honestly (#724 gate② round 4, P2-3)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-estop-halfcap-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const round = state.startRound("2026-07-09T00:00:00.000Z");
+    state.advanceRoundPhase(round.round_id, "executing", "2026-07-09T00:01:00.000Z");
+    state.upsertWorker({ name: "lane-half", issue: 55, session_id: "s", state: "handoff", started_at: "t", ended_at: "t2" });
+    state.close();
+
+    const state2 = new State(join(dir, "sapwood.sqlite"));
+    const events = spyOnEvents(state2);
+    const forge = new FakeForge();
+    forge.ready = [];
+    const sup = new FakeSupervisor();
+    // ONLY the liveness half — signalDurablePid is left genuinely unset (the FakeSupervisor
+    // default), reproducing the exact half-capable shape the finding describes.
+    sup.durablePidAlive = (w) => sup.durablePids[w] ?? false;
+    sup.durablePids["lane-half"] = true;
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    const deps = baseDeps({ forge, supervisor: sup, state: state2, sleep });
+    const stopSafety = boundedStopOnPhase(deps, 5);
+    const result = await runRoundsGuarded(deps);
+    stopSafety();
+    assert.equal(result.stoppedBy, "emergency-stop");
+    // The fix: no signal was ever sent (the capability half that would send it is absent).
+    assert.deepEqual(sup.signalsSent, []);
+    // Never settled — the row is exactly as it was found, never a fabricated `failed`.
+    assert.equal(state2.getWorker("lane-half")?.state, "handoff");
+    // Never a fake completion event, never a pre-kill intent either (nothing was ever actually
+    // decided-and-acted-on for this lane).
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "estop-lane-swept" || kind === "estop-lane-sweep-started"),
+      [],
+    );
+    // The honest trail instead: evented because THIS run's own durablePidAlive positively
+    // reported the lane alive, even though it could not act on that finding.
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "estop-lane-sweep-incapable"),
+      [["estop-lane-sweep-incapable", { worker: "lane-half", issue: 55 }]],
+    );
+    // Still forced non-zero regardless — no separate forcing mechanism was needed for this path.
+    assert.equal(roundsExitCode(result), 1);
     state2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1705,12 +1778,15 @@ test("runRounds thrown-under-EMERGENCY_STOP: a rejecting sweep step still announ
     forge.ready = [];
     // An unexpected failure sending the signal — e.g. a transient OS error — must not be
     // swallowed OR leave the activation unrecorded; it propagates, but through the wrapper.
-    class ThrowingSignalSupervisor extends FakeSupervisor {
-      override signalDurablePid(): void {
-        throw new Error("boom: signal failed unexpectedly");
-      }
-    }
-    const sup = new ThrowingSignalSupervisor();
+    // Both halves of the durablePid capability are assigned directly (not via
+    // enableDurablePidCapability(), which would install a non-throwing signalDurablePid) — a
+    // fully capable pair is required for the sweep to reach the signal at all (P2-3's own
+    // fail-closed gate would otherwise skip this lane silently, never reaching the throw).
+    const sup = new FakeSupervisor();
+    sup.durablePidAlive = (w) => sup.durablePids[w] ?? false;
+    sup.signalDurablePid = (): void => {
+      throw new Error("boom: signal failed unexpectedly");
+    };
     sup.durablePids["lane-boom"] = true;
     // EMERGENCY_STOP already present before this resumed pass even starts (same shape as the
     // sweep test above) — the sweep is reached immediately, on the very first drainedEnoughToExit

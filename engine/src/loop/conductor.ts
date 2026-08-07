@@ -1363,7 +1363,14 @@ export interface Supervisor {
    *  for round.ts's E-STOP durable-pid sweep, a hard-stop path that must never wait on the
    *  network. Optional: a test-double Supervisor with no opinion on live-process identity (most
    *  fixtures) simply never reports anything alive, same "no opinion" stance `dispatch`/
-   *  `resume`'s own optional `pid`/`worktreePath` already take. */
+   *  `resume`'s own optional `pid`/`worktreePath` already take.
+   *
+   *  #724 gate② round 4, P2-3: this and `signalDurablePid` below are ONE capability, not two
+   *  independent ones — round.ts's sweep checks `typeof` on BOTH before trusting EITHER
+   *  (`hasDurablePidCapability`, its own doc). A Supervisor implementing only this one is exactly
+   *  the shape that used to let the sweep report a lane "alive," silently no-op the (missing)
+   *  signal, then settle the row `failed` anyway — a confirmed-alive answer with nothing behind
+   *  it to act on it is worse than no opinion at all. Implement both or neither. */
   durablePidAlive?(worker: string): boolean;
   /** #724 gate② round 3, P1-1: signal the lane's durable persisted process GROUP directly — the
    *  SAME `signalGroup` primitive `killByPid`/`killTree` already use (negative pid -> whole
@@ -1371,7 +1378,8 @@ export interface Supervisor {
    *  round.ts's E-STOP sweep can drive its own TERM-then-KILL sequence without `reclaim()`'s
    *  worktree/PR bookkeeping, which the sweep does not need (it settles the row itself — see
    *  round.ts's own sweep doc). A no-op, never throws, when there is no persisted pid to signal.
-   *  Optional for the same reason `durablePidAlive` is. */
+   *  Optional for the same reason `durablePidAlive` is — and, per that field's own P2-3 doc, the
+   *  SAME capability: implement both or neither. */
   signalDurablePid?(worker: string, signal: "SIGTERM" | "SIGKILL"): void;
 }
 

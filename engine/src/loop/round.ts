@@ -23,6 +23,7 @@ import type { IForge, Issue } from "../forge/forge.js";
 import { type LabelSpec, labelsInclude } from "../forge/labels.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import { createProxyMint } from "../proxy/mint.js";
+import { KILL_SIGNAL_GRACE_MS } from "../roles/worker.js";
 import type { RoundPhase, RoundRow, SpendActorKind, State } from "../state/state.js";
 import { createHeartbeatGate } from "../util/heartbeat.js";
 import {
@@ -1768,9 +1769,10 @@ async function runRoundsCore(deps: RoundDeps): Promise<RoundsResult> {
      *  (no worktree/PR bookkeeping applies to a row this function settles itself — P1-2 below).
      *
      *  P1-2: a lane this sweep actually signals (found alive) is settled TERMINALLY in the SAME
-     *  step, via `State.settleTerminalWorker` (state.ts) — the SAME atomic row+spend transition
-     *  every OTHER terminal-lane path in this codebase uses (reclaimTerminalLane's own DEAD/
-     *  DONE/FAILED branches, conductor.ts). This is deliberate, and is the actual no-revival
+     *  atomic step (P1-1's round-4 fix: `State.settleEstopSweptWorker`, replacing three separate
+     *  writes — see that method's own doc for the crash windows bundling closes, and
+     *  `estopSweepIntentOpen`'s own doc for the durable PRE-KILL marker below that closes the
+     *  remaining OS-kill/write boundary). This is deliberate, and is the actual no-revival
      *  mechanism: `state.drivingWorkers()`/`state.handoffWorkers()` (state.ts) are STATE-COLUMN-
      *  FILTERED queries (`WHERE state = 'driving'` / `'handoff'`), and `reconcileDrivingFixIntents`/
      *  `adoptAndReclaimTerminal` (conductor.ts) — the ONLY code that ever reads a lane's stale
@@ -1778,22 +1780,55 @@ async function runRoundsCore(deps: RoundDeps): Promise<RoundsResult> {
      *  `failed`, it is STRUCTURALLY unreachable by either adoption loop on every later tick or
      *  restart — there is no separate "revival latch" needed (unlike #447's `lane-revival-
      *  terminal` event, a different, PR-merge-specific mechanism this is not). Needs-human
-     *  escalation is EVENTED, never labeled: `estop-lane-swept` carries `escalation-source:always`
-     *  (event-kinds/lane.ts) — "needs-human, always proven by presence," the SAME pattern
-     *  `resume-capped`/`resume-undecidable` use — because P1-1's "zero forge calls" applies to
-     *  this settlement step too (an `addLabel` call could ALSO hang/reject, defeating the point
-     *  of a hard-stop path that must always run to completion). Cost is recorded as 0 — this
-     *  sweep deliberately never reads a lane's jsonl/cost sentinel (that would mean touching the
-     *  same worktree-and-transcript surface `probe()` does); a genuinely-orphaned lane's true
-     *  cost is unrecoverable here, the same "no sentinel -> 0, record whatever else is known"
-     *  fallback conductor.ts's own DEAD-lane path already accepts. */
+     *  escalation is EVENTED, never labeled: `estop-lane-swept` carries `escalation-source:never`
+     *  (event-kinds/lane.ts, corrected in round 4 — see that kind's own doc for why `always`, the
+     *  round-3 tagging, was a false label-ownership claim) — it still surfaces on the dashboard's
+     *  needs-attention strip, it just never auto-clears via a missing label this sweep never
+     *  wrote. Cost is recorded as 0 — this sweep deliberately never reads a lane's jsonl/cost
+     *  sentinel (that would mean touching the same worktree-and-transcript surface `probe()`
+     *  does); a genuinely-orphaned lane's true cost is unrecoverable here, the same "no sentinel
+     *  -> 0, record whatever else is known" fallback conductor.ts's own DEAD-lane path accepts.
+     *
+     *  P2-3: `durablePidAlive`/`signalDurablePid` are ONE capability, checked once per LANE
+     *  (never via independent optional-chaining, which is what let a supervisor implementing
+     *  only `durablePidAlive` report a lane "alive," silently no-op the missing signal, then
+     *  settle it `failed` anyway — a fabricated "swept" outcome over a child nobody touched).
+     *  `canCheckLiveness`/`canSignal` are read separately (not folded into one boolean) because
+     *  the fail-closed EVENT below distinguishes "we have evidence this lane is alive but cannot
+     *  act on it" (evented unconditionally — the dangerous half-capable shape) from "we have no
+     *  opinion at all" (evented only if a PRIOR, fully-capable run already left an open intent —
+     *  the same "no opinion" stance every other optional Supervisor method already takes). */
     const sweepDetachedLanesUnderEstop = async (): Promise<void> => {
       for (const w of [...deps.state.drivingWorkers(), ...deps.state.handoffWorkers()]) {
-        if (!deps.supervisor.durablePidAlive?.(w.name)) continue; // nothing confirmed alive — #293's own "left untouched" contract
-        deps.supervisor.signalDurablePid?.(w.name, "SIGTERM");
-        await drainWait(200); // the SAME short grace killByPid/killTree (worker.ts) already use
-        deps.supervisor.signalDurablePid?.(w.name, "SIGKILL");
-        const confirmedDead = !deps.supervisor.durablePidAlive?.(w.name);
+        const intentOpen = deps.state.estopSweepIntentOpen(w.name, w.issue);
+        const canCheckLiveness = typeof deps.supervisor.durablePidAlive === "function";
+        const canSignal = typeof deps.supervisor.signalDurablePid === "function";
+        const observedAlive = canCheckLiveness && deps.supervisor.durablePidAlive!(w.name);
+        if (!canCheckLiveness || !canSignal) {
+          // P2-3 fail-closed: this run's Supervisor cannot both assess AND act on this row —
+          // never settle on a half-formed answer. Evented whenever there is EITHER durable
+          // reason to worry (a PRIOR run's open intent) OR fresh reason RIGHT NOW (this run's
+          // own `durablePidAlive` — if implemented — says alive); silent only when neither holds,
+          // matching the pre-existing "no opinion" stance every other optional Supervisor method
+          // already takes. Never settled: fabricating `failed` for a lane whose liveness this run
+          // cannot fully assess is the exact bug this fix closes. `stoppedBy: "emergency-stop"`
+          // already forces this run's exit code non-zero (cli.ts's roundsExitCode) regardless.
+          if (intentOpen || observedAlive) deps.state.appendEvent("estop-lane-sweep-incapable", { worker: w.name, issue: w.issue });
+          continue;
+        }
+        if (!intentOpen && !observedAlive) continue; // ordinary case — nothing confirmed alive, no open intent
+        if (!intentOpen) {
+          // P1-1 crash-rerun safety: the durable PRE-KILL marker, written BEFORE the first
+          // signal — see estopSweepIntentOpen's own doc for the restart contract this enables.
+          deps.state.appendEvent("estop-lane-sweep-started", { worker: w.name, issue: w.issue });
+        }
+        // Idempotent either way — a prior crash may have already delivered one or both signals
+        // to a lane whose intent was already open; signalGroup (worker.ts) is a safe no-op
+        // against an already-dead pid.
+        deps.supervisor.signalDurablePid!(w.name, "SIGTERM");
+        await drainWait(KILL_SIGNAL_GRACE_MS); // the SAME grace killByPid/killTree (worker.ts) use — one named constant, not a duplicated literal
+        deps.supervisor.signalDurablePid!(w.name, "SIGKILL");
+        const confirmedDead = !deps.supervisor.durablePidAlive!(w.name);
         const settledAt = now().toISOString();
         // #645 P2-3 attribution: a `driving` row this sweep ever reaches is, by construction,
         // always the confirmed-fix-leg-resume-intent shape (an ORDINARY driving row has no live
@@ -1801,11 +1836,11 @@ async function runRoundsCore(deps: RoundDeps): Promise<RoundsResult> {
         // `handoff` row can be either an ordinary worker resume or a fix-leg one, distinguished
         // by the SAME `fixing_handoff` marker reclaimTerminalLane's own FIXING RECLAIM loop reads.
         const actorKind: SpendActorKind = w.state === "driving" || w.fixing_handoff === 1 ? "fix-leg" : "worker";
-        deps.state.settleTerminalWorker(
+        deps.state.settleEstopSweptWorker(
           { ...w, state: "failed", ended_at: settledAt },
           { worker: w.name, issue: w.issue, usd: 0, at: settledAt, actorKind },
+          { worker: w.name, issue: w.issue, confirmedDead },
         );
-        deps.state.appendEvent("estop-lane-swept", { worker: w.name, issue: w.issue, confirmedDead });
       }
     };
     /** #380 (F5): this loop's exit. Ordinarily "nothing in flight" — but once a stop signal has
@@ -2385,13 +2420,26 @@ function announceEstopActivation(deps: Pick<RoundDeps, "state" | "now">): void {
  *  rejected run, so what this closes is narrower and load-bearing on its own — the durable
  *  `emergency-stop` event/ceiling-breach row still lands even though THIS call never got to
  *  report a clean result, so a later status/dashboard read (or a restart's own detection) is
- *  never left believing E-STOP was silently missed just because one particular run threw. */
+ *  never left believing E-STOP was silently missed just because one particular run threw.
+ *
+ *  #724 gate② round 4, P2-4: the announce-under-catch itself is now its OWN try/catch, best-
+ *  effort — `deps.state.isEstopActive()`/`announceEstopActivation` can themselves throw (a
+ *  broken filesystem read, a DB write failure), and an UNGUARDED call there would replace the
+ *  ORIGINAL captured error with this new one, masking the real failure behind an unrelated
+ *  bookkeeping one. Logged (best-effort, `deps.log` — the SAME fail-toward-visibility-not-abort
+ *  stance every other best-effort append in this file takes), never thrown; `e` (the original
+ *  rejection) is ALWAYS what propagates out of this function, whether or not the announce
+ *  itself succeeded. */
 export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   let result: RoundsResult;
   try {
     result = await runRoundsCore(deps);
   } catch (e) {
-    if (deps.state.isEstopActive()) announceEstopActivation(deps);
+    try {
+      if (deps.state.isEstopActive()) announceEstopActivation(deps);
+    } catch (announceError) {
+      deps.log?.(`[sapwood:estop] activation announce failed while propagating the original error: ${String(announceError)}`);
+    }
     throw e;
   }
   if (!deps.state.isEstopActive()) return result;
