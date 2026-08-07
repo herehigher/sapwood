@@ -6,12 +6,14 @@ import type { CostBarGroup } from "./components/CostStrip.tsx";
 import { CostStrip } from "./components/CostStrip.tsx";
 import { LaneBoard } from "./components/LaneBoard.tsx";
 import { readConfigPath } from "./config-captions.ts";
+import { Hero } from "./hero/Hero.tsx";
+import { Legend } from "./hero/Legend.tsx";
 
 /**
- * The lane board (C), activity feed (D), and cost strip + config drawer (E) from
- * frontend-design.md §3. The hero/rings/header band land in their own issue; this shell just
- * hosts these four panels against the same §8 data hooks. `now` is test-only (defaults to the
- * real clock) — the cost strip's "by lane" day boundary needs a fixed instant to assert against.
+ * The header (A) + hero (B, #144) + lane board (C) + activity feed (D) + cost strip/config
+ * drawer (E) from frontend-design.md §3, all against the same §8 data hooks. `now` is
+ * test-only (defaults to the real clock) — the cost strip's "by lane" day boundary needs a
+ * fixed instant to assert against.
  */
 export function App({ now }: { now?: Date | undefined } = {}) {
   const clock = now ?? new Date();
@@ -53,7 +55,7 @@ export function App({ now }: { now?: Date | undefined } = {}) {
 
   return (
     <main className="stack">
-      <section className="panel">
+      <header className="panel app-header">
         <h1>sapwood</h1>
         {disconnected ? (
           <p className="muted" style={{ color: "var(--rust)" }}>
@@ -71,10 +73,22 @@ export function App({ now }: { now?: Date | undefined } = {}) {
             </dl>
           )
         )}
+        <Legend />
         <button type="button" onClick={() => setConfigOpen((v) => !v)}>
           Config ▸
         </button>
-      </section>
+      </header>
+
+      {loop.data && (
+        <Hero
+          events={events.events}
+          lanesMax={loop.data.lanes.max}
+          engine={loop.data.engine.state}
+          lanes={loop.data.lanes.items}
+          fixCap={Number(loop.data.config?.["lanes.prFixCap"] ?? 2)}
+          roundPhase={loop.data.round?.phase ?? null}
+        />
+      )}
 
       <LaneBoard
         lanesMax={loop.data?.lanes.max ?? null}
