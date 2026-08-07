@@ -1387,6 +1387,53 @@ test("runRounds KILL_SWITCH: blocks the very next peripheral phase — harvest/r
   }
 });
 
+// ── #724 gate② finding [1]: EMERGENCY_STOP must halt round-level progression the same way
+// KILL_SWITCH already does — a paid peripheral session, an open standby probe loop, or the
+// ceiling/park wait must never keep running (or keep waiting indefinitely) once E-STOP fires. ──
+
+test("runRounds EMERGENCY_STOP: blocks the very next peripheral phase — harvest/retro are NEVER invoked, stoppedBy names emergency-stop", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const forge = new FakeForge();
+    forge.ready = [];
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    // Flip E-STOP BEFORE the round loop even starts aligning — proves the FIRST peripheral
+    // phase it would otherwise run is blocked, not just later ones (mirrors the KILL_SWITCH
+    // test just above).
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    const deps = baseDeps({ forge, state, sleep, peripherals: allPeripherals(log) });
+    const result = await runRoundsGuarded(deps);
+    assert.equal(result.stoppedBy, "emergency-stop");
+    assert.deepEqual(log, []); // no peripheral ever ran — no paid session starts under E-STOP
+    assert.equal(result.rounds, 0); // the round never closed
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds EMERGENCY_STOP + KILL_SWITCH both present: stoppedBy names emergency-stop, not kill-switch (same precedence tick() already uses)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const forge = new FakeForge();
+    forge.ready = [];
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const deps = baseDeps({ forge, state, sleep, peripherals: allPeripherals(log) });
+    const result = await runRoundsGuarded(deps);
+    assert.equal(result.stoppedBy, "emergency-stop"); // E-STOP is the stricter tier — its name wins
+    assert.deepEqual(log, []);
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runRounds: a graceful signal (not KILL_SWITCH) still lets the in-flight round run harvest + retro before stopping", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();

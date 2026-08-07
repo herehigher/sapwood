@@ -23,6 +23,7 @@ import {
   parseStopFlags,
   reconcileWorkflowLabels,
   resolveStopConfig,
+  roundsExitCode,
   runCli,
   runExitCode,
   runStatus,
@@ -219,6 +220,13 @@ test("runExitCode: --once with a failed-only attempt exits 1; success exits 0 (C
 test("runExitCode: daemon/until-idle runs exit 0 even with contained tick errors (retry design, not terminal failure)", () => {
   assert.equal(runExitCode({ ticks: 0, tickErrors: 5 }, "forever"), 0);
   assert.equal(runExitCode({ ticks: 3, tickErrors: 2 }, "until-idle"), 0);
+});
+
+test("roundsExitCode (#724 gate② finding [1]): kill-switch AND emergency-stop are both operator-notice failures — 1; every graceful stop is 0", () => {
+  assert.equal(roundsExitCode({ stoppedBy: "kill-switch" }), 1);
+  assert.equal(roundsExitCode({ stoppedBy: "emergency-stop" }), 1);
+  assert.equal(roundsExitCode({ stoppedBy: "signal" }), 0);
+  assert.equal(roundsExitCode({ stoppedBy: "stop-condition" }), 0);
 });
 
 // ── #76: goal-based stop conditions ─────────────────────────────────────────────────────────

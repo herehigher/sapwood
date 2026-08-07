@@ -2016,13 +2016,14 @@ export function formatTickSummary(result: TickResult): string {
   );
 }
 
-/** #106: exit code for a finished `sapwood run` under the round orchestrator. Rounds have no
- *  --once/--until-idle equivalent (no single-tick concept), so unlike runExitCode above this
- *  doesn't key off stopMode/ticks — a kill-switch stop is the one outcome that needs an operator
- *  to notice (cron/scripts should see it as a failure); a graceful signal or a final stop
- *  condition is the design working as intended, same as the tick driver's daemon-mode exit 0. */
+/** #106 (#293/#724 gate② finding [1] extends this to emergency-stop): exit code for a finished
+ *  `sapwood run` under the round orchestrator. Rounds have no --once/--until-idle equivalent (no
+ *  single-tick concept), so unlike runExitCode above this doesn't key off stopMode/ticks — a
+ *  kill-switch OR emergency-stop stop is the one outcome that needs an operator to notice
+ *  (cron/scripts should see it as a failure); a graceful signal or a final stop condition is the
+ *  design working as intended, same as the tick driver's daemon-mode exit 0. */
 export function roundsExitCode(result: Pick<RoundsResult, "stoppedBy">): number {
-  return result.stoppedBy === "kill-switch" ? 1 : 0;
+  return result.stoppedBy === "kill-switch" || result.stoppedBy === "emergency-stop" ? 1 : 0;
 }
 
 /** #377 (was #106): `WorkerSupervisor.lanePr` needs `GithubForge`'s branch-keyed reads and PR-body

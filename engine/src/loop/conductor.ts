@@ -2834,6 +2834,16 @@ async function reconcileDrivingFixIntents(
   supervisor: Supervisor,
   cfg: SapwoodConfig,
   iso: () => string,
+  /** #724 gate② finding [0]: this reconciliation runs BEFORE the EMERGENCY_STOP gate (same
+   *  "before kill-switch" positioning the doc above already explains, for the same crash-window
+   *  reason), so its own `requestHandoff` call — otherwise unconditional — would violate AC1's
+   *  "no requestHandoff, ever" contract for exactly this one row shape: a `driving` lane whose
+   *  fix-leg child was adopted from a confirmed resume intent. Under E-STOP the row is still
+   *  adopted into `fixing` (so it's visible to THIS SAME tick's hard-kill pass, which scans
+   *  running+fixing lanes) but the graceful handoff request itself is skipped — matching every
+   *  other lane shape's treatment under this sentinel. Default false: every pre-#293 caller
+   *  (ordinary ticks, kill-switch, stop-signal) is unaffected. */
+  immediate = false,
 ): Promise<void> {
   for (const w of state.drivingWorkers()) {
     const intent = supervisor.resumeIntentState(w.name, w.issue);
@@ -2849,8 +2859,9 @@ async function reconcileDrivingFixIntents(
       // Never trust the adopted child's proxy channel across a crash (see doc above) — drain it
       // gracefully now rather than let it keep running against a dead evidence channel. Ordered
       // FIRST (B3): durable + idempotent, so a crash before the upsert below just re-enters this
-      // same branch next tick.
-      supervisor.requestHandoff(w.name);
+      // same branch next tick. Skipped entirely under `immediate` (#293/#724) — see this
+      // function's own `immediate` doc above.
+      if (!immediate) supervisor.requestHandoff(w.name);
       // B1: consume any stale PRIOR-leg sentinel resume() itself may not have gotten to.
       supervisor.clearStaleFixEntrySentinel(w.name);
       const fixRounds = (w.fix_rounds ?? 0) + 1;
@@ -3388,9 +3399,14 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // a human clearing a folder mid-drain must still clear the Needs-attention row.
   releaseVanishedWorktrees(state);
 
+  // #724 gate② finding [0]: read BEFORE reconcileDrivingFixIntents, not after — that
+  // reconciliation's own requestHandoff call must already know E-STOP is active so it can skip
+  // itself for a confirmed-intent driving row (see that function's own `immediate` doc).
+  const estopActive = state.isEstopActive();
+
   // #245 round-2 fix A3: reconcile any driving-row fix-leg spawn intent BEFORE the kill-switch
   // gate — see reconcileDrivingFixIntents' own doc for the crash window this repairs.
-  await reconcileDrivingFixIntents(forge, state, supervisor, cfg, iso);
+  await reconcileDrivingFixIntents(forge, state, supervisor, cfg, iso, estopActive);
 
   // ── EMERGENCY_STOP (#293): checked BEFORE the kill switch — the immediate, no-drain-window
   //   tier. Active -> every running/fixing lane is hard-killed THIS SAME TICK via the existing
@@ -3400,7 +3416,6 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   durable switch wins over an in-memory signal) — it is the STRICTER of the two, so it must
   //   never be shadowed by a switch that would otherwise wait out a drain window first. PAUSE is
   //   never reached (this branch returns before that check, same as the kill switch).
-  const estopActive = state.isEstopActive();
   if (estopActive) {
     const { resumed, reclaimed } = await adoptAndReclaimTerminal(forge, state, supervisor, cfg, threshold, iso);
     // #293: "once per activation" — mirrors recordCeilingBreach's own first-detection framing

@@ -8039,6 +8039,37 @@ test("tick: EMERGENCY_STOP active -> immediate hard-kill of running/fixing lanes
   }
 });
 
+test("tick: EMERGENCY_STOP + a `driving` lane with a CONFIRMED fix-leg resume intent -> reconcileDrivingFixIntents' own pre-gate adoption never calls requestHandoff, then the adopted lane is hard-killed the SAME tick (#724 gate② finding [0])", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-fixintent-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-fix", 6, 60);
+    sup.resumeIntents["lane-fix"] = "confirmed";
+    sup.probes["lane-fix"] = { ...DEFAULT_PROBE };
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+    assert.deepEqual(
+      sup.handoffRequested,
+      [],
+      "AC1's 'no requestHandoff, ever' contract must hold even for this pre-gate driving-row adoption path — reconcileDrivingFixIntents runs before the E-STOP check but must already know it's active",
+    );
+    assert.deepEqual(
+      r.escalated,
+      ["lane-fix"],
+      "adopted into fixing THEN hard-killed — visible to the same tick's kill pass, not left spinning",
+    );
+    assert.deepEqual(sup.reclaimed, ["lane-fix"]);
+    assert.equal(st.getWorker("lane-fix")?.state, "failed");
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("tick: EMERGENCY_STOP + a lane that already wrote .handoff before the tick -> its real terminal state is recorded, never mislabeled killed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-terminal-"));
   try {

@@ -384,14 +384,18 @@ export interface RoundsResult {
   rounds: number;
   ticks: number;
   tickErrors: number;
-  /** "kill-switch": a peripheral phase was blocked by an active KILL_SWITCH — the round loop
-   *  stops immediately, without running that (or any later) peripheral for the round in
-   *  flight. "signal"/"stop-condition": graceful — the round already open always finishes
-   *  harvest+retro and closes before the loop stops; only a NEW round is withheld. #395's
-   *  liveness watchdog (watchdog.ts) is NOT a `stoppedBy` value here — it runs as an
-   *  independent background timer, never cooperatively unwinding this loop; a real stall means
-   *  `runRounds` itself never returns (the nonzero exit is the operative signal). */
-  stoppedBy: "signal" | "stop-condition" | "kill-switch";
+  /** "kill-switch"/"emergency-stop" (#724 gate② finding [1]): a peripheral phase was blocked by
+   *  an active stop sentinel — the round loop stops immediately, without running that (or any
+   *  later) peripheral for the round in flight. Named by whichever sentinel is actually active,
+   *  with the SAME precedence tick() itself uses (E-STOP is the stricter tier — its name wins
+   *  when both are present); tick()'s own gate is what performs E-STOP's immediate hard-kill,
+   *  this value only reports why the ROUND loop itself stopped. "signal"/"stop-condition":
+   *  graceful — the round already open always finishes harvest+retro and closes before the loop
+   *  stops; only a NEW round is withheld. #395's liveness watchdog (watchdog.ts) is NOT a
+   *  `stoppedBy` value here — it runs as an independent background timer, never cooperatively
+   *  unwinding this loop; a real stall means `runRounds` itself never returns (the nonzero exit
+   *  is the operative signal). */
+  stoppedBy: "signal" | "stop-condition" | "kill-switch" | "emergency-stop";
   stopCondition?: StopConditionHit;
 }
 
@@ -993,6 +997,17 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   /** #380: no LIVE worker process left to drain (running + fixing; a `driving` lane has no
    *  process to hand off — see driver.ts's identical predicate for the full rationale). */
   const liveLanesDrained = (): boolean => deps.state.runningWorkers().length === 0 && deps.state.fixingWorkers().length === 0;
+  // #724 gate② finding [1]: every gate below that used to check ONLY isKillSwitchActive() — the
+  // ceiling/park wait loop, runPeripheral, and the standby probe loop — must also stop for
+  // EMERGENCY_STOP, or E-STOP's own "immediate" promise breaks the moment round-level machinery
+  // (a paid peripheral session, an open-ended park wait, a standby backoff sleep) is between
+  // tick() calls: tick() itself always hard-kills correctly once reached, but these loops could
+  // otherwise keep this run doing further work, or simply waiting, for as long as their own
+  // condition takes to clear — unbounded, in park's case. haltReason() names WHICH sentinel is
+  // live for RoundsResult.stoppedBy, with the SAME precedence conductor.ts's tick() already
+  // established: E-STOP is the stricter tier, so its name wins whenever both are present.
+  const haltActive = (): boolean => deps.state.isEstopActive() || deps.state.isKillSwitchActive();
+  const haltReason = (): "emergency-stop" | "kill-switch" => (deps.state.isEstopActive() ? "emergency-stop" : "kill-switch");
   // #395: the liveness watchdog — an INDEPENDENT background timer for this call's whole
   // lifetime (every round-phase: aligning/architecting/plan_review/executing/harvesting/retro,
   // not just tick()'s own dispatch/reclaim/drive), stopped in this function's `finally`
@@ -1168,7 +1183,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  executes, both names are long past their TDZ. */
   const waitForDispatchClear = async (): Promise<void> => {
     for (;;) {
-      if (signalledNow() || deps.state.isKillSwitchActive()) return;
+      if (signalledNow() || haltActive()) return;
       const nowDate = now();
       // #431 (F29): elapsed measures THIS process's life (the in-memory anchor above), so this
       // wait loop can no longer extend — or inherit — a wall-clock budget across restarts, and
@@ -1275,7 +1290,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
       if (signalledNow()) return;
       await interTickWait(deps.tickIntervalSec * 1000);
-      if (deps.state.isKillSwitchActive()) return;
+      if (haltActive()) return;
       // #395 (gate② round 3): a per-iteration heartbeat — this loop's own probe cadence
       // (envFailure.probeBackoffMaxSec / parkEscalateAfterSec, both up to 1800-3600s default) can
       // leave many consecutive iterations with no probe due and therefore no park-probe event,
@@ -1460,11 +1475,13 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   });
 
   /** Run one peripheral phase's stub, persist its marker, fire the observability hook. `ok`
-   *  false (never invoking the stub) when KILL_SWITCH is active — the caller must stop the
-   *  whole loop without advancing past this phase; `ranSession` is threaded straight from the
-   *  stub's own PeripheralStub.run() return (#394 F23) — see that interface's own doc. */
+   *  false (never invoking the stub) when KILL_SWITCH OR EMERGENCY_STOP is active (#724 gate②
+   *  finding [1]: a paid peripheral session must never start under either stop sentinel) — the
+   *  caller must stop the whole loop without advancing past this phase; `ranSession` is
+   *  threaded straight from the stub's own PeripheralStub.run() return (#394 F23) — see that
+   *  interface's own doc. */
   const runPeripheral = async (round: RoundRow, phase: PeripheralPhase): Promise<{ ok: boolean; ranSession: boolean }> => {
-    if (deps.state.isKillSwitchActive()) return { ok: false, ranSession: false };
+    if (haltActive()) return { ok: false, ranSession: false };
     const stub = peripherals[phase] ?? noopPeripheralStub;
     // Rerun-not-resume marker: only the phase we are CURRENTLY sitting in (round.phase ===
     // phase — true both for a fresh phase just advanced into this run, and for a phase we
@@ -1807,9 +1824,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         // peripheral phase (runPeripheral's own check) instead, the same contract every other
         // caller of this loop already relies on — standby must never turn that into "loops
         // forever probing instead" for an operator who just wants the freeze to take effect.
-        if (cfg.round.standby.enabled && roundsClosed > 0 && lastRoundIdle && !deps.state.isKillSwitchActive()) {
+        if (cfg.round.standby.enabled && roundsClosed > 0 && lastRoundIdle && !haltActive()) {
           while (!(await probeHasWork())) {
-            if (deps.state.isKillSwitchActive()) break; // let the round open & block normally
+            if (haltActive()) break; // let the round open & block normally
             const waitSec = Math.min(deps.tickIntervalSec * 2 ** standbyAttempts, cfg.round.standby.backoffCapSec);
             // Observability-only write, best-effort (Codex P2 round 5, PR #150): this block sits
             // outside the contained tick(), so a transient state-write failure here must degrade
@@ -1828,7 +1845,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
             // re-checking the sentinel between slices (one standby-wait event per backoff step
             // above, NOT per slice — the schedule and total wait are unchanged).
             let remainingSec = waitSec;
-            while (remainingSec > 0 && !signalledNow() && !deps.state.isKillSwitchActive()) {
+            while (remainingSec > 0 && !signalledNow() && !haltActive()) {
               const sliceSec = Math.min(remainingSec, deps.tickIntervalSec);
               await interTickWait(sliceSec * 1000);
               remainingSec -= sliceSec;
@@ -1844,7 +1861,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
               // additionally skips the append whenever real progress already fired this cadence.
               loopHeartbeatGate.tick("standby-heartbeat", { attempt: standbyAttempts, remainingSec });
             }
-            if (deps.state.isKillSwitchActive()) break; // let the round open & block normally
+            if (haltActive()) break; // let the round open & block normally
             if (signalledNow()) break;
             // Codex P2 (PR #150): re-check the FINAL stop condition on every standby wake —
             // checkFinalMilestone only ran once, before this block, so a stop.onMilestoneComplete
@@ -1899,7 +1916,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
       const startedPhase = round.phase; // captured once — the freshBatch test for `executing`
       let idx = SEQUENCE.indexOf(round.phase);
-      let killSwitchStop = false;
+      let haltStop = false;
       let workersThisRound = 0;
       // #125 (Codex P2 round 6): a round resumed PAST executing (process restart mid-harvest/
       // retro) never calls runExecuting in this process, so workersThisRound === 0 says nothing
@@ -1931,7 +1948,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           // runtime, kept only so TypeScript can see the exhaustive narrowing).
           const result = await runPeripheral(round, phase);
           if (!result.ok) {
-            killSwitchStop = true;
+            haltStop = true;
             break;
           }
           if (result.ranSession) ranPeripheralPhases.add(phase);
@@ -1942,8 +1959,8 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         round = deps.state.getRound(round.round_id)!;
       }
 
-      if (killSwitchStop) {
-        return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "kill-switch" };
+      if (haltStop) {
+        return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: haltReason() };
       }
 
       // #212 (gate② P1-3, superseding gate① F2's dispatched-events exemption): clear the pool
