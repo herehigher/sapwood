@@ -3359,6 +3359,16 @@ test("sessionTreeIsGone (#403, F25 — PR #430 gate② round 5, P1): an absent p
 test("sessionTreeIsGone (#403, F25 — PR #430 gate② round 5, P1): a LIVE detached group reads as alive, and only reads gone once it is actually gone", async () => {
   // A real detached group, because that is the thing the probe is about. The assertions are on the
   // probe's answer, never on how long anything took: the wait below is a named hang guard.
+  //
+  // #724 CI fix: `/bin/sh -c "sleep 30"` is NOT guaranteed to exec-replace into a single `sleep`
+  // process — dash (Linux's /bin/sh) forks a real child here (verified directly: two live pids,
+  // shell leader + sleep, both members of the group), where macOS's /bin/sh (bash) collapses to
+  // one. `child.kill("SIGKILL")` — a single-pid signal — killed only the shell leader, leaving the
+  // real `sleep` grandchild running for its own natural 30s and racing the hang guard's own 30s
+  // deadline: a load-bearing real-vs-real-timer race, exactly the class this repo's doctrine bans
+  // (reddened CI, passed on macOS). Signalling the GROUP (`-child.pid`, what production's own
+  // killTree/killGroup path already does — worker.ts's `spawnClaudeSession`) kills every member at
+  // once, so the probe's "gone" transition reflects an actual kill instead of racing a timer.
   const child = spawn("/bin/sh", ["-c", "sleep 30"], { detached: true, stdio: "ignore" });
   try {
     await new Promise<void>((resolve, reject) => {
@@ -3370,7 +3380,7 @@ test("sessionTreeIsGone (#403, F25 — PR #430 gate② round 5, P1): a LIVE deta
       false,
       "a live detached group must never read as gone — that would skip the SIGKILL escalation",
     );
-    child.kill("SIGKILL");
+    process.kill(-child.pid!, "SIGKILL");
     const deadline = Date.now() + 30_000;
     while (!sessionTreeIsGone(child.pid)) {
       if (Date.now() > deadline) throw new Error("hang guard (30000ms): the SIGKILLed detached group never became unsignalable");
@@ -3379,7 +3389,7 @@ test("sessionTreeIsGone (#403, F25 — PR #430 gate② round 5, P1): a LIVE deta
     assert.equal(sessionTreeIsGone(child.pid), true);
   } finally {
     try {
-      child.kill("SIGKILL");
+      if (child.pid != null) process.kill(-child.pid, "SIGKILL");
     } catch {
       /* already gone */
     }
