@@ -155,15 +155,26 @@ export function useSpendHistory(): { rows: SpendRow[]; error: unknown; isPending
   return { rows: merged.rows, error: query.error, isPending: query.isPending && merged.rows.length === 0 };
 }
 
+/** Only these two `actorKind` values are actually LANES (§3 E's "by lane" strip) — `worker` and
+ *  `fix-leg` are the two phases the same lane occupies across its life (#645's durable
+ *  attribution column). `peripheral-role` (e.g. `role-po-align-1`) and `engine-review` rows are
+ *  real spend but never a lane slot, and a `null` row (never claimed an attribution at all) is an
+ *  honest unknown, not a lane either — including any of the three would inflate the strip with a
+ *  bar that isn't one of the board's `lanes.max` slots (#715 gate② round 4 [3]). */
+const LANE_ACTOR_KINDS: ReadonlySet<SpendRow["actorKind"]> = new Set(["worker", "fix-leg"]);
+
 /** Groups accumulated spend rows by lane (`worker`), summed, for `now`'s UTC calendar day — the
  *  SAME day-boundary rule the engine's own `dailySpendUsd`/`spendByModelForDay` use (ts-prefix
  *  match against `now.toISOString().slice(0, 10)`), so the cost strip's "by lane" total agrees
- *  with the header's "today" total instead of drifting on its own boundary. */
+ *  with the header's "today" total instead of drifting on its own boundary. Filtered to
+ *  `actorKind: "worker" | "fix-leg"` rows only (#715 gate② round 4 [3]) — every other
+ *  attribution is real spend but not a lane, so it belongs elsewhere, never inflating this strip. */
 export function spendByWorkerForDay(rows: readonly SpendRow[], now: Date): { label: string; usd: number }[] {
   const dayPrefix = now.toISOString().slice(0, 10);
   const totals = new Map<string, number>();
   for (const row of rows) {
     if (!row.ts.startsWith(dayPrefix)) continue;
+    if (!LANE_ACTOR_KINDS.has(row.actorKind)) continue;
     totals.set(row.worker, (totals.get(row.worker) ?? 0) + row.usd);
   }
   return [...totals.entries()].map(([label, usd]) => ({ label, usd }));

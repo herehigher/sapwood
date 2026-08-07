@@ -45,10 +45,14 @@ function SentencePartView({ part, titles, repoUrl }: { part: SentencePart; title
 }
 
 function FeedEntry({ event, titles, repoUrl, now }: { event: LoopEvent; titles: EntityTitles; repoUrl?: string | undefined; now: Date }) {
+  // #715 gate② round 4 [4]: a corrupt legacy row's payload is served as `null`, never an object
+  // (state.ts's eventsPage) — normalize once so every dereference below (the sentence, the
+  // attention predicate, the gate glyph) sees an honest empty object instead of crashing.
+  const payload = event.payload ?? {};
   const entry = copyFor(event.kind);
-  const parts = entry ? entry.sentence(event.payload) : [`Unrecognized event: ${event.kind}`];
-  const attention = hasAttention(event.kind, event.payload);
-  const glyph = gateGlyph(event.kind, event.payload);
+  const parts = entry ? entry.sentence(payload) : [`Unrecognized event: ${event.kind}`];
+  const attention = hasAttention(event.kind, payload);
+  const glyph = gateGlyph(event.kind, payload);
   const dotColor = attention ? "var(--rust)" : glyph === true ? "var(--moss)" : "var(--sap)";
   return (
     <li className={attention ? "feed-entry feed-entry-attention" : "feed-entry"}>

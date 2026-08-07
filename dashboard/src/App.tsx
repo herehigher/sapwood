@@ -20,10 +20,13 @@ export function App({ now }: { now?: Date | undefined } = {}) {
   const spend = useSpendHistory();
   const [configOpen, setConfigOpen] = useState(false);
 
-  // §3's documented `disconnected` header state: EITHER query failing means the dashboard has
-  // lost its one data source, regardless of which one (#715 gate② [7] — this used to render only
-  // `loop.error`'s raw message, and nothing at all when just the events query failed).
-  const disconnected = loop.isError || Boolean(events.error);
+  // §3's documented `disconnected` header state: ANY of the three queries failing means the
+  // dashboard has lost part of its one data source, regardless of which one (#715 gate② [7] —
+  // this used to render only `loop.error`'s raw message, and nothing at all when just the events
+  // query failed; #715 gate② round 4 [2] — `spend` was still missing, so a lone `/api/spend`
+  // failure left the header looking normal while the cost strip silently misreported "no spend
+  // yet today").
+  const disconnected = loop.isError || Boolean(events.error) || Boolean(spend.error);
   // `useEventHistory` folds titles/open-attention durably itself (#715 gate② [0]) — App no longer
   // re-derives `titles` from the bounded `events.events` window, which would forget anything past
   // the display cap.

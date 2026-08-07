@@ -78,6 +78,16 @@ test("#715 gate② [7]: header ALSO shows disconnected when only /api/events fai
   assert.match(html, /disconnected — restart sapwood to reconnect/);
 });
 
+test("#715 gate② round 4 [2]: header ALSO shows disconnected when only /api/spend fails (loop-state and events are fine)", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+    "/api/spend": { status: 503, body: { error: "nope" } },
+  });
+  assert.match(html, /disconnected — restart sapwood to reconnect/);
+  assert.doesNotMatch(html, /503/, "the header must never leak the raw fetch-error message");
+});
+
 test("both queries succeeding renders the normal header, not disconnected", async () => {
   const html = await renderSettledApp({
     "/api/loop/state": { status: 200, body: LOOP_STATE_OK },

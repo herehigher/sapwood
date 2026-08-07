@@ -57,8 +57,12 @@ export type LoopEvent = {
   id: number;
   ts: string;
   kind: string;
-  /** Stored JSON, verbatim — the §7 copy map is what turns a kind + payload into prose. */
-  payload: Record<string, unknown>;
+  /** Stored JSON, verbatim — the §7 copy map is what turns a kind + payload into prose.
+   *  `null` on a row whose stored payload wasn't parseable JSON (`state.ts`'s `eventsPage`/
+   *  `eventsPageFiltered`: "a corrupt row is served as null, never a 500/throw for the whole
+   *  page") — a genuinely honest wire value, not a defect, so every consumer must treat it as
+   *  a real possibility rather than assume an object (#715 gate② round 4 [4]). */
+  payload: Record<string, unknown> | null;
 };
 
 export type EventsPage = { events: LoopEvent[]; lastId: number };

@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { LoopEvent } from "../api/types.ts";
+import type { EventKind } from "../copy.ts";
 import { foldOpenAttention } from "../entities.ts";
 import { ActivityFeed } from "./ActivityFeed.tsx";
 
 const NOW = new Date("2026-08-06T12:00:00.000Z");
 
-const ev = (id: number, kind: string, payload: Record<string, unknown> = {}): LoopEvent => ({
+// `kind: EventKind`, not a bare `string` — #715 gate② round 4 [0]: this is one of the events
+// fixtures the closed copy union is now connected to (see copy.types.test.ts's negative compile
+// fixture for the proof that an unmapped kind here fails typecheck).
+const ev = (id: number, kind: EventKind, payload: Record<string, unknown> = {}): LoopEvent => ({
   id,
   ts: new Date(NOW.getTime() - (100 - id) * 1000).toISOString(),
   kind,
@@ -205,4 +209,16 @@ test("#715 gate② round 3 [0]: engine-review-containment-gap renders its gaps a
   const withoutRepo = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[]} titles={{}} now={NOW} />);
   assert.doesNotMatch(withoutRepo, /<a /);
   assert.match(withoutRepo, /What this means/);
+});
+
+// ── #715 gate② round 4 [4]: a corrupt legacy row's payload is served as `null`, never an object ──
+
+test("a null-payload row (corrupt legacy JSON) renders without throwing, both alone and pinned", () => {
+  const corrupt: LoopEvent = { id: 1, ts: "2026-08-06T00:00:00Z", kind: "dispatched", payload: null };
+  assert.doesNotThrow(() => renderToStaticMarkup(<ActivityFeed events={[corrupt]} pinnedAttention={[]} titles={{}} now={NOW} />));
+
+  const corruptAttention: LoopEvent = { id: 2, ts: "2026-08-06T00:00:01Z", kind: "drive-needs-human", payload: null };
+  assert.doesNotThrow(() =>
+    renderToStaticMarkup(<ActivityFeed events={[corruptAttention]} pinnedAttention={[corruptAttention]} titles={{}} now={NOW} />),
+  );
 });

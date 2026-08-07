@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
+import type { EventKind } from "../copy.ts";
 import { fetchEvents, fetchLoopState, fetchSpend } from "./client.ts";
 import {
   accumulateEventsPage,
@@ -90,7 +91,9 @@ test("queryFn forwards the AbortSignal so a superseded poll is cancelled", async
 
 // ── #715 gate② [4]: accumulateEventsPage — the fixed-feed-cursor fix ────────────────────────────
 
-const evt = (id: number, kind = "dispatched"): LoopEvent => ({ id, ts: "2026-08-06T00:00:00Z", kind, payload: {} });
+// `kind: EventKind`, not a bare `string` — #715 gate② round 4 [0], same rationale as
+// ActivityFeed.test.tsx's `ev` / entities.test.ts's `event`.
+const evt = (id: number, kind: EventKind = "dispatched"): LoopEvent => ({ id, ts: "2026-08-06T00:00:00Z", kind, payload: {} });
 const page = (events: LoopEvent[], lastId: number): EventsPage => ({ events, lastId });
 
 test("accumulateEventsPage advances the cursor past the first page instead of holding at 0 forever", () => {
@@ -201,7 +204,13 @@ test("accumulateEventsPage keeps an open escalation pinned after it ages out of 
 
 // ── #715 gate② round 3 [2]: accumulateSpendPage / spendByWorkerForDay ───────────────────────────
 
-const spendRow = (id: number, worker: string, usd: number, ts = "2026-08-06T12:00:00Z"): SpendRow => ({
+const spendRow = (
+  id: number,
+  worker: string,
+  usd: number,
+  ts = "2026-08-06T12:00:00Z",
+  actorKind: SpendRow["actorKind"] = "worker",
+): SpendRow => ({
   id,
   ts,
   worker,
@@ -212,7 +221,7 @@ const spendRow = (id: number, worker: string, usd: number, ts = "2026-08-06T12:0
   outputTokens: 0,
   cacheReadTokens: 0,
   cacheCreationTokens: 0,
-  actorKind: "worker",
+  actorKind,
   role: null,
   estimated: false,
 });
@@ -263,4 +272,20 @@ test("#715 gate② round 3 [2]'s core regression: a lane's settled spend survive
 test("spendByWorkerForDay never fabricates a $0 bar for a lane with no settled spend", () => {
   const bars = spendByWorkerForDay([], new Date("2026-08-06T12:00:00Z"));
   assert.deepEqual(bars, []);
+});
+
+test("#715 gate② round 4 [3]: spendByWorkerForDay excludes non-lane actorKind rows — mixed-attribution regression", () => {
+  const rows = [
+    spendRow(1, "w1", 1.0, "2026-08-06T01:00:00Z", "worker"),
+    spendRow(2, "w1", 0.5, "2026-08-06T02:00:00Z", "fix-leg"),
+    // Real spend, but none of these is a lane slot — must never appear as a bar.
+    spendRow(3, "role-po-align-1", 2.0, "2026-08-06T03:00:00Z", "peripheral-role"),
+    spendRow(4, "lane-a:engine-review", 5.0, "2026-08-06T04:00:00Z", "engine-review"),
+    spendRow(5, "w2", 3.0, "2026-08-06T05:00:00Z", null),
+  ];
+  const bars = spendByWorkerForDay(rows, new Date("2026-08-06T12:00:00Z"));
+  // Asserting the exact bar array (not per-key lookups) proves inclusion AND exclusion in one
+  // shot: only "w1" (worker + fix-leg summed) survives; the peripheral-role, engine-review, and
+  // null-attribution rows never produce a bar at all, real spend or not.
+  assert.deepEqual(bars, [{ label: "w1", usd: 1.5 }]);
 });

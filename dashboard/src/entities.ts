@@ -28,15 +28,19 @@ export function foldEntityTitles(events: readonly LoopEvent[], seed: EntityTitle
   const ordered = [...events].sort((a, b) => a.id - b.id);
   const titles: EntityTitles = Object.fromEntries(Object.entries(seed).map(([issue, entry]) => [issue, { ...entry }]));
   for (const event of ordered) {
-    const issue = event.payload.issue;
+    // #715 gate② round 4 [4]: a corrupt legacy row's payload is served as `null` (state.ts's
+    // eventsPage), never an object — normalize once here rather than dereferencing `event.payload`
+    // directly, same honest-unknown stance as the rest of this fold.
+    const payload = event.payload ?? {};
+    const issue = payload.issue;
     if (typeof issue !== "number") continue;
     titles[issue] ??= {};
     const entry = titles[issue]!;
-    const issueTitle = event.payload.issueTitle;
+    const issueTitle = payload.issueTitle;
     if (entry.issueTitle === undefined && typeof issueTitle === "string") {
       entry.issueTitle = issueTitle;
     }
-    const prTitle = event.payload.prTitle;
+    const prTitle = payload.prTitle;
     if (entry.prTitle === undefined && typeof prTitle === "string") {
       entry.prTitle = prTitle;
     }
@@ -60,7 +64,7 @@ const ISSUE_CLEAR_KINDS = new Set(["dispatched", "merged", "gated-reentry", "lan
  *  not evidence the board got fixed (§3: "an operation's own effects are not evidence it was
  *  resolved"). No other kind/reason pair carries this exemption in the engine today. */
 function clearedBySameOperation(clearKind: string, openEvent: LoopEvent): boolean {
-  return clearKind === "merged" && openEvent.kind === "rollback-escalated" && openEvent.payload.reason === "merged-board-done";
+  return clearKind === "merged" && openEvent.kind === "rollback-escalated" && openEvent.payload?.reason === "merged-board-done";
 }
 
 /** Entity-scoped attention items key by `${kind}:${issue}` when the payload carries a numeric
@@ -104,7 +108,10 @@ export function foldOpenAttention(events: readonly LoopEvent[], seed: OpenAttent
   const ordered = [...events].sort((a, b) => a.id - b.id);
   const open: OpenAttention = { ...seed };
   for (const event of ordered) {
-    const { kind, payload } = event;
+    const { kind } = event;
+    // #715 gate② round 4 [4]: normalize a corrupt row's `null` payload once here, same stance as
+    // `foldEntityTitles` above — every field read below assumes an object.
+    const payload = event.payload ?? {};
     if (kind === "escalation-resolved") {
       const source = typeof payload.source === "string" ? payload.source : "";
       delete open[openAttentionKey(source, payload)];
@@ -125,7 +132,7 @@ export function foldOpenAttention(events: readonly LoopEvent[], seed: OpenAttent
         // can be redispatched onto a DIFFERENT worktree while the original retained folder still
         // needs a human, so this generic issue-sweep must never touch it.
         if (openEvent.kind === "worktree-retained") continue;
-        if (openEvent.payload.issue !== payload.issue) continue;
+        if (openEvent.payload?.issue !== payload.issue) continue;
         if (clearedBySameOperation(kind, openEvent)) continue;
         delete open[key];
       }

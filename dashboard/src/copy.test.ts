@@ -313,3 +313,146 @@ test("#715 gate② [2]: attention drift guard — every §7-table kind the engin
 test("resume-held carries no attention marker — it is a consequence, not a new item (§3)", () => {
   assert.equal(COPY["resume-held"].attention, undefined);
 });
+
+// ── #715 gate② round 4 [1]: table-driven sentence oracle — exact §7 text, every row, every branch ─
+//
+// The tests above already exercise attention metadata and a handful of sentences via `assert
+// .match` on a fragment. This table is the thing the finding asked for: an INDEPENDENT
+// transcription of §7's "Feed sentence" column (same "count is derived from the map, never
+// hard-coded" discipline `DOC_TABLE_KINDS` above already applies to the row COUNT — this applies
+// it to each row's TEXT), asserted with `assert.equal` against the full rendered sentence, not a
+// substring. Every current §7 row appears at least once; a row with a documented payload branch
+// (`reclaim-done`, `ceiling-breach-entered`/`cleared`, `escalation-resolved`'s five `via` values,
+// `engine-review-verdict`, `park-probe`, `drive-fixup`, `pool-selected`, `fix-leg-started`) appears
+// once per branch.
+
+const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expected: string][] = [
+  ["dispatched", { issue: 1 }, "Started work on issue #1"],
+  ["dispatch-failed", { issue: 1 }, "Couldn't start issue #1 — it's back in the backlog"],
+  ["reclaim-done", { worker: "w1", next: "DRIVING" }, "Lane w1 opened a PR — now in review"],
+  ["reclaim-done", { worker: "w1", next: "ESCALATE_NOPR" }, "Lane w1 ended without a PR — flagged for a human"],
+  ["reclaim-failed", { worker: "w1" }, "Lane w1 hit a problem and stopped"],
+  ["reclaim-dead", { worker: "w1" }, "Lane w1 went silent — cleaned up; its issue goes back to the backlog"],
+  ["handoff", { worker: "w1" }, "Lane w1 reached its budget and saved its progress for a successor"],
+  ["merged", { pr: 10, issue: 1 }, "Merged PR #10 — checks green and review approved"],
+  ["drive-needs-human", { pr: 10, issue: 1 }, "PR #10 needs a human decision"],
+  ["drive-no-pr", { worker: "w1" }, "Lane w1 ended without opening a PR"],
+  ["drive-queued", { pr: 10, issue: 1 }, "PR #10 is ready — waiting its turn to merge"],
+  ["drive-stopped", { pr: 10, issue: 1 }, "PR #10 is open and left for you — auto-merge is off"],
+  ["pool-selected", { issues: [1, 2, 3] }, "Selected 3 issue(s) for this round"],
+  ["pool-selected", {}, "Selected 0 issue(s) for this round"],
+  ["drive-fixup", { pr: 1, issue: 1, reason: "gate:FIXABLE:findings" }, "PR #1 sent back to fix — review findings"],
+  ["drive-fixup", { pr: 1, issue: 1, reason: "gate:FIXABLE:merge-conflict" }, "PR #1 sent back to fix — merge conflict"],
+  ["drive-fixup", { pr: 1, issue: 1, reason: "gate:FIXABLE:CI_RED:build" }, "PR #1 sent back to fix — checks failed"],
+  ["fix-leg-started", { worker: "w1", fixRounds: 2, cap: 5 }, "Lane w1 is fixing its PR — round 2 of 5"],
+  ["fix-leg-started", { worker: "w1", fixRounds: 1 }, "Lane w1 is fixing its PR — round 1"],
+  ["fix-leg-resumed", { worker: "w1" }, "Lane w1 resumed fixing after a handoff"],
+  ["fix-rounds-capped", { pr: 1, issue: 1 }, "PR #1 used up its fix attempts — needs a human"],
+  ["fix-leg-verdict-rerun", { pr: 1, issue: 1 }, "PR #1's review findings aren't fixable by the producer — needs a human"],
+  ["ceiling-escalated", {}, "Safety ceiling reached — winding down all work"],
+  [
+    "ceiling-breach-entered",
+    { reason: "wall-clock", maxWallClockSec: 3600 },
+    "This run hit its 3600s attention alarm — no new work until a restart",
+  ],
+  ["ceiling-breach-entered", { reason: "daily-budget", dailyBudgetUsd: 100 }, "Today's $100 budget is spent — no new work until tomorrow"],
+  ["ceiling-breach-entered", {}, "A safety ceiling was reached — no new work until it clears"],
+  [
+    "rapid-restart-detected",
+    { births: 3, windowSec: 60 },
+    "Engine started 3 times in 60s — crash loop suspected, dispatch parked for a human",
+  ],
+  ["ceiling-breach-cleared", { reason: "wall-clock" }, "The wall-clock alarm cleared"],
+  ["ceiling-breach-cleared", { reason: "daily-budget" }, "The daily budget rolled over"],
+  ["ceiling-breach-cleared", {}, "A safety ceiling cleared"],
+  ["rollback-recovered", { issue: 1 }, "Returned issue #1 to the backlog safely"],
+  ["rollback-retry-failed", { issue: 1 }, "Still trying to return issue #1 to the backlog"],
+  ["rollback-escalated", { issue: 1 }, "Couldn't return issue #1 automatically — flagged for a human"],
+  ["engine-review-verdict", { outcome: "approved", pr: 1, issue: 1, findingCount: 0 }, "Review approved PR #1 — 0 finding(s) noted"],
+  ["engine-review-verdict", { outcome: "rejected", pr: 1, issue: 1, findingCount: 2 }, "Review sent PR #1 back — 2 finding(s) to fix"],
+  ["engine-review-verdict", { outcome: "approved", pr: 1, issue: 1 }, "Review approved PR #1 — counts unavailable noted"],
+  [
+    "engine-review-budget-advisory",
+    { capUsd: 5 },
+    "This review’s $5 budget is a guide, not a limit — the tool running it can’t enforce one",
+  ],
+  ["engine-review-cost-unknown", {}, "This review finished without reporting what it cost — its spend is unknown, not zero"],
+  [
+    "engine-review-containment-gap",
+    {},
+    "Recorded limits, not an incident: this review ran in a sandbox that blocks writes but still lets the reviewed code run, and does not limit which files it can read\nWhat this means",
+  ],
+  [
+    "engine-review-orphaned-group",
+    {},
+    "A review that ran out of time was stopped, but something it started is still running on this machine",
+  ],
+  ["engine-review-session-inspection", { toolItemCount: 5 }, "This review session made 5 tool/command call(s) while looking things over"],
+  ["reviewer-fallback-switch", {}, "The usual reviewer isn't answering — switched to the backup"],
+  ["reviewer-fallback-revert", {}, "The usual reviewer is back — switched back"],
+  ["pr-held", { pr: 1, issue: 1 }, "A person put PR #1 on hold — nothing moves until they lift it"],
+  ["pr-released", { pr: 1, issue: 1 }, "Hold released — PR #1 resumes"],
+  ["lane-state-labeled", { worker: "w1", pr: 1, issue: 1 }, "Lane w1 is now shown as working on PR #1"],
+  ["lane-state-cleared", { worker: "w1", pr: 1, issue: 1 }, "PR #1 no longer shows lane w1 as working on it"],
+  [
+    "resume-held",
+    { worker: "w1", issue: 7, label: "sapwood:blocked" },
+    "Lane w1's handoff can't resume — issue #7 still carries `sapwood:blocked`",
+  ],
+  ["worktree-retained", { worker: "w1" }, "Kept lane w1's working folder for inspection"],
+  ["worktree-released", { worker: "w1" }, "Lane w1's retained folder was cleaned up"],
+  ["env-failure", { worker: "w1" }, "Lane w1 hit an environment problem — not the work itself"],
+  [
+    "env-failure-preserved",
+    { worker: "w1" },
+    "Kept lane w1's work safe after an environment problem — its PR needs a human to continue it",
+  ],
+  ["park-escalated", {}, "The environment keeps failing — paused dispatch and flagged a human"],
+  ["park-probe", { source: "forge", success: true }, "Forge check passed"],
+  ["park-probe", { source: "llm", success: true }, "Model check passed"],
+  ["park-probe", { source: "forge", success: false }, "Environment check failed — still waiting"],
+  ["park-resumed", {}, "Environment recovered — resuming work"],
+  ["park-canary", {}, "Sent one test lane to check the environment"],
+  ["park-canary-failed", {}, "The test lane failed — still waiting on the environment"],
+  ["park-canary-inconclusive", {}, "The test lane didn't settle it — still waiting on the environment"],
+  ["tick-error", {}, "The engine hit an error this cycle — it will retry"],
+  ["standby-wait", { waitSec: 30 }, "Nothing to work on — checking again in 30 s"],
+  ["standby-exit", { attempts: 4 }, "Work appeared — resuming after 4 quiet check(s)"],
+  ["round-stop", { detail: "lane cap" }, "This round reached its limit (lane cap) — no new work this round"],
+  ["align-summary", { created: 3, triaged: 2 }, "Planning pass: 3 issue(s) created, 2 plan(s) drafted"],
+  ["triage-degraded", {}, "A planning session had trouble — some issues keep their old plans"],
+  ["no-plan-after-draft", { issue: 1 }, "Issue #1 still has no usable plan after a drafting attempt"],
+  ["plan-review-escalated", { issue: 1 }, "Issue #1's plan needs a human — automated review couldn't approve it"],
+  ["verify-na-proposed", { issue: 1 }, "Issue #1 proposed as not separately verifiable — a person decides"],
+  ["gated-reentry", { issue: 1 }, "Issue #1's PR was unblocked by a human — back through review"],
+  ["lane-revived", { issue: 1 }, "Issue #1's PR picked back up after an environment failure — back under review"],
+  ["gated-reentry-capped", { issue: 1 }, "Issue #1 was unblocked too many times without landing — flagged for a human"],
+  ["gated-reentry-capped-label-failed", { issue: 1 }, "Couldn't re-flag issue #1 — please check it manually"],
+  ["escalation-resolved", { issue: 7, pr: 12, via: "merged" }, "Issue #7 no longer needs you — PR #12 was merged"],
+  ["escalation-resolved", { issue: 7, via: "issue-closed" }, "Issue #7 no longer needs you — it was closed"],
+  ["escalation-resolved", { issue: 7, pr: 12, via: "pr-closed" }, "Issue #7 no longer needs you — PR #12 was closed without merging"],
+  ["escalation-resolved", { issue: 7, via: "label-removed" }, "Issue #7 no longer needs you — the flag was cleared"],
+  ["escalation-resolved", { issue: 7, via: "board-fixed" }, "Issue #7 no longer needs you — the board was set to Done"],
+  [
+    "needs-human-swept",
+    { issue: 7, label: "sapwood:needs-human" },
+    "Issue #7 no longer carries `sapwood:needs-human` — the engine removed the flag it had applied itself, now that its escalation is resolved",
+  ],
+  ["retro-pr-opened", { pr: 5 }, "The loop proposed an improvement to itself — PR #5 awaits review"],
+  ["retro-pr-degraded", {}, "A self-improvement proposal didn't come together this round"],
+  ["run-started", {}, "Engine started a new run"],
+  ["instance-lock-taken-over", { previousPid: 1234 }, "Took over the engine lock left by a crashed run (pid 1234)"],
+  ["round-phase", { round_id: 5, phase: "executing" }, "Round 5 moved into executing"],
+  ["idle-churn-detected", { rounds: 3 }, "The loop ran 3 rounds in a row that changed nothing at all — parked for a human"],
+];
+
+test("table-driven §7 sentence oracle: every row (and every documented payload branch) renders its exact documented text", () => {
+  for (const [kind, payload, expected] of SENTENCE_ORACLE) {
+    assert.equal(render(kind, payload), expected, `${kind} with payload ${JSON.stringify(payload)}`);
+  }
+});
+
+test("the sentence oracle covers every current §7-table kind at least once", () => {
+  const covered = new Set(SENTENCE_ORACLE.map(([kind]) => kind));
+  assert.deepEqual([...covered].sort(), [...EVENT_KINDS].sort());
+});
