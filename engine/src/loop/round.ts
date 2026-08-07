@@ -2429,7 +2429,15 @@ function announceEstopActivation(deps: Pick<RoundDeps, "state" | "now">): void {
  *  bookkeeping one. Logged (best-effort, `deps.log` — the SAME fail-toward-visibility-not-abort
  *  stance every other best-effort append in this file takes), never thrown; `e` (the original
  *  rejection) is ALWAYS what propagates out of this function, whether or not the announce
- *  itself succeeded. */
+ *  itself succeeded.
+ *
+ *  #724 gate② round 5, P2: the LOG call itself is now ALSO guarded (a second, inner try/catch) —
+ *  a throwing `deps.log` (a test double, or a real logger backed by a broken stream) used to
+ *  escape this catch block unguarded, replacing `e` with the logger's OWN error and masking the
+ *  original failure exactly the way this whole block exists to prevent. Swallowed, silently, on
+ *  purpose: a logger failing while we are already mid-teardown for an E-STOP-active rejection is
+ *  the one place going quiet is correct — there is no more-original error left to protect by
+ *  surfacing it, and re-raising it would still clobber `e`. */
 export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   let result: RoundsResult;
   try {
@@ -2438,7 +2446,11 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     try {
       if (deps.state.isEstopActive()) announceEstopActivation(deps);
     } catch (announceError) {
-      deps.log?.(`[sapwood:estop] activation announce failed while propagating the original error: ${String(announceError)}`);
+      try {
+        deps.log?.(`[sapwood:estop] activation announce failed while propagating the original error: ${String(announceError)}`);
+      } catch {
+        /* the logger itself failed — swallow; e (the original error) is still what must propagate below */
+      }
     }
     throw e;
   }

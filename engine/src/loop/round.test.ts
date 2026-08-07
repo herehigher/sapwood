@@ -1808,6 +1808,53 @@ test("runRounds thrown-under-EMERGENCY_STOP: a rejecting sweep step still announ
   }
 });
 
+// #724 gate② round 5, P2: the announce-under-catch (and, inside it, the best-effort log call)
+// must NEVER be able to replace the ORIGINAL rejection — even when BOTH of them throw too. The
+// test above proves the happy path (announce succeeds); this one proves the degraded one.
+test("runRounds thrown-under-EMERGENCY_STOP: the ORIGINAL error still propagates even when the announce itself throws AND the logger it falls back to also throws (#724 gate② round 5, P2)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-estop-throw-throw-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const round = state.startRound("2026-07-09T00:00:00.000Z");
+    state.advanceRoundPhase(round.round_id, "executing", "2026-07-09T00:01:00.000Z");
+    state.upsertWorker({ name: "lane-boom2", issue: 8, session_id: "s", state: "handoff", started_at: "t", ended_at: "t2" });
+    state.close();
+
+    const state2 = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    forge.ready = [];
+    const sup = new FakeSupervisor();
+    sup.durablePidAlive = (w) => sup.durablePids[w] ?? false;
+    sup.signalDurablePid = (): void => {
+      throw new Error("original: signal failed unexpectedly");
+    };
+    sup.durablePids["lane-boom2"] = true;
+    // The wrapper's own announce write (announceEstopActivation's recordEstopActivation call)
+    // ALSO throws — a broken DB write hitting exactly the moment this run is already unwinding
+    // from the sweep's own rejection. Not isEstopActive: that method is called from MANY places
+    // throughout runRoundsCore's own normal flow, so overriding it would make the ORIGINAL error
+    // come from there instead of from the sweep this test is actually about. recordEstopActivation
+    // is reached ONLY via the announce path in this scenario (the round resumes straight into
+    // `executing`, so runPeripheral's own announce call is never reached, and tick() never runs).
+    state2.recordEstopActivation = (): void => {
+      throw new Error("announce-failure: recordEstopActivation broke");
+    };
+    // The best-effort log fallback ALSO throws — e.g. a logger backed by a broken stream.
+    const throwingLog = (): void => {
+      throw new Error("logger-failure: log broke too");
+    };
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    const deps = baseDeps({ forge, supervisor: sup, state: state2, sleep, log: throwingLog });
+    // The ORIGINAL error — never the announce failure, never the logger failure — is what a
+    // caller must see. Either of the other two escaping unguarded would replace this message.
+    await assert.rejects(runRoundsGuarded(deps), /original: signal failed unexpectedly/);
+    state2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runRounds: a graceful signal (not KILL_SWITCH) still lets the in-flight round run harvest + retro before stopping", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();
