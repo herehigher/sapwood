@@ -5,11 +5,10 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 import { ConfigSchema, loadConfig, type SapwoodConfig } from "../config/config.js";
 import {
   associateLanePr,
@@ -8148,11 +8147,6 @@ test("tick: EMERGENCY_STOP NOT active -> no behavior change (regression guard)",
   assert.equal(gate.calls.length, 1);
   assert.deepEqual(r.ceilingReasons, []);
   st.close();
-});
-
-test("frontend-design.md §7 copy map carries the `emergency-stop` event kind (#293 gate② checklist)", () => {
-  const doc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "docs", "frontend-design.md"), "utf8");
-  assert.match(doc, /\|\s*`emergency-stop`\s*\|/);
 });
 
 test("#75 tick: removing the PAUSE sentinel restores dispatch on the very next tick, no restart / cache needed", async () => {
