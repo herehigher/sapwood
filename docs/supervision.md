@@ -125,13 +125,41 @@ cd "$DEPLOY" && nohup node "$DEPLOY"/engine/dist/cli.js run --config <cfg-path> 
 disown
 ```
 
+That pattern is verified sufficient **only from an interactive shell** — job control
+there is what gives the backgrounded process its own process group in the first place;
+`disown` merely drops it from the shell's *job table*, not from that group. Launched
+from a **non-interactive** shell instead (an automation harness, a CI runner, an agent
+session's own shell), the backgrounded process shares the launcher's process group, and
+a later group-directed signal from that launching environment kills the "detached"
+engine collaterally — live-verified 2026-08-07: pid 95193, launched `nohup`+`disown`
+from a non-interactive harness shell, died to an external SIGKILL ~23 minutes in,
+together with its codex-exec review child (the shared-pgid mechanism is the verified
+fact here; the exact external signal source was never identified, and is
+environment-specific). From a non-interactive launcher, give the engine a true new
+session instead of relying on job control — `setsid <cmd>` is the one-line form where
+the OS ships it, but macOS does not, so the portable equivalent is a small double-fork:
+
+```bash
+python3 - <<'PY'
+import os
+if os.fork(): raise SystemExit(0)     # orphan the child from this shell
+os.setsid()                            # new session + process group of its own
+if os.fork(): raise SystemExit(0)      # never reacquire a controlling terminal
+log = open("$DEPLOY/data/logs/detached.log", "a")
+os.dup2(log.fileno(), 1); os.dup2(log.fileno(), 2)
+os.execv("<absolute-path-to-node>",
+          ["<absolute-path-to-node>", "$DEPLOY/engine/dist/cli.js", "run", "--config", "<cfg-path>"])
+PY
+```
+
 Then confirm it's actually alive the way [Batch open ritual](#batch-open-ritual)'s
 Single-instance check already tells you to, not by trusting your own memory of having
-started it: read `"$DEPLOY"/data/sapwood.lock`'s recorded `pid` and `ps -p <pid>`
-it yourself — the lock is authoritative, a shell job you believe is running is not.
-Check it by the SAME absolute path you launched under, never a bare `data/sapwood.lock`
-typed from whatever directory the checking shell happens to be in — the lock, like the
-DB below, is cwd-relative by default and resolves to nothing from anywhere else.
+started it — same check for either launch form above: read
+`"$DEPLOY"/data/sapwood.lock`'s recorded `pid` and `ps -p <pid>` it yourself — the lock
+is authoritative, a shell job you believe is running is not. Check it by the SAME
+absolute path you launched under, never a bare `data/sapwood.lock` typed from whatever
+directory the checking shell happens to be in — the lock, like the DB below, is
+cwd-relative by default and resolves to nothing from anywhere else.
 
 Three script-environment gotchas from the same incident apply to any detached script,
 not just the launch line above:
