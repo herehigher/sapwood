@@ -1391,23 +1391,30 @@ test("runRounds KILL_SWITCH: blocks the very next peripheral phase — harvest/r
 // KILL_SWITCH already does — a paid peripheral session, an open standby probe loop, or the
 // ceiling/park wait must never keep running (or keep waiting indefinitely) once E-STOP fires. ──
 
-test("runRounds EMERGENCY_STOP: blocks the very next peripheral phase — harvest/retro are NEVER invoked, stoppedBy names emergency-stop", async () => {
+test("runRounds EMERGENCY_STOP: blocks the very next peripheral phase — harvest/retro are NEVER invoked, stoppedBy names emergency-stop, and the emergency-stop event is appended exactly once (#724 gate② finding [0])", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
   try {
     const { sleep } = mkSleepSpy();
     const forge = new FakeForge();
     forge.ready = [];
     const state = new State(join(dir, "sapwood.sqlite"));
+    const events = spyOnEvents(state);
     const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
     // Flip E-STOP BEFORE the round loop even starts aligning — proves the FIRST peripheral
     // phase it would otherwise run is blocked, not just later ones (mirrors the KILL_SWITCH
-    // test just above).
+    // test just above). This is exactly the round-level detection path (runPeripheral's own
+    // haltActive() gate, never reaching tick()) that #724 gate② finding [0] found silent.
     writeFileSync(join(dir, "EMERGENCY_STOP"), "");
     const deps = baseDeps({ forge, state, sleep, peripherals: allPeripherals(log) });
     const result = await runRoundsGuarded(deps);
     assert.equal(result.stoppedBy, "emergency-stop");
     assert.deepEqual(log, []); // no peripheral ever ran — no paid session starts under E-STOP
     assert.equal(result.rounds, 0); // the round never closed
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "emergency-stop"),
+      [["emergency-stop", {}]],
+      "the activation must be recorded even though no tick() ever ran this call — the pre-tick round-level detection path itself must announce it, exactly once",
+    );
     state.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1428,6 +1435,57 @@ test("runRounds EMERGENCY_STOP + KILL_SWITCH both present: stoppedBy names emerg
     const result = await runRoundsGuarded(deps);
     assert.equal(result.stoppedBy, "emergency-stop"); // E-STOP is the stricter tier — its name wins
     assert.deepEqual(log, []);
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds executing-phase drain loop: a pre-existing driving lane + EMERGENCY_STOP mid-round — the loop exits immediately instead of freezing behind the deliberately-untouched driving lane (#724 gate② finding [1])", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-estop-drive-"));
+  try {
+    const { sleep, calls: sleepCalls } = mkSleepSpy();
+    const forge = new FakeForge();
+    forge.ready = []; // no new dispatch — isolates the driving lane as the drain loop's only occupant
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const events = spyOnEvents(state);
+    // A driving lane already occupying the board BEFORE this round even opens — activeWorkers()
+    // is a live, round-agnostic query (state.ts's own doc on that method), so the executing
+    // phase's drain loop inherits it as in-flight from its very first check. This is exactly the
+    // shape a mid-run E-STOP wedges on: tick()'s own E-STOP branch (conductor.ts) hard-kills
+    // running/fixing lanes but, by design, never touches `driving` rows.
+    state.upsertWorker({ name: "lane-drv", issue: 900, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 900 });
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    const deps = baseDeps({ forge, state, sleep, peripherals: allPeripherals(log) });
+    // E-STOP is flipped only once plan_review (the phase immediately before executing) has
+    // already run to completion — round.ts's own peripheral gate (runPeripheral) checks
+    // haltActive() on ENTRY, so flipping any earlier would block the round before it ever
+    // reaches executing at all (that pre-tick path is finding [0]'s own test, above). Here the
+    // round must be genuinely INSIDE the executing phase for the drain loop itself to be
+    // exercised.
+    deps.onRoundPhase = (_roundId, phase) => {
+      if (phase === "plan_review") writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    };
+    const stopSafety = boundedStopOnPhase(deps, 10); // generous: aligning/architecting/plan_review is 3
+    const result = await runRoundsGuarded(deps);
+    stopSafety();
+    assert.equal(result.stoppedBy, "emergency-stop");
+    // The fix: drainedEnoughToExit() is true on its very FIRST check inside runExecuting — no
+    // running/fixing lane ever existed, so liveLanesDrained() is immediately true — meaning ZERO
+    // drainWait calls. Pre-fix, activeWorkers() stayed nonzero forever (the driving lane, never
+    // touched by an E-STOP tick) and this loop would spin until boundedStopOnPhase's own sleep
+    // backstop forced a stop — an unmistakably different, wrong outcome this assertion rules out.
+    assert.deepEqual(sleepCalls, [], "the executing drain loop must exit without ever waiting on the driving lane");
+    // The driving lane itself: still `driving`, untouched — E-STOP's contract (conductor.ts)
+    // never kills it (no live process to kill); this fix only stops the loop from waiting on it.
+    assert.equal(state.getWorker("lane-drv")?.state, "driving");
+    // tick()'s own E-STOP branch (conductor.ts) announces the event during executing's wave 1 —
+    // the round-level gate this round later hits at harvesting (finding [0]'s own fix) must see
+    // it already recorded and stay silent, so exactly one still lands overall.
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "emergency-stop"),
+      [["emergency-stop", {}]],
+    );
     state.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

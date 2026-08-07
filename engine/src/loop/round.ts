@@ -1008,6 +1008,25 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   // established: E-STOP is the stricter tier, so its name wins whenever both are present.
   const haltActive = (): boolean => deps.state.isEstopActive() || deps.state.isKillSwitchActive();
   const haltReason = (): "emergency-stop" | "kill-switch" => (deps.state.isEstopActive() ? "emergency-stop" : "kill-switch");
+  // #724 gate② finding [0]: `runPeripheral` below (the ONLY caller — every other haltActive()
+  // checkpoint in this file breaks/returns to let the round open and hit runPeripheral's own
+  // gate instead, per that gate's own doc) can detect EMERGENCY_STOP and stop the round BEFORE
+  // any tick() this run ever reaches conductor.ts's own E-STOP branch, which is the sole place
+  // the `emergency-stop` event was previously appended — so this round-level detection must
+  // record the SAME once-per-activation event tick() records, using the IDENTICAL dedup
+  // contract (conductor.ts's tick(), #293: read ceilingBreach().reasons BEFORE recording, so
+  // whichever of the two — a tick mid-executing, or this phase gate — fires first wins and the
+  // other sees `alreadyAnnounced` and stays silent; recordCeilingBreach's own INSERT-preserves-
+  // `at`-on-conflict shape means neither order double-books the drain-window anchor either).
+  // KILL_SWITCH-only halts are untouched — that sentinel has its own separate event vocabulary
+  // (ceiling-breach-entered et al.), never this one.
+  const announceEstopIfNewlyDetected = (): void => {
+    if (haltReason() !== "emergency-stop") return;
+    const alreadyAnnounced = (deps.state.ceilingBreach()?.reasons ?? []).includes("emergency-stop");
+    if (alreadyAnnounced) return;
+    deps.state.appendEvent("emergency-stop", {});
+    deps.state.recordCeilingBreach(["emergency-stop"], now());
+  };
   // #395: the liveness watchdog — an INDEPENDENT background timer for this call's whole
   // lifetime (every round-phase: aligning/architecting/plan_review/executing/harvesting/retro,
   // not just tick()'s own dispatch/reclaim/drive), stopped in this function's `finally`
@@ -1479,9 +1498,14 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  finding [1]: a paid peripheral session must never start under either stop sentinel) — the
    *  caller must stop the whole loop without advancing past this phase; `ranSession` is
    *  threaded straight from the stub's own PeripheralStub.run() return (#394 F23) — see that
-   *  interface's own doc. */
+   *  interface's own doc. Under EMERGENCY_STOP specifically, this IS the round-level detection
+   *  point every haltActive() checkpoint above funnels into (#724 gate② finding [0]) — see
+   *  announceEstopIfNewlyDetected's own doc for why the event gets recorded right here. */
   const runPeripheral = async (round: RoundRow, phase: PeripheralPhase): Promise<{ ok: boolean; ranSession: boolean }> => {
-    if (haltActive()) return { ok: false, ranSession: false };
+    if (haltActive()) {
+      announceEstopIfNewlyDetected();
+      return { ok: false, ranSession: false };
+    }
     const stub = peripherals[phase] ?? noopPeripheralStub;
     // Rerun-not-resume marker: only the phase we are CURRENTLY sitting in (round.phase ===
     // phase — true both for a fresh phase just advanced into this run, and for a phase we
@@ -1712,9 +1736,21 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
      *  longer be resumed, so waiting on either (as `activeWorkers()`/`recoveryBeatPending` do)
      *  would wedge shutdown behind work this loop has itself frozen. What the drain still owes
      *  is the LIVE processes — running/fixing lanes — and those it is actively draining, hard
-     *  kill included past cfg.cost.drainWindowSec. */
+     *  kill included past cfg.cost.drainWindowSec.
+     *
+     *  #724 gate② finding [1]: EMERGENCY_STOP joins signalledNow() in this branch for the exact
+     *  same reason, one tier stricter — tick()'s own E-STOP gate (conductor.ts) hard-kills
+     *  running/fixing lanes immediately but, by design, leaves `driving` lanes untouched (no
+     *  live process to kill, and DRIVE — the only thing that could move a driving lane forward —
+     *  is deliberately never reached on an E-STOP tick). Waiting on activeWorkers()==0 under
+     *  E-STOP would therefore wait on a lane this run has permanently frozen: every subsequent
+     *  tick is the same immediate-kill no-op, the driving row never changes state, and this loop
+     *  never exits. deps.state.isEstopActive() specifically (not haltActive()) — KILL_SWITCH-
+     *  file-only halts (no process signal) are UNCHANGED by this fix (AC5), matching the existing
+     *  signalledNow()-only special case above; only the process-signal path and the E-STOP
+     *  sentinel skip the driving/recovery wait. */
     const drainedEnoughToExit = (): boolean =>
-      signalledNow() ? liveLanesDrained() : deps.state.activeWorkers().length === 0 && !recoveryBeatPending;
+      signalledNow() || deps.state.isEstopActive() ? liveLanesDrained() : deps.state.activeWorkers().length === 0 && !recoveryBeatPending;
     for (;;) {
       if (drainedEnoughToExit()) break;
       await drainWait(deps.tickIntervalSec * 1000);
