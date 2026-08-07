@@ -6,7 +6,6 @@ import type { CostBarGroup } from "./components/CostStrip.tsx";
 import { CostStrip } from "./components/CostStrip.tsx";
 import { LaneBoard } from "./components/LaneBoard.tsx";
 import { readConfigPath } from "./config-captions.ts";
-import { foldEntityTitles } from "./entities.ts";
 
 /**
  * The lane board (C), activity feed (D), and cost strip + config drawer (E) from
@@ -22,7 +21,10 @@ export function App() {
   // lost its one data source, regardless of which one (#715 gate② [7] — this used to render only
   // `loop.error`'s raw message, and nothing at all when just the events query failed).
   const disconnected = loop.isError || Boolean(events.error);
-  const titles = foldEntityTitles(events.events);
+  // `useEventHistory` folds titles/open-attention durably itself (#715 gate② [0]) — App no longer
+  // re-derives `titles` from the bounded `events.events` window, which would forget anything past
+  // the display cap.
+  const { titles, openAttention } = events;
   const owner = loop.data?.config ? readConfigPath(loop.data.config, "board.owner") : undefined;
   const repo = loop.data?.config ? readConfigPath(loop.data.config, "board.repo") : undefined;
   const repoUrl = typeof owner === "string" && typeof repo === "string" ? `https://github.com/${owner}/${repo}` : undefined;
@@ -76,7 +78,7 @@ export function App() {
         disconnected={disconnected}
       />
 
-      <ActivityFeed events={events.events} titles={titles} repoUrl={repoUrl} disconnected={disconnected} />
+      <ActivityFeed events={events.events} pinnedAttention={openAttention} titles={titles} repoUrl={repoUrl} disconnected={disconnected} />
 
       <CostStrip groups={[byModel, byLane]} />
 

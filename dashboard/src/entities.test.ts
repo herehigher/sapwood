@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { LoopEvent } from "./api/types.ts";
-import { foldEntityTitles } from "./entities.ts";
+import { foldEntityTitles, foldOpenAttention } from "./entities.ts";
 
 const event = (id: number, kind: string, payload: Record<string, unknown>): LoopEvent => ({
   id,
@@ -52,4 +52,101 @@ test("an entity with no title-bearing event has no title", () => {
 test("events with no issue number are skipped without throwing", () => {
   const titles = foldEntityTitles([event(1, "run-started", { config: {}, configHash: "x" })]);
   assert.deepEqual(titles, {});
+});
+
+// ── #715 gate② [0]: seeded, durable accumulation across calls ───────────────────────────────────
+
+test("foldEntityTitles(events, seed) folds onto a prior result instead of starting over", () => {
+  const first = foldEntityTitles([event(1, "dispatched", { issue: 86, issueTitle: "Fix the thing" })]);
+  // A second call with a DIFFERENT (later) page of events, seeded with the first result, must
+  // still know issue 86's title even though event 1 itself is nowhere in this second call's input
+  // — exactly the shape `useEventHistory` needs once event 1 ages out of the bounded window.
+  const second = foldEntityTitles([event(50, "dispatch-failed", { issue: 90 })], first);
+  assert.equal(second[86]?.issueTitle, "Fix the thing");
+  assert.equal(second[90]?.issueTitle, undefined);
+});
+
+test("foldEntityTitles never mutates its seed", () => {
+  const seed = foldEntityTitles([event(1, "dispatched", { issue: 86, issueTitle: "Original" })]);
+  const frozenCopy = JSON.parse(JSON.stringify(seed));
+  foldEntityTitles([event(2, "dispatched", { issue: 86, issueTitle: "Should never apply — issue 86 already has a title" })], seed);
+  assert.deepEqual(seed, frozenCopy);
+});
+
+test("foldEntityTitles(seed) still keeps the first title, even across two separate calls", () => {
+  const first = foldEntityTitles([event(1, "dispatched", { issue: 86, issueTitle: "Original title" })]);
+  const second = foldEntityTitles([event(2, "dispatched", { issue: 86, issueTitle: "A later re-dispatch title" })], first);
+  assert.equal(second[86]?.issueTitle, "Original title");
+});
+
+// ── foldOpenAttention ────────────────────────────────────────────────────────────────────────
+
+test("foldOpenAttention opens an entry for an attention-class event", () => {
+  const open = foldOpenAttention([event(1, "drive-needs-human", { issue: 5, pr: 50 })]);
+  assert.equal(Object.keys(open).length, 1);
+  assert.equal(Object.values(open)[0]?.id, 1);
+});
+
+test("foldOpenAttention ignores routine (non-attention) events", () => {
+  const open = foldOpenAttention([event(1, "dispatched", { issue: 5 })]);
+  assert.deepEqual(open, {});
+});
+
+test("foldOpenAttention closes an entry when a matching (source, issue) escalation-resolved arrives", () => {
+  const open = foldOpenAttention([
+    event(1, "drive-needs-human", { issue: 5, pr: 50 }),
+    event(2, "escalation-resolved", { issue: 5, source: "drive-needs-human", via: "merged", pr: 50 }),
+  ]);
+  assert.deepEqual(open, {});
+});
+
+test("foldOpenAttention keeps a DIFFERENT open source on the same issue when only one source resolves", () => {
+  const open = foldOpenAttention([
+    event(1, "drive-needs-human", { issue: 5, pr: 50 }),
+    event(2, "rollback-escalated", { issue: 5 }),
+    event(3, "escalation-resolved", { issue: 5, source: "drive-needs-human", via: "merged", pr: 50 }),
+  ]);
+  assert.equal(Object.keys(open).length, 1);
+  assert.equal(Object.values(open)[0]?.kind, "rollback-escalated");
+});
+
+test("foldOpenAttention keys entity-less attention items (no issue) by kind alone, and never clears them here", () => {
+  const open = foldOpenAttention([
+    event(1, "ceiling-escalated", {}),
+    event(2, "escalation-resolved", { issue: 9, source: "ceiling-escalated", via: "merged" }),
+  ]);
+  assert.equal(Object.keys(open).length, 1);
+  assert.equal(Object.values(open)[0]?.kind, "ceiling-escalated");
+});
+
+test("foldOpenAttention(events, seed) is durable across calls — #715 gate② [0]'s core regression", () => {
+  // An escalation opened in an EARLIER call (page 1) must still be open after a LATER call (page
+  // 2) that never mentions it again — this is exactly what lets an open item survive past the
+  // bounded display window's eviction.
+  const afterPage1 = foldOpenAttention([event(1, "drive-needs-human", { issue: 5, pr: 50 })]);
+  const afterPage2 = foldOpenAttention([event(2, "dispatched", { issue: 9 })], afterPage1);
+  assert.equal(Object.keys(afterPage2).length, 1);
+  assert.equal(Object.values(afterPage2)[0]?.kind, "drive-needs-human");
+
+  // A THIRD call, arriving much later, resolves it — even though the original escalation event
+  // itself was never part of this call's own input.
+  const afterPage3 = foldOpenAttention(
+    [event(3, "escalation-resolved", { issue: 5, source: "drive-needs-human", via: "merged", pr: 50 })],
+    afterPage2,
+  );
+  assert.deepEqual(afterPage3, {});
+});
+
+test("foldOpenAttention overwrites an open entry with a NEWER occurrence of the same key", () => {
+  const first = foldOpenAttention([event(1, "drive-needs-human", { issue: 5, pr: 50 })]);
+  const second = foldOpenAttention([event(2, "drive-needs-human", { issue: 5, pr: 51 })], first);
+  assert.equal(Object.keys(second).length, 1);
+  assert.equal(Object.values(second)[0]?.id, 2);
+});
+
+test("foldOpenAttention never mutates its seed", () => {
+  const seed = foldOpenAttention([event(1, "drive-needs-human", { issue: 5, pr: 50 })]);
+  const frozenCopy = JSON.parse(JSON.stringify(seed));
+  foldOpenAttention([event(2, "escalation-resolved", { issue: 5, source: "drive-needs-human", via: "merged" })], seed);
+  assert.deepEqual(seed, frozenCopy);
 });

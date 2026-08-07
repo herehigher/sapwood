@@ -100,7 +100,12 @@ test("accumulateEventsPage deduplicates by id when a page overlaps the accumulat
 });
 
 test("accumulateEventsPage caps history at maxHistory, dropping the oldest first", () => {
-  const history: EventHistory = { after: 10, events: Array.from({ length: 10 }, (_, i) => evt(i + 1)) };
+  const history: EventHistory = {
+    after: 10,
+    events: Array.from({ length: 10 }, (_, i) => evt(i + 1)),
+    titles: {},
+    openAttention: {},
+  };
   const grown = accumulateEventsPage(history, page([evt(11)], 11), 5);
   assert.deepEqual(
     grown.events.map((e) => e.id),
@@ -112,4 +117,60 @@ test("accumulateEventsPage is a no-op when the page carries no events and no cur
   const history = accumulateEventsPage(EMPTY_EVENT_HISTORY, page([evt(1)], 1));
   const same = accumulateEventsPage(history, page([], 1));
   assert.equal(same, history);
+});
+
+// ── #715 gate② [0]: titles/openAttention are durable, never bounded by maxHistory ───────────────
+
+test("accumulateEventsPage keeps a title after its title-bearing event ages out of the bounded events window", () => {
+  const dispatched: LoopEvent = {
+    id: 1,
+    ts: "2026-08-06T00:00:00Z",
+    kind: "dispatched",
+    payload: { issue: 86, issueTitle: "Fix the thing" },
+  };
+  let history = accumulateEventsPage(EMPTY_EVENT_HISTORY, page([dispatched], 1), 3);
+  assert.equal(history.titles[86]?.issueTitle, "Fix the thing");
+
+  // Push enough later events through a small maxHistory that event 1 is evicted from `events`.
+  history = accumulateEventsPage(history, page([evt(2), evt(3), evt(4)], 4), 3);
+  assert.deepEqual(
+    history.events.map((e) => e.id),
+    [2, 3, 4],
+  );
+  assert.equal(
+    history.events.some((e) => e.id === 1),
+    false,
+    "event 1 must actually be gone from the bounded window",
+  );
+  // But the title it carried must have survived the eviction.
+  assert.equal(history.titles[86]?.issueTitle, "Fix the thing");
+});
+
+test("accumulateEventsPage keeps an open escalation pinned after it ages out of the bounded events window, and clears it on resolution arriving in a LATER page", () => {
+  const escalation: LoopEvent = { id: 1, ts: "2026-08-06T00:00:00Z", kind: "drive-needs-human", payload: { issue: 5, pr: 50 } };
+  let history = accumulateEventsPage(EMPTY_EVENT_HISTORY, page([escalation], 1), 3);
+  assert.equal(Object.keys(history.openAttention).length, 1);
+
+  // Evict event 1 from the bounded window with a run of later, unrelated events.
+  history = accumulateEventsPage(history, page([evt(2), evt(3), evt(4)], 4), 3);
+  assert.equal(
+    history.events.some((e) => e.id === 1),
+    false,
+    "event 1 must actually be gone from the bounded window",
+  );
+  // The open escalation survives — this is the core of the finding: a bounded display window
+  // must not silently drop an unresolved escalation with no resolution ever having been observed.
+  assert.equal(Object.keys(history.openAttention).length, 1);
+  assert.equal(Object.values(history.openAttention)[0]?.kind, "drive-needs-human");
+
+  // A resolution arrives in a later page — the original escalation event is never in this page's
+  // `events`, only its resolution is, and it still correctly clears the durable open-attention entry.
+  const resolved: LoopEvent = {
+    id: 5,
+    ts: "2026-08-06T00:00:01Z",
+    kind: "escalation-resolved",
+    payload: { issue: 5, source: "drive-needs-human", via: "merged", pr: 50 },
+  };
+  history = accumulateEventsPage(history, page([resolved], 5), 3);
+  assert.deepEqual(history.openAttention, {});
 });

@@ -6,7 +6,12 @@ import { EntityRef } from "./EntityRef.tsx";
 import { StateGlyph } from "./icons.tsx";
 
 export interface ActivityFeedProps {
+  /** The bounded recent window — routine display, newest-first, capped for memory. */
   events: LoopEvent[];
+  /** Durable, NEVER bounded by the display window (§715 gate② [0]) — `useEventHistory`'s
+   *  `foldOpenAttention` accumulator, folded incrementally over the WHOLE history so an
+   *  escalation that ages out of `events` stays pinned until its own resolution clears it. */
+  pinnedAttention: LoopEvent[];
   titles: EntityTitles;
   repoUrl?: string | undefined;
   disconnected?: boolean;
@@ -52,7 +57,7 @@ function FeedEntry({ event, titles, repoUrl, now }: { event: LoopEvent; titles: 
   );
 }
 
-export function ActivityFeed({ events, titles, repoUrl, disconnected, now }: ActivityFeedProps) {
+export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconnected, now }: ActivityFeedProps) {
   const clock = now ?? new Date();
   if (disconnected) {
     return (
@@ -64,7 +69,7 @@ export function ActivityFeed({ events, titles, repoUrl, disconnected, now }: Act
       </section>
     );
   }
-  if (events.length === 0) {
+  if (events.length === 0 && pinnedAttention.length === 0) {
     return (
       <section className="panel activity-feed" aria-label="activity">
         <h2>activity</h2>
@@ -72,46 +77,22 @@ export function ActivityFeed({ events, titles, repoUrl, disconnected, now }: Act
       </section>
     );
   }
-  // Needs-human-class events pin to the top until a newer escalation supersedes them (§3's
-  // pre-strip feed convention, still this component's own contract until #361 lands): partition
-  // by attention, sort each subset newest-first, and render the attention subset first — a newer
-  // NON-escalation event never displaces an older, still-open escalation.
-  //
-  // "Superseded": a NEWER `escalation-resolved` for the SAME (source, issue) pair unpins it (§3's
-  // own clearing-semantics prose — "since #295, when escalation-resolved reports the human
-  // resolved it outside the loop entirely"; the engine's reconciler keys its own resolution
-  // receipts `(source, issue)` for exactly this reason — escalation-reconcile.ts's `source: e.kind`
-  // on the receipt it appends). Keyed by kind, not just issue: #715 gate② [5] — an issue can carry
-  // TWO simultaneously-open escalation sources (e.g. a `drive-needs-human` AND a separate
-  // `rollback-escalated`), and resolving one must not silently unpin the other. This is the one
-  // clearing signal narrow enough to apply safely here without re-deriving the engine's full
-  // `attentionProof`/per-kind clearing rules (worktree custody, park episodes, …) — that fuller
-  // reconciliation is #361's job, which imports the engine's own function rather than re-encoding
-  // it a second time. An attention event with no `issue` in its payload (e.g. `ceiling-escalated`,
-  // `park-escalated`) is never issue-scoped, so it is never a candidate `escalation-resolved`
-  // clears — it stays pinned.
-  const resolvedAt = new Map<string, number>(); // `${source}:${issue}` -> newest escalation-resolved id
-  const resolutionKey = (source: unknown, issue: unknown): string | undefined =>
-    typeof source === "string" && typeof issue === "number" ? `${source}:${issue}` : undefined;
-  for (const e of events) {
-    if (e.kind !== "escalation-resolved") continue;
-    const key = resolutionKey(e.payload.source, e.payload.issue);
-    if (key === undefined) continue;
-    resolvedAt.set(key, Math.max(e.id, resolvedAt.get(key) ?? -Infinity));
-  }
-  const isSuperseded = (e: LoopEvent): boolean => {
-    const key = resolutionKey(e.kind, e.payload.issue);
-    if (key === undefined) return false;
-    const at = resolvedAt.get(key);
-    return at !== undefined && at > e.id;
-  };
-  const attention = events.filter((e) => hasAttention(e.kind, e.payload) && !isSuperseded(e)).sort((a, b) => b.id - a.id);
-  const rest = events.filter((e) => !hasAttention(e.kind, e.payload) || isSuperseded(e)).sort((a, b) => b.id - a.id);
+  // Needs-human-class events pin to the top until their own resolution clears them (§3's
+  // pre-strip feed convention, still this component's own contract until #361 lands).
+  // `pinnedAttention` is the caller's DURABLE fold (`foldOpenAttention`, over the whole history,
+  // never bounded by `events`' display window — #715 gate② [0]): an escalation that ages out of
+  // the recent window must still stay pinned until its own resolution clears it, which a fold
+  // computed only from the bounded `events` array could never guarantee. Dedupe by id against the
+  // bounded window — a pinned item that is ALSO still within the recent window must render once,
+  // in its pinned position, not twice.
+  const pinnedIds = new Set(pinnedAttention.map((e) => e.id));
+  const pinned = [...pinnedAttention].sort((a, b) => b.id - a.id);
+  const rest = events.filter((e) => !pinnedIds.has(e.id)).sort((a, b) => b.id - a.id);
   return (
     <section className="panel activity-feed" aria-label="activity">
       <h2>activity</h2>
       <ul aria-live="polite" className="feed-list">
-        {[...attention, ...rest].map((event) => (
+        {[...pinned, ...rest].map((event) => (
           <FeedEntry key={event.id} event={event} titles={titles} repoUrl={repoUrl} now={clock} />
         ))}
       </ul>
