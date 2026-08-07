@@ -64,7 +64,9 @@ import {
   signalOnceAndReport,
   spawnClaudeSession,
   spawnSshKeygen,
+  WORKER_ALLOWED_TOOLS,
   WORKER_ALLOWED_TOOLS_NO_GH,
+  WORKER_DISABLE_BACKGROUND_TASKS_ENV,
   WORKER_DISALLOWED_TOOLS,
   type WorkerDeps,
   WorkerSupervisor,
@@ -2582,6 +2584,93 @@ test("dispatch sets SAPWOOD_WORKTREE_ROOT to the resolved absolute worktree path
     s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// #708: five worker legs backgrounded their OWN verification run (Bash tool `run_in_background`)
+// and then blocked polling it until heartbeat-stale reclaim (2026-08-05/06 dogfood, events
+// 9573/9578) — 2 of 3 lanes lost in one wave. Live audit (PR body) verified
+// `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` structurally removes `run_in_background` from the
+// Bash tool's own schema in a real `claude -p` session; this test pins that the env var actually
+// REACHES the spawned worker process, the same way the SAPWOOD_GUARD_MODE test above pins that.
+test("dispatch sets CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 in the worker env (#708) — closes self-backgrounded verification waits at the tool-surface layer", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\necho "$CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" > "${join(dir, "bgflag.seen.tmp")}"\nmv "${join(dir, "bgflag.seen.tmp")}" "${join(dir, "bgflag.seen")}"\nexit 0\n`,
+    );
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    await s.dispatch({ number: 708, title: "t", labels: [] });
+    await waitForFile(join(dir, "bgflag.seen"), "background-tasks-disabled env marker was not published");
+    assert.equal(readFileSync(join(dir, "bgflag.seen"), "utf8").trim(), "1");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume: also sets CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 in the worker env (#708) — a resumed leg keeps the same closure, not just fresh dispatch", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const ready = join(dir, "stub-ready");
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        `  echo "$CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" > "${join(dir, "resume-bgflag.seen.tmp")}"`,
+        `  mv "${join(dir, "resume-bgflag.seen.tmp")}" "${join(dir, "resume-bgflag.seen")}"`,
+        '  echo \'{"type":"result","subtype":"success","total_cost_usd":0.05,"model":"claude-stub","usage":{"input_tokens":1,"output_tokens":1}}\'',
+        "  exit 0",
+        "fi",
+        "trap 'exit 0' TERM",
+        `touch "${ready}"`,
+        "for _ in $(seq 1 600); do sleep 1; done",
+        "",
+      ].join("\n"),
+    );
+    s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 708, title: "t", labels: [] });
+    await waitForFile(ready, "stub installed its TERM trap before handoff");
+    assert.equal(s.requestHandoff(name), true);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
+    await s.resume({ number: 708, title: "t", labels: [] }, name);
+    await waitForFile(join(dir, "resume-bgflag.seen"), "resumed background-tasks-disabled env marker was not published");
+    assert.equal(readFileSync(join(dir, "resume-bgflag.seen"), "utf8").trim(), "1");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Reverse check (hardening doctrine): the #708 fix lives ENTIRELY in the spawn env
+// (CLAUDE_CODE_DISABLE_BACKGROUND_TASKS), never in the `--allowedTools`/`--disallowedTools`
+// permission surface that matches against a command STRING. Pinning these two constants
+// byte-identical to their pre-#708 values proves no new `Bash(...)` pattern was introduced that
+// could false-positive-match an ordinary foreground command (e.g. `Bash(npm test)`) — the
+// permission surface a worker's everyday verification commands run through is untouched, so a
+// legitimate long-running FOREGROUND suite is not misclassified by this change.
+test("#708 reverse check: WORKER_ALLOWED_TOOLS / WORKER_DISALLOWED_TOOLS are unchanged — the fix never touched the command-string permission surface, so ordinary foreground verification commands are unaffected", () => {
+  assert.equal(WORKER_ALLOWED_TOOLS, "Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(npx *)");
+  assert.equal(
+    WORKER_DISALLOWED_TOOLS,
+    "Bash(gh pr merge*),Bash(gh pr ready*),Bash(gh pr review*),Bash(gh release*),Bash(gh issue edit*),Bash(gh label*),Bash(gh project*)," +
+      "mcp__github__*,mcp__server-filesystem__*,mcp__filesystem__*,mcp__Google_Drive__*",
+  );
+  assert.deepEqual(WORKER_DISABLE_BACKGROUND_TASKS_ENV, { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" });
 });
 
 test("dispatch fails closed in hard mode when the guard hook is missing (no unguarded worker)", async () => {

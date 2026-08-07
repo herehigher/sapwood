@@ -1083,6 +1083,38 @@ export const WORKER_ALLOWED_TOOLS_NO_GH = WORKER_ALLOWED_TOOLS.split(",")
   .filter((t) => t !== "Bash(gh *)")
   .join(",");
 
+/** #708: five worker legs (2026-08-05/06 dogfood, events 9573/9578) backgrounded their OWN
+ *  verification run via the Bash tool's `run_in_background` parameter, then blocked polling it
+ *  until heartbeat-stale reclaim — 2 of 3 lanes lost in one wave, on a suite that (post-#692/
+ *  #693/#695) is already self-bounded and needs no polling. A headless single-issue leg has no
+ *  legitimate use for backgrounding, so this closes it at the TOOL-SURFACE layer rather than the
+ *  prompt layer alone (design-first per the issue: audit before fix).
+ *
+ *  LIVE-VERIFIED (claude 2.1.223, `claude -p --model haiku --setting-sources ""`, mimicking this
+ *  module's own claudeArgs flag shape — WORKER_ALLOWED_TOOLS/WORKER_DISALLOWED_TOOLS, `--permission-mode
+ *  auto`): setting `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the spawned process's env removes
+ *  `run_in_background` from the Bash tool's OWN input schema — an explicit attempt fails
+ *  `InputValidationError: ... An unexpected parameter \`run_in_background\` was provided` instead
+ *  of backgrounding, and the tool-description text that advertises the parameter is suppressed
+ *  too, so the model is never even offered it. This is STRICTLY WIDER than a
+ *  `--disallowedTools Bash(run_in_background:true*)` permission rule (also live-verified to work,
+ *  see #708 PR body for the transcript) — that rule only intercepts an EXPLICIT
+ *  `run_in_background: true` tool call; it cannot reach the CLI's own timeout-triggered
+ *  auto-backgrounding of an ordinary FOREGROUND command (a separate code path gated only by this
+ *  same env var, never by the permission engine), which every worker-issued long verification
+ *  command is otherwise eligible for. Not a CLI flag — `claude --help` (2.1.223) has no
+ *  background-disabling flag; this env var is the one working knob.
+ *
+ *  Accepted residual (named, not closed here): a command STRING containing shell-level
+ *  backgrounding (`... &`, `nohup ... &disown`) is untouched by this — the CLI never sees it as
+ *  a `run_in_background` request, so no schema/permission layer can catch it. `prompts/worker.md`
+ *  carries one negative-form sentence against exactly this gap (belt-and-suspenders, not the
+ *  primary mechanism).
+ *
+ *  Scoped to WORKER LEGS ONLY (WorkerSupervisor.dispatch/resume spawn env, below) — never applied
+ *  to the guard hook subprocess or any peripheral/review session, both out of scope for #708. */
+export const WORKER_DISABLE_BACKGROUND_TASKS_ENV: NodeJS.ProcessEnv = { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" };
+
 /** The full `claude -p` argv. Pure, so every flag is testable without spawning. NOTE: no
  *  --max-budget-usd — the per-worker budget is SOFT (monitored + graceful handoff), never a
  *  hard mid-step kill (PLAN.md). The hard ceiling is the conductor's, not the CLI's. */
@@ -2300,7 +2332,15 @@ export class WorkerSupervisor implements Supervisor {
     const child = spawn(this.bin, args, {
       detached: true,
       stdio: ["ignore", jsonlFd, jsonlFd],
-      env: { ...baseEnv, SAPWOOD_GUARD_MODE: guardMode, SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, laneName) },
+      // #708: WORKER_DISABLE_BACKGROUND_TASKS_ENV placed AFTER baseEnv, same reason
+      // SAPWOOD_GUARD_MODE/SAPWOOD_WORKTREE_ROOT are — so it wins even if an inherited
+      // process.env somehow already carried CLAUDE_CODE_DISABLE_BACKGROUND_TASKS unset/cleared.
+      env: {
+        ...baseEnv,
+        ...WORKER_DISABLE_BACKGROUND_TASKS_ENV,
+        SAPWOOD_GUARD_MODE: guardMode,
+        SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, laneName),
+      },
     });
     // Register the lane + `exit` handler BEFORE any await. Node does not replay `exit` to
     // listeners attached after it fires, so a fast exit (instant completion / the CLI
@@ -2723,7 +2763,14 @@ export class WorkerSupervisor implements Supervisor {
       child = spawn(this.bin, args, {
         detached: true,
         stdio: ["ignore", jsonlFd, jsonlFd],
-        env: { ...baseEnv, SAPWOOD_GUARD_MODE: guardMode, SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, name) },
+        // #708: same env-precedence rationale as dispatch()'s own spawn() call above — a
+        // resumed leg must keep the background-task closure too, not just the fresh-dispatch path.
+        env: {
+          ...baseEnv,
+          ...WORKER_DISABLE_BACKGROUND_TASKS_ENV,
+          SAPWOOD_GUARD_MODE: guardMode,
+          SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, name),
+        },
       });
     } catch (e) {
       closeSync(jsonlFd);
