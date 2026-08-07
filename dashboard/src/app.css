@@ -5,6 +5,7 @@
  */
 @import "./tokens.css";
 @import "./panels.css";
+@import "./hero/hero.css";
 
 *,
 *::before,
@@ -47,6 +48,47 @@ code,
   padding: var(--space-4);
 }
 
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* ---- "?" legend toggle (§7) — the header's whole onboarding surface ------- */
+
+.hero-legend summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-pill);
+  border: var(--hairline);
+  cursor: pointer;
+  font-family: var(--font-body);
+  color: var(--bark-text);
+  list-style: none;
+}
+
+.hero-legend summary::-webkit-details-marker {
+  display: none;
+}
+
+.hero-legend ul {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  list-style: none;
+  background: var(--panel);
+  border: var(--hairline);
+  border-radius: var(--radius-card);
+  font-size: var(--text-0);
+  color: var(--sapwood);
+}
+
+.hero-legend li {
+  white-space: nowrap;
+}
+
 /* §5 quality floor: visible keyboard focus, --sap outline. */
 :focus-visible {
   outline: 2px solid var(--sap);
@@ -59,6 +101,29 @@ code,
   gap: var(--space-4);
   grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   padding: var(--space-4);
+}
+
+/*
+ * §3's A→B→C→D→E layout: header and hero always span the full row, same as the cost strip
+ * and the config drawer when open — only the lane board / activity feed share a row (§3's
+ * C | D split), which `.stack`'s own auto-fit already gives the two remaining items.
+ * #716 gate② P2-7: without this, the hero's fixed 1200×380 stage landed in the SAME
+ * minmax(320px, 1fr) cell as a single lane card — live-measured at 374×118px with ~3px
+ * labels, instead of the full-width band the design calls for.
+ */
+.stack > .app-header,
+.stack > .hero,
+.stack > .cost-strip,
+.stack > .config-drawer {
+  grid-column: 1 / -1;
+}
+
+/* A real ≤720px single-column breakpoint (auto-fit's own wrap is only an approximation of
+ * this — it can still show two narrow columns above 720px depending on viewport width). */
+@media (max-width: 720px) {
+  .stack {
+    grid-template-columns: 1fr;
+  }
 }
 
 /*

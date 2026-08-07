@@ -6,12 +6,28 @@ import type { CostBarGroup } from "./components/CostStrip.tsx";
 import { CostStrip } from "./components/CostStrip.tsx";
 import { LaneBoard } from "./components/LaneBoard.tsx";
 import { readConfigPath } from "./config-captions.ts";
+import { Hero } from "./hero/Hero.tsx";
+import { Legend } from "./hero/Legend.tsx";
 
 /**
- * The lane board (C), activity feed (D), and cost strip + config drawer (E) from
- * frontend-design.md §3. The hero/rings/header band land in their own issue; this shell just
- * hosts these four panels against the same §8 data hooks. `now` is test-only (defaults to the
- * real clock) — the cost strip's "by lane" day boundary needs a fixed instant to assert against.
+ * #716 gate② P1-3: pulls `lanes.prFixCap` through the same nested-path reader `board.owner`/
+ * `board.repo` already use — a flat `config["lanes.prFixCap"]` bracket lookup can never match
+ * the server's nested allowlisted shape (`{ lanes: { prFixCap } }`), so that silently fell
+ * back to the hardcoded default on every real config. Exported and pure so the regression is
+ * pinned by a direct unit test: `fixCap` only ever becomes visible in rendered markup via
+ * `Hero`'s event fold, which runs in a `useEffect` — `renderToStaticMarkup`, this app's only
+ * test harness, never executes those, so an App-level render test cannot observe it.
+ */
+export function resolveFixCap(config: Record<string, unknown> | null | undefined): number {
+  const raw = config ? readConfigPath(config, "lanes.prFixCap") : undefined;
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : 2;
+}
+
+/**
+ * The header (A) + hero (B, #144) + lane board (C) + activity feed (D) + cost strip/config
+ * drawer (E) from frontend-design.md §3, all against the same §8 data hooks. `now` is
+ * test-only (defaults to the real clock) — the cost strip's "by lane" day boundary needs a
+ * fixed instant to assert against.
  */
 export function App({ now }: { now?: Date | undefined } = {}) {
   const clock = now ?? new Date();
@@ -34,6 +50,7 @@ export function App({ now }: { now?: Date | undefined } = {}) {
   const owner = loop.data?.config ? readConfigPath(loop.data.config, "board.owner") : undefined;
   const repo = loop.data?.config ? readConfigPath(loop.data.config, "board.repo") : undefined;
   const repoUrl = typeof owner === "string" && typeof repo === "string" ? `https://github.com/${owner}/${repo}` : undefined;
+  const fixCap = resolveFixCap(loop.data?.config);
 
   // §3 E specifies a "by phase" bucket; `/api/loop/state` serves no phase-bucketed spend today
   // (only `spend.byModel`), so this ships "by lane" instead — ponytail: upgrade to "by phase"
@@ -53,7 +70,7 @@ export function App({ now }: { now?: Date | undefined } = {}) {
 
   return (
     <main className="stack">
-      <section className="panel">
+      <header className="panel app-header">
         <h1>sapwood</h1>
         {disconnected ? (
           <p className="muted" style={{ color: "var(--rust)" }}>
@@ -71,10 +88,23 @@ export function App({ now }: { now?: Date | undefined } = {}) {
             </dl>
           )
         )}
+        <Legend />
         <button type="button" onClick={() => setConfigOpen((v) => !v)}>
           Config ▸
         </button>
-      </section>
+      </header>
+
+      {loop.data && (
+        <Hero
+          events={events.events}
+          lanesMax={loop.data.lanes.max}
+          engine={loop.data.engine.state}
+          lanes={loop.data.lanes.items}
+          fixCap={fixCap}
+          roundPhase={loop.data.round?.phase ?? null}
+          config={loop.data.config}
+        />
+      )}
 
       <LaneBoard
         lanesMax={loop.data?.lanes.max ?? null}
