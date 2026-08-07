@@ -68,11 +68,13 @@ start: it names failure classes this repo's reviewers have flagged more than onc
    command times out once, do not run it again unchanged: inspect and narrow the
    failure, change approach, or hand off. A command that never returns is not
    evidence of flakiness — do not rerun it to find out.
-5. **Implement the minimal change to go green.** Write only the code needed to make
+5. **Never run verification commands as background tasks.** Run them in the
+   foreground and wait for them to finish.
+6. **Implement the minimal change to go green.** Write only the code needed to make
    the red tests pass. Resist scope creep: this issue, not adjacent cleanup.
-6. **Run the full test suite, not just your new tests.** Confirm nothing else broke.
+7. **Run the full test suite, not just your new tests.** Confirm nothing else broke.
    A change that passes its own tests but breaks the existing suite is not done.
-7. **Re-check against the verification plan.** Re-read the acceptance criteria from
+8. **Re-check against the verification plan.** Re-read the acceptance criteria from
    the issue body and confirm your change actually satisfies each one — the same
    check the reviewer will make at gate②.
 
