@@ -714,6 +714,36 @@ three metaphor keys in one line each: droplet = an issue moving through the
 loop; lane = one autonomous worker; ring = one merged PR. That is the whole
 onboarding surface — no tour, no modal sequence.
 
+### Time display
+
+Decided 2026-08-03 (owner + peer architecture review, #587) — this document had no rule
+for rendering absolute times, and unlabeled absolute times are actively misleading once
+the dashboard is viewed from a different timezone than the operator machine. A full
+timezone picker is explicitly out of scope (marginal-complexity principle): these are
+display rules only — §11's stored/replayed ISO timestamps and durations/elapsed values
+(lane-card elapsed, §3 C) are untouched.
+
+1. **All absolute times render in the viewer's browser-local timezone**, via the `Intl`
+   API — zero config, zero dependency.
+2. **Every relative timestamp gets hover-absolute detail.** Feed timestamps ("14s ago",
+   §3 D) and needs-attention age chips (§3, "Needs attention strip") keep their existing
+   relative form on the surface; the absolute time is always one hover away.
+3. **Absolute times always carry the UTC-offset label** (e.g. `14:32 +09:00`) — a bare
+   wall-clock time is never shown on its own; it is ambiguous the moment viewer and
+   operator sit in different zones.
+4. **One toggle: local / UTC** — for correlating with operator-machine logs. Explicitly
+   not a timezone picker. Display-only state: component state, optionally mirrored to
+   `localStorage` so a reload keeps it — no server round-trip, no per-user persistence
+   contract.
+
+**One helper, one path.** `dashboard/src/format-time.ts` is the only place that calls
+`Intl.DateTimeFormat`/`toLocaleString` on a stored ISO timestamp: `formatAbsoluteTime(iso,
+mode)` renders rules 1 + 3 for a given `TimeMode` (`"local" | "utc"`); `formatRelativeTime`
+pairs the relative string with its `formatAbsoluteTime` hover title so rule 2's
+relative→hover-absolute path can't drift out of sync. An inline `toLocaleString` call
+anywhere else in `dashboard/src/**` is a review finding — gate② checklist item, same
+pattern as §7's copy-map-extension rule above.
+
 ## 8. Data contract
 
 Four read-only GET endpoints plus the single `POST /api/control` route
@@ -880,6 +910,7 @@ dashboard/            # npm workspace — listed in root package.json "workspace
     components/       # Header, NeedsAttention, LaneBoard, Feed, CostStrip,
                       # ConfigDrawer, Controls (the §3 verbs + confirm flow)
     copy.ts           # §7 — the single copy map
+    format-time.ts    # §7 "Time display" — the only Intl/toLocaleString call site
     fonts/            # the one bundled display face (Fraunces, latin subset woff2)
     contrast.ts       # §5 quality-floor checker — test assertion + `npm run contrast`
     tokens.css  app.css
