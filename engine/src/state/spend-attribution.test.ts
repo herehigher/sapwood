@@ -24,7 +24,12 @@ const srcRoot = join(here, "..");
 
 const ACTOR_KIND_REF = /\bactorKind\b|"worker"|"fix-leg"|"peripheral-role"|"engine-review"/;
 
-const SPEND_WRITE_METHODS = ["recordSpend", "settleTerminalWorker", "recordEngineReviewVerdictAndSpend"] as const;
+// #724 gate② round 4, P1-1: settleEstopSweptWorker joins the sweep — round.ts's E-STOP sweep's
+// OWN atomic settlement method (a deliberate sibling of settleTerminalWorker, state.ts's own
+// doc), not a call THROUGH settleTerminalWorker, so it needs its own tracked entry here or a
+// new write site could dodge the sweep exactly the way P2-3's own fix (the file glob) closed
+// for locations.
+const SPEND_WRITE_METHODS = ["recordSpend", "settleTerminalWorker", "recordEngineReviewVerdictAndSpend", "settleEstopSweptWorker"] as const;
 
 /** Every call site of `methodName(` in `source` (a `.methodName(` or `this.methodName(` call —
  *  never the method's OWN declaration, which reads `methodName(` with no leading dot/`this.`),
@@ -69,7 +74,7 @@ function productionSourceFiles(dir: string): string[] {
   return out.sort();
 }
 
-test("write-site sweep (#645 P2-3): every recordSpend/settleTerminalWorker/recordEngineReviewVerdictAndSpend call site across ALL of engine/src attributes actor_kind — glob, not a hard-coded file list", () => {
+test("write-site sweep (#645 P2-3): every recordSpend/settleTerminalWorker/recordEngineReviewVerdictAndSpend/settleEstopSweptWorker call site across ALL of engine/src attributes actor_kind — glob, not a hard-coded file list", () => {
   const files = productionSourceFiles(srcRoot);
   assert.ok(files.length > 50, "sanity: the sweep must actually be walking a nontrivial tree, not an empty/wrong directory");
 
@@ -89,14 +94,19 @@ test("write-site sweep (#645 P2-3): every recordSpend/settleTerminalWorker/recor
   // Pinned counts — same "count drift means a site was added/removed, update ONLY after
   // confirming the new/removed site's attribution is correct" discipline the old per-file tests
   // used, now summed over the whole glob instead of 3 file names:
-  //   recordSpend: state.ts's own internal forward inside settleTerminalWorker (1) +
-  //     recordEngineReviewVerdictAndSpend (1, #645 P1-1) + peripheral.ts's shared role-session
-  //     call (1) = 3.
+  //   recordSpend: state.ts's own internal forwards inside settleTerminalWorker (1) +
+  //     recordEngineReviewVerdictAndSpend (1, #645 P1-1) + settleEstopSweptWorker (1, #724 gate②
+  //     round 4 P1-1) + peripheral.ts's shared role-session call (1) = 4.
   //   settleTerminalWorker: conductor.ts's reclaimTerminalLane (8) + the ordinary RECLAIM
-  //     DEAD-lane loop (3) + the FIXING RECLAIM DEAD-lane loop (3) = 14.
+  //     DEAD-lane loop (3) + the FIXING RECLAIM DEAD-lane loop (3) = 14. round.ts's E-STOP sweep
+  //     called this directly in gate② round 3 (+1, now reverted) — round 4 replaced that call
+  //     with settleEstopSweptWorker, a deliberate SIBLING (state.ts's own doc explains why
+  //     settleTerminalWorker itself was left untouched — nesting a transaction inside an
+  //     already-open one throws in sqlite), tracked as its OWN method below instead.
   //   recordEngineReviewVerdictAndSpend: production.ts's decisive-verdict callback (1, #645 P1-1
   //     — replaces the old direct recordSpend call that method used to make).
-  assert.equal(perMethodCounts.recordSpend, 3, "recordSpend call-site count drifted — see this test's own doc before updating the pin");
+  //   settleEstopSweptWorker: round.ts's E-STOP durable-pid sweep (1, #724 gate② round 4 P1-1).
+  assert.equal(perMethodCounts.recordSpend, 4, "recordSpend call-site count drifted — see this test's own doc before updating the pin");
   assert.equal(
     perMethodCounts.settleTerminalWorker,
     14,
@@ -106,6 +116,11 @@ test("write-site sweep (#645 P2-3): every recordSpend/settleTerminalWorker/recor
     perMethodCounts.recordEngineReviewVerdictAndSpend,
     1,
     "recordEngineReviewVerdictAndSpend call-site count drifted — see this test's own doc before updating the pin",
+  );
+  assert.equal(
+    perMethodCounts.settleEstopSweptWorker,
+    1,
+    "settleEstopSweptWorker call-site count drifted — see this test's own doc before updating the pin",
   );
 });
 

@@ -23,6 +23,7 @@ import {
   parseStopFlags,
   reconcileWorkflowLabels,
   resolveStopConfig,
+  roundsExitCode,
   runCli,
   runExitCode,
   runStatus,
@@ -219,6 +220,13 @@ test("runExitCode: --once with a failed-only attempt exits 1; success exits 0 (C
 test("runExitCode: daemon/until-idle runs exit 0 even with contained tick errors (retry design, not terminal failure)", () => {
   assert.equal(runExitCode({ ticks: 0, tickErrors: 5 }, "forever"), 0);
   assert.equal(runExitCode({ ticks: 3, tickErrors: 2 }, "until-idle"), 0);
+});
+
+test("roundsExitCode (#724 gate② finding [1]): kill-switch AND emergency-stop are both operator-notice failures — 1; every graceful stop is 0", () => {
+  assert.equal(roundsExitCode({ stoppedBy: "kill-switch" }), 1);
+  assert.equal(roundsExitCode({ stoppedBy: "emergency-stop" }), 1);
+  assert.equal(roundsExitCode({ stoppedBy: "signal" }), 0);
+  assert.equal(roundsExitCode({ stoppedBy: "stop-condition" }), 0);
 });
 
 // ── #76: goal-based stop conditions ─────────────────────────────────────────────────────────
@@ -1564,6 +1572,7 @@ test("formatStatus: kill-switch active and a recorded ceiling breach both render
     active: [],
     driving: [],
     killSwitchActive: true,
+    estopActive: false,
     pauseActive: false,
     ceilingBreach: { reasons: ["daily-budget", "kill-switch"], at: new Date("2026-07-07T00:00:00.000Z") },
     dailySpendUsd: 0,
@@ -1587,6 +1596,7 @@ test("formatStatus: PAUSE active renders distinctly from kill switch, both can b
     active: [],
     driving: [],
     killSwitchActive: false,
+    estopActive: false,
     pauseActive: true,
     ceilingBreach: null,
     dailySpendUsd: 0,
@@ -1610,6 +1620,7 @@ function laneAnchorsSnapshot(state: "running" | "fixing" | "driving", laneAnchor
     active: [{ name: "lane-x", issue: 12, session_id: "s1", state, started_at: "2026-08-06T00:00:00.000Z", ended_at: null }],
     driving: [],
     killSwitchActive: false,
+    estopActive: false,
     pauseActive: false,
     ceilingBreach: null,
     dailySpendUsd: 0,
@@ -1684,6 +1695,7 @@ test("formatStatus: parked (llm) renders source/reason/duration/no-escalation", 
     active: [],
     driving: [],
     killSwitchActive: false,
+    estopActive: false,
     pauseActive: false,
     ceilingBreach: null,
     dailySpendUsd: 0,
@@ -1718,6 +1730,7 @@ test("formatStatus: parked + escalated renders the escalation timestamp", () => 
     active: [],
     driving: [],
     killSwitchActive: false,
+    estopActive: false,
     pauseActive: false,
     ceilingBreach: null,
     dailySpendUsd: 0,
@@ -1751,6 +1764,7 @@ test("formatStatus: not parked -> 'park: inactive', clears once resumed", () => 
     active: [],
     driving: [],
     killSwitchActive: false,
+    estopActive: false,
     pauseActive: false,
     ceilingBreach: null,
     dailySpendUsd: 0,
@@ -1770,6 +1784,7 @@ test("formatStatus renders latest reconcile orphans and omits an absent/healthy 
     active: [],
     driving: [],
     killSwitchActive: false,
+    estopActive: false,
     pauseActive: false,
     ceilingBreach: null,
     dailySpendUsd: 0,
@@ -1852,6 +1867,7 @@ test("formatStatus: a mixed storm renders BOTH episodes (one line per source), c
     active: [],
     driving: [],
     killSwitchActive: false,
+    estopActive: false,
     pauseActive: false,
     ceilingBreach: null,
     dailySpendUsd: 0,

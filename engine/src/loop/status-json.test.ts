@@ -72,6 +72,7 @@ test("#642 AC2: status --json golden shape — formatVersion 1, per-lane detail,
       "config",
       "dbPath",
       "drivingCount",
+      "estopActive",
       "formatVersion",
       "generatedAt",
       "killSwitchActive",
@@ -84,6 +85,7 @@ test("#642 AC2: status --json golden shape — formatVersion 1, per-lane detail,
     ]);
     assert.deepEqual(body.snapshot, { mode: "live" });
     assert.equal(body.killSwitchActive, false);
+    assert.equal(body.estopActive, false);
     assert.equal(body.pauseActive, false);
     assert.equal(body.ceilingBreach, null);
     assert.equal(body.drivingCount, 1);

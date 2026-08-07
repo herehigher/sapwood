@@ -40,6 +40,61 @@ export const LANE_EVENT_KINDS = defineKinds({
     meaning: "a worker lane was reclaimed as DEAD (crashed/unresponsive process).",
     actionability: "investigate",
   },
+  // #724 gate② P1: EMERGENCY_STOP's own durable-pid sweep (round.ts) — a `driving`/`handoff`
+  // row whose DURABLE persisted process identity (never the in-memory supervisor, which a
+  // crash-resumed process cannot have) read confirmed-alive gets signalled directly, bypassing
+  // the ordinary tick()-only kill path entirely. `confirmedDead` (payload) is the post-signal
+  // probe's own verdict — `false` means the kill could not be verified (an orphan process
+  // group), never silently dropped; cli.ts's roundsExitCode already forces this run's exit code
+  // non-zero once `stoppedBy` names "emergency-stop" regardless of this outcome.
+  // #724 gate② round 4, P1-2 (correcting round 3's own mistake): escalation-source:NEVER, not
+  // `always` — `always` means "this event cannot exist unless the engine's OWN label write
+  // landed" (escalation-reconcile.ts's `labelProven` gate, consumed by `observeResolution`'s
+  // `label-removed` arm), and this sweep never calls `addLabel` at all (P1-1's "zero forge
+  // calls" — a hard-stop path that must stay network-free end to end). Tagging it `always` would
+  // let escalation-sweep.ts treat a LATER-missing needs-human label as proof a human resolved
+  // THIS escalation and safely remove it — but no label was ever ours to begin with, so that
+  // "removal" could delete a completely unrelated, human-applied needs-human label. `never` is
+  // the SAME proof mode `env-failure-preserved`/`ceiling-escalated` use for exactly this reason
+  // (their own doc, escalation-reconcile.ts): the item still surfaces on the dashboard's
+  // needs-attention strip (presence alone is still enough to open it — `attentionProof` reads
+  // the registry regardless of proof mode), it just NEVER auto-clears via "the label went away"
+  // — only via the issue itself reaching a terminal GitHub state (closed).
+  "estop-lane-swept": {
+    tags: ["round-artifact", "escalation-source:never"],
+    meaning:
+      "under EMERGENCY_STOP, a driving/handoff lane's durable process identity was found alive and signalled directly (TERM then KILL), then the row was settled to `failed` in the same step so no later reconciliation can revive it; confirmedDead records whether a post-signal check verified the kill. Needs-human, but never label-proven — no forge write ever backs it.",
+    actionability: "intervene",
+    see: "#293",
+  },
+  // #724 gate② round 4, P1-1: the crash-rerun safety marker — appended BEFORE the sweep's first
+  // signal, never after. A crash between this event and the eventual `estop-lane-swept`
+  // completion leaves the row still `driving`/`handoff`; `State.estopSweepIntentOpen` folds this
+  // pair to tell a restart's OWN sweep (never conductor.ts's ordinary reconciliation — see that
+  // method's own doc for why it is guaranteed to run first) "this lane was already decided
+  // must-settle," not a fresh candidate. Not an escalation source on its own — the terminal
+  // `estop-lane-swept` (or, on a capability-less restart, `estop-lane-sweep-incapable` below)
+  // is what an operator needs to see; this is the durable intermediate fact those two read back.
+  "estop-lane-sweep-started": {
+    tags: ["round-artifact"],
+    meaning:
+      "the E-STOP durable-pid sweep (round.ts) decided a driving/handoff lane is confirmed alive and is about to signal it — written before the first signal, for crash-rerun safety.",
+    actionability: "routine",
+    see: "#293",
+  },
+  // #724 gate② round 4, P2-3: durablePidAlive/signalDurablePid are ONE capability on a
+  // Supervisor — a lane whose OPEN pre-kill intent (above) this run's supervisor cannot verify
+  // or complete (missing either half) is left EXACTLY as it was found (never a fabricated
+  // settlement, never a swallowed signal) and evented honestly instead. `stoppedBy: "emergency-
+  // stop"` already forces this run's exit code non-zero regardless (cli.ts's roundsExitCode) —
+  // this event's job is only to make the gap visible, not to add a second forcing mechanism.
+  "estop-lane-sweep-incapable": {
+    tags: ["round-artifact"],
+    meaning:
+      "a lane carries an open E-STOP sweep intent, but this run's Supervisor cannot verify or signal its durable pid (missing durablePidAlive/signalDurablePid) — left unsettled, never a fabricated outcome.",
+    actionability: "intervene",
+    see: "#293",
+  },
 
   // Handoff / resume.
   handoff: {

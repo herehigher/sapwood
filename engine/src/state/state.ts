@@ -3038,6 +3038,72 @@ export class State {
     }
   }
 
+  /** #724 gate② round 4, P1-1: round.ts's E-STOP durable-pid sweep's own atomic settlement — the
+   *  row transition (to `failed`), its settled spend, and the `estop-lane-swept` outcome event,
+   *  in ONE transaction. Same shape (and reason) as `recordEstopActivation`/`recordDispatch`/
+   *  `recordLaneRowAndSpawnFact` above — this is the same atomic-State-method family, not a new
+   *  parallel path. Before this, the sweep did these as THREE separate writes (signal the
+   *  process, `settleTerminalWorker`, `appendEvent`): a crash between the row-settle and the
+   *  event left a `failed` row with NO `estop-lane-swept` trail — permanently invisible, since
+   *  nothing else ever re-examines a `failed` row — and a crash before the row-settle (but after
+   *  the OS-level SIGKILL) left a genuinely-dead child's row still `driving`/`handoff`, exactly
+   *  the shape `reconcileDrivingFixIntents`/`adoptAndReclaimTerminal` (conductor.ts) could
+   *  mistake for an ordinary confirmed-resume-intent and try to ADOPT. Bundling row+spend+event
+   *  makes the FIRST half of that window unrepresentable (either everything here lands, or
+   *  nothing does). The SECOND half — a crash strictly between the OS signal and this call ever
+   *  running at all — is NOT closeable by a transaction (the kill already happened outside the
+   *  DB); it is closed instead by `estopSweepIntentOpen`'s own durable PRE-KILL marker, written
+   *  by the caller BEFORE the first signal — see that method's own doc for the crash-rerun
+   *  argument. `settleTerminalWorker` above is left untouched: this is a DELIBERATE sibling, not
+   *  a generalization of it (nesting `BEGIN` inside an already-open transaction throws in
+   *  sqlite, so calling settleTerminalWorker FROM here was never an option; the alternative —
+   *  widening settleTerminalWorker's own signature with an arbitrary extra event — was rejected
+   *  as a wider blast radius on a method 14 OTHER call sites already depend on). */
+  settleEstopSweptWorker(
+    row: WorkerRow,
+    spend: { worker: string; issue: number; usd: number; at: string; actorKind?: SpendActorKind },
+    eventPayload: { worker: string; issue: number; confirmedDead: boolean },
+  ): void {
+    this.db.exec("BEGIN");
+    try {
+      this.upsertWorker(row);
+      this.recordSpend(spend.worker, spend.issue, spend.usd, spend.at, [], spend.actorKind);
+      this.appendEvent("estop-lane-swept", eventPayload);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /** #724 gate② round 4, P1-1: is there an OPEN pre-kill sweep intent for (worker, issue) — the
+   *  crash-rerun safety marker round.ts's E-STOP sweep writes BEFORE it ever signals a durable
+   *  pid (an `estop-lane-sweep-started` event), so a restart that finds the row STILL `driving`/
+   *  `handoff` (settlement never completed — `settleEstopSweptWorker` above never landed) knows
+   *  this lane was ALREADY decided must-settle, not a fresh candidate to re-classify from
+   *  scratch. This is what makes tick()'s ordinary reconciliation safe to leave untouched: a
+   *  round already `in_progress` at `executing` when a crash lands NEVER advances its persisted
+   *  `phase` column past `executing` until `runExecuting` returns cleanly (round.ts's own
+   *  rerun-not-resume doctrine — `SEQUENCE.indexOf(round.phase)` on restart re-enters exactly
+   *  the still-open phase, never a fresh one) — so a restart of THIS round is guaranteed
+   *  `freshBatch: false`, which skips tick()'s wave-1 call entirely and lets round.ts's OWN sweep
+   *  (not conductor.ts's `reconcileDrivingFixIntents`) be the FIRST thing to observe the row.
+   *  Last-event-wins fold over the two-kind pair, the SAME shape escalation-reconcile.ts's own
+   *  `openEscalations` uses for a source/resolution pair: a NEWER `estop-lane-swept` (the
+   *  completion event) than the newest `estop-lane-sweep-started` means the intent already
+   *  closed; no `estop-lane-swept` at all after a `started` means it is still open. */
+  estopSweepIntentOpen(worker: string, issue: number): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT kind FROM events
+         WHERE kind IN ('estop-lane-sweep-started', 'estop-lane-swept')
+           AND json_extract(payload, '$.worker') = ? AND json_extract(payload, '$.issue') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker, issue) as { kind: string } | undefined;
+    return row?.kind === "estop-lane-sweep-started";
+  }
+
   /** Cumulative usd ledgered under this worker NAME across all of its terminal legs. */
   spentUsdForWorker(worker: string): number {
     const row = this.db.prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE worker = ?").get(worker) as {
@@ -3148,6 +3214,30 @@ export class State {
     return { reasons: JSON.parse(row.reason) as string[], at: new Date(row.at) };
   }
 
+  /** #724 gate② P2-2: the `emergency-stop` activation event and its ceiling_breach row, in ONE
+   *  transaction — same shape as `recordEngineReviewVerdictAndSpend` above. Both callers
+   *  (conductor.ts's tick() E-STOP branch, round.ts's pre-tick round-level detection path) used
+   *  to do `appendEvent("emergency-stop", {})` then `recordCeilingBreach(...)` as two SEPARATE
+   *  writes, with a real crash window between them: a crash after the event commits but before
+   *  the ceiling_breach row does leaves `ceilingBreach()` reading null on restart — and BOTH
+   *  callers' own dedup check ("read ceilingBreach().reasons before writing") is what turns THAT
+   *  into a duplicate: a later detection (this same run recovering, or the other of the two
+   *  callers) reads "not yet announced" and appends the event again. Bundling the two writes
+   *  makes that torn state unrepresentable: either both land, or (a thrown error) neither does.
+   *  The caller's own dedup READ is UNCHANGED — it still runs, by the caller, BEFORE calling this
+   *  method; this only wraps the two writes the read gates. */
+  recordEstopActivation(now: Date): void {
+    this.db.exec("BEGIN");
+    try {
+      this.appendEvent("emergency-stop", {});
+      this.recordCeilingBreach(["emergency-stop"], now);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
   /** Clear a resolved breach (e.g. the kill switch was lifted, or the daily cap rolled over
    *  to a fresh day) so a later re-breach starts its own fresh drain window. */
   clearCeilingBreach(): void {
@@ -3164,6 +3254,20 @@ export class State {
 
   isKillSwitchActive(): boolean {
     const p = this.killSwitchPath();
+    return p != null && existsSync(p);
+  }
+
+  /** #293: the emergency-stop sentinel — same file-sentinel pattern as killSwitchPath above
+   *  (human-flippable, engine-owned data dir, null dir -> never active), but a DIFFERENT
+   *  contract: KILL_SWITCH is drain-first (SIGTERM handoff, bounded window, then hard kill);
+   *  EMERGENCY_STOP means immediate hard kill with no drain window at all — see conductor.ts's
+   *  tick() gate, which checks this BEFORE killSwitchPath so both present -> E-STOP wins. */
+  estopPath(): string | null {
+    return this.dataDir ? join(this.dataDir, "EMERGENCY_STOP") : null;
+  }
+
+  isEstopActive(): boolean {
+    const p = this.estopPath();
     return p != null && existsSync(p);
   }
 

@@ -1013,6 +1013,31 @@ test("kill switch: a file sentinel in the engine's own data dir flips it, human-
   }
 });
 
+test("emergency stop (#293): in-memory State has no data dir -> always inactive", () => {
+  const s = mem();
+  assert.equal(s.estopPath(), null);
+  assert.equal(s.isEstopActive(), false);
+  s.close();
+});
+
+test("emergency stop (#293): a file sentinel in the engine's own data dir flips it, human-flippable, no config touched; distinct from KILL_SWITCH", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const s = new State(join(dir, "sapwood.sqlite"));
+    assert.equal(s.isEstopActive(), false);
+    const p = s.estopPath();
+    // biome-ignore lint/complexity/useOptionalChain: the assertion deliberately requires a non-null sentinel path.
+    assert.ok(p && p.startsWith(dir)); // lives in the engine's OWN data dir
+    assert.notEqual(p, s.killSwitchPath()); // distinct sentinel from KILL_SWITCH
+    writeFileSync(p!, "");
+    assert.equal(s.isEstopActive(), true);
+    assert.equal(s.isKillSwitchActive(), false); // e-stop sentinel never implies kill-switch
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("pause (#75): in-memory State has no data dir -> always inactive", () => {
   const s = mem();
   assert.equal(s.pausePath(), null);

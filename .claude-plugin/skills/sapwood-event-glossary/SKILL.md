@@ -48,6 +48,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `role-debris-swept` — **routine**: leftover session/worktree debris from a peripheral role session was cleaned up.
 - `ceiling-breach-entered` — **investigate**: a cost-ceiling reason (per-run/per-day/...) newly joined the set of currently-breached reasons.
 - `ceiling-breach-cleared` — **routine**: a cost-ceiling reason left the set of currently-breached reasons (including the total-clear case).
+- `emergency-stop` — **intervene**: the EMERGENCY_STOP sentinel was detected — every running/fixing lane was hard-killed immediately, no drain window (#293). (see #293)
 - `base-ci-red-observed` — **investigate**: the default branch's CI was observed red (#502); opens the standing base-red episode. (see #502)
 - `base-ci-red-escalated` — **intervene**: the standing base-red episode persisted long enough to escalate; not issue-keyed, so it is not an escalation-source (no needs-human label to remove). (see #502)
 - `base-ci-red-cleared` — **routine**: a NEWER base-ci-red-observed/cleared pair showed the default branch's CI green again; closes the standing episode. (see #502)
@@ -69,6 +70,9 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `reclaim-done` — **investigate** [round-artifact, escalation-source:always]: a finished worker lane was reclaimed cleanly; whether it needs attention is a predicate over the payload (#404), not the kind alone. (see #404)
 - `reclaim-failed` — **investigate** [round-artifact, escalation-source:always]: reclaiming a finished worker lane failed; whether it needs attention is a predicate over the payload (#404), not the kind alone. (see #404)
 - `reclaim-dead` — **investigate** [round-artifact]: a worker lane was reclaimed as DEAD (crashed/unresponsive process).
+- `estop-lane-swept` — **intervene** [round-artifact, escalation-source:never]: under EMERGENCY_STOP, a driving/handoff lane's durable process identity was found alive and signalled directly (TERM then KILL), then the row was settled to `failed` in the same step so no later reconciliation can revive it; confirmedDead records whether a post-signal check verified the kill. Needs-human, but never label-proven — no forge write ever backs it. (see #293)
+- `estop-lane-sweep-started` — **routine** [round-artifact]: the E-STOP durable-pid sweep (round.ts) decided a driving/handoff lane is confirmed alive and is about to signal it — written before the first signal, for crash-rerun safety. (see #293)
+- `estop-lane-sweep-incapable` — **intervene** [round-artifact]: a lane carries an open E-STOP sweep intent, but this run's Supervisor cannot verify or signal its durable pid (missing durablePidAlive/signalDurablePid) — left unsettled, never a fabricated outcome. (see #293)
 - `handoff` — **routine** [retro, round-artifact]: a worker lane handed off gracefully (soft cost-limit reached): WIP committed+pushed, progress note left, `.handoff` sentinel written.
 - `resumed` — **routine**: a handed-off lane was resumed by a fresh worker session.
 - `resume-failed` — **expected-noise**: resuming a handed-off lane failed this attempt; eligible for a further retry.

@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
+import { roundsExitCode } from "../cli.js";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type {
   CommitInfo,
@@ -28,9 +29,11 @@ import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { WorkerProxyOpts } from "../roles/worker.js";
+import { KILL_SIGNAL_GRACE_MS } from "../roles/worker.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
+import { ESCALATION_SOURCE_KINDS, ESCALATION_SOURCES } from "./escalation-reconcile.js";
 import { attachAttemptGuard, withHangGuard } from "./hang-guard.test-support.js";
 import {
   buildFixLegResume,
@@ -283,7 +286,12 @@ class FakeSupervisor implements Supervisor {
   resumeIntentState(): "none" {
     return "none";
   }
-  async reclaim(): Promise<{ worktreePath: string | null; worktreeRetained: boolean }> {
+  /** Every worker name reclaim() was called for — general bookkeeping for tests about the
+   *  ORDINARY (tick()-driven) reclaim path. #724 gate② round 3: the E-STOP durable-pid sweep no
+   *  longer calls reclaim() at all (P1-1) — see durablePids/signalsSent below for its own tests. */
+  reclaimedNames: string[] = [];
+  async reclaim(worker: string): Promise<{ worktreePath: string | null; worktreeRetained: boolean }> {
+    this.reclaimedNames.push(worker);
     return { worktreePath: null, worktreeRetained: false };
   }
   inspectWorktree(): { worktreePath: string | null; worktreeRetained: boolean } {
@@ -297,6 +305,33 @@ class FakeSupervisor implements Supervisor {
     return true;
   }
   clearStaleFixEntrySentinel(): void {}
+  /** #724 gate② round 3, P1-1: a pid-liveness fake — set per-worker (default false) to simulate
+   *  a confirmed-alive durable pid, once `enableDurablePidCapability()` below has attached the
+   *  reader. Deliberately does NOT auto-flip to false when SIGKILL is recorded — a test that
+   *  wants a CONFIRMED-dead outcome sets it explicitly after asserting the signal sequence, so
+   *  the fixture never hides which of the two post-signal outcomes (confirmed dead vs. orphaned)
+   *  a given test exercises. */
+  durablePids: Record<string, boolean> = {};
+  /** #724 gate② round 4, P2-3: every (worker, signal) pair signalDurablePid was called for, in
+   *  order. The durable-pid sweep tests' proof that a confirmed-alive row actually got the
+   *  TERM-then-KILL sequence, replacing the retired reclaimedNames-based assertion for this path. */
+  signalsSent: Array<{ worker: string; signal: "SIGTERM" | "SIGKILL" }> = [];
+  /** #724 gate② round 4, P2-3: BOTH left genuinely unset (never assigned, not even to
+   *  `undefined` — `exactOptionalPropertyTypes` forbids that explicitly) by default — "no
+   *  opinion," the SAME stance `dispatch`/`resume`'s own optional `pid`/`worktreePath` already
+   *  take, matching the vast majority of this fixture's existing callers that never touch
+   *  durable-pid behavior at all. `enableDurablePidCapability()` attaches BOTH together, since
+   *  the pair IS one capability (conductor.ts's own P2-3 doc); a test exercising the FAIL-CLOSED
+   *  half-capable path instead assigns exactly ONE directly (`sup.durablePidAlive = (w) =>
+   *  true;`), leaving the other genuinely absent. */
+  durablePidAlive?: (w: string) => boolean;
+  signalDurablePid?: (w: string, signal: "SIGTERM" | "SIGKILL") => void;
+  enableDurablePidCapability(): void {
+    this.durablePidAlive = (w) => this.durablePids[w] ?? false;
+    this.signalDurablePid = (w, signal) => {
+      this.signalsSent.push({ worker: w, signal });
+    };
+  }
 }
 
 /** A supervisor whose lanes complete IMMEDIATELY (done, no PR) unless a test explicitly
@@ -1382,6 +1417,439 @@ test("runRounds KILL_SWITCH: blocks the very next peripheral phase — harvest/r
     assert.deepEqual(log, []); // no peripheral ever ran
     assert.equal(result.rounds, 0); // the round never closed
     state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #724 gate② finding [1]: EMERGENCY_STOP must halt round-level progression the same way
+// KILL_SWITCH already does — a paid peripheral session, an open standby probe loop, or the
+// ceiling/park wait must never keep running (or keep waiting indefinitely) once E-STOP fires. ──
+
+test("runRounds EMERGENCY_STOP: blocks the very next peripheral phase — harvest/retro are NEVER invoked, stoppedBy names emergency-stop, and the emergency-stop event is appended exactly once (#724 gate② finding [0])", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const forge = new FakeForge();
+    forge.ready = [];
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const events = spyOnEvents(state);
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    // Flip E-STOP BEFORE the round loop even starts aligning — proves the FIRST peripheral
+    // phase it would otherwise run is blocked, not just later ones (mirrors the KILL_SWITCH
+    // test just above). This is exactly the round-level detection path (runPeripheral's own
+    // haltActive() gate, never reaching tick()) that #724 gate② finding [0] found silent.
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    const deps = baseDeps({ forge, state, sleep, peripherals: allPeripherals(log) });
+    const result = await runRoundsGuarded(deps);
+    assert.equal(result.stoppedBy, "emergency-stop");
+    assert.deepEqual(log, []); // no peripheral ever ran — no paid session starts under E-STOP
+    assert.equal(result.rounds, 0); // the round never closed
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "emergency-stop"),
+      [["emergency-stop", {}]],
+      "the activation must be recorded even though no tick() ever ran this call — the pre-tick round-level detection path itself must announce it, exactly once",
+    );
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds EMERGENCY_STOP + KILL_SWITCH both present: stoppedBy names emergency-stop, not kill-switch (same precedence tick() already uses)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const forge = new FakeForge();
+    forge.ready = [];
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const deps = baseDeps({ forge, state, sleep, peripherals: allPeripherals(log) });
+    const result = await runRoundsGuarded(deps);
+    assert.equal(result.stoppedBy, "emergency-stop"); // E-STOP is the stricter tier — its name wins
+    assert.deepEqual(log, []);
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds executing-phase drain loop: a pre-existing driving lane + EMERGENCY_STOP mid-round — the loop exits immediately instead of freezing behind the deliberately-untouched driving lane (#724 gate② finding [1])", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-estop-drive-"));
+  try {
+    const { sleep, calls: sleepCalls } = mkSleepSpy();
+    const forge = new FakeForge();
+    forge.ready = []; // no new dispatch — isolates the driving lane as the drain loop's only occupant
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const events = spyOnEvents(state);
+    // A driving lane already occupying the board BEFORE this round even opens — activeWorkers()
+    // is a live, round-agnostic query (state.ts's own doc on that method), so the executing
+    // phase's drain loop inherits it as in-flight from its very first check. This is exactly the
+    // shape a mid-run E-STOP wedges on: tick()'s own E-STOP branch (conductor.ts) hard-kills
+    // running/fixing lanes but, by design, never touches `driving` rows.
+    state.upsertWorker({ name: "lane-drv", issue: 900, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 900 });
+    // #724 gate② P1: an ORDINARY driving lane (the shape this test is about) has no live process
+    // at all — #293's own "left untouched, no process to kill" contract. FakeSupervisor's
+    // durablePids default (false, "no opinion") already represents that; no fixture needed here
+    // — this test is isolated from the P1 durable-pid sweep (see the dedicated sweep test below)
+    // by construction, not by an explicit not-alive override.
+    const sup = new FakeSupervisor();
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    const deps = baseDeps({ forge, state, supervisor: sup, sleep, peripherals: allPeripherals(log) });
+    // E-STOP is flipped only once plan_review (the phase immediately before executing) has
+    // already run to completion — round.ts's own peripheral gate (runPeripheral) checks
+    // haltActive() on ENTRY, so flipping any earlier would block the round before it ever
+    // reaches executing at all (that pre-tick path is finding [0]'s own test, above). Here the
+    // round must be genuinely INSIDE the executing phase for the drain loop itself to be
+    // exercised.
+    deps.onRoundPhase = (_roundId, phase) => {
+      if (phase === "plan_review") writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    };
+    const stopSafety = boundedStopOnPhase(deps, 10); // generous: aligning/architecting/plan_review is 3
+    const result = await runRoundsGuarded(deps);
+    stopSafety();
+    assert.equal(result.stoppedBy, "emergency-stop");
+    // The fix: drainedEnoughToExit() is true on its very FIRST check inside runExecuting — no
+    // running/fixing lane ever existed, so liveLanesDrained() is immediately true — meaning ZERO
+    // drainWait calls. Pre-fix, activeWorkers() stayed nonzero forever (the driving lane, never
+    // touched by an E-STOP tick) and this loop would spin until boundedStopOnPhase's own sleep
+    // backstop forced a stop — an unmistakably different, wrong outcome this assertion rules out.
+    assert.deepEqual(sleepCalls, [], "the executing drain loop must exit without ever waiting on the driving lane");
+    // The driving lane itself: still `driving`, untouched — E-STOP's contract (conductor.ts)
+    // never kills it (no live process to kill); this fix only stops the loop from waiting on it.
+    assert.equal(state.getWorker("lane-drv")?.state, "driving");
+    // tick()'s own E-STOP branch (conductor.ts) announces the event during executing's wave 1 —
+    // the round-level gate this round later hits at harvesting (finding [0]'s own fix) must see
+    // it already recorded and stay silent, so exactly one still lands overall.
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "emergency-stop"),
+      [["emergency-stop", {}]],
+    );
+    // #724 gate② P1 reverse test: an ORDINARY driving lane (no live process — durablePids has no
+    // entry for it) must never be signalled by the durable-pid sweep — it has nothing to kill,
+    // and signaling it would be pure noise (or worse, a false "swept"+failed-row outcome) on the
+    // overwhelmingly common driving-lane shape. Never settled to `failed` either.
+    assert.deepEqual(sup.signalsSent, []);
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "estop-lane-swept"),
+      [],
+    );
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #724 gate② P1 (round 3: P1-1/P1-2 redesign): on a CRASH-RESUMED batch (freshBatch false — the
+// round is picked up directly at `executing`, never re-entering aligining/architecting/
+// plan_review, #86's own rerun-not-resume contract), tick()'s wave-1 dispatch is skipped
+// entirely (#172's own recovery-beat design) — so if the ONLY non-terminal rows are driving/
+// handoff (zero running/fixing), the pre-fix exit predicate could call this loop drained WITHOUT
+// tick() ever running once, leaving a CONFIRMED-alive detached child (spawned by the now-dead
+// prior engine process, invisible to this fresh process's supervisor) completely unsignaled.
+// This is the durable-pid sweep's own test — process-only (P1-1: no probe()/reclaim()) and
+// terminalizing (P1-2: the row settles to `failed`, never left revivable).
+test("runRounds executing-phase durable-pid sweep: a crash-resumed batch's handoff-row lane with a confirmed-alive durable pid is signalled directly (TERM then KILL), settled to failed, escalated, and made unreachable to reconciliation under EMERGENCY_STOP (#724 gate② P1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-estop-sweep-"));
+  try {
+    const { sleep, calls: sleepCalls } = mkSleepSpy();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const round = state.startRound("2026-07-09T00:00:00.000Z");
+    state.advanceRoundPhase(round.round_id, "executing", "2026-07-09T00:01:00.000Z");
+    // A handoff-row lane left behind by the CRASHED prior process: a later confirmed resume
+    // minted a fresh live child, but the crash landed before the DB row was ever flipped out of
+    // `handoff` — the exact crash window reconcileDrivingFixIntents/adoptAndReclaimTerminal
+    // (conductor.ts) exist to repair, provided tick() actually runs.
+    state.upsertWorker({ name: "lane-ho", issue: 42, session_id: "s", state: "handoff", started_at: "t", ended_at: "t2" });
+    state.close();
+
+    // A FRESH State instance over the SAME file — the crash-restart itself (mirrors the existing
+    // "resuming directly at 'executing'" crash-rerun test above).
+    const state2 = new State(join(dir, "sapwood.sqlite"));
+    const events = spyOnEvents(state2);
+    const forge = new FakeForge();
+    forge.ready = []; // no new dispatch — isolates the handoff row as the drain loop's only occupant
+    const sup = new FakeSupervisor();
+    sup.enableDurablePidCapability();
+    // The fake-ALIVE durable pid: this crash-resumed process's supervisor has NO in-memory
+    // handle for this lane (a brand-new `this.lanes` map — it was spawned by the now-dead PRIOR
+    // process), but its DURABLE persisted process identity (running.json wrapper_pid) reads
+    // genuinely alive. Never flips to false on its own (see FakeSupervisor's own doc) — this
+    // test exercises the ORPHANED (unconfirmed-dead) outcome deliberately, proving the honest
+    // trail even when the fake can't simulate a real kill.
+    sup.durablePids["lane-ho"] = true;
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    // EMERGENCY_STOP already present before this resumed pass even starts — runPeripheral is
+    // never going to run again for aligining/architecting/plan_review (this round resumes
+    // straight into `executing`, past them all), so the sweep is the only mechanism that can
+    // ever reach this row on this run.
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    const deps = baseDeps({ forge, supervisor: sup, state: state2, sleep, peripherals: allPeripherals(log) });
+    const stopSafety = boundedStopOnPhase(deps, 5);
+    const result = await runRoundsGuarded(deps);
+    stopSafety();
+    assert.equal(result.stoppedBy, "emergency-stop");
+    // P1-1: signalled directly, by durable pid — TERM then KILL, in order — never through
+    // reclaim()/probe() (never through tick()'s ordinary RESUME path either: freshBatch is
+    // false, and E-STOP means no dispatch-enabled tick ever fires).
+    assert.deepEqual(sup.signalsSent, [
+      { worker: "lane-ho", signal: "SIGTERM" },
+      { worker: "lane-ho", signal: "SIGKILL" },
+    ]);
+    // The short grace between TERM and KILL — the SAME named constant killByPid/killTree
+    // (worker.ts) use — is the ONLY wait this whole run performs.
+    assert.deepEqual(sleepCalls, [KILL_SIGNAL_GRACE_MS], "the grace wait is real and singular — no other waiting happens on this run");
+    // P1-2: settled TERMINALLY in the same atomic step — never left `handoff` with a durable
+    // resume intent a later reconciliation pass could adopt.
+    assert.equal(state2.getWorker("lane-ho")?.state, "failed");
+    // P1-1 crash-rerun safety: the durable PRE-KILL intent marker lands BEFORE the completion
+    // event — both present, in order, proving the sweep actually wrote the marker before ever
+    // signaling (not just at settlement time).
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "estop-lane-sweep-started" || kind === "estop-lane-swept"),
+      [
+        ["estop-lane-sweep-started", { worker: "lane-ho", issue: 42 }],
+        ["estop-lane-swept", { worker: "lane-ho", issue: 42, confirmedDead: false }],
+      ],
+    );
+    // Outcome evented, never silent: FakeSupervisor's signalDurablePid doesn't actually kill
+    // anything (durablePids stays true), so the post-signal check still reads alive — an honest
+    // "could not confirm death" trail, not swallowed into a false "confirmed dead".
+    // needs-human, but NEVER label-proven (#724 gate② round 4, P1-2 — round 3's own
+    // `escalation-source:always` tagging was a false label-ownership claim; this sweep never
+    // calls addLabel). Still a registered escalation source (surfaces on the dashboard), just
+    // under the "never" proof mode env-failure-preserved/ceiling-escalated also use.
+    assert.ok(ESCALATION_SOURCE_KINDS.includes("estop-lane-swept"), "estop-lane-swept must be a registered escalation source");
+    assert.equal(ESCALATION_SOURCES["estop-lane-swept"], "never", "must never claim label ownership — this path writes no forge label");
+    // The activation event itself still lands exactly once, from runPeripheral's own gate
+    // (finding [0]) — the sweep is a SEPARATE concern from announcing the sentinel's activation.
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "emergency-stop"),
+      [["emergency-stop", {}]],
+    );
+    // P1-2's actual no-revival proof: `reconcileDrivingFixIntents`/`adoptAndReclaimTerminal`
+    // (conductor.ts) — the ONLY code that ever reads a lane's resume intent and adopts it — act
+    // exclusively over `drivingWorkers()`/`handoffWorkers()`. A `failed` row is structurally
+    // absent from BOTH, on this run and any later restart's reconciliation pass alike.
+    assert.deepEqual(
+      state2.handoffWorkers().map((w) => w.name),
+      [],
+      "the swept lane must never again appear in handoffWorkers() — the exact query reconciliation adopts from",
+    );
+    assert.deepEqual(
+      state2.drivingWorkers().map((w) => w.name),
+      [],
+    );
+    state2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #724 gate② round 4, P2-3: durablePidAlive/signalDurablePid are ONE capability, not two
+// independently-optional ones. A Supervisor implementing only `durablePidAlive` (reporting a
+// lane ALIVE) but not `signalDurablePid` used to let the sweep silently no-op the missing
+// signal (optional chaining) and then settle the row `failed` anyway — a fabricated "swept"
+// outcome over a child nobody ever touched, still alive when the run exits. This test proves
+// the fail-closed fix: no settlement, no fake event, an honest "incapable" trail instead.
+test("runRounds durable-pid sweep, half-capable Supervisor: durablePidAlive alone (no signalDurablePid) never settles or signals — fails closed and events the incapacity honestly (#724 gate② round 4, P2-3)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-estop-halfcap-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const round = state.startRound("2026-07-09T00:00:00.000Z");
+    state.advanceRoundPhase(round.round_id, "executing", "2026-07-09T00:01:00.000Z");
+    state.upsertWorker({ name: "lane-half", issue: 55, session_id: "s", state: "handoff", started_at: "t", ended_at: "t2" });
+    state.close();
+
+    const state2 = new State(join(dir, "sapwood.sqlite"));
+    const events = spyOnEvents(state2);
+    const forge = new FakeForge();
+    forge.ready = [];
+    const sup = new FakeSupervisor();
+    // ONLY the liveness half — signalDurablePid is left genuinely unset (the FakeSupervisor
+    // default), reproducing the exact half-capable shape the finding describes.
+    sup.durablePidAlive = (w) => sup.durablePids[w] ?? false;
+    sup.durablePids["lane-half"] = true;
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    const deps = baseDeps({ forge, supervisor: sup, state: state2, sleep });
+    const stopSafety = boundedStopOnPhase(deps, 5);
+    const result = await runRoundsGuarded(deps);
+    stopSafety();
+    assert.equal(result.stoppedBy, "emergency-stop");
+    // The fix: no signal was ever sent (the capability half that would send it is absent).
+    assert.deepEqual(sup.signalsSent, []);
+    // Never settled — the row is exactly as it was found, never a fabricated `failed`.
+    assert.equal(state2.getWorker("lane-half")?.state, "handoff");
+    // Never a fake completion event, never a pre-kill intent either (nothing was ever actually
+    // decided-and-acted-on for this lane).
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "estop-lane-swept" || kind === "estop-lane-sweep-started"),
+      [],
+    );
+    // The honest trail instead: evented because THIS run's own durablePidAlive positively
+    // reported the lane alive, even though it could not act on that finding.
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "estop-lane-sweep-incapable"),
+      [["estop-lane-sweep-incapable", { worker: "lane-half", issue: 55 }]],
+    );
+    // Still forced non-zero regardless — no separate forcing mechanism was needed for this path.
+    assert.equal(roundsExitCode(result), 1);
+    state2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #724 gate② P2-3: `runPeripheral` (finding [0]'s own fix point) is NOT the only round-level exit
+// path — `waitForDispatchClear`'s own haltActive() gate can return into the round-boundary's
+// final-stop recheck WITHOUT ever reaching a peripheral phase, and a stop.* condition completing
+// in that exact window can win the naming instead. The race test below reproduces exactly that.
+test("runRounds EMERGENCY_STOP race with stop.onMilestoneComplete: the sentinel wins — stoppedBy names emergency-stop (never stop-condition), the event lands exactly once, and the exit code is forced non-zero (#724 gate② P2-3)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-estop-race-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const forge = new FakeForge();
+    forge.ready = []; // isolates the milestone check from dispatch activity — same isolation as the plain onMilestoneComplete test above
+    // Round 1's preemptive checkFinalMilestone() (round.ts, right before the roundsClosed>0 gate)
+    // reads the FIRST count (1, not complete) and falls through into waitForDispatchClear(); the
+    // race-window RE-check right after it (round.ts's own "closes that gap for free" comment)
+    // reads the SECOND count (0, complete) — mirrors the plain onMilestoneComplete test's own
+    // [1, 0] fixture exactly, the only difference here being E-STOP landing in between.
+    forge.milestoneOpenCounts = [1, 0];
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const events = spyOnEvents(state);
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    const deps = baseDeps({
+      forge,
+      state,
+      sleep,
+      stop: { onMilestoneComplete: "M4" },
+      peripherals: allPeripherals(log),
+      // E-STOP lands the INSTANT round 1's LAST peripheral phase (retro) completes — active
+      // before the round-boundary gate's own waitForDispatchClear() call, exactly the race
+      // window the finding describes: that call's own haltActive() check returns immediately
+      // (no announce of its own — waitForDispatchClear has no opinion on WHICH sentinel is
+      // active), and the very next statements are the milestone re-check that, pre-fix, would
+      // win the naming silently (runPeripheral never runs again — round 2 never opens far
+      // enough to reach a peripheral phase).
+      onRoundPhase: (_roundId, phase) => {
+        if (phase === "retro") writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+      },
+    });
+    const stopSafety = boundedStopOnPhase(deps, 15);
+    const result = await runRoundsGuarded(deps);
+    stopSafety();
+    assert.equal(result.stoppedBy, "emergency-stop");
+    assert.equal(result.stopCondition, undefined, "the override must not also carry a stale stop-condition reason alongside it");
+    assert.equal(result.rounds, 1); // round 1 fully closed; round 2 never opened
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "emergency-stop"),
+      [["emergency-stop", {}]],
+      "the finalization wrapper announces it — nothing else in this run's path ever ran tick() or hit runPeripheral's own gate a second time",
+    );
+    assert.equal(roundsExitCode(result), 1, "non-zero exit — #293's own 'same shape as the kill-switch exit' contract");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #724 gate② round 3, P2-4: `runRoundsCore` REJECTING while E-STOP is active used to bypass the
+// wrapper entirely — the promise just rejected, no announce, no `stoppedBy`. The durable record
+// must still land even when this particular call never gets to report a clean result.
+test("runRounds thrown-under-EMERGENCY_STOP: a rejecting sweep step still announces the activation before propagating the original error (#724 gate② round 3, P2-4)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-estop-throw-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const round = state.startRound("2026-07-09T00:00:00.000Z");
+    state.advanceRoundPhase(round.round_id, "executing", "2026-07-09T00:01:00.000Z");
+    // Crash-resumed at `executing` (same shape as the durable-pid sweep test above) with a
+    // confirmed-alive handoff row — the sweep will reach signalDurablePid() for it.
+    state.upsertWorker({ name: "lane-boom", issue: 7, session_id: "s", state: "handoff", started_at: "t", ended_at: "t2" });
+    state.close();
+
+    const state2 = new State(join(dir, "sapwood.sqlite"));
+    const events = spyOnEvents(state2);
+    const forge = new FakeForge();
+    forge.ready = [];
+    // An unexpected failure sending the signal — e.g. a transient OS error — must not be
+    // swallowed OR leave the activation unrecorded; it propagates, but through the wrapper.
+    // Both halves of the durablePid capability are assigned directly (not via
+    // enableDurablePidCapability(), which would install a non-throwing signalDurablePid) — a
+    // fully capable pair is required for the sweep to reach the signal at all (P2-3's own
+    // fail-closed gate would otherwise skip this lane silently, never reaching the throw).
+    const sup = new FakeSupervisor();
+    sup.durablePidAlive = (w) => sup.durablePids[w] ?? false;
+    sup.signalDurablePid = (): void => {
+      throw new Error("boom: signal failed unexpectedly");
+    };
+    sup.durablePids["lane-boom"] = true;
+    // EMERGENCY_STOP already present before this resumed pass even starts (same shape as the
+    // sweep test above) — the sweep is reached immediately, on the very first drainedEnoughToExit
+    // check, with no other phase in between.
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    const deps = baseDeps({ forge, supervisor: sup, state: state2, sleep });
+    await assert.rejects(runRoundsGuarded(deps), /boom: signal failed unexpectedly/);
+    // The wrapper's own catch: E-STOP was active at the moment of rejection, so the durable
+    // record still lands — a status/dashboard read (or a restart's own detection) is never left
+    // believing E-STOP was silently missed just because THIS run threw.
+    assert.deepEqual(
+      events.filter(([kind]) => kind === "emergency-stop"),
+      [["emergency-stop", {}]],
+    );
+    assert.ok(state2.ceilingBreach()?.reasons.includes("emergency-stop"));
+    state2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #724 gate② round 5, P2: the announce-under-catch (and, inside it, the best-effort log call)
+// must NEVER be able to replace the ORIGINAL rejection — even when BOTH of them throw too. The
+// test above proves the happy path (announce succeeds); this one proves the degraded one.
+test("runRounds thrown-under-EMERGENCY_STOP: the ORIGINAL error still propagates even when the announce itself throws AND the logger it falls back to also throws (#724 gate② round 5, P2)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-estop-throw-throw-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const round = state.startRound("2026-07-09T00:00:00.000Z");
+    state.advanceRoundPhase(round.round_id, "executing", "2026-07-09T00:01:00.000Z");
+    state.upsertWorker({ name: "lane-boom2", issue: 8, session_id: "s", state: "handoff", started_at: "t", ended_at: "t2" });
+    state.close();
+
+    const state2 = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    forge.ready = [];
+    const sup = new FakeSupervisor();
+    sup.durablePidAlive = (w) => sup.durablePids[w] ?? false;
+    sup.signalDurablePid = (): void => {
+      throw new Error("original: signal failed unexpectedly");
+    };
+    sup.durablePids["lane-boom2"] = true;
+    // The wrapper's own announce write (announceEstopActivation's recordEstopActivation call)
+    // ALSO throws — a broken DB write hitting exactly the moment this run is already unwinding
+    // from the sweep's own rejection. Not isEstopActive: that method is called from MANY places
+    // throughout runRoundsCore's own normal flow, so overriding it would make the ORIGINAL error
+    // come from there instead of from the sweep this test is actually about. recordEstopActivation
+    // is reached ONLY via the announce path in this scenario (the round resumes straight into
+    // `executing`, so runPeripheral's own announce call is never reached, and tick() never runs).
+    state2.recordEstopActivation = (): void => {
+      throw new Error("announce-failure: recordEstopActivation broke");
+    };
+    // The best-effort log fallback ALSO throws — e.g. a logger backed by a broken stream.
+    const throwingLog = (): void => {
+      throw new Error("logger-failure: log broke too");
+    };
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    const deps = baseDeps({ forge, supervisor: sup, state: state2, sleep, log: throwingLog });
+    // The ORIGINAL error — never the announce failure, never the logger failure — is what a
+    // caller must see. Either of the other two escaping unguarded would replace this message.
+    await assert.rejects(runRoundsGuarded(deps), /original: signal failed unexpectedly/);
+    state2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

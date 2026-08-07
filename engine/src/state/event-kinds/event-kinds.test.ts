@@ -129,6 +129,7 @@ const GOLDEN_ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> 
   "drive-needs-human": "payload",
   "drive-no-pr": "always",
   "env-failure-preserved": "never",
+  "estop-lane-swept": "never",
   "fix-leg-undecidable": "always",
   "fix-leg-verdict-rerun": "always",
   "fix-rounds-capped": "always",

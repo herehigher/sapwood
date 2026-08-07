@@ -123,6 +123,15 @@ const EGRESS_SNIPPET_MAX_CHARS = 200;
 export const MAX_EGRESS_SUSPECTS_PER_LEG = 20;
 const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
+/** #724 gate② round 4, P3-5: the ONE grace window between a SIGTERM and the escalation SIGKILL
+ *  — `killTree`/`killByPid` (this file, the process-tree/detached-pid kill sequence) and
+ *  round.ts's own E-STOP durable-pid sweep (which drives the SAME sequence one signal at a time
+ *  via `signalDurablePid`, never calling `killTree`/`killByPid` directly — see that sweep's own
+ *  doc for why) both consume this SAME constant, exported here since this file owns the kill
+ *  sequence. Previously duplicated as a bare `200` literal in both places — a real drift risk
+ *  (the two grace windows silently diverging under a future edit to just one of them). */
+export const KILL_SIGNAL_GRACE_MS = 200;
+
 /** Splits only on ordinary shell command separators outside quotes. On an unquoted heredoc or
  *  here-string operator (`<<`/`<<<`), fragments through that line are retained, then scanning
  *  stops at its newline so body data is never treated as commands. This deliberately over-skips
@@ -2497,6 +2506,25 @@ export class WorkerSupervisor implements Supervisor {
     return running.spawn_confirmed === false ? "unconfirmed" : "none";
   }
 
+  /** #724 gate② round 3, P1-1: the `Supervisor` interface's process-only liveness primitive —
+   *  see its own doc for why round.ts's E-STOP sweep needs this instead of `probe()`. Built
+   *  entirely from the SAME two private primitives every other cross-process path in this file
+   *  already uses (`persistedPid`/`pidGroupAlive` — `wrapperAlive` above is the same pair, just
+   *  returning a tri-state instead of a plain boolean). No forge call, no `this.lanes` read. */
+  durablePidAlive(name: string): boolean {
+    return this.pidGroupAlive(this.persistedPid(name));
+  }
+
+  /** #724 gate② round 3, P1-1: the `Supervisor` interface's process-only signal primitive — the
+   *  SAME `signalGroup` call `killByPid`/`killTree` already make, exposed standalone (no grace
+   *  wait, no escalation sequencing) so round.ts's E-STOP sweep can drive its OWN TERM-then-KILL
+   *  sequence one signal at a time, without `reclaim()`'s worktree/PR bookkeeping. A no-op when
+   *  there's no persisted pid — `signalGroup` itself never throws either. */
+  signalDurablePid(name: string, signal: NodeJS.Signals): void {
+    const pid = this.persistedPid(name);
+    if (pid != null) this.signalGroup(pid, signal);
+  }
+
   /**
    * #46: resume a lane the wrapper handed off (`.handoff` sentinel) via `claude --resume`,
    * reusing the ORIGINAL session id (no --fork-session) so claude continues the same
@@ -4007,12 +4035,12 @@ export class WorkerSupervisor implements Supervisor {
   // ── helpers ──────────────────────────────────────────────────────────────
   private async killTree(child: ChildProcess): Promise<void> {
     this.killGroup(child, "SIGTERM");
-    await sleep(200); // brief grace, then hard-kill the whole group
+    await sleep(KILL_SIGNAL_GRACE_MS); // brief grace, then hard-kill the whole group
     this.killGroup(child, "SIGKILL");
   }
   private async killByPid(pid: number): Promise<void> {
     this.signalGroup(pid, "SIGTERM");
-    await sleep(200);
+    await sleep(KILL_SIGNAL_GRACE_MS);
     this.signalGroup(pid, "SIGKILL");
   }
   private killGroup(child: ChildProcess, sig: NodeJS.Signals): void {

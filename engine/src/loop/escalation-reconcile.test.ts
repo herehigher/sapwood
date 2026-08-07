@@ -647,6 +647,33 @@ test("reconcileEscalations: env-failure-preserved (never labels, by contract) is
   state.close();
 });
 
+// #724 gate② round 4, P1-2: `estop-lane-swept` (round.ts's E-STOP durable-pid sweep) writes NO
+// forge label, ever (the sweep is a hard-stop path that must stay network-free end to end) — so
+// it must NEVER claim label ownership. Round 3 mistakenly tagged it escalation-source:always,
+// which would let this exact test scenario (label absent) resolve it via "label-removed" —
+// falsely claiming a human cleared OUR label when we never wrote one at all, which could delete
+// a completely unrelated, human-applied needs-human label on the same issue. Same shape as the
+// env-failure-preserved test just above.
+test("reconcileEscalations: estop-lane-swept (never labels, by contract) is NOT resolved by label absence — must never claim label ownership from a path that writes no label", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("estop-lane-swept", { worker: "lane-1", issue: 7, confirmedDead: false });
+  forge.issueLabels[7] = [];
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), []);
+  // Belt-and-suspenders on the proof-mode read itself: labelProven must be false for this kind,
+  // which is what makes observeResolution's `label-removed` arm unreachable above.
+  assert.equal(
+    openEscalations([{ kind: "estop-lane-swept", payload: { worker: "lane-1", issue: 7, confirmedDead: false } }]).get("estop-lane-swept:7")
+      ?.labelProven,
+    false,
+  );
+  state.close();
+});
+
 test("reconcileEscalations: a still-present hold label from the WHOLE humanLabels set keeps it escalated", async () => {
   const forge = new FakeForge();
   const state = new State(":memory:");
