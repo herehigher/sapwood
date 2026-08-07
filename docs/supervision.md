@@ -97,6 +97,228 @@ lane is inactive** — that is exactly backwards from the authority rule above: 
 activity, the DB belief (read via `status`) is the honest check, GitHub's label is only
 ever a best-effort, occasionally-lagging cache of it.
 
+### Detached operation
+
+A `sapwood run` you intend to leave running past your own shell session must be
+**detached from the launching session's lifetime**, never left in a terminal's
+foreground or handed to a session-managed background task. Session-managed background
+tasks carry a runtime ceiling (10 minutes in the incident this section is drawn from,
+wave-2, 2026-08-07); on expiry the harness TERMs the whole process group. The engine
+reads that correctly — two signals are exactly the freeze-drain-then-hard-exit sequence
+[Stop ritual](#stop-ritual)'s drain-semantics bullet already documents — but an operator
+who expected a supervised stop instead got an unattended one: one un-drained hard-exit,
+three lanes killed mid-flight, ~$30 bounded loss. The engine did nothing wrong; the
+launch method never detached it from a clock that was always going to run out.
+
+Verified working pattern: `nohup`, backgrounded, and `disown`'d out of the launching
+shell's job table — this defeats `SIGHUP`-on-shell-exit and any other signal the shell
+would otherwise deliver to its own job, nothing more (the pgid/session/cgroup hierarchy
+below says precisely what it does and doesn't cover). `run`'s data dir
+(`data/sapwood.sqlite`, `KILL_SWITCH`/`PAUSE`, sessions, worktree roots) resolves
+**relative to the process's cwd, not to `--config`'s directory** — the CLI's own `run
+--help` says so (`docs/configuration.md`'s loader-resolution note carries the same
+rule) — so `cd` into the deployment checkout FIRST, or the detached process silently
+takes root wherever the launching shell happened to be sitting. Use an absolute `node`
+here too (the lazy-load gotcha below applies to this line exactly as much as a script).
+Create the shell redirect's log directory before backgrounding, too: the shell performs
+the `>>` open BEFORE it runs `nohup` at all (not something `nohup` itself does), so a
+missing directory fails the launch right there — loudly, at the prompt; both bash and
+zsh report the failed redirect (`No such file or directory` / `no such file or
+directory`) and never start the background job — no engine, no lock, nothing to `ps -p`
+later. `run`'s OWN structured log (`cfg.logging.path`) creates its own directory lazily
+once the engine itself starts (`logger.ts`) — a different file, created too late to help
+this redirect, which is why `mkdir -p` comes first below:
+
+```bash
+DEPLOY=/absolute/path/to/deployment-checkout   # the repo root `data/` must resolve under
+NODE=/absolute/path/to/node                    # from `node -e 'console.log(process.execPath)'` — see the node gotcha below
+mkdir -p "$DEPLOY"/data/logs
+cd "$DEPLOY" && nohup "$NODE" "$DEPLOY"/engine/dist/cli.js run --config <cfg-path> \
+  >> "$DEPLOY"/data/logs/detached.log 2>&1 &
+disown
+```
+
+The criterion that actually matters here is whether your launcher's job control gives
+the backgrounded process its own process group at all — not whether the shell is
+"interactive" in the abstract. An ordinary interactive shell's job control does this by
+default; the incident below is an **example of a launcher that didn't**: an automation
+harness's shell ran `nohup ... & disown` without job control ever assigning the child a
+group of its own, so it inherited the launcher's process group, and a later
+group-directed signal from that same launching environment killed the "detached" engine
+collaterally. Live-verified 2026-08-07: pid 95193, launched this way, died to an
+external SIGKILL ~23 minutes in, together with its codex-exec review child; the exact
+external signal source was never identified, but the shared-pgid mechanism is
+confirmed.
+
+Even a `nohup`+`disown` that DOES land the child in its own process group only clears
+the first of a three-layer hierarchy, and each layer defeats a strictly smaller class of
+launcher-side cleanup than the next — say precisely which, rather than implying any one
+of them delivers more than it does:
+
+1. **Own process group** (plain `nohup`+`disown`, job control working as intended)
+   defeats `SIGHUP`-on-shell-exit and any signal the launching shell delivers to "its own
+   job." It does **not** defeat a launcher that reaps by POSIX session id, by cgroup, or
+   by the whole process tree instead of by a group-directed signal.
+2. **Own session** (`setsid`/the double-fork below) additionally defeats
+   session-id-based reaping — a controlling terminal's process dying and cascading
+   through its session, for instance. It does **not** escape a **cgroup** the child was
+   forked inside, or a container/job whose lifetime is enforced by killing that cgroup or
+   its whole process tree wholesale: a CI runner that cleans up its job's cgroup at
+   job-end kills the pgid-only form and the setsid form identically — neither is a
+   supervisor.
+3. **A supervisor living outside the container/cgroup/session entirely** — a system
+   service manager (systemd/launchd), a separate always-up host, or an explicit "remove
+   this pid from cleanup scope" step in the harness — is the only guarantee stronger than
+   layer 2. Layers 1–2 protect the engine from its OWN launching session signaling it;
+   neither protects it from the launching ENVIRONMENT being torn down wholesale.
+
+Give the engine layer 2 whenever you can't be certain your launcher's job control
+assigns a fresh pgid — most automation harnesses, CI runners, and agent-session shells —
+since it strictly subsumes layer 1 at no extra cost, while being honest that it's still
+not layer 3: `setsid <cmd>` is the one-line form where the OS ships it, but macOS does
+not, so the portable equivalent is a small double-fork. Pass the paths in as environment
+variables, not string-interpolated into the Python source (a quoted heredoc treats
+`$DEPLOY` as literal text, not a shell expansion — silent `FileNotFoundError` in a
+process whose parent has already exited "successfully"), and `chdir` explicitly before
+`execv` rather than trusting the double-forked child inherited the right cwd:
+
+```bash
+export DEPLOY NODE
+python3 - <<'PY'
+import os
+
+deploy = os.environ["DEPLOY"]
+node = os.environ["NODE"]
+
+if os.fork(): raise SystemExit(0)      # orphan the child from this shell
+os.setsid()                            # new session + process group of its own
+if os.fork(): raise SystemExit(0)      # never reacquire a controlling terminal
+
+os.chdir(deploy)                       # `run`'s data dir is cwd-relative — root it here explicitly
+log_dir = os.path.join(deploy, "data", "logs")
+os.makedirs(log_dir, exist_ok=True)
+log = open(os.path.join(log_dir, "detached.log"), "a")
+os.dup2(log.fileno(), 1); os.dup2(log.fileno(), 2)
+os.execv(node, [node, os.path.join(deploy, "engine", "dist", "cli.js"),
+                 "run", "--config", "<cfg-path>"])
+PY
+```
+
+Then confirm it's actually alive the way [Batch open ritual](#batch-open-ritual)'s
+Single-instance check already tells you to, not by trusting your own memory of having
+started it — same check for either launch form above: read
+`"$DEPLOY"/data/sapwood.lock`'s recorded `pid` and `ps -p <pid>` it yourself — the lock
+is authoritative, a shell job you believe is running is not. Check it by the SAME
+absolute path you launched under, never a bare `data/sapwood.lock` typed from whatever
+directory the checking shell happens to be in — the lock, like the DB below, is
+cwd-relative by default and resolves to nothing from anywhere else.
+
+Three script-environment gotchas from the same incident apply to any detached script,
+not just the launch line above:
+
+- **Hard-code the absolute `node` binary — a bare `node` is not safe outside an
+  interactive shell.** Ordinary nvm setups leave `node` a real binary on an exported
+  `PATH`, which a child process inherits fine — but some nvm setups (lazy-load
+  wrappers, used to avoid nvm's per-shell startup cost) make `node` a shell *function*
+  instead, resolved only inside an interactive shell that has sourced nvm's init code.
+  A detached or non-interactive process (a `nohup`'d launch, a cron job, a
+  service-manager unit) never sources that init code, so under a lazy-load setup
+  specifically, `node` resolves to nothing and every poll or launch built on it fails.
+  Resolve the real binary once, interactively, and paste the absolute path into the
+  detached script regardless of which kind of nvm setup you're on — it costs nothing
+  when `node` was already a real binary, and it's the only fix when it wasn't:
+  ```bash
+  node -e 'console.log(process.execPath)'
+  # -> e.g. /Users/you/.nvm/versions/node/v20.x.x/bin/node — hard-code this, not `node`
+  ```
+- **zsh does not word-split an unquoted variable.** `CLI="node cli.js"` followed by
+  `$CLI events` does not run `node` with args `cli.js events` — it tries to run the
+  single, nonexistent command `"node cli.js"` and fails **loudly**: `command not found`,
+  exit 127, same as any other typo — this is not a silent failure by itself. Build the
+  command as an array (`CLI=(node cli.js)`, invoked `${CLI[@]}`) or force the split
+  explicitly (`${=CLI}`) — never rely on an unquoted string variable splitting the way
+  it would in bash. What made this silent in the incident wasn't zsh: the monitor
+  script itself redirected its own stderr to `/dev/null`, which is what actually
+  swallowed the loud 127 and turned a visible typo into a dead poller nobody noticed —
+  the general lesson, independent of this specific splitting bug, is don't blind an
+  unattended script's own stderr.
+- **The state DB path defaults to `data/sapwood.sqlite`, resolved against the
+  invoking process's cwd — pass it explicitly, same as the deploy-dir rule above.**
+  `status`/`events`/`park clear` all fall back to this cwd-relative default when no
+  positional `db-path` is given, and `--config` does **not** change that resolution
+  (`docs/configuration.md`'s loader-resolution note: logging/prompt/goal/doctrine paths
+  go config-file-relative, but the DB, `KILL_SWITCH`/`PAUSE`, sessions, and worktree
+  roots stay cwd-relative regardless). A detached poller's cwd is arbitrary — polling
+  from anywhere but the deployment checkout silently prints `sapwood events: no state DB
+  at data/sapwood.sqlite — engine has never run` and **exits 0**, indistinguishable from
+  "nothing new yet" unless you're reading the message itself. Pass the DB positionally,
+  as an absolute path, on every `status`/`events` call a detached script makes.
+
+**Canonical detached monitor loop.** The [poll-cursor recipe](#supervising-a-run) above,
+run from a detached script with all three gotchas fixed and both `--config` and the DB
+path passed explicitly on every read (a detached poller has no interactive session, and
+no reliable cwd, to infer either from — see [Config provenance](#batch-open-ritual)).
+Every read also validates its own response and keeps the OLD cursor on any failure
+(command error, empty output, unparseable JSON, a missing `nextSinceId`) rather than
+letting a single transient failure — the documented busy-timeout case included — corrupt
+`CURSOR` into an empty string that would make every subsequent `--since-id ""` fail
+forever:
+
+```bash
+NODE=/absolute/path/to/node          # from `node -e 'console.log(process.execPath)'`, resolved once
+CLI=("$NODE" /absolute/path/to/engine/dist/cli.js)   # array — zsh-safe by construction
+CFG=/absolute/path/to/config.yaml
+DB=/absolute/path/to/deployment-checkout/data/sapwood.sqlite   # NEVER the bare default
+
+# One node call does the validation AND the printing: line 1 of stdout is the next
+# cursor, everything after is one event per line — malformed/empty input exits 1 and
+# prints nothing, so a failed parse is unambiguous to the caller below.
+PARSE='
+const fs = require("fs");
+let d;
+try { d = JSON.parse(fs.readFileSync(0, "utf8")); } catch (e) { process.exit(1); }
+if (typeof d.nextSinceId !== "number" || !Array.isArray(d.events)) process.exit(1);
+console.log(d.nextSinceId);
+d.events.forEach(e => console.log(JSON.stringify(e)));
+'
+
+# bootstrap: learn "now" with no history read — retry (transient busy timeouts are
+# expected) until a valid cursor comes back, rather than starting the loop on garbage.
+CURSOR=""
+while [ -z "$CURSOR" ]; do
+  if RESP=$("${CLI[@]}" events "$DB" --config "$CFG" --tail 0 --json); then
+    CURSOR=$(echo "$RESP" | "$NODE" -e "$PARSE" | head -n1)
+  fi
+  [ -z "$CURSOR" ] && { echo "bootstrap failed — retrying" >&2; sleep 5; }
+done
+
+while true; do
+  if ! RESP=$("${CLI[@]}" events "$DB" --config "$CFG" --since-id "$CURSOR" --json); then
+    echo "poll failed (busy/transient?) — keeping cursor at $CURSOR, retrying" >&2
+    sleep 30
+    continue
+  fi
+  PARSED=$(echo "$RESP" | "$NODE" -e "$PARSE")
+  if [ $? -ne 0 ] || [ -z "$PARSED" ]; then
+    echo "unparseable response — keeping cursor at $CURSOR, retrying" >&2
+    sleep 30
+    continue
+  fi
+  CURSOR=$(echo "$PARSED" | head -n1)
+  echo "$PARSED" | tail -n +2   # the new events, one JSON object per line
+  sleep 30
+done
+```
+
+No jq dependency, no bare `node`/`sapwood` invocation, no unquoted-string command, no
+cwd-relative DB/lock/deploy-dir default left to chance, and no single transient failure
+able to corrupt the cursor — the failure shapes above are structurally excluded rather
+than left to the operator to remember on every invocation. This is a recipe, not new
+machinery: `run --detach` or an engine daemon mode is deliberately out of scope here
+(marginal-complexity doctrine — nobody has asked for it, and a `cd`-first launch in
+whichever of the two forms above matches your launcher, plus the lock-file liveness
+check, already covers the verified failure modes).
+
 ## Batch open ritual
 
 Before dispatching a batch of work (starting a new `sapwood run`, or resuming after a
