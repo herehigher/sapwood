@@ -684,6 +684,28 @@ work waiting on a person additionally carry `attention` on the same entry —
 `true`, or a payload predicate where only some payloads qualify (§3) — so
 the strip and the sentences share one map and cannot drift apart.
 
+**Verification contract for the "type error" claim** (added 2026-08-07,
+retro round #344 — this exact gap was gate②-flagged twice on the same PR,
+once fixed with a look-alike guard that didn't close it): the claim above
+is only true if the wire/event type is *derived from* `copy.ts`, not
+duplicated next to it. A hand-maintained `EventKind` union declared
+independently in the dashboard (or in test fixtures) and merely checked
+against an unrelated string is not this contract — it compiles happily
+when an engine event kind is added without a matching `COPY` entry, which
+is precisely the failure this paragraph promises can't happen. Concretely:
+`LoopEvent["kind"]` (and any events-fixture type used in tests) must be
+`keyof typeof COPY` or a type imported from it, not a second union kept in
+sync by hand. The required proof, alongside the type itself, is a compile
+fixture that adds an unmapped kind to a real events value and asserts the
+build fails — a runtime fallback branch (e.g. `copyFor` returning a
+default string for unknown kinds) is a legitimate defensive measure but is
+not evidence for this claim and must not be cited as satisfying it. The
+same standard applies to the sentence *text* itself: a test that only
+counts one `COPY` entry per table row does not verify against this row's
+literal documented sentence — add a table-driven oracle that asserts each
+kind's rendered output against the string in this table (including its
+branches), so a sentence and its doc row can't drift apart either.
+
 **Stage labels lead with plain language** (decided at the design-director
 review: PO / gate⓪ / harvest are jargon to anyone who hasn't read PLAN.md,
 and the small-print caption "PO · goal alignment" is still jargon; *retro*
