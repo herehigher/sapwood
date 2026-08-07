@@ -738,7 +738,7 @@ display rules only — §11's stored/replayed ISO timestamps and durations/elaps
 
 **One helper, one path.** `dashboard/src/format-time.ts` is the only place that calls
 `Intl.DateTimeFormat`/`toLocaleString` on a stored ISO timestamp: `formatAbsoluteTime(iso,
-mode)` renders rules 1 + 3 for a given `TimeMode` (`"local" | "utc"`); `formatRelativeTime`
+mode)` renders rules 1 + 3 for a given `TimeMode` (`"local" | "utc"`); `formatRelativeWithAbsoluteTitle`
 pairs the relative string with its `formatAbsoluteTime` hover title so rule 2's
 relative→hover-absolute path can't drift out of sync. An inline `toLocaleString` call
 anywhere else in `dashboard/src/**` is a review finding — gate② checklist item, same
