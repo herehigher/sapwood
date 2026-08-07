@@ -4,6 +4,7 @@
  * inherits (focus ring, reduced motion, 720 px stacking).
  */
 @import "./tokens.css";
+@import "./panels.css";
 
 *,
 *::before,

@@ -57,8 +57,33 @@ export type LoopEvent = {
   id: number;
   ts: string;
   kind: string;
-  /** Stored JSON, verbatim — the §7 copy map is what turns a kind + payload into prose. */
-  payload: Record<string, unknown>;
+  /** Stored JSON, verbatim — the §7 copy map is what turns a kind + payload into prose.
+   *  `null` on a row whose stored payload wasn't parseable JSON (`state.ts`'s `eventsPage`/
+   *  `eventsPageFiltered`: "a corrupt row is served as null, never a 500/throw for the whole
+   *  page") — a genuinely honest wire value, not a defect, so every consumer must treat it as
+   *  a real possibility rather than assume an object (#715 gate② round 4 [4]). */
+  payload: Record<string, unknown> | null;
 };
 
 export type EventsPage = { events: LoopEvent[]; lastId: number };
+
+/** One `spend_ledger` row, served verbatim (`server.ts`'s `/api/spend` route, `State.spendPage`) —
+ *  `actorKind`/`role`/`estimated` are `null` on a row that never claimed one (#645), same never-
+ *  guess stance as everywhere else this triple appears. */
+export type SpendRow = {
+  id: number;
+  ts: string;
+  worker: string;
+  issue: number;
+  usd: number;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  actorKind: "worker" | "fix-leg" | "peripheral-role" | "engine-review" | null;
+  role: string | null;
+  estimated: boolean | null;
+};
+
+export type SpendPage = { spend: SpendRow[]; lastId: number };
