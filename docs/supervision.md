@@ -111,21 +111,30 @@ three lanes killed mid-flight, ~$30 bounded loss. The engine did nothing wrong; 
 launch method never detached it from a clock that was always going to run out.
 
 Verified working pattern: `nohup`, backgrounded, and `disown`'d out of the launching
-shell's job table, so nothing tied to that session can signal it:
+shell's job table, so nothing tied to that session can signal it. `run`'s data dir
+(`data/sapwood.sqlite`, `KILL_SWITCH`/`PAUSE`, sessions, worktree roots) resolves
+**relative to the process's cwd, not to `--config`'s directory** — the CLI's own `run
+--help` says so (`docs/configuration.md`'s loader-resolution note carries the same
+rule) — so `cd` into the deployment checkout FIRST, or the detached process silently
+takes root wherever the launching shell happened to be sitting:
 
 ```bash
-nohup node <absolute-path>/engine/dist/cli.js run --config <cfg-path> \
-  >> <log-path> 2>&1 &
+DEPLOY=/absolute/path/to/deployment-checkout   # the repo root `data/` must resolve under
+cd "$DEPLOY" && nohup node "$DEPLOY"/engine/dist/cli.js run --config <cfg-path> \
+  >> "$DEPLOY"/data/logs/detached.log 2>&1 &
 disown
 ```
 
 Then confirm it's actually alive the way [Batch open ritual](#batch-open-ritual)'s
 Single-instance check already tells you to, not by trusting your own memory of having
-started it: read `data/sapwood.lock`'s recorded `pid` and `ps -p <pid>` it yourself —
-the lock is authoritative, a shell job you believe is running is not.
+started it: read `"$DEPLOY"/data/sapwood.lock`'s recorded `pid` and `ps -p <pid>`
+it yourself — the lock is authoritative, a shell job you believe is running is not.
+Check it by the SAME absolute path you launched under, never a bare `data/sapwood.lock`
+typed from whatever directory the checking shell happens to be in — the lock, like the
+DB below, is cwd-relative by default and resolves to nothing from anywhere else.
 
-Two script-environment gotchas from the same incident apply to any detached script, not
-just the launch line above:
+Three script-environment gotchas from the same incident apply to any detached script,
+not just the launch line above:
 
 - **Hard-code the absolute `node` binary — a bare `node` is not safe outside an
   interactive shell.** An nvm-managed install makes `node` a lazy-load shell
@@ -144,23 +153,35 @@ just the launch line above:
   shell error. Build the command as an array (`CLI=(node cli.js)`, invoked `${CLI[@]}`)
   or force the split explicitly (`${=CLI}`) — never rely on an unquoted string variable
   splitting the way it would in bash.
+- **The state DB path defaults to `data/sapwood.sqlite`, resolved against the
+  invoking process's cwd — pass it explicitly, same as the deploy-dir rule above.**
+  `status`/`events`/`park clear` all fall back to this cwd-relative default when no
+  positional `db-path` is given, and `--config` does **not** change that resolution
+  (`docs/configuration.md`'s loader-resolution note: logging/prompt/goal/doctrine paths
+  go config-file-relative, but the DB, `KILL_SWITCH`/`PAUSE`, sessions, and worktree
+  roots stay cwd-relative regardless). A detached poller's cwd is arbitrary — polling
+  from anywhere but the deployment checkout silently prints `sapwood events: no state DB
+  at data/sapwood.sqlite — engine has never run` and **exits 0**, indistinguishable from
+  "nothing new yet" unless you're reading the message itself. Pass the DB positionally,
+  as an absolute path, on every `status`/`events` call a detached script makes.
 
 **Canonical detached monitor loop.** The [poll-cursor recipe](#supervising-a-run) above,
-run from a detached script with both gotchas fixed and `--config` passed explicitly on
-every read (a detached poller has no interactive session to infer it from — see [Config
-provenance](#batch-open-ritual)):
+run from a detached script with all three gotchas fixed and both `--config` and the DB
+path passed explicitly on every read (a detached poller has no interactive session, and
+no reliable cwd, to infer either from — see [Config provenance](#batch-open-ritual)):
 
 ```bash
 NODE=/absolute/path/to/node          # from `node -e 'console.log(process.execPath)'`, resolved once
 CLI=("$NODE" /absolute/path/to/engine/dist/cli.js)   # array — zsh-safe by construction
 CFG=/absolute/path/to/config.yaml
+DB=/absolute/path/to/deployment-checkout/data/sapwood.sqlite   # NEVER the bare default
 
 # bootstrap: learn "now" with no history read
-CURSOR=$("${CLI[@]}" events --config "$CFG" --tail 0 --json \
+CURSOR=$("${CLI[@]}" events "$DB" --config "$CFG" --tail 0 --json \
   | "$NODE" -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(0,"utf8")).nextSinceId))')
 
 while true; do
-  RESP=$("${CLI[@]}" events --config "$CFG" --since-id "$CURSOR" --json)
+  RESP=$("${CLI[@]}" events "$DB" --config "$CFG" --since-id "$CURSOR" --json)
   echo "$RESP" | "$NODE" -e \
     'JSON.parse(require("fs").readFileSync(0,"utf8")).events.forEach(e => console.log(JSON.stringify(e)))'
   CURSOR=$(echo "$RESP" | "$NODE" -e \
@@ -169,12 +190,13 @@ while true; do
 done
 ```
 
-No jq dependency, no bare `node`/`sapwood` invocation, no unquoted-string command — the
-three failure shapes above are structurally excluded rather than left to the operator to
-remember on every invocation. This is a recipe, not new machinery: `run --detach` or an
-engine daemon mode is deliberately out of scope here (marginal-complexity doctrine —
-nobody has asked for it, and a `nohup ... & disown` launch plus the lock-file liveness
-check already covers the verified failure mode).
+No jq dependency, no bare `node`/`sapwood` invocation, no unquoted-string command, no
+cwd-relative DB/lock/deploy-dir default left to chance — the four failure shapes above
+are structurally excluded rather than left to the operator to remember on every
+invocation. This is a recipe, not new machinery: `run --detach` or an engine daemon
+mode is deliberately out of scope here (marginal-complexity doctrine — nobody has asked
+for it, and a `cd`-first `nohup ... & disown` launch plus the lock-file liveness check
+already covers the verified failure mode).
 
 ## Batch open ritual
 
