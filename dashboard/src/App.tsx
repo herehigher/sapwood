@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useEvents, useLoopState } from "./api/queries.ts";
+import { useEventHistory, useLoopState } from "./api/queries.ts";
 import { ActivityFeed } from "./components/ActivityFeed.tsx";
 import { ConfigDrawer } from "./components/ConfigDrawer.tsx";
 import type { CostBarGroup } from "./components/CostStrip.tsx";
@@ -15,11 +15,14 @@ import { foldEntityTitles } from "./entities.ts";
  */
 export function App() {
   const loop = useLoopState();
-  const events = useEvents(0);
+  const events = useEventHistory();
   const [configOpen, setConfigOpen] = useState(false);
 
-  const disconnected = loop.isError || events.isError;
-  const titles = foldEntityTitles(events.data?.events ?? []);
+  // §3's documented `disconnected` header state: EITHER query failing means the dashboard has
+  // lost its one data source, regardless of which one (#715 gate② [7] — this used to render only
+  // `loop.error`'s raw message, and nothing at all when just the events query failed).
+  const disconnected = loop.isError || Boolean(events.error);
+  const titles = foldEntityTitles(events.events);
   const owner = loop.data?.config ? readConfigPath(loop.data.config, "board.owner") : undefined;
   const repo = loop.data?.config ? readConfigPath(loop.data.config, "board.repo") : undefined;
   const repoUrl = typeof owner === "string" && typeof repo === "string" ? `https://github.com/${owner}/${repo}` : undefined;
@@ -44,15 +47,21 @@ export function App() {
     <main className="stack">
       <section className="panel">
         <h1>sapwood</h1>
-        {loop.isPending && <p className="muted">connecting…</p>}
-        {loop.error && <p style={{ color: "var(--rust)" }}>✕ {loop.error.message}</p>}
-        {loop.data && (
-          <dl>
-            <dt className="muted">engine</dt>
-            <dd className="data">{loop.data.engine.state}</dd>
-            <dt className="muted">rings</dt>
-            <dd className="data">{loop.data.rings}</dd>
-          </dl>
+        {disconnected ? (
+          <p className="muted" style={{ color: "var(--rust)" }}>
+            disconnected — restart sapwood to reconnect
+          </p>
+        ) : loop.isPending ? (
+          <p className="muted">connecting…</p>
+        ) : (
+          loop.data && (
+            <dl>
+              <dt className="muted">engine</dt>
+              <dd className="data">{loop.data.engine.state}</dd>
+              <dt className="muted">rings</dt>
+              <dd className="data">{loop.data.rings}</dd>
+            </dl>
+          )
         )}
         <button type="button" onClick={() => setConfigOpen((v) => !v)}>
           Config ▸
@@ -67,7 +76,7 @@ export function App() {
         disconnected={disconnected}
       />
 
-      <ActivityFeed events={events.data?.events ?? []} titles={titles} repoUrl={repoUrl} disconnected={disconnected} />
+      <ActivityFeed events={events.events} titles={titles} repoUrl={repoUrl} disconnected={disconnected} />
 
       <CostStrip groups={[byModel, byLane]} />
 

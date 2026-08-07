@@ -31,6 +31,12 @@
   gap: var(--space-2);
 }
 
+.lane-card-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .entity-ref {
   display: inline-flex;
   align-items: center;

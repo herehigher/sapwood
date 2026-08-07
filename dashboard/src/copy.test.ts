@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { COPY, copyFor, EVENT_KINDS, type EventKind, hasAttention } from "./copy.ts";
+// Test-only import (same pattern as config-captions.test.ts's CONFIG_ALLOWLIST cross-check): the
+// engine's own tagged registry is the AUTHORITATIVE attention-membership signal, not frontend-
+// design.md §3's prose list, which has already drifted once (finding [2] below).
+import { ESCALATION_SOURCE_KINDS } from "../../engine/src/loop/escalation-reconcile.ts";
+import { COPY, copyFor, EVENT_KINDS, type EventKind, hasAttention, type SentencePart } from "./copy.ts";
 
 const render = (kind: EventKind, payload: Record<string, unknown> = {}) =>
   COPY[kind]
@@ -136,14 +140,66 @@ test("ceiling-breach-cleared branches on payload.reason", () => {
 });
 
 test("escalation-resolved branches on payload.via across all five documented values", () => {
-  assert.match(render("escalation-resolved", { issue: 7, pr: 12, via: "merged" }), /no longer needs you — #12 was merged/);
+  assert.match(render("escalation-resolved", { issue: 7, pr: 12, via: "merged" }), /no longer needs you — PR #12 was merged/);
   assert.match(render("escalation-resolved", { issue: 7, via: "issue-closed" }), /no longer needs you — it was closed/);
   assert.match(
     render("escalation-resolved", { issue: 7, pr: 12, via: "pr-closed" }),
-    /no longer needs you — #12 was closed without merging/,
+    /no longer needs you — PR #12 was closed without merging/,
   );
   assert.match(render("escalation-resolved", { issue: 7, via: "label-removed" }), /the flag was cleared/);
   assert.match(render("escalation-resolved", { issue: 7, via: "board-fixed" }), /the board was set to Done/);
+});
+
+test("needs-human-swept names the issue as an entity token and states the escalation-resolved clause", () => {
+  assert.match(
+    render("needs-human-swept", { issue: 7, label: "sapwood:needs-human" }),
+    /Issue #7 no longer carries `sapwood:needs-human` — the engine removed the flag it had applied itself, now that its escalation is resolved/,
+  );
+});
+
+test("resume-held names the issue as an entity token, not a raw string", () => {
+  assert.match(
+    render("resume-held", { worker: "w1", issue: 7, label: "sapwood:blocked" }),
+    /Lane w1's handoff can't resume — issue #7 still carries `sapwood:blocked`/,
+  );
+});
+
+/** The part immediately before the first PR entity token must end in the literal word "PR " —
+ *  §7's rows all read "... PR #{pr} ..."; the token itself only ever renders the glyph + number. */
+function textBeforeFirstPrToken(parts: SentencePart[]): string | undefined {
+  const i = parts.findIndex((p) => typeof p !== "string" && p.kind === "pr");
+  const before = i > 0 ? parts[i - 1] : undefined;
+  return typeof before === "string" ? before : undefined;
+}
+
+test("every PR-bearing sentence spells out the literal word PR before the entity token (§7 exact text)", () => {
+  const prBearing: [EventKind, Record<string, unknown>][] = [
+    ["merged", { pr: 1, issue: 1 }],
+    ["pr-held", { pr: 1, issue: 1 }],
+    ["pr-released", { pr: 1, issue: 1 }],
+    ["lane-state-labeled", { worker: "w1", pr: 1, issue: 1 }],
+    ["retro-pr-opened", { pr: 1 }],
+  ];
+  for (const [kind, payload] of prBearing) {
+    const before = textBeforeFirstPrToken(COPY[kind].sentence(payload));
+    assert.match(before ?? "", /PR $/, `${kind} should spell "PR " immediately before its entity token`);
+  }
+  assert.match(
+    textBeforeFirstPrToken(COPY["engine-review-verdict"].sentence({ outcome: "approved", pr: 1, issue: 1, findingCount: 0 })) ?? "",
+    /Review approved PR $/,
+  );
+  assert.match(
+    textBeforeFirstPrToken(COPY["engine-review-verdict"].sentence({ outcome: "rejected", pr: 1, issue: 1, findingCount: 1 })) ?? "",
+    /Review sent PR $/,
+  );
+  assert.match(
+    textBeforeFirstPrToken(COPY["escalation-resolved"].sentence({ issue: 1, pr: 1, via: "merged" })) ?? "",
+    /no longer needs you — PR $/,
+  );
+  assert.match(
+    textBeforeFirstPrToken(COPY["escalation-resolved"].sentence({ issue: 1, pr: 1, via: "pr-closed" })) ?? "",
+    /no longer needs you — PR $/,
+  );
 });
 
 test("drive-fixup names the reason word for each of the three prescriptions", () => {
@@ -195,9 +251,37 @@ test("every kind named in §3's flagged-attention list carries the marker", () =
     "park-escalated",
     "env-failure-preserved",
     "ceiling-escalated",
+    // #715 gate② [2]: not named in §3's own (dated) prose list, but each is
+    // `escalation-source:always` in the engine's own authoritative registry
+    // (engine/src/state/event-kinds/drive.ts) — see the drift test below, which checks the
+    // full registry rather than re-transcribing it a second time here.
+    "drive-no-pr",
+    "fix-rounds-capped",
+    "fix-leg-verdict-rerun",
   ];
   for (const kind of alwaysAttention) {
     assert.equal(COPY[kind].attention, true, `${kind} should carry attention: true`);
+  }
+});
+
+test("#715 gate② [2]: attention drift guard — every §7-table kind the engine tags as an unconditional escalation source carries `attention` in COPY", () => {
+  // The two reclaim kinds are PAYLOAD-predicated (#404) — their membership depends on `next`,
+  // not unconditional presence, and copy.ts already covers them with `reclaimNeedsAttention`
+  // (tested above); this guard only asserts the UNCONDITIONAL sources.
+  const predicated = new Set(["reclaim-done", "reclaim-failed"]);
+  // Set<string>, not Set<engine's EventKind>: dashboard's own EventKind union is NOT provably a
+  // subset of the engine's (e.g. `no-plan-after-draft` has a §7 table row and a COPY entry but,
+  // as of this writing, no matching engine-registered kind at all — a separate, pre-existing
+  // doc/engine drift this test does not try to adjudicate). Comparing as plain strings is the
+  // correct membership check regardless of which side's nominal type is wider.
+  const unconditionalSources: Set<string> = new Set(ESCALATION_SOURCE_KINDS.filter((k) => !predicated.has(k)));
+  for (const kind of EVENT_KINDS) {
+    if (!unconditionalSources.has(kind)) continue;
+    assert.equal(
+      COPY[kind].attention,
+      true,
+      `${kind} is escalation-source:* in the engine's registry but carries no attention marker in COPY`,
+    );
   }
 });
 

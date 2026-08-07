@@ -77,26 +77,33 @@ export function ActivityFeed({ events, titles, repoUrl, disconnected, now }: Act
   // by attention, sort each subset newest-first, and render the attention subset first — a newer
   // NON-escalation event never displaces an older, still-open escalation.
   //
-  // "Superseded": a NEWER `escalation-resolved` for the SAME issue unpins it (§3's own
-  // clearing-semantics prose — "since #295, when escalation-resolved reports the human resolved
-  // it outside the loop entirely"). This is the one clearing signal narrow enough to apply safely
-  // here without re-deriving the engine's full `attentionProof`/per-kind clearing rules (worktree
-  // custody, park episodes, …) — that fuller reconciliation is #361's job, which imports the
-  // engine's own function rather than re-encoding it a second time. An attention event with no
-  // `issue` in its payload (e.g. `ceiling-escalated`, `park-escalated`) is never issue-scoped, so
-  // it is never a candidate `escalation-resolved` clears — it stays pinned.
-  const resolvedIssues = new Map<number, number>(); // issue -> newest escalation-resolved id
+  // "Superseded": a NEWER `escalation-resolved` for the SAME (source, issue) pair unpins it (§3's
+  // own clearing-semantics prose — "since #295, when escalation-resolved reports the human
+  // resolved it outside the loop entirely"; the engine's reconciler keys its own resolution
+  // receipts `(source, issue)` for exactly this reason — escalation-reconcile.ts's `source: e.kind`
+  // on the receipt it appends). Keyed by kind, not just issue: #715 gate② [5] — an issue can carry
+  // TWO simultaneously-open escalation sources (e.g. a `drive-needs-human` AND a separate
+  // `rollback-escalated`), and resolving one must not silently unpin the other. This is the one
+  // clearing signal narrow enough to apply safely here without re-deriving the engine's full
+  // `attentionProof`/per-kind clearing rules (worktree custody, park episodes, …) — that fuller
+  // reconciliation is #361's job, which imports the engine's own function rather than re-encoding
+  // it a second time. An attention event with no `issue` in its payload (e.g. `ceiling-escalated`,
+  // `park-escalated`) is never issue-scoped, so it is never a candidate `escalation-resolved`
+  // clears — it stays pinned.
+  const resolvedAt = new Map<string, number>(); // `${source}:${issue}` -> newest escalation-resolved id
+  const resolutionKey = (source: unknown, issue: unknown): string | undefined =>
+    typeof source === "string" && typeof issue === "number" ? `${source}:${issue}` : undefined;
   for (const e of events) {
     if (e.kind !== "escalation-resolved") continue;
-    const issue = e.payload.issue;
-    if (typeof issue !== "number") continue;
-    resolvedIssues.set(issue, Math.max(e.id, resolvedIssues.get(issue) ?? -Infinity));
+    const key = resolutionKey(e.payload.source, e.payload.issue);
+    if (key === undefined) continue;
+    resolvedAt.set(key, Math.max(e.id, resolvedAt.get(key) ?? -Infinity));
   }
   const isSuperseded = (e: LoopEvent): boolean => {
-    const issue = e.payload.issue;
-    if (typeof issue !== "number") return false;
-    const resolvedAt = resolvedIssues.get(issue);
-    return resolvedAt !== undefined && resolvedAt > e.id;
+    const key = resolutionKey(e.kind, e.payload.issue);
+    if (key === undefined) return false;
+    const at = resolvedAt.get(key);
+    return at !== undefined && at > e.id;
   };
   const attention = events.filter((e) => hasAttention(e.kind, e.payload) && !isSuperseded(e)).sort((a, b) => b.id - a.id);
   const rest = events.filter((e) => !hasAttention(e.kind, e.payload) || isSuperseded(e)).sort((a, b) => b.id - a.id);

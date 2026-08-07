@@ -135,9 +135,9 @@ export type EventKind =
   | "idle-churn-detected";
 
 const RESOLUTION_SENTENCE: Record<string, (p: Payload) => SentencePart[]> = {
-  merged: (p) => ["Issue ", issueTok(p.issue), " no longer needs you — ", prTok(p.pr, p.issue), " was merged"],
+  merged: (p) => ["Issue ", issueTok(p.issue), " no longer needs you — PR ", prTok(p.pr, p.issue), " was merged"],
   "issue-closed": (p) => ["Issue ", issueTok(p.issue), " no longer needs you — it was closed"],
-  "pr-closed": (p) => ["Issue ", issueTok(p.issue), " no longer needs you — ", prTok(p.pr, p.issue), " was closed without merging"],
+  "pr-closed": (p) => ["Issue ", issueTok(p.issue), " no longer needs you — PR ", prTok(p.pr, p.issue), " was closed without merging"],
   "label-removed": (p) => ["Issue ", issueTok(p.issue), " no longer needs you — the flag was cleared"],
   "board-fixed": (p) => ["Issue ", issueTok(p.issue), " no longer needs you — the board was set to Done"],
 };
@@ -167,7 +167,7 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: (p) => [`Lane ${p.worker} reached its budget and saved its progress for a successor`],
   },
   merged: {
-    sentence: (p) => ["Merged ", prTok(p.pr, p.issue), " — checks green and review approved"],
+    sentence: (p) => ["Merged PR ", prTok(p.pr, p.issue), " — checks green and review approved"],
   },
   "drive-needs-human": {
     sentence: (p) => ["PR ", prTok(p.pr, p.issue), " needs a human decision"],
@@ -175,6 +175,10 @@ export const COPY: Record<EventKind, CopyEntry> = {
   },
   "drive-no-pr": {
     sentence: (p) => [`Lane ${p.worker} ended without opening a PR`],
+    // #715 gate② [2]: the engine's own registry tags this `escalation-source:always`
+    // (engine/src/state/event-kinds/drive.ts) — a driving lane with no PR is always a person's
+    // decision, unconditionally, same tier as `drive-needs-human`.
+    attention: true,
   },
   "drive-queued": {
     sentence: (p) => ["PR ", prTok(p.pr, p.issue), " is ready — waiting its turn to merge"],
@@ -196,9 +200,14 @@ export const COPY: Record<EventKind, CopyEntry> = {
   },
   "fix-rounds-capped": {
     sentence: (p) => ["PR ", prTok(p.pr, p.issue), " used up its fix attempts — needs a human"],
+    // #715 gate② [2]: `escalation-source:always` in the engine's own registry (drive.ts) —
+    // "needs a human" in the sentence itself, and the reconciler treats it as unconditional.
+    attention: true,
   },
   "fix-leg-verdict-rerun": {
     sentence: (p) => ["PR ", prTok(p.pr, p.issue), "'s review findings aren't fixable by the producer — needs a human"],
+    // #715 gate② [2]: same `escalation-source:always` tier as `fix-rounds-capped` above.
+    attention: true,
   },
   "ceiling-escalated": {
     sentence: () => ["Safety ceiling reached — winding down all work"],
@@ -241,8 +250,8 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: (p) => {
       const findingCount = typeof p.findingCount === "number" ? `${p.findingCount} finding(s)` : "counts unavailable";
       return p.outcome === "approved"
-        ? ["Review approved ", prTok(p.pr, p.issue), ` — ${findingCount} noted`]
-        : ["Review sent ", prTok(p.pr, p.issue), ` back — ${findingCount} to fix`];
+        ? ["Review approved PR ", prTok(p.pr, p.issue), ` — ${findingCount} noted`]
+        : ["Review sent PR ", prTok(p.pr, p.issue), ` back — ${findingCount} to fix`];
     },
   },
   "engine-review-budget-advisory": {
@@ -269,19 +278,19 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: () => ["The usual reviewer is back — switched back"],
   },
   "pr-held": {
-    sentence: (p) => ["A person put ", prTok(p.pr, p.issue), " on hold — nothing moves until they lift it"],
+    sentence: (p) => ["A person put PR ", prTok(p.pr, p.issue), " on hold — nothing moves until they lift it"],
   },
   "pr-released": {
-    sentence: (p) => ["Hold released — ", prTok(p.pr, p.issue), " resumes"],
+    sentence: (p) => ["Hold released — PR ", prTok(p.pr, p.issue), " resumes"],
   },
   "lane-state-labeled": {
-    sentence: (p) => [`Lane ${p.worker} is now shown as working on `, prTok(p.pr, p.issue)],
+    sentence: (p) => [`Lane ${p.worker} is now shown as working on PR `, prTok(p.pr, p.issue)],
   },
   "lane-state-cleared": {
     sentence: (p) => ["PR ", prTok(p.pr, p.issue), ` no longer shows lane ${p.worker} as working on it`],
   },
   "resume-held": {
-    sentence: (p) => [`Lane ${p.worker}'s handoff can't resume — issue #${p.issue} still carries \`${p.label}\``],
+    sentence: (p) => [`Lane ${p.worker}'s handoff can't resume — issue `, issueTok(p.issue), ` still carries \`${p.label}\``],
   },
   "worktree-retained": {
     sentence: (p) => [`Kept lane ${p.worker}'s working folder for inspection`],
@@ -369,10 +378,14 @@ export const COPY: Record<EventKind, CopyEntry> = {
     },
   },
   "needs-human-swept": {
-    sentence: (p) => [`Issue #${p.issue} no longer carries \`${p.label}\` — the engine removed the flag it had applied itself`],
+    sentence: (p) => [
+      "Issue ",
+      issueTok(p.issue),
+      ` no longer carries \`${p.label}\` — the engine removed the flag it had applied itself, now that its escalation is resolved`,
+    ],
   },
   "retro-pr-opened": {
-    sentence: (p) => ["The loop proposed an improvement to itself — ", prTok(p.pr), " awaits review"],
+    sentence: (p) => ["The loop proposed an improvement to itself — PR ", prTok(p.pr), " awaits review"],
   },
   "retro-pr-degraded": {
     sentence: () => ["A self-improvement proposal didn't come together this round"],

@@ -3,6 +3,18 @@ import { laneStateCaption } from "../copy.ts";
 import type { EntityTitles } from "../entities.ts";
 import { formatElapsed, formatUsd } from "../format.ts";
 import { EntityRef } from "./EntityRef.tsx";
+import { StateGlyph } from "./icons.tsx";
+
+/** The lane states `/api/loop/state` can actually serve (`state.activeWorkers()` reads
+ *  `WHERE state IN ('running','driving','fixing')`; `handoff` is included since §7 captions it
+ *  explicitly). #715 gate② [6]: §5's "failed lanes a static ✕" cannot literally apply to a lane
+ *  CARD today — a `failed` worker row is excluded from `activeWorkers()` by design (state.ts's own
+ *  doc: "a `failed`+PR lane awaiting GATED RECLAIM does NOT block a fresh dispatch"), so it can
+ *  never reach this component through the real API; a failed lane's outcome surfaces in the
+ *  activity feed instead (already covered — see ActivityFeed's attention-class glyph). This set
+ *  is the defensive backstop should a future engine change ever widen what a lane card can carry:
+ *  any state outside it renders the static ✕ glyph alongside its text, same non-color-only rule. */
+const KNOWN_ACTIVE_LANE_STATES = new Set(["running", "driving", "fixing", "handoff"]);
 
 export interface LaneBoardProps {
   /** `null` when the config is unreadable (§3's documented empty state) — never a fabricated
@@ -21,7 +33,10 @@ function LaneCard({ lane, titles, repoUrl, now }: { lane: Lane; titles: EntityTi
     <div className="lane-card panel">
       <div className="lane-card-head">
         <EntityRef token={{ kind: "issue", number: lane.issue }} titles={titles} repoUrl={repoUrl} />
-        <span className="data muted">{laneStateCaption(lane.state)}</span>
+        <span className="data muted lane-card-state">
+          {!KNOWN_ACTIVE_LANE_STATES.has(lane.state) && <StateGlyph ok={false} className="glyph-fail" />}
+          {laneStateCaption(lane.state)}
+        </span>
       </div>
       {lane.pr !== null && (
         <div className="lane-card-pr">

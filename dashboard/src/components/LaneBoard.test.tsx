@@ -60,6 +60,20 @@ test("state word renders the plain-language caption, not the raw internal state"
   assert.match(html, />writing</);
 });
 
+test("#715 gate② [6]: a known active state (running/driving/fixing/handoff) renders no failure glyph", () => {
+  for (const state of ["running", "driving", "fixing", "handoff"]) {
+    const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ state })]} titles={{}} now={NOW} />);
+    assert.doesNotMatch(html, /glyph-fail/, `${state} should not render the failure glyph`);
+  }
+});
+
+test("#715 gate② [6]: an unexpected lane state (e.g. a future/failed value) renders the static ✕ glyph alongside its color", () => {
+  const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ state: "failed" })]} titles={{}} now={NOW} />);
+  assert.match(html, /glyph-fail/);
+  assert.match(html, /<svg/);
+  assert.match(html, />failed</);
+});
+
 test("unreadable config (lanes.max null) renders the specified placeholder caption", () => {
   const html = renderToStaticMarkup(<LaneBoard lanesMax={null} lanes={[]} titles={{}} now={NOW} />);
   assert.match(html, /lane count unknown — config unreadable/);

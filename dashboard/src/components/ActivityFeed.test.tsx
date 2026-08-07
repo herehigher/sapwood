@@ -76,6 +76,26 @@ test("issue/PR numbers in feed sentences carry a type glyph and conditional tool
   assert.match(html, /title="Add the widget"/);
 });
 
+test("#715 gate② [3]: resume-held and needs-human-swept render their issue as a real entity token, not raw text", () => {
+  const withTitle = renderToStaticMarkup(
+    <ActivityFeed
+      events={[ev(1, "resume-held", { worker: "w1", issue: 42, label: "sapwood:blocked" })]}
+      titles={{ 42: { issueTitle: "Fix the thing" } }}
+      now={NOW}
+    />,
+  );
+  assert.match(withTitle, /<svg/);
+  assert.match(withTitle, /title="Fix the thing"/);
+  assert.match(withTitle, /#42/);
+
+  const withoutTitle = renderToStaticMarkup(
+    <ActivityFeed events={[ev(1, "needs-human-swept", { issue: 7, label: "sapwood:needs-human" })]} titles={{}} now={NOW} />,
+  );
+  assert.match(withoutTitle, /<svg/);
+  assert.doesNotMatch(withoutTitle, /title=/);
+  assert.match(withoutTitle, /#7/);
+});
+
 test("gate resolutions render a ✓/✕ glyph in the DOM regardless of outcome", () => {
   const approved = renderToStaticMarkup(
     <ActivityFeed
@@ -103,13 +123,13 @@ test("attention-class entries render a static fail glyph alongside the rust dot"
   assert.match(html, /var\(--rust\)/);
 });
 
-test("a later escalation-resolved for the same issue unpins the escalation it resolves", () => {
+test("a later escalation-resolved for the same (source, issue) unpins the escalation it resolves", () => {
   const html = renderToStaticMarkup(
     <ActivityFeed
       events={[
         ev(1, "drive-needs-human", { issue: 5, pr: 50 }), // older escalation, issue 5
         ev(2, "dispatched", { issue: 9 }), // newer, routine
-        ev(3, "escalation-resolved", { issue: 5, via: "merged", pr: 50 }), // resolves #1
+        ev(3, "escalation-resolved", { issue: 5, source: "drive-needs-human", via: "merged", pr: 50 }), // resolves #1
       ]}
       titles={{}}
       now={NOW}
@@ -127,11 +147,34 @@ test("an escalation with no issue in its payload is never superseded by escalati
       events={[
         ev(1, "ceiling-escalated", {}),
         ev(2, "dispatched", { issue: 9 }),
-        ev(3, "escalation-resolved", { issue: 9, via: "merged" }),
+        ev(3, "escalation-resolved", { issue: 9, source: "ceiling-escalated", via: "merged" }),
       ]}
       titles={{}}
       now={NOW}
     />,
   );
   assert.ok(html.indexOf("Safety ceiling reached") < html.indexOf("Started work on issue"));
+});
+
+test("#715 gate② [5]: resolving ONE of two simultaneously-open sources on the same issue leaves the other pinned", () => {
+  const html = renderToStaticMarkup(
+    <ActivityFeed
+      events={[
+        ev(1, "drive-needs-human", { issue: 5, pr: 50 }), // source A, issue 5
+        ev(2, "rollback-escalated", { issue: 5 }), // source B, SAME issue 5
+        ev(3, "dispatched", { issue: 9 }), // newer, routine
+        // Resolves ONLY source A (drive-needs-human) — source B must stay pinned.
+        ev(4, "escalation-resolved", { issue: 5, source: "drive-needs-human", via: "merged", pr: 50 }),
+      ]}
+      titles={{}}
+      now={NOW}
+    />,
+  );
+  const needsHumanIdx = html.indexOf("needs a human decision");
+  // renderToStaticMarkup HTML-escapes the apostrophe ("Couldn't" -> "Couldn&#x27;t"), so match on
+  // an apostrophe-free substring of the sentence instead.
+  const rollbackIdx = html.indexOf("automatically — flagged for a human");
+  const dispatchedIdx = html.indexOf("Started work on issue");
+  assert.ok(needsHumanIdx > dispatchedIdx, "the RESOLVED source should no longer be pinned above the routine entry");
+  assert.ok(rollbackIdx !== -1 && rollbackIdx < dispatchedIdx, "the UNRESOLVED source on the same issue must stay pinned");
 });
