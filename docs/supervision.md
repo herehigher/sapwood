@@ -111,18 +111,23 @@ three lanes killed mid-flight, ~$30 bounded loss. The engine did nothing wrong; 
 launch method never detached it from a clock that was always going to run out.
 
 Verified working pattern: `nohup`, backgrounded, and `disown`'d out of the launching
-shell's job table, so nothing tied to that session can signal it. `run`'s data dir
+shell's job table — this defeats `SIGHUP`-on-shell-exit and any other signal the shell
+would otherwise deliver to its own job, nothing more (the pgid/session/cgroup hierarchy
+below says precisely what it does and doesn't cover). `run`'s data dir
 (`data/sapwood.sqlite`, `KILL_SWITCH`/`PAUSE`, sessions, worktree roots) resolves
 **relative to the process's cwd, not to `--config`'s directory** — the CLI's own `run
 --help` says so (`docs/configuration.md`'s loader-resolution note carries the same
 rule) — so `cd` into the deployment checkout FIRST, or the detached process silently
 takes root wherever the launching shell happened to be sitting. Use an absolute `node`
-here too (the lazy-load gotcha below applies to this line exactly as much as a script),
-and create the shell redirect's log directory before backgrounding: `run`'s OWN
-structured log (`cfg.logging.path`) creates its directory lazily once the engine
-starts (`logger.ts`), but the shell's `>>` redirect below opens its target file BEFORE
-that — before `nohup` even forks — so a missing directory fails the whole launch line
-silently at the prompt, no engine, no lock, nothing to `ps -p` later:
+here too (the lazy-load gotcha below applies to this line exactly as much as a script).
+Create the shell redirect's log directory before backgrounding, too: the shell performs
+the `>>` open BEFORE it runs `nohup` at all (not something `nohup` itself does), so a
+missing directory fails the launch right there — loudly, at the prompt; both bash and
+zsh report the failed redirect (`No such file or directory` / `no such file or
+directory`) and never start the background job — no engine, no lock, nothing to `ps -p`
+later. `run`'s OWN structured log (`cfg.logging.path`) creates its own directory lazily
+once the engine itself starts (`logger.ts`) — a different file, created too late to help
+this redirect, which is why `mkdir -p` comes first below:
 
 ```bash
 DEPLOY=/absolute/path/to/deployment-checkout   # the repo root `data/` must resolve under
@@ -143,18 +148,39 @@ group-directed signal from that same launching environment killed the "detached"
 collaterally. Live-verified 2026-08-07: pid 95193, launched this way, died to an
 external SIGKILL ~23 minutes in, together with its codex-exec review child; the exact
 external signal source was never identified, but the shared-pgid mechanism is
-confirmed. And even where `nohup`+`disown` DOES land in its own process group, that is
-only a new **group**, never a new **session** — a launcher that reaps by session id,
-cgroup, or the whole process tree rather than by a group-directed signal can still catch
-it either way. Wherever you can't be certain your launcher's job control assigns the
-child a fresh pgid — most automation harnesses, CI runners, and agent-session shells —
-give the engine a true new session instead, the stronger of the two guarantees:
-`setsid <cmd>` is the one-line form where the OS ships it, but macOS does not, so the
-portable equivalent is a small double-fork. Pass the paths in as environment variables,
-not string-interpolated into the Python source (a quoted heredoc treats `$DEPLOY` as
-literal text, not a shell expansion — silent `FileNotFoundError` in a process whose
-parent has already exited "successfully"), and `chdir` explicitly before `execv` rather
-than trusting the double-forked child inherited the right cwd:
+confirmed.
+
+Even a `nohup`+`disown` that DOES land the child in its own process group only clears
+the first of a three-layer hierarchy, and each layer defeats a strictly smaller class of
+launcher-side cleanup than the next — say precisely which, rather than implying any one
+of them delivers more than it does:
+
+1. **Own process group** (plain `nohup`+`disown`, job control working as intended)
+   defeats `SIGHUP`-on-shell-exit and any signal the launching shell delivers to "its own
+   job." It does **not** defeat a launcher that reaps by POSIX session id, by cgroup, or
+   by the whole process tree instead of by a group-directed signal.
+2. **Own session** (`setsid`/the double-fork below) additionally defeats
+   session-id-based reaping — a controlling terminal's process dying and cascading
+   through its session, for instance. It does **not** escape a **cgroup** the child was
+   forked inside, or a container/job whose lifetime is enforced by killing that cgroup or
+   its whole process tree wholesale: a CI runner that cleans up its job's cgroup at
+   job-end kills the pgid-only form and the setsid form identically — neither is a
+   supervisor.
+3. **A supervisor living outside the container/cgroup/session entirely** — a system
+   service manager (systemd/launchd), a separate always-up host, or an explicit "remove
+   this pid from cleanup scope" step in the harness — is the only guarantee stronger than
+   layer 2. Layers 1–2 protect the engine from its OWN launching session signaling it;
+   neither protects it from the launching ENVIRONMENT being torn down wholesale.
+
+Give the engine layer 2 whenever you can't be certain your launcher's job control
+assigns a fresh pgid — most automation harnesses, CI runners, and agent-session shells —
+since it strictly subsumes layer 1 at no extra cost, while being honest that it's still
+not layer 3: `setsid <cmd>` is the one-line form where the OS ships it, but macOS does
+not, so the portable equivalent is a small double-fork. Pass the paths in as environment
+variables, not string-interpolated into the Python source (a quoted heredoc treats
+`$DEPLOY` as literal text, not a shell expansion — silent `FileNotFoundError` in a
+process whose parent has already exited "successfully"), and `chdir` explicitly before
+`execv` rather than trusting the double-forked child inherited the right cwd:
 
 ```bash
 export DEPLOY NODE
