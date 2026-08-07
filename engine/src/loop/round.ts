@@ -964,8 +964,17 @@ export async function escalatePoolRemovalFailures(
  * phases (harvesting/retro) -> close. Rerun-not-resume: a round already `in_progress` on
  * startup (state.openRound()) is picked up AT its persisted phase, not restarted from
  * `aligning` — earlier, already-completed phases are never re-run.
- */
-export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
+ *
+ * #724 gate② P2-3: NOT this function directly — `runRounds` below is a thin wrapper around this
+ * one, applying EMERGENCY_STOP precedence to whatever `RoundsResult` this body produces. See
+ * that wrapper's own doc for why: this body has dozens of internal `return` statements (every
+ * stop-signal/stop-condition/halt exit above uses its own), and `runPeripheral`'s own haltActive()
+ * gate (finding [0]'s fix) is NOT the only one of them a live EMERGENCY_STOP sentinel can reach —
+ * `waitForDispatchClear`'s own haltActive() checkpoint can return into a signal/final-stop
+ * recheck that resolves a DIFFERENT `stoppedBy` (e.g. "stop-condition", a milestone completing in
+ * the very same window) without ever reaching a peripheral phase at all. Precedence has to be
+ * enforced ONCE, over whatever this body returns, not threaded into every individual checkpoint. */
+async function runRoundsCore(deps: RoundDeps): Promise<RoundsResult> {
   const now = deps.now;
   const iso = () => now().toISOString();
   // #431 (F29): the wall-clock ceiling's anchor — THIS process's start, held in memory for the
@@ -1016,16 +1025,19 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   // record the SAME once-per-activation event tick() records, using the IDENTICAL dedup
   // contract (conductor.ts's tick(), #293: read ceilingBreach().reasons BEFORE recording, so
   // whichever of the two — a tick mid-executing, or this phase gate — fires first wins and the
-  // other sees `alreadyAnnounced` and stays silent; recordCeilingBreach's own INSERT-preserves-
-  // `at`-on-conflict shape means neither order double-books the drain-window anchor either).
-  // KILL_SWITCH-only halts are untouched — that sentinel has its own separate event vocabulary
-  // (ceiling-breach-entered et al.), never this one.
+  // other sees `alreadyAnnounced` and stays silent). #724 gate② P2-2: the write itself goes
+  // through State.recordEstopActivation — the event append + the ceiling_breach row in ONE
+  // transaction, so a crash between them (the pre-P2-2 shape: two separate writes) can no longer
+  // leave `ceilingBreach()` reading null on restart while the event already landed, which is
+  // exactly what turned a later re-detection into a DUPLICATE event. The dedup READ here is
+  // unchanged — still runs BEFORE the (now atomic) write. KILL_SWITCH-only halts are untouched —
+  // that sentinel has its own separate event vocabulary (ceiling-breach-entered et al.), never
+  // this one.
   const announceEstopIfNewlyDetected = (): void => {
     if (haltReason() !== "emergency-stop") return;
     const alreadyAnnounced = (deps.state.ceilingBreach()?.reasons ?? []).includes("emergency-stop");
     if (alreadyAnnounced) return;
-    deps.state.appendEvent("emergency-stop", {});
-    deps.state.recordCeilingBreach(["emergency-stop"], now());
+    deps.state.recordEstopActivation(now());
   };
   // #395: the liveness watchdog — an INDEPENDENT background timer for this call's whole
   // lifetime (every round-phase: aligning/architecting/plan_review/executing/harvesting/retro,
@@ -1730,6 +1742,40 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // wait here is drainWait, not interTickWait (#381/F6): a loop that keeps ticking past the
     // signal must keep PACING past it too — see drainWait's own doc.
     //
+    /** #724 gate② P1: under E-STOP, `liveLanesDrained()` (running+fixing DB rows only) is not
+     *  enough to call this loop drained. A CRASH-RESUMED round (freshBatch false) skips its
+     *  wave-1 tick entirely (the `if (freshBatch)` block above, #172's own recovery-beat design)
+     *  — so if this round's only non-terminal rows are `driving`/`handoff` (zero running/fixing),
+     *  `drainedEnoughToExit` below can return true on its very FIRST check, and tick() — the ONLY
+     *  place that runs conductor.ts's reconcileDrivingFixIntents/adoptAndReclaimTerminal, which
+     *  is what actually adopts a confirmed-resume-intent row and hard-kills it — never executes
+     *  even once for this round. A row left in that shape can carry a CONFIRMED live child
+     *  spawned by a NOW-DEAD prior engine process: invisible to THIS process's
+     *  supervisor.this.lanes (a fresh in-memory map), so reapAll()'s own engine-exit sweep
+     *  (#677, scoped to this.lanes) can never reach it either — nothing else in the shutdown path
+     *  would. Swept DIRECTLY here instead, by durable persisted process identity:
+     *  `supervisor.reclaim(name)` already falls back to the persisted running.json `wrapper_pid`
+     *  when there's no in-memory handle (worker.ts's own cross-process reclaim() branch —
+     *  unchanged, no new kill machinery), so this only needs a caller that reaches driving/
+     *  handoff rows too. `probe()` before AND after reclaim(): before, so the common case (an
+     *  ordinary driving/handoff row with no live child at all — #293's own "left untouched, no
+     *  process to kill" contract) costs one cheap read and zero signals; after, to VERIFY the
+     *  kill actually landed — reclaim()'s own SIGTERM->200ms->SIGKILL never confirms death itself
+     *  (that's reapChildren's OWN job, #668, scoped to this.lanes). A row that still reads alive
+     *  (or unknown) is EVENTED as an orphan rather than silently dropped — cli.ts's
+     *  roundsExitCode already forces this run's overall exit code non-zero once `stoppedBy` names
+     *  "emergency-stop" (finding [0]/P2-3's own fix), so no separate forced-failure plumbing is
+     *  needed here; this sweep's only remaining job is to actually signal the process and leave
+     *  an honest trail of whether that signal was confirmed to land. */
+    const sweepDetachedLanesUnderEstop = async (): Promise<void> => {
+      for (const w of [...deps.state.drivingWorkers(), ...deps.state.handoffWorkers()]) {
+        const before = await deps.supervisor.probe(w.name);
+        if (before.wrapperAlive !== 1) continue; // not confirmed alive — nothing to signal
+        await deps.supervisor.reclaim(w.name);
+        const after = await deps.supervisor.probe(w.name);
+        deps.state.appendEvent("estop-lane-swept", { worker: w.name, issue: w.issue, confirmedDead: after.wrapperAlive === 0 });
+      }
+    };
     /** #380 (F5): this loop's exit. Ordinarily "nothing in flight" — but once a stop signal has
      *  been requested every tick is the KILL_SWITCH drain path, which freezes DRIVE and RESUME
      *  as well as DISPATCH: a `driving` lane can no longer progress and a `handoff` lane can no
@@ -1748,11 +1794,20 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
      *  never exits. deps.state.isEstopActive() specifically (not haltActive()) — KILL_SWITCH-
      *  file-only halts (no process signal) are UNCHANGED by this fix (AC5), matching the existing
      *  signalledNow()-only special case above; only the process-signal path and the E-STOP
-     *  sentinel skip the driving/recovery wait. */
-    const drainedEnoughToExit = (): boolean =>
-      signalledNow() || deps.state.isEstopActive() ? liveLanesDrained() : deps.state.activeWorkers().length === 0 && !recoveryBeatPending;
+     *  sentinel skip the driving/recovery wait.
+     *
+     *  #724 gate② P1: async now — sweeps driving/handoff rows' durable pids (see
+     *  sweepDetachedLanesUnderEstop's own doc) BEFORE evaluating the exit condition, whenever
+     *  E-STOP is active. Harmless to repeat on every call: a row already confirmed dead (or never
+     *  alive) costs one cheap probe and is skipped. */
+    const drainedEnoughToExit = async (): Promise<boolean> => {
+      if (deps.state.isEstopActive()) await sweepDetachedLanesUnderEstop();
+      return signalledNow() || deps.state.isEstopActive()
+        ? liveLanesDrained()
+        : deps.state.activeWorkers().length === 0 && !recoveryBeatPending;
+    };
     for (;;) {
-      if (drainedEnoughToExit()) break;
+      if (await drainedEnoughToExit()) break;
       await drainWait(deps.tickIntervalSec * 1000);
       const attempt = await tryDispatchWave();
       const remaining = Math.max(0, cfg.lanes.roundDispatchCap - dispatchedThisRound());
@@ -1777,7 +1832,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           tickResult.reclaimed.some((r) => r.kind === "handoff") || tickResult.fixingReclaimed.some((r) => r.kind === "handoff");
       }
       recordBudgetStop();
-      if (drainedEnoughToExit()) break;
+      if (await drainedEnoughToExit()) break;
     }
     // stopHit has already been externalized (emitRoundStop) — the caller only needs the
     // in-flight count for the idle throttle.
@@ -2257,4 +2312,29 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     stopSignal.dispose();
     watchdog.stop();
   }
+}
+
+/** #724 gate② P2-3: the SINGLE choke point every `runRoundsCore` exit path funnels through — not
+ *  `runPeripheral` (finding [0]'s own fix point), which round-level machinery can bypass
+ *  entirely (`waitForDispatchClear`'s own haltActive() gate returns into a signal/final-stop
+ *  recheck WITHOUT ever reaching a peripheral phase; a milestone completing in that exact window
+ *  resolves `stoppedBy: "stop-condition"` — the wrong tier, silently, since `runPeripheral`'s own
+ *  announce call never runs on that path). EMERGENCY_STOP is the strictest tier there is: if the
+ *  sentinel is STILL active at the moment this run is about to report its outcome, that fact
+ *  wins over whatever internal path produced the result — the SAME precedence conductor.ts's own
+ *  tick() already established over KILL_SWITCH — and the once-per-activation event is announced
+ *  HERE too, unconditionally, through the identical dedup-then-atomic-write contract every other
+ *  caller of `State.recordEstopActivation` uses (so this is a no-op whenever `runPeripheral` or
+ *  tick() already announced it). `stopCondition` is dropped on override: it named a DIFFERENT
+ *  reason this run stopped, and leaving it attached to `stoppedBy: "emergency-stop"` would claim
+ *  two contradictory reasons for the same stop. cli.ts's `roundsExitCode` already maps
+ *  `stoppedBy: "emergency-stop"` to a non-zero exit — no separate forced-failure plumbing needed
+ *  here for that half of the contract. */
+export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
+  const result = await runRoundsCore(deps);
+  if (!deps.state.isEstopActive()) return result;
+  const alreadyAnnounced = (deps.state.ceilingBreach()?.reasons ?? []).includes("emergency-stop");
+  if (!alreadyAnnounced) deps.state.recordEstopActivation(deps.now());
+  if (result.stoppedBy === "emergency-stop") return result;
+  return { rounds: result.rounds, ticks: result.ticks, tickErrors: result.tickErrors, stoppedBy: "emergency-stop" };
 }

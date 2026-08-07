@@ -3148,6 +3148,30 @@ export class State {
     return { reasons: JSON.parse(row.reason) as string[], at: new Date(row.at) };
   }
 
+  /** #724 gate② P2-2: the `emergency-stop` activation event and its ceiling_breach row, in ONE
+   *  transaction — same shape as `recordEngineReviewVerdictAndSpend` above. Both callers
+   *  (conductor.ts's tick() E-STOP branch, round.ts's pre-tick round-level detection path) used
+   *  to do `appendEvent("emergency-stop", {})` then `recordCeilingBreach(...)` as two SEPARATE
+   *  writes, with a real crash window between them: a crash after the event commits but before
+   *  the ceiling_breach row does leaves `ceilingBreach()` reading null on restart — and BOTH
+   *  callers' own dedup check ("read ceilingBreach().reasons before writing") is what turns THAT
+   *  into a duplicate: a later detection (this same run recovering, or the other of the two
+   *  callers) reads "not yet announced" and appends the event again. Bundling the two writes
+   *  makes that torn state unrepresentable: either both land, or (a thrown error) neither does.
+   *  The caller's own dedup READ is UNCHANGED — it still runs, by the caller, BEFORE calling this
+   *  method; this only wraps the two writes the read gates. */
+  recordEstopActivation(now: Date): void {
+    this.db.exec("BEGIN");
+    try {
+      this.appendEvent("emergency-stop", {});
+      this.recordCeilingBreach(["emergency-stop"], now);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
   /** Clear a resolved breach (e.g. the kill switch was lifted, or the daily cap rolled over
    *  to a fresh day) so a later re-breach starts its own fresh drain window. */
   clearCeilingBreach(): void {

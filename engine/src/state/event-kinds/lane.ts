@@ -40,6 +40,20 @@ export const LANE_EVENT_KINDS = defineKinds({
     meaning: "a worker lane was reclaimed as DEAD (crashed/unresponsive process).",
     actionability: "investigate",
   },
+  // #724 gate② P1: EMERGENCY_STOP's own durable-pid sweep (round.ts) — a `driving`/`handoff`
+  // row whose DURABLE persisted process identity (never the in-memory supervisor, which a
+  // crash-resumed process cannot have) read confirmed-alive gets signalled directly, bypassing
+  // the ordinary tick()-only kill path entirely. `confirmedDead` (payload) is the post-signal
+  // probe's own verdict — `false` means the kill could not be verified (an orphan process
+  // group), never silently dropped; cli.ts's roundsExitCode already forces this run's exit code
+  // non-zero once `stoppedBy` names "emergency-stop" regardless of this outcome.
+  "estop-lane-swept": {
+    tags: ["round-artifact"],
+    meaning:
+      "under EMERGENCY_STOP, a driving/handoff lane's durable process identity was found alive and signalled directly; confirmedDead records whether a post-signal probe verified the kill.",
+    actionability: "investigate",
+    see: "#293",
+  },
 
   // Handoff / resume.
   handoff: {

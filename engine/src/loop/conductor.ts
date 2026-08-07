@@ -3423,8 +3423,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // announced" is to read the PRIOR reason before this tick's own recordCeilingBreach call,
     // below, overwrites it). A second tick that still finds the sentinel present (the engine
     // hasn't exited yet, or never does in a given driver) must not duplicate the event.
+    // #724 gate② P2-2: State.recordEstopActivation wraps the event append + the ceiling_breach
+    // row in ONE transaction — see its own doc for the torn-write window this closes (a crash
+    // between the two as separate writes left `ceilingBreach()` reading null on restart, which
+    // is exactly what turned a later re-detection — round.ts's own pre-tick gate included — into
+    // a DUPLICATE event). The dedup READ above is unchanged.
     const alreadyAnnounced = (state.ceilingBreach()?.reasons ?? []).includes("emergency-stop");
-    if (!alreadyAnnounced) state.appendEvent("emergency-stop", {});
+    if (!alreadyAnnounced) state.recordEstopActivation(now());
     const { drainRequested, escalated } = await drainThenEscalate(
       forge,
       state,
