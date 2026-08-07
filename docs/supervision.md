@@ -97,6 +97,85 @@ lane is inactive** — that is exactly backwards from the authority rule above: 
 activity, the DB belief (read via `status`) is the honest check, GitHub's label is only
 ever a best-effort, occasionally-lagging cache of it.
 
+### Detached operation
+
+A `sapwood run` you intend to leave running past your own shell session must be
+**detached from the launching session's lifetime**, never left in a terminal's
+foreground or handed to a session-managed background task. Session-managed background
+tasks carry a runtime ceiling (10 minutes in the incident this section is drawn from,
+wave-2, 2026-08-07); on expiry the harness TERMs the whole process group. The engine
+reads that correctly — two signals are exactly the freeze-drain-then-hard-exit sequence
+[Stop ritual](#stop-ritual)'s drain-semantics bullet already documents — but an operator
+who expected a supervised stop instead got an unattended one: one un-drained hard-exit,
+three lanes killed mid-flight, ~$30 bounded loss. The engine did nothing wrong; the
+launch method never detached it from a clock that was always going to run out.
+
+Verified working pattern: `nohup`, backgrounded, and `disown`'d out of the launching
+shell's job table, so nothing tied to that session can signal it:
+
+```bash
+nohup node <absolute-path>/engine/dist/cli.js run --config <cfg-path> \
+  >> <log-path> 2>&1 &
+disown
+```
+
+Then confirm it's actually alive the way [Batch open ritual](#batch-open-ritual)'s
+Single-instance check already tells you to, not by trusting your own memory of having
+started it: read `data/sapwood.lock`'s recorded `pid` and `ps -p <pid>` it yourself —
+the lock is authoritative, a shell job you believe is running is not.
+
+Two script-environment gotchas from the same incident apply to any detached script, not
+just the launch line above:
+
+- **Hard-code the absolute `node` binary — a bare `node` is not safe outside an
+  interactive shell.** An nvm-managed install makes `node` a lazy-load shell
+  *function*, not a binary on `PATH`; a detached or non-interactive process (a
+  `nohup`'d launch, a cron job, a service-manager unit) inherits neither that function
+  nor nvm's `PATH` mutation, so `node` silently resolves to nothing and every poll or
+  launch built on it fails empty rather than erroring loudly. Resolve the real binary
+  once, interactively, and paste the absolute path into the detached script:
+  ```bash
+  node -e 'console.log(process.execPath)'
+  # -> e.g. /Users/you/.nvm/versions/node/v20.x.x/bin/node — hard-code this, not `node`
+  ```
+- **zsh does not word-split an unquoted variable.** `CLI="node cli.js"` followed by
+  `$CLI events` does not run `node` with args `cli.js events` — it runs the single,
+  nonexistent command `"node cli.js"`, a silent wrong-command failure rather than a
+  shell error. Build the command as an array (`CLI=(node cli.js)`, invoked `${CLI[@]}`)
+  or force the split explicitly (`${=CLI}`) — never rely on an unquoted string variable
+  splitting the way it would in bash.
+
+**Canonical detached monitor loop.** The [poll-cursor recipe](#supervising-a-run) above,
+run from a detached script with both gotchas fixed and `--config` passed explicitly on
+every read (a detached poller has no interactive session to infer it from — see [Config
+provenance](#batch-open-ritual)):
+
+```bash
+NODE=/absolute/path/to/node          # from `node -e 'console.log(process.execPath)'`, resolved once
+CLI=("$NODE" /absolute/path/to/engine/dist/cli.js)   # array — zsh-safe by construction
+CFG=/absolute/path/to/config.yaml
+
+# bootstrap: learn "now" with no history read
+CURSOR=$("${CLI[@]}" events --config "$CFG" --tail 0 --json \
+  | "$NODE" -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(0,"utf8")).nextSinceId))')
+
+while true; do
+  RESP=$("${CLI[@]}" events --config "$CFG" --since-id "$CURSOR" --json)
+  echo "$RESP" | "$NODE" -e \
+    'JSON.parse(require("fs").readFileSync(0,"utf8")).events.forEach(e => console.log(JSON.stringify(e)))'
+  CURSOR=$(echo "$RESP" | "$NODE" -e \
+    'process.stdout.write(String(JSON.parse(require("fs").readFileSync(0,"utf8")).nextSinceId))')
+  sleep 30
+done
+```
+
+No jq dependency, no bare `node`/`sapwood` invocation, no unquoted-string command — the
+three failure shapes above are structurally excluded rather than left to the operator to
+remember on every invocation. This is a recipe, not new machinery: `run --detach` or an
+engine daemon mode is deliberately out of scope here (marginal-complexity doctrine —
+nobody has asked for it, and a `nohup ... & disown` launch plus the lock-file liveness
+check already covers the verified failure mode).
+
 ## Batch open ritual
 
 Before dispatching a batch of work (starting a new `sapwood run`, or resuming after a
