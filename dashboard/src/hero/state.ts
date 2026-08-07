@@ -46,6 +46,14 @@ export type LaneView = {
   fixRound: number;
   /** Send-back reason word for the fix-loop return arrow. */
   reason: string | null;
+  /**
+   * The event id that last changed this lane's phase/worker/issue (#716 gate② round 2
+   * P1-1 + PO probe: `visibleLanes`'s tie-break for lanes sharing the same priority tier —
+   * e.g. several long-`driving` (PR-out-for-review) lanes — must favor the most RECENTLY
+   * touched one, not whichever happens to sit earliest in the array. A lane stuck in
+   * `driving` for a long time is real, current information; array position never was.
+   */
+  touchedAt: number;
 };
 
 export type HeroState = {
@@ -55,8 +63,15 @@ export type HeroState = {
   /** This round's selection pool from `pool-selected` (§6 zone 1). */
   pool: number[];
   rings: number;
-  /** Latched by `ceiling-escalated`; PAUSE / kill switch dim via the engine state instead. */
-  ceilingReached: boolean;
+  /**
+   * #716 gate② round 2 P1-2: the set of currently-breached ceiling reasons (e.g.
+   * `dailyBudgetUsd`, `wallClockSec`) — engine semantics are per-reason entered/cleared
+   * PAIRS (`ceiling-breach-entered`/`ceiling-breach-cleared`, each carrying its own
+   * `reason`), never one shared boolean. Daily-budget clearing at midnight while
+   * wall-clock stays breached must keep the stage dimmed — a single boolean can't
+   * represent that. Dimmed = this set is non-empty (`isStageDimmed`).
+   */
+  openCeilingReasons: ReadonlySet<string>;
   /** `lanes.max` was unreadable — the stage says so rather than guessing a lane count. */
   laneCountUnknown: boolean;
   lastId: number;
@@ -94,7 +109,8 @@ export type PlannedTransition = Transition & { animate: boolean };
 /** §6: the stage dims for the safety tiers as well as for a ceiling breach. */
 const DIMMING_ENGINE_STATES: ReadonlySet<EngineState> = new Set<EngineState>(["paused", "winding-down", "stopping", "stopped"]);
 
-export const isStageDimmed = (state: HeroState, engine: EngineState): boolean => state.ceilingReached || DIMMING_ENGINE_STATES.has(engine);
+export const isStageDimmed = (state: HeroState, engine: EngineState): boolean =>
+  state.openCeilingReasons.size > 0 || DIMMING_ENGINE_STATES.has(engine);
 
 export function initialHeroState(lanesMax: number | null): HeroState {
   const channels = lanesMax ?? 1;
@@ -106,11 +122,12 @@ export function initialHeroState(lanesMax: number | null): HeroState {
       phase: "idle" as const,
       fixRound: 0,
       reason: null,
+      touchedAt: 0,
     })),
     droplets: [],
     pool: [],
     rings: 0,
-    ceilingReached: false,
+    openCeilingReasons: new Set(),
     laneCountUnknown: lanesMax === null,
     lastId: 0,
     lastEventTs: null,
@@ -132,7 +149,8 @@ export function withLaneCount(state: HeroState, lanesMax: number | null): HeroSt
   if (state.lanes.length >= want && state.laneCountUnknown === unknown) return state;
 
   const lanes = [...state.lanes];
-  while (lanes.length < want) lanes.push({ channel: lanes.length, worker: null, issue: null, phase: "idle", fixRound: 0, reason: null });
+  while (lanes.length < want)
+    lanes.push({ channel: lanes.length, worker: null, issue: null, phase: "idle", fixRound: 0, reason: null, touchedAt: 0 });
   return { ...state, lanes, laneCountUnknown: unknown };
 }
 
@@ -155,22 +173,41 @@ const LANE_PRIORITY: Record<LanePhase, number> = { writing: 0, driving: 0, fixin
  * behind it, that folded into 39 "Work lane N" tracks squeezed into the fixed-width stage.
  * This is a READ VIEW only — `state.lanes` itself (and lane assignment in `apply`) is
  * untouched, so the fold stays the honest source of truth; only what gets DRAWN is capped.
- * A stable sort by `LANE_PRIORITY` keeps live work first without ever reordering two lanes of
- * the SAME tier relative to each other; survivors are renumbered 0..n-1 for display (the
- * `channel` used to pick a stage row and the `w{n+1}` label, §6/baseline).
+ *
+ * #716 gate② round 2 P1-1 + PO probe: a plain stable sort by `LANE_PRIORITY` alone still
+ * picks WRONG under real load — several lanes can share the same tier (e.g. multiple PRs
+ * sitting `driving`/out-for-review at once), and stable-sort ties resolve to array/creation
+ * order, i.e. OLDEST first — the live probe measured exactly this: three long-stale
+ * `driving` lanes drawn while the one genuinely active (`writing`) lane was cut. `touchedAt`
+ * (the event id that last changed a lane) breaks ties by RECENCY instead, so live work wins
+ * over old, forgotten channels of the same nominal phase. Survivors are renumbered 0..n-1 for
+ * display (the `channel` used to pick a stage row and the `w{n+1}` label, §6/baseline).
  */
 export function visibleLanes(lanes: readonly LaneView[], lanesMax: number | null): LaneView[] {
   const want = Math.max(1, lanesMax ?? lanes.length);
-  const ordered = lanes.length <= want ? lanes : [...lanes].sort((a, b) => LANE_PRIORITY[a.phase] - LANE_PRIORITY[b.phase]);
+  const ordered =
+    lanes.length <= want ? lanes : [...lanes].sort((a, b) => LANE_PRIORITY[a.phase] - LANE_PRIORITY[b.phase] || b.touchedAt - a.touchedAt);
   return ordered.slice(0, want).map((l, i) => ({ ...l, channel: i }));
 }
 
-/** `state` with `.lanes` replaced by its capped, renumbered `visibleLanes` view — the form
- *  every position/render computation (`dropletPoint`, `HeroStage`'s lane loop, `playback.ts`)
- *  must use so a droplet's channel lookup and the DOM it actually lands in never disagree. */
+/**
+ * `state` with `.lanes` replaced by its capped, renumbered `visibleLanes` view AND
+ * `.droplets` filtered to match — the form every position/render computation
+ * (`dropletPoint`, `HeroStage`'s lane loop, `playback.ts`) must use.
+ *
+ * #716 gate② round 2 P1-1 + PO probe: capping `.lanes` alone was not enough — `dropletPoint`'s
+ * `laneIndex` falls back to channel 0 for a droplet whose lane got cut (`.find` returns
+ * `undefined`, `?? 0`), and `HeroStage`'s droplet loop draws EVERY `state.droplets` entry
+ * regardless — together, every droplet riding an omitted lane piled onto channel 0's track,
+ * overlapping tags/✕ marks with whatever real lane draws there. A droplet whose lane was cut
+ * must be DROPPED from the scene, never remapped: only `at === "lane"` droplets depend on a
+ * channel at all (backlog/checkpoint/needs-human/trunk position independently of any lane).
+ */
 export function withVisibleLanes(state: HeroState, lanesMax: number | null): HeroState {
   const lanes = visibleLanes(state.lanes, lanesMax);
-  return lanes === state.lanes ? state : { ...state, lanes };
+  const visibleWorkers = new Set(lanes.map((l) => l.worker).filter((w): w is string => w !== null));
+  const droplets = state.droplets.filter((d) => d.at !== "lane" || (d.lane !== null && visibleWorkers.has(d.lane)));
+  return { ...state, lanes, droplets };
 }
 
 /**
@@ -269,7 +306,7 @@ type Draft = {
   droplets: Map<number, Droplet>;
   pool: number[];
   rings: number;
-  ceilingReached: boolean;
+  openCeilingReasons: Set<string>;
   lastEventTs: string | null;
   roundId: number | null;
   roundMerged: number;
@@ -292,7 +329,7 @@ function claimLane(draft: Draft, worker: string): LaneView {
     free.worker = worker;
     return free;
   }
-  const extra: LaneView = { channel: draft.lanes.length, worker, issue: null, phase: "idle", fixRound: 0, reason: null };
+  const extra: LaneView = { channel: draft.lanes.length, worker, issue: null, phase: "idle", fixRound: 0, reason: null, touchedAt: 0 };
   draft.lanes.push(extra);
   return extra;
 }
@@ -319,7 +356,10 @@ function releaseLane(lane: LaneView | undefined): void {
  */
 function toCheckpoint(draft: Draft, id: number, issue: number, worker: string | null, pr: number | null): Transition {
   const lane = laneOf(draft, worker);
-  if (lane) lane.phase = "driving";
+  if (lane) {
+    lane.phase = "driving";
+    lane.touchedAt = id;
+  }
   const d = moveDroplet(draft, issue, { at: "checkpoint", ...(pr !== null ? { pr } : {}) });
   return { kind: "to-checkpoint", id, issue, lane: worker ?? "", pr: d.pr };
 }
@@ -403,6 +443,7 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       lane.phase = "writing";
       lane.fixRound = 0;
       lane.reason = null;
+      lane.touchedAt = id;
       moveDroplet(draft, issue, { lane: worker, at: "lane", failed: false, handedOff: false });
       draft.pool = draft.pool.filter((i) => i !== issue);
       return { kind: "dispatch", id, issue, lane: worker };
@@ -452,6 +493,7 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       lane.phase = "fixing";
       lane.fixRound = round;
       lane.reason = reason;
+      lane.touchedAt = id;
       const d = moveDroplet(draft, issue, { lane: worker, at: "lane", handedOff: false, sendBack: reason, ...(pr !== null ? { pr } : {}) });
       return { kind: "fix-return", id, issue, lane: worker, pr: d.pr, reason, round };
     }
@@ -474,23 +516,36 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       return { kind: "handoff", id, issue, lane: worker };
     }
 
+    // #716 gate② round 2 P1-2: engine semantics are per-reason entered/cleared PAIRS
+    // (`engine/src/state/event-kinds/run.ts`) — a daily-budget breach clearing at midnight
+    // while a wall-clock breach is still open must NOT undim the stage. `ceiling-escalated`
+    // (a lane got drained) carries the reasons that caused it, so it ALSO adds them —
+    // defensive against a `ceiling-breach-entered` that fell outside a bounded event window
+    // — but the canonical add/remove pair is `ceiling-breach-entered`/`-cleared`, each
+    // scoped to its own `reason`. §6 gives none of these three an animation of their own; the
+    // stage's dim state is a per-render read of `openCeilingReasons`, not a narrated moment.
+    case "ceiling-breach-entered": {
+      const reason = str(p.reason);
+      if (reason) draft.openCeilingReasons.add(reason);
+      return null;
+    }
+
+    case "ceiling-breach-cleared": {
+      const reason = str(p.reason);
+      if (reason) draft.openCeilingReasons.delete(reason);
+      return null;
+    }
+
     case "ceiling-escalated": {
-      draft.ceilingReached = true;
+      const reasons = Array.isArray(p.reasons) ? p.reasons.filter((r): r is string => typeof r === "string") : [];
+      for (const r of reasons) draft.openCeilingReasons.add(r);
       return { kind: "dim", id };
     }
 
-    // #716 gate② P1-2: `ceiling-escalated` used to LATCH `ceilingReached` forever — the
-    // dashboard folds from event id 0, so any HISTORICAL ceiling breach (yesterday's run,
-    // long since cleared) permanently dimmed a perfectly healthy current scene. These two
-    // are the engine's real clearing signals (`engine/src/state/event-kinds/run.ts`):
-    // `ceiling-breach-cleared` (a breached reason leaves the set — the hero tracks one
-    // boolean, not the full reason set, so any clear is treated as "no longer breached", the
-    // honest simplification given the doc only ever names ONE dimmed/undimmed state) and
-    // `run-started` (a fresh boot carries no breach state forward at all — the hard reset
-    // that makes "stale history" impossible regardless of how far back id 0 goes).
-    case "ceiling-breach-cleared":
+    // A fresh boot carries no breach state forward at all — the hard reset that makes
+    // "stale history" impossible regardless of how far back the dashboard's `id 0` fold goes.
     case "run-started": {
-      draft.ceilingReached = false;
+      draft.openCeilingReasons.clear();
       return null;
     }
 
@@ -507,7 +562,10 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       // they are the PR-open transition, not a failure.
       if (isRescue(e.kind, p)) return toCheckpoint(draft, id, issue, worker, pr);
       const lane = laneOf(draft, worker);
-      if (lane) lane.phase = "failed";
+      if (lane) {
+        lane.phase = "failed";
+        lane.touchedAt = id;
+      }
       moveDroplet(draft, issue, { failed: true });
       return { kind: "fail", id, issue, lane: worker };
     }
@@ -522,7 +580,7 @@ function snapshotDraft(draft: Draft, laneCountUnknown: boolean, lastId: number):
     droplets: [...draft.droplets.values()],
     pool: [...draft.pool],
     rings: draft.rings,
-    ceilingReached: draft.ceilingReached,
+    openCeilingReasons: new Set(draft.openCeilingReasons),
     laneCountUnknown,
     lastId,
     lastEventTs: draft.lastEventTs,
@@ -562,7 +620,7 @@ export function foldEvents(state: HeroState, events: DomainEvent[]): { state: He
     droplets: new Map(state.droplets.map((d) => [d.issue, { ...d }])),
     pool: [...state.pool],
     rings: state.rings,
-    ceilingReached: state.ceilingReached,
+    openCeilingReasons: new Set(state.openCeilingReasons),
     lastEventTs: state.lastEventTs,
     roundId: state.roundId,
     roundMerged: state.roundMerged,

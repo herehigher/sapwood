@@ -144,3 +144,38 @@ test("P1-1: buildPlayback caps lane channel resolution through the same visibleL
     `expected a capped channel < 2, got ${lastDispatch.laneChannel}`,
   );
 });
+
+test("#716 gate② round 2 P1-3: two non-coalesced merges in ONE poll carry DISTINCT ring numbers, sequenced", () => {
+  // Two issues already parked at checkpoint from a PRIOR poll; THIS poll's only fresh events
+  // are their two `merged`s — exactly 2 transitions, within COALESCE_AFTER, so BOTH animate.
+  // Codex's finding: Hero.tsx used to target the sole `data-current="true"` ring for every
+  // "ring" step, so both merges animated the SAME (newest) circle. The data-correctness half
+  // of that fix — each transition carrying its OWN ring number, distinctly — is pinned here;
+  // the DOM `data-ring="${transition.ring}"` selector itself lives in Hero.tsx, untestable
+  // without a browser (see this file's header + the PR's own documented coverage boundary).
+  const first = run([
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 11 }),
+    ev("dispatched", { worker: "w2", issue: 2 }),
+    ev("reclaim-done", { worker: "w2", issue: 2, next: "DRIVING", pr: 12 }),
+  ]);
+  const second = foldEvents(first.state, [
+    ev("merged", { worker: "w1", issue: 1, pr: 11 }),
+    ev("merged", { worker: "w2", issue: 2, pr: 12 }),
+  ]);
+  assert.equal(second.transitions.length, 2);
+  assert.ok(second.transitions.every((t) => t.kind === "ring"));
+
+  const { playback } = buildPlayback(second.steps, second.state, 3, new Map());
+  assert.equal(playback.length, 2);
+  const [ring1, ring2] = playback;
+  assert.ok(ring1 && ring2);
+  assert.ok(ring1.animate && ring2.animate, "both merges are within COALESCE_AFTER — both must animate");
+  assert.ok(ring1.transition.kind === "ring" && ring2.transition.kind === "ring");
+  assert.notEqual(ring1.transition.ring, ring2.transition.ring, "each merge must target its OWN ring, never the same one twice");
+
+  // Sequenced: the second flash's window starts no earlier than the first one's ends —
+  // otherwise the DOM code's scheduled add/remove for each step's gate flash would overlap
+  // (Codex's second symptom).
+  assert.ok(ring2.offset >= ring1.offset + ring1.duration, `${ring2.offset} < ${ring1.offset + ring1.duration}`);
+});

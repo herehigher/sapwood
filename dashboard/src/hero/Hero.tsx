@@ -81,8 +81,8 @@ export function Hero({ events, lanesMax, engine, lanes = [], fixCap = 2, roundPh
     previous.current = finalPoints;
     const root = svgRef.current;
     if (!root) return;
-    const timeline = play(root, playback, finalPoints);
-    if (timeline) controller.current.start(timeline);
+    const result = play(root, playback, finalPoints);
+    if (result) controller.current.start(result.timeline, result.cleanup);
     else controller.current.cancel();
     return () => controller.current.cancel();
   }, [scene, lanesMax, reducedMotion, speed]);
@@ -123,13 +123,18 @@ const droplet = (root: SVGSVGElement, issue: number) => root.querySelector<SVGGE
  * Run one render pass: snap everything the plan did not animate straight to its final
  * position, then narrate the animating steps as ONE sequenced timeline (#716 gate② P1-1 —
  * each step's own `offset`, from `buildPlayback`, keeps steps from overlapping). Returns the
- * created timeline, or `null` when nothing in this pass animates (the caller still needs to
- * know that, to cancel whatever a PREVIOUS pass left in flight — P2-4).
+ * created timeline plus a `cleanup` — a strip-every-gate's-`is-merged`-class function, always
+ * safe to call idempotently — or `null` when nothing in this pass animates (the caller still
+ * needs to know that, to cancel whatever a PREVIOUS pass left in flight — P2-4).
  *
  * Snapping first is what makes the coalescing policy honest — a collapsed burst reaches its
  * true position immediately and only the newest ring is allowed to take its time (§6).
  */
-function play(root: SVGSVGElement, playback: PlaybackStep[], finalPoints: Map<number, Point>): Timeline | null {
+function play(
+  root: SVGSVGElement,
+  playback: PlaybackStep[],
+  finalPoints: Map<number, Point>,
+): { timeline: Timeline; cleanup: () => void } | null {
   const travelling = new Set(
     playback.filter((p) => p.animate && p.to !== null && "issue" in p.transition).map((p) => (p.transition as { issue: number }).issue),
   );
@@ -197,14 +202,26 @@ function play(root: SVGSVGElement, playback: PlaybackStep[], finalPoints: Map<nu
       // into the trunk, and a new ring — also --moss — strokes in behind it.
       case "ring": {
         const gates = [...root.querySelectorAll<SVGGElement>(".hero-gate")];
-        for (const g of gates) g.classList.add("is-merged");
-        // `tl.call` (not a global `onComplete`) so the flash clears at THIS step's own end,
-        // correct even when other steps share the composed timeline.
+        // #716 gate② round 2 P1-3: BOTH the add and the remove are now scheduled ON the
+        // timeline, at THIS step's own offset/offset+duration — not "add synchronously at
+        // play()-call time, remove on a timer". Two non-coalesced merges in one poll used to
+        // both add the class the instant `play()` ran (before either step's visual window
+        // even started), so step 1's scheduled removal (firing at t=duration) killed the
+        // class before step 2's window (which starts at that same instant) ever got a
+        // matching add of its own — the flash never reappeared for step 2. Scheduling both
+        // ends per-step means step 2's add (inserted after step 1's remove in call order)
+        // wins at the shared boundary tick, and each step's flash is honestly its own.
+        tl.call(() => {
+          for (const g of gates) g.classList.add("is-merged");
+        }, offset);
         tl.call(() => {
           for (const g of gates) g.classList.remove("is-merged");
         }, offset + duration);
         travelOn(tl, root, transition.issue, from, to, TRAVEL, offset);
-        const ring = root.querySelector<SVGCircleElement>('.hero-ring[data-current="true"]');
+        // #716 gate② round 2 P1-3: target THIS transition's own ring (`data-ring`, stage.tsx)
+        // rather than the sole `data-current="true"` element — two non-coalesced merges in
+        // one poll used to both animate the SAME (newest) circle.
+        const ring = root.querySelector<SVGCircleElement>(`.hero-ring[data-ring="${transition.ring}"]`);
         if (ring) {
           const circumference = 2 * Math.PI * ring.r.baseVal.value;
           utils.set(ring, { strokeDasharray: circumference, strokeDashoffset: circumference });
@@ -238,7 +255,16 @@ function play(root: SVGSVGElement, playback: PlaybackStep[], finalPoints: Map<nu
     }
   }
 
-  return tl;
+  // #716 gate② round 2 P2-4: the gate `classList` mutations above happen OUTSIDE anime.js —
+  // `Timeline.revert()` has no idea they exist, so cancelling mid-merge (reduced motion
+  // flipping on, or a fresh scene landing) used to leave the gates stuck permanently
+  // `--moss`/✓. This cleanup — idempotent, safe to call whether or not a merge ever actually
+  // ran — is handed to `AnimationController.start()` and always runs on `cancel()`.
+  const cleanup = () => {
+    for (const g of root.querySelectorAll<SVGGElement>(".hero-gate.is-merged")) g.classList.remove("is-merged");
+  };
+
+  return { timeline: tl, cleanup };
 }
 
 function travelOn(

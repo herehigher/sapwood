@@ -25,7 +25,9 @@ export const STAGE = { w: 1200, h: 380 } as const;
 
 // The backlog sits in from the left edge so the "saved for a successor" badge — the widest
 // thing that hangs off a droplet — still fits inside the viewBox.
-const BACKLOG = { x: 46, y: 62, w: 96, chip: 22 } as const;
+// #716 gate② round 2 PO probe P3: chip step bumped 22 → 26 — labels like "⊙ 725" stacked at
+// the old 22px step were measured colliding with the next chip's label at small render sizes.
+const BACKLOG = { x: 46, y: 62, w: 96, chip: 26 } as const;
 /** `note` clears the tallest lane stack (`lanes.max` 6) rather than sitting under 3 lanes. */
 const PLANNING = { x: 224, note: 300, noteX: 152 } as const;
 /** §7: plain word first, internal term never. `role` is the config-captions.ts `roles.<role>`
@@ -65,7 +67,12 @@ const REFLECTION_NODES = [
 
 const laneY = (index: number) => LANES.top + index * LANES.gap;
 
-/** The channel a droplet belongs to; channel 0 when its lane has already been released. */
+/**
+ * The channel a droplet belongs to. `withVisibleLanes` (state.ts, #716 gate② round 2 P1-1)
+ * already drops any `at === "lane"` droplet whose lane was cut from the capped view before
+ * this ever runs, so the `?? 0` fallback is defensive only — never remap a droplet whose real
+ * lane is genuinely gone onto whatever else happens to draw at channel 0.
+ */
 const laneIndex = (state: HeroState, d: Droplet) => state.lanes.find((l) => l.worker === d.lane)?.channel ?? 0;
 
 /**
@@ -180,6 +187,9 @@ export function HeroStage({
   // all-time ring count); pending/needs-human are the droplets currently in each state.
   const pendingCount = state.droplets.filter((d) => d.at === "backlog" || d.at === "lane" || d.at === "checkpoint").length;
   const outcomeTally = `${state.roundMerged} merged · ${pendingCount} pending · ${escalated} needs human`;
+  // #716 gate② round 2 P2-5: the fix-return arrow's own label (§6: "labeled with the send-back
+  // reason") — the first currently-fixing lane, in channel order.
+  const fixingReason = state.lanes.find((l) => l.phase === "fixing")?.reason ?? null;
 
   return (
     <svg
@@ -297,9 +307,22 @@ export function HeroStage({
 
         {/* The fix loop, drawn as the engine's true shape: back into the lane itself. */}
         <path
+          id="hero-fixloop-path"
           className="hero-fixloop"
           d={`M ${GATES.ci - 30} ${GATES.y + 26} C ${640} ${GATES.y + 78}, ${430} ${GATES.y + 78}, ${LANES.x + 40} ${laneY(0) + 12}`}
         />
+        {/* #716 gate② round 2 P2-5: the AC wants the send-back reason word ON the return
+         * arrow itself, via textPath — the per-lane caption flash (above) narrates WHICH
+         * lane, this narrates WHAT the loop is doing. One shared path draws one label; when
+         * several lanes are fixing at once, the first (channel order) wins rather than
+         * concatenating an ambiguous list. */}
+        {fixingReason && (
+          <text className="hero-fixloop-label">
+            <textPath href="#hero-fixloop-path" startOffset="50%" textAnchor="middle">
+              {fixingReason}
+            </textPath>
+          </text>
+        )}
       </g>
 
       {/*
@@ -358,6 +381,12 @@ export function HeroStage({
       <g className="hero-trunk" data-rings={state.rings}>
         {ringRadii(state.rings).map((r, i, all) => {
           const current = i === all.length - 1;
+          // #716 gate② round 2 P1-3: each drawn ring's real 1-indexed ring NUMBER (not its
+          // draw-order index, which resets every time older rings age out past TRUNK.max) —
+          // lets `Hero.tsx` target the ring a specific `merged` transition actually produced
+          // (`transition.ring`) instead of always hitting the sole `data-current="true"` one,
+          // which two non-coalesced merges in one poll both animated onto the same circle.
+          const ringNumber = state.rings - all.length + 1 + i;
           return (
             <circle
               className="hero-ring"
@@ -366,6 +395,7 @@ export function HeroStage({
               cy={TRUNK.y}
               r={r}
               data-current={current ? "true" : "false"}
+              data-ring={ringNumber}
               style={current ? { stroke: "var(--moss)" } : undefined}
             />
           );
@@ -378,8 +408,10 @@ export function HeroStage({
         </text>
         {/* §6: "the round's outcome tally (N merged · N pending · N needs human) — small
          * numbers, never repeating the all-time ring count." `roundMerged` is the round-
-         * scoped counter (#716 gate② P2-8); `state.rings` above stays the all-time one. */}
-        <text className="hero-num hero-small hero-outcome-tally" x={TRUNK.x} y={TRUNK.y + 140} textAnchor="middle">
+         * scoped counter (#716 gate② P2-8); `state.rings` above stays the all-time one.
+         * #716 gate② round 2 PO probe P3: shifted left of TRUNK.x (was centered ON it) — the
+         * live probe measured double-digit counts clipping past the STAGE.w right edge. */}
+        <text className="hero-num hero-small hero-outcome-tally" x={TRUNK.x - 30} y={TRUNK.y + 140} textAnchor="middle">
           {outcomeTally}
         </text>
       </g>

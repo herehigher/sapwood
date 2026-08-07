@@ -21,6 +21,7 @@ import {
   visibleLanes,
   withLaneCount,
   withLanePrs,
+  withVisibleLanes,
 } from "./state.ts";
 
 let seq = 0;
@@ -218,6 +219,21 @@ test("§6 `fix-leg-resumed` re-lights the same fixing state after a handoff", ()
   assert.equal(droplet(state, 86)?.handedOff, false);
 });
 
+test("#716 gate② round 2 P2-5: the fix-return arrow carries the send-back reason as a textPath label, not only the lane caption", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 86 }),
+    ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
+    ev("drive-fixup", { worker: "w1", issue: 86, pr: 97, fixRounds: 1, reason: "gate:FIXABLE:merge-conflict" }),
+    ev("fix-leg-started", { worker: "w1", issue: 86, pr: 97, fixRounds: 1 }),
+  ]);
+  const html = markup(state);
+  assert.match(html, /<path id="hero-fixloop-path"/);
+  assert.match(html, /<textPath[^>]*href="#hero-fixloop-path"[^>]*>merge conflict<\/textPath>/);
+
+  // No fixing lane at all — no label on the arrow.
+  assert.doesNotMatch(markup(initialHeroState(3)), /<textPath/);
+});
+
 test("sendBackReason maps the engine's gate reason to the three §6/§7 words", () => {
   assert.equal(sendBackReason("gate:FIXABLE:merge-conflict"), "merge conflict");
   assert.equal(sendBackReason("gate:FIXABLE:REQUEST_CHANGES:unresolvedThreads=0:ciRed=true"), "checks failed");
@@ -345,7 +361,7 @@ test("§6 `ceiling-escalated` / PAUSE / kill switch dim the stage", () => {
   ]);
 
   assert.deepEqual(kinds(transitions), ["dispatch", "dim"]);
-  assert.equal(state.ceilingReached, true);
+  assert.deepEqual([...state.openCeilingReasons], ["dailyBudgetUsd"]);
   assert.equal(isStageDimmed(state, "running"), true);
   assert.match(markup(state, { dimmed: true }), /data-dimmed="true"/);
 
@@ -356,26 +372,47 @@ test("§6 `ceiling-escalated` / PAUSE / kill switch dim the stage", () => {
   }
 });
 
-test("#716 gate② P1-2: `ceiling-breach-cleared` un-latches a dimmed stage", () => {
-  const dimmed = run([ev("ceiling-escalated", { worker: "w1", issue: 86, reasons: ["dailyBudgetUsd"] })]);
-  assert.equal(dimmed.state.ceilingReached, true);
+test("#716 gate② P1-2: `ceiling-breach-cleared` clears its OWN reason, un-dimming once the set is empty", () => {
+  const dimmed = run([ev("ceiling-breach-entered", { reason: "dailyBudgetUsd" })]);
+  assert.equal(isStageDimmed(dimmed.state, "running"), true);
 
   const cleared = foldEvents(dimmed.state, [ev("ceiling-breach-cleared", { reason: "dailyBudgetUsd" })]);
-  assert.equal(cleared.state.ceilingReached, false);
+  assert.equal(cleared.state.openCeilingReasons.size, 0);
   assert.equal(isStageDimmed(cleared.state, "running"), false);
-  // No stage animation for the clear itself — §6 gives dimming an entry, not un-dimming.
+  // No stage animation for entered/cleared — §6 gives dimming no narrated moment of its own.
+  assert.deepEqual(
+    dimmed.transitions.filter((t) => t.kind !== "dim"),
+    [],
+  );
   assert.deepEqual(cleared.transitions, []);
 });
 
-test("#716 gate② P1-2: `run-started` hard-resets the latch — a fresh boot never inherits a stale historical breach", () => {
+test("#716 gate② round 2 P1-2: two OPEN reasons — clearing one leaves the stage dimmed by the other", () => {
+  // The engine's real per-reason lifecycle: daily-budget clearing at midnight while
+  // wall-clock stays breached must NOT undim the scene — a single shared boolean can't
+  // represent that, which is exactly why this is now a set.
+  const both = run([ev("ceiling-breach-entered", { reason: "dailyBudgetUsd" }), ev("ceiling-breach-entered", { reason: "wallClockSec" })]);
+  assert.deepEqual([...both.state.openCeilingReasons].sort(), ["dailyBudgetUsd", "wallClockSec"]);
+  assert.equal(isStageDimmed(both.state, "running"), true);
+
+  const oneCleared = foldEvents(both.state, [ev("ceiling-breach-cleared", { reason: "dailyBudgetUsd" })]);
+  assert.deepEqual([...oneCleared.state.openCeilingReasons], ["wallClockSec"]);
+  assert.equal(isStageDimmed(oneCleared.state, "running"), true, "wallClockSec is still open — the scene must stay dimmed");
+
+  const bothCleared = foldEvents(oneCleared.state, [ev("ceiling-breach-cleared", { reason: "wallClockSec" })]);
+  assert.equal(bothCleared.state.openCeilingReasons.size, 0);
+  assert.equal(isStageDimmed(bothCleared.state, "running"), false);
+});
+
+test("#716 gate② P1-2: `run-started` hard-resets the whole set — a fresh boot never inherits a stale historical breach", () => {
   const dimmed = run([ev("ceiling-escalated", { worker: "w1", issue: 86, reasons: ["dailyBudgetUsd"] })]);
-  assert.equal(dimmed.state.ceilingReached, true);
+  assert.equal(isStageDimmed(dimmed.state, "running"), true);
 
   // The dashboard folds from event id 0 — a LATER run's `run-started` must clear whatever a
-  // PRIOR run's ceiling breach left latched, with no `ceiling-breach-cleared` in between at
-  // all (the prior process may simply have been killed, never emitting one).
+  // PRIOR run's ceiling breach left open, with no `ceiling-breach-cleared` in between at all
+  // (the prior process may simply have been killed, never emitting one).
   const restarted = foldEvents(dimmed.state, [ev("run-started", { config: {}, configHash: "abc" })]);
-  assert.equal(restarted.state.ceilingReached, false);
+  assert.equal(restarted.state.openCeilingReasons.size, 0);
 });
 
 test("#716 gate② P1-2: a HISTORICAL ceiling-escalated does not dim a scene that has since moved on", () => {
@@ -385,7 +422,7 @@ test("#716 gate② P1-2: a HISTORICAL ceiling-escalated does not dim a scene tha
     ev("run-started", { config: {}, configHash: "def" }),
     ev("dispatched", { worker: "w1", issue: 90 }),
   ]);
-  assert.equal(state.ceilingReached, false);
+  assert.equal(state.openCeilingReasons.size, 0);
   assert.equal(isStageDimmed(state, "running"), false);
 });
 
@@ -640,9 +677,11 @@ test("the merged event's checkpoint flash and the new growth ring use --moss, ne
   assert.match(markup(initialHeroState(3)), /class="hero-gate"/);
   assert.match(heroCss, /\.hero-gate\.is-merged rect\s*\{[^}]*stroke:\s*var\(--moss\)/);
 
-  // The newest ring is a static, server-rendered attribute — directly assertable.
+  // The newest ring is a static, server-rendered attribute — directly assertable. `data-ring`
+  // (#716 gate② round 2 P1-3) sits between `data-current` and `style` in draw order, hence
+  // the `[^>]*` between them rather than requiring them adjacent.
   const { state } = run([ev("merged", { worker: "w1", issue: 1, pr: 11 })]);
-  assert.match(markup(state), /class="hero-ring"[^>]*data-current="true" style="stroke:var\(--moss\)"/);
+  assert.match(markup(state), /class="hero-ring"[^>]*data-current="true"[^>]*style="stroke:var\(--moss\)"/);
 });
 
 test("the ring count and the PLAN/IMPLEMENT/OUTCOME phase captions render with --font-display", () => {
@@ -776,13 +815,14 @@ test("the lane count re-fits when the config arrives, without losing what was fo
 
 // ── #716 gate② P1-9 (PO live probe): tracks cap at the CONFIGURED slot count ──────
 
-const laneAt = (channel: number, phase: LaneView["phase"] = "idle", worker: string | null = null): LaneView => ({
+const laneAt = (channel: number, phase: LaneView["phase"] = "idle", worker: string | null = null, touchedAt = 0): LaneView => ({
   channel,
   worker,
   issue: null,
   phase,
   fixRound: 0,
   reason: null,
+  touchedAt,
 });
 
 test("#716 gate② P1-9: visibleLanes caps at lanesMax, prioritizing active lanes over idle overflow", () => {
@@ -815,7 +855,27 @@ test("#716 gate② P1-9: visibleLanes caps at lanesMax, prioritizing active lane
   assert.equal(visibleLanes([laneAt(0), laneAt(1)], 3).length, 2);
 });
 
-test("#716 gate② P1-9: a live DB's worth of abandoned/historical lanes folds down to lanesMax tracks, never one per historical worker", () => {
+test("#716 gate② round 2 P1-1 + PO probe: among SAME-tier lanes, the MOST RECENTLY touched survives — not first-seen/array order", () => {
+  // Three long-`driving` (PR-out-for-review) lanes, all tied at the same priority tier, plus
+  // one touched far more recently — the exact shape the PO's live probe found: three old
+  // `driving` lanes (lane-401/-403/-434) drawn while the genuinely active lane
+  // (lane-293-6f5f168d) was cut, because a plain priority-only sort's ties resolve to array
+  // (creation) order — i.e. OLDEST first, backwards from what the operator needs to see.
+  const stale = [laneAt(0, "driving", "lane-401", 10), laneAt(1, "driving", "lane-403", 20), laneAt(2, "driving", "lane-434", 30)];
+  const fresh = laneAt(3, "driving", "lane-293-6f5f168d", 999);
+  const capped = visibleLanes([...stale, fresh], 3);
+
+  assert.equal(capped.length, 3);
+  assert.ok(
+    capped.some((l) => l.worker === "lane-293-6f5f168d"),
+    "the most recently touched lane must survive the cut over older same-tier lanes",
+  );
+  // The survivors are the three most recently touched overall (293@999, 434@30, 403@20) —
+  // 401@10, the OLDEST, is the one that gets cut.
+  assert.deepEqual(capped.map((l) => l.worker).sort(), ["lane-293-6f5f168d", "lane-403", "lane-434"]);
+});
+
+test("#716 gate② round 2 P1-1 + PO probe: a live DB's worth of abandoned lanes folds down to lanesMax tracks — active lane IS drawn, omitted-lane droplets are DROPPED, never piled onto channel 0", () => {
   // Simulates the PO's live probe: many distinct worker identities dispatch-then-fail (a
   // FAILED, never-revisited channel is never released — `moveDroplet`'s own doc — so it
   // permanently occupies a slot in the RAW fold, same as a worker name the fold has simply
@@ -831,17 +891,36 @@ test("#716 gate② P1-9: a live DB's worth of abandoned/historical lanes folds d
   // The RAW fold really did grow past the configured slot count — this is the bug's root
   // shape, not something `run()`'s fixture massaged away.
   assert.ok(state.lanes.length > 3, `expected raw fold to overflow past 3, got ${state.lanes.length}`);
+  // Every dead worker's droplet is still riding its lane, un-released — this is the pile-up
+  // bug's precondition: 40 real `at: "lane"` droplets, only 3 tracks to draw them on.
+  assert.equal(state.droplets.filter((d) => d.at === "lane").length, 40);
 
-  const capped = visibleLanes(state.lanes, 3);
-  assert.equal(capped.length, 3);
-  // The one truly active lane (w40, still writing) must be among the survivors.
+  const view = withVisibleLanes(state, 3);
+  assert.equal(view.lanes.length, 3);
+  // (a) the active lane IS on a track.
   assert.ok(
-    capped.some((l) => l.worker === "w40"),
+    view.lanes.some((l) => l.worker === "w40"),
     "the active lane must survive the cap",
+  );
+  const visibleWorkers = new Set(view.lanes.map((l) => l.worker));
+  // (b) NO droplet renders for an omitted lane — every surviving droplet's lane is one of the
+  // 3 tracks actually drawn, never remapped onto whichever happens to occupy channel 0.
+  assert.equal(view.droplets.length, 3, "only the surviving lanes' droplets remain — 37 must be dropped, not remapped");
+  for (const d of view.droplets) {
+    assert.ok(
+      d.lane !== null && visibleWorkers.has(d.lane),
+      `droplet for issue ${d.issue} (lane ${d.lane}) must belong to a surviving lane`,
+    );
+  }
+  assert.ok(
+    view.droplets.some((d) => d.lane === "w40"),
+    "the active worker's own droplet must survive",
   );
 
   const html = markup(state, { lanesMax: 3 });
   assert.equal(html.match(/class="hero-lane"/g)?.length, 3, "the stage draws exactly lanesMax tracks, never state.lanes.length");
+  assert.equal(html.match(/class="hero-droplet"/g)?.length, 3, "no extra droplets pile onto an omitted lane's channel");
+  assert.match(html, /data-issue="40"/, "the active worker's issue is actually drawn, not silently cut along with its 37 dead siblings");
 });
 
 test("the backlog renders this round's selection pool", () => {

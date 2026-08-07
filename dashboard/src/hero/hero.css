@@ -65,6 +65,16 @@
 .hero-outcome-tally {
   font-family: var(--font-data);
   letter-spacing: normal;
+  /* #716 gate② round 2 PO probe P3: a touch smaller than --font-data's default 11px — the
+   * live probe measured double-digit tallies clipping past the stage's right edge. */
+  font-size: 9px;
+}
+
+/* #716 gate② round 2 P2-5: the fix-return arrow's own send-back-reason label. */
+.hero-fixloop-label {
+  font-family: var(--font-data);
+  font-size: 9px;
+  fill: var(--bark-text);
 }
 
 .hero-small {
