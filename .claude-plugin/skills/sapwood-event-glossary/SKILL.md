@@ -70,7 +70,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `reclaim-done` — **investigate** [round-artifact, escalation-source:always]: a finished worker lane was reclaimed cleanly; whether it needs attention is a predicate over the payload (#404), not the kind alone. (see #404)
 - `reclaim-failed` — **investigate** [round-artifact, escalation-source:always]: reclaiming a finished worker lane failed; whether it needs attention is a predicate over the payload (#404), not the kind alone. (see #404)
 - `reclaim-dead` — **investigate** [round-artifact]: a worker lane was reclaimed as DEAD (crashed/unresponsive process).
-- `estop-lane-swept` — **investigate** [round-artifact]: under EMERGENCY_STOP, a driving/handoff lane's durable process identity was found alive and signalled directly; confirmedDead records whether a post-signal probe verified the kill. (see #293)
+- `estop-lane-swept` — **intervene** [round-artifact, escalation-source:always]: under EMERGENCY_STOP, a driving/handoff lane's durable process identity was found alive and signalled directly (TERM then KILL), then the row was settled to `failed` in the same step so no later reconciliation can revive it; confirmedDead records whether a post-signal check verified the kill. needs-human, always proven by presence. (see #293)
 - `handoff` — **routine** [retro, round-artifact]: a worker lane handed off gracefully (soft cost-limit reached): WIP committed+pushed, progress note left, `.handoff` sentinel written.
 - `resumed` — **routine**: a handed-off lane was resumed by a fresh worker session.
 - `resume-failed` — **expected-noise**: resuming a handed-off lane failed this attempt; eligible for a further retry.

@@ -1353,6 +1353,26 @@ export interface Supervisor {
    *  (reconcileDrivingFixIntents' "confirmed" branch calls this to cover the case where
    *  resume()'s own post-confirmation removal never ran before a crash). Never throws. */
   clearStaleFixEntrySentinel(worker: string): void;
+  /** #724 gate② round 3, P1-1: process-only liveness check via the lane's DURABLE persisted
+   *  process identity (worker.ts: running.json's `wrapper_pid` + a plain `kill(pid, 0)` probe —
+   *  the SAME primitive `wrapperAlive`/`pidGroupAlive` already use elsewhere in that file). NO
+   *  forge call, NO dependency on this supervisor's in-memory `this.lanes` (a crash-resumed
+   *  process's supervisor never holds an entry for a lane a PRIOR, now-dead process spawned).
+   *  Synchronous by design: a `kill(pid, 0)` signal probe never blocks, unlike `probe()`'s own
+   *  lane/PR forge-association read, which awaits a `gh` call that can hang or reject — unsafe
+   *  for round.ts's E-STOP durable-pid sweep, a hard-stop path that must never wait on the
+   *  network. Optional: a test-double Supervisor with no opinion on live-process identity (most
+   *  fixtures) simply never reports anything alive, same "no opinion" stance `dispatch`/
+   *  `resume`'s own optional `pid`/`worktreePath` already take. */
+  durablePidAlive?(worker: string): boolean;
+  /** #724 gate② round 3, P1-1: signal the lane's durable persisted process GROUP directly — the
+   *  SAME `signalGroup` primitive `killByPid`/`killTree` already use (negative pid -> whole
+   *  process group, falling back to a direct-pid signal if that fails), exposed standalone so
+   *  round.ts's E-STOP sweep can drive its own TERM-then-KILL sequence without `reclaim()`'s
+   *  worktree/PR bookkeeping, which the sweep does not need (it settles the row itself — see
+   *  round.ts's own sweep doc). A no-op, never throws, when there is no persisted pid to signal.
+   *  Optional for the same reason `durablePidAlive` is. */
+  signalDurablePid?(worker: string, signal: "SIGTERM" | "SIGKILL"): void;
 }
 
 /** The conductor's only handle on the review + merge gate (#13). merge-driver.ts's

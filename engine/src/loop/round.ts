@@ -23,7 +23,7 @@ import type { IForge, Issue } from "../forge/forge.js";
 import { type LabelSpec, labelsInclude } from "../forge/labels.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import { createProxyMint } from "../proxy/mint.js";
-import type { RoundPhase, RoundRow, State } from "../state/state.js";
+import type { RoundPhase, RoundRow, SpendActorKind, State } from "../state/state.js";
 import { createHeartbeatGate } from "../util/heartbeat.js";
 import {
   type CeilingReason,
@@ -1742,38 +1742,70 @@ async function runRoundsCore(deps: RoundDeps): Promise<RoundsResult> {
     // wait here is drainWait, not interTickWait (#381/F6): a loop that keeps ticking past the
     // signal must keep PACING past it too — see drainWait's own doc.
     //
-    /** #724 gate② P1: under E-STOP, `liveLanesDrained()` (running+fixing DB rows only) is not
-     *  enough to call this loop drained. A CRASH-RESUMED round (freshBatch false) skips its
-     *  wave-1 tick entirely (the `if (freshBatch)` block above, #172's own recovery-beat design)
-     *  — so if this round's only non-terminal rows are `driving`/`handoff` (zero running/fixing),
-     *  `drainedEnoughToExit` below can return true on its very FIRST check, and tick() — the ONLY
-     *  place that runs conductor.ts's reconcileDrivingFixIntents/adoptAndReclaimTerminal, which
-     *  is what actually adopts a confirmed-resume-intent row and hard-kills it — never executes
-     *  even once for this round. A row left in that shape can carry a CONFIRMED live child
-     *  spawned by a NOW-DEAD prior engine process: invisible to THIS process's
-     *  supervisor.this.lanes (a fresh in-memory map), so reapAll()'s own engine-exit sweep
-     *  (#677, scoped to this.lanes) can never reach it either — nothing else in the shutdown path
-     *  would. Swept DIRECTLY here instead, by durable persisted process identity:
-     *  `supervisor.reclaim(name)` already falls back to the persisted running.json `wrapper_pid`
-     *  when there's no in-memory handle (worker.ts's own cross-process reclaim() branch —
-     *  unchanged, no new kill machinery), so this only needs a caller that reaches driving/
-     *  handoff rows too. `probe()` before AND after reclaim(): before, so the common case (an
-     *  ordinary driving/handoff row with no live child at all — #293's own "left untouched, no
-     *  process to kill" contract) costs one cheap read and zero signals; after, to VERIFY the
-     *  kill actually landed — reclaim()'s own SIGTERM->200ms->SIGKILL never confirms death itself
-     *  (that's reapChildren's OWN job, #668, scoped to this.lanes). A row that still reads alive
-     *  (or unknown) is EVENTED as an orphan rather than silently dropped — cli.ts's
-     *  roundsExitCode already forces this run's overall exit code non-zero once `stoppedBy` names
-     *  "emergency-stop" (finding [0]/P2-3's own fix), so no separate forced-failure plumbing is
-     *  needed here; this sweep's only remaining job is to actually signal the process and leave
-     *  an honest trail of whether that signal was confirmed to land. */
+    /** #724 gate② P1 (round 3: P1-1/P1-2 redesign): under E-STOP, `liveLanesDrained()`
+     *  (running+fixing DB rows only) is not enough to call this loop drained. A CRASH-RESUMED
+     *  round (freshBatch false) skips its wave-1 tick entirely (the `if (freshBatch)` block
+     *  above, #172's own recovery-beat design) — so if this round's only non-terminal rows are
+     *  `driving`/`handoff` (zero running/fixing), `drainedEnoughToExit` below can return true on
+     *  its very FIRST check, and tick() — the ONLY place that runs conductor.ts's
+     *  reconcileDrivingFixIntents/adoptAndReclaimTerminal, which is what actually adopts a
+     *  confirmed-resume-intent row and hard-kills it — never executes even once for this round.
+     *  A row left in that shape can carry a CONFIRMED live child spawned by a NOW-DEAD prior
+     *  engine process: invisible to THIS process's supervisor.this.lanes (a fresh in-memory
+     *  map), so reapAll()'s own engine-exit sweep (#677, scoped to this.lanes) can never reach
+     *  it either — nothing else in the shutdown path would. Swept DIRECTLY here instead.
+     *
+     *  P1-1: process-only, ZERO forge calls anywhere in this function — a hard kill must never
+     *  wait on the network. `probe()`/`reclaim()` are unsafe for exactly that reason: `probe()`
+     *  awaits `Supervisor.lanePr`, a `gh` read that can hang or reject (worker.ts's own
+     *  association-read branch), and `reclaim()` calls it as an ordinary part of its worktree
+     *  bookkeeping. `durablePidAlive`/`signalDurablePid` (the `Supervisor` interface's own new
+     *  primitives, worker.ts) are the process-only equivalents: a plain `kill(pid, 0)`/signal
+     *  against the persisted running.json `wrapper_pid`, never touching the forge or this
+     *  supervisor's in-memory `this.lanes`. The TERM-then-KILL sequence, and its 200ms grace, is
+     *  IDENTICAL to `killByPid`/`killTree`'s own (worker.ts) — this sweep drives that same
+     *  sequence one signal at a time instead of calling reclaim(), which the sweep does not need
+     *  (no worktree/PR bookkeeping applies to a row this function settles itself — P1-2 below).
+     *
+     *  P1-2: a lane this sweep actually signals (found alive) is settled TERMINALLY in the SAME
+     *  step, via `State.settleTerminalWorker` (state.ts) — the SAME atomic row+spend transition
+     *  every OTHER terminal-lane path in this codebase uses (reclaimTerminalLane's own DEAD/
+     *  DONE/FAILED branches, conductor.ts). This is deliberate, and is the actual no-revival
+     *  mechanism: `state.drivingWorkers()`/`state.handoffWorkers()` (state.ts) are STATE-COLUMN-
+     *  FILTERED queries (`WHERE state = 'driving'` / `'handoff'`), and `reconcileDrivingFixIntents`/
+     *  `adoptAndReclaimTerminal` (conductor.ts) — the ONLY code that ever reads a lane's stale
+     *  resume intent and ADOPTS it — iterate exactly those two queries. Once this row's state is
+     *  `failed`, it is STRUCTURALLY unreachable by either adoption loop on every later tick or
+     *  restart — there is no separate "revival latch" needed (unlike #447's `lane-revival-
+     *  terminal` event, a different, PR-merge-specific mechanism this is not). Needs-human
+     *  escalation is EVENTED, never labeled: `estop-lane-swept` carries `escalation-source:always`
+     *  (event-kinds/lane.ts) — "needs-human, always proven by presence," the SAME pattern
+     *  `resume-capped`/`resume-undecidable` use — because P1-1's "zero forge calls" applies to
+     *  this settlement step too (an `addLabel` call could ALSO hang/reject, defeating the point
+     *  of a hard-stop path that must always run to completion). Cost is recorded as 0 — this
+     *  sweep deliberately never reads a lane's jsonl/cost sentinel (that would mean touching the
+     *  same worktree-and-transcript surface `probe()` does); a genuinely-orphaned lane's true
+     *  cost is unrecoverable here, the same "no sentinel -> 0, record whatever else is known"
+     *  fallback conductor.ts's own DEAD-lane path already accepts. */
     const sweepDetachedLanesUnderEstop = async (): Promise<void> => {
       for (const w of [...deps.state.drivingWorkers(), ...deps.state.handoffWorkers()]) {
-        const before = await deps.supervisor.probe(w.name);
-        if (before.wrapperAlive !== 1) continue; // not confirmed alive — nothing to signal
-        await deps.supervisor.reclaim(w.name);
-        const after = await deps.supervisor.probe(w.name);
-        deps.state.appendEvent("estop-lane-swept", { worker: w.name, issue: w.issue, confirmedDead: after.wrapperAlive === 0 });
+        if (!deps.supervisor.durablePidAlive?.(w.name)) continue; // nothing confirmed alive — #293's own "left untouched" contract
+        deps.supervisor.signalDurablePid?.(w.name, "SIGTERM");
+        await drainWait(200); // the SAME short grace killByPid/killTree (worker.ts) already use
+        deps.supervisor.signalDurablePid?.(w.name, "SIGKILL");
+        const confirmedDead = !deps.supervisor.durablePidAlive?.(w.name);
+        const settledAt = now().toISOString();
+        // #645 P2-3 attribution: a `driving` row this sweep ever reaches is, by construction,
+        // always the confirmed-fix-leg-resume-intent shape (an ORDINARY driving row has no live
+        // process at all — #293's own contract — so durablePidAlive() never trips for one); a
+        // `handoff` row can be either an ordinary worker resume or a fix-leg one, distinguished
+        // by the SAME `fixing_handoff` marker reclaimTerminalLane's own FIXING RECLAIM loop reads.
+        const actorKind: SpendActorKind = w.state === "driving" || w.fixing_handoff === 1 ? "fix-leg" : "worker";
+        deps.state.settleTerminalWorker(
+          { ...w, state: "failed", ended_at: settledAt },
+          { worker: w.name, issue: w.issue, usd: 0, at: settledAt, actorKind },
+        );
+        deps.state.appendEvent("estop-lane-swept", { worker: w.name, issue: w.issue, confirmedDead });
       }
     };
     /** #380 (F5): this loop's exit. Ordinarily "nothing in flight" — but once a stop signal has
@@ -1791,20 +1823,26 @@ async function runRoundsCore(deps: RoundDeps): Promise<RoundsResult> {
      *  is deliberately never reached on an E-STOP tick). Waiting on activeWorkers()==0 under
      *  E-STOP would therefore wait on a lane this run has permanently frozen: every subsequent
      *  tick is the same immediate-kill no-op, the driving row never changes state, and this loop
-     *  never exits. deps.state.isEstopActive() specifically (not haltActive()) — KILL_SWITCH-
-     *  file-only halts (no process signal) are UNCHANGED by this fix (AC5), matching the existing
-     *  signalledNow()-only special case above; only the process-signal path and the E-STOP
-     *  sentinel skip the driving/recovery wait.
+     *  never exits. Now sourced from the SAME single `estopActive` local the sweep gate reads
+     *  below (P1-3) — KILL_SWITCH-file-only halts (no process signal) are UNCHANGED by this fix
+     *  (AC5), matching the existing signalledNow()-only special case above; only the
+     *  process-signal path and the E-STOP sentinel skip the driving/recovery wait.
      *
      *  #724 gate② P1: async now — sweeps driving/handoff rows' durable pids (see
      *  sweepDetachedLanesUnderEstop's own doc) BEFORE evaluating the exit condition, whenever
-     *  E-STOP is active. Harmless to repeat on every call: a row already confirmed dead (or never
-     *  alive) costs one cheap probe and is skipped. */
+     *  E-STOP is active. Harmless to repeat on every call: a row already settled `failed` (or
+     *  never alive) drops out of drivingWorkers()/handoffWorkers() and costs nothing further.
+     *
+     *  #724 gate② round 3, P1-3: the sentinel is sampled EXACTLY ONCE per call, into `estopActive`
+     *  — both the sweep gate and the exit-branch predicate read that SAME local, never
+     *  `deps.state.isEstopActive()` a second time. Reading it twice (the pre-round-3 shape) left
+     *  a real race: E-STOP arriving BETWEEN the two reads would skip the sweep (first read: not
+     *  yet active) but still take the estop exit branch (second read: now active) — an unswept,
+     *  still-alive detached lane declared "drained" regardless. */
     const drainedEnoughToExit = async (): Promise<boolean> => {
-      if (deps.state.isEstopActive()) await sweepDetachedLanesUnderEstop();
-      return signalledNow() || deps.state.isEstopActive()
-        ? liveLanesDrained()
-        : deps.state.activeWorkers().length === 0 && !recoveryBeatPending;
+      const estopActive = deps.state.isEstopActive();
+      if (estopActive) await sweepDetachedLanesUnderEstop();
+      return signalledNow() || estopActive ? liveLanesDrained() : deps.state.activeWorkers().length === 0 && !recoveryBeatPending;
     };
     for (;;) {
       if (await drainedEnoughToExit()) break;
@@ -2314,27 +2352,50 @@ async function runRoundsCore(deps: RoundDeps): Promise<RoundsResult> {
   }
 }
 
-/** #724 gate② P2-3: the SINGLE choke point every `runRoundsCore` exit path funnels through — not
- *  `runPeripheral` (finding [0]'s own fix point), which round-level machinery can bypass
- *  entirely (`waitForDispatchClear`'s own haltActive() gate returns into a signal/final-stop
- *  recheck WITHOUT ever reaching a peripheral phase; a milestone completing in that exact window
- *  resolves `stoppedBy: "stop-condition"` — the wrong tier, silently, since `runPeripheral`'s own
- *  announce call never runs on that path). EMERGENCY_STOP is the strictest tier there is: if the
- *  sentinel is STILL active at the moment this run is about to report its outcome, that fact
- *  wins over whatever internal path produced the result — the SAME precedence conductor.ts's own
- *  tick() already established over KILL_SWITCH — and the once-per-activation event is announced
- *  HERE too, unconditionally, through the identical dedup-then-atomic-write contract every other
- *  caller of `State.recordEstopActivation` uses (so this is a no-op whenever `runPeripheral` or
- *  tick() already announced it). `stopCondition` is dropped on override: it named a DIFFERENT
- *  reason this run stopped, and leaving it attached to `stoppedBy: "emergency-stop"` would claim
- *  two contradictory reasons for the same stop. cli.ts's `roundsExitCode` already maps
- *  `stoppedBy: "emergency-stop"` to a non-zero exit — no separate forced-failure plumbing needed
- *  here for that half of the contract. */
-export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
-  const result = await runRoundsCore(deps);
-  if (!deps.state.isEstopActive()) return result;
+/** #724 gate② P2-2/P2-3 shared: announce the `emergency-stop` activation exactly once, through
+ *  the SAME dedup-then-atomic-write contract every other caller of `State.recordEstopActivation`
+ *  uses (read `ceilingBreach().reasons` first — a no-op if `runPeripheral` or tick() already
+ *  announced it). Factored out so both of `runRounds`' own exit paths below (resolved, P2-3; and
+ *  thrown, P2-4) call the identical logic instead of drifting apart. */
+function announceEstopActivation(deps: Pick<RoundDeps, "state" | "now">): void {
   const alreadyAnnounced = (deps.state.ceilingBreach()?.reasons ?? []).includes("emergency-stop");
   if (!alreadyAnnounced) deps.state.recordEstopActivation(deps.now());
+}
+
+/** #724 gate② P2-3/P2-4: the SINGLE choke point every `runRoundsCore` exit path funnels
+ *  through — not `runPeripheral` (finding [0]'s own fix point), which round-level machinery can
+ *  bypass entirely (`waitForDispatchClear`'s own haltActive() gate returns into a signal/
+ *  final-stop recheck WITHOUT ever reaching a peripheral phase; a milestone completing in that
+ *  exact window resolves `stoppedBy: "stop-condition"` — the wrong tier, silently, since
+ *  `runPeripheral`'s own announce call never runs on that path). EMERGENCY_STOP is the strictest
+ *  tier there is: if the sentinel is STILL active at the moment this run is about to report its
+ *  outcome, that fact wins over whatever internal path produced the result — the SAME precedence
+ *  conductor.ts's own tick() already established over KILL_SWITCH. `stopCondition` is dropped on
+ *  override: it named a DIFFERENT reason this run stopped, and leaving it attached to
+ *  `stoppedBy: "emergency-stop"` would claim two contradictory reasons for the same stop. cli.ts's
+ *  `roundsExitCode` already maps `stoppedBy: "emergency-stop"` to a non-zero exit — no separate
+ *  forced-failure plumbing needed here for that half of the contract.
+ *
+ *  #724 gate② round 3, P2-4: `runRoundsCore` REJECTING (any awaited step throwing while E-STOP is
+ *  active — a peripheral/tick error, a state-write failure, this sweep's own settlement write)
+ *  used to bypass this whole function: the promise simply rejected, no announce, no `stoppedBy`.
+ *  The try/catch below makes "the sentinel is active" win on EITHER exit shape — resolved or
+ *  thrown — while still PROPAGATING the original error (never masking a real failure behind a
+ *  synthetic result): cli.ts's own top-level catch already records `stoppedBy: "error"` for a
+ *  rejected run, so what this closes is narrower and load-bearing on its own — the durable
+ *  `emergency-stop` event/ceiling-breach row still lands even though THIS call never got to
+ *  report a clean result, so a later status/dashboard read (or a restart's own detection) is
+ *  never left believing E-STOP was silently missed just because one particular run threw. */
+export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
+  let result: RoundsResult;
+  try {
+    result = await runRoundsCore(deps);
+  } catch (e) {
+    if (deps.state.isEstopActive()) announceEstopActivation(deps);
+    throw e;
+  }
+  if (!deps.state.isEstopActive()) return result;
+  announceEstopActivation(deps);
   if (result.stoppedBy === "emergency-stop") return result;
   return { rounds: result.rounds, ticks: result.ticks, tickErrors: result.tickErrors, stoppedBy: "emergency-stop" };
 }

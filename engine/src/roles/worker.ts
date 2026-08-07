@@ -2497,6 +2497,25 @@ export class WorkerSupervisor implements Supervisor {
     return running.spawn_confirmed === false ? "unconfirmed" : "none";
   }
 
+  /** #724 gate② round 3, P1-1: the `Supervisor` interface's process-only liveness primitive —
+   *  see its own doc for why round.ts's E-STOP sweep needs this instead of `probe()`. Built
+   *  entirely from the SAME two private primitives every other cross-process path in this file
+   *  already uses (`persistedPid`/`pidGroupAlive` — `wrapperAlive` above is the same pair, just
+   *  returning a tri-state instead of a plain boolean). No forge call, no `this.lanes` read. */
+  durablePidAlive(name: string): boolean {
+    return this.pidGroupAlive(this.persistedPid(name));
+  }
+
+  /** #724 gate② round 3, P1-1: the `Supervisor` interface's process-only signal primitive — the
+   *  SAME `signalGroup` call `killByPid`/`killTree` already make, exposed standalone (no grace
+   *  wait, no escalation sequencing) so round.ts's E-STOP sweep can drive its OWN TERM-then-KILL
+   *  sequence one signal at a time, without `reclaim()`'s worktree/PR bookkeeping. A no-op when
+   *  there's no persisted pid — `signalGroup` itself never throws either. */
+  signalDurablePid(name: string, signal: NodeJS.Signals): void {
+    const pid = this.persistedPid(name);
+    if (pid != null) this.signalGroup(pid, signal);
+  }
+
   /**
    * #46: resume a lane the wrapper handed off (`.handoff` sentinel) via `claude --resume`,
    * reusing the ORIGINAL session id (no --fork-session) so claude continues the same

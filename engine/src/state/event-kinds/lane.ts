@@ -47,11 +47,18 @@ export const LANE_EVENT_KINDS = defineKinds({
   // probe's own verdict — `false` means the kill could not be verified (an orphan process
   // group), never silently dropped; cli.ts's roundsExitCode already forces this run's exit code
   // non-zero once `stoppedBy` names "emergency-stop" regardless of this outcome.
+  // #724 gate② round 3, P1-2: escalation-source:always — needs-human, proven by PRESENCE alone
+  // (the SAME "resume-capped"/"resume-undecidable" shape above), never by a forge label: the
+  // E-STOP sweep that appends this (round.ts) is a hard-stop path that must stay network-free
+  // end to end (P1-1), so it never calls addLabel. Clears the same way `env-failure-preserved`
+  // does — via the issue reaching a terminal GitHub state, since no label was ever applied for
+  // escalation-sweep.ts's "label absence is only a human act if the engine provably applied the
+  // label" doctrine to observe.
   "estop-lane-swept": {
-    tags: ["round-artifact"],
+    tags: ["round-artifact", "escalation-source:always"],
     meaning:
-      "under EMERGENCY_STOP, a driving/handoff lane's durable process identity was found alive and signalled directly; confirmedDead records whether a post-signal probe verified the kill.",
-    actionability: "investigate",
+      "under EMERGENCY_STOP, a driving/handoff lane's durable process identity was found alive and signalled directly (TERM then KILL), then the row was settled to `failed` in the same step so no later reconciliation can revive it; confirmedDead records whether a post-signal check verified the kill. needs-human, always proven by presence.",
+    actionability: "intervene",
     see: "#293",
   },
 

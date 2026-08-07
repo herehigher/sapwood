@@ -93,13 +93,14 @@ test("write-site sweep (#645 P2-3): every recordSpend/settleTerminalWorker/recor
   //     recordEngineReviewVerdictAndSpend (1, #645 P1-1) + peripheral.ts's shared role-session
   //     call (1) = 3.
   //   settleTerminalWorker: conductor.ts's reclaimTerminalLane (8) + the ordinary RECLAIM
-  //     DEAD-lane loop (3) + the FIXING RECLAIM DEAD-lane loop (3) = 14.
+  //     DEAD-lane loop (3) + the FIXING RECLAIM DEAD-lane loop (3) + round.ts's E-STOP
+  //     durable-pid sweep (1, #724 gate② round 3 P1-2) = 15.
   //   recordEngineReviewVerdictAndSpend: production.ts's decisive-verdict callback (1, #645 P1-1
   //     — replaces the old direct recordSpend call that method used to make).
   assert.equal(perMethodCounts.recordSpend, 3, "recordSpend call-site count drifted — see this test's own doc before updating the pin");
   assert.equal(
     perMethodCounts.settleTerminalWorker,
-    14,
+    15,
     "settleTerminalWorker call-site count drifted — see this test's own doc before updating the pin",
   );
   assert.equal(
