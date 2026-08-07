@@ -3167,6 +3167,20 @@ export class State {
     return p != null && existsSync(p);
   }
 
+  /** #293: the emergency-stop sentinel — same file-sentinel pattern as killSwitchPath above
+   *  (human-flippable, engine-owned data dir, null dir -> never active), but a DIFFERENT
+   *  contract: KILL_SWITCH is drain-first (SIGTERM handoff, bounded window, then hard kill);
+   *  EMERGENCY_STOP means immediate hard kill with no drain window at all — see conductor.ts's
+   *  tick() gate, which checks this BEFORE killSwitchPath so both present -> E-STOP wins. */
+  estopPath(): string | null {
+    return this.dataDir ? join(this.dataDir, "EMERGENCY_STOP") : null;
+  }
+
+  isEstopActive(): boolean {
+    const p = this.estopPath();
+    return p != null && existsSync(p);
+  }
+
   /** Out-of-band PAUSE sentinel (#75): same file-sentinel pattern as KILL_SWITCH above — a
    *  human-flippable file in the engine's OWN data dir. NOTE: that dir sits outside worker
    *  worktrees as a permission-layer boundary (no --add-dir data), not an OS sandbox — the

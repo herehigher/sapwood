@@ -64,16 +64,23 @@ Note the asymmetry: **milestone scoping** (`round.milestone`, or the
 
 ## 2. Inside one tick (`conductor.ts tick()`, strict order)
 
-1. **KILL_SWITCH gate** — active → this tick is terminal-reclaim + drain
+1. **EMERGENCY_STOP gate** (#293) — checked BEFORE the kill switch. Active →
+   this tick is terminal-reclaim + **immediate hard-kill** of every
+   `running`/`fixing` lane, no drain window, no handoff request ever sent.
+   Nothing else runs. In-flight work is killed outright — **WIP not already
+   committed/pushed is lost**; killed lanes end `failed` with the existing
+   needs-human escalation. Both `EMERGENCY_STOP` and `KILL_SWITCH` present →
+   E-STOP wins (it is the stricter tier).
+2. **KILL_SWITCH gate** — active → this tick is terminal-reclaim + drain
    ONLY (handoff requests; hard kill past `cost.drainWindowSec`). Nothing
    else runs. A received SIGTERM/SIGINT takes this same gate (#380, §3) — one
    drain path, two ways in.
-2. **PAUSE / wind-down read** — freezes DISPATCH only; reclaim, rollback
+3. **PAUSE / wind-down read** — freezes DISPATCH only; reclaim, rollback
    retry, and DRIVE proceed. Fresh file check every tick, no restart needed.
-3. **Rollback retry** — pending board mutations from prior failures, before
+4. **Rollback retry** — pending board mutations from prior failures, before
    any new work; bounded by `recovery.rollbackRetryCap`, then
    `rollback-escalated`.
-4. **GATED RECLAIM** (#147) — failed lanes still holding a PR whose
+5. **GATED RECLAIM** (#147) — failed lanes still holding a PR whose
    `needs-human` label a human has since removed re-enter DRIVE, up to
    `lanes.gatedReentryCap` per issue (`gated-reentry` /
    `gated-reentry-capped` events; capped lanes are latched and re-labeled).
@@ -84,20 +91,20 @@ Note the asymmetry: **milestone scoping** (`round.milestone`, or the
    (`gated-reentry-issue-closed`), never re-driven and never re-labeled. Only a
    live issue with a live PR ever reaches the cap, so the capped re-label on a
    finished lane is unreachable by construction rather than by a guard.
-5. **RECLAIM** — every running lane classified by four signals (terminal
+6. **RECLAIM** — every running lane classified by four signals (terminal
    sentinel `.handoff`/`.done`/`.failed`; heartbeat age vs
    `worker.heartbeatStaleSecs`; wrapper liveness): KEEP / terminal-record /
    DEAD. A DEAD lane with an open PR is rescued to `driving` (never
    requeued — a second worker racing the PR is the bug class this closes);
    a possibly-dirty worktree is retained on disk and escalated.
-6. **CEILING** — `dailyBudgetUsd` + `maxWallClockSec` (post-hoc: spend is
+7. **CEILING** — `dailyBudgetUsd` + `maxWallClockSec` (post-hoc: spend is
    known only at lane end; overshoot bounded ≈ dispatch cap × worker soft
    budget). Breach → engine-wide dispatch freeze + drain + escalate. The
    engine **keeps ticking while frozen** — see §6.
-7. **DRIVE (gate②)** — each `driving` lane's PR: CI green + fresh
+8. **DRIVE (gate②)** — each `driving` lane's PR: CI green + fresh
    cross-model review → merge (`merged`); review demands work → back to a
    fix lane (`prFixCap` bounded); no PR / unresolvable → `needs-human`.
-8. **DISPATCH** — Ready queue ordered by priority (meta-rank issues yield to
+9. **DISPATCH** — Ready queue ordered by priority (meta-rank issues yield to
    coding work — anti-starvation floor), each candidate checked against:
    ceiling, already-in-flight, round budget, dispatch cap, free lanes.
    Skips are recorded with reasons — dispatch decisions are reconstructible.
@@ -165,9 +172,19 @@ from the sentinel:
 | Engine process (hard) | `cost.maxWallClockSec` (default **24 h**, #431: a per-process attention alarm — one clock per process life, fresh on every restart) | same freeze+drain | after drain window |
 | Human (hard) | `data/KILL_SWITCH` | freeze + drain + hard kill, exit 1 | after drain window |
 | Human (signal) | SIGTERM / SIGINT (#380) | the same freeze + drain, exit 0 once drained; a second signal exits at once with 128+signum | after drain window |
+| Human (emergency, #293) | `data/EMERGENCY_STOP` | freeze + **immediate** hard kill, exit 1 — no drain window, no handoff request, checked before KILL_SWITCH so it wins if both are present | **on this same tick** |
 
 Soft tiers preserve work (hard-killing a worker re-burns the same tokens on
-requeue, forever); hard tiers exist so the ceiling is actually a ceiling.
+requeue, forever); hard tiers exist so the ceiling is actually a ceiling. The
+three human-triggered stop tiers are, honestly, not equally gentle: PAUSE only
+withholds new dispatch (in-flight work finishes); KILL_SWITCH and the signal
+tier drain first, giving a running lane up to `drainWindowSec` to reach a
+terminal sentinel on its own; EMERGENCY_STOP skips the drain step entirely —
+every `running`/`fixing` lane's process group is killed outright, and any WIP
+that lane had not already committed and pushed is lost. Reach for it only
+when a lane is doing something actively dangerous (credential exposure,
+destructive filesystem/API calls, runaway cost) and cannot wait out even a
+zero-length drain tick.
 
 ## 6. The state truth table — reading the engine at a glance
 

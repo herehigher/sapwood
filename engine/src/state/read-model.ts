@@ -461,6 +461,8 @@ export interface StatusDTO {
   lanes: StatusLaneDTO[];
   drivingCount: number;
   killSwitchActive: boolean;
+  /** #293: mirrors killSwitchActive — see StatusSnapshot's own doc (cli.ts) for the distinction. */
+  estopActive: boolean;
   pauseActive: boolean;
   ceilingBreach: { reasons: string[]; at: string } | null;
   spend: StatusSpendDTO;
@@ -511,6 +513,7 @@ export function buildStatusDTO(input: BuildStatusDTOInput): StatusDTO {
     })),
     drivingCount: state.drivingWorkers().length,
     killSwitchActive: state.isKillSwitchActive(),
+    estopActive: state.isEstopActive(),
     pauseActive: state.isPauseActive(),
     ceilingBreach: ceilingBreach ? { reasons: ceilingBreach.reasons, at: ceilingBreach.at.toISOString() } : null,
     spend: buildSpendSection(state, cfg, now),

@@ -5,10 +5,11 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { ConfigSchema, loadConfig, type SapwoodConfig } from "../config/config.js";
 import {
   associateLanePr,
@@ -8005,6 +8006,153 @@ test("#75 tick: PAUSE + KILL_SWITCH together behaves exactly as KILL alone (stri
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── #293: EMERGENCY_STOP — immediate hard stop, no drain window. Checked BEFORE KILL_SWITCH;
+// active means every running/fixing lane is hard-killed in THIS SAME tick, no requestHandoff. ──
+
+test("tick: EMERGENCY_STOP active -> immediate hard-kill of running/fixing lanes in the SAME tick, no requestHandoff, no drain window wait", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-gate-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-run", 2);
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE };
+    forge.ready = [{ number: 9, title: "", labels: ["prio:1-high"] }];
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+    assert.equal(r.ceilingBreached, true);
+    assert.deepEqual(r.ceilingReasons, ["emergency-stop"]);
+    assert.deepEqual(sup.handoffRequested, [], "no requestHandoff — E-STOP skips the drain-request step entirely");
+    assert.deepEqual(r.drainRequested, []);
+    assert.deepEqual(r.escalated, ["lane-run"], "hard-killed on the FIRST tick — no drain window to wait out");
+    assert.deepEqual(sup.reclaimed, ["lane-run"]); // the existing SIGTERM->grace->SIGKILL kill path
+    assert.equal(st.getWorker("lane-run")?.state, "failed");
+    assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]); // existing post-drain escalation treatment
+    assert.deepEqual(r.dispatched, []); // no dispatch
+    assert.deepEqual(sup.dispatched, [] as Issue[]);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: EMERGENCY_STOP + a lane that already wrote .handoff before the tick -> its real terminal state is recorded, never mislabeled killed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-terminal-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-ho", 5);
+    sup.probes["lane-ho"] = { ...DEFAULT_PROBE, handoff: true, costUsd: 0.4 };
+    seedRunning(st, "lane-keep", 6);
+    sup.probes["lane-keep"] = { ...DEFAULT_PROBE };
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+    assert.equal(st.getWorker("lane-ho")?.state, "handoff"); // real outcome, not "failed"
+    assert.deepEqual(r.reclaimed, [{ kind: "handoff", worker: "lane-ho", issue: 5, costUsd: 0.4, modelUsage: [] }]);
+    assert.ok(!r.escalated.includes("lane-ho")); // never hard-killed — it had already finished draining
+    assert.ok(!sup.reclaimed.includes("lane-ho"));
+    // The genuinely still-running lane IS hard-killed, same tick.
+    assert.deepEqual(r.escalated, ["lane-keep"]);
+    assert.equal(st.getWorker("lane-keep")?.state, "failed");
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: EMERGENCY_STOP + KILL_SWITCH both present -> E-STOP wins (immediate kill, no drain window arming)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-precedence-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-run", 2);
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE };
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+    assert.deepEqual(r.ceilingReasons, ["emergency-stop"]); // E-STOP names the reason, not kill-switch
+    assert.deepEqual(sup.handoffRequested, []);
+    assert.deepEqual(r.escalated, ["lane-run"]); // hard-killed immediately, not drained
+    assert.equal(st.getWorker("lane-run")?.state, "failed");
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: EMERGENCY_STOP + PAUSE both present -> E-STOP governs (immediate kill), PAUSE has no effect", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-pause-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-run", 2);
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE };
+    forge.ready = [{ number: 9, title: "", labels: ["prio:1-high"] }];
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    writeFileSync(join(dir, "PAUSE"), "");
+
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+    assert.deepEqual(r.ceilingReasons, ["emergency-stop"]);
+    assert.deepEqual(r.escalated, ["lane-run"]); // immediate kill — PAUSE's gentler tier never runs
+    assert.deepEqual(r.dispatched, []);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: EMERGENCY_STOP — the `emergency-stop` event is appended once per activation, not once per tick", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-event-once-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-run", 2);
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE };
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+    // A second tick under the still-present sentinel (e.g. the process didn't exit yet) must not
+    // duplicate the announcement — same "first detection only" contract as recordCeilingBreach.
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+    const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["emergency-stop"]);
+    assert.equal(events.length, 1);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: EMERGENCY_STOP NOT active -> no behavior change (regression guard)", async () => {
+  const st = new State(":memory:"); // no data dir: both sentinels definitionally inactive
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(gate.calls.length, 1);
+  assert.deepEqual(r.ceilingReasons, []);
+  st.close();
+});
+
+test("frontend-design.md §7 copy map carries the `emergency-stop` event kind (#293 gate② checklist)", () => {
+  const doc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "docs", "frontend-design.md"), "utf8");
+  assert.match(doc, /\|\s*`emergency-stop`\s*\|/);
 });
 
 test("#75 tick: removing the PAUSE sentinel restores dispatch on the very next tick, no restart / cache needed", async () => {

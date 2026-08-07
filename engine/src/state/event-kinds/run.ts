@@ -154,6 +154,17 @@ export const RUN_EVENT_KINDS = defineKinds({
     actionability: "routine",
   },
 
+  // #293: the EMERGENCY_STOP sentinel was detected — immediate hard stop, no drain window. Not a
+  // CeilingReason/entered-cleared pair member (same reasoning as kill-switch: it has its own
+  // visibility via `sapwood status` and the returned TickResult) — appended once per activation,
+  // mirroring recordCeilingBreach's own first-detection framing.
+  "emergency-stop": {
+    tags: [],
+    meaning: "the EMERGENCY_STOP sentinel was detected — every running/fixing lane was hard-killed immediately, no drain window (#293).",
+    actionability: "intervene",
+    see: "#293",
+  },
+
   // Base-branch CI observation (#502). `base-ci-red-escalated` is deliberately NOT an
   // `escalation-source:*` — a red default branch is a RUN-level fact with no issue to key on;
   // its resolution is escalation-reconcile.ts's own base-green observer.

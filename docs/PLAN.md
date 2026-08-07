@@ -929,6 +929,20 @@ public-repo hardening is additive, not a rewrite.** v1 requirements:
     spend, not routine cost management — prefer drain (let in-flight workers hand off)
     over kill; hard kill is the last resort. Conservative defaults (small round budget,
     dispatch cap 1–2).
+  - *Three human-triggered stop tiers, deliberately not equally gentle (#293).* The
+    v0.2 dashboard header exposes PAUSE (withhold new dispatch only; in-flight lanes
+    finish), STOP (`data/KILL_SWITCH` — the drain-first kill switch above: every
+    running/fixing lane gets a graceful SIGTERM-based handoff request, hard-killed only
+    past `cost.drainWindowSec`), and an **EMERGENCY_STOP** (`data/EMERGENCY_STOP`)
+    tier that skips the drain step entirely — checked before the kill switch every
+    tick, so if both sentinels are present E-STOP governs. On detection every
+    `running`/`fixing` lane's process group is hard-killed on that same tick via the
+    existing SIGTERM→200ms grace→SIGKILL path, with the same needs-human escalation
+    and evidence preservation as any other hard kill. Said plainly: **E-STOP kills
+    in-flight work immediately, and any WIP a lane had not already committed and
+    pushed is lost** — it exists for a runaway lane doing something actively
+    dangerous (credential exposure, destructive calls, cost blowout faster than a
+    drain window), not as a stronger "STOP".
 - **Issues-only peripheral role sessions carry no shell and no forge credential
   (#110; read grant widened to worktree-confined by #235, 2026-07-17):**
   verification-plan-reviewer, verification-plan-drafter, PO/align+triage, harvest, and architect hold no

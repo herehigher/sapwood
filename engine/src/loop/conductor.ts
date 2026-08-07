@@ -144,15 +144,19 @@ export function budgetExceeded(total: number, cap: number): boolean {
 
 export type CeilingReason = "kill-switch" | "daily-budget" | "wall-clock";
 
-/** #380 (F5): what a bounded drain is being run FOR. A superset of CeilingReason by exactly one
- *  member — "stop-signal", the in-memory SIGTERM/SIGINT request (TickDeps.stopRequested) that
- *  shares the kill switch's whole drain path (see the gate at the top of tick()). The reason is
- *  the ONLY thing that forks between the two: it is what a `ceiling-escalated` event, a drain
- *  escalation comment, and `sapwood status` say happened, and a human reading "kill-switch"
- *  after a plain SIGTERM would go hunting for a sentinel file nobody ever wrote. Deliberately
- *  NOT a CeilingReason member: evaluateCeiling can never produce it (it isn't a cost/wall-clock
- *  ceiling) and it is not announceable (same as "kill-switch" — it has its own visibility). */
-export type DrainReason = CeilingReason | "stop-signal";
+/** #380 (F5): what a bounded drain is being run FOR. A superset of CeilingReason by two
+ *  members — "stop-signal", the in-memory SIGTERM/SIGINT request (TickDeps.stopRequested) that
+ *  shares the kill switch's whole drain path (see the gate at the top of tick()), and (#293)
+ *  "emergency-stop", the immediate-no-drain-window sentinel that shares the same escalation
+ *  machinery but skips the drain-request step and the bounded window (drainThenEscalate's
+ *  `immediate` param). The reason is the ONLY thing that forks between these and the kill
+ *  switch: it is what a `ceiling-escalated` event, a drain escalation comment, and `sapwood
+ *  status` say happened, and a human reading "kill-switch" after a plain SIGTERM would go
+ *  hunting for a sentinel file nobody ever wrote. Deliberately NOT a CeilingReason member:
+ *  evaluateCeiling can never produce either (neither is a cost/wall-clock ceiling) and neither
+ *  is announceable via the entered/cleared pair (same as "kill-switch" — each has its own
+ *  visibility). */
+export type DrainReason = CeilingReason | "stop-signal" | "emergency-stop";
 
 // #431 (F29): the engine-session gap machinery that used to live here (ENGINE_SESSION_GAP_SEC,
 // engineSessionGapSec, State.engineSessionStart's started_at resurrection) is DELETED, not
@@ -1991,6 +1995,13 @@ async function drainThenEscalate(
   nowDate: Date,
   iso: () => string,
   drivingDrain: DrivingDrainMode,
+  /** #293: EMERGENCY_STOP's contract — skip the drain-REQUEST step entirely (no
+   *  `requestHandoff` call, ever) and treat the bounded window as already elapsed, so the
+   *  escalation (hard kill) below runs on THIS SAME tick regardless of `cfg.cost.drainWindowSec`.
+   *  Driving lanes (no live process to kill, and out of this signal's scope) are left untouched
+   *  — the driving-lane escalation loop below only ever runs for the ordinary (non-immediate)
+   *  drain. Default false: every pre-#293 caller (kill switch, stop signal) is unaffected. */
+  immediate = false,
 ): Promise<{ drainRequested: string[]; escalated: string[] }> {
   state.recordCeilingBreach(reasons, nowDate);
   const drainRequested: string[] = [];
@@ -2004,12 +2015,13 @@ async function drainThenEscalate(
     // INCONCLUSIVE right here, at drain-request time — see releaseCanaryInconclusive's doc
     // comment for the two corruption modes this closes (false-clear via the later .handoff
     // reclaim; permanent wedge via the hard kill below). Idempotent no-op for every other lane
-    // and for repeat drain ticks.
+    // and for repeat drain ticks. Runs even under `immediate` — the corruption modes it closes
+    // apply just as much to an immediate hard kill as to a windowed one.
     releaseCanaryInconclusive(state, w.name);
-    if (supervisor.requestHandoff(w.name)) drainRequested.push(w.name);
+    if (!immediate && supervisor.requestHandoff(w.name)) drainRequested.push(w.name);
   }
   const breach = state.ceilingBreach();
-  if (breach && drainEscalationDue(breach.at.toISOString(), nowDate.getTime(), cfg.cost.drainWindowSec)) {
+  if (breach && (immediate || drainEscalationDue(breach.at.toISOString(), nowDate.getTime(), cfg.cost.drainWindowSec))) {
     for (const w of stillRunning) {
       // Probe BEFORE reclaim (which kills the process) so an open PR is still discoverable for
       // the belt-and-suspenders PR-label below.
@@ -2069,7 +2081,11 @@ async function drainThenEscalate(
     // timestamp is untouched by a retry (recordCeilingBreach only ever records FIRST detection),
     // so the NEXT tick's `drainEscalationDue` check is still past-window and retries immediately —
     // one extra tick, never a fresh drain window.
-    for (const w of state.drivingWorkers()) {
+    //
+    // #293: skipped entirely under `immediate` — EMERGENCY_STOP's scope is "hard-kill every
+    // running/fixing lane's process group", and a `driving` row has no live process to kill. It
+    // is left exactly as it stood; nothing here escalates it.
+    for (const w of immediate ? [] : state.drivingWorkers()) {
       const fixRounds = w.fix_rounds ?? 0;
       // #426 (F26): the CI-wedge fact, durable and forge-free — safe to read even under a
       // kill-switch-frozen tick (see `ciPendingWedgedForDrain`). It DECIDES terminality only on the
@@ -3283,6 +3299,84 @@ async function checkCommentCursorBeforeDrive(
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: "comment-cursor-stale" };
 }
 
+/** Shared by the EMERGENCY_STOP and KILL_SWITCH/stop-signal gates (#293, extracted from the
+ *  single kill-switch branch this used to be the body of — behavior byte-for-byte unchanged for
+ *  that caller): adopt any confirmed-intent handoff (so a resumed lane is visible to the
+ *  drain/kill about to run, rather than invisible in `handoff` state), then settle every
+ *  running/fixing lane's TERMINAL state — a lane that already wrote .done/.handoff/.failed
+ *  before this tick finished draining/working on its own; reclaimTerminalLane decides KEEP vs
+ *  terminal per lane, and only KEEP lanes stay running/fixing for the caller's own drain/kill
+ *  step. */
+async function adoptAndReclaimTerminal(
+  forge: IForge,
+  state: State,
+  supervisor: Supervisor,
+  cfg: SapwoodConfig,
+  threshold: number,
+  iso: () => string,
+): Promise<{ resumed: ResumeOutcome[]; reclaimed: ReclaimOutcome[] }> {
+  // A confirmed resume intent means its child already exists despite the DB still saying
+  // `handoff`. Reconcile these rows BEFORE the drain snapshot so the hard safety boundary
+  // supervises and drains reality in this same tick; this is adoption, never a spawn.
+  const resumed: ResumeOutcome[] = [];
+  for (const w of state.handoffWorkers()) {
+    if (supervisor.resumeIntentState(w.name, w.issue) !== "confirmed") continue;
+    const issue: Issue = { number: w.issue, title: "", labels: [] };
+    let result: { name: string; sessionId: string; pid?: number | null; worktreePath?: string };
+    try {
+      result = await supervisor.resume(issue, w.name);
+    } catch (e) {
+      state.appendEvent("resume-failed", { worker: w.name, issue: w.issue, error: String(e) });
+      throw e;
+    }
+    if (result.name !== w.name) {
+      throw new Error(`resume returned worker ${result.name}; expected existing lane ${w.name}`);
+    }
+    const attempt = (w.resume_attempts ?? 0) + 1;
+    // #245 round-2 fix (B2b): a fixing-origin handoff adopted here must land back in
+    // `fixing`, never `running` — writing `running` unconditionally silently discarded its
+    // fix identity (`fixing_handoff` stays 1 on `w`, spread through unchanged below, but a
+    // `running`-state row is invisible to the ordinary RESUME phase's fixing_handoff check
+    // entirely). Landing it in `fixing` makes it visible to THIS SAME tick's drain loop just
+    // below (which now scans running+fixing) — no separate requestHandoff needed here, same
+    // as the ordinary (non-fix) adoption case.
+    // #705 gate② P2-3: row transition + resumed event + lane-spawned fact, one transaction.
+    state.recordLaneRowAndSpawnFact(
+      {
+        ...w,
+        session_id: result.sessionId,
+        state: w.fixing_handoff === 1 ? "fixing" : "running",
+        started_at: iso(),
+        ended_at: null,
+        resume_attempts: attempt,
+      },
+      "resumed",
+      { worker: w.name, issue: w.issue, attempt },
+      spawnFactFrom(w.name, w.issue, result),
+    );
+    resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt });
+  }
+  const reclaimed: ReclaimOutcome[] = [];
+  // #245: a `fixing` lane is a LIVE fix-leg worker process — the kill switch's drain/hard-kill
+  // contract must supervise it exactly like a `running` lane (worker paradigm); it must never
+  // be left spinning just because the engine considers itself "killed".
+  for (const w of [...state.runningWorkers(), ...state.fixingWorkers()]) {
+    const p = await supervisor.probe(w.name);
+    // #245 round-2 fix A5: reclaimTerminalLane itself clears the fixing-origin review-trigger
+    // pin atomically (same settleTerminalWorker transaction as the `driving` write) — no
+    // separate follow-up call needed here.
+    const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
+    if (terminal) {
+      reclaimed.push(terminal); // KEEP/DEAD lanes stay running/fixing -> drained below
+    }
+    // #155: no setLiveTelemetry here for a still-running (KEEP) lane — this branch is drain-
+    // only (kill switch/e-stop engaged); telemetry is left as its last known value until the
+    // lane actually leaves `running` (reclaimTerminalLane above, or drainThenEscalate below —
+    // both clear it). Refreshing display telemetry mid-drain isn't worth a special case.
+  }
+  return { resumed, reclaimed };
+}
+
 export async function tick(deps: TickDeps): Promise<TickResult> {
   const { forge, state, supervisor, cfg } = deps;
   const now = deps.now;
@@ -3298,10 +3392,58 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // gate — see reconcileDrivingFixIntents' own doc for the crash window this repairs.
   await reconcileDrivingFixIntents(forge, state, supervisor, cfg, iso);
 
-  // ── KILL SWITCH (#69): ONE global gate, checked before anything else runs. Active ->
-  //   this tick is DRAIN + TERMINAL-RECLAIM ONLY. Replaces the per-phase gates from #59/#61/#64
-  //   (a DRIVE-loop check, a DISPATCH-loop check, and the kill-switch tier of evaluateCeiling).
-  //   Two things run; everything else is blocked:
+  // ── EMERGENCY_STOP (#293): checked BEFORE the kill switch — the immediate, no-drain-window
+  //   tier. Active -> every running/fixing lane is hard-killed THIS SAME TICK via the existing
+  //   kill path (drainThenEscalate's `immediate` mode: no requestHandoff, the bounded
+  //   cfg.cost.drainWindowSec is never armed/waited). Both stop sentinels present -> E-STOP wins
+  //   the naming and the behavior (opposite of the kill-switch/stop-signal fork above, where the
+  //   durable switch wins over an in-memory signal) — it is the STRICTER of the two, so it must
+  //   never be shadowed by a switch that would otherwise wait out a drain window first. PAUSE is
+  //   never reached (this branch returns before that check, same as the kill switch).
+  const estopActive = state.isEstopActive();
+  if (estopActive) {
+    const { resumed, reclaimed } = await adoptAndReclaimTerminal(forge, state, supervisor, cfg, threshold, iso);
+    // #293: "once per activation" — mirrors recordCeilingBreach's own first-detection framing
+    // (the row's `reason` is overwritten every tick, so the ONLY way to know "was this already
+    // announced" is to read the PRIOR reason before this tick's own recordCeilingBreach call,
+    // below, overwrites it). A second tick that still finds the sentinel present (the engine
+    // hasn't exited yet, or never does in a given driver) must not duplicate the event.
+    const alreadyAnnounced = (state.ceilingBreach()?.reasons ?? []).includes("emergency-stop");
+    if (!alreadyAnnounced) state.appendEvent("emergency-stop", {});
+    const { drainRequested, escalated } = await drainThenEscalate(
+      forge,
+      state,
+      supervisor,
+      cfg,
+      ["emergency-stop"],
+      now(),
+      iso,
+      // Never read: `immediate` (below) skips the driving-lane loop entirely, which is the only
+      // consumer of `drivingDrain`. `dailyBudgetBreached: false` is a placeholder, not a claim.
+      { mode: "heuristic", dailyBudgetBreached: false },
+      true,
+    );
+    return {
+      reclaimed,
+      dispatched: [],
+      overBudget: false,
+      ceilingBreached: true,
+      ceilingReasons: ["emergency-stop"],
+      drainRequested,
+      escalated,
+      driven: [],
+      rollbacks: [],
+      gatedReclaimed: [],
+      resumed,
+      fixingReclaimed: [],
+      fixResponses: [],
+    };
+  }
+
+  // ── KILL SWITCH (#69): ONE global gate, checked before anything else runs (after E-STOP
+  //   above). Active -> this tick is DRAIN + TERMINAL-RECLAIM ONLY. Replaces the per-phase gates
+  //   from #59/#61/#64 (a DRIVE-loop check, a DISPATCH-loop check, and the kill-switch tier of
+  //   evaluateCeiling). Two things run; everything else is blocked:
   //     1. TERMINAL-state reclaim (Codex PR #72 P2): a lane that already wrote .handoff/.done/
   //        .failed has FINISHED draining — record its real outcome (via reclaimTerminalLane) so
   //        it isn't rotted as `running` and then mislabeled `failed`/`needs-human` by the drain
@@ -3320,65 +3462,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const stopSignalled = deps.stopRequested?.() ?? false;
   if (killSwitchActive || stopSignalled) {
     const drainReason: DrainReason = killSwitchActive ? "kill-switch" : "stop-signal";
-    // A confirmed resume intent means its child already exists despite the DB still saying
-    // `handoff`. Reconcile these rows BEFORE the drain snapshot so the hard safety boundary
-    // supervises and drains reality in this same tick; this is adoption, never a spawn.
-    const resumed: ResumeOutcome[] = [];
-    for (const w of state.handoffWorkers()) {
-      if (supervisor.resumeIntentState(w.name, w.issue) !== "confirmed") continue;
-      const issue: Issue = { number: w.issue, title: "", labels: [] };
-      let result: { name: string; sessionId: string; pid?: number | null; worktreePath?: string };
-      try {
-        result = await supervisor.resume(issue, w.name);
-      } catch (e) {
-        state.appendEvent("resume-failed", { worker: w.name, issue: w.issue, error: String(e) });
-        throw e;
-      }
-      if (result.name !== w.name) {
-        throw new Error(`resume returned worker ${result.name}; expected existing lane ${w.name}`);
-      }
-      const attempt = (w.resume_attempts ?? 0) + 1;
-      // #245 round-2 fix (B2b): a fixing-origin handoff adopted here must land back in
-      // `fixing`, never `running` — writing `running` unconditionally silently discarded its
-      // fix identity (`fixing_handoff` stays 1 on `w`, spread through unchanged below, but a
-      // `running`-state row is invisible to the ordinary RESUME phase's fixing_handoff check
-      // entirely). Landing it in `fixing` makes it visible to THIS SAME tick's drain loop just
-      // below (which now scans running+fixing) — no separate requestHandoff needed here, same
-      // as the ordinary (non-fix) adoption case.
-      // #705 gate② P2-3: row transition + resumed event + lane-spawned fact, one transaction.
-      state.recordLaneRowAndSpawnFact(
-        {
-          ...w,
-          session_id: result.sessionId,
-          state: w.fixing_handoff === 1 ? "fixing" : "running",
-          started_at: iso(),
-          ended_at: null,
-          resume_attempts: attempt,
-        },
-        "resumed",
-        { worker: w.name, issue: w.issue, attempt },
-        spawnFactFrom(w.name, w.issue, result),
-      );
-      resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt });
-    }
-    const reclaimed: ReclaimOutcome[] = [];
-    // #245: a `fixing` lane is a LIVE fix-leg worker process — the kill switch's drain/hard-kill
-    // contract must supervise it exactly like a `running` lane (worker paradigm); it must never
-    // be left spinning just because the engine considers itself "killed".
-    for (const w of [...state.runningWorkers(), ...state.fixingWorkers()]) {
-      const p = await supervisor.probe(w.name);
-      // #245 round-2 fix A5: reclaimTerminalLane itself clears the fixing-origin review-trigger
-      // pin atomically (same settleTerminalWorker transaction as the `driving` write) — no
-      // separate follow-up call needed here.
-      const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
-      if (terminal) {
-        reclaimed.push(terminal); // KEEP/DEAD lanes stay running/fixing -> drained below
-      }
-      // #155: no setLiveTelemetry here for a still-running (KEEP) lane — this branch is drain-
-      // only (kill switch engaged); telemetry is left as its last known value until the lane
-      // actually leaves `running` (reclaimTerminalLane above, or drainThenEscalate below —
-      // both clear it). Refreshing display telemetry mid-drain isn't worth a special case.
-    }
+    const { resumed, reclaimed } = await adoptAndReclaimTerminal(forge, state, supervisor, cfg, threshold, iso);
     // drainThenEscalate re-reads runningWorkers()+fixingWorkers() AFTER the terminal reclaim
     // above transitioned those lanes out of `running`/`fixing`, so a just-recorded
     // handoff/done/driving lane is never re-touched.

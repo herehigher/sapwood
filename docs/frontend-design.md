@@ -626,6 +626,7 @@ checklist item**):
 | `fix-rounds-capped` | PR #{pr} used up its fix attempts — needs a human |
 | `fix-leg-verdict-rerun` | PR #{pr}'s review findings aren't fixable by the producer — needs a human |
 | `ceiling-escalated` | Safety ceiling reached — winding down all work |
+| `emergency-stop` | Emergency stop triggered — every in-flight lane was stopped immediately (#293). Renders through the same stopping/stopped state word as the other stop tiers — no new word |
 | `ceiling-breach-entered` | Branches on `payload.reason` (#431 round 3: one event per REASON, each ceiling has its own lifecycle): wall-clock → "This run hit its {maxWallClockSec}s attention alarm — no new work until a restart"; daily-budget → "Today's ${dailyBudgetUsd} budget is spent — no new work until tomorrow". One per reason per episode, never per tick |
 | `rapid-restart-detected` | Engine started {births} times in {windowSec}s — crash loop suspected, dispatch parked for a human (#431) |
 | `ceiling-breach-cleared` | Branches on `payload.reason` (#431 round 3): wall-clock → "The wall-clock alarm cleared"; daily-budget → "The daily budget rolled over" — that reason's closing receipt; work resumes only when no ceiling remains open. One per reason per episode, transition-only |

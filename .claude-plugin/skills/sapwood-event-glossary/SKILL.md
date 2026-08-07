@@ -48,6 +48,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `role-debris-swept` — **routine**: leftover session/worktree debris from a peripheral role session was cleaned up.
 - `ceiling-breach-entered` — **investigate**: a cost-ceiling reason (per-run/per-day/...) newly joined the set of currently-breached reasons.
 - `ceiling-breach-cleared` — **routine**: a cost-ceiling reason left the set of currently-breached reasons (including the total-clear case).
+- `emergency-stop` — **intervene**: the EMERGENCY_STOP sentinel was detected — every running/fixing lane was hard-killed immediately, no drain window (#293). (see #293)
 - `base-ci-red-observed` — **investigate**: the default branch's CI was observed red (#502); opens the standing base-red episode. (see #502)
 - `base-ci-red-escalated` — **intervene**: the standing base-red episode persisted long enough to escalate; not issue-keyed, so it is not an escalation-source (no needs-human label to remove). (see #502)
 - `base-ci-red-cleared` — **routine**: a NEWER base-ci-red-observed/cleared pair showed the default branch's CI green again; closes the standing episode. (see #502)

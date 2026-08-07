@@ -574,6 +574,10 @@ export interface StatusSnapshot {
   active: WorkerRow[]; // running + driving (occupied lanes)
   driving: WorkerRow[]; // driving lanes: PRs awaiting the review gate
   killSwitchActive: boolean;
+  /** #293: the immediate-hard-stop sentinel (data/EMERGENCY_STOP) — mirrors killSwitchActive's
+   *  reporting. Distinct from it: e-stop skips the drain window entirely (kill-switch drains
+   *  first), and takes precedence when both are set. */
+  estopActive: boolean;
   /** #75: the gentle-tier PAUSE sentinel (data/PAUSE) — true means new dispatch is skipped
    *  this tick, but reclaim/drive (in-flight lanes, PR review/merge) proceed normally. Distinct
    *  from killSwitchActive above (which also drains + freezes); both can be true at once, in
@@ -662,6 +666,7 @@ export function formatStatus(s: StatusSnapshot): string {
   lines.push(
     "",
     `spend: $${s.dailySpendUsd.toFixed(2)} / ${dailyBudget} daily ceiling`,
+    `e-stop: ${s.estopActive ? "ACTIVE" : "inactive"}`,
     `kill switch: ${s.killSwitchActive ? "ACTIVE" : "inactive"}`,
     `pause: ${s.pauseActive ? "PAUSED (no new dispatch; in-flight lanes proceed normally)" : "inactive"}`,
     s.ceilingBreach
@@ -904,6 +909,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
         active,
         driving: state.drivingWorkers(),
         killSwitchActive: state.isKillSwitchActive(),
+        estopActive: state.isEstopActive(),
         pauseActive: state.isPauseActive(),
         ceilingBreach: state.ceilingBreach(),
         dailySpendUsd: state.dailySpendUsd(now),
