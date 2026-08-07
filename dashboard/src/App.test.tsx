@@ -3,7 +3,7 @@ import test, { mock } from "node:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { App } from "./App.tsx";
-import { eventsQuery, loopStateQuery } from "./api/queries.ts";
+import { eventsQuery, loopStateQuery, spendQuery } from "./api/queries.ts";
 
 /**
  * #715 gate② [7]: the documented `disconnected` header state (frontend-design.md §3's closing
@@ -34,18 +34,27 @@ function stubFetch(byPath: Record<string, { status: number; body: unknown }>) {
   });
 }
 
-async function renderSettledApp(byPath: Record<string, { status: number; body: unknown }>): Promise<string> {
-  stubFetch(byPath);
+const SPEND_EMPTY = { "/api/spend": { status: 200, body: { spend: [], lastId: 0 } } };
+
+async function renderSettledApp(byPath: Record<string, { status: number; body: unknown }>, now?: Date): Promise<string> {
+  // `/api/spend` defaults to an empty, successful page — most tests here aren't exercising the
+  // cost strip and would otherwise fail on an unstubbed fetch now that App also polls it (#715
+  // gate② round 3 [2]). Callers exercising spend explicitly can still override it via `byPath`.
+  stubFetch({ ...SPEND_EMPTY, ...byPath });
   // `retryOnMount: false` matters as much as `retry: false` here: a query that has ONLY ever
   // errored (never succeeded) otherwise re-triggers a fresh fetch the instant a new observer
   // mounts (TanStack Query's default `retryOnMount: true`), which collapses `status` back to
   // 'pending' during that in-flight refetch — `renderToStaticMarkup` runs no effects, so it would
   // capture that transient 'pending' snapshot instead of the settled error this test wants.
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
-  await Promise.allSettled([client.prefetchQuery(loopStateQuery()), client.prefetchQuery(eventsQuery(0))]);
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+  ]);
   return renderToStaticMarkup(
     <QueryClientProvider client={client}>
-      <App />
+      <App now={now} />
     </QueryClientProvider>,
   );
 }
@@ -76,4 +85,42 @@ test("both queries succeeding renders the normal header, not disconnected", asyn
   });
   assert.doesNotMatch(html, /disconnected/);
   assert.match(html, />running</);
+});
+
+test("#715 gate② round 3 [2]: a completed lane's settled spend still renders in the by-lane cost strip", async () => {
+  // The lane is NOT in `lanes.items` (it already left the active set — merged/reclaimed), but its
+  // spend_ledger row still exists, forever, since the ledger is append-only. This is exactly the
+  // finding's scenario: the active-worker read model alone would show nothing for this lane.
+  const html = await renderSettledApp(
+    {
+      "/api/loop/state": { status: 200, body: { ...LOOP_STATE_OK, lanes: { max: 1, items: [] } } },
+      "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+      "/api/spend": {
+        status: 200,
+        body: {
+          spend: [
+            {
+              id: 1,
+              ts: "2026-08-06T01:00:00Z",
+              worker: "w1",
+              issue: 5,
+              usd: 3.4,
+              model: "opus",
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+              actorKind: "worker",
+              role: null,
+              estimated: false,
+            },
+          ],
+          lastId: 1,
+        },
+      },
+    },
+    new Date("2026-08-06T12:00:00Z"),
+  );
+  assert.match(html, /w1/);
+  assert.match(html, /\$3\.40/);
 });

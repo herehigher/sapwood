@@ -1,8 +1,19 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
-import { fetchEvents, fetchLoopState } from "./client.ts";
-import { accumulateEventsPage, EMPTY_EVENT_HISTORY, type EventHistory, eventsQuery, loopStateQuery, POLL_MS } from "./queries.ts";
-import type { EventsPage, LoopEvent } from "./types.ts";
+import { fetchEvents, fetchLoopState, fetchSpend } from "./client.ts";
+import {
+  accumulateEventsPage,
+  accumulateSpendPage,
+  EMPTY_EVENT_HISTORY,
+  EMPTY_SPEND_HISTORY,
+  type EventHistory,
+  eventsQuery,
+  loopStateQuery,
+  POLL_MS,
+  spendByWorkerForDay,
+  spendQuery,
+} from "./queries.ts";
+import type { EventsPage, LoopEvent, SpendPage, SpendRow } from "./types.ts";
 
 type FetchCall = { url: string; init: RequestInit | undefined };
 
@@ -49,12 +60,25 @@ test("a non-2xx response rejects instead of yielding a half-typed object", async
   await assert.rejects(() => fetchLoopState(), /503/);
 });
 
+test("§8 GET /api/spend pages with after + limit, same contract as /api/events", async () => {
+  const calls = stubFetch({
+    spend: [{ id: 91, ts: "2026-08-06T00:00:00Z", worker: "w1", issue: 5, usd: 1.2, model: "opus" }],
+    lastId: 91,
+  });
+  const spendPage = await fetchSpend({ after: 80, limit: 50 });
+  assert.equal(calls[0]?.url, "/api/spend?after=80&limit=50");
+  assert.equal(spendPage.lastId, 91);
+  assert.equal(spendPage.spend[0]?.worker, "w1");
+});
+
 test("§2 Transport: query options poll every 3 s, no WebSocket", () => {
   assert.equal(POLL_MS, 3000);
   assert.equal(loopStateQuery().refetchInterval, POLL_MS);
   assert.equal(eventsQuery(0).refetchInterval, POLL_MS);
+  assert.equal(spendQuery(0).refetchInterval, POLL_MS);
   assert.deepEqual(loopStateQuery().queryKey, ["loop", "state"]);
   assert.deepEqual(eventsQuery(480).queryKey, ["events", 480]);
+  assert.deepEqual(spendQuery(80).queryKey, ["spend", 80]);
 });
 
 test("queryFn forwards the AbortSignal so a superseded poll is cancelled", async () => {
@@ -173,4 +197,70 @@ test("accumulateEventsPage keeps an open escalation pinned after it ages out of 
   };
   history = accumulateEventsPage(history, page([resolved], 5), 3);
   assert.deepEqual(history.openAttention, {});
+});
+
+// ── #715 gate② round 3 [2]: accumulateSpendPage / spendByWorkerForDay ───────────────────────────
+
+const spendRow = (id: number, worker: string, usd: number, ts = "2026-08-06T12:00:00Z"): SpendRow => ({
+  id,
+  ts,
+  worker,
+  issue: 5,
+  usd,
+  model: "opus",
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheCreationTokens: 0,
+  actorKind: "worker",
+  role: null,
+  estimated: false,
+});
+const spendPage = (spend: SpendRow[], lastId: number): SpendPage => ({ spend, lastId });
+
+test("accumulateSpendPage advances the cursor and accumulates, same shape as accumulateEventsPage", () => {
+  const first = accumulateSpendPage(EMPTY_SPEND_HISTORY, spendPage([spendRow(1, "w1", 1.2)], 1));
+  assert.equal(first.after, 1);
+  const second = accumulateSpendPage(first, spendPage([spendRow(2, "w2", 0.8)], 2));
+  assert.equal(second.after, 2);
+  assert.deepEqual(
+    second.rows.map((r) => r.id),
+    [1, 2],
+  );
+});
+
+test("accumulateSpendPage deduplicates by id when a page overlaps the accumulated history", () => {
+  const first = accumulateSpendPage(EMPTY_SPEND_HISTORY, spendPage([spendRow(1, "w1", 1.2)], 1));
+  const merged = accumulateSpendPage(first, spendPage([spendRow(1, "w1", 1.2), spendRow(2, "w2", 0.5)], 2));
+  assert.deepEqual(
+    merged.rows.map((r) => r.id),
+    [1, 2],
+  );
+});
+
+test("spendByWorkerForDay sums settled spend per lane for the given day, ignoring other days", () => {
+  const rows = [
+    spendRow(1, "w1", 1.2, "2026-08-06T01:00:00Z"),
+    spendRow(2, "w1", 0.5, "2026-08-06T02:00:00Z"),
+    spendRow(3, "w2", 2.0, "2026-08-06T03:00:00Z"),
+    spendRow(4, "w1", 9.0, "2026-08-05T23:00:00Z"), // yesterday — excluded
+  ];
+  const bars = spendByWorkerForDay(rows, new Date("2026-08-06T12:00:00Z"));
+  const byLabel = Object.fromEntries(bars.map((b) => [b.label, b.usd]));
+  assert.equal(byLabel.w1, 1.7);
+  assert.equal(byLabel.w2, 2.0);
+});
+
+test("#715 gate② round 3 [2]'s core regression: a lane's settled spend survives after it stops being active", () => {
+  // Simulates exactly the finding's scenario: a lane that has already left `/api/loop/state`'s
+  // active-worker set (merged/reclaimed) but whose spend_ledger row is still there, forever, since
+  // the ledger is append-only and keyed by worker name/id, not by "is this lane currently active".
+  const rows = [spendRow(1, "w1", 3.4, "2026-08-06T01:00:00Z")];
+  const bars = spendByWorkerForDay(rows, new Date("2026-08-06T12:00:00Z"));
+  assert.deepEqual(bars, [{ label: "w1", usd: 3.4 }]);
+});
+
+test("spendByWorkerForDay never fabricates a $0 bar for a lane with no settled spend", () => {
+  const bars = spendByWorkerForDay([], new Date("2026-08-06T12:00:00Z"));
+  assert.deepEqual(bars, []);
 });

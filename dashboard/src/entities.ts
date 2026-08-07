@@ -47,14 +47,38 @@ export function foldEntityTitles(events: readonly LoopEvent[], seed: EntityTitle
 /** An open (unresolved) attention-class event, keyed for supersede/eviction tracking. */
 export type OpenAttention = Record<string, LoopEvent>;
 
-/** Entity-scoped attention items key by `${kind}:${issue}` (matching the engine's own
- *  `escalation-resolved` receipt shape — `payload.source`/`payload.issue`, escalation-
- *  reconcile.ts). Entity-LESS items (no `issue` in the payload — `ceiling-escalated`,
- *  `park-escalated`) key by kind alone: there is only ever "one" of that global condition open at
- *  a time, and no resolution witness clears them through this fold (§361's fuller reconciliation,
- *  not this issue's scope, owns that — they simply stay open, same as today). */
-function openAttentionKey(kind: string, issue: unknown): string {
-  return typeof issue === "number" ? `${kind}:${issue}` : kind;
+/** §3's own "clears when a later event moves that issue" list — `dispatched`, `merged`,
+ *  `gated-reentry`, `lane-revived` — mirrored here (matching the engine's `escalation-clear` tag
+ *  on those four kinds exactly; dashboard's own workspace doesn't import engine/src at runtime,
+ *  same established pattern as `EventKind`'s own doc-table mirror). */
+const ISSUE_CLEAR_KINDS = new Set(["dispatched", "merged", "gated-reentry", "lane-revived"]);
+
+/** escalation-reconcile.ts's own `CLEAR_PRODUCES` exemption, mirrored, not re-derived: a `merged`
+ *  event must never clear the `rollback-escalated` it itself produced — conductor.ts's merge path
+ *  appends `rollback-escalated` (reason `"merged-board-done"`, `MERGED_BOARD_DONE_REASON`) BEFORE
+ *  its own `merged` event when the post-merge Done-board write fails, so `merged`'s own arrival is
+ *  not evidence the board got fixed (§3: "an operation's own effects are not evidence it was
+ *  resolved"). No other kind/reason pair carries this exemption in the engine today. */
+function clearedBySameOperation(clearKind: string, openEvent: LoopEvent): boolean {
+  return clearKind === "merged" && openEvent.kind === "rollback-escalated" && openEvent.payload.reason === "merged-board-done";
+}
+
+/** Entity-scoped attention items key by `${kind}:${issue}` when the payload carries a numeric
+ *  `issue` (matching the engine's own `escalation-resolved` receipt shape — `payload.source`/
+ *  `payload.issue`, escalation-reconcile.ts). `worktree-retained` is the one exception: §3 is
+ *  explicit that its clear ("Matching for the §3 Needs-attention clear is by worktreePath — lane
+ *  names are reused slots; the path is the identity") keys by `worktreePath`, not issue, even
+ *  though its payload also carries one — an issue slot can be redispatched onto a DIFFERENT
+ *  worktree while the original retained folder still needs a human, so keying by issue would let
+ *  an unrelated later dispatch on the same issue number silently drop that human task. Every other
+ *  entity-less item (no `issue` in the payload — `park-escalated`, keyed by `triggerIssue`/`source`
+ *  rather than `issue`) keys by kind alone — there is only ever "one" of that global condition open
+ *  at a time. */
+function openAttentionKey(kind: string, payload: Record<string, unknown>): string {
+  if (kind === "worktree-retained") {
+    return typeof payload.worktreePath === "string" ? `worktree-retained:${payload.worktreePath}` : kind;
+  }
+  return typeof payload.issue === "number" ? `${kind}:${payload.issue}` : kind;
 }
 
 /**
@@ -67,20 +91,47 @@ function openAttentionKey(kind: string, issue: unknown): string {
  * Processes oldest-first regardless of input order. An attention-class event (`copy.ts`'s
  * `hasAttention`) OPENS its key, overwriting any earlier open event under the same key (the latest
  * instance is what's currently open — a re-escalation after an earlier one on the same issue is a
- * genuinely new episode, same doctrine the engine's own escalation-reconcile.ts uses). A later
- * `escalation-resolved` naming that same `(source, issue)` pair CLOSES it. Never mutates `seed`.
+ * genuinely new episode, same doctrine the engine's own escalation-reconcile.ts uses).
+ *
+ * §3's full clearing-semantics prose, mirrored (#715 gate② round 3 [1] — round 2 covered only
+ * `escalation-resolved`): a later `escalation-resolved` naming the same `(source, issue)` pair
+ * closes it; `park-resumed` closes the (single, global) `park-escalated` entry; `worktree-released`
+ * closes the `worktree-retained` entry sharing its `worktreePath`; and any of `dispatched`,
+ * `merged`, `gated-reentry`, `lane-revived` closes EVERY open entry sharing that event's `issue`,
+ * except one an operation's own effects produced (`clearedBySameOperation`). Never mutates `seed`.
  */
 export function foldOpenAttention(events: readonly LoopEvent[], seed: OpenAttention = {}): OpenAttention {
   const ordered = [...events].sort((a, b) => a.id - b.id);
   const open: OpenAttention = { ...seed };
   for (const event of ordered) {
-    if (event.kind === "escalation-resolved") {
-      const key = openAttentionKey(typeof event.payload.source === "string" ? event.payload.source : "", event.payload.issue);
-      delete open[key];
+    const { kind, payload } = event;
+    if (kind === "escalation-resolved") {
+      const source = typeof payload.source === "string" ? payload.source : "";
+      delete open[openAttentionKey(source, payload)];
       continue;
     }
-    if (!hasAttention(event.kind, event.payload)) continue;
-    open[openAttentionKey(event.kind, event.payload.issue)] = event;
+    if (kind === "park-resumed") {
+      delete open["park-escalated"];
+      continue;
+    }
+    if (kind === "worktree-released") {
+      if (typeof payload.worktreePath === "string") delete open[`worktree-retained:${payload.worktreePath}`];
+      continue;
+    }
+    if (ISSUE_CLEAR_KINDS.has(kind) && typeof payload.issue === "number") {
+      for (const [key, openEvent] of Object.entries(open)) {
+        // worktree-retained's payload also carries `issue`, but §3 is explicit that only
+        // `worktree-released` (matched by `worktreePath`, handled above) clears it — a lane slot
+        // can be redispatched onto a DIFFERENT worktree while the original retained folder still
+        // needs a human, so this generic issue-sweep must never touch it.
+        if (openEvent.kind === "worktree-retained") continue;
+        if (openEvent.payload.issue !== payload.issue) continue;
+        if (clearedBySameOperation(kind, openEvent)) continue;
+        delete open[key];
+      }
+    }
+    if (!hasAttention(kind, payload)) continue;
+    open[openAttentionKey(kind, payload)] = event;
   }
   return open;
 }

@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { type EntityTitles, foldEntityTitles, foldOpenAttention, type OpenAttention } from "../entities.ts";
-import { fetchEvents, fetchLoopState } from "./client.ts";
-import type { EventsPage, LoopEvent, LoopState } from "./types.ts";
+import { fetchEvents, fetchLoopState, fetchSpend } from "./client.ts";
+import type { EventsPage, LoopEvent, LoopState, SpendPage, SpendRow } from "./types.ts";
 
 /** §2 Transport: HTTP polling at 3 s. No WebSocket — that row is the acceptance bar. */
 export const POLL_MS = 3000;
@@ -14,6 +14,11 @@ export const EVENTS_PAGE = 200;
  *  window anyway, so the oldest entries are dropped once history exceeds this. */
 export const MAX_EVENT_HISTORY = 2000;
 
+/** Spend page size / history cap — same paging contract as events (§8), but the ledger writes far
+ *  less often than the event feed, so a smaller cap easily covers a full day. */
+export const SPEND_PAGE = 200;
+export const MAX_SPEND_HISTORY = 5000;
+
 export const loopStateQuery = () => ({
   queryKey: ["loop", "state"] as const,
   queryFn: ({ signal }: { signal: AbortSignal }): Promise<LoopState> => fetchLoopState(signal),
@@ -23,6 +28,12 @@ export const loopStateQuery = () => ({
 export const eventsQuery = (after: number) => ({
   queryKey: ["events", after] as const,
   queryFn: ({ signal }: { signal: AbortSignal }): Promise<EventsPage> => fetchEvents({ after, limit: EVENTS_PAGE }, signal),
+  refetchInterval: POLL_MS,
+});
+
+export const spendQuery = (after: number) => ({
+  queryKey: ["spend", after] as const,
+  queryFn: ({ signal }: { signal: AbortSignal }): Promise<SpendPage> => fetchSpend({ after, limit: SPEND_PAGE }, signal),
   refetchInterval: POLL_MS,
 });
 
@@ -84,16 +95,76 @@ export function useEventHistory(): {
 } {
   const [history, setHistory] = useState<EventHistory>(EMPTY_EVENT_HISTORY);
   const query = useQuery(eventsQuery(history.after));
+  // Fold the latest page into the render's OWN output immediately — `accumulateEventsPage` is
+  // pure and idempotent (dedupes by id), so recomputing it here ahead of the effect below is
+  // free. Without this, the very first page's data would be invisible until the effect commits
+  // (a one-frame lag in the browser; permanently invisible under `renderToStaticMarkup`, which
+  // never runs effects at all — a real gap `App.test.tsx`'s cost-strip regression test found).
+  const merged = query.data ? accumulateEventsPage(history, query.data) : history;
 
   useEffect(() => {
     if (query.data) setHistory((prev) => accumulateEventsPage(prev, query.data));
   }, [query.data]);
 
   return {
-    events: history.events,
-    titles: history.titles,
-    openAttention: Object.values(history.openAttention),
+    events: merged.events,
+    titles: merged.titles,
+    openAttention: Object.values(merged.openAttention),
     error: query.error,
-    isPending: query.isPending && history.events.length === 0,
+    isPending: query.isPending && merged.events.length === 0,
   };
+}
+
+export interface SpendHistory {
+  after: number;
+  rows: SpendRow[];
+}
+
+export const EMPTY_SPEND_HISTORY: SpendHistory = { after: 0, rows: [] };
+
+/**
+ * Folds one `/api/spend` page into an accumulated history, advancing the cursor — same shape as
+ * `accumulateEventsPage`, pure so it's unit-testable without mounting a component. #715 gate②
+ * round 3 [2]: the cost strip's "by lane" group was built from `/api/loop/state`'s active-worker
+ * `lanes.items`, so a lane's settled spend vanished the instant it left the active set (merged/
+ * reclaimed), and an in-flight lane with no settled or estimated cost rendered as a fabricated
+ * `$0`. The spend ledger is the honest source for "today's spend by lane" — it only ever records
+ * SETTLED cost, so a lane genuinely absent from it (still in flight, nothing billed yet) simply
+ * has no bar, never a $0 one.
+ */
+export function accumulateSpendPage(history: SpendHistory, page: SpendPage, maxHistory = MAX_SPEND_HISTORY): SpendHistory {
+  const seen = new Set(history.rows.map((r) => r.id));
+  const fresh = page.spend.filter((r) => !seen.has(r.id));
+  const after = Math.max(history.after, page.lastId);
+  if (fresh.length === 0) return after === history.after ? history : { ...history, after };
+  return { after, rows: [...history.rows, ...fresh].slice(-maxHistory) };
+}
+
+/** Polls the append-only spend ledger and accumulates it into a growing, cursor-advancing history,
+ *  same rationale as `useEventHistory` — including folding the latest page into the render's own
+ *  output immediately rather than only via the effect (see that hook's doc for why). */
+export function useSpendHistory(): { rows: SpendRow[]; error: unknown; isPending: boolean } {
+  const [history, setHistory] = useState<SpendHistory>(EMPTY_SPEND_HISTORY);
+  const query = useQuery(spendQuery(history.after));
+  const merged = query.data ? accumulateSpendPage(history, query.data) : history;
+
+  useEffect(() => {
+    if (query.data) setHistory((prev) => accumulateSpendPage(prev, query.data));
+  }, [query.data]);
+
+  return { rows: merged.rows, error: query.error, isPending: query.isPending && merged.rows.length === 0 };
+}
+
+/** Groups accumulated spend rows by lane (`worker`), summed, for `now`'s UTC calendar day — the
+ *  SAME day-boundary rule the engine's own `dailySpendUsd`/`spendByModelForDay` use (ts-prefix
+ *  match against `now.toISOString().slice(0, 10)`), so the cost strip's "by lane" total agrees
+ *  with the header's "today" total instead of drifting on its own boundary. */
+export function spendByWorkerForDay(rows: readonly SpendRow[], now: Date): { label: string; usd: number }[] {
+  const dayPrefix = now.toISOString().slice(0, 10);
+  const totals = new Map<string, number>();
+  for (const row of rows) {
+    if (!row.ts.startsWith(dayPrefix)) continue;
+    totals.set(row.worker, (totals.get(row.worker) ?? 0) + row.usd);
+  }
+  return [...totals.entries()].map(([label, usd]) => ({ label, usd }));
 }

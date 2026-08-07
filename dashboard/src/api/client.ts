@@ -1,4 +1,4 @@
-import type { EventsPage, LoopState } from "./types.ts";
+import type { EventsPage, LoopState, SpendPage } from "./types.ts";
 
 /**
  * Fetch wrappers for the §8 read-only endpoints. Same-origin relative paths only: the
@@ -18,3 +18,10 @@ export const fetchLoopState = (signal?: AbortSignal): Promise<LoopState> => getJ
 /** `GET /api/events?after&limit` — the append-only feed, ascending by id. */
 export const fetchEvents = ({ after, limit }: { after: number; limit: number }, signal?: AbortSignal): Promise<EventsPage> =>
   getJson<EventsPage>(`/api/events?after=${after}&limit=${limit}`, signal);
+
+/** `GET /api/spend?after&limit` — the append-only spend ledger, same paging contract as
+ *  `/api/events` (§8). #715 gate② [2]: the cost strip's "by lane" group reads from here, not from
+ *  `/api/loop/state`'s active-worker `lanes.items` — a lane's settled cost must not disappear
+ *  from today's total the instant it stops being active. */
+export const fetchSpend = ({ after, limit }: { after: number; limit: number }, signal?: AbortSignal): Promise<SpendPage> =>
+  getJson<SpendPage>(`/api/spend?after=${after}&limit=${limit}`, signal);

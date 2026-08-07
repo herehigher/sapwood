@@ -19,7 +19,15 @@ export type Payload = Record<string, unknown>;
  *  `undefined`, and so does its tooltip — there is nothing to fold a title from). */
 export type EntityToken = { kind: "issue"; number: number } | { kind: "pr"; number: number; issue?: number };
 
-export type SentencePart = string | EntityToken;
+/** A link to a repo-relative doc path (frontend-design.md §7's `engine-review-containment-gap`
+ *  row: "the place that explains what it means for a reader is the security guide, which this
+ *  sentence should link"). `path` is repo-relative, not a full URL — `copy.ts` has no access to
+ *  `repoUrl` (a pure function of `payload` only, same as every other entry), so the renderer
+ *  (which already receives `repoUrl` for entity links) resolves it, exactly like `EntityRef`
+ *  degrades to plain text when `repoUrl` is unknown instead of guessing a URL. */
+export type LinkToken = { kind: "link"; path: string; label: string };
+
+export type SentencePart = string | EntityToken | LinkToken;
 
 const issueTok = (n: unknown): EntityToken => ({ kind: "issue", number: n as number });
 const prTok = (n: unknown, issue?: unknown): EntityToken => ({
@@ -27,6 +35,16 @@ const prTok = (n: unknown, issue?: unknown): EntityToken => ({
   number: n as number,
   ...(issue !== undefined ? { issue: issue as number } : {}),
 });
+const linkTok = (path: string, label: string): LinkToken => ({ kind: "link", path, label });
+
+/** `engine-review-containment-gap`'s `payload.gaps` codes (codex-exec.ts's own constants,
+ *  e.g. `model-invoked-shell-execution`) — narrow, named patterns per the terminology rule
+ *  (§7: "no jargon"), falling back to the raw code itself for an unrecognized one (honest,
+ *  same as `fixReasonWord`'s own fallback) rather than a silent drop. */
+const CONTAINMENT_GAP_LABELS: Record<string, string> = {
+  "model-invoked-shell-execution": "the model can run shell commands directly",
+  "host-wide-filesystem-reads": "it can read files anywhere on this machine, not just the reviewed code",
+};
 
 export interface CopyEntry {
   /** Renders the feed sentence as a token list — plain strings interleave with issue/PR
@@ -261,9 +279,19 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: () => ["This review finished without reporting what it cost — its spend is unknown, not zero"],
   },
   "engine-review-containment-gap": {
-    sentence: () => [
-      "Recorded limits, not an incident: this review ran in a sandbox that blocks writes but still lets the reviewed code run, and does not limit which files it can read",
-    ],
+    // #715 gate② [0]: the §7 row names `payload.gaps` explicitly ("one line per entry in
+    // payload.gaps") and asks the sentence to link to the security guide — both were previously
+    // ignored (one fixed generic string, no payload read, no link). `\n`-prefixed parts render as
+    // separate lines via `.feed-sentence`'s `white-space: pre-line` (panels.css).
+    sentence: (p) => {
+      const gaps = Array.isArray(p.gaps) ? p.gaps.filter((g): g is string => typeof g === "string") : [];
+      return [
+        "Recorded limits, not an incident: this review ran in a sandbox that blocks writes but still lets the reviewed code run, and does not limit which files it can read",
+        ...gaps.map((gap) => `\n- ${CONTAINMENT_GAP_LABELS[gap] ?? gap}`),
+        "\n",
+        linkTok("docs/security.md", "What this means"),
+      ];
+    },
   },
   "engine-review-orphaned-group": {
     sentence: () => ["A review that ran out of time was stopped, but something it started is still running on this machine"],

@@ -191,3 +191,18 @@ test("#715 gate② [0]: a pinned item that is ALSO still within the recent windo
   const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[escalation]} titles={{}} now={NOW} />);
   assert.equal(html.match(/needs a human decision/g)?.length, 1);
 });
+
+test("#715 gate② round 3 [0]: engine-review-containment-gap renders its gaps as separate lines and links the security guide", () => {
+  const events = [ev(1, "engine-review-containment-gap", { gaps: ["model-invoked-shell-execution"] })];
+  const withRepo = renderToStaticMarkup(
+    <ActivityFeed events={events} pinnedAttention={[]} titles={{}} repoUrl="https://github.com/herehigher/sapwood" now={NOW} />,
+  );
+  assert.match(withRepo, /shell commands directly/);
+  assert.match(withRepo, /href="https:\/\/github\.com\/herehigher\/sapwood\/blob\/main\/docs\/security\.md"/);
+
+  // No repoUrl known -> the link degrades to plain text, never a guessed URL (same posture as
+  // EntityRef with no repoUrl).
+  const withoutRepo = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[]} titles={{}} now={NOW} />);
+  assert.doesNotMatch(withoutRepo, /<a /);
+  assert.match(withoutRepo, /What this means/);
+});

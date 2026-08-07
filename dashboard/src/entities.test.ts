@@ -150,3 +150,74 @@ test("foldOpenAttention never mutates its seed", () => {
   foldOpenAttention([event(2, "escalation-resolved", { issue: 5, source: "drive-needs-human", via: "merged" })], seed);
   assert.deepEqual(seed, frozenCopy);
 });
+
+// ── #715 gate② round 3 [1]: the rest of §3's documented clearing transitions ────────────────────
+
+test("foldOpenAttention: a later `dispatched` for the same issue clears an open ceiling-escalated", () => {
+  const open = foldOpenAttention([event(1, "ceiling-escalated", { worker: "w1", issue: 5 }), event(2, "dispatched", { issue: 5 })]);
+  assert.deepEqual(open, {});
+});
+
+test("foldOpenAttention: a later `merged` for the same issue clears an open env-failure-preserved", () => {
+  const open = foldOpenAttention([event(1, "env-failure-preserved", { worker: "w1", issue: 5 }), event(2, "merged", { issue: 5, pr: 50 })]);
+  assert.deepEqual(open, {});
+});
+
+test("foldOpenAttention: `gated-reentry` and `lane-revived` also clear open issue-scoped attention", () => {
+  const gatedReentry = foldOpenAttention([event(1, "gated-reentry-capped", { issue: 5 }), event(2, "gated-reentry", { issue: 5 })]);
+  assert.deepEqual(gatedReentry, {});
+
+  const laneRevived = foldOpenAttention([
+    event(1, "env-failure-preserved", { worker: "w1", issue: 5 }),
+    event(2, "lane-revived", { issue: 5 }),
+  ]);
+  assert.deepEqual(laneRevived, {});
+});
+
+test("foldOpenAttention: an issue-clear event never touches a DIFFERENT issue's open attention", () => {
+  const open = foldOpenAttention([event(1, "drive-needs-human", { issue: 5, pr: 50 }), event(2, "dispatched", { issue: 9 })]);
+  assert.equal(Object.keys(open).length, 1);
+  assert.equal(Object.values(open)[0]?.payload.issue, 5);
+});
+
+test("foldOpenAttention: the same-operation exemption — a merge never clears the rollback-escalated it itself produced", () => {
+  const open = foldOpenAttention([
+    event(1, "merged", { issue: 5, pr: 50 }),
+    event(2, "rollback-escalated", { issue: 5, reason: "merged-board-done" }),
+  ]);
+  // The `rollback-escalated` is appended AFTER `merged` in this exact scenario (conductor.ts's
+  // merge path posts the rollback escalation before its OWN merged event in real ordering, but
+  // the exemption must hold regardless of arrival order — a later, UNRELATED merged for the same
+  // issue must still not accidentally launder this specific reason away).
+  const laterMerge = foldOpenAttention([event(3, "merged", { issue: 5, pr: 51 })], open);
+  assert.equal(Object.keys(laterMerge).length, 1, "the same-reason rollback-escalated must survive a later merged for its issue");
+});
+
+test("foldOpenAttention: a merge WITHOUT the merged-board-done reason clears normally (the exemption is narrow)", () => {
+  const open = foldOpenAttention([
+    event(1, "rollback-escalated", { issue: 5, reason: "some-other-reason" }),
+    event(2, "merged", { issue: 5, pr: 50 }),
+  ]);
+  assert.deepEqual(open, {});
+});
+
+test("foldOpenAttention: `park-resumed` clears the open park-escalated entry", () => {
+  const open = foldOpenAttention([event(1, "park-escalated", { source: "llm" }), event(2, "park-resumed", {})]);
+  assert.deepEqual(open, {});
+});
+
+test("foldOpenAttention: `worktree-released` clears the worktree-retained entry sharing its worktreePath, keyed by path not issue", () => {
+  const open = foldOpenAttention([
+    event(1, "worktree-retained", { worker: "w1", issue: 5, worktreePath: "/data/worktrees/w1-issue5" }),
+    // A DIFFERENT dispatch for the SAME issue number reusing the lane slot must NOT clear the
+    // still-retained folder — §3's own reason keying by worktreePath exists to prevent this.
+    event(2, "dispatched", { issue: 5 }),
+  ]);
+  assert.equal(Object.keys(open).length, 1, "an unrelated dispatch on the same issue must not clear a retained worktree");
+
+  const released = foldOpenAttention(
+    [event(3, "worktree-released", { worker: "w1", issue: 5, worktreePath: "/data/worktrees/w1-issue5" })],
+    open,
+  );
+  assert.deepEqual(released, {});
+});

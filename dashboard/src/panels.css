@@ -69,6 +69,13 @@
   font-weight: 600;
 }
 
+/* #715 gate② [0]: engine-review-containment-gap's per-gap lines use embedded "\n" sentence
+ * parts (copy.ts) rather than a second rendering path — pre-line turns those into real line
+ * breaks without collapsing the ordinary single-space-separated sentences everywhere else. */
+.feed-sentence {
+  white-space: pre-line;
+}
+
 .feed-dot {
   width: 8px;
   height: 8px;

@@ -1,5 +1,5 @@
 import type { LoopEvent } from "../api/types.ts";
-import { copyFor, type EntityToken, hasAttention } from "../copy.ts";
+import { copyFor, type EntityToken, hasAttention, type SentencePart } from "../copy.ts";
 import type { EntityTitles } from "../entities.ts";
 import { formatRelative } from "../format.ts";
 import { EntityRef } from "./EntityRef.tsx";
@@ -28,6 +28,22 @@ function gateGlyph(kind: string, payload: Record<string, unknown>): boolean | nu
   return null;
 }
 
+/** Renders one `SentencePart` — string, entity token, or doc link (#715 gate② [0]:
+ *  `engine-review-containment-gap`'s link to the security guide). A link with no known `repoUrl`
+ *  degrades to plain text, same posture as `EntityRef` — never a guessed URL. */
+function SentencePartView({ part, titles, repoUrl }: { part: SentencePart; titles: EntityTitles; repoUrl?: string | undefined }) {
+  if (typeof part === "string") return <>{part}</>;
+  if (part.kind === "link") {
+    if (!repoUrl) return <span>{part.label}</span>;
+    return (
+      <a href={`${repoUrl}/blob/main/${part.path}`} target="_blank" rel="noreferrer">
+        {part.label}
+      </a>
+    );
+  }
+  return <EntityRef token={part as EntityToken} titles={titles} repoUrl={repoUrl} />;
+}
+
 function FeedEntry({ event, titles, repoUrl, now }: { event: LoopEvent; titles: EntityTitles; repoUrl?: string | undefined; now: Date }) {
   const entry = copyFor(event.kind);
   const parts = entry ? entry.sentence(event.payload) : [`Unrecognized event: ${event.kind}`];
@@ -39,14 +55,12 @@ function FeedEntry({ event, titles, repoUrl, now }: { event: LoopEvent; titles: 
       <span className="feed-dot" style={{ background: dotColor }} aria-hidden="true" />
       {glyph !== null && <StateGlyph ok={glyph} className={glyph ? "glyph-ok" : "glyph-fail"} />}
       <span className="feed-sentence">
-        {parts.map((part, i) =>
-          typeof part === "string" ? (
-            // biome-ignore lint/suspicious/noArrayIndexKey: sentence parts are a fixed-order render list, not reorderable data
-            <span key={i}>{part}</span>
-          ) : (
-            <EntityRef key={`${part.kind}-${part.number}`} token={part as EntityToken} titles={titles} repoUrl={repoUrl} />
-          ),
-        )}
+        {parts.map((part, i) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: sentence parts are a fixed-order render list, not reorderable data
+          <span key={i}>
+            <SentencePartView part={part} titles={titles} repoUrl={repoUrl} />
+          </span>
+        ))}
       </span>
       <span className="muted data feed-ts">{formatRelative(event.ts, now)}</span>
       <details className="feed-details">

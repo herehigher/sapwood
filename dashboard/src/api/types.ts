@@ -62,3 +62,24 @@ export type LoopEvent = {
 };
 
 export type EventsPage = { events: LoopEvent[]; lastId: number };
+
+/** One `spend_ledger` row, served verbatim (`server.ts`'s `/api/spend` route, `State.spendPage`) —
+ *  `actorKind`/`role`/`estimated` are `null` on a row that never claimed one (#645), same never-
+ *  guess stance as everywhere else this triple appears. */
+export type SpendRow = {
+  id: number;
+  ts: string;
+  worker: string;
+  issue: number;
+  usd: number;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  actorKind: "worker" | "fix-leg" | "peripheral-role" | "engine-review" | null;
+  role: string | null;
+  estimated: boolean | null;
+};
+
+export type SpendPage = { spend: SpendRow[]; lastId: number };

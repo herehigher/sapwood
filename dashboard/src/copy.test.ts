@@ -10,7 +10,7 @@ import { COPY, copyFor, EVENT_KINDS, type EventKind, hasAttention, type Sentence
 const render = (kind: EventKind, payload: Record<string, unknown> = {}) =>
   COPY[kind]
     .sentence(payload)
-    .map((part) => (typeof part === "string" ? part : `#${part.number}`))
+    .map((part) => (typeof part === "string" ? part : part.kind === "link" ? part.label : `#${part.number}`))
     .join("");
 
 // frontend-design.md §7's TABLE, copied verbatim as the count/order oracle — "the map is the
@@ -200,6 +200,31 @@ test("every PR-bearing sentence spells out the literal word PR before the entity
     textBeforeFirstPrToken(COPY["escalation-resolved"].sentence({ issue: 1, pr: 1, via: "pr-closed" })) ?? "",
     /no longer needs you — PR $/,
   );
+});
+
+test("#715 gate② round 3 [0]: engine-review-containment-gap renders one line per payload.gaps entry and a security-guide link", () => {
+  const parts = COPY["engine-review-containment-gap"].sentence({
+    gaps: ["model-invoked-shell-execution", "host-wide-filesystem-reads"],
+  });
+  const lines = parts.filter((p): p is string => typeof p === "string" && p.startsWith("\n- "));
+  assert.equal(lines.length, 2, "expected one line per gap entry");
+  assert.match(lines[0]!, /shell commands directly/);
+  assert.match(lines[1]!, /read files anywhere/);
+  const link = parts.find((p) => typeof p !== "string" && p.kind === "link");
+  assert.ok(link, "expected a link token in the sentence");
+  assert.equal((link as { kind: "link"; path: string }).path, "docs/security.md");
+});
+
+test("engine-review-containment-gap falls back to the raw code for an unrecognized gap, never a silent drop", () => {
+  const parts = COPY["engine-review-containment-gap"].sentence({ gaps: ["some-future-gap-code"] });
+  const lines = parts.filter((p): p is string => typeof p === "string" && p.startsWith("\n- "));
+  assert.deepEqual(lines, ["\n- some-future-gap-code"]);
+});
+
+test("engine-review-containment-gap tolerates a missing/malformed payload.gaps without throwing", () => {
+  assert.doesNotThrow(() => COPY["engine-review-containment-gap"].sentence({}));
+  const parts = COPY["engine-review-containment-gap"].sentence({});
+  assert.equal(parts.filter((p) => typeof p === "string" && p.startsWith("\n- ")).length, 0);
 });
 
 test("drive-fixup names the reason word for each of the three prescriptions", () => {
