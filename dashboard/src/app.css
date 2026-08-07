@@ -104,6 +104,29 @@ code,
 }
 
 /*
+ * §3's A→B→C→D→E layout: header and hero always span the full row, same as the cost strip
+ * and the config drawer when open — only the lane board / activity feed share a row (§3's
+ * C | D split), which `.stack`'s own auto-fit already gives the two remaining items.
+ * #716 gate② P2-7: without this, the hero's fixed 1200×380 stage landed in the SAME
+ * minmax(320px, 1fr) cell as a single lane card — live-measured at 374×118px with ~3px
+ * labels, instead of the full-width band the design calls for.
+ */
+.stack > .app-header,
+.stack > .hero,
+.stack > .cost-strip,
+.stack > .config-drawer {
+  grid-column: 1 / -1;
+}
+
+/* A real ≤720px single-column breakpoint (auto-fit's own wrap is only an approximation of
+ * this — it can still show two narrow columns above 720px depending on viewport width). */
+@media (max-width: 720px) {
+  .stack {
+    grid-template-columns: 1fr;
+  }
+}
+
+/*
  * §6: honour prefers-reduced-motion by collapsing the motion tokens rather than by
  * disabling animations one at a time — every module reads --beat/--travel, so this is
  * the single switch. Lives here, not in tokens.css: tokens.css stays a flat declaration

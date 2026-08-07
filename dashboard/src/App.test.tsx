@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
-import { App } from "./App.tsx";
+import { App, resolveFixCap } from "./App.tsx";
 import { eventsQuery, loopStateQuery, spendQuery } from "./api/queries.ts";
 
 /**
@@ -60,6 +60,18 @@ async function renderSettledApp(byPath: Record<string, { status: number; body: u
 }
 
 test.afterEach(() => mock.restoreAll());
+
+test("#716 gate② P1-3: resolveFixCap reads the nested lanes.prFixCap path, not a flat bracket lookup", () => {
+  // A non-default cap (6, not the hardcoded fallback 2) — the regression this pins is the flat
+  // `config["lanes.prFixCap"]` lookup silently missing every real (nested) server config and
+  // always falling back to the default, which a default-valued fixture couldn't distinguish.
+  assert.equal(resolveFixCap({ lanes: { prFixCap: 6 } }), 6);
+  assert.equal(resolveFixCap({ "lanes.prFixCap": 6 }), 2, "a flat dotted key must not match — the server never serves one");
+  assert.equal(resolveFixCap(null), 2);
+  assert.equal(resolveFixCap(undefined), 2);
+  assert.equal(resolveFixCap({ lanes: {} }), 2);
+  assert.equal(resolveFixCap({ lanes: { prFixCap: "6" } }), 2, "a non-number value is never coerced");
+});
 
 test("#715 gate② [7]: header shows the documented disconnected caption when /api/loop/state fails", async () => {
   const html = await renderSettledApp({

@@ -60,6 +60,15 @@ export type HeroState = {
   /** `lanes.max` was unreadable — the stage says so rather than guessing a lane count. */
   laneCountUnknown: boolean;
   lastId: number;
+  /** ISO timestamp of the last folded event, whatever its kind — the OUTCOME zone's staleness
+   *  caption (#716 gate② P2-8) reads "how long since anything happened", not phase-scoped. */
+  lastEventTs: string | null;
+  /** `pool-selected`/`round-phase`'s `round_id` — the boundary `roundMerged` resets on
+   *  (#716 gate② P2-8's round outcome tally: "never repeating the all-time ring count"). */
+  roundId: number | null;
+  /** `merged` events folded since `roundId` last changed — the tally's "N merged", distinct
+   *  from `rings` (the all-time trunk count). */
+  roundMerged: number;
 };
 
 /** One row of the §6 transition table. `id` is the event id, so keys are stable. */
@@ -67,6 +76,13 @@ export type Transition =
   | { kind: "dispatch"; id: number; issue: number; lane: string }
   | { kind: "to-checkpoint"; id: number; issue: number; lane: string; pr: number | null }
   | { kind: "fix-return"; id: number; issue: number; lane: string; pr: number | null; reason: string; round: number }
+  /**
+   * #716 gate② P2-6: production writes `fix-leg-started` BEFORE `drive-fixup` — the real
+   * send-back reason routinely names its lane only after the droplet has already returned
+   * there wearing the generic "review findings" fallback. No travel (`transitionOrigin` is
+   * `null`): the droplet is already in its lane, only the label was wrong.
+   */
+  | { kind: "fix-reason"; id: number; issue: number; lane: string; reason: string }
   | { kind: "escalate"; id: number; issue: number; pr: number | null }
   | { kind: "ring"; id: number; issue: number; pr: number | null; ring: number }
   | { kind: "handoff"; id: number; issue: number; lane: string | null }
@@ -97,6 +113,9 @@ export function initialHeroState(lanesMax: number | null): HeroState {
     ceilingReached: false,
     laneCountUnknown: lanesMax === null,
     lastId: 0,
+    lastEventTs: null,
+    roundId: null,
+    roundMerged: 0,
   };
 }
 
@@ -115,6 +134,43 @@ export function withLaneCount(state: HeroState, lanesMax: number | null): HeroSt
   const lanes = [...state.lanes];
   while (lanes.length < want) lanes.push({ channel: lanes.length, worker: null, issue: null, phase: "idle", fixRound: 0, reason: null });
   return { ...state, lanes, laneCountUnknown: unknown };
+}
+
+/**
+ * Priority tier for a `visibleLanes` cut — LOWER survives first. Genuinely active work
+ * (writing/driving/fixing) always wins a slot; a permanently `failed` channel (never
+ * revisited — see `moveDroplet`'s doc) is real information but stale, so it ranks below
+ * live work and above a plain idle placeholder, which carries nothing at all.
+ */
+const LANE_PRIORITY: Record<LanePhase, number> = { writing: 0, driving: 0, fixing: 0, failed: 1, idle: 2 };
+
+/**
+ * The lanes actually worth drawing as tracks — capped at the CONFIGURED slot count
+ * (`lanes.max`, the same source `LaneBoard` renders against) rather than `state.lanes.length`,
+ * which only ever grows.
+ *
+ * #716 gate② P1-9 (PO live probe): a lane whose worker never returns (a permanently failed,
+ * never-revisited channel) or whose engine-minted worker name the fold has simply never seen
+ * before both leave a stale/extra entry behind forever; against a live DB with real history
+ * behind it, that folded into 39 "Work lane N" tracks squeezed into the fixed-width stage.
+ * This is a READ VIEW only — `state.lanes` itself (and lane assignment in `apply`) is
+ * untouched, so the fold stays the honest source of truth; only what gets DRAWN is capped.
+ * A stable sort by `LANE_PRIORITY` keeps live work first without ever reordering two lanes of
+ * the SAME tier relative to each other; survivors are renumbered 0..n-1 for display (the
+ * `channel` used to pick a stage row and the `w{n+1}` label, §6/baseline).
+ */
+export function visibleLanes(lanes: readonly LaneView[], lanesMax: number | null): LaneView[] {
+  const want = Math.max(1, lanesMax ?? lanes.length);
+  const ordered = lanes.length <= want ? lanes : [...lanes].sort((a, b) => LANE_PRIORITY[a.phase] - LANE_PRIORITY[b.phase]);
+  return ordered.slice(0, want).map((l, i) => ({ ...l, channel: i }));
+}
+
+/** `state` with `.lanes` replaced by its capped, renumbered `visibleLanes` view — the form
+ *  every position/render computation (`dropletPoint`, `HeroStage`'s lane loop, `playback.ts`)
+ *  must use so a droplet's channel lookup and the DOM it actually lands in never disagree. */
+export function withVisibleLanes(state: HeroState, lanesMax: number | null): HeroState {
+  const lanes = visibleLanes(state.lanes, lanesMax);
+  return lanes === state.lanes ? state : { ...state, lanes };
 }
 
 /**
@@ -139,6 +195,7 @@ export function transitionOrigin(t: Transition): DropletAt | null {
       return "checkpoint";
     case "fail":
     case "dim":
+    case "fix-reason":
       return null;
   }
 }
@@ -213,7 +270,14 @@ type Draft = {
   pool: number[];
   rings: number;
   ceilingReached: boolean;
+  lastEventTs: string | null;
+  roundId: number | null;
+  roundMerged: number;
 };
+
+/** Either round-boundary event's `round_id` field (engine payload, snake_case verbatim —
+ *  `pool-selected`/`round-phase` in `engine/src/loop/align.ts`/`round.ts`). */
+const roundIdOf = (p: Record<string, unknown>): number | null => num(p.round_id);
 
 /**
  * Find (or open) the channel a worker owns. A worker beyond `lanes.max` gets an extra
@@ -299,6 +363,19 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
   const issue = num(p.issue);
   const pr = num(p.pr);
 
+  // #716 gate② P2-8: the OUTCOME zone's staleness caption reads "how long since anything
+  // happened" — every fresh event, whatever its kind, updates the clock.
+  draft.lastEventTs = e.ts;
+
+  // #716 gate② P2-8: `pool-selected` and `round-phase` both carry the engine's `round_id`
+  // (`engine/src/loop/align.ts`/`round.ts`) — whichever names a NEW one resets the round's
+  // outcome tally so `roundMerged` never becomes the all-time `rings` count in disguise.
+  const roundId = roundIdOf(p);
+  if (roundId !== null && roundId !== draft.roundId) {
+    draft.roundId = roundId;
+    draft.roundMerged = 0;
+  }
+
   // Any event naming both an issue and a PR teaches that droplet its number, whether or not
   // the kind moves anything. This is how the tag arrives in replay, where no live lane
   // overlay exists and `reclaim-done` itself carries no PR: the next drive event supplies it.
@@ -312,6 +389,12 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       draft.pool = [...new Set(issues)];
       return null;
     }
+
+    case "round-phase":
+      // The round-boundary bookkeeping above already handled this; §6 gives this kind no
+      // stage animation of its own (the live `round.phase` overlay drives the planning/
+      // reflection nodes, not the event fold — see `activePlanningNode`/`activeReflectionNode`).
+      return null;
 
     case "dispatched": {
       if (issue === null || worker === null) return null;
@@ -339,13 +422,23 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
     }
 
     case "drive-fixup": {
-      // Half of a pair: the send-back is recorded now, the return animates when the fix leg
-      // actually starts. Animating here would show the droplet moving before the engine moved it.
+      // Half of a pair, in the ASSUMED order: the send-back is recorded now, the return
+      // animates when the fix leg actually starts. Animating here would show the droplet
+      // moving before the engine moved it.
+      //
+      // #716 gate② P2-6: production writes the OPPOSITE order — `fix-leg-started` durably
+      // lands BEFORE `drive-fixup`, so by the time this fires the droplet is routinely
+      // already back in its lane wearing `fix-leg-started`'s generic "review findings"
+      // fallback (neither event's own payload can see the other's field). When that's
+      // already happened (the lane is mid-fix on THIS issue), correct the label in place
+      // instead of leaving the wrong reason lit for the rest of the fix round.
       if (issue === null) return null;
       const reason = sendBackReason(p.reason);
       const lane = laneOf(draft, worker);
+      const alreadyFixing = lane?.phase === "fixing" && lane.issue === issue;
       if (lane) lane.reason = reason;
       moveDroplet(draft, issue, { sendBack: reason, ...(pr !== null ? { pr } : {}) });
+      if (alreadyFixing && worker) return { kind: "fix-reason", id, issue, lane: worker, reason };
       return null;
     }
 
@@ -367,6 +460,7 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       if (issue === null) return null;
       releaseLane(laneOf(draft, worker));
       draft.rings += 1;
+      draft.roundMerged += 1;
       // Only the newest merge keeps its tag on the trunk — older ones *are* the rings now.
       for (const [key, d] of draft.droplets) if (d.at === "trunk") draft.droplets.delete(key);
       const d = moveDroplet(draft, issue, { at: "trunk", ...(pr !== null ? { pr } : {}) });
@@ -383,6 +477,21 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
     case "ceiling-escalated": {
       draft.ceilingReached = true;
       return { kind: "dim", id };
+    }
+
+    // #716 gate② P1-2: `ceiling-escalated` used to LATCH `ceilingReached` forever — the
+    // dashboard folds from event id 0, so any HISTORICAL ceiling breach (yesterday's run,
+    // long since cleared) permanently dimmed a perfectly healthy current scene. These two
+    // are the engine's real clearing signals (`engine/src/state/event-kinds/run.ts`):
+    // `ceiling-breach-cleared` (a breached reason leaves the set — the hero tracks one
+    // boolean, not the full reason set, so any clear is treated as "no longer breached", the
+    // honest simplification given the doc only ever names ONE dimmed/undimmed state) and
+    // `run-started` (a fresh boot carries no breach state forward at all — the hard reset
+    // that makes "stale history" impossible regardless of how far back id 0 goes).
+    case "ceiling-breach-cleared":
+    case "run-started": {
+      draft.ceilingReached = false;
+      return null;
     }
 
     default: {
@@ -405,6 +514,38 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
   }
 }
 
+/** Freeze a `Draft` in progress into a real, independent `HeroState` snapshot — used both for
+ *  the final fold result and, per event, for `FoldStep.state` below (#716 gate② P1-1). */
+function snapshotDraft(draft: Draft, laneCountUnknown: boolean, lastId: number): HeroState {
+  return {
+    lanes: draft.lanes.map((l) => ({ ...l })),
+    droplets: [...draft.droplets.values()],
+    pool: [...draft.pool],
+    rings: draft.rings,
+    ceilingReached: draft.ceilingReached,
+    laneCountUnknown,
+    lastId,
+    lastEventTs: draft.lastEventTs,
+    roundId: draft.roundId,
+    roundMerged: draft.roundMerged,
+  };
+}
+
+/**
+ * One folded event that produced a transition, paired with the stage state exactly as it
+ * stood right after that single event — i.e. this step's own intermediate scene, not the
+ * batch's final one.
+ *
+ * #716 gate② P1-1: the animation layer used to animate every transition in a poll's batch
+ * against the SAME (final) `dropletPoint` — a batch containing `dispatched` then
+ * `reclaim-done` for the same issue animated the `dispatched` leg straight to the checkpoint
+ * (reclaim-done's destination, since that's where the FINAL state has the droplet), skipping
+ * the backlog→lane beat entirely, while two timelines wrote conflicting transforms onto the
+ * same element. `steps` gives the animation layer (`hero/playback.ts`) each transition's own
+ * before/after scene to compute correct, sequenced endpoints from.
+ */
+export type FoldStep = { transition: Transition; state: HeroState };
+
 /**
  * Fold a page of events onto the stage state.
  *
@@ -412,9 +553,9 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
  * overlapping tail (`queries.ts` holds `after` steady), so without this every poll would
  * re-count every merge.
  */
-export function foldEvents(state: HeroState, events: DomainEvent[]): { state: HeroState; transitions: Transition[] } {
+export function foldEvents(state: HeroState, events: DomainEvent[]): { state: HeroState; transitions: Transition[]; steps: FoldStep[] } {
   const fresh = events.filter((e) => e.id > state.lastId).sort((a, b) => a.id - b.id);
-  if (fresh.length === 0) return { state, transitions: [] };
+  if (fresh.length === 0) return { state, transitions: [], steps: [] };
 
   const draft: Draft = {
     lanes: state.lanes.map((l) => ({ ...l })),
@@ -422,25 +563,27 @@ export function foldEvents(state: HeroState, events: DomainEvent[]): { state: He
     pool: [...state.pool],
     rings: state.rings,
     ceilingReached: state.ceilingReached,
+    lastEventTs: state.lastEventTs,
+    roundId: state.roundId,
+    roundMerged: state.roundMerged,
   };
 
   const transitions: Transition[] = [];
+  const steps: FoldStep[] = [];
+  let lastId = state.lastId;
   for (const e of fresh) {
     const t = apply(draft, e);
-    if (t) transitions.push(t);
+    lastId = e.id;
+    if (t) {
+      transitions.push(t);
+      steps.push({ transition: t, state: snapshotDraft(draft, state.laneCountUnknown, lastId) });
+    }
   }
 
   return {
-    state: {
-      lanes: draft.lanes,
-      droplets: [...draft.droplets.values()],
-      pool: draft.pool,
-      rings: draft.rings,
-      ceilingReached: draft.ceilingReached,
-      laneCountUnknown: state.laneCountUnknown,
-      lastId: fresh.at(-1)?.id ?? state.lastId,
-    },
+    state: snapshotDraft(draft, state.laneCountUnknown, lastId),
     transitions,
+    steps,
   };
 }
 

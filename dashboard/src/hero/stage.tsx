@@ -14,7 +14,8 @@
  */
 
 import type { Ref } from "react";
-import { activePlanningNode, activeReflectionNode, type Droplet, type DropletAt, type HeroState } from "./state.ts";
+import { readConfigPath } from "../config-captions.ts";
+import { activePlanningNode, activeReflectionNode, type Droplet, type DropletAt, type HeroState, withVisibleLanes } from "./state.ts";
 
 // ── Geometry ──────────────────────────────────────────────────────────────────
 // One coordinate space, shared with Hero.tsx's timelines so travel always lands where
@@ -27,15 +28,29 @@ export const STAGE = { w: 1200, h: 380 } as const;
 const BACKLOG = { x: 46, y: 62, w: 96, chip: 22 } as const;
 /** `note` clears the tallest lane stack (`lanes.max` 6) rather than sitting under 3 lanes. */
 const PLANNING = { x: 224, note: 300, noteX: 152 } as const;
-/** §7: plain word first, internal term never. */
+/** §7: plain word first, internal term never. `role` is the config-captions.ts `roles.<role>`
+ *  path (#716 gate② P2-8's model·effort caption) — never worker.* (that's the lanes zone). */
 const PLANNING_NODES = [
-  { node: "goal-align" as const, y: 96, label: "Goal & align", hint: "Decides what's worth doing this round and files it as issues" },
-  { node: "arch-review" as const, y: 158, label: "Arch review", hint: "Checks the round's plans fit the architecture before work starts" },
+  {
+    node: "goal-align" as const,
+    y: 96,
+    label: "Goal & align",
+    hint: "Decides what's worth doing this round and files it as issues",
+    role: "roles.po",
+  },
+  {
+    node: "arch-review" as const,
+    y: 158,
+    label: "Arch review",
+    hint: "Checks the round's plans fit the architecture before work starts",
+    role: "roles.architect",
+  },
   {
     node: "verify" as const,
     y: 220,
     label: "Verify",
     hint: "An independent review approves each plan — including how it will be verified — before any code is written",
+    role: "roles.verificationPlanReviewer",
   },
 ] as const;
 const LANES = { x: 330, w: 372, top: 92, gap: 44 } as const;
@@ -44,8 +59,8 @@ const ESCALATION = { x: 810, y: 320 } as const;
 const TRUNK = { x: 1006, y: 156, step: 7, max: 12 } as const;
 const REFLECTION = { x: 1118, bottom: 244 } as const;
 const REFLECTION_NODES = [
-  { node: "summary" as const, y: 110, label: "Summary" },
-  { node: "retro" as const, y: 200, label: "Retro" },
+  { node: "summary" as const, y: 110, label: "Summary", role: "roles.harvest" },
+  { node: "retro" as const, y: 200, label: "Retro", role: "roles.retro" },
 ] as const;
 
 const laneY = (index: number) => LANES.top + index * LANES.gap;
@@ -59,6 +74,10 @@ const laneIndex = (state: HeroState, d: Droplet) => state.lanes.find((l) => l.wo
  * `at` defaults to where the droplet actually is; pass a zone to get the same droplet's
  * coordinates somewhere else — that is how a first-seen droplet gets a travel origin
  * (`transitionOrigin`) instead of animating from its own destination.
+ *
+ * `state.lanes` must already be the CAPPED, renumbered view (`withVisibleLanes` in
+ * `state.ts`, #716 gate② P1-9) — this function trusts `state.lanes`' `channel` values as
+ * the real, drawn track index, so callers own applying the cap before this ever sees state.
  */
 export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at): { x: number; y: number } {
   switch (at) {
@@ -90,6 +109,9 @@ function dropletFill(d: Droplet): string {
 
 export type HeroStageProps = {
   state: HeroState;
+  /** `lanes.max` — caps the drawn tracks to the CONFIGURED slot count (#716 gate② P1-9);
+   *  `null` draws whatever `state.lanes` already carries (the fold's own "unknown" placeholder). */
+  lanesMax: number | null;
   /** `lanes.prFixCap` — the stage renders "round n of cap", the fold only knows n. */
   fixCap: number;
   /** Live round-phase cursor (`/api/loop/state`'s `round.phase`); null when no round is open. */
@@ -98,16 +120,66 @@ export type HeroStageProps = {
   dimmed?: boolean;
   /** Drives the CSS ambient shimmer off; the travel/stroke half is `Hero.tsx`'s job. */
   reducedMotion?: boolean;
+  /** Allowlisted config (§3 E's subset), for the model·effort captions §6 documents on the
+   *  LLM-backed nodes (planning trio, lanes, SUMMARY, RETRO) and REVIEW's mode word. `null`/
+   *  absent draws no captions — an honest gap, never a guessed model name (#716 gate② P2-8). */
+  config?: Record<string, unknown> | null;
+  /** Test-injectable clock for the staleness caption (#716 gate② P2-8) — defaults to the real
+   *  clock; never a real timer inside this component (repo bans timing-dependent tests). */
+  now?: Date;
   ref?: Ref<SVGSVGElement>;
 };
 
-export function HeroStage({ state, fixCap, roundPhase = null, dimmed = false, reducedMotion = false, ref }: HeroStageProps) {
+/** `roles.<role>.model`/`.effort`, or top-level `worker.model`/`.effort` when `rolePath` is
+ *  already the leaf ("worker") — §3 C's mono `model · effort` caption, config-sourced only,
+ *  never a live telemetry guess. `null` when the config doesn't name a model (honest gap). */
+function modelEffortCaption(config: Record<string, unknown> | null | undefined, rolePath: string): string | null {
+  if (!config) return null;
+  const model = readConfigPath(config, `${rolePath}.model`);
+  if (typeof model !== "string") return null;
+  const effort = readConfigPath(config, `${rolePath}.effort`);
+  return typeof effort === "string" ? `${model} · ${effort}` : model;
+}
+
+/** §6: "how long since anything happened" — the OUTCOME zone's staleness caption. Whole
+ *  seconds, floored; a future/unparseable timestamp (clock skew) reads as "just now" rather
+ *  than a negative or NaN caption. */
+function stalenessCaption(lastEventTs: string | null, now: Date): string | null {
+  if (lastEventTs === null) return null;
+  const ts = Date.parse(lastEventTs);
+  if (Number.isNaN(ts)) return null;
+  const secs = Math.max(0, Math.floor((now.getTime() - ts) / 1000));
+  return `last event ${secs}s ago`;
+}
+
+export function HeroStage({
+  state: rawState,
+  lanesMax,
+  fixCap,
+  roundPhase = null,
+  dimmed = false,
+  reducedMotion = false,
+  config = null,
+  now,
+  ref,
+}: HeroStageProps) {
+  // #716 gate② P1-9: every downstream position/render computation reads the CAPPED,
+  // renumbered lane view — never `rawState.lanes` directly — so a droplet's channel lookup
+  // and the DOM row it actually lands in can never disagree.
+  const state = withVisibleLanes(rawState, lanesMax);
+  const clock = now ?? new Date();
   const waiting = state.droplets.some((d) => d.at === "checkpoint");
   const gateState = waiting ? "waiting" : "idle";
   const escalated = state.droplets.filter((d) => d.at === "needs-human").length;
   const anyRunning = state.lanes.some((l) => l.phase === "writing" || l.phase === "fixing");
   const activePlanning = activePlanningNode(roundPhase);
   const activeReflection = activeReflectionNode(roundPhase);
+  const staleness = stalenessCaption(state.lastEventTs, clock);
+  const reviewMode = config ? readConfigPath(config, "reviewer.mode") : undefined;
+  // §6: "N merged · N pending · N needs human" — merged is THIS round's tally (never the
+  // all-time ring count); pending/needs-human are the droplets currently in each state.
+  const pendingCount = state.droplets.filter((d) => d.at === "backlog" || d.at === "lane" || d.at === "checkpoint").length;
+  const outcomeTally = `${state.roundMerged} merged · ${pendingCount} pending · ${escalated} needs human`;
 
   return (
     <svg
@@ -160,39 +232,68 @@ export function HeroStage({ state, fixCap, roundPhase = null, dimmed = false, re
        * `round-phase` (#206) is shipped engine reality, so this is real state, not fake progress.
        */}
       <g className="hero-planning" data-node="planning">
-        {PLANNING_NODES.map((n) => (
-          <g key={n.node} data-active={activePlanning === n.node ? "true" : "false"}>
-            <title>{n.hint}</title>
-            <circle className="hero-planning-node" cx={PLANNING.x} cy={n.y} r={17} />
-            <text className="hero-node-label" x={PLANNING.x + 28} y={n.y + 4}>
-              {n.label}
-            </text>
-          </g>
-        ))}
+        {PLANNING_NODES.map((n) => {
+          const caption = modelEffortCaption(config, n.role);
+          return (
+            <g key={n.node} data-active={activePlanning === n.node ? "true" : "false"}>
+              <title>{n.hint}</title>
+              <circle className="hero-planning-node" cx={PLANNING.x} cy={n.y} r={17} />
+              <text className="hero-node-label" x={PLANNING.x + 28} y={n.y + 4}>
+                {n.label}
+              </text>
+              {caption && (
+                <text className="hero-node-caption" x={PLANNING.x + 28} y={n.y + 17}>
+                  {caption}
+                </text>
+              )}
+            </g>
+          );
+        })}
+        {staleness && (
+          <text className="hero-label hero-staleness" x={PLANNING.noteX} y={PLANNING.note}>
+            {staleness}
+          </text>
+        )}
       </g>
 
       {/* ── Zone 3: work lanes, checkpoints, fix loop, escalation branch ── */}
       <g className="hero-lanes">
-        {state.lanes.map((lane) => (
-          <g className="hero-lane" key={lane.channel} data-lane-index={lane.channel} data-phase={lane.phase} data-issue={lane.issue ?? ""}>
-            <line className="hero-channel" x1={LANES.x} y1={laneY(lane.channel)} x2={LANES.x + LANES.w} y2={laneY(lane.channel)} />
-            <text className="hero-node-label" x={LANES.x} y={laneY(lane.channel) - 10}>
-              {state.laneCountUnknown ? "lane count unknown — config unreadable" : `Work lane ${lane.channel + 1}`}
-            </text>
-            {lane.worker && !state.laneCountUnknown && (
-              <text className="hero-num hero-small" x={LANES.x + LANES.w} y={laneY(lane.channel) - 10} textAnchor="end">
-                {lane.phase === "fixing"
-                  ? `FIXING · round ${lane.fixRound} of ${fixCap}${lane.reason ? ` · ${lane.reason}` : ""}`
-                  : lane.worker}
+        {(() => {
+          const laneCaption = modelEffortCaption(config, "worker");
+          return state.lanes.map((lane) => (
+            <g
+              className="hero-lane"
+              key={lane.channel}
+              data-lane-index={lane.channel}
+              data-phase={lane.phase}
+              data-issue={lane.issue ?? ""}
+            >
+              <line className="hero-channel" x1={LANES.x} y1={laneY(lane.channel)} x2={LANES.x + LANES.w} y2={laneY(lane.channel)} />
+              <text className="hero-node-label" x={LANES.x} y={laneY(lane.channel) - 10}>
+                {/* #716 gate② P1-9 (PO live probe, baseline + §6): the primary label is the
+                 * plain slot name `w{n}`, not the generic "Work lane N" this rendered before. */}
+                {state.laneCountUnknown ? "lane count unknown — config unreadable" : `w${lane.channel + 1}`}
               </text>
-            )}
-            {lane.phase === "failed" && (
-              <text className="hero-mark" x={LANES.x + LANES.w + 12} y={laneY(lane.channel) + 5}>
-                ✕
-              </text>
-            )}
-          </g>
-        ))}
+              {laneCaption && !state.laneCountUnknown && (
+                <text className="hero-num hero-small hero-node-caption" x={LANES.x} y={laneY(lane.channel) + 12}>
+                  {laneCaption}
+                </text>
+              )}
+              {lane.worker && !state.laneCountUnknown && (
+                <text className="hero-num hero-small" x={LANES.x + LANES.w} y={laneY(lane.channel) - 10} textAnchor="end">
+                  {lane.phase === "fixing"
+                    ? `FIXING · round ${lane.fixRound} of ${fixCap}${lane.reason ? ` · ${lane.reason}` : ""}`
+                    : lane.worker}
+                </text>
+              )}
+              {lane.phase === "failed" && (
+                <text className="hero-mark" x={LANES.x + LANES.w + 12} y={laneY(lane.channel) + 5}>
+                  ✕
+                </text>
+              )}
+            </g>
+          ));
+        })()}
 
         {/* The fix loop, drawn as the engine's true shape: back into the lane itself. */}
         <path
@@ -212,12 +313,29 @@ export function HeroStage({ state, fixCap, roundPhase = null, dimmed = false, re
           <text className="hero-node-label" x={GATES.ci} y={GATES.y + 5} textAnchor="middle">
             CI
           </text>
+          {/* #716 gate② P2-5: the merged flash used to be a border-color change ONLY
+           * (`.hero-gate.is-merged rect`) — a real ✓ glyph is the non-color-carried channel
+           * this file's own §5 doctrine requires; shown via CSS opacity keyed off `.is-merged`
+           * (Hero.tsx toggles that class), never a second render path. */}
+          <text className="hero-gate-check" x={GATES.ci + 24} y={GATES.y - 8} textAnchor="middle">
+            ✓
+          </text>
         </g>
         <g className="hero-gate" data-gate="review" data-state={gateState}>
           <rect x={GATES.review - 42} y={GATES.y - 20} width={84} height={40} rx={6} />
           <text className="hero-node-label" x={GATES.review} y={GATES.y + 5} textAnchor="middle">
             Review
           </text>
+          <text className="hero-gate-check" x={GATES.review + 32} y={GATES.y - 8} textAnchor="middle">
+            ✓
+          </text>
+          {/* §6: REVIEW carries the review MODE word (e.g. "codex"), not a model·effort pair —
+           * it isn't itself model-backed, the mode just names which reviewer runs. */}
+          {typeof reviewMode === "string" && (
+            <text className="hero-node-caption" x={GATES.review} y={GATES.y + 18} textAnchor="middle">
+              {reviewMode}
+            </text>
+          )}
         </g>
         <line className="hero-arm" x1={GATES.ci + 34} y1={GATES.y} x2={GATES.review - 42} y2={GATES.y} />
         <line className="hero-arm" x1={GATES.review + 42} y1={GATES.y} x2={TRUNK.x - 40} y2={TRUNK.y} />
@@ -258,17 +376,31 @@ export function HeroStage({ state, fixCap, roundPhase = null, dimmed = false, re
         <text className="hero-label" x={TRUNK.x} y={TRUNK.y + 124} textAnchor="middle">
           {state.rings === 1 ? "ring" : "rings"}
         </text>
+        {/* §6: "the round's outcome tally (N merged · N pending · N needs human) — small
+         * numbers, never repeating the all-time ring count." `roundMerged` is the round-
+         * scoped counter (#716 gate② P2-8); `state.rings` above stays the all-time one. */}
+        <text className="hero-num hero-small hero-outcome-tally" x={TRUNK.x} y={TRUNK.y + 140} textAnchor="middle">
+          {outcomeTally}
+        </text>
       </g>
 
       <g className="hero-reflection" data-node="reflection">
-        {REFLECTION_NODES.map((n) => (
-          <g key={n.node} data-active={activeReflection === n.node ? "true" : "false"}>
-            <circle className="hero-planning-node" cx={REFLECTION.x} cy={n.y} r={13} />
-            <text className="hero-node-label" x={REFLECTION.x} y={n.y + 30} textAnchor="middle">
-              {n.label}
-            </text>
-          </g>
-        ))}
+        {REFLECTION_NODES.map((n) => {
+          const caption = modelEffortCaption(config, n.role);
+          return (
+            <g key={n.node} data-active={activeReflection === n.node ? "true" : "false"}>
+              <circle className="hero-planning-node" cx={REFLECTION.x} cy={n.y} r={13} />
+              <text className="hero-node-label" x={REFLECTION.x} y={n.y + 30} textAnchor="middle">
+                {n.label}
+              </text>
+              {caption && (
+                <text className="hero-node-caption" x={REFLECTION.x} y={n.y + 43} textAnchor="middle">
+                  {caption}
+                </text>
+              )}
+            </g>
+          );
+        })}
       </g>
 
       {/* The dashed return path that closes the loop back into planning. */}

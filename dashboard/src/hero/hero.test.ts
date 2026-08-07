@@ -13,10 +13,12 @@ import {
   type HeroState,
   initialHeroState,
   isStageDimmed,
+  type LaneView,
   planTransitions,
   sendBackReason,
   type Transition,
   transitionOrigin,
+  visibleLanes,
   withLaneCount,
   withLanePrs,
 } from "./state.ts";
@@ -38,8 +40,11 @@ const run = (events: DomainEvent[], lanesMax: number | null = 3) => foldEvents(i
 
 const kinds = (ts: Transition[]) => ts.map((t) => t.kind);
 const droplet = (state: HeroState, issue: number) => state.droplets.find((d) => d.issue === issue);
+// `lanesMax: 3` matches `run()`'s own default — every call site whose state was built with a
+// different lanesMax passes it explicitly via `extra` (`withVisibleLanes` only ever CAPS from
+// above, so a state with fewer lanes than the default is unaffected either way).
 const markup = (state: HeroState, extra: Partial<Parameters<typeof HeroStage>[0]> = {}) =>
-  renderToStaticMarkup(createElement(HeroStage, { state, fixCap: 2, ...extra }));
+  renderToStaticMarkup(createElement(HeroStage, { state, lanesMax: 3, fixCap: 2, ...extra }));
 const heroCss = readFileSync(new URL("./hero.css", import.meta.url), "utf8");
 
 // ── §6 transition table — one row at a time ────────────────────────────────────
@@ -122,7 +127,11 @@ test("§6 `reclaim-done` without a PR frees the lane and stages nothing", () => 
   assert.equal(state.lanes[0]?.phase, "idle");
 });
 
-test("§6 `drive-fixup` → `fix-leg-started`: droplet returns into its own lane with the send-back reason", () => {
+test("§6 `drive-fixup` (assumed order, reason already known) → `fix-leg-started`: droplet returns into its own lane with the send-back reason", () => {
+  // This is the ASSUMED order — `drive-fixup` names the reason before the lane starts fixing.
+  // It's a real, still-supported path (e.g. a mid-fix handoff/resume, covered below), but it
+  // is NOT production's typical order for the first `fix-leg-started` of a fix round — see
+  // the PRODUCTION-order test right after this one (#716 gate② P2-6).
   const { state, transitions } = run([
     ev("dispatched", { worker: "w1", issue: 86 }),
     ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
@@ -145,6 +154,51 @@ test("§6 `drive-fixup` → `fix-leg-started`: droplet returns into its own lane
   assert.equal(state.lanes[0]?.phase, "fixing");
   assert.equal(state.lanes[0]?.fixRound, 1);
   assert.match(markup(state), /FIXING · round 1 of 2/);
+});
+
+test("§6 `fix-leg-started` → `drive-fixup`: PRODUCTION event order corrects the fallback reason label in place", () => {
+  // #716 gate② P2-6: the engine durably writes `fix-leg-started` BEFORE `drive-fixup` — by
+  // the time the real reason arrives, the droplet is already back in its lane wearing the
+  // generic "review findings" fallback (neither event's own payload can see the other's
+  // field). The ORIGINAL version of the test above exercised the opposite (assumed) order,
+  // which happened to pass regardless of the bug because its chosen reason string mapped to
+  // the SAME word as the fallback either way — this uses a DIFFERENT reason specifically so
+  // the fallback and the correction are distinguishable.
+  const started = run([
+    ev("dispatched", { worker: "w1", issue: 86 }),
+    ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
+    ev("fix-leg-started", { worker: "w1", issue: 86, pr: 97, fixRounds: 1 }),
+  ]);
+
+  assert.deepEqual(kinds(started.transitions), ["dispatch", "to-checkpoint", "fix-return"]);
+  const fix = started.transitions[2];
+  assert.ok(fix?.kind === "fix-return");
+  // No `drive-fixup` has arrived yet — the fold has nothing to name the reason from, so the
+  // droplet returns wearing the honest fallback, never a guess.
+  assert.equal(fix.reason, "review findings");
+  assert.equal(started.state.lanes[0]?.phase, "fixing");
+  assert.equal(started.state.lanes[0]?.reason, "review findings");
+  assert.match(markup(started.state), /review findings/);
+
+  const corrected = foldEvents(started.state, [
+    ev("drive-fixup", {
+      worker: "w1",
+      issue: 86,
+      pr: 97,
+      fixRounds: 1,
+      reason: "gate:FIXABLE:REQUEST_CHANGES:unresolvedThreads=0:ciRed=true",
+    }),
+  ]);
+
+  assert.deepEqual(kinds(corrected.transitions), ["fix-reason"]);
+  const reasonFix = corrected.transitions[0];
+  assert.ok(reasonFix?.kind === "fix-reason");
+  assert.equal(reasonFix.reason, "checks failed");
+  assert.equal(reasonFix.lane, "w1");
+  assert.equal(corrected.state.lanes[0]?.reason, "checks failed");
+  assert.equal(droplet(corrected.state, 86)?.sendBack, "checks failed");
+  assert.match(markup(corrected.state), /checks failed/);
+  assert.doesNotMatch(markup(corrected.state), /review findings/);
 });
 
 test("§6 `fix-leg-resumed` re-lights the same fixing state after a handoff", () => {
@@ -201,7 +255,11 @@ test("§6 `merged`: gates flash ✓, the droplet becomes a ring, the counter inc
   const html = markup(state);
   assert.match(html, /class="hero-ring-count"[^>]*>1</);
   assert.equal(html.match(/class="hero-ring"/g)?.length, 1);
-  assert.match(html, /✓/);
+  // #716 gate② P2-5: the merged flash is a REAL ✓ glyph element on each gate, not just the
+  // rect's border color — targets `.hero-gate-check` specifically, not the unrelated ✓ every
+  // merged droplet's own label already carries (`stage.tsx`'s `d.at === "trunk" ? "✓ " : ""`),
+  // which the old loose `/✓/` match could never actually distinguish from.
+  assert.equal(html.match(/class="hero-gate-check"/g)?.length, 2, "both CI and Review gates carry the ✓ glyph element");
 });
 
 test("§6 `handoff`: droplet folds back into the backlog with a progress badge", () => {
@@ -298,6 +356,39 @@ test("§6 `ceiling-escalated` / PAUSE / kill switch dim the stage", () => {
   }
 });
 
+test("#716 gate② P1-2: `ceiling-breach-cleared` un-latches a dimmed stage", () => {
+  const dimmed = run([ev("ceiling-escalated", { worker: "w1", issue: 86, reasons: ["dailyBudgetUsd"] })]);
+  assert.equal(dimmed.state.ceilingReached, true);
+
+  const cleared = foldEvents(dimmed.state, [ev("ceiling-breach-cleared", { reason: "dailyBudgetUsd" })]);
+  assert.equal(cleared.state.ceilingReached, false);
+  assert.equal(isStageDimmed(cleared.state, "running"), false);
+  // No stage animation for the clear itself — §6 gives dimming an entry, not un-dimming.
+  assert.deepEqual(cleared.transitions, []);
+});
+
+test("#716 gate② P1-2: `run-started` hard-resets the latch — a fresh boot never inherits a stale historical breach", () => {
+  const dimmed = run([ev("ceiling-escalated", { worker: "w1", issue: 86, reasons: ["dailyBudgetUsd"] })]);
+  assert.equal(dimmed.state.ceilingReached, true);
+
+  // The dashboard folds from event id 0 — a LATER run's `run-started` must clear whatever a
+  // PRIOR run's ceiling breach left latched, with no `ceiling-breach-cleared` in between at
+  // all (the prior process may simply have been killed, never emitting one).
+  const restarted = foldEvents(dimmed.state, [ev("run-started", { config: {}, configHash: "abc" })]);
+  assert.equal(restarted.state.ceilingReached, false);
+});
+
+test("#716 gate② P1-2: a HISTORICAL ceiling-escalated does not dim a scene that has since moved on", () => {
+  const { state } = run([
+    ev("ceiling-escalated", { worker: "w1", issue: 86, reasons: ["dailyBudgetUsd"] }),
+    ev("ceiling-breach-cleared", { reason: "dailyBudgetUsd" }),
+    ev("run-started", { config: {}, configHash: "def" }),
+    ev("dispatched", { worker: "w1", issue: 90 }),
+  ]);
+  assert.equal(state.ceilingReached, false);
+  assert.equal(isStageDimmed(state, "running"), false);
+});
+
 // ── Travel origin ─────────────────────────────────────────────────────────────
 
 test("every travelling transition declares where it travels FROM", () => {
@@ -306,6 +397,7 @@ test("every travelling transition declares where it travels FROM", () => {
       ["dispatch", { kind: "dispatch", id: 1, issue: 1, lane: "w1" }],
       ["to-checkpoint", { kind: "to-checkpoint", id: 2, issue: 1, lane: "w1", pr: 11 }],
       ["fix-return", { kind: "fix-return", id: 3, issue: 1, lane: "w1", pr: 11, reason: "review findings", round: 1 }],
+      ["fix-reason", { kind: "fix-reason", id: 9, issue: 1, lane: "w1", reason: "checks failed" }],
       ["escalate", { kind: "escalate", id: 4, issue: 1, pr: 11 }],
       ["ring", { kind: "ring", id: 5, issue: 1, pr: 11, ring: 1 }],
       ["handoff", { kind: "handoff", id: 6, issue: 1, lane: "w1" }],
@@ -318,6 +410,7 @@ test("every travelling transition declares where it travels FROM", () => {
     dispatch: "backlog",
     "to-checkpoint": "lane",
     "fix-return": "checkpoint",
+    "fix-reason": null,
     escalate: "checkpoint",
     ring: "checkpoint",
     handoff: "lane",
@@ -560,6 +653,63 @@ test("the ring count and the PLAN/IMPLEMENT/OUTCOME phase captions render with -
   assert.match(html, /class="hero-ring-count" style="font-family:var\(--font-display\)"/);
 });
 
+// ── #716 gate② P2-8: staleness, round outcome tally, model·effort/review-mode captions ──
+
+test("P2-8: the planning group's staleness caption reads seconds since the last folded event", () => {
+  const { state } = run([ev("dispatched", { worker: "w1", issue: 86 })]);
+  const eventTs = state.lastEventTs;
+  assert.ok(eventTs);
+  const later = new Date(new Date(eventTs).getTime() + 14_000);
+  const html = markup(state, { now: later });
+  assert.match(html, /last event 14s ago/);
+
+  // A fresh stage with nothing folded yet has no event to be stale about.
+  assert.doesNotMatch(markup(initialHeroState(3)), /last event/);
+});
+
+test("P2-8: the round outcome tally is THIS round's merges, never the all-time ring count", () => {
+  const roundOne = run([
+    ev("pool-selected", { round_id: 1, issues: [1, 2] }),
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("merged", { worker: "w1", issue: 1, pr: 11 }),
+  ]);
+  assert.equal(roundOne.state.roundMerged, 1);
+  assert.equal(roundOne.state.rings, 1);
+
+  const roundTwo = foldEvents(roundOne.state, [
+    ev("pool-selected", { round_id: 2, issues: [3] }),
+    ev("dispatched", { worker: "w1", issue: 3 }),
+    ev("merged", { worker: "w1", issue: 3, pr: 13 }),
+  ]);
+  // Round 2 has merged exactly ONE issue so far — never the all-time total (2).
+  assert.equal(roundTwo.state.roundMerged, 1);
+  assert.equal(roundTwo.state.rings, 2);
+
+  const html = markup(roundTwo.state);
+  assert.match(html, /1 merged · \d+ pending · \d+ needs human/);
+  // Anchored to the tally's own format (`class="hero-outcome-tally"`) — the stage's
+  // `aria-label` separately says "2 merged pull requests" (state.rings, the honest all-time
+  // count, used correctly there), which a bare `/2 merged/` would collide with.
+  assert.doesNotMatch(html, /class="hero-outcome-tally"[^>]*>2 merged/);
+});
+
+test("P2-8: LLM-backed stage nodes render their configured model·effort caption; REVIEW shows the review mode word", () => {
+  const config = {
+    roles: { po: { model: "opus", effort: "high" }, harvest: { model: "sonnet", effort: "low" } },
+    worker: { model: "sonnet", effort: "medium" },
+    reviewer: { mode: "engine-agent" },
+  };
+  const html = markup(initialHeroState(3), { config });
+  assert.match(html, /opus · high/); // Goal & align (roles.po)
+  assert.match(html, /sonnet · low/); // Summary (roles.harvest)
+  assert.match(html, /sonnet · medium/); // lanes (worker.*)
+  assert.match(html, /engine-agent/); // REVIEW's mode word, not a model·effort pair
+
+  // No config, no caption — an honest gap, never a guessed model name.
+  const bare = markup(initialHeroState(3));
+  assert.doesNotMatch(bare, /opus|sonnet|engine-agent/);
+});
+
 // ── "?" legend toggle ──────────────────────────────────────────────────────────
 
 test("the legend exposes all three metaphor keys — droplet, lane, ring — and role vocabulary lives only here", () => {
@@ -578,8 +728,11 @@ test("the legend exposes all three metaphor keys — droplet, lane, ring — and
 test("the stage draws one channel per `lanes.max`, each with its plain-language label", () => {
   const html = markup(initialHeroState(3));
   assert.equal(html.match(/class="hero-lane"/g)?.length, 3);
-  assert.match(html, /Work lane 1/);
-  assert.match(html, /Work lane 3/);
+  // #716 gate② P1-9 (PO live probe, baseline + §6): the plain slot label is `w{n}`, not the
+  // generic "Work lane N" this used to render.
+  assert.match(html, />w1</);
+  assert.match(html, />w3</);
+  assert.doesNotMatch(html, /Work lane/);
 });
 
 test("an unreadable config draws one placeholder channel with the §3 direction", () => {
@@ -619,6 +772,76 @@ test("the lane count re-fits when the config arrives, without losing what was fo
   assert.doesNotMatch(markup(fitted), /config unreadable/);
 
   assert.equal(withLaneCount(fitted, 3), fitted);
+});
+
+// ── #716 gate② P1-9 (PO live probe): tracks cap at the CONFIGURED slot count ──────
+
+const laneAt = (channel: number, phase: LaneView["phase"] = "idle", worker: string | null = null): LaneView => ({
+  channel,
+  worker,
+  issue: null,
+  phase,
+  fixRound: 0,
+  reason: null,
+});
+
+test("#716 gate② P1-9: visibleLanes caps at lanesMax, prioritizing active lanes over idle overflow", () => {
+  // 5 idle lanes, lanesMax 3 — the fold never had reason to draw more than 3 real tracks.
+  const idleOnly = Array.from({ length: 5 }, (_, i) => laneAt(i));
+  const cappedIdle = visibleLanes(idleOnly, 3);
+  assert.equal(cappedIdle.length, 3);
+  assert.deepEqual(
+    cappedIdle.map((l) => l.channel),
+    [0, 1, 2],
+  );
+
+  // Two ACTIVE lanes buried among idle ones must survive the cut over idle overflow.
+  const mixed = [laneAt(0), laneAt(1, "fixing", "w2"), laneAt(2), laneAt(3, "writing", "w4"), laneAt(4)];
+  const cappedMixed = visibleLanes(mixed, 2);
+  assert.equal(cappedMixed.length, 2);
+  assert.deepEqual(
+    cappedMixed.map((l) => l.worker),
+    ["w2", "w4"],
+  );
+  // Renumbered 0..n-1 for display — the raw channel 1/3 must not leak into the DOM index.
+  assert.deepEqual(
+    cappedMixed.map((l) => l.channel),
+    [0, 1],
+  );
+
+  // Nothing to cap: lanesMax unreadable (`null`) or already within budget passes through
+  // (renumbered, but never dropped).
+  assert.equal(visibleLanes(idleOnly, null).length, 5);
+  assert.equal(visibleLanes([laneAt(0), laneAt(1)], 3).length, 2);
+});
+
+test("#716 gate② P1-9: a live DB's worth of abandoned/historical lanes folds down to lanesMax tracks, never one per historical worker", () => {
+  // Simulates the PO's live probe: many distinct worker identities dispatch-then-fail (a
+  // FAILED, never-revisited channel is never released — `moveDroplet`'s own doc — so it
+  // permanently occupies a slot in the RAW fold, same as a worker name the fold has simply
+  // never reused). One currently-active worker (w40) is still on shift.
+  const events: DomainEvent[] = [];
+  for (let i = 1; i <= 39; i++) {
+    events.push(ev("dispatched", { worker: `w${i}`, issue: i }));
+    events.push(ev("reclaim-failed", { worker: `w${i}`, issue: i, next: "ESCALATE" }));
+  }
+  events.push(ev("dispatched", { worker: "w40", issue: 40 }));
+
+  const { state } = run(events, 3);
+  // The RAW fold really did grow past the configured slot count — this is the bug's root
+  // shape, not something `run()`'s fixture massaged away.
+  assert.ok(state.lanes.length > 3, `expected raw fold to overflow past 3, got ${state.lanes.length}`);
+
+  const capped = visibleLanes(state.lanes, 3);
+  assert.equal(capped.length, 3);
+  // The one truly active lane (w40, still writing) must be among the survivors.
+  assert.ok(
+    capped.some((l) => l.worker === "w40"),
+    "the active lane must survive the cap",
+  );
+
+  const html = markup(state, { lanesMax: 3 });
+  assert.equal(html.match(/class="hero-lane"/g)?.length, 3, "the stage draws exactly lanesMax tracks, never state.lanes.length");
 });
 
 test("the backlog renders this round's selection pool", () => {
