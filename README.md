@@ -30,10 +30,12 @@ merge.
   guarded action is denied, and the merge path waits for its configured gates.
   Unlike advisory-only AI review, its conclusion is not merely a recommendation
   that the producer can act around.
-- **legible, ceiling-checked cost** — **plugin-enforced:** configured spend
-  ceilings, dry-run preview, and a kill switch make the controls visible. The
-  ceilings are checked at admission/drain points, so in-flight work can
-  overshoot; spawned-subagent spend is a documented unbounded blind spot.
+- **legible, ledger-checked cost** — **plugin-enforced for recorded worker,
+  round, and daily spend:** ledger-based ceilings are checked post-hoc at
+  admission/drain points; dry-run preview and a kill switch make the controls
+  visible. The `codex-exec` review cost cap is advisory (with a hard wall-clock
+  timeout); non-decisive review attempts are unledgered, and subagent fan-out
+  is a documented blind spot.
 
 **Deployment prerequisite.** The plugin's guard mediates the covered built-in
 Bash/file-tool family, not inherited ambient MCP tools or unknown servers. For
