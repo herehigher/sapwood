@@ -59,3 +59,18 @@ export function restoreTheme(): ThemeOverride {
   applyThemeToDom(stored);
   return stored;
 }
+
+/**
+ * The exact composition IconRail's theme switch runs on click: advance the cycle, apply it to
+ * the DOM/storage, then hand the new value to the caller's own state setter. Exported (#727
+ * gate② finding rail-ac1-coverage) so a test can drive the REAL `nextTheme`+`applyTheme`
+ * composition directly — IconRail.tsx's own click handler is now a one-line delegation to this,
+ * so a test calling `railContent`'s `onToggleTheme` prop with a substitute callback (as the
+ * prior round did) could still pass with `nextTheme`/`applyTheme` silently removed from the
+ * production path; testing `toggleTheme` itself closes that gap.
+ */
+export function toggleTheme(current: ThemeOverride, setTheme: (next: ThemeOverride) => void): void {
+  const next = nextTheme(current);
+  applyTheme(next);
+  setTheme(next);
+}

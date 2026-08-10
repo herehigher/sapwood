@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { applyTheme, nextTheme, restoreTheme, type ThemeOverride } from "../theme.ts";
+import { restoreTheme, type ThemeOverride, toggleTheme } from "../theme.ts";
 
 /**
  * frontend-design.md §3: "wordmark at top, anchor / drawer entries (overview, cost, config) and
@@ -131,11 +131,11 @@ export function IconRail({ onOpenConfig }: IconRailProps) {
   // SYSTEM theme while the button's own label claimed the stored override was active.
   useEffect(() => setTheme(restoreTheme()), []);
 
-  const onToggleTheme = () => {
-    const next = nextTheme(theme);
-    applyTheme(next);
-    setTheme(next);
-  };
+  // #727 gate② finding rail-ac1-coverage: this is now a one-line delegation to `theme.ts`'s
+  // `toggleTheme` — the actual `nextTheme`+`applyTheme` composition is tested directly there
+  // (with stubbed document/localStorage), so a test can no longer pass with that composition
+  // silently broken just because it substituted its own callback here.
+  const onToggleTheme = () => toggleTheme(theme, setTheme);
 
   return railContent(theme ?? "system", onToggleTheme, onOpenConfig);
 }

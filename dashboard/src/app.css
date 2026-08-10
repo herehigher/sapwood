@@ -113,6 +113,15 @@ body {
     margin-top: 0;
     margin-left: auto;
   }
+
+  /* #727 gate② finding mobile-anchor-hidden-under-rail: once the rail becomes this sticky
+   * top bar, native hash navigation would otherwise align an anchor target's top edge with
+   * the viewport top — directly UNDER the bar, hiding the target's leading content. 48px is
+   * the docked rail's own height (32px icon-rail-item + 2 × var(--space-2) padding). */
+  #overview,
+  #cost {
+    scroll-margin-top: 48px;
+  }
 }
 
 h1,

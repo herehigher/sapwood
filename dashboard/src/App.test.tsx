@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
-import { App, resolveFixCap, toggleConfigOpen } from "./App.tsx";
+import { App, appContent, resolveFixCap, toggleConfigOpen } from "./App.tsx";
 import { eventsQuery, loopStateQuery, spendQuery } from "./api/queries.ts";
-import { railContent } from "./components/IconRail.tsx";
+import { IconRail, railContent } from "./components/IconRail.tsx";
+import { initialHeroState } from "./hero/state.ts";
 
 /** Same tree-walk IconRail.test.tsx uses — finds a node in a REAL React element tree (never a
  *  `renderToStaticMarkup` string, which strips function props) by exact `className`. */
@@ -18,6 +19,39 @@ function findByClassName(node: unknown, className: string): { props: Record<stri
     if (found) return found;
   }
   return null;
+}
+
+/** Same idea, but by element TYPE (a component reference) rather than className — needed to
+ *  find the `<IconRail>` element itself in `appContent`'s real tree. */
+function findByType(node: unknown, type: unknown): { props: Record<string, unknown> } | null {
+  if (node === null || typeof node !== "object") return null;
+  const n = node as { type?: unknown; props?: Record<string, unknown> };
+  if (n.type === type) return n as { props: Record<string, unknown> };
+  const children = n.props?.children;
+  for (const child of Array.isArray(children) ? children : [children]) {
+    const found = findByType(child, type);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** A minimal-but-real `Parameters<typeof appContent>[0]` — `loop` only needs the two fields
+ *  `appContent` actually reads (`isPending`, `data`); the full TanStack `UseQueryResult` shape
+ *  isn't worth hand-implementing for a fixture, so it's cast rather than fully typed. */
+function minimalAppViewModel(overrides: { configOpen?: boolean; setConfigOpen?: (updater: unknown) => void } = {}) {
+  return {
+    clock: new Date("2026-01-01T00:00:00Z"),
+    loop: { data: undefined, isPending: false },
+    events: { events: [], titles: {}, openAttention: [], hero: initialHeroState(null), steps: [], error: undefined, isPending: false },
+    disconnected: false,
+    parked: false,
+    repoUrl: undefined,
+    fixCap: 2,
+    byModel: { title: "by model", bars: [] },
+    byLane: { title: "by lane", bars: [] },
+    configOpen: overrides.configOpen ?? false,
+    setConfigOpen: overrides.setConfigOpen ?? (() => {}),
+  } as unknown as Parameters<typeof appContent>[0];
 }
 
 /**
@@ -227,6 +261,31 @@ test("#727 gate②: one call to the rail's REAL gear onClick, run through App's 
   assert.equal(configOpen, false);
   (gear!.props.onClick as () => void)();
   assert.equal(configOpen, true, "one gear click must flip configOpen exactly like App's own handler does");
+});
+
+// #727 gate② finding config-app-wiring-still-unexercised (round 3): the test above STILL only
+// proves a hand-built `railContent(...)` call responds to `toggleConfigOpen` — it never touches
+// `App.tsx`'s own `<IconRail onOpenConfig={...}>` JSX, and stays green even if that prop were
+// changed to a no-op. `appContent` (extracted from `App.tsx` the same way `railContent` was
+// extracted from `IconRail.tsx`) returns the REAL tree `App` renders, with the REAL `onOpenConfig`
+// closure attached — this walks THAT tree, finds the REAL `<IconRail>` element inside it, and
+// calls its actual prop directly.
+test("#727 gate②: appContent's REAL <IconRail onOpenConfig> — App's own production wiring, not a reconstruction — calls setConfigOpen(toggleConfigOpen)", () => {
+  const setCalls: unknown[] = [];
+  const setConfigOpen = (updater: unknown) => setCalls.push(updater);
+  const tree = appContent(minimalAppViewModel({ configOpen: false, setConfigOpen }));
+
+  const rail = findByType(tree, IconRail);
+  assert.ok(rail, "IconRail not found in App's real rendered tree");
+  const onOpenConfig = rail!.props.onOpenConfig as () => void;
+  assert.equal(setCalls.length, 0);
+  onOpenConfig();
+  assert.equal(setCalls.length, 1, "one call to App's REAL onOpenConfig must call setConfigOpen exactly once");
+  assert.equal(
+    setCalls[0],
+    toggleConfigOpen,
+    "App's real handler must pass the exact toggleConfigOpen reference — not a copy, not a no-op",
+  );
 });
 
 // #727 gate② finding anchor-targets-not-tested: the previous IconRail-only test proved the two

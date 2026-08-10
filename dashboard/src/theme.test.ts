@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyTheme, nextTheme, readStoredTheme, restoreTheme } from "./theme.ts";
+import { applyTheme, nextTheme, readStoredTheme, restoreTheme, toggleTheme } from "./theme.ts";
 
 /** Minimal stand-ins for `document`/`localStorage` — this repo's test harness has neither (see
  *  theme.ts's own header comment). Installed for the duration of `run()` and removed after, so
@@ -72,4 +72,28 @@ test("restoreTheme with no stored override leaves the DOM at system default (no 
   assert.equal(result, null);
   assert.deepEqual(setAttributeCalls, []);
   assert.deepEqual(removeAttributeCalls, ["data-theme"]);
+});
+
+// #727 gate② finding rail-ac1-coverage: IconRail's click handler is now a one-line delegation to
+// THIS function — testing it directly (with real `nextTheme`/`applyTheme` calls, not substitutes)
+// is what actually proves the production composition still works, since a test that hands
+// `railContent` its own callback instead would stay green even with `nextTheme`/`applyTheme`
+// silently dropped from IconRail's real click handler.
+test("toggleTheme advances the cycle, applies it to the DOM/storage, AND hands the new value to the caller's setter", () => {
+  let setCalls: unknown[] = [];
+  const setTheme = (next: unknown) => setCalls.push(next);
+
+  const fromSystem = withFakeBrowserGlobals(null, () => toggleTheme(null, setTheme));
+  assert.deepEqual(setCalls, ["sapwood"], "system -> light");
+  assert.deepEqual(fromSystem.setAttributeCalls, [["data-theme", "sapwood"]]);
+
+  setCalls = [];
+  const fromLight = withFakeBrowserGlobals(null, () => toggleTheme("sapwood", setTheme));
+  assert.deepEqual(setCalls, ["heartwood"], "light -> dark");
+  assert.deepEqual(fromLight.setAttributeCalls, [["data-theme", "heartwood"]]);
+
+  setCalls = [];
+  const fromDark = withFakeBrowserGlobals("heartwood", () => toggleTheme("heartwood", setTheme));
+  assert.deepEqual(setCalls, [null], "dark -> system");
+  assert.deepEqual(fromDark.removeAttributeCalls, ["data-theme"]);
 });

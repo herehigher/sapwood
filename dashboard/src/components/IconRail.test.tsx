@@ -111,4 +111,25 @@ test("#727 AC4: ≤720px docks the rail as a horizontal bar instead of a fixed-w
   assert.match(rail, /flex-direction:\s*row/, ".icon-rail must lay its items out horizontally");
   assert.match(rail, /width:\s*100%/, ".icon-rail must span the full width once docked");
   assert.match(rail, /height:\s*auto/, ".icon-rail must drop its 100vh sidebar height once docked");
+
+  // #727 gate② finding mobile-anchor-hidden-under-rail: the docked rail is `position: sticky;
+  // top: 0`, so plain hash navigation would align an anchor target's top edge directly under
+  // it. Both `#overview` and `#cost` (the rail's own two anchor targets) need a scroll offset
+  // sized to clear the docked bar.
+  const anchors = cssBlock(block, "#overview,\\s*#cost");
+  assert.match(anchors, /scroll-margin-top:\s*\d/, "#overview/#cost need scroll-margin-top to clear the sticky mobile rail");
+});
+
+// #727 gate② finding rail-ac1-coverage: the earlier tests checked CONTENTS but never the base
+// (non-mobile) rail's own required layout — a regression that dropped the fixed 56px width, the
+// sticky positioning, or the gear's bottom-pin would previously have gone unnoticed.
+test("#727 AC1: the base rail is a 56px sticky sidebar with the config gear pinned to its bottom", () => {
+  const css = readFileSync(new URL("../app.css", import.meta.url), "utf8");
+  const rail = cssBlock(css, ".icon-rail");
+  assert.match(rail, /width:\s*56px/, "§3's ~56px rail width");
+  assert.match(rail, /position:\s*sticky/, "the rail must stay in view while the page scrolls");
+  assert.match(rail, /top:\s*0/, "sticky against the viewport top");
+
+  const gear = cssBlock(css, ".icon-rail-config");
+  assert.match(gear, /margin-top:\s*auto/, '§3: "config gear at bottom" — pinned below the anchors/theme switch');
 });
