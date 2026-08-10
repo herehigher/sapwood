@@ -4382,13 +4382,14 @@ test("latestStandbySignal: no standby events at all -> undefined", () => {
   st.close();
 });
 
-test("latestStandbySignal: newest of the three kinds wins by id, carrying the events table's own ts and the payload verbatim", () => {
+test("latestStandbySignal: newest of the three kinds wins by id, carrying the events table's own id/ts and the payload verbatim", () => {
   const st = new State(":memory:");
   st.appendEvent("standby-wait", { attempt: 0, waitSec: 30 });
   st.appendEvent("standby-heartbeat", { attempt: 0, remainingSec: 15 });
   const sig = st.latestStandbySignal();
   assert.ok(sig);
   assert.equal(sig.kind, "standby-heartbeat");
+  assert.ok(typeof sig.id === "number" && sig.id > 0);
   assert.ok(typeof sig.ts === "string" && sig.ts.length > 0);
   assert.deepEqual(sig.payload, { attempt: 0, remainingSec: 15 });
   st.close();

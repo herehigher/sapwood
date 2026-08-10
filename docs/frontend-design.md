@@ -779,7 +779,14 @@ mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
                                     // check runs BEFORE staleness decides and overrides it; a
                                     // standby signal that has itself gone stale beyond its own
                                     // window is NOT fresh, and a stale tick with no fresh
-                                    // standby signal still renders stalled, unchanged.
+                                    // standby signal still renders stalled, unchanged. #746: a
+                                    // run-ended/engine-stalled terminal STRICTLY NEWER (by event
+                                    // id) than the standby signal ALSO invalidates its freshness
+                                    // — a process that exits mid-standby-dwell never appends
+                                    // standby-exit (round.ts's exit-append site is reached only
+                                    // on a normal resume, never on process death), so without
+                                    // this check a dead engine would keep rendering `standby`
+                                    // until the lingering signal's own window happened to elapse.
                                     // Precedence (fixed 2026-07-21, resolving §8 vs
                                     // walkthrough §6): STALENESS BEATS PAUSE — a dead engine
                                     // with a PAUSE file renders stalled, the sentinel demoted

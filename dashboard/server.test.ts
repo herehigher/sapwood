@@ -38,17 +38,23 @@ const FRESH: EngineFacts = {
   terminal: null,
 };
 
-// #407: the three terminal shapes for the dead-engine truth table below.
+// #407: the three terminal shapes for the dead-engine truth table below. `eventId: 1` is an
+// arbitrary low ledger id — most of these tests pair a terminal with `standbySignal: null`, where
+// eventId ordering plays no role at all; the #746 tests below give both their own explicit ids.
 const STALE_TICK = "2026-07-24T11:00:00.000Z"; // an hour ago — past the 900s gap
-const CLEAN_STOP = { kind: "run-ended", payload: { stoppedBy: "signal" } } as const;
-const SELF_STALL = { kind: "engine-stalled", payload: { openRoundPhase: "executing", lastEventKind: "park-wait-heartbeat" } } as const;
+const CLEAN_STOP = { kind: "run-ended", payload: { stoppedBy: "signal" }, eventId: 1 } as const;
+const SELF_STALL = {
+  kind: "engine-stalled",
+  payload: { openRoundPhase: "executing", lastEventKind: "park-wait-heartbeat" },
+  eventId: 1,
+} as const;
 
 test("engine state: a ticking engine with an open round is running", () => {
   assert.equal(deriveEngineState(FRESH), "running");
 });
 
 test("engine state: no open round + a fresh standby signal (within its own declared window) is standby, not stalled", () => {
-  assert.equal(deriveEngineState({ ...FRESH, roundOpen: false, standbySignal: { ageSec: 10, windowSec: 30 } }), "standby");
+  assert.equal(deriveEngineState({ ...FRESH, roundOpen: false, standbySignal: { ageSec: 10, windowSec: 30, eventId: 1 } }), "standby");
   // a closed round with no standby signal at all is still just running — standby is the PARKED signal
   assert.equal(deriveEngineState({ ...FRESH, roundOpen: false, standbySignal: null }), "running");
 });
@@ -60,7 +66,7 @@ test("engine state: no open round + a fresh standby signal (within its own decla
 // has gone in the meantime.
 test("#723 engine state: a standby signal fresh within its own window overrides a stale tick — the standby dwell itself deliberately stops ticking", () => {
   assert.equal(
-    deriveEngineState({ ...FRESH, roundOpen: false, lastTickAt: STALE_TICK, standbySignal: { ageSec: 60, windowSec: 1800 } }),
+    deriveEngineState({ ...FRESH, roundOpen: false, lastTickAt: STALE_TICK, standbySignal: { ageSec: 60, windowSec: 1800, eventId: 1 } }),
     "standby",
   );
 });
@@ -70,13 +76,66 @@ test("#723 engine state: a standby signal fresh within its own window overrides 
 // stale, so this is genuinely `stalled`, not an indefinitely-extended `standby`.
 test("#723 engine state boundary: a standby signal older than its own declared window, with the tick also stale, is stalled", () => {
   assert.equal(
-    deriveEngineState({ ...FRESH, roundOpen: false, lastTickAt: STALE_TICK, standbySignal: { ageSec: 1900, windowSec: 1800 } }),
+    deriveEngineState({
+      ...FRESH,
+      roundOpen: false,
+      lastTickAt: STALE_TICK,
+      standbySignal: { ageSec: 1900, windowSec: 1800, eventId: 1 },
+    }),
     "stalled",
   );
 });
 
 test("#723 engine state: a round OPEN cancels standby freshness — an in-flight round is running, never standby, whatever a lingering old standby signal says", () => {
-  assert.equal(deriveEngineState({ ...FRESH, roundOpen: true, standbySignal: { ageSec: 10, windowSec: 30 } }), "running");
+  assert.equal(deriveEngineState({ ...FRESH, roundOpen: true, standbySignal: { ageSec: 10, windowSec: 30, eventId: 1 } }), "running");
+});
+
+// ── #746 gate② finding [0]: a terminal newer than the standby signal invalidates it — a process
+// that exits (cleanly or self-diagnosed) mid-standby-dwell never appends `standby-exit` (round.ts's
+// exit-append site is reached only on a normal resume, never on process death), so kind/ts alone
+// would keep reading `standby` off a signal the process has since proven it can no longer honor. ──
+
+test("#746 engine state: a run-ended terminal NEWER than the standby signal invalidates it — a clean exit mid-dwell renders stopped, not an indefinitely-extended standby", () => {
+  assert.equal(
+    deriveEngineState({
+      ...FRESH,
+      roundOpen: false,
+      lastTickAt: STALE_TICK,
+      // The signal itself is still well within its own 1800s window...
+      standbySignal: { ageSec: 60, windowSec: 1800, eventId: 5 },
+      // ...but a run-ended landed AFTER it (higher eventId) — the process died mid-dwell.
+      terminal: { kind: "run-ended", payload: { stoppedBy: "signal" }, eventId: 6 },
+    }),
+    "stopped",
+  );
+});
+
+test("#746 engine state: an engine-stalled terminal NEWER than the standby signal invalidates it — renders stalled, not standby", () => {
+  assert.equal(
+    deriveEngineState({
+      ...FRESH,
+      roundOpen: false,
+      lastTickAt: STALE_TICK,
+      standbySignal: { ageSec: 60, windowSec: 1800, eventId: 5 },
+      terminal: { kind: "engine-stalled", payload: {}, eventId: 6 },
+    }),
+    "stalled",
+  );
+});
+
+test("#746 engine state: a terminal OLDER than the standby signal leaves it fresh — that terminal belongs to a run this dwell has already outlived", () => {
+  assert.equal(
+    deriveEngineState({
+      ...FRESH,
+      roundOpen: false,
+      lastTickAt: STALE_TICK,
+      // The standby signal is NEWER than the terminal (a restart's own fresh dwell, or a terminal
+      // from a prior run this run's standby loop has already superseded).
+      standbySignal: { ageSec: 60, windowSec: 1800, eventId: 6 },
+      terminal: { kind: "run-ended", payload: { stoppedBy: "signal" }, eventId: 5 },
+    }),
+    "standby",
+  );
 });
 
 test("engine state: a tick older than the stale gap is stalled (a dead engine must never read green)", () => {
@@ -148,6 +207,7 @@ test("#407 latestRunTerminal: newest of the run-lifecycle triple decides — run
     {
       kind: "run-ended",
       payload: { stoppedBy: "signal" },
+      eventId: 2,
     },
   );
   assert.deepEqual(
@@ -158,6 +218,7 @@ test("#407 latestRunTerminal: newest of the run-lifecycle triple decides — run
     {
       kind: "engine-stalled",
       payload: { windowMs: 600000 },
+      eventId: 2,
     },
   );
   assert.equal(
@@ -176,7 +237,7 @@ test("#407 latestRunTerminal: newest of the run-lifecycle triple decides — run
       ["run-started", {}],
       ["run-ended", { stoppedBy: "stop-condition", stopCondition: "afterIssuesMerged" }],
     ]),
-    { kind: "run-ended", payload: { stoppedBy: "stop-condition", stopCondition: "afterIssuesMerged" } },
+    { kind: "run-ended", payload: { stoppedBy: "stop-condition", stopCondition: "afterIssuesMerged" }, eventId: 4 },
     "the newest run's own terminal wins, never an older run's",
   );
 });
@@ -463,9 +524,12 @@ test("#407 /api/loop/state serves the newest run's terminal event verbatim — t
   });
   try {
     const body = await getJson(fx, "/api/loop/state");
+    // #746 gate② finding [0]: `eventId` rides along on the wire too — deriveEngineState needs it
+    // to order a terminal against a standby signal (read-model.ts's own doc).
     assert.deepEqual(body.engine.terminal, {
       kind: "run-ended",
       payload: { stoppedBy: "stop-condition", stopCondition: "afterIssuesMerged" },
+      eventId: 2,
     });
   } finally {
     fx.close();

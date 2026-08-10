@@ -3893,17 +3893,34 @@ export class State {
    *  parking already ended) and the write-time clock (the SAME `latestHeartbeatForWorker`-style
    *  events-table `ts`, not a payload field) to tell a genuinely fresh standby dwell from one
    *  whose own last-seen signal has gone stale. `undefined` when none of the three kinds has
-   *  ever been written. */
-  latestStandbySignal(): { kind: "standby-wait" | "standby-heartbeat" | "standby-exit"; ts: string; payload: unknown } | undefined {
+   *  ever been written.
+   *
+   *  #746 gate② finding [0]: `id` is ALSO carried through — a process that exits cleanly (or
+   *  self-diagnoses a stall) mid-standby-dwell appends `run-ended`/`engine-stalled` WITHOUT ever
+   *  appending `standby-exit` (round.ts's standby loop simply never resumes to reach its own
+   *  exit-append site), so kind/ts alone cannot tell "still genuinely parked" from "parking was
+   *  cut short by the process dying". `id` gives read-model.ts an authoritative, doctrine-
+   *  preferred (id cursor, not timestamp — repo review doctrine's crash-rerun rule) ordering
+   *  against `latestRunTerminal`'s own newly-carried `eventId`, so a terminal newer than this
+   *  signal can invalidate it even though the signal's own wait/remaining window hasn't elapsed
+   *  yet. */
+  latestStandbySignal():
+    | { id: number; kind: "standby-wait" | "standby-heartbeat" | "standby-exit"; ts: string; payload: unknown }
+    | undefined {
     const row = this.db
       .prepare(
-        `SELECT ts, kind, payload FROM events
+        `SELECT id, ts, kind, payload FROM events
          WHERE kind IN ('standby-wait', 'standby-heartbeat', 'standby-exit')
          ORDER BY id DESC LIMIT 1`,
       )
-      .get() as { ts: string; kind: string; payload: string } | undefined;
+      .get() as { id: number; ts: string; kind: string; payload: string } | undefined;
     return row
-      ? { kind: row.kind as "standby-wait" | "standby-heartbeat" | "standby-exit", ts: row.ts, payload: JSON.parse(row.payload) as unknown }
+      ? {
+          id: row.id,
+          kind: row.kind as "standby-wait" | "standby-heartbeat" | "standby-exit",
+          ts: row.ts,
+          payload: JSON.parse(row.payload) as unknown,
+        }
       : undefined;
   }
 
