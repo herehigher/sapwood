@@ -13,6 +13,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parseDashboardArgs, parseDashboardPortFlag, resolveDashboardPort, runCli, runDashboard } from "../cli.js";
@@ -36,9 +37,15 @@ before(async () => {
   await pExecFile("npm", ["run", "build"], { cwd: DASHBOARD_DIR });
 });
 
+// #786 gate② finding [ac3-unowned-process-match]: embedded in every dir this file creates (and
+// therefore in the real dist-server child's own `--db-path` argv, since dbPath always lives under
+// one of these dirs) so check-no-leaked-test-processes.ts can attribute a survivor to THIS run
+// specifically — see worker.test.ts's REAP_TMP_PREFIX for the identical mechanism and rationale.
+const DASHBOARD_CLI_TMP_PREFIX = `sapwood-dashboard-cli-${process.env.SAPWOOD_TEST_RUN_ID ?? String(process.pid)}-`;
+
 /** Temp dir, cleaned up after `fn` (which may be async — the caller awaits this). */
 async function withDataDir(fn: (dir: string) => Promise<void> | void): Promise<void> {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-dashboard-cli-"));
+  const dir = mkdtempSync(join(tmpdir(), DASHBOARD_CLI_TMP_PREFIX));
   try {
     await fn(dir);
   } finally {
@@ -385,10 +392,12 @@ function seedDb(dbPath: string): void {
 // line is unreachable if the test hangs on an earlier `await` (e.g. a stuck `fetch`) past
 // `--test-timeout`: node:test reports a timed-out test as failed WITHOUT unwinding its still-
 // pending promise chain, yet subsequent tests and this file's own `after()` hook still run
-// (verified empirically against worker.test.ts's identical shape). Registering the real pid the
-// instant a handle resolves — before any further `await` that could hang — closes that gap: even
-// if `finally` is never reached, `after()` still SIGKILLs the real child, re-verifying liveness
-// immediately before signaling (never a stale pid, never a group signal).
+// (verified empirically against worker.test.ts's identical shape).
+//
+// #786 gate② finding [ac2-prehandle-leak]: tracking must begin at SPAWN time via `onSpawn`, not at
+// promise-RESOLVE time — a resolve-time-only `.add()` misses the exact case where startup itself
+// hangs and the caller times out before the resolved handle (and its `.pid`) ever arrives, leaving
+// the already-spawned real child untracked and unreachable by `after()`.
 const spawnedDashboardServerPids = new Set<number>();
 after(() => {
   const forceKilled: number[] = [];
@@ -417,11 +426,33 @@ after(() => {
   );
 });
 
+/** For a call site that expects `startDashboardServer` to REJECT (no `DashboardServerHandle`, so
+ *  no `.stop()` to await): dashboard-launcher.ts's own reject paths already fire `child.kill
+ *  ("SIGTERM")` before rejecting, but fire-and-forget — the child may still be mid-shutdown when
+ *  `assert.rejects` resolves. Named hang-guard poll (never a fixed sleep — this suite's own
+ *  established idiom) for the signal-0 check to fail, THEN untrack, so this test's own teardown —
+ *  not `after()`'s fallback — is what confirms and closes it out (#786 gate② finding [ac1-sigkill-
+ *  teardown]'s same "deterministic, not fallback-only" requirement, applied to the reject path). */
+async function waitForUntrackedDeath(pid: number, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      spawnedDashboardServerPids.delete(pid);
+      return;
+    }
+    await sleep(20);
+  }
+  throw new Error(`hang guard (${timeoutMs}ms): pid ${pid} never exited after its own reject-path SIGTERM`);
+}
+
 /** Wraps startDashboardServer so every real e2e test below tracks its child in the suite-wide
- *  registry above, and stops tracking it once `stop()` has actually confirmed the child exited. */
+ *  registry above the INSTANT it's spawned (via `onSpawn`, #786 gate② finding [ac2-prehandle-
+ *  leak] — never only once the startup promise resolves), and stops tracking it once `stop()` has
+ *  actually confirmed the child exited. */
 async function startTrackedDashboardServer(opts: Parameters<typeof startDashboardServer>[0]): Promise<DashboardServerHandle> {
-  const handle = await startDashboardServer(opts);
-  spawnedDashboardServerPids.add(handle.pid);
+  const handle = await startDashboardServer({ ...opts, onSpawn: (pid) => spawnedDashboardServerPids.add(pid) });
   return {
     ...handle,
     stop: async () => {
@@ -474,12 +505,29 @@ test("startDashboardServer (real, e2e): a second bind on an already-occupied por
     const dbPath = join(dir, "sapwood.sqlite");
     seedDb(dbPath);
     const first = await startTrackedDashboardServer({ dbPath, port: 0 });
+    let secondPid: number | undefined;
     try {
       await assert.rejects(
-        () => startDashboardServer({ dbPath, port: first.port }),
+        // #786 gate② finding [ac2-prehandle-leak]: `onSpawn` tracks the real child even on a
+        // reject-bound call — a hang before EADDRINUSE is even decided would otherwise leave a
+        // real spawned process untracked and unreachable by after().
+        () =>
+          startDashboardServer({
+            dbPath,
+            port: first.port,
+            onSpawn: (pid) => {
+              secondPid = pid;
+              spawnedDashboardServerPids.add(pid);
+            },
+          }),
         (e: NodeJS.ErrnoException) => e.code === "EADDRINUSE",
       );
     } finally {
+      // #786 gate② finding [ac1-sigkill-teardown]: confirm the rejected second spawn's own
+      // (already-fired) SIGTERM actually landed before this test's own teardown is done — closes
+      // the exact race the file's `after()` assertion caught otherwise (fire-and-forget SIGTERM
+      // inside dashboard-launcher.ts's reject path vs. this test finishing first).
+      if (secondPid !== undefined) await waitForUntrackedDeath(secondPid);
       await first.stop();
     }
   });
@@ -543,7 +591,23 @@ test("startDashboardServer (real, e2e): an explicit --config naming a MISSING fi
     const dbPath = join(dir, "sapwood.sqlite");
     seedDb(dbPath);
     const missingConfigPath = join(dir, "does-not-exist.yaml");
-    await assert.rejects(() => startDashboardServer({ dbPath, configPath: missingConfigPath, port: 0 }));
+    // #786 gate② finding [ac2-prehandle-leak]: onSpawn tracks the real child before the reject
+    // decision is even made.
+    let spawnedPid: number | undefined;
+    await assert.rejects(() =>
+      startDashboardServer({
+        dbPath,
+        configPath: missingConfigPath,
+        port: 0,
+        onSpawn: (pid) => {
+          spawnedPid = pid;
+          spawnedDashboardServerPids.add(pid);
+        },
+      }),
+    );
+    // #786 gate② finding [ac1-sigkill-teardown]: confirm the rejected spawn's own (already-fired)
+    // SIGTERM actually landed before this test's own teardown is done.
+    if (spawnedPid !== undefined) await waitForUntrackedDeath(spawnedPid);
   });
 });
 
@@ -558,7 +622,23 @@ test("startDashboardServer (real, e2e): an explicit --config naming a SCHEMA-INV
     seedDb(dbPath);
     const invalidConfigPath = join(dir, "sapwood.config.yaml");
     writeFileSync(invalidConfigPath, "board: { owner: acme, repo: widgets, projectNumber: 7 }\nlanes: { max: -1 }\n");
-    await assert.rejects(() => startDashboardServer({ dbPath, configPath: invalidConfigPath, port: 0 }));
+    // #786 gate② finding [ac2-prehandle-leak]: onSpawn tracks the real child before the reject
+    // decision is even made.
+    let spawnedPid: number | undefined;
+    await assert.rejects(() =>
+      startDashboardServer({
+        dbPath,
+        configPath: invalidConfigPath,
+        port: 0,
+        onSpawn: (pid) => {
+          spawnedPid = pid;
+          spawnedDashboardServerPids.add(pid);
+        },
+      }),
+    );
+    // #786 gate② finding [ac1-sigkill-teardown]: confirm the rejected spawn's own (already-fired)
+    // SIGTERM actually landed before this test's own teardown is done.
+    if (spawnedPid !== undefined) await waitForUntrackedDeath(spawnedPid);
   });
 });
 
