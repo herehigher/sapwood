@@ -60,37 +60,9 @@ jobs:
       - run: timeout --kill-after=30s 600 npm --workspace engine test
       - run: timeout --kill-after=30s 300 npm --workspace dashboard test
 
-  # PRE-PUBLIC ONLY: auxiliary hosted arm running in parallel with `test` while the
-  # self-hosted runner is primary (owner directive, 2026-08-10). This job is advisory
-  # — it is NOT in `ci.requiredChecks` (gate① keys on the job name `test`), so a
-  # failure here does not block merge. It exists to keep the hosted-runner path
-  # exercised on every merge to main during the self-hosted-primary window. AT
-  # go-public, this job is DELETED along with the whole self-hosted setup: `test`
-  # reverts to `ubuntu-latest`, `selfhost-ci.yml` and the actionlint label entry are
-  # removed, and the runner is deregistered. Full removal list tracked on the
-  # go-public cutover checklist (#329).
-  #
-  # Steps below mirror `test`'s step list exactly (checkout, setup-node@v4 node 24 +
-  # npm cache, npm ci, both typechecks, lint, both timeout-wrapped test steps); `test`
-  # is the canonical source — if it changes, update this job too (drift check is
-  # manual, no automated diff).
-  test-hosted:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # PR iterations run only on the self-hosted primary (`test`); this hosted arm runs
-    # once per merge to main as the hosted-path sentinel, saving Actions minutes (owner
-    # decision 2026-08-10).
-    if: github.event_name == 'push'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
-      - run: npm ci
-      - run: npm --workspace engine run typecheck
-      - run: npm --workspace dashboard run typecheck
-      - run: npm run lint
-      - run: timeout --kill-after=30s 600 npm --workspace engine test
-      - run: timeout --kill-after=30s 300 npm --workspace dashboard test
+  # The auxiliary hosted arm (`test-hosted`, owner directive 2026-08-10) lives in
+  # ci-hosted-aux.yml with its own `on: push: branches: [main]` trigger — NOT here as
+  # an `if: github.event_name == 'push'` job: a job-level `if` reports a SKIPPED check
+  # on every PR head, and the engine's gate① predicate deliberately refuses skipped
+  # checks (forge.ts `ciGreen`; live wedge: PR #766, 2026-08-10). See that file's
+  # header for the full rationale and the go-public removal list (#329).
