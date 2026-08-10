@@ -36,8 +36,14 @@ Start with the [development guide](docs/dev-guide/README.md):
 belongs.
 
 A quirk worth knowing: this repository dogfoods itself — a portion of its own
-PRs are produced and review-gated by sapwood. Human contributions follow the
-exact same gate.
+PRs are produced and review-gated by sapwood.
+
+## External contributions
+
+External pull requests follow the ordinary pull-request quality gate, then are
+reviewed and merged by a human maintainer. The autonomous merge path applies
+only to the maintainer's governed dogfood loop; it does not apply to external
+contributions.
 
 ## Reporting problems
 

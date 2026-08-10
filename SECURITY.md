@@ -20,6 +20,7 @@ a fix to merge (through the human-merge-only path) before public disclosure.
 
 ## Scope notes
 
+- sapwood is pre-release software; supported versions are commits on `main`.
 - sapwood currently targets **trusted repositories** (your own / your team's);
   behavior on adversarial public repos is explicitly out of the current threat
   model — see the trust assumptions in [docs/security.md](docs/security.md).
