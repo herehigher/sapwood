@@ -80,6 +80,93 @@ test("the theme switch's REAL onClick likewise calls the passed-in onToggleTheme
   assert.equal(calls, 1);
 });
 
+// #727 gate② finding wrapper-wiring-unexercised: the two "REAL onClick" tests above call
+// `railContent` directly with TEST-SUPPLIED callbacks — they never run `IconRail`'s own body, so
+// they'd stay green even if `IconRail` stopped forwarding its real `onToggleTheme`/`onOpenConfig`
+// into `railContent` (e.g. `return railContent(theme ?? "system", () => {}, () => {})`). The
+// tests below actually MOUNT `IconRail` — call it as a real function from inside an active React
+// render (its own module comment: calling it directly outside a render throws "invalid hook
+// call") — and click the buttons on the exact tree ITS OWN body returned.
+
+/** `IconRail` can't be invoked directly outside a render (see IconRail.tsx's own comment on why
+ *  it was split from `railContent`). This wrapper calls it FROM INSIDE a real render pass — so
+ *  its `useState`/`useEffect` run for real — and stashes the REAL element tree it returns (with
+ *  IconRail's own `onToggleTheme`/`onOpenConfig` wiring still attached, not a reconstruction)
+ *  into `capture`, for the test to walk and click once `renderToStaticMarkup` has returned. */
+function MountIconRail({
+  onOpenConfig,
+  capture,
+}: {
+  onOpenConfig: () => void;
+  capture: { tree: ReturnType<typeof IconRail> | null };
+}) {
+  capture.tree = IconRail({ onOpenConfig });
+  return capture.tree;
+}
+
+/** Minimal stand-ins for `document`/`localStorage` — this repo's test harness has neither. Same
+ *  idiom as theme.test.ts's own `withFakeBrowserGlobals` (duplicated locally rather than
+ *  imported — matches this repo's existing pattern of duplicating small test helpers per file,
+ *  e.g. `findByClassName`'s copy in App.test.tsx). Installed only for the duration of `run()`. */
+function withFakeBrowserGlobals<T>(run: () => T): { result: T; setAttributeCalls: Array<[string, string]> } {
+  const setAttributeCalls: Array<[string, string]> = [];
+  const g = globalThis as unknown as { document?: unknown; localStorage?: unknown };
+  g.document = {
+    documentElement: {
+      setAttribute: (name: string, value: string) => setAttributeCalls.push([name, value]),
+      removeAttribute: () => {},
+    },
+  };
+  const store = new Map<string, string>();
+  g.localStorage = {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => store.set(k, v),
+    removeItem: (k: string) => store.delete(k),
+  };
+  let result: T;
+  try {
+    result = run();
+  } finally {
+    delete g.document;
+    delete g.localStorage;
+  }
+  return { result, setAttributeCalls };
+}
+
+test("mounting the REAL IconRail: clicking its actually-rendered config gear fires the exact onOpenConfig it was mounted with", () => {
+  let calls = 0;
+  const capture: { tree: ReturnType<typeof IconRail> | null } = { tree: null };
+  renderToStaticMarkup(
+    <MountIconRail
+      onOpenConfig={() => {
+        calls++;
+      }}
+      capture={capture}
+    />,
+  );
+
+  const gear = findByClassName(capture.tree, "icon-rail-item icon-rail-config");
+  assert.ok(gear, "config gear not found in IconRail's own real rendered tree");
+  assert.equal(calls, 0, "no calls before the click");
+  (gear!.props.onClick as () => void)();
+  assert.equal(calls, 1, "IconRail's own rendered gear must call the onOpenConfig it was actually given, not a substitute");
+});
+
+test("mounting the REAL IconRail: clicking its actually-rendered theme switch drives the real DOM mutation (system -> sapwood)", () => {
+  const capture: { tree: ReturnType<typeof IconRail> | null } = { tree: null };
+  renderToStaticMarkup(<MountIconRail onOpenConfig={() => {}} capture={capture} />);
+
+  const themeButton = findByClassName(capture.tree, "icon-rail-item icon-rail-theme");
+  assert.ok(themeButton, "theme switch not found in IconRail's own real rendered tree");
+
+  const { setAttributeCalls } = withFakeBrowserGlobals(() => (themeButton!.props.onClick as () => void)());
+  assert.deepEqual(
+    setAttributeCalls,
+    [["data-theme", "sapwood"]],
+    "IconRail's own rendered theme switch must drive the real toggleTheme -> applyTheme DOM write, not a substitute",
+  );
+});
+
 /** Pulls one `selector { ... }` block's declaration body out of a larger CSS chunk — used below
  *  to check the ACTUAL layout properties per selector, not just that ANY property changed
  *  somewhere in the breakpoint (#727 gate② finding responsive-dock-test-incomplete: the previous
