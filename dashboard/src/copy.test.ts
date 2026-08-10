@@ -86,6 +86,7 @@ const DOC_TABLE_KINDS = [
   "instance-lock-taken-over",
   "round-phase",
   "idle-churn-detected",
+  "ci-inert-escalated",
 ].sort();
 
 test("copy.ts has exactly one entry per §7 table kind — no more, no fewer", () => {
@@ -245,6 +246,26 @@ test("pr-held and pr-released carry no attention marker", () => {
 test("verify-na-proposed always carries attention", () => {
   assert.equal(COPY["verify-na-proposed"].attention, true);
   assert.equal(hasAttention("verify-na-proposed", { issue: 1 }), true);
+});
+
+test("gate② opus round 1 P3 (#797): ci-inert-escalated names the check count, pluralizes correctly, and always carries attention", () => {
+  assert.equal(render("ci-inert-escalated", { pr: 1, checks: [] }), "PR #1 needs a human — CI concluded without ever going green");
+  assert.equal(
+    render("ci-inert-escalated", { pr: 1, checks: [{ name: "a", conclusion: "SKIPPED" }] }),
+    "PR #1 needs a human — CI concluded without ever going green (1 check)",
+  );
+  assert.equal(
+    render("ci-inert-escalated", {
+      pr: 1,
+      checks: [
+        { name: "a", conclusion: "SKIPPED" },
+        { name: "b", conclusion: "NEUTRAL" },
+      ],
+    }),
+    "PR #1 needs a human — CI concluded without ever going green (2 checks)",
+  );
+  assert.equal(COPY["ci-inert-escalated"].attention, true);
+  assert.equal(hasAttention("ci-inert-escalated", { pr: 1 }), true);
 });
 
 test("escalation-resolved never carries attention — it clears an item, never opens one", () => {
@@ -444,6 +465,11 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
   ["instance-lock-taken-over", { previousPid: 1234 }, "Took over the engine lock left by a crashed run (pid 1234)"],
   ["round-phase", { round_id: 5, phase: "executing" }, "Round 5 moved into executing"],
   ["idle-churn-detected", { rounds: 3 }, "The loop ran 3 rounds in a row that changed nothing at all — parked for a human"],
+  [
+    "ci-inert-escalated",
+    { pr: 12, issue: 7, checks: [{ name: "lint", conclusion: "SKIPPED" }] },
+    "PR #12 needs a human — CI concluded without ever going green (1 check)",
+  ],
 ];
 
 test("table-driven §7 sentence oracle: every row (and every documented payload branch) renders its exact documented text", () => {

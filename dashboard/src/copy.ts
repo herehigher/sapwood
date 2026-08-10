@@ -150,7 +150,16 @@ export type EventKind =
   | "run-started"
   | "instance-lock-taken-over"
   | "round-phase"
-  | "idle-churn-detected";
+  | "idle-churn-detected"
+  // gate② opus round 1 P3 (#797): frontend-design.md's §7 rule — a new event kind must land in
+  // the copy map in the SAME PR that registers it (engine/src/state/event-kinds/drive.ts). Not
+  // yet emitted anywhere (the live-posting wiring is #783's human-owned remainder,
+  // merge-driver.ts/conductor.ts being guard-protected), but the kind itself is registered now,
+  // so it must be representable here today. `ci-pending-escalated` (#426) has the SAME gap —
+  // pre-existing, left untouched by this PR; not forced by any copy.ts union test (its engine
+  // registry `tags: []` keeps it out of `ESCALATION_SOURCE_KINDS`, so copy.test.ts's drift guard
+  // does not require it either), and out of this PR's own scope.
+  | "ci-inert-escalated";
 
 const RESOLUTION_SENTENCE: Record<string, (p: Payload) => SentencePart[]> = {
   merged: (p) => ["Issue ", issueTok(p.issue), " no longer needs you — PR ", prTok(p.pr, p.issue), " was merged"],
@@ -429,6 +438,23 @@ export const COPY: Record<EventKind, CopyEntry> = {
   },
   "idle-churn-detected": {
     sentence: (p) => [`The loop ran ${p.rounds} rounds in a row that changed nothing at all — parked for a human`],
+  },
+  // gate② opus round 1 P3 (#797): not yet emitted anywhere (see the `EventKind` union's own
+  // comment on this kind) — this entry exists so `COPY`'s closed-union contract compiles once the
+  // kind is registered, and so the feed already knows how to render it the moment the human-owned
+  // wiring lands. Payload shape mirrors `buildCiInertEscalationPayload`'s `{checks: [{name,
+  // conclusion}]}` (engine/src/review/drive.ts) plus the usual `pr`/`issue` pair every drive-arm
+  // escalation carries.
+  "ci-inert-escalated": {
+    sentence: (p) => {
+      const n = Array.isArray(p.checks) ? p.checks.length : 0;
+      return [
+        "PR ",
+        prTok(p.pr, p.issue),
+        ` needs a human — CI concluded without ever going green${n > 0 ? ` (${n} check${n === 1 ? "" : "s"})` : ""}`,
+      ];
+    },
+    attention: true,
   },
 };
 

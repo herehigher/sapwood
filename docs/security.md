@@ -2048,6 +2048,13 @@ session. Workflow-command binding remains a documented residual: the agent revie
 changes in the diff, but the engine does not statically prove that a named CheckRun executed a
 particular command.
 
+**Gate① is rollup-wide and strictly broader than `requiredChecks` (#783).** `requiredChecks`
+narrows which checks count as trusted EVIDENCE for a code-verifiable AC; it never narrows which
+checks gate the merge itself. `PRStatus.ciGreen` requires the ENTIRE status-check rollup to pass,
+`requiredChecks` or not — so a non-required check can still BLOCK a merge (by being red, pending,
+or concluding without passing) but can never AUTHORIZE one on its own; only a fully green rollup
+does that.
+
 ## The comment-adjudication cursor (#652)
 
 Batch-8 incident (2026-08-04, PR #651 round 1): a binding owner ruling recorded as an ISSUE

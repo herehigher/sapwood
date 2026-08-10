@@ -9,6 +9,8 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { IForge, PRCheckItem, PRReviewData, PRStatus } from "../forge/forge.js";
 import type { ApprovalResult } from "../roles/reviewer.js";
 import {
+  buildCiInertEscalationComment,
+  buildCiInertEscalationPayload,
   checkPreflight,
   driveEngineAgentReview,
   type EngineAgentDriveDeps,
@@ -181,6 +183,100 @@ test("refetchStillValid: newly blocking (unresolved thread appeared) -> discard"
 test("refetchStillValid: CI regressed -> discard", () => {
   const r = refetchStillValid(status({ ciGreen: false }), data(), "H1", "B1");
   assert.equal(r.ok, false);
+});
+
+// ── gate② opus round 1 P2 (#797): refetchStillValid's discard reason describes CURRENT state only
+// (ci-red / ci-inert / ci-pending) — it never asserts a history claim (see refetchStillValid's own
+// doc for why "never-green" vs. "no-longer-green" is unprovable from a current-state `ciInert`) ──
+
+test("refetchStillValid (gate② opus round 1 P2, #797): a red rollup -> discard reason is ci-red", () => {
+  const r = refetchStillValid(status({ ciGreen: false, ciRed: true, ciInert: false }), data(), "H1", "B1");
+  assert.deepEqual(r, { ok: false, reason: "ci-red" });
+});
+
+test("refetchStillValid (gate② opus round 1 P2, #797): a still-pending rollup (neither ciRed nor ciInert) -> discard reason is ci-pending", () => {
+  const r = refetchStillValid(status({ ciGreen: false, ciRed: false, ciInert: false }), data(), "H1", "B1");
+  assert.deepEqual(r, { ok: false, reason: "ci-pending" });
+});
+
+test("refetchStillValid (gate② opus round 1 P2, #797): an inert rollup with no ciChecks attached -> discard reason is the bare ci-inert (no names to append)", () => {
+  const r = refetchStillValid(status({ ciGreen: false, ciRed: false, ciInert: true }), data(), "H1", "B1");
+  assert.deepEqual(r, { ok: false, reason: "ci-inert" });
+});
+
+test("refetchStillValid (gate② opus round 1 P2, #797): an inert rollup WITH ciChecks attached names the non-passing checks, drops the passing one", () => {
+  const r = refetchStillValid(
+    status({
+      ciGreen: false,
+      ciRed: false,
+      ciInert: true,
+      ciChecks: [
+        { name: "test", conclusion: "SUCCESS" },
+        { name: "lint", conclusion: "SKIPPED" },
+      ],
+    }),
+    data(),
+    "H1",
+    "B1",
+  );
+  assert.deepEqual(r, { ok: false, reason: "ci-inert: lint (SKIPPED)" });
+});
+
+// ── #783/#797: buildCiInertEscalationPayload / buildCiInertEscalationComment — pure, unwired ────
+//
+// gate② opus round 1 P2 (#797): buildCiInertEscalationPayload now takes the PRStatus itself, not
+// a separately-fetched PRCheckItem[] page — see the function's own doc for why a second read
+// could disagree with the ciInert decision (TOCTOU family, capped-page under-naming).
+
+test("buildCiInertEscalationPayload: names each non-passing check with its conclusion, drops passing ones", () => {
+  const payload = buildCiInertEscalationPayload(
+    status({
+      ciChecks: [
+        { name: "test", conclusion: "SUCCESS" },
+        { name: "lint", conclusion: "SKIPPED" },
+        { name: "legacy-ctx", conclusion: "PENDING" },
+      ],
+    }),
+  );
+  assert.deepEqual(payload, {
+    checks: [
+      { name: "lint", conclusion: "SKIPPED" },
+      { name: "legacy-ctx", conclusion: "PENDING" },
+    ],
+  });
+});
+
+test("buildCiInertEscalationPayload: a malformed entry with neither conclusion nor state names UNKNOWN (parsePRStatus's own normalization), never throws", () => {
+  const payload = buildCiInertEscalationPayload(status({ ciChecks: [{ name: "mystery", conclusion: "UNKNOWN" }] }));
+  assert.deepEqual(payload, { checks: [{ name: "mystery", conclusion: "UNKNOWN" }] });
+});
+
+test("buildCiInertEscalationPayload: an all-passing rollup names nothing", () => {
+  const payload = buildCiInertEscalationPayload(status({ ciChecks: [{ name: "test", conclusion: "SUCCESS" }] }));
+  assert.deepEqual(payload, { checks: [] });
+});
+
+test("buildCiInertEscalationPayload: no ciChecks attached (pre-#797 fixture/absent-rollup case) names nothing, never throws", () => {
+  const payload = buildCiInertEscalationPayload(status({ ciChecks: undefined }));
+  assert.deepEqual(payload, { checks: [] });
+});
+
+test("buildCiInertEscalationComment: names the remedy, cites docs/configuration.md's ci section, and cites PR #769", () => {
+  const comment = buildCiInertEscalationComment("abc123", [{ name: "lint", conclusion: "SKIPPED" }]);
+  assert.match(comment, /lint \(SKIPPED\)/);
+  assert.match(comment, /always run and skip its STEPS/);
+  assert.match(comment, /push-only workflow/);
+  assert.match(comment, /docs\/configuration\.md/);
+  assert.match(comment, /PR #769/);
+  assert.match(comment, /`abc123`/);
+});
+
+test("buildCiInertEscalationComment: names every non-passing check, comma-separated", () => {
+  const comment = buildCiInertEscalationComment("H1", [
+    { name: "lint", conclusion: "SKIPPED" },
+    { name: "legacy-ctx", conclusion: "PENDING" },
+  ]);
+  assert.match(comment, /lint \(SKIPPED\), legacy-ctx \(PENDING\)/);
 });
 
 // ── driveEngineAgentReview: the full composition, scripted with fakes ─────────────────────────

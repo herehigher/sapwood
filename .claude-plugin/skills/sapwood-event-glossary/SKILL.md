@@ -126,6 +126,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `lane-state-cleared` — **routine**: the engine's per-tick lane-state mirror (#399) removed the PR-side lane-state label (the lane no longer needs one). (see #399)
 - `ci-pending-observed` — **routine**: gate① (CI) is decisive-pending on a PR's head — opens the CI-pending pin the escalation timer reads.
 - `ci-pending-escalated` — **intervene**: a PR's CI stayed PENDING past the escalation bound while gate② was already decisive, so it can never progress on its own; labeled needs-human.
+- `ci-inert-escalated` — **intervene**: a PR's CI concluded without ever going green (no check still running, none failed, at least one concluded without passing) — it can never progress on its own; labeled needs-human. (see #783)
 - `ci-pending-cleared` — **routine**: a PR's CI-pending pin closed (resolved green/red, or the head moved) — cancels the escalation timer.
 - `gated-reentry` — **routine** [round-artifact, escalation-clear]: a human removed a lane's escalation label, and the #147 handshake re-admitted the lane for one bounded reentry attempt. (see #147)
 - `gated-reentry-capped` — **intervene** [round-artifact, escalation-source:always]: a lane exhausted its bounded #147 gated-reentry attempts; always proven by presence. (see #147)
