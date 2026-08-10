@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
-import { App, appContent, resolveFixCap, toggleConfigOpen } from "./App.tsx";
+import { App, appContent, resolveActiveFold, resolveFixCap, resolveHeaderSpend, toggleConfigOpen } from "./App.tsx";
 import { eventsQuery, loopStateQuery, spendQuery } from "./api/queries.ts";
+import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
+import type { DomainEvent } from "./domain-event.ts";
 import { initialHeroState } from "./hero/state.ts";
+import { initialReplayState } from "./replay/reducer.ts";
 
 /** Same tree-walk IconRail.test.tsx uses — finds a node in a REAL React element tree (never a
  *  `renderToStaticMarkup` string, which strips function props) by exact `className`. */
@@ -327,4 +330,108 @@ test("#727 gate②: every rail hash anchor resolves to exactly one matching targ
     const targets = html.match(new RegExp(`id="${id}"`, "g")) ?? [];
     assert.equal(targets.length, 1, `expected exactly one id="${id}" target, found ${targets.length}`);
   }
+});
+
+// ── #766 gate② finding [0] (replay-header-spend-live): resolveHeaderSpend ─────────────────────
+
+test("resolveHeaderSpend: live mode passes the live spend snapshot straight through, unchanged", () => {
+  const liveSpend = { runUsd: 42, runBudgetUsd: 100, todayUsd: 42, dailyBudgetUsd: 100 };
+  assert.equal(resolveHeaderSpend("live", 999 /* must be ignored in live mode */, liveSpend), liveSpend);
+});
+
+test("resolveHeaderSpend: replay mode reports the CURSOR-TRUNCATED replay total, never the live 'today' figure — proven with distinguishable values", () => {
+  // Deliberately distinguishable: live shows $999 spent today; the replayed round, truncated at
+  // its cursor, has only spent $12.5 so far. If the bug (finding [0]) were still present, the
+  // header would show $999 while replaying a round that has only actually spent $12.50.
+  const liveSpend = { runUsd: 999, runBudgetUsd: 500, todayUsd: 999, dailyBudgetUsd: 500 };
+  const result = resolveHeaderSpend("replay", 12.5, liveSpend);
+  assert.equal(result?.runUsd, 12.5);
+  assert.equal(result?.todayUsd, 12.5);
+  assert.notEqual(result?.runUsd, 999, "the live $999 total must never leak into the replay reading");
+  // Budget denominators are config, which does not replay — carried through from the live
+  // snapshot as the current ceiling either way.
+  assert.equal(result?.runBudgetUsd, 500);
+  assert.equal(result?.dailyBudgetUsd, 500);
+});
+
+test("resolveHeaderSpend: replay mode with an empty spendThroughCursor (round still loading) reports 0, never the live snapshot", () => {
+  const liveSpend = { runUsd: 999, runBudgetUsd: 500, todayUsd: 999, dailyBudgetUsd: 500 };
+  const result = resolveHeaderSpend("replay", 0, liveSpend);
+  assert.equal(result?.runUsd, 0);
+  assert.equal(result?.todayUsd, 0);
+});
+
+test("resolveHeaderSpend: replay mode with no live spend at all (loop.data still pending) still returns a spend object with the replay total, budgets null", () => {
+  const result = resolveHeaderSpend("replay", 7.25, undefined);
+  assert.deepEqual(result, { runUsd: 7.25, runBudgetUsd: null, todayUsd: 7.25, dailyBudgetUsd: null });
+});
+
+// ── appContent integration: Header actually receives the mode-resolved spend, not loop.data.spend ──
+
+test("#766 gate② finding [0]: appContent's REAL <Header spend> prop is the resolved replay spend, not the raw live loop.data.spend", () => {
+  const vm = minimalAppViewModel();
+  const distinguishableReplaySpend = { runUsd: 12.5, runBudgetUsd: 500, todayUsd: 12.5, dailyBudgetUsd: 500 };
+  const tree = appContent({
+    ...vm,
+    mode: "replay",
+    loop: {
+      data: { ...LOOP_STATE_OK, spend: { runUsd: 999, runBudgetUsd: 500, todayUsd: 999, dailyBudgetUsd: 500 } },
+      isPending: false,
+    },
+    spendFacts: distinguishableReplaySpend,
+  } as unknown as Parameters<typeof appContent>[0]);
+
+  const header = findByType(tree, Header);
+  assert.ok(header, "Header not found in appContent's real tree");
+  assert.deepEqual(header!.props.spend, distinguishableReplaySpend, "Header must receive vm.spendFacts, never loop.data.spend directly");
+});
+
+// ── #766 gate② finding [2] (replay-loading-leaks-live-fold): resolveActiveFold ─────────────────
+
+function domainEvent(id: number, kind: string): DomainEvent {
+  return { known: false, id, ts: "2026-08-10T10:00:00Z", kind, payload: {} };
+}
+
+test("resolveActiveFold: live mode returns the live fold's own fields, untouched", () => {
+  const live = {
+    hero: initialHeroState(3),
+    steps: [],
+    events: [domainEvent(1, "merged")],
+    titles: { 1: { issueTitle: "live issue" } },
+    openAttention: [domainEvent(2, "drive-needs-human")],
+  };
+  const result = resolveActiveFold("live", null, live, initialReplayState(3));
+  assert.equal(result, live);
+});
+
+test("resolveActiveFold: replay mode with a loaded position returns THAT position's state, never the live fold", () => {
+  const live = {
+    hero: initialHeroState(3),
+    steps: [],
+    events: [domainEvent(999, "merged")], // distinguishable "live" event id
+    titles: { 999: { issueTitle: "LIVE — must not leak" } },
+    openAttention: [],
+  };
+  const replayState = { ...initialReplayState(3), events: [domainEvent(1, "dispatched")], titles: { 1: { issueTitle: "replayed issue" } } };
+  const result = resolveActiveFold("replay", { state: replayState, cursorId: 1, cursorIndex: 1 }, live, initialReplayState(3));
+  assert.deepEqual(result.events, replayState.events);
+  assert.deepEqual(result.titles, replayState.titles);
+  assert.notDeepEqual(result.events, live.events, "the live event must never leak into a loaded replay position");
+});
+
+test("resolveActiveFold: replay mode with NO position yet (round still loading) returns the neutral empty replay state — never falls through to live's distinguishable values", () => {
+  const live = {
+    hero: initialHeroState(3),
+    steps: [],
+    events: [domainEvent(999, "merged")],
+    titles: { 999: { issueTitle: "LIVE — must not leak during load" } },
+    openAttention: [domainEvent(998, "drive-needs-human")],
+  };
+  const emptyReplay = initialReplayState(3);
+  const result = resolveActiveFold("replay", null, live, emptyReplay);
+  assert.deepEqual(result.events, emptyReplay.events);
+  assert.deepEqual(result.titles, emptyReplay.titles);
+  assert.deepEqual(result.openAttention, []);
+  assert.notDeepEqual(result.events, live.events, "the loading window must never show the live fold's events");
+  assert.notDeepEqual(result.titles, live.titles, "the loading window must never show the live fold's titles");
 });

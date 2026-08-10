@@ -26,14 +26,18 @@ export interface TransportProps {
   now?: Date;
 }
 
+/** #766 gate② finding [3] (round-tally-uses-nonexistent-field): the authoritative v1
+ *  `RoundArtifactSchema` (`engine/src/loop/round-artifact.ts`) names the merged-PR counter
+ *  `prsMerged`, not `merged` — a real `/api/rounds` artifact has no `merged` field at all, so the
+ *  old read always fell through to "no summary yet" for every genuine artifact. */
 function roundTally(round: Round): string {
   if (round.artifact === null || typeof round.artifact !== "object") return "no summary yet";
   const a = round.artifact as Record<string, unknown>;
-  const merged = typeof a.merged === "number" ? a.merged : undefined;
+  const prsMerged = typeof a.prsMerged === "number" ? a.prsMerged : undefined;
   const spendUsd = typeof a.spendUsd === "number" ? a.spendUsd : undefined;
-  if (merged === undefined && spendUsd === undefined) return "no summary yet";
+  if (prsMerged === undefined && spendUsd === undefined) return "no summary yet";
   const parts: string[] = [];
-  if (merged !== undefined) parts.push(`${merged} merged`);
+  if (prsMerged !== undefined) parts.push(`${prsMerged} merged`);
   if (spendUsd !== undefined) parts.push(formatUsd(spendUsd));
   return parts.join(" · ");
 }

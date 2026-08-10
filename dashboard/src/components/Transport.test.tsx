@@ -6,6 +6,41 @@ import { Transport } from "./Transport.tsx";
 
 const NOW = new Date("2026-08-10T12:00:00Z");
 
+/** #766 gate② finding [3]: a hand-built object matching the FULL, authoritative v1
+ *  `RoundArtifactSchema` shape (`engine/src/loop/round-artifact.ts`) — the dashboard workspace
+ *  never imports `engine/src` at runtime (same established boundary `entities.ts`'s title-fold
+ *  doc and `copy.ts`'s `EventKind` mirror already document), so this mirrors the contract by
+ *  hand rather than importing the zod schema. Every required field is present with its correct
+ *  NAME (`prsMerged`, not `merged` — the exact field the finding caught this renderer missing)
+ *  so a fixture drift from the real contract would show up as an obviously-wrong test value, not
+ *  a silently-passing invented field. */
+function contractValidArtifact(overrides: Partial<{ prsMerged: number; spendUsd: number }> = {}) {
+  return {
+    schemaVersion: 1,
+    roundId: 1,
+    startedAt: "2026-08-10T10:00:00Z",
+    endedAt: "2026-08-10T10:30:00Z",
+    dispatches: [],
+    merges: [],
+    prsOpened: overrides.prsMerged ?? 3,
+    prsMerged: overrides.prsMerged ?? 3,
+    issuesClosed: overrides.prsMerged ?? 3,
+    spendUsd: overrides.spendUsd ?? 4.5,
+    roundBudgetUsd: 100,
+    retries: { gatedReentries: 0, gatedReentryCapped: 0, rollbacksRecovered: 0, rollbacksEscalated: 0 },
+    reviewRounds: { reviewerFallbackSwitches: 0, reviewerFallbackReverts: 0 },
+    escalations: { needsHuman: [], ceiling: 0, driveNoPr: 0 },
+    egressSuspects: [],
+    handoffs: 0,
+    degradedPhases: [],
+    roundStops: [],
+    retro: { opened: null, degraded: null },
+    align: null,
+    concerns: [],
+    concernsReconciled: [],
+  };
+}
+
 function round(overrides: Partial<Round> = {}): Round {
   return {
     roundId: 1,
@@ -16,7 +51,7 @@ function round(overrides: Partial<Round> = {}): Round {
     startSpendId: 50,
     eventCount: 42,
     schemaVersion: 1,
-    artifact: { merged: 3, spendUsd: 4.5 },
+    artifact: contractValidArtifact(),
     ...overrides,
   };
 }
@@ -34,12 +69,24 @@ test("lists every round from /api/rounds, one row each", () => {
   for (const r of rounds) assert.match(html, new RegExp(`round ${r.roundId}`));
 });
 
-test("a round with a tally (artifact present) shows its merged count and spend", () => {
+test("a round with a tally (artifact present) shows its merged count and spend, read from the REAL v1 artifact field names", () => {
   const html = renderToStaticMarkup(
-    <Transport rounds={[round({ artifact: { merged: 5, spendUsd: 12.3 } })]} selectedRoundId={null} onSelectRound={() => {}} now={NOW} />,
+    <Transport
+      rounds={[round({ artifact: contractValidArtifact({ prsMerged: 5, spendUsd: 12.3 }) })]}
+      selectedRoundId={null}
+      onSelectRound={() => {}}
+      now={NOW}
+    />,
   );
   assert.match(html, /5 merged/);
   assert.match(html, /\$12\.30/);
+});
+
+test("#766 gate② finding [3]: an artifact shaped like the invented 'merged' field (never a real contract field) renders tally-less, not a fabricated count", () => {
+  const html = renderToStaticMarkup(
+    <Transport rounds={[round({ artifact: { merged: 5, spendUsd: 12.3 } })]} selectedRoundId={null} onSelectRound={() => {}} now={NOW} />,
+  );
+  assert.doesNotMatch(html, /5 merged/, "there is no 'merged' field on a real artifact — this must not render a count from it");
 });
 
 test("an artifact-less round renders tally-less — 'no summary yet', never a fabricated $0/0", () => {

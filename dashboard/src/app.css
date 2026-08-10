@@ -149,6 +149,16 @@ code,
   padding: var(--space-4);
 }
 
+/* #741/#766 gate② finding [1]: replay's non-replayable-surface grey-out (frontend-design.md
+   §6/§9) — a REDUCED-OPACITY, dashed-border `.panel`, so it reads as "the same panel, dimmed",
+   never a bare unstyled placeholder dropped in its place. The "live only" text is the badge on
+   top of that dimmed surface, not the whole of the treatment. */
+.live-only {
+  opacity: 0.5;
+  border-style: dashed;
+  text-align: center;
+}
+
 .app-header {
   display: flex;
   align-items: center;

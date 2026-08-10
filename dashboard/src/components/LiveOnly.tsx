@@ -8,8 +8,12 @@ import type { ReactNode } from "react";
  *  through as if it were current, regardless of what `children` happens to hold. */
 export function LiveOnly({ mode, children }: { mode: "live" | "replay"; children: ReactNode }) {
   if (mode === "replay") {
+    // #766 gate② finding [1] (live-only-is-not-a-greyed-panel): the `panel` class is what makes
+    // this read as the SAME panel, dimmed, rather than a bare unstyled div dropped in its place —
+    // `.live-only` (app.css) applies the actual grey-out (reduced opacity + dashed border), so the
+    // caption is a badge ON a recognizably panel-shaped surface, never floating text alone.
     return (
-      <div className="live-only" role="status" aria-label="live only">
+      <div className="panel live-only" role="status" aria-label="live only">
         <p className="muted live-only-caption">live only</p>
       </div>
     );
