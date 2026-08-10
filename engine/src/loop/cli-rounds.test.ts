@@ -854,7 +854,7 @@ test("sapwood run --dry-run: round.milestone scopes the preview — out-of-miles
 });
 
 test("sapwood run --dry-run: round.milestone unset -> passthrough, every Ready issue previewed (#561)", async () => {
-  const stdout = await captureDryRun({}, DRY_RUN_READY);
+  const stdout = await captureDryRun({ lanes: { roundDispatchCap: 3 } }, DRY_RUN_READY);
   assert.match(stdout, /3 ready issue\(s\), 3 dispatchable, 3 candidate\(s\)/);
   for (const n of [145, 561, 900]) assert.match(stdout, new RegExp(`would dispatch: #${n}`));
 });

@@ -1633,24 +1633,25 @@ rule is also a process rule: even a PR that touches these files and somehow pass
 and review is not something the conductor should be configured to auto-merge.
 <!-- sapwood:skill:human-merge-only-paths:end -->
 
-### `sapwood.config.*` is also the shipped starter config — a known consequence (#386)
+### The protected live config and shipped starter are separate (#386, #577)
 
-The denial above is path-based, not intent-based, and `sapwood.config.*` carries a second
-role that makes that worth stating explicitly: `sapwood init` ships **this repo's own
-root `sapwood.config.yaml`, verbatim**, as a new user's starter config
-(`engine/src/loop/init.ts`'s `sampleConfig()`/`ensureConfig()` — there is no separate
-template file). So the file a worker may not write and the commented example every new
-operator receives are the same object.
+The path-based denial protects this repository's root `sapwood.config.yaml`: it is the
+live dogfood configuration, and changing it remains human-merge-only through the guard.
+`sapwood init` instead ships `sapwood.config.example.yaml` as the starter template
+(`engine/src/loop/init.ts`'s `sampleConfig()`/`ensureConfig()`). That template now belongs
+to the default `escalation.instructionPaths` surface, so edits to it route to human merge
+review. It is **not** guard-protected: extending the hard guard boundary to the template is
+tracked separately in #781.
 
-The consequence: **a worker cannot land a change to the shipped config's own comments —
-even a purely editorial one carrying no security meaning at all.** The guard denies the
-write (`BLOCK [write-path] sapwood.config.* (engine/guard config) is human-merge-only`)
-without inspecting whether the edit touches `guard.mode` or a `#` comment, which is the
-correct fail-closed behaviour: an intent-aware exception is exactly the seam a worker
-could talk its way through.
+The consequence for the protected root config: **a worker cannot land a change to its
+comments — even a purely editorial one carrying no security meaning at all.** The guard
+denies the write (`BLOCK [write-path] sapwood.config.* (engine/guard config) is
+human-merge-only`) without inspecting whether the edit touches `guard.mode` or a `#`
+comment, which is the correct fail-closed behaviour: an intent-aware exception is exactly
+the seam a worker could talk its way through.
 
 This is a deliberate trade, not a defect — but it means any issue whose acceptance
-criteria require the shipped YAML to change has a **human-applied step that no worker can
+criteria require the protected root YAML to change has a **human-applied step that no worker can
 discharge**. Such issues are best written to ask for a paste-ready patch (which a worker
 *can* produce, in the PR body or a plain file) rather than for the edit itself, so the
 work is dispatchable and the acceptance criteria are honestly satisfiable.

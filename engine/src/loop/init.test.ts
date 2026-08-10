@@ -1302,6 +1302,30 @@ test("clearDeployKeyConfigFromJson: malformed JSON -> a hand-edit WARN, file unt
 
 const cfgKeyPath = (dir: string) => join(dir, "data", "worker-deploy-key");
 
+test("init: a fresh fixture repo receives a starter config pinned to produce-pr-and-stop", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((label) => label.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+  });
+  const dir = tmpCwd();
+  try {
+    await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      ...nonInteractive,
+      sshKeygen: failSshKeygen,
+      probeSshAuth: failProbeSshAuth,
+    });
+
+    const starter = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
+    assert.equal(parseConfig(starter).merge.mode, "produce-pr-and-stop");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("init: FRESH PROVISIONING — nothing configured, no sapwood-titled remote key -> provisions end-to-end (ssh-keygen + gh repo deploy-key add --allow-write --title sapwood-worker), reads back the new id, preflight green, BOTH deployKeyPath and deployKeyId written into the config file, .gitignore covers the key", async () => {
   const { run, calls } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
