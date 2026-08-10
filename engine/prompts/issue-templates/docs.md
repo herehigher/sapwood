@@ -17,6 +17,7 @@ Which document and section will change, and what should be true afterward?
 Out of scope: <!-- Encouraged: name one adjacent documentation change this issue will not do. -->
 
 ## Acceptance criteria
+<!-- sapwood:ac -->
 
 <!-- Each line MUST be a literal `- [ ]` checkbox (start unchecked — nothing should be done yet)
      — the engine parses this exact format into the acceptance-criteria set a worker is
@@ -32,6 +33,7 @@ Out of scope: <!-- Encouraged: name one adjacent documentation change this issue
       which doc is added/updated, and what it says).
 
 ## Verification plan
+<!-- sapwood:verification -->
 
 Most docs-only work is inherently unverifiable by test/command — if that's the case
 here, say so and apply the `verify:n/a` label instead of filling this section (the

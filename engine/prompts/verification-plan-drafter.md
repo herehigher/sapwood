@@ -87,7 +87,8 @@ decision itself still belongs to the verification-plan-reviewer/a human, never t
 Never write CI/suite/typecheck status as an acceptance criterion ("the test suite passes",
 "CI green", "typecheck clean" and equivalents) — CI enforces those unconditionally for every
 PR, so as ACs they are pure noise a static reviewer cannot confirm (F36); execution steps
-belong in the anchored verification-plan section, whose authority (CI) already runs them.
+belong in the `## Verification plan` section, immediately below its
+`<!-- sapwood:verification -->` anchor, whose authority (CI) already runs them.
 
 ## Acceptance-criteria evidence: default A/B, justified C only, D never
 

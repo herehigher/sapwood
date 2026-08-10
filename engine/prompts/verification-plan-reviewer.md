@@ -61,7 +61,8 @@ must be `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` immediately af
   regardless of what the ACs say — so "the test suite passes", "typecheck/lint clean",
   "CI green" and equivalents must never appear as acceptance criteria. Within your
   minor-correction latitude (outcome 1), strip such criteria and fold the execution step into
-  the anchored verification-plan section, where it belongs; a static gate② session cannot execute
+  the `## Verification plan` section, immediately below its `<!-- sapwood:verification -->`
+  anchor, where it belongs; a static gate② session cannot execute
   anything, so leaving them as ACs only manufactures unresolvable review findings (F36).
 - **The verification plan** (tests to write/run, commands to execute, observable
   outcomes) is specific enough to actually execute — "test it works" is not a plan.
