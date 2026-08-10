@@ -241,6 +241,17 @@ test("validateDecomposeOutput: both union branches validate; mixed output preser
   assert.deepEqual(unresolved.ok && unresolved.outcome, "unresolved");
 });
 
+test("#591: decompose accepts a ready child whose language-free sections use both sapwood anchors", () => {
+  const anchoredReadyBody =
+    "## 受け入れ条件\n<!-- sapwood:ac -->\n\n- [ ] 動作する\n\n## 検証\n<!-- sapwood:verification -->\n\n- npm test を実行する";
+  const metadata = {
+    outcome: "decomposed",
+    children: [{ title: "日本語の子", kind: "ready", blockedBy: [] }],
+    coverage: { mappings: [{ parentIntent: "実装する", children: [0] }], remainders: [] },
+  };
+  assert.ok(validateDecomposeOutput(result(metadata, [anchoredReadyBody]), 1).ok);
+});
+
 test("validateDecomposeOutput: maxChildren, ready-plan/AC, coverage, and remainder honesty fail closed", () => {
   assert.match((validateDecomposeOutput(result(mixedMetadata, [readyBody, remainderBody]), 1) as { reason: string }).reason, /maxChildren/);
   assert.match(

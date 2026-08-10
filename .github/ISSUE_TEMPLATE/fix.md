@@ -23,6 +23,7 @@ Out of scope: <!-- Encouraged: name one adjacent thing this issue will not do. -
      issue-specific boundaries, never a restatement of repo doctrine. -->
 
 ## Acceptance criteria
+<!-- sapwood:ac -->
 
 <!-- Each line MUST be a literal `- [ ]` checkbox (start unchecked — nothing should be done yet)
      — the engine parses this exact format into the acceptance-criteria set a worker is
@@ -38,6 +39,7 @@ Out of scope: <!-- Encouraged: name one adjacent thing this issue will not do. -
 - [ ] Add one line per criterion — each must be independently verifiable.
 
 ## Verification plan
+<!-- sapwood:verification -->
 
 How will the reviewer at gate② prove the fix actually works (and didn't regress
 anything)? Name the tests to write/run, commands to execute, or observable outcomes

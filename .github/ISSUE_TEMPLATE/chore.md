@@ -17,6 +17,7 @@ Describe the scoped maintenance change and its intended result.
 Out of scope: <!-- Encouraged: name one adjacent thing this issue will not do. -->
 
 ## Acceptance criteria
+<!-- sapwood:ac -->
 
 <!-- Each line MUST be a literal `- [ ]` checkbox (start unchecked — nothing should be done yet)
      — the engine parses this exact format into the acceptance-criteria set a worker is
@@ -31,6 +32,7 @@ Out of scope: <!-- Encouraged: name one adjacent thing this issue will not do. -
 - [ ] Concrete, checkable statement of what "done" looks like.
 
 ## Verification plan
+<!-- sapwood:verification -->
 
 If this chore is inherently unverifiable (no test/command can prove it — pure
 cleanup, config bump with no behavior change, etc.), say so and apply the

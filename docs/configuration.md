@@ -392,23 +392,44 @@ preference — "always respond in Japanese," "write commit messages in French" �
 in the target repo's own `CLAUDE.md`, exactly like any other repo-specific working convention.
 There's nothing to configure in `sapwood.config.yaml` for this.
 
-**Caveat: keep machine-parsed surfaces in English.** A language preference in `CLAUDE.md`
-naturally covers everything an agent freely composes — comments, commit messages, PR
-descriptions, conversational replies. It must NOT extend to the handful of surfaces sapwood's
-own engine code parses with an English-only pattern, since these are read by the engine, not by
-an LLM, and a translated heading/label is invisible to a fixed regex:
+**Issue-body headings may use any language.** Put an exact own-line marker immediately after
+each semantic section heading:
 
-- **Issue-body verification/acceptance headings** — `forge.ts`'s `extractVerificationPlan` looks
-  for a heading matching `/^(#{1,6})\s*(verification|acceptance)[^\n]*$/im`. A translated heading
-  (e.g. `## 検証`) is invisible to this regex — the issue reads as having no verification plan at
-  all, which blocks dispatch (Decision #8) or silently routes it down the `verify:n/a` doc-gate
-  path instead.
-- **Labels and board `Status` values** — `type:*`/`prio:*`/`needs-human`/etc. and the ProjectV2
-  `Status` field's option names are matched literally against the values `sapwood.config.yaml`
-  configures; they are identifiers, not prose, and translating them just breaks the match.
-- **Structured-output blocks** — the `<<<SAPWOOD_RESULT>>>`/`<<<BODY>>>` sentinels
-  (`structured-output.ts`) and every role's JSON metadata keys are a fixed wire format the engine
-  parses; only the free-text BODY content within them is safe to localize.
+```md
+## 受け入れ条件
+<!-- sapwood:ac -->
+
+## 検証計画
+<!-- sapwood:verification -->
+```
+
+The heading remains the Markdown structural boundary and may be in the issue's own language.
+The two lower-case ASCII comments are sapwood machine protocol: do not translate, case-change,
+width-normalize, duplicate, or place them in a code fence. Once any `<!-- sapwood:<word> -->`
+marker occurs outside a fence, anchored mode is a hard override: sapwood ignores legacy heading
+matching and requires exactly one correctly placed `ac` marker and one correctly placed
+`verification` marker. A partial, duplicate, unknown, or misplaced marker set is planless and
+routes to PO triage; it never mixes anchors with English headings or dispatches silently.
+This is #588's parsing boundary: issue headings are language-free when paired with sapwood
+anchors, rather than English-regex matched protocol.
+
+For compatibility, bodies with no sapwood markers retain the legacy English heading parser
+unchanged. An unmarked non-English body is therefore planless and triaged — it does **not**
+silently enter the `verify:n/a` doc-gate path, which requires the explicit configured label.
+
+Issue-facing prose an LLM composes (drafted bodies, triage/proposal text, and LLM-written notes)
+should use the issue's own language and preserve original-language content unless asked to
+translate it. Engine-authored static receipts and escalation comments remain English, including
+on non-English issues; this is a deliberate permanent-until-revisited boundary, not a language
+selection mechanism.
+
+**Other machine-parsed surfaces remain protocol identifiers.**
+
+- **Config keys and structured-output sentinels** — YAML keys, the
+  `<<<SAPWOOD_RESULT>>>`/`<<<BODY>>>` sentinels (`structured-output.ts`), and role JSON metadata
+  keys are fixed protocol identifiers. Only their free-text body content is localized.
+- **Labels and board `Status` values** — these are user-configured opaque strings, not an
+  English-only protocol. sapwood matches them literally and never translates or infers them.
 
 ## `recovery`
 

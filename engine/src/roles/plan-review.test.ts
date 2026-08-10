@@ -295,6 +295,8 @@ const lastComment = (forge: FakeForge, issue: number): string => {
 const PLAN_BODY =
   "Some description.\n\n## Acceptance criteria\n\n- [ ] the criteria are met\n\n## Verification\n\nRun `npm test` and confirm green.";
 const NO_PLAN_BODY = "Some description with no verification section at all.";
+const ANCHORED_PLAN_BODY =
+  "## 受け入れ条件\n<!-- sapwood:ac -->\n\n- [ ] 条件を満たす\n\n## 検証\n<!-- sapwood:verification -->\n\n- npm test を実行する";
 
 test("createPlanReviewStub: marker present -> returns it unchanged, no forge call, no session run (idempotence)", async () => {
   const forge = new FakeForge();
@@ -1042,6 +1044,11 @@ test("validateReviewerOutput: well-formed 'approve' with a valid current body ->
   const text = sapwoodResult({ decision: "approve", issue: 1 });
   const result = validateReviewerOutput(text, 1, PLAN_BODY);
   assert.equal(result.ok, true);
+});
+
+test("#591: plan-review approval and drafter re-checks accept a fully anchored non-English body", () => {
+  assert.ok(validateReviewerOutput(sapwoodResult({ decision: "approve", issue: 1 }), 1, ANCHORED_PLAN_BODY).ok);
+  assert.ok(validateDrafterOutput(sapwoodResult({ issue: 1 }, ANCHORED_PLAN_BODY), 1).ok);
 });
 
 test("validateDrafterOutput: missing body -> fail-closed", () => {

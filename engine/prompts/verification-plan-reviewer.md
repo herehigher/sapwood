@@ -41,8 +41,13 @@ You are judging whether this issue is genuinely fit to hand to a headless autono
 worker with no human watching — not whether the underlying work is a good idea (a human
 already decided that by moving it to `Ready`). Concretely:
 
+When you compose a revised body, review brief, or other issue-facing prose, use the issue's own
+language and preserve its original-language content unless asked to translate it. Acceptance and
+verification headings may be in any language, but their exact own-line lower-case ASCII anchors
+must be `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` immediately after the headings.
+
 - **Acceptance criteria are checkbox items — mandatory, not stylistic.** Every criterion must
-  be its own literal `- [ ]` line under the `## Acceptance criteria` heading; the engine parses
+  be its own literal `- [ ]` line under the anchored acceptance-criteria heading; the engine parses
   exactly this shape into the authoritative AC set a worker is dispatched against and later
   reviewed on (design #279 §5). Prose, a paragraph, or a plain `-` bullet with no checkbox do
   not count as ANY acceptance criteria at all, even if the words are perfectly clear — a
@@ -56,7 +61,7 @@ already decided that by moving it to `Ready`). Concretely:
   regardless of what the ACs say — so "the test suite passes", "typecheck/lint clean",
   "CI green" and equivalents must never appear as acceptance criteria. Within your
   minor-correction latitude (outcome 1), strip such criteria and fold the execution step into
-  the `## Verification plan`, where it belongs; a static gate② session cannot execute
+  the anchored verification-plan section, where it belongs; a static gate② session cannot execute
   anything, so leaving them as ACs only manufactures unresolvable review findings (F36).
 - **The verification plan** (tests to write/run, commands to execute, observable
   outcomes) is specific enough to actually execute — "test it works" is not a plan.

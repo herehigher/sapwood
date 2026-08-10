@@ -788,6 +788,169 @@ test("extractAcceptanceCriteria corpus: duplicate identical criterion text at di
   assert.equal(items[0]!.text, items[1]!.text);
 });
 
+// ── #591: language-free issue bodies use exact, fence-safe sapwood section anchors ─────────
+
+const JAPANESE_ANCHORED_BODY = `## 受け入れ条件
+<!-- sapwood:ac -->
+
+- [ ] 日本語の完了条件を満たす
+
+## 検証計画
+<!-- sapwood:verification -->
+
+- npm test を実行する`;
+
+const RTL_ANCHORED_BODY = `## معايير القبول
+<!-- sapwood:ac -->
+
+- [ ] يتحقق السلوك المتوقع
+
+## خطة التحقق
+<!-- sapwood:verification -->
+
+- شغّل npm test`;
+
+test("#591 fixture matrix: Japanese and RTL headings with both anchors extract a complete dispatch plan and checkbox ACs", () => {
+  for (const body of [JAPANESE_ANCHORED_BODY, RTL_ANCHORED_BODY]) {
+    assert.ok(extractVerificationPlan(body)?.includes("<!-- sapwood:ac -->"));
+    assert.ok(extractVerificationSection(body)?.includes("<!-- sapwood:verification -->"));
+    assert.equal(extractAcceptanceCriteria(body)?.length, 1);
+  }
+});
+
+test("#591: Japanese and RTL anchored issues dispatch once plan:approved is labelled", () => {
+  const project = parseProject(
+    JSON.stringify({
+      data: {
+        user: {
+          projectV2: {
+            id: "PVT_591",
+            field: { id: "PVTF_status", options: [{ id: "ready", name: "Ready" }] },
+            items: {
+              nodes: [JAPANESE_ANCHORED_BODY, RTL_ANCHORED_BODY].map((body, index) => ({
+                id: `ITEM_591_${index}`,
+                content: {
+                  number: 5910 + index,
+                  title: "anchored issue",
+                  state: "OPEN",
+                  body,
+                  repository: { nameWithOwner: "herehigher/sapwood" },
+                  labels: { nodes: [{ name: "plan:approved" }] },
+                },
+                fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
+              })),
+            },
+          },
+        },
+      },
+    }),
+    "Status",
+  );
+  assert.deepEqual(
+    selectReadyIssues(project, cfg).map((issue) => issue.number),
+    [5910, 5911],
+  );
+});
+
+test("#591 fixture matrix: legacy English extraction remains byte-for-byte unchanged when no anchors are present", () => {
+  const body = "before\n\n## Acceptance criteria\n\n- [ ] legacy AC\n\n## Verification plan\n\n- run legacy test\n\nafter";
+  assert.equal(
+    extractVerificationPlan(body),
+    "## Acceptance criteria\n\n- [ ] legacy AC\n\n## Verification plan\n\n- run legacy test\n\nafter",
+  );
+  assert.equal(extractVerificationSection(body), "## Verification plan\n\n- run legacy test\n\nafter");
+  assert.deepEqual(
+    extractAcceptanceCriteria(body)?.map((item) => item.text),
+    ["legacy AC"],
+  );
+});
+
+test("#591 fixture matrix: fenced anchors are ignored, so fenced-only non-English markers remain planless", () => {
+  const body = "```markdown\n## 受け入れ条件\n<!-- sapwood:ac -->\n\n## 検証\n<!-- sapwood:verification -->\n```";
+  assert.equal(extractVerificationPlan(body), null);
+  assert.equal(extractVerificationSection(body), null);
+  assert.equal(extractAcceptanceCriteria(body), null);
+});
+
+test("#591 fixture matrix: CRLF anchored bodies parse identically", () => {
+  const body = JAPANESE_ANCHORED_BODY.replace(/\n/g, "\r\n");
+  assert.ok(extractVerificationPlan(body)?.includes("## 受け入れ条件"));
+  assert.equal(extractAcceptanceCriteria(body)?.[0]?.text, "日本語の完了条件を満たす");
+});
+
+test("#591 fixture matrix: partial, duplicate, unknown, and misplaced anchors fail closed as planless", () => {
+  const malformedBodies = [
+    "## 受け入れ条件\n<!-- sapwood:ac -->\n\n- [ ] one\n\n## 検証\n- run test",
+    `${JAPANESE_ANCHORED_BODY}\n\n## 重複\n<!-- sapwood:ac -->`,
+    "## 受け入れ条件\n<!-- sapwood:ac -->\n\n- [ ] one\n\n## 検証\n<!-- sapwood:verification -->\n\n- test\n\n<!-- sapwood:future -->",
+    "<!-- sapwood:ac -->\n\n## 受け入れ条件\n\n- [ ] one\n\n## 検証\n<!-- sapwood:verification -->\n\n- test",
+  ];
+  for (const body of malformedBodies) {
+    assert.equal(extractVerificationPlan(body), null);
+    assert.equal(extractVerificationSection(body), null);
+    assert.equal(extractAcceptanceCriteria(body), null);
+  }
+});
+
+test("#591: a partial anchor set enters PO triage instead of using an English-heading fallback", () => {
+  const body = "## Acceptance criteria\n\n- [ ] ignored legacy AC\n\n## 受け入れ条件\n<!-- sapwood:ac -->\n\n- [ ] incomplete marker set";
+  const project = parseProject(
+    JSON.stringify({
+      data: {
+        user: {
+          projectV2: {
+            id: "PVT_591_TRIAGE",
+            field: { id: "PVTF_status", options: [{ id: "todo", name: "Todo" }] },
+            items: {
+              nodes: [
+                {
+                  id: "ITEM_591_TRIAGE",
+                  content: {
+                    number: 5912,
+                    title: "partial anchors",
+                    state: "OPEN",
+                    body,
+                    repository: { nameWithOwner: "herehigher/sapwood" },
+                    labels: { nodes: [] },
+                  },
+                  fieldValues: { nodes: [{ name: "Todo", field: { name: "Status" } }] },
+                },
+              ],
+            },
+          },
+        },
+      },
+    }),
+    "Status",
+  );
+  assert.deepEqual(
+    selectPlanTriageCandidates(project, cfg).map((issue) => issue.number),
+    [5912],
+  );
+});
+
+test("#591 fixture matrix: anchored mode overrides conflicting English headings and protocol tokens are exact lowercase ASCII", () => {
+  const body = `## Acceptance criteria
+
+- [ ] ignored English AC
+
+## Verification plan
+
+- ignored English verification
+
+${JAPANESE_ANCHORED_BODY}`;
+  assert.ok(extractVerificationPlan(body)?.includes("日本語の完了条件"));
+  assert.ok(!extractVerificationPlan(body)?.includes("ignored English AC"));
+  assert.deepEqual(
+    extractAcceptanceCriteria(body)?.map((item) => item.text),
+    ["日本語の完了条件を満たす"],
+  );
+
+  const wrongCase = JAPANESE_ANCHORED_BODY.replace("sapwood:ac", "sapwood:AC").replace("sapwood:verification", "sapwood:VERIFICATION");
+  assert.equal(extractVerificationPlan(wrongCase), null);
+  assert.equal(extractAcceptanceCriteria(wrongCase), null);
+});
+
 test("readStartupReconcileData returns board placements plus open PR bodies using read-only gh calls", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
