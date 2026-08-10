@@ -5464,6 +5464,47 @@ test("runRounds standby (#630 AC3): a run whose ONLY gated-reentry candidate sit
   state.close();
 });
 
+test("runRounds standby (#730 AC1): only human-blocked gated candidates are excluded, so the 2026-08-07 shape reaches standby", async () => {
+  const forge = new FakeForge(); // ready/planReview/triage/milestone-backlog all empty
+  const state = new State(":memory:");
+  const cfg = mkCfg({ round: { milestone: "M-X", standby: { enabled: true } } });
+  state.upsertWorker({
+    name: "lane-730",
+    issue: 730,
+    session_id: "s",
+    state: "failed",
+    started_at: "t",
+    ended_at: "t2",
+    pr: 1730,
+    gated_escalation_labeled: 1,
+  });
+  forge.issueMilestone[730] = "M-X";
+  forge.issueLabels[730] = [cfg.labels.needsHuman];
+
+  const events = spyOnEvents(state);
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop();
+  };
+  const deps = baseDeps({ forge, state, sleep, mergeGate: new ScriptedMergeGate([]), tickIntervalSec: 5, cfg });
+  deps.registerSignals = (requestStop) => {
+    stop = once(requestStop);
+    return () => {};
+  };
+
+  const result = await runRoundsGuarded(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round runs when every re-entry candidate awaits a human");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby's no-work precondition holds",
+  );
+  assert.equal(state.getRound(2), undefined, "no idle-churn round is opened over human-blocked re-entry candidates");
+  state.close();
+});
+
 test("runRounds (#431 AC3): the ceiling-wait loop announces the breach ONCE — many wait iterations, one reason-bearing ceiling-breach-entered, and the wait itself can no longer extend the budget", async () => {
   const forge = new FakeForge();
   forge.ready = []; // round 1 has no dispatch work — opens unconditionally, closes idle
