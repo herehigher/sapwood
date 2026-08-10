@@ -89,6 +89,17 @@ assertion that a human will check. Tier-D producer-side artifacts (browser outpu
 session logs, or any other inherited-host-tool observation) are never acceptance evidence,
 advisory at most — never draft a criterion whose proof is the worker's own session output.
 
+## UI-conditional criteria need real-wiring evidence, not an isolated harness
+
+When a criterion describes how an already-integrated component must render under a specific
+mode or data condition ("shows X in replay mode", "greys out when disconnected"), its
+verification step must name a test through the actual production entry point (the real
+component tree, fed real props from real data) with distinguishable values for the condition —
+not a standalone render of the target component with hand-built props. A test proving the
+component branches correctly in isolation does not prove that branch is ever reached with real
+data; a synthetic-prop test satisfies the AC's letter while leaving the wiring itself unverified.
+Name the entry point and what makes the fixture's live vs. condition values distinguishable.
+
 ## Structured output
 
 End with exactly one sentinel block. Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence.
