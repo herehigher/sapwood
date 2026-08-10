@@ -31,11 +31,11 @@ function Bar({ bar, max }: { bar: CostBar; max: number }) {
   );
 }
 
-export function CostStrip({ groups }: { groups: CostBarGroup[] }) {
+export function CostStrip({ groups, heading = "cost · today" }: { groups: CostBarGroup[]; heading?: string }) {
   const max = Math.max(0, ...groups.flatMap((g) => g.bars.map((b) => b.usd)));
   return (
     <section className="panel cost-strip" aria-label="cost">
-      <h2>cost · today</h2>
+      <h2>{heading}</h2>
       <div className="cost-strip-groups">
         {groups.map((group) => (
           <div key={group.title} className="cost-strip-group">

@@ -109,3 +109,26 @@ export type SpendRow = {
 };
 
 export type SpendPage = { spend: SpendRow[]; lastId: number };
+
+/** `GET /api/rounds` — §8's replay chapter marks + round navigator. `RoundStatus` mirrors the
+ *  engine's own `rounds.status` column (`engine/src/state/state.ts`) verbatim — a round is either
+ *  still open (`in_progress`) or closed (`done`); the dashboard never derives a third value. */
+export type RoundStatus = "in_progress" | "done";
+
+/** One `rounds` row with its artifact left-joined (server's `RoundListRow`, #360). `schemaVersion`
+ *  and `artifact` are BOTH `null` for a round that closed without one — render it tally-less,
+ *  never skip the row (§8). `startEventId`/`startSpendId` are the #123 id cursors — the exact
+ *  replay chapter window this round covers, NOT artifact fields. */
+export type Round = {
+  roundId: number;
+  status: RoundStatus;
+  startedAt: string;
+  endedAt: string | null;
+  startEventId: number;
+  startSpendId: number;
+  eventCount: number;
+  schemaVersion: number | null;
+  artifact: unknown;
+};
+
+export type RoundsPage = { rounds: Round[] };

@@ -18,8 +18,10 @@ export interface Checkpoint {
 }
 
 /** First index whose id is > `id` — the standard "insertion point after all id<=id entries"
- *  bisect, used both to locate the checkpoint boundary and to slice `sortedEvents` in O(log n). */
-function bisectAfter(sortedEvents: readonly DomainEvent[], id: number): number {
+ *  bisect, used both to locate the checkpoint boundary and to slice `sortedEvents` in O(log n).
+ *  Exported for `replay/player.ts`'s `scrubTo`, which needs the same O(log n) lookup to convert a
+ *  scrub target id into an event-array index for resuming playback afterward. */
+export function bisectAfter(sortedEvents: readonly DomainEvent[], id: number): number {
   let lo = 0;
   let hi = sortedEvents.length;
   while (lo < hi) {
