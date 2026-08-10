@@ -253,14 +253,20 @@ test("buildCiInertEscalationPayload: a malformed entry with neither conclusion n
   assert.deepEqual(payload, { checks: [{ name: "mystery", conclusion: "UNKNOWN" }] });
 });
 
-test("buildCiInertEscalationPayload: an all-passing rollup names nothing", () => {
-  const payload = buildCiInertEscalationPayload(status({ ciInert: true, ciChecks: [{ name: "test", conclusion: "SUCCESS" }] }));
-  assert.deepEqual(payload, { checks: [] });
+// ── gate② opus round 1 on PR #806 (P3): an empty non-passing list is ALSO asserted, not silently
+// tolerated — `ciInert: true` from a real `parsePRStatus` read can never coexist with zero
+// non-passing checks (forge.ts's own derivation), so a status that does is a hand-built fixture
+// violating the invariant, the same class of caller bug the `ciInert`-gate assertion above catches ──
+
+test("buildCiInertEscalationPayload: throws on an all-passing rollup — ciInert:true with zero non-passing checks violates the invariant, never rendered as a degenerate empty-evidence payload", () => {
+  assert.throws(
+    () => buildCiInertEscalationPayload(status({ ciInert: true, ciChecks: [{ name: "test", conclusion: "SUCCESS" }] })),
+    /names no non-passing check/,
+  );
 });
 
-test("buildCiInertEscalationPayload: no ciChecks attached (a hand-built fixture violating the ciInert->ciChecks invariant) names nothing, never throws", () => {
-  const payload = buildCiInertEscalationPayload(status({ ciInert: true, ciChecks: undefined }));
-  assert.deepEqual(payload, { checks: [] });
+test("buildCiInertEscalationPayload: throws when no ciChecks are attached at all (a hand-built fixture violating the ciInert->ciChecks invariant) — same reasoning as the all-passing case", () => {
+  assert.throws(() => buildCiInertEscalationPayload(status({ ciInert: true, ciChecks: undefined })), /names no non-passing check/);
 });
 
 // ── gate② opus round 1 review note (b), carried into this wiring PR: the caller must gate on

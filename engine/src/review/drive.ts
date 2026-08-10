@@ -259,12 +259,28 @@ export interface CiInertEscalationPayload {
  *  `"UNKNOWN"`-conclusion entry reaching this function can only mean a genuinely malformed rollup
  *  row (neither `conclusion` nor `state` populated) — NEVER an in-flight check being mislabeled
  *  UNKNOWN. A caller that forgets the `ciInert` gate is a producer bug: better a loud throw here
- *  than a human reading a fabricated "still running, but the engine called it UNKNOWN" comment. */
+ *  than a human reading a fabricated "still running, but the engine called it UNKNOWN" comment.
+ *
+ *  gate② opus round 1 on PR #806 (P3): the SAME reasoning applies to an empty non-passing list.
+ *  `ciInert === true` (forge.ts's own derivation) can only be true when at least one check
+ *  concluded WITHOUT passing — real `parsePRStatus` output can never hand this function a
+ *  `ciInert: true` status whose `ciChecks` has zero non-passing entries. A hand-built `PRStatus`
+ *  CAN violate that invariant (nothing at the type level stops it), and doing so silently would
+ *  render a degenerate escalation comment/payload naming NOTHING — "concluded without passing —
+ *  concluded without passing, and nothing in the rollup is still running" with an empty subject.
+ *  Asserted here too, for the identical reason the `ciInert` gate above is: a caller that can
+ *  produce this state has a bug upstream, and a loud throw beats a human reading nonsense. */
 export function buildCiInertEscalationPayload(status: PRStatus): CiInertEscalationPayload {
   if (status.ciInert !== true) {
     throw new Error("buildCiInertEscalationPayload: caller must gate on status.ciInert === true before calling this");
   }
   const { shown, truncated } = capNonPassingChecks(status.ciChecks ?? []);
+  // `shown.length === 0` implies zero non-passing checks total (capping can only ever shrink a
+  // non-empty list, never manufacture entries), so this one check covers both the empty-rollup
+  // and the "ciChecks omitted" cases.
+  if (shown.length === 0) {
+    throw new Error("buildCiInertEscalationPayload: status.ciInert is true but ciChecks names no non-passing check — invariant violated");
+  }
   return { checks: shown, ...(truncated > 0 ? { truncated } : {}) };
 }
 

@@ -966,23 +966,26 @@ const CI_PENDING_RESET_KINDS = ["gated-reentry", "lane-revived"];
  *  reentry, with the lane, PR, and branch all preserved. Verifying the head here would mean a forge
  *  read on the one code path that must never make one.
  *
- *  #783 wiring (gate② opus round 1, PM-direct human-owned remainder): this predicate is ALSO
- *  rollup-blind, for the exact same reason it is head-blind — the durable `ci-pending-observed`
- *  event carries no `inert` flag (adding one would be new machinery for a bounded, already-
- *  accepted blind spot), so a frozen drain tick cannot tell whether the pin it is reading is
- *  merely pending or already inert. Comparing against the SHORTER of the two bounds
- *  (`Math.min`, the same choice `ciEscalationBound` in merge-driver.ts makes for the live aging
- *  arm) is the conservative, fail-safe direction specifically for a DRAIN-terminality check: it
- *  can only make a still-pending (not-yet-6h, but past-900s) lane terminal for drain purposes
- *  EARLIER than the classic-only bound would, never later — a drain's whole purpose is to finish
- *  rather than hang, so erring toward "terminal sooner" here is the safe side, exactly the "one
- *  recoverable false needs-human during an active drain" blast radius this function's own doc
- *  already accepts for its pre-existing head-blind spot. */
+ *  #783 wiring, REVERTED (gate② opus round 1 on PR #806, P1; PO premise correction on issue #783,
+ *  2026-08-10T20:48:50Z): a prior version of this function applied `Math.min(pendingEscalateAfterSec,
+ *  inertEscalateAfterSec)` here, reasoning that the shorter bound was a "conservative, fail-safe"
+ *  choice for a rollup-blind predicate. That reasoning was wrong, and the PO's comment records why:
+ *  this function reads the DURABLE EVENT LOG (`ci-pending-observed`, above) — never `DriveOutcome` —
+ *  so there is no per-lane inertness signal to scope the shorter bound to in the first place. Applying
+ *  it unconditionally meant EVERY driving lane whose CI had simply not finished within 15 minutes —
+ *  the ordinary, healthy case, not a wedge — became drain-terminal on ANY routine drain (a daily-
+ *  budget-ceiling breach, e.g.): false `needs-human` plus the human ceremony to clear it, strictly
+ *  WORSE than the permanently-hung-lane class this predicate exists to catch. Reverted to the plain
+ *  `pendingEscalateAfterSec` bound alone. The honest residual (documented, not fixed here, per the
+ *  marginal-complexity principle — stamping an `inert` flag onto the durable pin would be NEW durable
+ *  machinery for what stays a bounded gap): an inert lane still LIVE-ESCALATES at the shorter 900s
+ *  bound via the aging arm (`ciEscalationBound`, merge-driver.ts — the user-visible half #783 asks
+ *  for), but is drain-terminal only at the full 6h `pendingEscalateAfterSec` bound, exactly like any
+ *  other CI-pending lane. */
 function ciPendingWedgedForDrain(state: State, cfg: SapwoodConfig, worker: string, pr: number, now: Date): boolean {
   const pin = openCiPendingPin(state, worker, pr);
   const pendingSec = pinElapsedSec(pin?.at ?? null, now);
-  const escalateAfterSec = Math.min(cfg.ci.pendingEscalateAfterSec, cfg.ci.inertEscalateAfterSec);
-  return pendingSec != null && pendingSec >= escalateAfterSec;
+  return pendingSec != null && pendingSec >= cfg.ci.pendingEscalateAfterSec;
 }
 
 /** #426 (F26): the lane's OPEN CI-pending pin, or null when none stands — the single reader both
@@ -4668,7 +4671,16 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
                 pr,
                 head: s.head,
                 pendingSec: s.pendingSec,
-                checks: s.inert.checks,
+                // gate② opus round 1 on PR #806 (P3): `checks` is a `string[]` here, matching the
+                // classic `ci-pending-escalated` event's own `checks` shape (below) and rendered in
+                // the SAME "name (CONCLUSION)" form the comment above already uses — a reader that
+                // has learned one event's shape reads the other for free. `s.inert.checks` (the
+                // structured `{name, conclusion}[]` pairs `buildCiInertEscalationPayload` builds) is
+                // deliberately NOT also carried here: nothing reads the structured shape today, and
+                // the rendered string already carries the full evidence (name + conclusion) — a
+                // second key duplicating the same data in a second shape is the thing to avoid, not
+                // add "just in case." Revisit if a real consumer needs the structured pairs back.
+                checks: s.inert.checks.map((c) => `${c.name} (${c.conclusion})`),
                 ...(s.inert.truncated ? { truncated: s.inert.truncated } : {}),
               });
             } catch {

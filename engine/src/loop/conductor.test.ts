@@ -10229,13 +10229,16 @@ test("#783 wiring: an INERT escalation posts the actionable inert comment (remed
 
   const inertEvents = st.eventsAfterId(0, ["ci-inert-escalated"]);
   assert.equal(inertEvents.length, 1);
+  // gate② opus round 1 on PR #806 (P3): `checks` is a `string[]` ("name (CONCLUSION)"), the same
+  // shape/rendering the classic `ci-pending-escalated` event's own `checks` key uses — unified so
+  // a reader of one event's shape reads the other for free.
   assert.deepEqual(inertEvents[0]!.payload, {
     worker: "lane-a",
     issue: 2,
     pr: 55,
     head: "H1",
     pendingSec: 900,
-    checks: [{ name: "aux-lint", conclusion: "SKIPPED" }],
+    checks: ["aux-lint (SKIPPED)"],
   });
   // The classic event NEVER fires for an inert-shaped escalation — the two are mutually exclusive
   // outcomes for the same episode, decided once upstream (merge-driver.ts's `ciEscalationBound`).
@@ -10281,11 +10284,11 @@ test("#783 wiring: an inert escalation's payload/comment respect the CI_INERT_NA
   assert.equal((inertEvents[0]!.payload as { truncated?: number }).truncated, 4);
 });
 
-test("#783 wiring: an inert-shaped wedge is drain-terminal at the SHORTER 900s bound — ciPendingWedgedForDrain's own head/rollup-blind Math.min fail-safe applies even though the classic pendingEscalateAfterSec bound (6h) has not been reached", async () => {
+test("#783 wiring, PO premise correction (issue #783, 2026-08-10T20:48:50Z, gate② opus round 1 on PR #806 P1): a CI-pending pin is NOT drain-terminal at 950s — ciPendingWedgedForDrain reads ONLY the durable event log, never DriveOutcome, so it has no per-lane inertness signal to scope a shorter bound to; drain terminality stays on the full pendingEscalateAfterSec bound regardless of whether the live rollup is merely pending or already inert. Terminal only past the full 6h bound.", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
-  seedDriving(st, "lane-a", 2, 55); // fix_rounds 0 — the inert wedge is the ONLY reason it is stuck
+  seedDriving(st, "lane-a", 2, 55); // fix_rounds 0 — CI-pending would be the ONLY reason to escalate
   st.appendEvent("ci-pending-observed", { worker: "lane-a", issue: 2, pr: 55, head: "H1", at: "2026-08-11T00:00:00.000Z" });
   st.recordSpend("lane-earlier", 99, 500, "2026-08-11T00:00:01.000Z"); // over a tiny daily cap
   const gate = new FakeMergeGate();
@@ -10294,20 +10297,30 @@ test("#783 wiring: an inert-shaped wedge is drain-terminal at the SHORTER 900s b
     cost: { drainWindowSec: 60, dailyBudgetUsd: 10 },
     ci: { pendingEscalateAfterSec: 21600, inertEscalateAfterSec: 900 },
   });
-  // 950s after the pin opened: PAST the 900s inert bound, well short of the 6h pending one. The
-  // drain predicate cannot see whether this pin is pending or inert (event-log-only, forge-free —
-  // ciPendingWedgedForDrain's own doc), so it conservatively compares against the SHORTER bound.
+  // 950s after the pin opened: past the 900s inert bound — but that bound is IRRELEVANT here, an
+  // ordinary healthy CI check routinely takes longer than 15 minutes to finish — well short of
+  // the 6h pending bound. Regression this test pins: an earlier version of ciPendingWedgedForDrain
+  // applied Math.min(pendingEscalateAfterSec, inertEscalateAfterSec) unconditionally here, which
+  // would have made THIS ordinary, still-legitimately-pending lane drain-terminal — a false
+  // needs-human on a routine drain, caught by gate② opus round 1 on PR #806.
   let clock = new Date("2026-08-11T00:15:50Z");
   const now = () => clock;
   const tickOpts = { forge, state: st, supervisor: sup, cfg, mergeGate: gate, now };
 
   const r1 = await tick(tickOpts);
   assert.equal(r1.ceilingBreached, true);
-  assert.deepEqual(r1.escalated, []); // still inside the drain window
+  assert.deepEqual(r1.escalated, []); // inside the drain window
 
-  clock = new Date(clock.getTime() + 61_000); // past drainWindowSec, breach still standing
+  clock = new Date(clock.getTime() + 61_000); // past drainWindowSec, breach still standing — 1011s pending
   const r2 = await tick(tickOpts);
-  assert.deepEqual(r2.escalated, ["lane-a"]);
+  assert.deepEqual(r2.escalated, [], "NOT drain-terminal at ~1011s — only the full pendingEscalateAfterSec (6h) bound governs");
+  assert.equal(st.getWorker("lane-a")?.state, "driving");
+
+  // Only past the FULL 6h bound does the lane become drain-terminal — unchanged from #426's
+  // original contract.
+  clock = new Date("2026-08-11T06:00:01.000Z");
+  const r3 = await tick(tickOpts);
+  assert.deepEqual(r3.escalated, ["lane-a"]);
   const ev = st.latestEvent("drive-needs-human") as { payload: { reason: string } } | undefined;
   assert.match(ev!.payload.reason, /drain-ci-pending-wedged:fix-rounds=0/);
 });
