@@ -150,6 +150,19 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   `CHAR_ADVANCE` is the worked example of a compliant deterministic model: it substitutes for a
   live render, but every input it consumes (font-size, character count) is the same value the
   real draw path consumes, so it cannot silently diverge from what actually gets drawn.
+- **Unwired-test rule.** A dashboard test that renders an extracted pure function, a bare
+  component with hand-built props, or a query/hook in isolation proves that piece is correct in
+  isolation — it does not prove the app actually wires it up. Recurring class across #759 and
+  three consecutive review rounds of #766 (`round-tally-uses-nonexistent-field`,
+  `live-only-test-does-not-cover-app-wiring`, `replay-spend-panel-wiring-unexercised`,
+  `rounds-api-wiring-unexercised`, and others): a helper/component test stayed green while the
+  real `App`/`appContent` tree either never called the helper, called it with the wrong data
+  source, or dropped the prop on the floor between the wrapper and the real consumer. Any new
+  dashboard behavior described by an acceptance criterion needs at least one test that renders
+  the real `appContent`/`App` tree (or the smallest real ancestor that actually owns the wiring)
+  with distinguishable fixture values at the seam under test — not only a unit test of the
+  extracted piece. Extracted-function/component unit tests are still worth keeping alongside for
+  their own edge cases; they just don't substitute for the wiring assertion.
 - **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
   be prominently flagged in review, with a recommendation to route it needs-human rather than
   auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
