@@ -1,5 +1,5 @@
 // `sapwood init` — credible, idempotent, recovery-safe onboarding. Automates the manual
-// GitHub setup 0day left to the human (bootstrap_github.sh:89 just says "make the board
+// GitHub setup the predecessor project left to the human (bootstrap_github.sh:89 just says "make the board
 // by hand"). Detect-before-create everywhere, so re-running is always safe.
 //
 // Steps: auth preflight -> user-vs-org -> ensure labels -> ensure milestones ->
@@ -206,7 +206,7 @@ async function ensureMilestones(cfg: SapwoodConfig, run: GhRunner, repo: string)
   return toCreate;
 }
 
-// ---- ProjectV2 board (the step 0day left manual) --------------------------------
+// ---- ProjectV2 board (the step the predecessor project left manual) --------------------------------
 
 export interface BoardOption {
   name: string;

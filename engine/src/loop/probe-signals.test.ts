@@ -56,6 +56,7 @@ const baseCtx = (): ProbeCtx => ({
     countOpenIssuesInMilestone: async () => 0,
     listOpenIssues: async () => [],
     getIssueMeta: async (issue) => ({ number: issue, title: "t", state: "OPEN", labels: [], updatedAt: "2026-01-01T00:00:00Z" }),
+    getPRLabels: async () => [],
   },
 });
 
@@ -77,7 +78,7 @@ const FIXTURES: Record<string, () => ProbeCtx> = {
   "handoff-resume-candidates": () => ({ ...baseCtx(), state: { ...baseCtx().state, handoffWorkers: oneWorker } }),
   "gated-reentry-candidates": () => ({
     ...baseCtx(),
-    state: { ...baseCtx().state, gatedFailedWorkers: oneWorker },
+    state: { ...baseCtx().state, gatedFailedWorkers: () => [{ issue: 1, pr: 2 } as WorkerRow] },
     // allOnCfg() scopes this run to milestone "M-X" (#630) — the candidate's own issue must be
     // IN that milestone for the fixture to fire; the off-milestone case is its own reverse test.
     forge: { ...baseCtx().forge, getIssueMeta: async (issue) => ({ ...(await baseCtx().forge.getIssueMeta(issue)), milestone: "M-X" }) },
@@ -216,6 +217,17 @@ test("#469: an eligible-but-UNPOOLED issue still counts as nothing — the round
   assert.equal(await firstWorkSignal(ctx), null, "a valid PO `selected: []` judgment must not pin the probe true");
 });
 
+test("#591: probe-signals treats a fully anchored non-English plan as plan-complete, not milestone backlog work", async () => {
+  const ctx = baseCtx();
+  ctx.forge.listOpenIssues = async () => [
+    mkIssue({
+      milestone: "M-X",
+      body: "## 受け入れ条件\n<!-- sapwood:ac -->\n\n- [ ] 動作する\n\n## 検証\n<!-- sapwood:verification -->\n\n- npm test を実行する",
+    }),
+  ];
+  assert.equal(await firstWorkSignal(ctx), null);
+});
+
 // ── #630 (F32 follow-through, live park batch-7 round 312): gated-reentry-candidates must be
 // ── milestone-scoped like the dispatch path already is — an off-milestone needs-human carrier is
 // ── not work this run can ever consume, and must not hold the standby probe open over it. ──────
@@ -265,4 +277,84 @@ test("#630: an unset round.milestone keeps gated-reentry-candidates unscoped —
     "gated-reentry-candidates",
     "no milestone configured means no scoping question can be asked — same stance as every other milestone-gated signal in this registry",
   );
+});
+
+test("#730 AC2: an in-scope gated candidate with no human block still holds the probe open for GATED RECLAIM", async () => {
+  const cfg = allOnCfg();
+  const ctx: ProbeCtx = {
+    ...baseCtx(),
+    cfg,
+    state: { ...baseCtx().state, gatedFailedWorkers: () => [{ issue: 730, pr: 731 } as WorkerRow] },
+    forge: {
+      ...baseCtx().forge,
+      getIssueMeta: async (issue) => ({
+        number: issue,
+        title: "CI-green gated PR",
+        state: "OPEN",
+        labels: [],
+        milestone: "M-X",
+        updatedAt: "2026-08-07T00:00:00Z",
+      }),
+      getPRLabels: async () => [],
+    },
+  };
+
+  assert.equal(await firstWorkSignal(ctx), "gated-reentry-candidates");
+});
+
+test("#730 gate② P1: an issue-side hold with needs-human cleared and a clean PR remains probe work — #400 carrier parity reaches RECLAIM", async () => {
+  const cfg = allOnCfg();
+  const ctx: ProbeCtx = {
+    ...baseCtx(),
+    cfg,
+    state: { ...baseCtx().state, gatedFailedWorkers: () => [{ issue: 730, pr: 731 } as WorkerRow] },
+    forge: {
+      ...baseCtx().forge,
+      getIssueMeta: async (issue) => ({
+        number: issue,
+        title: "issue-held but reentry-ready gated PR",
+        state: "OPEN",
+        labels: [cfg.escalation.holdLabels[0]!],
+        milestone: "M-X",
+        updatedAt: "2026-08-10T00:00:00Z",
+      }),
+      getPRLabels: async () => [],
+    },
+  };
+
+  assert.equal(
+    await firstWorkSignal(ctx),
+    "gated-reentry-candidates",
+    "#400: an issue-side hold is not part of conductor.ts:3982's issue carrier holdSet, so the next tick can RECLAIM",
+  );
+});
+
+test("#730 AC1: issue human labels and PR human/hold labels leave gated re-entry out of the probe", async () => {
+  const cfg = allOnCfg();
+  const ctx: ProbeCtx = {
+    ...baseCtx(),
+    cfg,
+    state: {
+      ...baseCtx().state,
+      gatedFailedWorkers: () => [
+        { issue: 730, pr: 1730 } as WorkerRow,
+        { issue: 731, pr: 1731 } as WorkerRow,
+        { issue: 732, pr: 1732 } as WorkerRow,
+      ],
+    },
+    forge: {
+      ...baseCtx().forge,
+      getIssueMeta: async (issue) => ({
+        number: issue,
+        title: "human-blocked gated candidate",
+        state: "OPEN",
+        labels: issue === 730 ? [cfg.labels.needsHuman] : [],
+        milestone: "M-X",
+        updatedAt: "2026-08-07T00:00:00Z",
+      }),
+      getPRLabels: async (pr) => (pr === 1731 ? [cfg.labels.blocked] : [cfg.escalation.holdLabels[0]!]),
+    },
+  };
+
+  assert.equal(await firstWorkSignal(ctx), null, "only candidates waiting on a human must not keep standby awake");
 });

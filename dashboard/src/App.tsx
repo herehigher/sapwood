@@ -19,8 +19,8 @@ import { Legend } from "./hero/Legend.tsx";
  * the server's nested allowlisted shape (`{ lanes: { prFixCap } }`), so that silently fell
  * back to the hardcoded default on every real config. Exported and pure so the regression is
  * pinned by a direct unit test: `fixCap` only ever becomes visible in rendered markup via
- * `Hero`'s event fold, which runs in a `useEffect` — `renderToStaticMarkup`, this app's only
- * test harness, never executes those, so an App-level render test cannot observe it.
+ * `Hero`'s animation effect, which runs in a `useEffect` — `renderToStaticMarkup`, this app's
+ * only test harness, never executes those, so an App-level render test cannot observe it.
  */
 export function resolveFixCap(config: Record<string, unknown> | null | undefined): number {
   const raw = config ? readConfigPath(config, "lanes.prFixCap") : undefined;
@@ -51,7 +51,9 @@ export function toggleConfigOpen(open: boolean): boolean {
 export function App({ now, initialConfigOpen }: { now?: Date | undefined; initialConfigOpen?: boolean | undefined } = {}) {
   const clock = now ?? new Date();
   const loop = useLoopState();
-  const events = useEventHistory();
+  // #740: `lanesMax` flows into the shared reducer so its hero slice re-fits its channel count
+  // the same way `Hero.tsx` used to do internally — see `useEventHistory`'s own doc.
+  const events = useEventHistory(loop.data?.lanes.max ?? null);
   const spend = useSpendHistory();
   const [configOpen, setConfigOpen] = useState(initialConfigOpen ?? false);
 
@@ -119,7 +121,8 @@ export function App({ now, initialConfigOpen }: { now?: Date | undefined; initia
 
         {loop.data && (
           <Hero
-            events={events.events}
+            heroState={events.hero}
+            steps={events.steps}
             lanesMax={loop.data.lanes.max}
             engine={loop.data.engine.state}
             lanes={loop.data.lanes.items}

@@ -5,7 +5,7 @@
 #       the runner and the two differential safety-parity tests actually execute there.
 #
 # WHY IT MATTERS: docs/PLAN.md's M1 Verification section states the guard port is proven
-#       by a differential fuzz against 0day's guard.py (1500 seeded commands, 0
+#       by a differential fuzz against the predecessor project's guard.py (1500 seeded commands, 0
 #       divergences on the shared surface). PR #565 vendored guard.py as an in-repo
 #       fixture, which removed the `existsSync(GUARD_PY)` half of the skip condition.
 #       This patch removes the other half. Until it lands, the two tests still skip in

@@ -1,14 +1,14 @@
 // merge-driver.ts — gate① (CI green) + gate② (fresh non-author review on the current head) ->
-// merge. TS port of 0day's ops/loop/loop_merge_driver.sh: the ONLY place a merge happens.
+// merge. TS port of the predecessor project's loop merge driver: the ONLY place a merge happens.
 //
-// Two-layer safety (mirrors 0day exactly):
+// Two-layer safety (mirrors the predecessor project exactly):
 //  1. deriveGate() — the SCHEDULING gate (MERGE/WAIT/HUMAN/FIXABLE), combining PR status
 //     with gate②'s review verdict (reviewer.ts) + PR state/draft/risk-labels. Feeds the
 //     Conductor's existing driveDecision (conductor.ts) is NOT used here — see the NOTE below
 //     driveOne for why FIXABLE/fixup-dispatch is out of scope for this port.
 //  2. mergeDecision() — the FINAL safety net, re-derived from fresh action/labels/state
-//     immediately before the actual `gh pr merge` call (0day's loop_merge_driver.sh
-//     merge_decision). Pure, zero-dep, parity-tested row-for-row against 0day's
+//     immediately before the actual `gh pr merge` call (the predecessor project's loop merge driver
+//     merge_decision). Pure, zero-dep, parity-tested row-for-row against the predecessor project's
 //     test_loop_merge_driver.sh — see merge-driver.test.ts.
 //
 // SECURITY (producer != reviewer != merger, structural): mergePR is called ONLY from
@@ -49,7 +49,7 @@ export type Gate = "MERGE" | "WAIT" | "HUMAN" | "FIXABLE";
  * labels -> a scheduling gate. Fail-safe ordering — a non-OPEN PR, a draft, or any configured
  * human-triage label always wins (never auto-act on one), checked before the review verdict.
  *
- * #246: FIXABLE — a bounded, mechanical rework loop. 0day's pr_gate.sh ACTION protocol has a
+ * #246: FIXABLE — a bounded, mechanical rework loop. The predecessor project's pr_gate.sh ACTION protocol has a
  * FIXABLE gate (CI_RED / unresolved review threads) that dispatches a fixup-worker in a bounded
  * retry loop (drive_decision/fix_rounds, ops/loop/loop_conductor.sh:941-1053); this function
  * ported only the ELIGIBILITY half of that (whether findings/CI-red route to a rework attempt
@@ -64,7 +64,7 @@ export type Gate = "MERGE" | "WAIT" | "HUMAN" | "FIXABLE";
  * CI_RED is FIXABLE only "alongside a decisive verdict" (owner ruling, #246): `ciRed` is
  * consulted ONLY in the MERGE_OK branch (review has nothing blocking, CI is the sole blocker) —
  * a red check while review is still in progress (WAIT_REVIEW) or unavailable does not preempt
- * those states, unlike 0day's pr_gate.sh (which checks CI_RED before anything else). `ciGreen`
+ * those states, unlike the predecessor project's pr_gate.sh (which checks CI_RED before anything else). `ciGreen`
  * still wins over `ciRed` — a rollup only ever reports one or the other true (see
  * forge.ts's parsePRStatus), so this is belt-and-suspenders ordering, not a real conflict.
  *
@@ -140,18 +140,18 @@ export function deriveGate(input: {
   }
 }
 
-// Default risk/human-triage label substrings (0day ops/loop/loop_merge_driver.sh
+// Default risk/human-triage label substrings (the predecessor project's loop merge driver
 // LOOP_HUMAN_LABELS default). Real runtime callers pass cfg.escalation.humanLabels instead
-// (sapwood dropped 0day's risk/fund trading-domain labels — CLAUDE.md: port the logic, not the
-// domain); this default exists only so mergeDecision reproduces 0day's parity-suite rows
+// (sapwood dropped the predecessor project's application-specific labels — CLAUDE.md: port the generic logic,
+// not application-specific behavior); this default exists only so mergeDecision reproduces the predecessor project's parity-suite rows
 // unchanged when called with no 5th argument.
 const BASH_DEFAULT_HUMAN_LABELS = ["risk", "fund", "needs-human", "blocked"] as const;
 
 /**
- * Port of 0day's loop_merge_driver.sh `merge_decision` — the FINAL fail-safe check evaluated
+ * Port of the predecessor project's loop merge driver `merge_decision` — the FINAL fail-safe check evaluated
  * immediately before the actual merge call, re-derived from FRESH action/labels/state (defense
  * in depth: independent of, and evaluated later than, deriveGate above). Pure, zero-dep.
- * Based on 0day's test_loop_merge_driver.sh, with #273's stricter OID-bound reaction rule.
+ * Based on the predecessor project's loop merge-driver tests, with #273's stricter OID-bound reaction rule.
  *
  *  - MERGE_OK: an automatic-merge candidate (gate② already guaranteed a fresh non-author review
  *    of the current head — this function does not re-derive that freshness).
@@ -830,7 +830,7 @@ export class MergeDriver {
       return { kind: "stopped", pr, reason: `gates-passed:${verdict.action}` };
     }
 
-    // Final safety net (0day's actual pre-merge re-check), evaluated on the SAME
+    // Final safety net (the predecessor project's actual pre-merge re-check), evaluated on the SAME
     // freshly-fetched action/labels/state as the gate above — defense in depth, not a
     // duplicate: this is the function unit-tested for row-for-row bash parity.
     const decision = mergeDecision(verdict.action, data.labels.join(","), data.state, false, cfg.escalation.humanLabels);

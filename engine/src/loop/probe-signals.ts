@@ -50,7 +50,7 @@
 // signal added to fix an under-count instead created an over-count.
 import type { SapwoodConfig } from "../config/config.js";
 import { extractVerificationPlan, type IForge } from "../forge/forge.js";
-import { labelsInclude } from "../forge/labels.js";
+import { labelsInclude, labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js";
 import type { State } from "../state/state.js";
 import { pendingDurableConcerns } from "./dissent.js";
 
@@ -70,6 +70,7 @@ export type ProbeCtx = {
     | "countOpenIssuesInMilestone"
     | "listOpenIssues"
     | "getIssueMeta"
+    | "getPRLabels"
   >;
   /** #147 GATED RECLAIM is skipped entirely without a merge gate — presence, not the gate itself. */
   mergeGateConfigured: boolean;
@@ -168,6 +169,13 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
     // sets are deliberately allowed to diverge from here on — this signal's own semantics below
     // are unchanged and still accurate for ITS consumer.
     consumer: "conductor.ts tick() GATED RECLAIM (#147) — skipped entirely without a merge gate, so gated on deps.mergeGate",
+    // #730 gate② P1: TERMINAL parity follows GATED RECLAIM's carrier semantics exactly.
+    // conductor.ts:3982 derives `holdSet = carrier === "pr" ? [...humanLabels, ...holdLabels]
+    // : humanLabels`; #400's owner-ratified contract is that hold has ONE carrier, the PR. Thus
+    // human labels retain their substring semantics on either object, but an exact hold label is
+    // terminal only on the PR. An issue-side hold after needs-human is cleared is already
+    // consumable by GATED RECLAIM, so excluding it here would strand that work in standby.
+    //
     // #630 (F32 follow-through, live park batch-7 round 312): a needs-human carrier OUTSIDE the
     // run's `round.milestone` scope is not work this run can ever consume — the aligning/PO and
     // gate⓪ passes it would wake are all milestone-scoped, and a human release of a candidate the
@@ -179,16 +187,23 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
     // reads getIssueMeta per candidate) is UNTOUCHED: an off-milestone candidate keeps its labels
     // and its human queue entry, it just no longer holds THIS probe's standby open.
     terminal:
-      "state.ts gatedFailedWorkers() ALREADY excludes `gated_reentry_capped = 1` (fail-closed one-way latch once reentry attempts are spent) and `gated_escalation_labeled = 0` (a row whose escalation label write failed is permanently invisible here) — neither shape is retried forever. On TOP of that, a candidate whose issue's milestone doesn't match cfg.round.milestone stops counting for THIS signal the moment it (or the run's own milestone) moves into scope — it remains visible to gatedFailedWorkers() itself, so GATED RECLAIM still reclaims it the instant a differently-scoped run (or this run once re-milestoned) executes a tick; a human release on an indefinite timescale is exactly what the #630 disabled-consumer analysis says must not pin a probe open.",
+      "state.ts gatedFailedWorkers() ALREADY excludes `gated_reentry_capped = 1` (fail-closed one-way latch once reentry attempts are spent) and `gated_escalation_labeled = 0` (a row whose escalation label write failed is permanently invisible here) — neither shape is retried forever. A human-label block on either object, or an exact hold-label block on the PR, is also this signal's terminal: conductor.ts:3982's #400 `holdSet` makes an issue-side hold non-blocking, while those carrier-correct blocks mean the engine cannot re-enter until a human changes that fact, so they are standby-compatible rather than probe work. On TOP of that, a candidate whose issue's milestone doesn't match cfg.round.milestone stops counting for THIS signal the moment it (or the run's own milestone) moves into scope — it remains visible to gatedFailedWorkers() itself, so GATED RECLAIM still reclaims it the instant a differently-scoped run (or this run once re-milestoned) executes a tick; a human release on an indefinite timescale is exactly what the #630 disabled-consumer analysis says must not pin a probe open.",
     enabled: (ctx) => ctx.mergeGateConfigured,
     probe: async (ctx) => {
       const candidates = ctx.state.gatedFailedWorkers();
       if (candidates.length === 0) return false;
       const milestone = ctx.cfg.round.milestone;
-      if (!milestone) return true; // unset = no scoping — RoundScopedForge's own convention
+      // Carrier parity with conductor.ts:3982: human labels retain their historical substring
+      // semantics on either object; #400's exact hold-label check belongs only to the PR.
+      const issueHumanBlocked = (labels: readonly string[]) => labelsIncludeAnySubstring(labels, ctx.cfg.escalation.humanLabels);
+      const prHumanBlocked = (labels: readonly string[]) =>
+        labelsIncludeAnySubstring(labels, ctx.cfg.escalation.humanLabels) || labelsIncludeAny(labels, ctx.cfg.escalation.holdLabels);
       for (const w of candidates) {
         const meta = await ctx.forge.getIssueMeta(w.issue);
-        if (meta.milestone === milestone) return true;
+        if (milestone && meta.milestone !== milestone) continue;
+        if (issueHumanBlocked(meta.labels)) continue;
+        if (w.pr != null && prHumanBlocked(await ctx.forge.getPRLabels(w.pr))) continue;
+        return true;
       }
       return false;
     },

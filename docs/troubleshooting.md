@@ -2,6 +2,43 @@
 
 What common failures mean and how to respond.
 
+## Ready issue never dispatches
+
+First distinguish an issue that is not eligible from one that is eligible but waiting for
+capacity. A `Ready` board status alone is not enough.
+
+- **Gate⓪ plan path:** a normal issue needs a genuine verification-plan section, a non-empty
+  checkbox acceptance-criteria list under `## Acceptance criteria`, and the configured
+  `sapwood:plan:approved` label. Under the normal `rounds` driver, the plan-review peripheral
+  can apply that label. Under the L1 `tick` driver, it never runs, so a human must apply the
+  label after reviewing the plan.
+- **Doc-gate path:** an inherently unverifiable docs/chore issue instead needs the configured
+  `sapwood:verify:n/a` label and must not still carry `sapwood:needs-human`. Do not put both
+  `sapwood:verify:n/a` and `sapwood:plan:approved` on the same issue: that mixed state is
+  deliberately fail-closed. A `verify:n/a` proposal accompanied by `needs-human` still needs a
+  human adjudication (remove `needs-human`) before it can proceed.
+- **Lane and holds:** the issue must be open and on this configured ProjectV2 board's `Ready`
+  lane. `sapwood:needs-human` and `sapwood:blocked` keep it out of either dispatch path; resolve
+  the stated problem, then remove the appropriate hold yourself. `sapwood:planless` is excluded
+  by the `rounds` driver's pooled selection, but the L1 `tick` driver's unpooled `Ready` path does
+  not test that label. Do not diagnose a tick candidate as skipped because it is `planless`.
+- **Snapshot drift:** `ac-snapshot-drift` is a later, fail-closed condition: a worker was
+  already dispatched, then the issue body changed before review. It adds `needs-human`; inspect
+  its durable record with `sapwood events --issue ISSUE --kind ac-snapshot-drift`, resolve the
+  body change by restoring the original plan/acceptance criteria or explicitly re-approving the
+  new body, then remove `sapwood:needs-human` to request gated re-entry. If the original
+  `needs-human` label write failed, that lane is permanently outside automatic re-entry even if a
+  human later adds or removes the label; review and merge its PR manually. It is not evidence that
+  a fresh `Ready` issue was silently skipped.
+
+The run narrative defaults to `data/logs/sapwood.log` and is also teed to stderr; use
+`sapwood status` for active lanes and `sapwood events --issue ISSUE` for durable escalation
+facts. Today, an in-memory dispatch result can name capacity reasons such as `cap`, `no-lane`,
+or `over-budget`, but the normal CLI does **not** persist a per-candidate skip reason for an
+issue excluded before dispatch eligibility. If the checks above all pass and no lane appears,
+capture the run narrative and event output for a follow-up rather than reading an idle
+`--until-idle` exit as success.
+
 ## Config validation errors
 
 Run `sapwood validate [path]` after any config edit. It loads the same config the real
@@ -92,15 +129,15 @@ the directory; nothing in the loop waits on either.
 
 ## Kill switch recovery
 
-If `data/KILL_SWITCH` is set (via `/sapwood-stop` or by hand), all new dispatch and
+If `data/KILL_SWITCH` is set (by a loaded plugin slash command or by hand), all new dispatch and
 merges are frozen and running workers are being drained. The switch is part of the stateful
 data directory; see [Data directory is stateful](configuration.md#data-directory-is-stateful)
 before moving, deleting, or restoring `data/`. Recovery:
 
 1. Check `sapwood status` — it reports `kill switch: ACTIVE` and shows any in-flight
    lanes still draining.
-2. Once you're satisfied it's safe to resume, run `/sapwood-stop --lift` (or
-   `rm -f data/KILL_SWITCH`).
+2. Once you're satisfied it's safe to resume, run `rm -f data/KILL_SWITCH` (or
+   `/sapwood-stop --lift` in a session where the plugin is loaded).
 3. Dispatch and merges resume on the **next tick** — a switch lifted mid-tick doesn't
    take effect within that same tick.
 

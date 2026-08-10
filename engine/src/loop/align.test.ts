@@ -2992,6 +2992,12 @@ test("validateTriageOutput: well-formed draft -> ok, returns the body verbatim",
   assert.ok(result.ok && result.body === PLAN_BODY);
 });
 
+test("#591: align triage preserves an anchored non-English draft as a plan that landed", () => {
+  const body = "## 受け入れ条件\n<!-- sapwood:ac -->\n\n- [ ] 動作する\n\n## 検証\n<!-- sapwood:verification -->\n\n- npm test を実行する";
+  const result = validateTriageOutput(triageResultText(1, body), 1);
+  assert.ok(result.ok && extractVerificationPlan(result.body) != null);
+});
+
 // ── #212: selectRoundPool ────────────────────────────────────────────────────────────────────
 
 const mkReady = (number: number, prio: number, milestone?: string): Issue => ({

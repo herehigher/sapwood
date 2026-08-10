@@ -1,7 +1,7 @@
 // PreToolUse hook adapter. Wires the pure `guardDecision` to Claude Code's hook protocol:
 // reads the hook event JSON on stdin, emits a `permissionDecision: deny` on a BLOCK.
 //
-// FAIL-CLOSED (PLAN requirement, a divergence from 0day which fails open): any error —
+// FAIL-CLOSED (PLAN requirement, a divergence from the predecessor project which fails open): any error —
 // malformed JSON, an unexpected payload shape, or the guard throwing — yields a DENY, not
 // a silent allow. A safety hook that can be disabled by feeding it garbage is not a
 // safety hook. The pure mapping (`hookResponse`) is offline-testable; only `main()` does IO.

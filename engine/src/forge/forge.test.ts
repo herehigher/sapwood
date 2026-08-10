@@ -10,6 +10,7 @@ import {
   collectReviewThreads,
   countUnresolvedThreads,
   ENGINE_COMMENT_MARKER,
+  engineOpenedPrMarker,
   extractAcceptanceCriteria,
   extractOrigin,
   extractVerificationPlan,
@@ -407,7 +408,7 @@ const PROJECT_JSON = JSON.stringify({
                 title: "ready but a different repo",
                 state: "OPEN",
                 body: "## Verification\nx",
-                repository: { nameWithOwner: "herehigher/0day" },
+                repository: { nameWithOwner: "example/private-predecessor" },
                 labels: { nodes: [] },
               },
               fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
@@ -786,6 +787,248 @@ test("extractAcceptanceCriteria corpus: duplicate identical criterion text at di
   assert.equal(items.length, 2);
   assert.notEqual(items[0]!.id, items[1]!.id);
   assert.equal(items[0]!.text, items[1]!.text);
+});
+
+// ── #591: language-free issue bodies use exact, fence-safe sapwood section anchors ─────────
+
+const JAPANESE_ANCHORED_BODY = `## 受け入れ条件
+<!-- sapwood:ac -->
+
+- [ ] 日本語の完了条件を満たす
+
+## 検証計画
+<!-- sapwood:verification -->
+
+- npm test を実行する`;
+
+const RTL_ANCHORED_BODY = `## معايير القبول
+<!-- sapwood:ac -->
+
+- [ ] يتحقق السلوك المتوقع
+
+## خطة التحقق
+<!-- sapwood:verification -->
+
+- شغّل npm test`;
+
+test("#591 fixture matrix: Japanese and RTL headings with both anchors extract a complete dispatch plan and checkbox ACs", () => {
+  for (const body of [JAPANESE_ANCHORED_BODY, RTL_ANCHORED_BODY]) {
+    assert.ok(extractVerificationPlan(body)?.includes("<!-- sapwood:ac -->"));
+    assert.ok(extractVerificationSection(body)?.includes("<!-- sapwood:verification -->"));
+    assert.equal(extractAcceptanceCriteria(body)?.length, 1);
+  }
+});
+
+test("#591: Japanese and RTL anchored issues dispatch once plan:approved is labelled", () => {
+  const project = parseProject(
+    JSON.stringify({
+      data: {
+        user: {
+          projectV2: {
+            id: "PVT_591",
+            field: { id: "PVTF_status", options: [{ id: "ready", name: "Ready" }] },
+            items: {
+              nodes: [JAPANESE_ANCHORED_BODY, RTL_ANCHORED_BODY].map((body, index) => ({
+                id: `ITEM_591_${index}`,
+                content: {
+                  number: 5910 + index,
+                  title: "anchored issue",
+                  state: "OPEN",
+                  body,
+                  repository: { nameWithOwner: "herehigher/sapwood" },
+                  labels: { nodes: [{ name: "plan:approved" }] },
+                },
+                fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
+              })),
+            },
+          },
+        },
+      },
+    }),
+    "Status",
+  );
+  assert.deepEqual(
+    selectReadyIssues(project, cfg).map((issue) => issue.number),
+    [5910, 5911],
+  );
+});
+
+test("#591 fixture matrix: legacy English extraction remains byte-for-byte unchanged when no anchors are present", () => {
+  const body = "before\n\n## Acceptance criteria\n\n- [ ] legacy AC\n\n## Verification plan\n\n- run legacy test\n\nafter";
+  assert.equal(
+    extractVerificationPlan(body),
+    "## Acceptance criteria\n\n- [ ] legacy AC\n\n## Verification plan\n\n- run legacy test\n\nafter",
+  );
+  assert.equal(extractVerificationSection(body), "## Verification plan\n\n- run legacy test\n\nafter");
+  assert.deepEqual(
+    extractAcceptanceCriteria(body)?.map((item) => item.text),
+    ["legacy AC"],
+  );
+});
+
+test("#591 fixture matrix: fenced anchors are ignored, so fenced-only non-English markers remain planless", () => {
+  const body = "```markdown\n## 受け入れ条件\n<!-- sapwood:ac -->\n\n## 検証\n<!-- sapwood:verification -->\n```";
+  assert.equal(extractVerificationPlan(body), null);
+  assert.equal(extractVerificationSection(body), null);
+  assert.equal(extractAcceptanceCriteria(body), null);
+});
+
+test("#591 fixture matrix: CRLF anchored bodies parse identically", () => {
+  const body = JAPANESE_ANCHORED_BODY.replace(/\n/g, "\r\n");
+  assert.ok(extractVerificationPlan(body)?.includes("## 受け入れ条件"));
+  assert.equal(extractAcceptanceCriteria(body)?.[0]?.text, "日本語の完了条件を満たす");
+});
+
+test("#591 fixture matrix: partial, duplicate, unknown, and misplaced anchors fail closed as planless", () => {
+  const malformedBodies = [
+    "## 受け入れ条件\n<!-- sapwood:ac -->\n\n- [ ] one\n\n## 検証\n- run test",
+    `${JAPANESE_ANCHORED_BODY}\n\n## 重複\n<!-- sapwood:ac -->`,
+    "## 受け入れ条件\n<!-- sapwood:ac -->\n\n- [ ] one\n\n## 検証\n<!-- sapwood:verification -->\n\n- test\n\n<!-- sapwood:future -->",
+    "<!-- sapwood:ac -->\n\n## 受け入れ条件\n\n- [ ] one\n\n## 検証\n<!-- sapwood:verification -->\n\n- test",
+  ];
+  for (const body of malformedBodies) {
+    assert.equal(extractVerificationPlan(body), null);
+    assert.equal(extractVerificationSection(body), null);
+    assert.equal(extractAcceptanceCriteria(body), null);
+  }
+});
+
+test("#591: digit and hyphenated reserved-namespace anchors fail closed instead of dispatching through legacy headings", () => {
+  const legacyDispatchable = `## Acceptance criteria
+
+- [ ] legacy AC
+
+## Verification plan
+
+- run legacy test`;
+  const project = parseProject(
+    JSON.stringify({
+      data: {
+        user: {
+          projectV2: {
+            id: "PVT_591_RESERVED",
+            field: { id: "PVTF_status", options: [{ id: "ready", name: "Ready" }] },
+            items: {
+              nodes: ["v2", "future-role"].map((token, index) => ({
+                id: `ITEM_591_RESERVED_${index}`,
+                content: {
+                  number: 5913 + index,
+                  title: "reserved namespace attempt",
+                  state: "OPEN",
+                  body: `${legacyDispatchable}\n\n<!-- sapwood:${token} -->`,
+                  repository: { nameWithOwner: "herehigher/sapwood" },
+                  labels: { nodes: [{ name: "plan:approved" }] },
+                },
+                fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
+              })),
+            },
+          },
+        },
+      },
+    }),
+    "Status",
+  );
+  for (const issue of project.items) {
+    assert.equal(extractVerificationPlan(issue.body), null);
+    assert.equal(extractVerificationSection(issue.body), null);
+    assert.equal(extractAcceptanceCriteria(issue.body), null);
+  }
+  assert.deepEqual(selectReadyIssues(project, cfg), []);
+});
+
+test("#591: mixed-level anchored role sections preserve legacy non-duplication in both nesting directions", () => {
+  const acContainingVerification = `## 受け入れ条件
+<!-- sapwood:ac -->
+
+- [ ] 完了する
+
+### 検証
+<!-- sapwood:verification -->
+
+- テストを実行する
+
+## 注記
+
+対象外`;
+  const verificationContainingAc = `## 検証
+<!-- sapwood:verification -->
+
+- テストを実行する
+
+### 受け入れ条件
+<!-- sapwood:ac -->
+
+- [ ] 完了する
+
+## 注記
+
+対象外`;
+  for (const body of [acContainingVerification, verificationContainingAc]) {
+    const plan = extractVerificationPlan(body);
+    assert.ok(plan != null);
+    assert.equal(plan.match(/<!-- sapwood:ac -->/g)?.length, 1, "acceptance range is emitted once");
+    assert.equal(plan.match(/<!-- sapwood:verification -->/g)?.length, 1, "verification range is emitted once");
+    assert.ok(!plan.includes("対象外"));
+  }
+});
+
+test("#591: a partial anchor set enters PO triage instead of using an English-heading fallback", () => {
+  const body = "## Acceptance criteria\n\n- [ ] ignored legacy AC\n\n## 受け入れ条件\n<!-- sapwood:ac -->\n\n- [ ] incomplete marker set";
+  const project = parseProject(
+    JSON.stringify({
+      data: {
+        user: {
+          projectV2: {
+            id: "PVT_591_TRIAGE",
+            field: { id: "PVTF_status", options: [{ id: "todo", name: "Todo" }] },
+            items: {
+              nodes: [
+                {
+                  id: "ITEM_591_TRIAGE",
+                  content: {
+                    number: 5912,
+                    title: "partial anchors",
+                    state: "OPEN",
+                    body,
+                    repository: { nameWithOwner: "herehigher/sapwood" },
+                    labels: { nodes: [] },
+                  },
+                  fieldValues: { nodes: [{ name: "Todo", field: { name: "Status" } }] },
+                },
+              ],
+            },
+          },
+        },
+      },
+    }),
+    "Status",
+  );
+  assert.deepEqual(
+    selectPlanTriageCandidates(project, cfg).map((issue) => issue.number),
+    [5912],
+  );
+});
+
+test("#591 fixture matrix: anchored mode overrides conflicting English headings and protocol tokens are exact lowercase ASCII", () => {
+  const body = `## Acceptance criteria
+
+- [ ] ignored English AC
+
+## Verification plan
+
+- ignored English verification
+
+${JAPANESE_ANCHORED_BODY}`;
+  assert.ok(extractVerificationPlan(body)?.includes("日本語の完了条件"));
+  assert.ok(!extractVerificationPlan(body)?.includes("ignored English AC"));
+  assert.deepEqual(
+    extractAcceptanceCriteria(body)?.map((item) => item.text),
+    ["日本語の完了条件を満たす"],
+  );
+
+  const wrongCase = JAPANESE_ANCHORED_BODY.replace("sapwood:ac", "sapwood:AC").replace("sapwood:verification", "sapwood:VERIFICATION");
+  assert.equal(extractVerificationPlan(wrongCase), null);
+  assert.equal(extractAcceptanceCriteria(wrongCase), null);
 });
 
 test("readStartupReconcileData returns board placements plus open PR bodies using read-only gh calls", async () => {
@@ -1288,7 +1531,7 @@ test("findItemId: repo-scoped so a multi-repo board can't hit the wrong #N (Code
                     title: "theirs",
                     state: "OPEN",
                     body: "",
-                    repository: { nameWithOwner: "herehigher/0day" },
+                    repository: { nameWithOwner: "example/private-predecessor" },
                     labels: { nodes: [] },
                   },
                   fieldValues: { nodes: [] },
@@ -1302,7 +1545,7 @@ test("findItemId: repo-scoped so a multi-repo board can't hit the wrong #N (Code
     "Status",
   );
   assert.equal(findItemId(p, 50, "herehigher/sapwood"), "ITEM_A"); // full owner/repo picks ours
-  assert.equal(findItemId(p, 50, "herehigher/0day"), "ITEM_B");
+  assert.equal(findItemId(p, 50, "example/private-predecessor"), "ITEM_B");
   assert.equal(findItemId(p, 50), "ITEM_A"); // no scope -> first match (back-compat)
 });
 
@@ -3563,12 +3806,53 @@ test("associateLanePr (c): the branch is pushed with NO PR -> the engine opens o
   const forge = fakeLanePrForge([], { branches: ["feat/294-hold"], nextPr: 372 });
   const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
   assert.equal(pr.pr, 372);
+  assert.equal(pr.engineOpened, true, "downstream rescue disposition can state the engine-opened provenance truthfully");
   const opened = forge.calls.find((c) => c.kind === "openPR");
   assert.ok(opened);
   assert.equal(opened.args[0], "feat/294-hold");
   const body = opened.args[2] as string;
   assert.deepEqual(readPrOwner(body), { lane: "lane-294-a1b2c3d4", issue: 294 });
+  assert.ok(
+    body.includes(engineOpenedPrMarker("lane-294-a1b2c3d4", 294)),
+    "only the engine-authored body carries durable engine-opened provenance",
+  );
   assert.ok(body.includes("Closes #294"), "GitHub's own closing-keyword semantics are still written for humans");
+});
+
+test("#719: found-existing engine-opened PRs recover provenance from either already-read body list, without a new fetch", async () => {
+  const lane = { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true };
+  const openingForge = fakeLanePrForge([], { branches: [lane.branch], nextPr: 372 });
+  await associateLanePr(openingForge, lane);
+  const engineAuthoredBody = openingForge.prs[0]!.body;
+
+  const branchFoundForge = fakeLanePrForge([{ number: 372, body: engineAuthoredBody, branch: lane.branch }]);
+  const branchFound = await associateLanePr(branchFoundForge, lane);
+  assert.deepEqual(branchFound, { pr: 372, inconclusive: false, engineOpened: true });
+  assert.deepEqual(
+    branchFoundForge.calls.map((call) => call.kind),
+    ["listOpenPrsForBranch"],
+    "no new fetch after restart",
+  );
+
+  const markerScanForge = fakeLanePrForge([{ number: 372, body: engineAuthoredBody }]);
+  const markerScan = await associateLanePr(markerScanForge, { ...lane, branch: null });
+  assert.deepEqual(markerScan, { pr: 372, inconclusive: false, engineOpened: true });
+  assert.deepEqual(
+    markerScanForge.calls.map((call) => call.kind),
+    ["listOpenPrBodies"],
+    "no new fetch after worktree reclamation",
+  );
+});
+
+test("#719: an owner marker stamped onto a worker-opened PR is not engine-opened provenance", async () => {
+  const lane = { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true };
+  const forge = fakeLanePrForge([{ number: 372, body: prOwnerMarker(lane.name, lane.issue), branch: lane.branch }]);
+  const reassociated = await associateLanePr(forge, lane);
+  assert.deepEqual(reassociated, { pr: 372, inconclusive: false });
+  assert.deepEqual(
+    forge.calls.map((call) => call.kind),
+    ["listOpenPrsForBranch"],
+  );
 });
 
 test("associateLanePr (c'): a branch that is not pushed to the forge -> nothing opened, no association", async () => {

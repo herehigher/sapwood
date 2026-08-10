@@ -23,6 +23,15 @@ import {
 import { type BaseRedPin, baseRedPin } from "./loop/base-ci.js";
 import { createBranchProtectionDetector } from "./loop/branch-protection-warning.js";
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
+import {
+  type BrowserOpenResult,
+  type DashboardServerHandle,
+  dashboardServerEntryPath,
+  openBrowserReal,
+  type StartDashboardServerOpts,
+  startDashboardServer,
+  waitForStopSignal,
+} from "./loop/dashboard-launcher.js";
 import { detectDeployKeyStartupTier } from "./loop/deploy-key-startup-check.js";
 import { unadjudicatedConcerns } from "./loop/dissent.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
@@ -60,6 +69,7 @@ import { EVENT_KIND_NAMES, isKnownEventKind } from "./state/event-kinds/index.js
 import {
   buildLaneAnchors,
   buildStatusDTO,
+  DEFAULT_DASHBOARD_PORT,
   type LaneAnchorsDTO,
   MAX_PAGE_LIMIT,
   probePidAlive,
@@ -113,6 +123,9 @@ Commands:
     --json             Machine-readable events instead of the text listing
   park clear     Clear a park episode receipt-first (refuses under a live engine)
     --source SOURCE  Clear only this park source (default: every open episode)
+  dashboard      Start the read-only dashboard server and open it in a browser (see --help)
+    --port PORT    Bind this port instead of the default (see --help)
+    --config PATH  Load config from this path instead of probing the defaults (#710)
   validate [path]  Load + validate a sapwood config file, report OK or the issues
 
 Flags:
@@ -748,7 +761,7 @@ function busyResult(command: string, e: SqliteBusyError, json: boolean): { stdou
  *  explicit-`--config` failure identically — ZodError -> one line per field issue, anything else
  *  (missing file, unreadable, ...) -> the bare error message (already names the path, same as
  *  Node's own ENOENT text). */
-function formatConfigLoadError(command: string, e: unknown): string {
+export function formatConfigLoadError(command: string, e: unknown): string {
   if (e instanceof ZodError) {
     const issues = e.issues.map((i) => `  ${i.path.join(".") || "(root)"}: ${i.message}`).join("\n");
     return `sapwood ${command}: invalid config:\n${issues}\n`;
@@ -765,7 +778,7 @@ function formatConfigLoadError(command: string, e: unknown): string {
  *  undefined is the normal, non-fatal "no config anywhere" case for that path, exactly the
  *  pre-#710 behavior). `cfg`/`provenance` are always BOTH set or BOTH undefined together — never
  *  one without the other — so a caller never has to reconcile them separately. */
-function resolveCliConfig(
+export function resolveCliConfig(
   configPath: string | undefined,
 ): { ok: true; cfg: SapwoodConfig | undefined; provenance: string | undefined } | { ok: false; error: unknown } {
   if (configPath !== undefined) {
@@ -1464,6 +1477,206 @@ export function runPark(argv: string[]): { stdout: string; stderr: string; code:
   }
 }
 
+// ── #743: `sapwood dashboard` — start the read-only data server + open a browser ───────────
+
+const DASHBOARD_BUILD_HINT = "npm run build -w dashboard";
+
+const DASHBOARD_USAGE = `\
+usage: sapwood dashboard [--port PORT] [--config PATH]
+
+Starts the dashboard's read-only data server (dashboard/server.ts) against the same state DB
+\`sapwood run\`/\`status\` use (${DEFAULT_DB_PATH}), then opens it in your default browser. In a
+headless/no-display environment where no browser can be opened, the server still runs — the URL
+is printed instead, and the process keeps serving until you press Ctrl+C.
+
+Flags:
+  --port PORT    Bind this port instead of the default (${DEFAULT_DASHBOARD_PORT}). Overrides
+                 SAPWOOD_DASHBOARD_PORT below when both are given.
+  --config PATH  Load config from this path instead of probing the defaults — same #710
+                 resolution semantics as \`status --config\`/\`events --config\`: authoritative
+                 once given, a missing/invalid path is a hard error, never a silent fallback.
+  --help, -h     Print this help and exit
+
+Env:
+  SAPWOOD_DASHBOARD_PORT  Same effect as --port, lower precedence. Must be a valid port number.
+
+There is no --host/bind flag: the server binds 127.0.0.1 only, always (docs/security.md's
+loopback-only posture) — this launcher has no way to change that.
+
+Requires a built dashboard/dist bundle (${DASHBOARD_BUILD_HINT}); refuses to start, before any
+browser-open attempt, if it is missing. A port already in use is reported by name, with this
+flag/env var named as the fix — never a raw stack trace.
+`;
+
+/** Pure value-taking parse for \`--port\`, same fail-closed convention as parseRunConfigFlag/
+ *  parseStopFlags: a missing/flag-shaped operand, or a value outside 1-65535, is an error, never
+ *  silently ignored or clamped. */
+export function parseDashboardPortFlag(argv: string[]): { rest: string[]; port?: number; error?: string } {
+  const rest: string[] = [];
+  let port: number | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token !== "--port") {
+      rest.push(token);
+      continue;
+    }
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith("-")) {
+      return { rest, error: "--port requires a value" };
+    }
+    const n = Number(value);
+    if (!Number.isInteger(n) || n < 1 || n > 65535) {
+      return { rest, error: `--port requires an integer between 1 and 65535, got: ${value}` };
+    }
+    port = n;
+    i++; // consume the value token too
+  }
+  return port !== undefined ? { rest, port } : { rest };
+}
+
+export interface DashboardArgs {
+  help: boolean;
+  error?: string | undefined;
+  configPath?: string | undefined;
+  port?: number | undefined;
+}
+
+export function parseDashboardArgs(argv: string[]): DashboardArgs {
+  const args = argv.slice(3);
+  if (args.includes("--help") || args.includes("-h")) {
+    return { help: true };
+  }
+  const { rest: afterConfig, configPath, error: configError } = parseRunConfigFlag(args);
+  if (configError) return { help: false, error: configError };
+  const { rest, port, error: portError } = parseDashboardPortFlag(afterConfig);
+  if (portError) return { help: false, error: portError };
+  if (rest.length > 0) {
+    return { help: false, error: `unknown argument(s): ${rest.join(" ")}` };
+  }
+  return { help: false, configPath, port };
+}
+
+/** \`--port\` wins over \`SAPWOOD_DASHBOARD_PORT\` wins over the shared default (read-model.ts's
+ *  DEFAULT_DASHBOARD_PORT — the same value dashboard/server.ts binds to when given no explicit
+ *  port). Always resolves to a CONCRETE port, never \`undefined\` — so a port-in-use error can
+ *  always name the exact number that collided (AC4), regardless of how it was chosen. The env var
+ *  gets the same integer-in-range validation as the flag: a malformed value is a hard error, never
+ *  a silent fallback to the default. */
+export function resolveDashboardPort(flagPort: number | undefined, env: NodeJS.ProcessEnv): { port: number } | { error: string } {
+  if (flagPort !== undefined) return { port: flagPort };
+  const raw = env.SAPWOOD_DASHBOARD_PORT;
+  if (raw === undefined || raw === "") return { port: DEFAULT_DASHBOARD_PORT };
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    return { error: `SAPWOOD_DASHBOARD_PORT must be an integer between 1 and 65535, got: ${raw}` };
+  }
+  return { port: n };
+}
+
+/** Injection seam for \`runDashboard\` — every field defaults to the real implementation in
+ *  loop/dashboard-launcher.ts (the ONLY module allowed to touch child_process for this feature —
+ *  see that file's own header comment); tests override individual fields (never real
+ *  \`execFile\`/child-process spawns, per #743's own verification plan) to exercise the
+ *  orchestration logic in isolation. \`log\` follows this
+ *  file's existing convention (e.g. normalizeUnplacedBoardItems' own \`log\` parameter, above) of
+ *  an injectable message sink defaulting to \`console.error\`, rather than writing to
+ *  \`process.stdout\`/\`process.stderr\` directly — a long-running command like this one prints as
+ *  it goes (the "serving at" line has to appear before the indefinite wait, not be buffered until
+ *  the process exits), so it needs a seam, not a returned string. */
+export interface DashboardDeps {
+  startServer?: (opts: StartDashboardServerOpts) => Promise<DashboardServerHandle>;
+  openBrowser?: (url: string) => Promise<BrowserOpenResult>;
+  waitForStop?: () => Promise<void>;
+  env?: NodeJS.ProcessEnv;
+  log?: (message: string) => void;
+  /** Overrides the dashboard/dist bundle probe path — real default: \`dashboard/dist/index.html\`
+   *  relative to cwd, matching how \`sapwood run\`/\`status\` read data/ relative to cwd too. */
+  dashboardDistIndex?: string;
+  /** Overrides the compiled dashboard server entry probe path — real default:
+   *  dashboardServerEntryPath() (dashboard/dist-server/start.js), the SAME file startServer's real
+   *  implementation spawns. Checked alongside dashboardDistIndex above, before either the server
+   *  starts or any browser-open attempt (AC5) — a stale/half-built \`dashboard/dist\` with no
+   *  compiled server would otherwise fail confusingly deep inside startServer instead of with the
+   *  one actionable "run the build command" message. */
+  dashboardServerEntry?: string;
+}
+
+export interface ValidatedDashboardArgs {
+  configPath?: string;
+  port?: number;
+}
+
+/** \`sapwood dashboard\`'s async body — mirrors \`run\`'s split: \`runCli\` does the synchronous
+ *  flag/help/error handling below, \`main()\` calls this for the validated success path. Order of
+ *  checks matches the issue's own acceptance criteria: config (#710 contract) -> port -> dist
+ *  bundle present (AC5: never opens a browser onto a broken page) -> start server (AC4: a clear
+ *  port-in-use error, not a stack trace) -> open browser (AC2: headless never crashes). */
+export async function runDashboard(validated: ValidatedDashboardArgs, deps: DashboardDeps = {}): Promise<number> {
+  const env = deps.env ?? process.env;
+  const log = deps.log ?? console.error;
+
+  const configResult = resolveCliConfig(validated.configPath);
+  if (!configResult.ok) {
+    log(formatConfigLoadError("dashboard", configResult.error).trimEnd());
+    return 1;
+  }
+
+  const portResult = resolveDashboardPort(validated.port, env);
+  if ("error" in portResult) {
+    log(`sapwood dashboard: ${portResult.error}`);
+    return 1;
+  }
+
+  const distIndex = deps.dashboardDistIndex ?? join("dashboard", "dist", "index.html");
+  if (!existsSync(distIndex)) {
+    log(`sapwood dashboard: no dashboard build found at ${distIndex} — run \`${DASHBOARD_BUILD_HINT}\` first, then retry.`);
+    return 1;
+  }
+  const serverEntry = deps.dashboardServerEntry ?? dashboardServerEntryPath();
+  if (!existsSync(serverEntry)) {
+    log(`sapwood dashboard: no dashboard server build found at ${serverEntry} — run \`${DASHBOARD_BUILD_HINT}\` first, then retry.`);
+    return 1;
+  }
+
+  const startServer = deps.startServer ?? startDashboardServer;
+  let handle: DashboardServerHandle;
+  try {
+    handle = await startServer({
+      dbPath: DEFAULT_DB_PATH,
+      ...(validated.configPath !== undefined ? { configPath: validated.configPath } : {}),
+      port: portResult.port,
+    });
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "EADDRINUSE") {
+      log(
+        `sapwood dashboard: port ${portResult.port} is already in use — pick another with --port PORT or the ` +
+          `SAPWOOD_DASHBOARD_PORT env var.`,
+      );
+      return 1;
+    }
+    log(`sapwood dashboard: failed to start — ${err.message}`);
+    return 1;
+  }
+
+  const url = `http://127.0.0.1:${handle.port}`;
+  const openBrowser = deps.openBrowser ?? openBrowserReal;
+  const opened = await openBrowser(url);
+  if (opened.opened) {
+    log(`sapwood dashboard: serving at ${url} — opened in your default browser. Press Ctrl+C to stop.`);
+  } else {
+    log(
+      `sapwood dashboard: serving at ${url} — could not open a browser automatically (${opened.reason}). ` +
+        `Open the URL above manually. Press Ctrl+C to stop.`,
+    );
+  }
+
+  const waitForStop = deps.waitForStop ?? waitForStopSignal;
+  await waitForStop();
+  await handle.stop();
+  return 0;
+}
+
 // ── #638: `sapwood init` — same synchronous fail-closed argument boundary as every other
 // subcommand, before the async engine-wiring fallthrough ──────────────────────────────────
 
@@ -1493,6 +1706,7 @@ export interface CliResult {
   stderr: string;
   code: number;
   validatedRun?: ValidatedRunArgs;
+  validatedDashboard?: ValidatedDashboardArgs;
 }
 
 export function runCli(argv: string[]): CliResult {
@@ -1514,6 +1728,22 @@ export function runCli(argv: string[]): CliResult {
   }
   if (arg === "park") {
     return runPark(argv);
+  }
+  if (arg === "dashboard") {
+    const parsed = parseDashboardArgs(argv);
+    if (parsed.help) return { stdout: DASHBOARD_USAGE, stderr: "", code: 0 };
+    if (parsed.error) {
+      return { stdout: "", stderr: `sapwood dashboard: ${parsed.error}\n\n${DASHBOARD_USAGE}`, code: 1 };
+    }
+    return {
+      stdout: "",
+      stderr: "",
+      code: -1,
+      validatedDashboard: {
+        ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
+        ...(parsed.port !== undefined ? { port: parsed.port } : {}),
+      },
+    };
   }
   if (arg !== "init" && arg !== "run") {
     return { stdout: "", stderr: USAGE, code: 2 };
@@ -2739,7 +2969,7 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
 }
 
 async function main(argv: string[]): Promise<number> {
-  const { stdout, stderr, code, validatedRun } = runCli(argv);
+  const { stdout, stderr, code, validatedRun, validatedDashboard } = runCli(argv);
   if (stdout) process.stdout.write(stdout);
   if (stderr) process.stderr.write(stderr);
   if (code !== -1) return code;
@@ -2750,6 +2980,10 @@ async function main(argv: string[]): Promise<number> {
       return runDryRun({}, validatedRun?.configPath);
     }
     return runEngine(argv, {}, validatedRun);
+  }
+
+  if (argv[2] === "dashboard") {
+    return runDashboard(validatedDashboard ?? {});
   }
 
   try {

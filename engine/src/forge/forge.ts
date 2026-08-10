@@ -1,6 +1,6 @@
 // IForge: the seam between the conductor and the code host. v1 impl is GithubForge
 // (gh CLI + GraphQL). Making GitLab/Gitea an implementation, not a rewrite. Every
-// 0day hard-coding (PROJECT_NUMBER, user-vs-org, literal status names, reviewer
+// Predecessor-project hard-coding (PROJECT_NUMBER, user-vs-org, literal status names, reviewer
 // login) lives in SapwoodConfig and is passed in here — never baked into the impl.
 //
 // SECURITY: all subprocess calls go through gh.ts (execFile with an argv array — never
@@ -191,13 +191,13 @@ export interface PRReview {
   submittedAt?: string;
 }
 
-/** Everything reviewer.ts needs to derive gate②'s ACTION (0day's pr_gate.sh, review half —
+/** Everything reviewer.ts needs to derive gate②'s ACTION (the predecessor project's pr_gate.sh, review half —
  *  CI/gate① stays on PRStatus.ciGreen). Assembled from 3 read-only gh calls (reactions, pr
  *  view, review threads) — see GithubForge.getPRReviewData. */
 export interface PRReviewData {
   headOid: string;
   author: string;
-  updatedAt: string; // ISO — the freshness cutoff for reactions (0day pr_gate.sh #92)
+  updatedAt: string; // ISO — the freshness cutoff for reactions (the predecessor project's pr_gate.sh #92)
   isDraft: boolean;
   labels: string[];
   state: "OPEN" | "CLOSED" | "MERGED";
@@ -1033,7 +1033,7 @@ export class GithubForge implements IForge {
 
   async mergePR(pr: number, headOid: string): Promise<void> {
     // --match-head-commit pins the reviewed head: TOCTOU guard against a push between
-    // review and merge (0day loop_merge_driver.sh). producer != merger: only the
+    // review and merge (the predecessor project's loop_merge_driver.sh). producer != merger: only the
     // conductor calls this, never a worker.
     await this.gh([
       "pr",
@@ -1149,7 +1149,7 @@ export class GithubForge implements IForge {
   }
 
   async getPRReviewData(pr: number): Promise<PRReviewData> {
-    // Read-only gh calls (0day pr_gate.sh): PR metadata + reviews, reactions (--paginate), and
+    // Read-only gh calls (the predecessor project's pr_gate.sh): PR metadata + reviews, reactions (--paginate), and
     // the review-threads connection PAGED TO EXHAUSTION (Codex PR #42 P2 — a first-100-only
     // fetch could report zero findings while an unresolved thread sits on a later page).
     // Never touches merge/approve/ready — this is a read surface only.
@@ -2080,6 +2080,92 @@ function statusValue(item: RawItem, statusField: string): string | null {
   return null;
 }
 
+type MarkedSectionRole = "ac" | "verification";
+type MarkedSection = { start: number; level: number };
+type MarkedSectionAssociation = Record<MarkedSectionRole, string> & { plan: string };
+
+/**
+ * Associate exact sapwood section markers with the ATX heading immediately above each marker.
+ *
+ * `undefined` means no markers occurred outside fences, so callers must retain the legacy
+ * English-heading parser unchanged. `null` means marked mode was selected but its protocol was
+ * malformed: never fall back to legacy matching in that case. This deliberately mirrors
+ * extractMarkdownSections' fence-aware line scan rather than interpolating markers into that
+ * helper's heading regex: the marker belongs after a heading, not in its text.
+ */
+function associateMarkedSections(body: string): MarkedSectionAssociation | null | undefined {
+  const headings: Array<MarkedSection & { line: number }> = [];
+  const anchors: Array<{ role: string; heading: MarkedSection | undefined }> = [];
+  let offset = 0;
+  let fence: { character: "`" | "~"; length: number } | null = null;
+
+  for (const [lineNumber, rawLine] of body.split("\n").entries()) {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (fence) {
+      const closer = /^ {0,3}(`+|~+)[ \t]*$/.exec(line)?.[1];
+      if (closer?.[0] === fence.character && closer.length >= fence.length) fence = null;
+    } else {
+      const opener = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+      if (opener) {
+        fence = { character: opener[0] as "`" | "~", length: opener.length };
+      } else {
+        const heading = /^(#{1,6})\s/.exec(line);
+        if (heading) headings.push({ start: offset, level: heading[1]!.length, line: lineNumber });
+
+        // The grammar is intentionally exact: lower-case ASCII protocol tokens, an otherwise
+        // empty line, and no normalization/case folding. Any plausible reserved-namespace
+        // token selects marked mode; only the two roles below are then accepted. This keeps
+        // future digit/hyphenated sapwood protocol attempts from falling through to legacy
+        // English-heading parsing.
+        const marker = /^<!-- sapwood:([a-z0-9][a-z0-9-]*) -->$/.exec(line);
+        if (marker) {
+          const previous = headings[headings.length - 1];
+          anchors.push({
+            role: marker[1]!,
+            heading: previous?.line === lineNumber - 1 ? previous : undefined,
+          });
+        }
+      }
+    }
+    offset += rawLine.length + 1;
+  }
+
+  if (anchors.length === 0) return undefined;
+  if (
+    anchors.length !== 2 ||
+    anchors.some((anchor) => (anchor.role !== "ac" && anchor.role !== "verification") || anchor.heading === undefined)
+  ) {
+    return null;
+  }
+
+  const byRole = new Map<MarkedSectionRole, MarkedSection>();
+  for (const anchor of anchors) {
+    const role = anchor.role as MarkedSectionRole;
+    if (byRole.has(role)) return null;
+    byRole.set(role, anchor.heading!);
+  }
+  const ac = byRole.get("ac");
+  const verification = byRole.get("verification");
+  if (!ac || !verification) return null;
+
+  const sectionFor = (heading: MarkedSection) => {
+    const end = headings.find((candidate) => candidate.start > heading.start && candidate.level <= heading.level)?.start ?? body.length;
+    return { start: heading.start, end, text: body.slice(heading.start, end).trim() };
+  };
+  const acSection = sectionFor(ac);
+  const verificationSection = sectionFor(verification);
+  const planSections = [acSection, verificationSection]
+    .sort((left, right) => left.start - right.start)
+    // Match extractMarkdownSections' legacy behavior: a matching section nested inside an
+    // already-emitted matching ancestor is present in that ancestor's text, never appended twice.
+    .filter((section, index, sections) => !sections.slice(0, index).some((prior) => section.end <= prior.end));
+  return {
+    ac: acSection.text,
+    verification: verificationSection.text,
+    plan: planSections.map((section) => section.text).join("\n\n"),
+  };
+}
+
 /**
  * Extract every Verification/Acceptance section's raw text from an issue body (Decision #8's
  * plan) — the SAME fail-closed heading match `hasVerificationPlan` uses to gate dispatch,
@@ -2091,6 +2177,11 @@ function statusValue(item: RawItem, statusField: string): string | null {
  * the plan (verify:n/a issues have no section and are expected to hit this null).
  */
 export function extractVerificationPlan(body: string): string | null {
+  const marked = associateMarkedSections(body);
+  if (marked !== undefined) {
+    if (marked === null) return null;
+    return marked.plan;
+  }
   const sections = extractMarkdownSections(body, /(verification|acceptance)/);
   return sections.length ? sections.join("\n\n") : null;
 }
@@ -2099,6 +2190,8 @@ export function extractVerificationPlan(body: string): string | null {
  * extractVerificationPlan's historical Verification-or-Acceptance compatibility shape:
  * a dispatchable implementation issue needs both checkbox AC and concrete verification steps. */
 export function extractVerificationSection(body: string): string | null {
+  const marked = associateMarkedSections(body);
+  if (marked !== undefined) return marked?.verification ?? null;
   const sections = extractMarkdownSections(body, /verification/);
   return sections.length ? sections.join("\n\n") : null;
 }
@@ -2189,9 +2282,15 @@ const NEW_BLOCK_LINE = /^ {0,3}(?:[-*+]|\d+[.)])\s|^#{1,6}\s/;
  * folded text, not just the checkbox's own first line).
  */
 export function extractAcceptanceCriteria(body: string): AcceptanceCriterion[] | null {
-  const sections = extractMarkdownSections(body, /acceptance\s+criteria/);
-  if (sections.length === 0) return null;
-  const text = sections.join("\n\n");
+  const marked = associateMarkedSections(body);
+  const text =
+    marked === undefined
+      ? (() => {
+          const sections = extractMarkdownSections(body, /acceptance\s+criteria/);
+          return sections.length === 0 ? null : sections.join("\n\n");
+        })()
+      : (marked?.ac ?? null);
+  if (text === null) return null;
   const texts: string[] = [];
   let continuing = false;
   for (const rawLine of text.split("\n")) {
@@ -2266,6 +2365,9 @@ export function referencedIssue(body: string): number | null {
 // learns its OWN name, via its worktree path), and a disagreeing second marker in one body reads
 // as null (fail closed) rather than resolving to either lane. This is a narrowing, not a proof.
 const PR_OWNER_MARKER_RE = /<!--\s*sapwood:pr-owner\s+lane="([^"]+)"\s+issue="(\d+)"\s*-->/g;
+// This is deliberately DISTINCT from PR_OWNER_MARKER_RE: the owner marker is stamped on both
+// worker-opened and engine-opened PRs, while this marker records only the latter provenance.
+const ENGINE_OPENED_PR_MARKER_RE = /<!--\s*sapwood:pr-engine-opened\s+lane="([^"]+)"\s+issue="(\d+)"\s*-->/g;
 
 /** Lane names are engine-generated (`lane-<issue>-<8 hex>`), so this always passes in practice;
  *  it exists so a name that could NOT be read back verbatim can never be written in the first
@@ -2277,6 +2379,21 @@ const LANE_NAME_RE = /^[A-Za-z0-9._-]+$/;
 export function prOwnerMarker(lane: string, issue: number): string {
   if (!LANE_NAME_RE.test(lane)) throw new Error(`prOwnerMarker: unusable lane name ${JSON.stringify(lane)}`);
   return `<!-- sapwood:pr-owner lane="${lane}" issue="${issue}" -->`;
+}
+
+/** Durable provenance for a PR the engine itself opened. This MUST NOT be added when the engine
+ * merely adopts a worker-opened PR: that path gets the owner marker above, but is not truthful
+ * evidence for the rescue comment's engine-opened statement. */
+export function engineOpenedPrMarker(lane: string, issue: number): string {
+  if (!LANE_NAME_RE.test(lane)) throw new Error(`engineOpenedPrMarker: unusable lane name ${JSON.stringify(lane)}`);
+  return `<!-- sapwood:pr-engine-opened lane="${lane}" issue="${issue}" -->`;
+}
+
+/** Reads the dedicated engine-opened marker back from an already-read PR body. Disagreeing
+ * markers fail closed, just as owner-marker disagreement does. */
+export function isEngineOpenedPr(body: string, lane: string, issue: number): boolean {
+  const found = [...body.matchAll(ENGINE_OPENED_PR_MARKER_RE)].map((m) => ({ lane: m[1]!, issue: Number(m[2]) }));
+  return found.length > 0 && found.every((marker) => marker.lane === lane && marker.issue === issue);
 }
 
 /** The pure read-back — paired with prOwnerMarker so the written and accepted syntax cannot
@@ -2380,6 +2497,8 @@ export interface LanePrOutcome {
    *  underlying forge response had no title. worker.ts's probe() carries this onto
    *  LaneProbe.prTitle, which conductor.ts's reclaim events persist. */
   title?: string;
+  /** True only when the engine itself opened `pr` from the lane's already-pushed branch. */
+  engineOpened?: boolean;
 }
 
 /**
@@ -2425,9 +2544,17 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
     const candidates = await forge.listOpenPrsForBranch(lane.branch);
     const owned = findLaneOwnedPr(candidates, lane.name, lane.issue);
     if (owned != null) {
-      // #595: the title rides this SAME candidates list — no extra lookup.
-      const title = candidates.find((c) => c.number === owned)?.title;
-      return { pr: owned, inconclusive: false, ...(title !== undefined ? { title } : {}) };
+      // #719: both title AND engine-opened provenance ride this SAME candidates list — no
+      // re-fetch after a crash between openPR and the rescue-reason comment.
+      const candidate = candidates.find((c) => c.number === owned);
+      const title = candidate?.title;
+      const engineOpened = candidate !== undefined && isEngineOpenedPr(candidate.body, lane.name, lane.issue);
+      return {
+        pr: owned,
+        inconclusive: false,
+        ...(title !== undefined ? { title } : {}),
+        ...(engineOpened ? { engineOpened: true } : {}),
+      };
     }
     // Stamp-and-adopt is eligible ONLY for a branch with exactly ONE open PR that carries no
     // marker at all. Both halves of that are load-bearing (gate② P1s on PR #423):
@@ -2472,23 +2599,31 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
           const title = await forge.getIssueMeta(lane.issue).then((m) => m.title);
           const opened = await forge.openPR(lane.branch, title, engineAuthoredPrBody(lane.name, lane.issue, lane.branch));
           // #595: the PR the engine just opened carries the title it opened WITH — no re-read.
-          return { pr: opened, inconclusive: false, title };
+          return { pr: opened, inconclusive: false, title, engineOpened: true };
         } catch (e) {
           return unknown(`could not open a PR for pushed branch ${lane.branch} (${String(e)}) — branch preserved, retried later`);
         }
       }
     }
   }
-  // #595: the marker-scan fallback's title rides this SAME listOpenPrBodies read.
+  // #595/#719: the marker-scan fallback's title and engine-opened provenance ride this SAME
+  // listOpenPrBodies read; a reclaimed worktree must not create a second read or lose provenance.
   const bodies = await forge.listOpenPrBodies();
   const marked = findLaneOwnedPr(bodies, lane.name, lane.issue);
-  const markedTitle = marked != null ? bodies.find((b) => b.number === marked)?.title : undefined;
-  return { pr: marked, inconclusive: false, ...(markedTitle !== undefined ? { title: markedTitle } : {}) };
+  const markedPr = marked != null ? bodies.find((b) => b.number === marked) : undefined;
+  const markedTitle = markedPr?.title;
+  const engineOpened = markedPr !== undefined && isEngineOpenedPr(markedPr.body, lane.name, lane.issue);
+  return {
+    pr: marked,
+    inconclusive: false,
+    ...(markedTitle !== undefined ? { title: markedTitle } : {}),
+    ...(engineOpened ? { engineOpened: true } : {}),
+  };
 }
 
-/** The body the engine writes when IT opens a lane's PR. Carries the human-facing closing keyword
- *  (GitHub's own auto-close semantics, unchanged by #377) plus the owner marker, and says plainly
- *  that only this description — not the code — is engine-authored. */
+/** The body the engine writes when IT opens a lane's PR. Carries the human-facing closing keyword,
+ * owner marker, and dedicated engine-opened marker; the latter lets restart association recover
+ * that fact without a new forge read. */
 function engineAuthoredPrBody(lane: string, issue: number, branch: string): string {
   return [
     `Closes #${issue}`,
@@ -2497,6 +2632,7 @@ function engineAuthoredPrBody(lane: string, issue: number, branch: string): stri
     "The commits are the worker's; this description is the engine's.",
     "",
     prOwnerMarker(lane, issue),
+    engineOpenedPrMarker(lane, issue),
     "",
   ].join("\n");
 }

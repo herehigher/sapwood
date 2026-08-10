@@ -1,11 +1,11 @@
 // The conductor: the scheduler. One tick = reclaim -> drive -> resume -> dispatch.
 //
-// This file is a TS port of 0day's ops/loop/loop_conductor.sh — but ONLY the generic
-// scheduling core, never the trading domain (no reserve/SLA/eval-report/HTML machinery).
+// This file is a TS port of the predecessor project's loop conductor — but ONLY the generic
+// scheduling core, never application-specific behavior.
 // The pure functions below mirror test_loop_conductor.sh row-for-row (see conductor.test.ts).
 //
 // Design (PLAN.md):
-//  - Structured, typed tick result (discriminated unions) replaces 0day's stringly-typed
+//  - Structured, typed tick result (discriminated unions) replaces the predecessor project's stringly-typed
 //    DISPATCHED.../RECLAIMED... text protocol greped by skills.
 //  - The tick takes its side-effecting collaborators by injection (IForge, a dispatch fn,
 //    a clock, State) so it is fully unit-testable without spawning a real `claude`.
@@ -453,7 +453,7 @@ export type DriveAction = "MERGE" | "WAIT" | "FIXUP" | "ESCALATE";
  * its FIXABLE semantics for a converging (or unclassified) lane did not.
  *
  * NOTE: this is the conductor's drive_decision only. The PR-gate ACTION->action map
- * (0day merge_decision / pr_gate) belongs to M3's reviewer.ts + merge-driver.ts.
+ * (the predecessor project's merge_decision / pr_gate) belongs to M3's reviewer.ts + merge-driver.ts.
  */
 export function driveDecision(
   gate: string,
@@ -1213,6 +1213,8 @@ export interface LaneProbe {
    *  Optional: absent when the underlying forge response had no title, or for probe fixtures
    *  that predate #595. */
   prTitle?: string;
+  /** The engine, rather than the producer, opened this PR from the lane's pushed branch. */
+  engineOpenedPr?: boolean;
   /** #377 (gate② round 3): the lane's PR association is UNKNOWN — a forge WRITE it depended on
    *  failed (a 502 on `gh pr create`, a 403 on the marker stamp) — as opposed to a definitive
    *  "this lane has no PR". The reclaim loops DEFER a lane flagged this way instead of settling
@@ -2948,6 +2950,19 @@ function needsHumanReasonCommentMarker(worker: string, pr: number): string {
   return `<!-- sapwood:needs-human-reason:${worker}:${pr} -->`;
 }
 
+function deadLaneRescueReasonCommentMarker(worker: string, pr: number): string {
+  return `<!-- sapwood:needs-human-reason:dead-lane-rescue:${worker}:${pr} -->`;
+}
+
+function deadLaneRescueReasonComment(worker: string, _pr: number, needsHumanLabel: string): string {
+  return (
+    `sapwood: lane \`${worker}\` died mid-flight (terminal reason: DEAD — exited or became unresponsive without a terminal sentinel). ` +
+    `The engine opened this PR from the pushed branch; its commits are unreviewed producer work. ` +
+    `Choose one: review and merge through the normal gates; hand it to a fresh lane; or close it. ` +
+    `Remove \`${needsHumanLabel}\` from this pull request only when that decision is complete.`
+  );
+}
+
 /** #398: the marker-checked escalation COMMENT, on the same carrier its label went to — because
  *  every one of these comments ends by telling a human to remove that label, and an instruction
  *  posted somewhere other than where the label actually is, is a wrong instruction.
@@ -3744,6 +3759,22 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     if (r.worktreeRetained) {
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
       if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
+      if (p.engineOpenedPr && p.prNumber != null) {
+        const marker = deadLaneRescueReasonCommentMarker(w.name, p.prNumber);
+        try {
+          await commentOnEscalationCarrier(
+            forge,
+            cfg,
+            "pr",
+            w.issue,
+            p.prNumber,
+            marker,
+            `${marker}\n${deadLaneRescueReasonComment(w.name, p.prNumber, cfg.labels.needsHuman)}`,
+          );
+        } catch (e) {
+          state.appendEvent("reclaim-dead-comment-failed", { worker: w.name, issue: w.issue, pr: p.prNumber, error: String(e) });
+        }
+      }
       await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath, cfg.labels.needsHuman);
       state.settleTerminalWorker(
         { ...w, state: "failed", ended_at: deadAt },
@@ -3866,6 +3897,22 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     if (r.worktreeRetained) {
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
       if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
+      if (p.engineOpenedPr && p.prNumber != null) {
+        const marker = deadLaneRescueReasonCommentMarker(w.name, p.prNumber);
+        try {
+          await commentOnEscalationCarrier(
+            forge,
+            cfg,
+            "pr",
+            w.issue,
+            p.prNumber,
+            marker,
+            `${marker}\n${deadLaneRescueReasonComment(w.name, p.prNumber, cfg.labels.needsHuman)}`,
+          );
+        } catch (e) {
+          state.appendEvent("reclaim-dead-comment-failed", { worker: w.name, issue: w.issue, pr: p.prNumber, error: String(e) });
+        }
+      }
       await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath, cfg.labels.needsHuman);
       state.settleTerminalWorker(
         { ...w, state: "failed", ended_at: deadAt },
@@ -5641,7 +5688,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // switch never reaches this loop; see the global gate at the top of tick(). #75: same
       // reasoning applies to pause — `paused` is captured once at the top of tick(), not
       // re-read per issue.
-      // Claim BEFORE launching (matches 0day claim_issue.sh order). The board transition
+      // Claim BEFORE launching (matches the predecessor project's claim_issue.sh order). The board transition
       // takes the issue out of the Ready lane first, so a launch failure can't leave an
       // untracked worker running while the issue stays dispatchable (Codex P1, PR #30). If
       // the launch fails after the claim, roll the board back to Ready so it's reclaimable.

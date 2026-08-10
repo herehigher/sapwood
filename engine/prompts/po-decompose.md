@@ -36,10 +36,16 @@ Hard target for every `ready` child:
 
 - Exactly one PR completes it: one issue, one implementation lane, one PR.
 - Its acceptance criteria are verifiable inside that PR's own CI plus gate②. Give it a real
-  `## Acceptance criteria` section with literal checkbox items and a distinct
-  `## Verification plan` section. Never write CI/suite/typecheck status itself as a criterion
+  acceptance-criteria section with literal checkbox items and a distinct verification-plan
+  section. Write those headings in the parent's language (English is fine), then put the exact
+  own-line `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` anchors immediately below
+  their respective headings. Never write CI/suite/typecheck status itself as a criterion
   ("the test suite passes", "CI green") — CI enforces those unconditionally; execution steps
-  belong in the child's `## Verification plan`.
+  belong in the child's verification-plan section.
+
+Write every issue-facing body, proposal, triage note, and other prose you compose in the
+parent issue's language. Preserve its original-language content; never re-translate or rewrite
+it unless asked. The two sapwood anchor tokens remain exact lower-case ASCII.
 
 Self-check heuristics only (never numeric scheduling claims and never hard gates):
 
@@ -103,10 +109,12 @@ Successful, possibly partial decomposition:
 ...
 
 ## Acceptance criteria
+<!-- sapwood:ac -->
 
 - [ ] One checkable outcome
 
 ## Verification plan
+<!-- sapwood:verification -->
 
 - Run the focused test and the repository verification commands.
 <<<END_ISSUE>>>

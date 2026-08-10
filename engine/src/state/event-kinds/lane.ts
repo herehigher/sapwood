@@ -40,6 +40,12 @@ export const LANE_EVENT_KINDS = defineKinds({
     meaning: "a worker lane was reclaimed as DEAD (crashed/unresponsive process).",
     actionability: "investigate",
   },
+  "reclaim-dead-comment-failed": {
+    tags: [],
+    meaning: "the explanatory PR comment for an engine-opened dead-lane rescue failed; the needs-human labels remain applied.",
+    actionability: "routine",
+    see: "#719",
+  },
   // #724 gate② P1: EMERGENCY_STOP's own durable-pid sweep (round.ts) — a `driving`/`handoff`
   // row whose DURABLE persisted process identity (never the in-memory supervisor, which a
   // crash-resumed process cannot have) read confirmed-alive gets signalled directly, bypassing
