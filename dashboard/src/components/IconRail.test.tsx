@@ -93,13 +93,7 @@ test("the theme switch's REAL onClick likewise calls the passed-in onToggleTheme
  *  its `useState`/`useEffect` run for real — and stashes the REAL element tree it returns (with
  *  IconRail's own `onToggleTheme`/`onOpenConfig` wiring still attached, not a reconstruction)
  *  into `capture`, for the test to walk and click once `renderToStaticMarkup` has returned. */
-function MountIconRail({
-  onOpenConfig,
-  capture,
-}: {
-  onOpenConfig: () => void;
-  capture: { tree: ReturnType<typeof IconRail> | null };
-}) {
+function MountIconRail({ onOpenConfig, capture }: { onOpenConfig: () => void; capture: { tree: ReturnType<typeof IconRail> | null } }) {
   capture.tree = IconRail({ onOpenConfig });
   return capture.tree;
 }
