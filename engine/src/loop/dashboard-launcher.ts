@@ -4,6 +4,17 @@
 // review/codex-exec.ts are: worker.test.ts's "#69 grep-invariant" enumerates the ONLY engine
 // files allowed to `import ... from "node:child_process"` and fails closed on every other file —
 // this module is the fifth, dashboard-scoped entry in that list (see that test's own update).
+//
+// DELIBERATE dependency-posture exception (gate② finding, flagged for human confirmation): the
+// child is spawned via `node --import tsx`, so `tsx` is now a real DEPENDENCY of
+// engine/package.json (moved out of devDependencies), not just yaml+zod. This is required because
+// dashboard/server.ts's NodeNext `.js` import specifiers point at uncompiled TypeScript siblings
+// (`../engine/src/config/config.js` etc — dashboard/tsconfig.server.json is typecheck-only, no
+// build emits that path) that plain `node` cannot resolve on its own (verified experimentally:
+// ERR_MODULE_NOT_FOUND). The alternative — a real compiled `dist` entry for the dashboard server,
+// so no loader is needed at all at runtime — is a separate, larger undertaking (a new
+// engine-vs-dashboard build/import convention, not a fix-round-sized change) and is left as
+// follow-up if this trade-off is rejected.
 import { execFile, spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { promisify } from "node:util";

@@ -7,7 +7,7 @@
 // (dashboard/start.ts under `node --import tsx`) reports back the port it actually bound, both
 // for an OS-assigned port and an explicit one, matching dashboard/server.ts:427's own contract.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -359,4 +359,82 @@ test("startDashboardServer (real, e2e): a second bind on an already-occupied por
       first.stop();
     }
   });
+});
+
+// #743 gate② finding [0]: the only other real-server test above binds port 0 (an OS-assigned
+// port) — AC1's own verification plan asks for BOTH an unspecified port and an explicit one to be
+// proven through the real listen callback, not just the unspecified case. Discover a genuinely
+// free port the same way the EADDRINUSE test above reuses one (bind 0, release, reuse the number)
+// rather than a hardcoded literal that could collide with something else already listening in CI.
+test("startDashboardServer (real, e2e): an explicit nonzero --port resolves with that EXACT port, through the real child process", async () => {
+  await withDataDir(async (dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    seedDb(dbPath);
+    const probe = await startDashboardServer({ dbPath, port: 0 });
+    const explicitPort = probe.port;
+    probe.stop();
+    const handle = await startDashboardServer({ dbPath, port: explicitPort });
+    try {
+      assert.equal(handle.port, explicitPort);
+      const res = await fetch(`http://127.0.0.1:${handle.port}/api/loop/state`);
+      assert.equal(res.status, 200);
+    } finally {
+      handle.stop();
+    }
+  });
+});
+
+// #743 gate② finding [1]: an explicit `--config` must be authoritative end-to-end through the
+// REAL child process, not just at the parent-side `resolveCliConfig` check runDashboard's own
+// (fake-injected) tests above cover — this proves the actual SERVED config is the named file's,
+// and that a bad explicit path fails the real server startup rather than silently degrading to
+// `config: null` (dashboard/server.ts's normal best-effort posture for an OMITTED --config).
+test("startDashboardServer (real, e2e): an explicit --config is what's actually served, not a coincidentally-discoverable default or a silent null", async () => {
+  await withDataDir(async (dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    seedDb(dbPath);
+    const configPath = join(dir, "sapwood.config.yaml");
+    // lanes.max: 9 is a value nothing else in this fixture would produce by coincidence.
+    writeFileSync(configPath, "board: { owner: acme, repo: widgets, projectNumber: 7 }\nlanes: { max: 9 }\ncost: { dailyBudgetUsd: 50 }\n");
+    const handle = await startDashboardServer({ dbPath, configPath, port: 0 });
+    try {
+      const res = await fetch(`http://127.0.0.1:${handle.port}/api/loop/state`);
+      // biome-ignore lint/suspicious/noExplicitAny: test-side JSON, asserted field by field below
+      const body = (await res.json()) as any;
+      assert.equal(body.lanes.max, 9, "the served config must be the explicitly-named file's, not null or a different default");
+    } finally {
+      handle.stop();
+    }
+  });
+});
+
+test("startDashboardServer (real, e2e): an explicit --config naming a missing/invalid file fails the real server startup, never a silent config:null degrade", async () => {
+  await withDataDir(async (dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    seedDb(dbPath);
+    const missingConfigPath = join(dir, "does-not-exist.yaml");
+    await assert.rejects(() => startDashboardServer({ dbPath, configPath: missingConfigPath, port: 0 }));
+  });
+});
+
+// ── structural: no engine module statically imports anything under dashboard/ (AC6) ────────
+
+test("#743 AC6 (structural, dependency-direction): no engine/src module statically imports a dashboard/ path — an engine -> dashboard import would invert dashboard/server.ts's existing one-way dashboard -> engine dependency into a cycle", () => {
+  const srcDir = new URL("../", import.meta.url); // engine/src/
+  const files = readdirSync(srcDir, { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+  assert.ok(files.includes("cli.ts") && files.includes("loop/dashboard-launcher.ts"), "sanity: the scan set includes the launcher files");
+  const offenders: string[] = [];
+  for (const f of files) {
+    const src = readFileSync(new URL(f, srcDir), "utf8");
+    // Real ESM import/re-export declarations (`import ... from "..."` / `export ... from "..."`),
+    // spanning multi-line brace lists too (non-greedy up to the next `from "..."` after the
+    // keyword) — not a bare substring grep, so a COMMENT mentioning "dashboard/server.ts" (there
+    // are several, by design, in cli.ts and dashboard-launcher.ts) never false-positives here.
+    const importStatements = src.match(/\b(?:import|export)\b[\s\S]*?\bfrom\s+["'][^"']+["']/g) ?? [];
+    for (const stmt of importStatements) {
+      const specifier = stmt.match(/from\s+["']([^"']+)["']/)?.[1];
+      if (specifier && /(^|\/)dashboard\//.test(specifier)) offenders.push(`${f}: ${stmt.replace(/\s+/g, " ").trim()}`);
+    }
+  }
+  assert.deepEqual(offenders, [], "no engine/src module may statically import a dashboard/ path");
 });
