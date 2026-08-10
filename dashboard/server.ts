@@ -59,6 +59,16 @@ export const DEFAULT_PORT = 4517;
 
 const DEFAULT_PAGE_LIMIT = 500;
 
+/** #361: the ONE fail-closed predicate for "should the write route exist / should the client
+ *  render its buttons" — an unreadable config (`cfg === null`) reads the same as an explicit
+ *  `dashboard.controls: false`, never the schema's `true` default. Both `createDashboardServer`'s
+ *  route registration and `loopState()`'s served `controlsEnabled` field call this, so the two
+ *  can never quietly diverge (a route that exists with no served signal to tell the client, or a
+ *  client rendering buttons with no route to POST to). */
+function controlsAllowed(cfg: SapwoodConfig | null): boolean {
+  return cfg !== null && cfg.dashboard.controls === true;
+}
+
 // ── /api/loop/state (§8) ───────────────────────────────────────────────────────────────────
 
 /** A lane's cost is `null` WHILE IN FLIGHT (§8): the real bill is written to spend_ledger at
@@ -114,6 +124,13 @@ export function loopState(state: State, cfg: SapwoodConfig | null, now: Date): R
       // last run, not a claim about the CURRENT state — the UI gates its own rendering on
       // `state` exactly as deriveEngineState does.
       terminal: latestRunTerminal(state),
+      // #361: the raw PAUSE sentinel, served ALONGSIDE the derived `state` rather than folded
+      // into it — §8's precedence rule (staleness/kill-switch/ceiling-breach all outrank PAUSE)
+      // means a live PAUSE file can be masked from `state` (e.g. a stale engine reads `stalled`,
+      // never `paused`). The header's own secondary "PAUSE set" chip needs the sentinel's real
+      // value regardless of which word `state` ends up rendering, so it is served as its own
+      // honest fact rather than left unrecoverable behind the derivation.
+      pauseActive: state.isPauseActive(),
     },
     lanes: {
       max: cfg?.lanes.max ?? null, // null, never a fabricated 3, when the config is unreadable
@@ -135,6 +152,9 @@ export function loopState(state: State, cfg: SapwoodConfig | null, now: Date): R
     // Path only, never content (§8) — the phase inspector's "view log" entry opens it locally.
     logPath: cfg?.logging.path ?? null,
     config: cfg ? allowlistedConfig(cfg) : null,
+    // #361: whether the client should render the operations-control buttons at all — the same
+    // `controlsEnabled` predicate `createDashboardServer` gates the route's registration on.
+    controlsEnabled: controlsAllowed(cfg),
   };
 }
 
@@ -380,7 +400,7 @@ export async function createDashboardServer(opts: DashboardServerOptions): Promi
   // false there is no such route to POST at, which is what makes the spectator posture
   // structural. An UNREADABLE config lands here too — fail-closed, matching how every other
   // config-derived field degrades to null rather than to a guessed default (§8).
-  const routes: typeof ROUTES = config?.dashboard.controls === true ? { ...ROUTES, "/api/control": { POST: control } } : ROUTES;
+  const routes: typeof ROUTES = controlsAllowed(config) ? { ...ROUTES, "/api/control": { POST: control } } : ROUTES;
 
   const server = createServer((req, res) => {
     void (async () => {

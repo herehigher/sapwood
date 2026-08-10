@@ -114,7 +114,8 @@ code,
 .stack > .app-header,
 .stack > .hero,
 .stack > .cost-strip,
-.stack > .config-drawer {
+.stack > .config-drawer,
+.stack > .needs-attention {
   grid-column: 1 / -1;
 }
 

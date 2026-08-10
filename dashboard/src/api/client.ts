@@ -1,4 +1,4 @@
-import type { EventsPage, LoopState, SpendPage } from "./types.ts";
+import type { ControlVerb, EventsPage, LoopState, SpendPage } from "./types.ts";
 
 /**
  * Fetch wrappers for the §8 read-only endpoints. Same-origin relative paths only: the
@@ -25,3 +25,17 @@ export const fetchEvents = ({ after, limit }: { after: number; limit: number }, 
  *  from today's total the instant it stops being active. */
 export const fetchSpend = ({ after, limit }: { after: number; limit: number }, signal?: AbortSignal): Promise<SpendPage> =>
   getJson<SpendPage>(`/api/spend?after=${after}&limit=${limit}`, signal);
+
+/** `POST /api/control` (§3 Operations / §8) — the dashboard's one write path. The server defends
+ *  itself independently of this client (same-origin `Origin` check, the `X-Sapwood-Control`
+ *  header forcing a CORS preflight it never grants) — this just sends what it expects. */
+export async function postControl(verb: ControlVerb, signal?: AbortSignal): Promise<{ state: string }> {
+  const res = await fetch("/api/control", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-sapwood-control": "1" },
+    body: JSON.stringify({ verb }),
+    ...(signal ? { signal } : {}),
+  });
+  if (!res.ok) throw new Error(`POST /api/control ${verb} → ${res.status} ${res.statusText}`);
+  return (await res.json()) as { state: string };
+}

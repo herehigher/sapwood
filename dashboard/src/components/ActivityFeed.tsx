@@ -33,8 +33,10 @@ function gateGlyph(kind: string, payload: Record<string, unknown>): boolean | nu
 
 /** Renders one `SentencePart` — string, entity token, or doc link (#715 gate② [0]:
  *  `engine-review-containment-gap`'s link to the security guide). A link with no known `repoUrl`
- *  degrades to plain text, same posture as `EntityRef` — never a guessed URL. */
-function SentencePartView({ part, titles, repoUrl }: { part: SentencePart; titles: EntityTitles; repoUrl?: string | undefined }) {
+ *  degrades to plain text, same posture as `EntityRef` — never a guessed URL. Exported so the
+ *  needs-attention strip (#361) renders the SAME §7 sentences this feed does, rather than a
+ *  second sentence-rendering path. */
+export function SentencePartView({ part, titles, repoUrl }: { part: SentencePart; titles: EntityTitles; repoUrl?: string | undefined }) {
   if (typeof part === "string") return <>{part}</>;
   if (part.kind === "link") {
     if (!repoUrl) return <span>{part.label}</span>;
@@ -105,7 +107,9 @@ export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconn
     );
   }
   // Needs-human-class events pin to the top until their own resolution clears them (§3's
-  // pre-strip feed convention, still this component's own contract until #361 lands).
+  // pre-strip feed convention). #361 landed the dedicated needs-attention strip alongside this —
+  // that surface is now the primary place to see what's open; this feed keeps its own pin too,
+  // since the pinned item is still a real feed entry and the feed reads fine on its own.
   // `pinnedAttention` is the caller's DURABLE fold (`foldOpenAttention`, over the whole history,
   // never bounded by `events`' display window — #715 gate② [0]): an escalation that ages out of
   // the recent window must still stay pinned until its own resolution clears it, which a fold

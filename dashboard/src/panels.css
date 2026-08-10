@@ -118,6 +118,68 @@
   height: 10px;
 }
 
+/* ---- header: engine state word + spend meter (§3 A, #361) ---------------- */
+
+.engine-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.engine-word {
+  text-transform: lowercase;
+}
+
+.engine-pause-chip {
+  padding: 2px var(--space-2);
+  border: var(--hairline);
+  border-radius: var(--radius-pill);
+}
+
+.spend-meter-warm .spend-meter-value {
+  color: var(--rust);
+}
+
+/* ---- needs-attention strip (§3, #361) ------------------------------------- */
+
+.attention-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.attention-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.attention-ts {
+  margin-left: auto;
+}
+
+/* ---- operations controls (§3 Operations, #361) ---------------------------- */
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.controls-confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--panel);
+  border: var(--hairline);
+  border-radius: var(--radius-card);
+  padding: var(--space-2) var(--space-3);
+}
+
 .config-drawer-head {
   display: flex;
   align-items: center;

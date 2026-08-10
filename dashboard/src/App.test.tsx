@@ -16,13 +16,14 @@ import { eventsQuery, loopStateQuery, spendQuery } from "./api/queries.ts";
  */
 
 const LOOP_STATE_OK = {
-  engine: { state: "running", reasons: [], lastTickAt: null },
+  engine: { state: "running", reasons: [], lastTickAt: null, pauseActive: false },
   lanes: { max: 1, items: [] },
   round: null,
   spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
   rings: 0,
   logPath: null,
   config: {},
+  controlsEnabled: false,
 };
 
 function stubFetch(byPath: Record<string, { status: number; body: unknown }>) {
