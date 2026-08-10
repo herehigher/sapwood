@@ -57,7 +57,7 @@ rm -f data/KILL_SWITCH && echo "kill switch lifted (data/KILL_SWITCH removed) �
 If the argument is `--pause`, pause new dispatch by creating the PAUSE sentinel:
 
 ```bash
-mkdir -p data && touch data/PAUSE && echo "paused (data/PAUSE) — no new lane dispatch; in-flight workers and PR review/merge proceed normally. Run /sapwood-stop --resume to resume dispatch."
+mkdir -p data && touch data/PAUSE && echo "paused (data/PAUSE) — no new lane dispatch; in-flight workers and PR review/merge proceed normally. Run /sapwood-stop --resume to remove PAUSE; dispatch can resume only if no EMERGENCY_STOP or KILL_SWITCH remains."
 ```
 
 If the argument is `--resume`, lift the pause by removing the PAUSE sentinel:

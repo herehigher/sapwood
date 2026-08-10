@@ -23,7 +23,7 @@ required — the same DB a running engine is currently writing (WAL, concurrent-
 safe):
 
 - **`sapwood status [db-path] [--json]`** — a point-in-time snapshot: active/driving
-  lanes, spend vs. the daily ceiling, kill-switch/pause state, park episodes, base-CI-red.
+  lanes, spend vs. the daily ceiling, e-stop/kill switch/pause state, park episodes, base-CI-red.
   `--json` prints a documented, additive-only DTO (`formatVersion 1`) instead of the text
   summary — ignore fields you don't recognize rather than fail on them.
 - **`sapwood events [db-path] [options]`** — the event ledger itself, id-cursor and

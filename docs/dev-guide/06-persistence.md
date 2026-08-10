@@ -36,7 +36,7 @@ rollback intents, review-trigger pins), never a competing authority.
 **Exclusion boundary — the medium is decided by ownership, not by shape.**
 Whoever owns a fact determines where it lives:
 
-- **Humans own the controls** → files (`data/KILL_SWITCH`, `data/PAUSE`):
+- **Human-controlled sentinels** → files (`data/EMERGENCY_STOP`, `data/KILL_SWITCH`, `data/PAUSE`):
   operable with `touch`/`rm`, readable with `ls`, and available even when the
   database is locked or corrupt.
 - **The wrapper owns session evidence** → sentinel files

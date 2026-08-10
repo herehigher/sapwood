@@ -392,7 +392,7 @@ rm -f data/EMERGENCY_STOP # clear only after human review
 touch data/KILL_SWITCH    # drain-first: freeze new dispatch and merges; drain workers
 rm -f data/KILL_SWITCH    # lift the kill switch on the next tick
 touch data/PAUSE          # gentle: stop new dispatch; in-flight work continues
-rm -f data/PAUSE          # resume dispatch on the next tick
+rm -f data/PAUSE          # remove PAUSE; dispatch resumes next tick only if no EMERGENCY_STOP or KILL_SWITCH remains
 ```
 
 See [`security.md`](security.md#human-controls-three-tiers) for the full semantics, including

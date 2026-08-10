@@ -1120,7 +1120,7 @@ comment on the issue whose lane triggered the episode; a `forge`-sourced escalat
 `llm`-sourced one during a mixed storm whose forge episode is also open — never attempts a
 GitHub write at all: it falls back to `sapwood status`, a local `ESCALATION` file in the
 engine's data dir (written by the engine, read-only informational output, never a control input
-— unlike `KILL_SWITCH`/`PAUSE`; removed automatically once the outage resolves), and a log
+— unlike `EMERGENCY_STOP`, `KILL_SWITCH`, or `PAUSE`; removed automatically once the outage resolves), and a log
 line. The escalation event records the channel *actually* used, including a comment attempt
 that failed and degraded to local.
 
