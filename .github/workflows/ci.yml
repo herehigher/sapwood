@@ -18,8 +18,9 @@ jobs:
     # PRE-PUBLIC ONLY: this job runs on the owner's self-hosted runner while the repo
     # is private (all PR authors are trusted collaborators). BEFORE the repo goes
     # public this MUST be flipped back to `ubuntu-latest` — a fork PR must never
-    # execute on the self-hosted runner. Tracked on the go-public cutover checklist
-    # (#329).
+    # execute on the self-hosted runner. Full removal list (this flip, deleting
+    # `selfhost-ci.yml`, the actionlint label entry, and deregistering the runner)
+    # tracked on the go-public cutover checklist (#329).
     runs-on: [self-hosted, mac-mini-docker-runner]
     # #691: GitHub's default job ceiling is 360 minutes. The whole suite runs in ~3.5
     # minutes, so that default is not a ceiling — it is six hours of billable runner time
@@ -63,9 +64,10 @@ jobs:
   # self-hosted runner is primary (owner directive, 2026-08-10). This job is advisory
   # — it is NOT in `ci.requiredChecks` (gate① keys on the job name `test`), so a
   # failure here does not block merge. It exists to keep the hosted-runner path
-  # exercised on every PR during the self-hosted-primary window. BEFORE the repo goes
-  # public, `test` reverts to `ubuntu-latest` and this job should be removed (or kept
-  # as redundant belt-and-suspenders — owner's call at that point). Tracked on the
+  # exercised on every merge to main during the self-hosted-primary window. AT
+  # go-public, this job is DELETED along with the whole self-hosted setup: `test`
+  # reverts to `ubuntu-latest`, `selfhost-ci.yml` and the actionlint label entry are
+  # removed, and the runner is deregistered. Full removal list tracked on the
   # go-public cutover checklist (#329).
   #
   # Steps below mirror `test`'s step list exactly (checkout, setup-node@v4 node 24 +
@@ -75,6 +77,10 @@ jobs:
   test-hosted:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # PR iterations run only on the self-hosted primary (`test`); this hosted arm runs
+    # once per merge to main as the hosted-path sentinel, saving Actions minutes (owner
+    # decision 2026-08-10).
+    if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
