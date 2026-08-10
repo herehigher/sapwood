@@ -334,7 +334,16 @@ export function HeroStage({
                 </text>
               )}
               {lane.worker && !state.laneCountUnknown && (
-                <text className="hero-num hero-small" x={LANES.x + LANES.w} y={laneY(lane.channel) - 10} textAnchor="end">
+                // #744: the FIXING phrase is long enough to run under the PR-bearing droplet's
+                // own label (which sits just above the channel line, `y - 14`, fixed regardless
+                // of phase) — drop it below the line instead of fighting for the same strip a
+                // short worker name safely shares with that label.
+                <text
+                  className="hero-num hero-small"
+                  x={LANES.x + LANES.w}
+                  y={laneY(lane.channel) + (lane.phase === "fixing" ? 14 : -10)}
+                  textAnchor="end"
+                >
                   {lane.phase === "fixing"
                     ? `FIXING · round ${lane.fixRound} of ${fixCap}${lane.reason ? ` · ${lane.reason}` : ""}`
                     : lane.worker}
