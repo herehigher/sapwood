@@ -10,7 +10,6 @@
 import { createTimeline, utils } from "animejs";
 import { useEffect, useRef, useState } from "react";
 import type { EngineState } from "../api/types.ts";
-import type { DomainEvent } from "../domain-event.ts";
 // hero.css is pulled in via app.css's @import (same pattern as panels.css) rather than a
 // direct module-level import here: a direct `import "./hero.css"` only resolves under Vite's
 // bundler and breaks the plain `node --import tsx --test` runner App.test.tsx (and any other
@@ -18,18 +17,21 @@ import type { DomainEvent } from "../domain-event.ts";
 import { AnimationController } from "./animator.ts";
 import { BEAT, buildPlayback, type PlaybackStep, type Point, RING_STROKE, TRAVEL } from "./playback.ts";
 import { HeroStage } from "./stage.tsx";
-import { type FoldStep, foldEvents, type HeroState, initialHeroState, isStageDimmed, withLaneCount, withLanePrs } from "./state.ts";
+import type { FoldStep, HeroState } from "./state.ts";
+import { isStageDimmed, withLanePrs } from "./state.ts";
 
 const EASE = "cubicBezier(.3,.7,.3,1)";
 
-type Scene = { state: HeroState; steps: FoldStep[] };
 type Timeline = ReturnType<typeof createTimeline>;
 
 export type HeroProps = {
-  /** The polled event tail, already classified at the `domain-event.ts` parse boundary
-   *  (`useEventHistory`'s `accumulateEventsPage`, #715 gate② round 5 [0]) — never the raw
-   *  wire `LoopEvent`. The fold skips ids it has already seen, so overlap is free. */
-  events: DomainEvent[];
+  /** #740: the shared reducer's hero slice (`replay/reducer.ts`'s `foldReplay`), folded by the
+   *  caller — `useEventHistory` in live mode, a replay/scrub hook later. Hero no longer folds
+   *  events itself; this is the fold's OUTPUT, pre-PR-overlay (see `lanes` below). */
+  heroState: HeroState;
+  /** This render's own fresh transitions/steps from the SAME fold call that produced `heroState`
+   *  — Hero's animation input (`buildPlayback`). Empty when nothing new folded. */
+  steps: FoldStep[];
   lanesMax: number | null;
   engine: EngineState;
   /**
@@ -48,36 +50,36 @@ export type HeroProps = {
   config?: Record<string, unknown> | null;
 };
 
-export function Hero({ events, lanesMax, engine, lanes = [], fixCap = 2, roundPhase = null, speed = 1, config = null }: HeroProps) {
+export function Hero({
+  heroState,
+  steps,
+  lanesMax,
+  engine,
+  lanes = [],
+  fixCap = 2,
+  roundPhase = null,
+  speed = 1,
+  config = null,
+}: HeroProps) {
   const reducedMotion = useReducedMotion();
   const svgRef = useRef<SVGSVGElement>(null);
   const previous = useRef(new Map<number, Point>());
   const controller = useRef(new AnimationController<Timeline>());
-  const [scene, setScene] = useState<Scene>(() => ({ state: initialHeroState(lanesMax), steps: [] }));
-
-  useEffect(() => {
-    setScene((prev) => {
-      const base = withLaneCount(prev.state, lanesMax);
-      const { state, steps } = foldEvents(base, events);
-      if (state === prev.state && steps.length === 0) return prev;
-      return { state, steps };
-    });
-  }, [events, lanesMax]);
 
   // The PR tag the events cannot supply (§6 live overlay) — applied for the STATIC render
   // only, so replay (no overlay) drives the identical reducer with no overlay at all. The
-  // animation pass below deliberately keeps reading `scene.state` (pre-overlay), same as it
+  // animation pass below deliberately keeps reading `heroState` (pre-overlay), same as it
   // always has — a PR tag never changes a droplet's on-stage POSITION, only its label.
-  const state = withLanePrs(scene.state, lanes);
+  const state = withLanePrs(heroState, lanes);
 
   // #716 gate② P1-1 + P2-4: `buildPlayback` gives each transition its own intermediate scene
   // and a non-overlapping offset (P1-1); this effect's dependency array is what makes P2-4's
-  // "cancel whatever's in flight" true for every trigger that matters — a fresh scene, a
+  // "cancel whatever's in flight" true for every trigger that matters — a fresh fold, a
   // lanesMax/speed change, AND reduced-motion flipping mid-animation all re-run it, and
   // React calls the previous run's cleanup (which cancels the tracked timeline) before the
   // new one starts. The same cleanup fires on unmount.
   useEffect(() => {
-    const { playback, finalPoints } = buildPlayback(scene.steps, scene.state, lanesMax, previous.current, { reducedMotion, speed });
+    const { playback, finalPoints } = buildPlayback(steps, heroState, lanesMax, previous.current, { reducedMotion, speed });
     previous.current = finalPoints;
     const root = svgRef.current;
     if (!root) return;
@@ -85,7 +87,7 @@ export function Hero({ events, lanesMax, engine, lanes = [], fixCap = 2, roundPh
     if (result) controller.current.start(result.timeline, result.cleanup);
     else controller.current.cancel();
     return () => controller.current.cancel();
-  }, [scene, lanesMax, reducedMotion, speed]);
+  }, [steps, heroState, lanesMax, reducedMotion, speed]);
 
   return (
     <HeroStage

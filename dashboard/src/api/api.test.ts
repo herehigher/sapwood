@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import type { EventKind } from "../copy.ts";
-import { toDomainEvent } from "../domain-event.ts";
+import { type DomainEvent, toDomainEvent } from "../domain-event.ts";
+import { foldEntityTitles, foldOpenAttention } from "../entities.ts";
+import { foldEvents, initialHeroState, withLaneCount } from "../hero/state.ts";
 import { fetchEvents, fetchLoopState, fetchSpend } from "./client.ts";
 import {
   accumulateEventsPage,
@@ -11,6 +13,7 @@ import {
   type EventHistory,
   eventsQuery,
   loopStateQuery,
+  MAX_EVENT_HISTORY,
   POLL_MS,
   spendByWorkerForDay,
   spendQuery,
@@ -136,6 +139,8 @@ test("accumulateEventsPage caps history at maxHistory, dropping the oldest first
     events: Array.from({ length: 10 }, (_, i) => toDomainEvent(evt(i + 1))),
     titles: {},
     openAttention: {},
+    hero: initialHeroState(null),
+    steps: [],
   };
   const grown = accumulateEventsPage(history, page([evt(11)], 11), 5);
   assert.deepEqual(
@@ -235,6 +240,64 @@ test("accumulateEventsPage keeps an open escalation pinned after it ages out of 
   };
   history = accumulateEventsPage(history, page([resolved], 5), 3);
   assert.deepEqual(history.openAttention, {});
+});
+
+// ── #740: live-wiring parity — the shared reducer must reproduce what the two SEPARATE fold
+// call sites it replaced (Hero.tsx's own internal effect, and this file's own titles/openAttention
+// calls) computed before this issue. Those two call sites are gone now (that duplication is
+// exactly what #740 removes), so this reconstructs their exact algorithm straight from the same
+// primitives they called — `withLaneCount`+`foldEvents` (Hero's own effect body, verbatim) and
+// `foldEntityTitles`/`foldOpenAttention` (this file's own pre-#740 calls, verbatim) — and diffs
+// `accumulateEventsPage`'s new output against it, across a multi-page poll sequence where
+// `lanesMax` itself changes mid-stream (config arriving after first paint), not just a single
+// static comparison.
+
+test("#740: accumulateEventsPage's hero/titles/openAttention exactly match the pre-#740 two-call-site composition, across pages and a mid-stream lanesMax change", () => {
+  const pages: { wire: LoopEvent[]; lastId: number; lanesMax: number | null }[] = [
+    {
+      wire: [
+        { id: 1, ts: "2026-08-06T00:00:00Z", kind: "pool-selected", payload: { issues: [86] } },
+        { id: 2, ts: "2026-08-06T00:00:01Z", kind: "dispatched", payload: { worker: "w1", issue: 86, issueTitle: "Fix the thing" } },
+      ],
+      lastId: 2,
+      lanesMax: 2, // config not yet loaded on the first poll — same as `App.tsx`'s `loop.data` being pending
+    },
+    {
+      wire: [{ id: 3, ts: "2026-08-06T00:00:02Z", kind: "reclaim-done", payload: { worker: "w1", issue: 86, next: "DRIVING" } }],
+      lastId: 3,
+      lanesMax: 3, // the config poll landed between these two pages — lanesMax grows mid-stream
+    },
+    {
+      wire: [{ id: 4, ts: "2026-08-06T00:00:03Z", kind: "drive-needs-human", payload: { worker: "w1", issue: 86, pr: 90 } }],
+      lastId: 4,
+      lanesMax: 3,
+    },
+  ];
+
+  // "New": the actual production path, one `accumulateEventsPage` call per poll.
+  let actual: EventHistory = EMPTY_EVENT_HISTORY;
+  for (const p of pages) actual = accumulateEventsPage(actual, { events: p.wire, lastId: p.lastId }, MAX_EVENT_HISTORY, p.lanesMax);
+
+  // "Old": Hero.tsx's own effect body (`withLaneCount` then `foldEvents`, fed the FULL classified
+  // history each time — it relied on `foldEvents`'s own `id > lastId` guard to skip what it had
+  // already folded) plus this file's own separate `foldEntityTitles`/`foldOpenAttention` calls
+  // (fed only each page's fresh batch, seeded onto the previous result) — reconstructed verbatim.
+  let heroState = initialHeroState(null);
+  let titles: EventHistory["titles"] = {};
+  let openAttention: EventHistory["openAttention"] = {};
+  const classifiedSoFar: DomainEvent[] = [];
+  for (const p of pages) {
+    const fresh = p.wire.map(toDomainEvent);
+    classifiedSoFar.push(...fresh);
+    heroState = withLaneCount(heroState, p.lanesMax);
+    heroState = foldEvents(heroState, classifiedSoFar).state;
+    titles = foldEntityTitles(fresh, titles);
+    openAttention = foldOpenAttention(fresh, openAttention);
+  }
+
+  assert.deepEqual(actual.hero, heroState);
+  assert.deepEqual(actual.titles, titles);
+  assert.deepEqual(actual.openAttention, openAttention);
 });
 
 // ── #715 gate② round 3 [2]: accumulateSpendPage / spendByWorkerForDay ───────────────────────────
