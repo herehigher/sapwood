@@ -311,11 +311,13 @@ test("/api/loop/state matches the §8 shape against a seeded DB", async () => {
   try {
     const body = await getJson(fx, "/api/loop/state");
 
-    assert.deepEqual(Object.keys(body).sort(), ["config", "engine", "lanes", "logPath", "rings", "round", "spend"]);
-    assert.deepEqual(Object.keys(body.engine).sort(), ["lastTickAt", "reasons", "standbyNextCheckSec", "state", "terminal"]);
+    assert.deepEqual(Object.keys(body).sort(), ["config", "controlsEnabled", "engine", "lanes", "logPath", "rings", "round", "spend"]);
+    assert.deepEqual(Object.keys(body.engine).sort(), ["lastTickAt", "pauseActive", "reasons", "standbyNextCheckSec", "state", "terminal"]);
     assert.equal(body.engine.standbyNextCheckSec, null, "not in standby in this fixture");
     assert.deepEqual(body.engine.reasons, []);
     assert.equal(body.engine.terminal, null, "#407: no terminal has been written for the newest run");
+    assert.equal(body.engine.pauseActive, false);
+    assert.equal(body.controlsEnabled, true, "schema default — no dashboard.controls key was written");
 
     assert.equal(body.lanes.max, 3);
     const [w1, w2] = body.lanes.items;
@@ -369,8 +371,55 @@ test("/api/loop/state reports lanes.max and budgets as null when the config is u
     assert.equal(body.spend.runBudgetUsd, null);
     assert.equal(body.logPath, null);
     assert.equal(body.config, null);
+    assert.equal(body.controlsEnabled, false, "an unreadable config never licenses the schema's true default");
   } finally {
     fx.close();
+  }
+});
+
+// ── #361: pauseActive / controlsEnabled ────────────────────────────────────────────────────
+
+test("#361 /api/loop/state serves the raw PAUSE sentinel independently of the derived state word", async () => {
+  const fx = await fixture(
+    (s) => {
+      s.touchLastTick(new Date("2026-07-24T11:59:30.000Z")); // fresh — reads paused, not stalled
+    },
+    { pause: true },
+  );
+  try {
+    const body = await getJson(fx, "/api/loop/state");
+    assert.equal(body.engine.state, "paused");
+    assert.equal(body.engine.pauseActive, true);
+  } finally {
+    fx.close();
+  }
+});
+
+test("#361 /api/loop/state: staleness beats PAUSE in `state`, but `pauseActive` still reports the sentinel is set (the header's secondary chip)", async () => {
+  // No heartbeat seeded at all -> stale -> `state` reads `stalled`, never `paused` — but the
+  // PAUSE file is genuinely there, and the client needs that fact to render its own chip.
+  const fx = await fixture(undefined, { pause: true });
+  try {
+    const body = await getJson(fx, "/api/loop/state");
+    assert.equal(body.engine.state, "stalled");
+    assert.equal(body.engine.pauseActive, true);
+  } finally {
+    fx.close();
+  }
+});
+
+test("#361 /api/loop/state: controlsEnabled mirrors dashboard.controls, true by default, false when set, false when config unreadable", async () => {
+  const on = await fixture(undefined, { controls: true });
+  const off = await fixture(undefined, { controls: false });
+  const unreadable = await fixture(undefined, { config: false });
+  try {
+    assert.equal((await getJson(on, "/api/loop/state")).controlsEnabled, true);
+    assert.equal((await getJson(off, "/api/loop/state")).controlsEnabled, false);
+    assert.equal((await getJson(unreadable, "/api/loop/state")).controlsEnabled, false);
+  } finally {
+    on.close();
+    off.close();
+    unreadable.close();
   }
 });
 
@@ -399,7 +448,7 @@ test("#642 AC1: /api/loop/state, /api/events, /api/spend are byte-identical to t
     assert.deepEqual(loop, {
       // No heartbeat was ever seeded (lastTickAt null -> infinite tick age -> stale, and no
       // terminal event -> the bare "crashed or killed" reading, deriveEngineState's own doc).
-      engine: { state: "stalled", reasons: [], lastTickAt: null, standbyNextCheckSec: null, terminal: null },
+      engine: { state: "stalled", reasons: [], lastTickAt: null, standbyNextCheckSec: null, terminal: null, pauseActive: false },
       lanes: {
         max: 3,
         items: [
@@ -429,6 +478,7 @@ test("#642 AC1: /api/loop/state, /api/events, /api/spend are byte-identical to t
       logPath: loop.logPath, // tmp-dir-dependent path — format checked separately below
       config: loop.config, // static leaf values checked separately below (allowlist coverage
       // already has its own dedicated test) — this route's own SHAPE is what's pinned here
+      controlsEnabled: true, // baseConfig() never sets dashboard.controls — schema default
     });
     assert.ok(String(loop.logPath).endsWith("sapwood.log"));
     assert.equal(loop.config.lanes.max, 3);

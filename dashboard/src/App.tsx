@@ -2,11 +2,13 @@ import { useState } from "react";
 import { spendByWorkerForDay, useEventHistory, useLoopState, useSpendHistory } from "./api/queries.ts";
 import { ActivityFeed } from "./components/ActivityFeed.tsx";
 import { ConfigDrawer } from "./components/ConfigDrawer.tsx";
+import { Controls } from "./components/Controls.tsx";
 import type { CostBarGroup } from "./components/CostStrip.tsx";
 import { CostStrip } from "./components/CostStrip.tsx";
+import { Header } from "./components/Header.tsx";
 import { LaneBoard } from "./components/LaneBoard.tsx";
+import { NeedsAttention } from "./components/NeedsAttention.tsx";
 import { readConfigPath } from "./config-captions.ts";
-import { engineStateCaption } from "./copy.ts";
 import { Hero } from "./hero/Hero.tsx";
 import { Legend } from "./hero/Legend.tsx";
 
@@ -48,6 +50,10 @@ export function App({ now }: { now?: Date | undefined } = {}) {
   // re-derives `titles` from the bounded `events.events` window, which would forget anything past
   // the display cap.
   const { titles, openAttention } = events;
+  // §3 A: env-park folds into the standby/"waiting" tier rather than an eighth state word — read
+  // straight off the SAME open-attention fold the needs-attention strip already renders, never a
+  // second park signal.
+  const parked = openAttention.some((e) => e.kind === "park-escalated");
   const owner = loop.data?.config ? readConfigPath(loop.data.config, "board.owner") : undefined;
   const repo = loop.data?.config ? readConfigPath(loop.data.config, "board.repo") : undefined;
   const repoUrl = typeof owner === "string" && typeof repo === "string" ? `https://github.com/${owner}/${repo}` : undefined;
@@ -73,30 +79,29 @@ export function App({ now }: { now?: Date | undefined } = {}) {
     <main className="stack">
       <header className="panel app-header">
         <h1>sapwood</h1>
-        {disconnected ? (
-          <p className="muted" style={{ color: "var(--rust)" }}>
-            disconnected — restart sapwood to reconnect
-          </p>
-        ) : loop.isPending ? (
-          <p className="muted">connecting…</p>
-        ) : (
-          loop.data && (
-            <dl>
-              <dt className="muted">engine</dt>
-              <dd className="data">
-                {loop.data.engine.state}
-                <span className="muted"> — {engineStateCaption(loop.data.engine.state, loop.data.engine.standbyNextCheckSec)}</span>
-              </dd>
-              <dt className="muted">rings</dt>
-              <dd className="data">{loop.data.rings}</dd>
-            </dl>
-          )
-        )}
+        <Header
+          disconnected={disconnected}
+          isPending={loop.isPending}
+          engine={
+            loop.data
+              ? {
+                  state: loop.data.engine.state,
+                  pauseActive: loop.data.engine.pauseActive,
+                  standbyNextCheckSec: loop.data.engine.standbyNextCheckSec,
+                }
+              : undefined
+          }
+          spend={loop.data?.spend}
+          parked={parked}
+        />
+        <Controls enabled={loop.data?.controlsEnabled ?? false} />
         <Legend />
         <button type="button" onClick={() => setConfigOpen((v) => !v)}>
           Config ▸
         </button>
       </header>
+
+      <NeedsAttention items={openAttention} titles={titles} repoUrl={repoUrl} now={clock} />
 
       {loop.data && (
         <Hero

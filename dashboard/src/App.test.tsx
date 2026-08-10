@@ -16,13 +16,14 @@ import { eventsQuery, loopStateQuery, spendQuery } from "./api/queries.ts";
  */
 
 const LOOP_STATE_OK = {
-  engine: { state: "running", reasons: [], lastTickAt: null, standbyNextCheckSec: null },
+  engine: { state: "running", reasons: [], lastTickAt: null, pauseActive: false, standbyNextCheckSec: null },
   lanes: { max: 1, items: [] },
   round: null,
   spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
   rings: 0,
   logPath: null,
   config: {},
+  controlsEnabled: false,
 };
 
 function stubFetch(byPath: Record<string, { status: number; body: unknown }>) {
@@ -115,7 +116,7 @@ test("#723: header renders the standby word with its plain-language caption and 
   const html = await renderSettledApp({
     "/api/loop/state": {
       status: 200,
-      body: { ...LOOP_STATE_OK, engine: { state: "standby", reasons: [], lastTickAt: null, standbyNextCheckSec: 42 } },
+      body: { ...LOOP_STATE_OK, engine: { state: "standby", reasons: [], lastTickAt: null, pauseActive: false, standbyNextCheckSec: 42 } },
     },
     "/api/events": { status: 200, body: { events: [], lastId: 0 } },
   });

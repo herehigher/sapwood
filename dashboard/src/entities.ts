@@ -54,8 +54,14 @@ export type OpenAttention = Record<string, DomainEvent>;
 /** §3's own "clears when a later event moves that issue" list — `dispatched`, `merged`,
  *  `gated-reentry`, `lane-revived` — mirrored here (matching the engine's `escalation-clear` tag
  *  on those four kinds exactly; dashboard's own workspace doesn't import engine/src at runtime,
- *  same established pattern as `EventKind`'s own doc-table mirror). */
-const ISSUE_CLEAR_KINDS = new Set(["dispatched", "merged", "gated-reentry", "lane-revived"]);
+ *  same established pattern as `EventKind`'s own doc-table mirror). Exported so
+ *  `entities.test.ts` can drift-guard it against the engine's own authoritative
+ *  `CLEAR_KINDS`/`escalation-clear` tag, the same way `copy.test.ts` drift-guards attention
+ *  membership against `ESCALATION_SOURCE_KINDS` — deliberately NOT widened to include every kind
+ *  an issue's own text happens to name (`pr-released`, `plan-approved` carry `tags: []` in the
+ *  engine's registry — routine bookkeeping, not `escalation-clear` — see the drift-guard test for
+ *  why adding them here would be a regression, not a fix). */
+export const ISSUE_CLEAR_KINDS = new Set(["dispatched", "merged", "gated-reentry", "lane-revived"]);
 
 /** escalation-reconcile.ts's own `CLEAR_PRODUCES` exemption, mirrored, not re-derived: a `merged`
  *  event must never clear the `rollback-escalated` it itself produced — conductor.ts's merge path

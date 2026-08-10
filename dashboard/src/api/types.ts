@@ -34,6 +34,10 @@ export type LoopState = {
     state: EngineState;
     reasons: string[];
     lastTickAt: string | null;
+    /** #361: the raw PAUSE sentinel, served alongside the derived `state` — §8's precedence
+     *  rule can mask a live PAUSE file from `state` (a stale/kill-switched engine never reads
+     *  `paused`), so the header's secondary "PAUSE set" chip needs this independently. */
+    pauseActive: boolean;
     /** #723: seconds until the next standby probe, served only while `state === "standby"` —
      *  null otherwise (never a stale countdown left over from a prior standby dwell). */
     standbyNextCheckSec: number | null;
@@ -58,7 +62,18 @@ export type LoopState = {
   /** Allowlisted subset of the resolved config (§3 E) — never the whole object.
    *  null when the config is unreadable, the same honest-unknown as `lanes.max`. */
   config: Record<string, unknown> | null;
+  /** #361: whether the operations-control buttons should render at all — mirrors the server's
+   *  own fail-closed gate on whether `POST /api/control` is even registered (an unreadable
+   *  config reads as `false`, never the schema's `true` default). */
+  controlsEnabled: boolean;
 };
+
+/** §3 Operations / §8: the exhaustive verb set `POST /api/control` accepts. `estop` is
+ *  deliberately absent (frontend-design.md's own note: the emergency-stop tier needs the
+ *  additive `EMERGENCY_STOP` engine sentinel first, out of scope for #361). */
+export type ControlVerb = "start" | "pause" | "resume" | "stop";
+
+export const CONTROL_VERBS: readonly ControlVerb[] = ["start", "pause", "resume", "stop"];
 
 export type LoopEvent = {
   id: number;

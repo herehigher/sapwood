@@ -473,6 +473,19 @@ export function laneStateCaption(state: string): string {
   return LANE_STATE_CAPTION[state] ?? state;
 }
 
+/** §3 Operations / §7: the misfire-protection confirm copy for each control verb, verbatim from
+ *  the design doc's own table + confirm-wording examples — sourced from here, never an inline
+ *  string in the Controls component, so a reviewer checking §7 compliance has one place to look. */
+export const CONTROL_COPY: Record<"start" | "pause" | "resume" | "stop", { label: string; confirm: string }> = {
+  start: { label: "Start", confirm: "Start — clears any pause or stop signal so the next tick runs." },
+  pause: { label: "Pause", confirm: "Pause — lanes finish their current work, nothing new dispatches." },
+  resume: { label: "Resume", confirm: "Resume — removes the pause; the next tick continues the run." },
+  stop: {
+    label: "Stop",
+    confirm: "Stop — lanes get the drain window to finish or hand off; any lane still running after that is stopped hard.",
+  },
+};
+
 /** #723: the same §7 caption convention applied to the header's ENGINE state word (frontend-
  *  design.md §3 A: "engine state as one word + dot"). The word itself stays the raw §8
  *  `EngineState` value (unchanged rendering); this is the plain-language phrase next to it — the
