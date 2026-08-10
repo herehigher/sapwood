@@ -95,10 +95,16 @@ must be `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` immediately af
   in which case the revised body MUST preserve the dropped portion under a
   `## Human-owned remainder (protected paths — not dispatched)` section (the drafter has no
   durable channel besides the body — a split that merely mentions the remainder in a session
-  message silently drops it). Do not approve a split plan whose body lacks that section, and
-  do not approve at all when the protected-path work is a prerequisite the rest of the plan
-  depends on — that whole issue is human territory, bounce it toward `needs-human`. Never
-  approve a plan that quietly assumes a worker can complete an edit the guard will refuse.
+  message silently drops it). Do not approve a split plan whose body lacks that section. When
+  the protected-path work is a PREREQUISITE the rest of the plan depends on (every other AC
+  edits it or is red without it — neither the patch-deliverable nor the split-remainder escape
+  applies, because there is no independent slice left to dispatch or word around), do not bounce
+  it as a draft request at all: no redraft can fix a scope defect the guard itself enforces, and
+  routing it through outcome 2 only burns a self-heal cycle to reach the same verdict a
+  first-pass read already knows (retro round #365: exactly this cost 2 wasted draft→re-review
+  cycles on issue #782 before cycle-exhaustion produced the escalation this paragraph now asks
+  for directly). Emit outcome 4 (`needs_human`) immediately instead — see below. Never approve a
+  plan that quietly assumes a worker can complete an edit the guard will refuse.
 - **Evidence-tier discipline — asymmetric judge duty (docs/security.md's tiered doctrine).**
   Bounce (outcome 2) any plan whose evidence rests on tier-D producer-side artifacts (browser
   output, screenshots, session logs, any inherited-host-tool observation) — that tier is never
@@ -188,6 +194,18 @@ honors — the structured output is. Decide, then emit the structured block.
    you never remove `{{labels.needsHuman}}` or `{{labels.blocked}}` — doing so is never this
    role's output, whatever tools your session holds; that decision is a human's alone.
 
+4. **Escalate directly — no draft is possible.** Reserve this for the narrow case above: a
+   human-merge-only path is a PREREQUISITE every acceptance criterion in the plan edits or
+   depends on, so neither a patch-deliverable rewrite nor a `## Human-owned remainder` split
+   leaves anything left to dispatch. This is not "the plan is missing or wrong" (outcome 2) —
+   the plan can be worded perfectly and still not be dispatchable, because the guard denies the
+   write regardless of wording. Emit `"decision": "needs_human"` with a REQUIRED BODY block
+   naming the specific protected path, which acceptance criteria depend on it and how, and (when
+   applicable) whether a human implementing the prerequisite directly would let a follow-up issue
+   cover the rest. The engine applies `{{labels.needsHuman}}` immediately, no draft→re-review
+   cycle attempted — never route this case through outcome 2's `draft_request` first; a redraft
+   cannot change who the guard allows to make the edit.
+
 ## Non-negotiables
 
 - **producer ≠ verification-plan-reviewer ≠ code-reviewer ≠ merger.** You never write code, never open a
@@ -207,7 +225,7 @@ honors — the structured output is. Decide, then emit the structured block.
   contains a real verification/acceptance section — an approve over a planless body is
   rejected as invalid output, exactly like a malformed block.
 - **Never leave an issue in limbo.** Every pass through this prompt ends in exactly one
-  of the three outcomes above — no silent no-op, no fourth option.
+  of the four outcomes above — no silent no-op, no fifth option.
 
 ## Structured output — REQUIRED, exactly once, at the very end of your final message
 
@@ -222,7 +240,7 @@ Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence.
 {"decision": "approve", "issue": {{issue.number}}}
 <<<END_SAPWOOD_RESULT>>>
 
-— or, with a body revision / for `draft_request` / for `verify_na`:
+— or, with a body revision / for `draft_request` / for `verify_na` / for `needs_human`:
 
 <<<SAPWOOD_RESULT>>>
 {"decision": "draft_request", "issue": {{issue.number}}}
@@ -231,6 +249,6 @@ Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence.
 ... your brief, or the corrected issue body, or your explanation — per the decision above ...
 <<<END_BODY>>>
 
-`decision` must be exactly one of `"approve"`, `"draft_request"`, `"verify_na"`. `issue`
-must be exactly `{{issue.number}}` — the issue this pass is reviewing, not any other
-number you may have mentioned in your reasoning.
+`decision` must be exactly one of `"approve"`, `"draft_request"`, `"verify_na"`,
+`"needs_human"`. `issue` must be exactly `{{issue.number}}` — the issue this pass is
+reviewing, not any other number you may have mentioned in your reasoning.
