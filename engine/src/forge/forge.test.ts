@@ -10,6 +10,7 @@ import {
   collectReviewThreads,
   countUnresolvedThreads,
   ENGINE_COMMENT_MARKER,
+  engineOpenedPrMarker,
   extractAcceptanceCriteria,
   extractOrigin,
   extractVerificationPlan,
@@ -3569,7 +3570,47 @@ test("associateLanePr (c): the branch is pushed with NO PR -> the engine opens o
   assert.equal(opened.args[0], "feat/294-hold");
   const body = opened.args[2] as string;
   assert.deepEqual(readPrOwner(body), { lane: "lane-294-a1b2c3d4", issue: 294 });
+  assert.ok(
+    body.includes(engineOpenedPrMarker("lane-294-a1b2c3d4", 294)),
+    "only the engine-authored body carries durable engine-opened provenance",
+  );
   assert.ok(body.includes("Closes #294"), "GitHub's own closing-keyword semantics are still written for humans");
+});
+
+test("#719: found-existing engine-opened PRs recover provenance from either already-read body list, without a new fetch", async () => {
+  const lane = { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true };
+  const openingForge = fakeLanePrForge([], { branches: [lane.branch], nextPr: 372 });
+  await associateLanePr(openingForge, lane);
+  const engineAuthoredBody = openingForge.prs[0]!.body;
+
+  const branchFoundForge = fakeLanePrForge([{ number: 372, body: engineAuthoredBody, branch: lane.branch }]);
+  const branchFound = await associateLanePr(branchFoundForge, lane);
+  assert.deepEqual(branchFound, { pr: 372, inconclusive: false, engineOpened: true });
+  assert.deepEqual(
+    branchFoundForge.calls.map((call) => call.kind),
+    ["listOpenPrsForBranch"],
+    "no new fetch after restart",
+  );
+
+  const markerScanForge = fakeLanePrForge([{ number: 372, body: engineAuthoredBody }]);
+  const markerScan = await associateLanePr(markerScanForge, { ...lane, branch: null });
+  assert.deepEqual(markerScan, { pr: 372, inconclusive: false, engineOpened: true });
+  assert.deepEqual(
+    markerScanForge.calls.map((call) => call.kind),
+    ["listOpenPrBodies"],
+    "no new fetch after worktree reclamation",
+  );
+});
+
+test("#719: an owner marker stamped onto a worker-opened PR is not engine-opened provenance", async () => {
+  const lane = { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true };
+  const forge = fakeLanePrForge([{ number: 372, body: prOwnerMarker(lane.name, lane.issue), branch: lane.branch }]);
+  const reassociated = await associateLanePr(forge, lane);
+  assert.deepEqual(reassociated, { pr: 372, inconclusive: false });
+  assert.deepEqual(
+    forge.calls.map((call) => call.kind),
+    ["listOpenPrsForBranch"],
+  );
 });
 
 test("associateLanePr (c'): a branch that is not pushed to the forge -> nothing opened, no association", async () => {

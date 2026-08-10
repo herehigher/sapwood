@@ -2954,7 +2954,7 @@ function deadLaneRescueReasonCommentMarker(worker: string, pr: number): string {
   return `<!-- sapwood:needs-human-reason:dead-lane-rescue:${worker}:${pr} -->`;
 }
 
-function deadLaneRescueReasonComment(worker: string, pr: number, needsHumanLabel: string): string {
+function deadLaneRescueReasonComment(worker: string, _pr: number, needsHumanLabel: string): string {
   return (
     `sapwood: lane \`${worker}\` died mid-flight (terminal reason: DEAD — exited or became unresponsive without a terminal sentinel). ` +
     `The engine opened this PR from the pushed branch; its commits are unreviewed producer work. ` +
