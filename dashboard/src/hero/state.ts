@@ -31,6 +31,27 @@ export type Droplet = {
    * handoff frees the lane, and `fix-leg-resumed` must re-light the *same* state (§6).
    */
   sendBack: string | null;
+  /** The event id that last actually moved this droplet (`moveDroplet`'s own id argument) —
+   *  bookkeeping only; the droplet-level counterpart to `LaneView.touchedAt`. #745 gate② round 4
+   *  PO ruling: no event-age/threshold inference is ever derived from this field again (the
+   *  confident/uncertain pending split reads `HeroState.foldTruncated` and the engine's live
+   *  lane list instead — see `isPendingConfident`). */
+  touchedAt: number;
+  /**
+   * The compacted rank this droplet held among simultaneously-checkpointed droplets the last
+   * time it arrived at `at: "checkpoint"` (`toCheckpoint`) — frozen there, never re-derived
+   * once the droplet has moved on. `null` until its first checkpoint arrival.
+   *
+   * #745 gate② round 4 finding [0] (secondary regression): a LATER transition whose origin is
+   * "checkpoint" (`ring`/`escalate`, via `transitionOrigin`) looks up where the droplet was
+   * actually DRAWN by calling `dropletPoint(state, d, "checkpoint")` — but by then `d.at` is no
+   * longer `"checkpoint"`, so re-deriving the rank from CURRENT checkpoint membership
+   * (`state.droplets.filter(...).findIndex(...)`) can no longer find it and silently fell back
+   * to rank 0, animating from the wrong point whenever the droplet's real rank was > 0. This
+   * frozen value is what that origin lookup reads instead — the point the droplet was actually
+   * drawn at, not wherever rank 0 happens to be now.
+   */
+  checkpointRank: number | null;
 };
 
 export type LanePhase = "idle" | "writing" | "driving" | "fixing" | "failed";
@@ -84,6 +105,24 @@ export type HeroState = {
   /** `merged` events folded since `roundId` last changed — the tally's "N merged", distinct
    *  from `rings` (the all-time trunk count). */
   roundMerged: number;
+  /**
+   * Whether the events this fold has actually been given are known to be an incomplete slice
+   * of the full history — set by the caller (`queries.ts`'s `withFoldTruncated`, live catch-up:
+   * a poll page landing at the full `EVENTS_PAGE` size means more history remains unfetched),
+   * never inferred by this module from event age or distance. `foldEvents` only ever carries
+   * this flag through unchanged — no event kind sets or clears it.
+   *
+   * #745 gate② round 5 PO pre-merge Tier-C probe: this field does NOT gate confidence anymore
+   * (`isPendingConfident` never reads it) — round 5's first cut treated "not currently
+   * truncated" as a THIRD confidence voucher, which measures tail-catch-up, not per-droplet
+   * lifecycle coverage, and a live probe caught it wrongly confidently-tallying 40 long-terminal
+   * PRs once the tail caught up. Its only remaining job is tuning the QUALIFIED caption's
+   * wording in `stage.tsx`: "(N in window)" while genuinely still catching up (this flag true —
+   * transient, self-resolving) vs "(N unverified)" once caught up but still unvouched (this
+   * flag false — persistent, needs the live lane list or a manual check) — two different honest
+   * REASONS a droplet is unconfident, never two different confidence levels.
+   */
+  foldTruncated: boolean;
 };
 
 /** One row of the §6 transition table. `id` is the event id, so keys are stable. */
@@ -133,7 +172,20 @@ export function initialHeroState(lanesMax: number | null): HeroState {
     lastEventTs: null,
     roundId: null,
     roundMerged: 0,
+    foldTruncated: false,
   };
+}
+
+/**
+ * Mark whether this fold's input is currently known to be an incomplete slice of the full
+ * event history — the caller's own knowledge (e.g. a live catch-up page landing at the full
+ * page size), never derived here. Same no-op-if-unchanged shape as `withLaneCount`/
+ * `withLanePrs`, so a poll that reports the SAME truncation state as last time doesn't churn
+ * `hero`'s object identity (`accumulateEventsPage`'s referential-stability contract).
+ */
+export function withFoldTruncated(state: HeroState, truncated: boolean): HeroState {
+  if (state.foldTruncated === truncated) return state;
+  return { ...state, foldTruncated: truncated };
 }
 
 /**
@@ -360,7 +412,18 @@ function toCheckpoint(draft: Draft, id: number, issue: number, worker: string | 
     lane.phase = "driving";
     lane.touchedAt = id;
   }
-  const d = moveDroplet(draft, issue, { at: "checkpoint", ...(pr !== null ? { pr } : {}) });
+  const d = moveDroplet(draft, issue, id, { at: "checkpoint", ...(pr !== null ? { pr } : {}) });
+  // Freeze THIS arrival's compacted rank onto the droplet — `dropletPoint`'s own checkpoint
+  // rank derivation, replicated here right after the droplet is added, so a later transition
+  // whose origin is "checkpoint" can read where this droplet was actually drawn even once it's
+  // no longer AT checkpoint (`Droplet.checkpointRank`'s own doc; #745 gate② round 4 finding [0]
+  // secondary regression).
+  const checkpointDroplets = [...draft.droplets.values()].filter((o) => o.at === "checkpoint");
+  const rank = Math.max(
+    0,
+    checkpointDroplets.findIndex((o) => o.issue === issue),
+  );
+  draft.droplets.set(issue, { ...d, checkpointRank: rank });
   return { kind: "to-checkpoint", id, issue, lane: worker ?? "", pr: d.pr };
 }
 
@@ -369,9 +432,10 @@ function toCheckpoint(draft: Draft, id: number, issue: number, worker: string | 
  *
  * Any move clears `failed` unless the patch re-asserts it: the ✕ marks the state a droplet is
  * *in*, not a scar it carries. A lane that failed, was re-dispatched and merged must not keep
- * rendering ✕ beside a merged PR.
+ * rendering ✕ beside a merged PR. `id` (the event doing the moving) always stamps `touchedAt` —
+ * bookkeeping only (`Droplet.touchedAt`'s own doc).
  */
-function moveDroplet(draft: Draft, issue: number, patch: Partial<Droplet>): Droplet {
+function moveDroplet(draft: Draft, issue: number, id: number, patch: Partial<Droplet>): Droplet {
   const current = draft.droplets.get(issue) ?? {
     issue,
     pr: null,
@@ -380,8 +444,10 @@ function moveDroplet(draft: Draft, issue: number, patch: Partial<Droplet>): Drop
     failed: false,
     handedOff: false,
     sendBack: null,
+    touchedAt: id,
+    checkpointRank: null,
   };
-  const next = { ...current, failed: false, ...patch };
+  const next = { ...current, failed: false, ...patch, touchedAt: id };
   draft.droplets.set(issue, next);
 
   // The lane's ✕ is the same mark on the other end of the wire: a channel still pinned to an
@@ -444,7 +510,7 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       lane.fixRound = 0;
       lane.reason = null;
       lane.touchedAt = id;
-      moveDroplet(draft, issue, { lane: worker, at: "lane", failed: false, handedOff: false });
+      moveDroplet(draft, issue, id, { lane: worker, at: "lane", failed: false, handedOff: false });
       draft.pool = draft.pool.filter((i) => i !== issue);
       return { kind: "dispatch", id, issue, lane: worker };
     }
@@ -478,7 +544,7 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       const lane = laneOf(draft, worker);
       const alreadyFixing = lane?.phase === "fixing" && lane.issue === issue;
       if (lane) lane.reason = reason;
-      moveDroplet(draft, issue, { sendBack: reason, ...(pr !== null ? { pr } : {}) });
+      moveDroplet(draft, issue, id, { sendBack: reason, ...(pr !== null ? { pr } : {}) });
       if (alreadyFixing && worker) return { kind: "fix-reason", id, issue, lane: worker, reason };
       return null;
     }
@@ -494,7 +560,13 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       lane.fixRound = round;
       lane.reason = reason;
       lane.touchedAt = id;
-      const d = moveDroplet(draft, issue, { lane: worker, at: "lane", handedOff: false, sendBack: reason, ...(pr !== null ? { pr } : {}) });
+      const d = moveDroplet(draft, issue, id, {
+        lane: worker,
+        at: "lane",
+        handedOff: false,
+        sendBack: reason,
+        ...(pr !== null ? { pr } : {}),
+      });
       return { kind: "fix-return", id, issue, lane: worker, pr: d.pr, reason, round };
     }
 
@@ -505,14 +577,14 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       draft.roundMerged += 1;
       // Only the newest merge keeps its tag on the trunk — older ones *are* the rings now.
       for (const [key, d] of draft.droplets) if (d.at === "trunk") draft.droplets.delete(key);
-      const d = moveDroplet(draft, issue, { at: "trunk", ...(pr !== null ? { pr } : {}) });
+      const d = moveDroplet(draft, issue, id, { at: "trunk", ...(pr !== null ? { pr } : {}) });
       return { kind: "ring", id, issue, pr: d.pr, ring: draft.rings };
     }
 
     case "handoff": {
       if (issue === null) return null;
       releaseLane(laneOf(draft, worker));
-      moveDroplet(draft, issue, { at: "backlog", handedOff: true });
+      moveDroplet(draft, issue, id, { at: "backlog", handedOff: true });
       return { kind: "handoff", id, issue, lane: worker };
     }
 
@@ -553,7 +625,7 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       if (ESCALATION_KINDS.has(e.kind)) {
         if (issue === null) return null;
         releaseLane(laneOf(draft, worker));
-        const d = moveDroplet(draft, issue, { at: "needs-human", ...(pr !== null ? { pr } : {}) });
+        const d = moveDroplet(draft, issue, id, { at: "needs-human", ...(pr !== null ? { pr } : {}) });
         return { kind: "escalate", id, issue, pr: d.pr };
       }
 
@@ -566,15 +638,58 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
         lane.phase = "failed";
         lane.touchedAt = id;
       }
-      moveDroplet(draft, issue, { failed: true });
+      moveDroplet(draft, issue, id, { failed: true });
       return { kind: "fail", id, issue, lane: worker };
     }
   }
 }
 
+/**
+ * #745 gate② round 2 finding [1] / round 3 finding [1] / round 4 PO ruling (design re-entry) /
+ * round 5 PO pre-merge Tier-C probe: event-age is NOT an authoritative terminal-state signal —
+ * the LIVE hero fold (`accumulateEventsPage`/`foldReplay`) accumulates every ascending page
+ * DURABLY, so a droplet that's gone many event ids without its own next event is exactly as
+ * often a genuinely still-open PR sitting quiet while OTHER lanes stay busy. Three successive
+ * attempts at this problem each failed differently: round 1 silently DELETED a droplet past a
+ * threshold; round 3 kept it drawn but was inert at the reported scale and wrongly flagged
+ * fold-vouched `backlog`/handoff droplets stale too; round 5's own first cut ADDED A THIRD
+ * disjunct — "the caller's `foldTruncated` flag is false ⇒ confident" — measured from
+ * `page.events.length >= EVENTS_PAGE` (live catch-up), which is a TAIL-CATCH-UP signal, not a
+ * per-droplet LIFECYCLE-COVERAGE one: a minute after page load the flag flips false and every
+ * untracked droplet became confidently pending again, even though a fully-caught-up fold still
+ * can't vouch for a droplet whose terminal kind predates this schema (old history has gaps
+ * where a terminal event simply never existed) or was written by a path outside this event log
+ * entirely (a PR merged/closed directly on GitHub). The live Tier-C probe caught exactly this:
+ * 40 long-terminal PRs read as a confident "40 pending" once the tail caught up.
+ *
+ * `isPendingConfident` now decides the split from a POSITIVE VOUCHER only — never a negative
+ * ("fold isn't KNOWN incomplete") one:
+ *
+ *   1. A `backlog` droplet is state the fold knows EXACTLY — it only ever reaches `backlog` via
+ *      `handoff` ("saved for a successor"), and nothing else moves it. Always confident.
+ *   2. A droplet the engine's own live lane list (`/api/loop/state`'s `lanes.items[]`, matched
+ *      by issue — the same rows `withLanePrs` already consumes for the PR tag) still names is
+ *      confident: the engine itself has not moved on from that issue's work RIGHT NOW,
+ *      independent of whatever this fold's own event history has or hasn't caught up to.
+ *
+ * Everything else renders under the qualified form, ALWAYS — `HeroState.foldTruncated` no
+ * longer participates in confidence at all; it only tunes the qualifier's WORDING in
+ * `stage.tsx` ("in window" while genuinely still catching up vs "unverified" once caught up but
+ * still unvouched — two different honest reasons, not two different confidence levels).
+ * `stage.tsx` reads the result to keep every pending droplet drawn regardless, moving only the
+ * unconfident ones out of the headline "N pending" figure — never a silent deletion, never a
+ * silently smaller or wrong number.
+ */
+export function isPendingConfident(d: Droplet, liveIssues: ReadonlySet<number>): boolean {
+  if (d.at === "backlog") return true;
+  return liveIssues.has(d.issue);
+}
+
 /** Freeze a `Draft` in progress into a real, independent `HeroState` snapshot — used both for
- *  the final fold result and, per event, for `FoldStep.state` below (#716 gate② P1-1). */
-function snapshotDraft(draft: Draft, laneCountUnknown: boolean, lastId: number): HeroState {
+ *  the final fold result and, per event, for `FoldStep.state` below (#716 gate② P1-1).
+ *  `foldTruncated` is carried through verbatim from the INPUT state, same as `laneCountUnknown`
+ *  — no event kind this fold applies ever sets or clears it (`HeroState.foldTruncated`'s doc). */
+function snapshotDraft(draft: Draft, laneCountUnknown: boolean, foldTruncated: boolean, lastId: number): HeroState {
   return {
     lanes: draft.lanes.map((l) => ({ ...l })),
     droplets: [...draft.droplets.values()],
@@ -586,6 +701,7 @@ function snapshotDraft(draft: Draft, laneCountUnknown: boolean, lastId: number):
     lastEventTs: draft.lastEventTs,
     roundId: draft.roundId,
     roundMerged: draft.roundMerged,
+    foldTruncated,
   };
 }
 
@@ -634,12 +750,12 @@ export function foldEvents(state: HeroState, events: DomainEvent[]): { state: He
     lastId = e.id;
     if (t) {
       transitions.push(t);
-      steps.push({ transition: t, state: snapshotDraft(draft, state.laneCountUnknown, lastId) });
+      steps.push({ transition: t, state: snapshotDraft(draft, state.laneCountUnknown, state.foldTruncated, lastId) });
     }
   }
 
   return {
-    state: snapshotDraft(draft, state.laneCountUnknown, lastId),
+    state: snapshotDraft(draft, state.laneCountUnknown, state.foldTruncated, lastId),
     transitions,
     steps,
   };

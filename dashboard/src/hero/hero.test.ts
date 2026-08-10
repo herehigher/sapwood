@@ -5,10 +5,11 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { DomainEvent } from "../domain-event.ts";
 import { LEGEND_ITEMS, Legend } from "./Legend.tsx";
-import { BACKLOG, dropletPoint, HeroStage, TRUNK } from "./stage.tsx";
+import { BACKLOG, checkpointOverflowPoint, dropletPoint, GATES, HeroStage, STAGE, TRUNK } from "./stage.tsx";
 import {
   activePlanningNode,
   activeReflectionNode,
+  type Droplet,
   foldEvents,
   type HeroState,
   initialHeroState,
@@ -19,6 +20,7 @@ import {
   type Transition,
   transitionOrigin,
   visibleLanes,
+  withFoldTruncated,
   withLaneCount,
   withLanePrs,
   withVisibleLanes,
@@ -53,10 +55,22 @@ const heroCss = readFileSync(new URL("./hero.css", import.meta.url), "utf8");
 // animation implemented, matching the described behavior".
 
 test("§6 `dispatched`: droplet leaves the backlog for a lane channel, lane lights", () => {
-  const { state, transitions } = run([ev("pool-selected", { issues: [86, 88] }), ev("dispatched", { worker: "w1", issue: 86 })]);
+  const poolEv = ev("pool-selected", { issues: [86, 88] });
+  const dispatchEv = ev("dispatched", { worker: "w1", issue: 86 });
+  const { state, transitions } = run([poolEv, dispatchEv]);
 
   assert.deepEqual(kinds(transitions), ["dispatch"]);
-  assert.deepEqual(droplet(state, 86), { issue: 86, pr: null, lane: "w1", at: "lane", failed: false, handedOff: false, sendBack: null });
+  assert.deepEqual(droplet(state, 86), {
+    issue: 86,
+    pr: null,
+    lane: "w1",
+    at: "lane",
+    failed: false,
+    handedOff: false,
+    sendBack: null,
+    touchedAt: dispatchEv.id,
+    checkpointRank: null,
+  });
   assert.equal(state.lanes[0]?.phase, "writing");
   assert.equal(state.lanes[0]?.issue, 86);
   // a dispatched issue is no longer a pending selection
@@ -1069,7 +1083,12 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   assert.equal(escalated.length, 6);
   assert.equal(state.roundMerged, 24);
 
-  const html = markup(state, { lanesMax: 43 });
+  // #745 gate② round 5: this test's own point is the tally TEXT's real rendered extent, not the
+  // confident/qualified split — the 13 dispatched-but-not-yet-checkpointed issues are the
+  // realistic "engine still actively tracking them" shape (`isPendingConfident`'s live-lane-list
+  // voucher), matching what `/api/loop/state`'s `lanes.items[]` would actually carry for a real
+  // in-flight lane, so the tally stays the unqualified double-digit stress case this test wants.
+  const html = markup(state, { lanesMax: 43, liveLanes: Array.from({ length: 13 }, (_, i) => ({ issue: 100 + i + 1 })) });
   const tallyMatch = html.match(/class="hero-num hero-small hero-outcome-tally" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
   assert.ok(tallyMatch, "outcome tally must render");
   const [, tallyXRaw, tallyYRaw, tallyText] = tallyMatch as unknown as [string, string, string, string];
@@ -1092,6 +1111,316 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   assertNoOverlap(boxes);
 
   assert.match(html, /data-node="needs-human" data-count="6"/);
+});
+
+// ── #745: a droplet the fold can no longer vouch for must not be COUNTED as confident pending ──
+//
+// #745 gate② round 5 PO pre-merge Tier-C probe (superseding round 4's ruling on this ONE point):
+// event-age/threshold inference is DELETED entirely — no constant, no band, in any form — AND
+// so is "the fold isn't currently known truncated" as a confidence source. Round 4's own first
+// cut still tried that third disjunct, measured from live tail-catch-up (`page.events.length >=
+// EVENTS_PAGE`); the live probe caught it wrongly confidently-tallying 40 long-terminal PRs once
+// the catch-up flag flipped false a minute after load — tail-caught-up is not the same claim as
+// "this droplet's lifecycle is fully covered" (schema-era gaps, external merges bypassing
+// conductor.ts). `isPendingConfident` (state.ts) now asks ONLY a positive voucher: is this a
+// fold-vouched backlog/handoff droplet, or does the engine's OWN live lane list still name it.
+// Everything else renders under the qualified form, ALWAYS — `state.foldTruncated` only tunes
+// the qualifier's WORDING ("in window" vs "unverified"), never whether one appears at all.
+
+test("#745 AC1: a PR's terminal event, when actually folded, resolves the droplet cleanly — proving the derivation below is honest, not just broken in a way that happens to pass", () => {
+  const events = [
+    ev("dispatched", { worker: "w-422", issue: 422 }),
+    ev("reclaim-done", { worker: "w-422", issue: 422, next: "DRIVING", pr: 900 }),
+    ev("merged", { worker: "w-422", issue: 422, pr: 900 }),
+  ];
+  const { state } = run(events, 3);
+
+  assert.equal(droplet(state, 422)?.at, "trunk", "a PR whose terminal event IS folded resolves out of pending, exactly as it always did");
+  const html = markup(state);
+  assert.match(
+    html.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /1 merged · 0 pending · 0 needs human/,
+  );
+});
+
+test("#745 AC1: merges outside the folded input, on a fold the caller reports truncated, are qualified 'in window' — never counted in the confident figure — with NO age inference involved", () => {
+  // Deliberately a SMALL event-id gap (the terminal `merged` row was never folded at all, not
+  // "folded a long time ago") — an age-based mutant would see nothing to flag here and this
+  // assertion would fail, proving the split is driven by a positive voucher, not event distance.
+  const dispatch422 = ev("dispatched", { worker: "w-422", issue: 422 });
+  const toCheckpoint422 = ev("reclaim-done", { worker: "w-422", issue: 422, next: "DRIVING", pr: 900 });
+  // Issue 422's own terminal event genuinely falls OUTSIDE this fold's input (a human
+  // merged/closed it directly on GitHub, bypassing conductor.ts's merge-driver) — nothing else
+  // ever names it again.
+  const untruncated = run([dispatch422, toCheckpoint422], 3).state;
+  const truncated = withFoldTruncated(untruncated, true);
+
+  const stillThere = droplet(truncated, 422);
+  assert.ok(stillThere, "a droplet the fold can't vouch for must still be drawn — never silently deleted");
+  assert.equal(stillThere?.at, "checkpoint", "its position is untouched — only the confident tally count excludes it, not the stage");
+  assert.match(
+    markup(truncated).match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /0 merged · 0 pending \(1 in window\) · 0 needs human/,
+    "'in window' is the transient-catch-up wording, chosen only because this fixture explicitly reports truncated=true",
+  );
+});
+
+// #745 gate② round 5 PO pre-merge Tier-C probe: THIS is the test that inverts round 1's own
+// (round-4-era) expectation — a fully-caught-up fold (`foldTruncated: false`) is NOT, by itself,
+// a confidence voucher. A droplet with no terminal event and no live-lane-list backing must
+// render QUALIFIED regardless — "unverified" is the caught-up-but-still-unvouched wording. The
+// mutation-kill pair for finding [1]: restoring `|| !foldTruncated` inside `isPendingConfident`
+// makes this specific assertion fail (both droplets would read back as unqualified "2 pending").
+test("#745 AC1: the SAME missing-terminal-event droplet, even when the fold is NOT reported truncated, still renders qualified 'unverified' — a caught-up fold is not a confidence voucher", () => {
+  // Deliberately a LARGE event-id gap (thousands of unrelated events between arrival and now) —
+  // proves this has nothing to do with event age either: qualified regardless of how old or how
+  // fresh the droplet's last touch is, because neither age NOR "not truncated" ever vouches for it.
+  const dispatch422 = ev("dispatched", { worker: "w-422", issue: 422 });
+  const toCheckpoint422 = ev("reclaim-done", { worker: "w-422", issue: 422, next: "DRIVING", pr: 900 });
+  const farLater = { ...ev("dispatched", { worker: "w-other-1", issue: 1 }), id: toCheckpoint422.id + 3000 };
+  const { state } = run([dispatch422, toCheckpoint422, farLater], 3);
+  assert.equal(state.foldTruncated, false, "the fixture's own fold must not be truncated — that's the case under test");
+
+  assert.ok(droplet(state, 422), "still drawn, as always");
+  assert.match(
+    markup(state).match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /0 merged · 0 pending \(2 unverified\) · 0 needs human/,
+    "'unverified' is the caught-up-but-still-unvouched wording — neither droplet has a positive voucher, so BOTH are qualified even though the fold is not truncated",
+  );
+});
+
+test("#745 AC1: a droplet the engine's live lane list still tracks stays in the confident figure EITHER WAY — truncated or not", () => {
+  const dispatch422 = ev("dispatched", { worker: "w-422", issue: 422 });
+  const toCheckpoint422 = ev("reclaim-done", { worker: "w-422", issue: 422, next: "DRIVING", pr: 900 });
+  const untruncated = run([dispatch422, toCheckpoint422], 3).state;
+
+  const htmlTruncated = markup(withFoldTruncated(untruncated, true), { liveLanes: [{ issue: 422 }] });
+  assert.match(
+    htmlTruncated.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /0 merged · 1 pending · 0 needs human/,
+    "the engine still naming this issue is authoritative — no windowed qualifier even though the fold is truncated",
+  );
+
+  const htmlUntruncated = markup(untruncated, { liveLanes: [{ issue: 422 }] });
+  assert.match(
+    htmlUntruncated.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /0 merged · 1 pending · 0 needs human/,
+    "and equally so when the fold reports itself caught up — the live voucher, not the truncation flag, is what's doing the work",
+  );
+});
+
+test('#745 AC1 / round 4 finding [1]: a handoff ("saved for a successor") droplet is NEVER flagged uncertain, even on a truncated fold', () => {
+  const { state } = run([ev("dispatched", { worker: "w-1", issue: 1 }), ev("handoff", { worker: "w-1", issue: 1 })]);
+  const truncated = withFoldTruncated(state, true);
+  assert.equal(droplet(truncated, 1)?.at, "backlog");
+  assert.equal(droplet(truncated, 1)?.handedOff, true);
+
+  assert.match(
+    markup(truncated).match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /0 merged · 1 pending · 0 needs human/,
+    "fold-vouched backlog/handoff state is confident by construction — the fold's truncation never touches it",
+  );
+});
+
+// ── #745 AC2: simultaneous checkpoint droplets must not collide at one shared coordinate ───
+//
+// #745 gate② round 2 finding [1]: EVERY `at: "checkpoint"` droplet drew at one fixed point —
+// unlike `backlog`/`needs-human`, `checkpoint` had no per-droplet offset at all, so two PRs out
+// for review at once (the normal steady state, not an edge case) already collided before this
+// fix. Round 2 [0]'s never-delete staleness policy (previous test block) makes any such pileup
+// durable rather than self-clearing, so a fixed point was no longer tenable. Reproduced through
+// the real fold exactly as the finding's own repro: two separate issues each reach checkpoint
+// via their own dispatch+reclaim-done pair — no hand-placed state.
+//
+// #745 gate② round 2 finding [2]: the round-1 `dispatched`-case lane-reuse eviction is removed
+// (state.ts) — confirmed dead code on the production path (worker names embed the issue number
+// plus a UUID, so `lane.issue !== issue` can never hold for a fresh dispatch) and, worse, unsafe
+// in the hypothetical it claimed to guard: `claimLane`'s worker-string match doesn't check lane
+// phase, so it could have deleted a genuinely live `at: "checkpoint"` droplet outright. The
+// checkpoint offset above is the real, reachable fix for the reported pileup; this file no
+// longer carries a test for the removed branch.
+
+test("#745 AC2: two PRs simultaneously out for review render at distinct stage positions, never the identical coordinate", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 11 }),
+    ev("dispatched", { worker: "w2", issue: 2 }),
+    ev("reclaim-done", { worker: "w2", issue: 2, next: "DRIVING", pr: 12 }),
+  ]);
+  const d1 = droplet(state, 1);
+  const d2 = droplet(state, 2);
+  assert.ok(d1 && d2);
+  assert.equal(d1.at, "checkpoint");
+  assert.equal(d2.at, "checkpoint");
+
+  const p1 = dropletPoint(state, d1);
+  const p2 = dropletPoint(state, d2);
+  assert.notDeepEqual(p1, p2, "two simultaneously-checkpointed droplets must not share a stage position");
+
+  const boxes: { label: string; box: Box }[] = [
+    { label: "checkpoint #1 circle", box: circleBox(p1.x, p1.y, 9) },
+    { label: "checkpoint #1 label", box: textBox("⤳ 11", p1.x, p1.y - 14, 10) },
+    { label: "checkpoint #2 circle", box: circleBox(p2.x, p2.y, 9) },
+    { label: "checkpoint #2 label", box: textBox("⤳ 12", p2.x, p2.y - 14, 10) },
+  ];
+  assertNoOverlap(boxes);
+  for (const { label, box } of boxes) {
+    assert.ok(box.left >= 0 && box.right <= STAGE.w, `${label} left=${box.left} right=${box.right} lies outside [0, ${STAGE.w}]`);
+    assert.ok(box.top >= 0 && box.bottom <= STAGE.h, `${label} top=${box.top} bottom=${box.bottom} lies outside [0, ${STAGE.h}]`);
+  }
+});
+
+test("#745 AC2: six simultaneous checkpoint droplets — CHECKPOINT_COLS/STEP's own documented verified-safe ceiling — stay collision-free and within stage bounds", () => {
+  const events: DomainEvent[] = [];
+  for (let i = 1; i <= 6; i++) {
+    events.push(ev("dispatched", { worker: `w${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `w${i}`, issue: i, next: "DRIVING", pr: 100 + i }));
+  }
+  const { state } = run(events, 6);
+  const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
+  assert.equal(checkpointed.length, 6);
+
+  const boxes: { label: string; box: Box }[] = [];
+  for (const d of checkpointed) {
+    const { x, y } = dropletPoint(state, d);
+    boxes.push({ label: `checkpoint #${d.issue} circle`, box: circleBox(x, y, 9) });
+    boxes.push({ label: `checkpoint #${d.issue} label`, box: textBox(`⤳ ${d.pr}`, x, y - 14, 10) });
+  }
+  assertNoOverlap(boxes);
+  for (const { label, box } of boxes) {
+    assert.ok(box.left >= 0 && box.right <= STAGE.w, `${label} left=${box.left} right=${box.right} lies outside [0, ${STAGE.w}]`);
+    assert.ok(box.top >= 0 && box.bottom <= STAGE.h, `${label} top=${box.top} bottom=${box.bottom} lies outside [0, ${STAGE.h}]`);
+  }
+});
+
+// #745 gate② round 5 PO pre-merge Tier-C probe (1700px, live DB): a drawn checkpoint chip's
+// label bbox-intersected the Review gate's own "engine-agent" mode caption — the same defect
+// family as #728/#744 (real rendered extent, not anchor-point spacing). Checked at every rank up
+// to `CHECKPOINT_DRAW_CAP - 1` (the pre-overflow ceiling) against the FULL CI/Review gate
+// cluster: both rects, both node labels, and the Review caption (rendered with `reviewer.mode`
+// set, the exact live shape — the caption doesn't even mount without it).
+test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any rank up to the grid's capacity, intersects the CI/Review gate cluster (rect, label, or mode caption)", () => {
+  const events: DomainEvent[] = [];
+  for (let i = 1; i <= 6; i++) {
+    events.push(ev("dispatched", { worker: `w${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `w${i}`, issue: i, next: "DRIVING", pr: 100 + i }));
+  }
+  const { state } = run(events, 6);
+  const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
+  assert.equal(checkpointed.length, 6, "exercise every rank up to CHECKPOINT_DRAW_CAP - 1 (0..5)");
+
+  const html = markup(state, { config: { reviewer: { mode: "engine-agent" } } });
+  const captionMatch = html.match(/class="hero-node-caption" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">engine-agent</);
+  assert.ok(captionMatch, "the fixture must actually mount the Review gate's mode caption (the live shape under test)");
+  const [, capXRaw, capYRaw] = captionMatch as unknown as [string, string, string];
+
+  const gateBoxes: { label: string; box: Box }[] = [
+    { label: "CI gate rect", box: { left: GATES.ci - 34, right: GATES.ci + 34, top: GATES.y - 20, bottom: GATES.y + 20 } },
+    { label: "CI gate label", box: textBox("CI", GATES.ci, GATES.y + 5, 12) },
+    { label: "Review gate rect", box: { left: GATES.review - 42, right: GATES.review + 42, top: GATES.y - 20, bottom: GATES.y + 20 } },
+    { label: "Review gate label", box: textBox("Review", GATES.review, GATES.y + 5, 12) },
+    { label: "Review gate mode caption (engine-agent)", box: textBox("engine-agent", Number(capXRaw), Number(capYRaw), 9) },
+  ];
+
+  const checkpointBoxes: { label: string; box: Box }[] = [];
+  for (const d of checkpointed) {
+    const { x, y } = dropletPoint(state, d);
+    checkpointBoxes.push({ label: `checkpoint #${d.issue} circle`, box: circleBox(x, y, 9) });
+    checkpointBoxes.push({ label: `checkpoint #${d.issue} label`, box: textBox(`⤳ ${d.pr}`, x, y - 14, 10) });
+  }
+
+  // Cross-product only — gate rect/label/caption overlapping EACH OTHER is by design (the
+  // caption and label are drawn inside/beside their own rect); what must never overlap is a
+  // checkpoint chip against any piece of the gate cluster.
+  for (const chip of checkpointBoxes) {
+    for (const gate of gateBoxes) {
+      assert.ok(
+        !boxesOverlap(chip.box, gate.box),
+        `${chip.label} ${JSON.stringify(chip.box)} overlaps ${gate.label} ${JSON.stringify(gate.box)}`,
+      );
+    }
+  }
+});
+
+// ── #745 gate② round 4 finding [0]: checkpoint zone overflow bound — never above-viewBox growth ──
+
+test("#745 gate② round 4 finding [0]: 39 simultaneous checkpoint droplets — the reported scale — draws only the grid's documented capacity plus a correct '+N more' badge, all within the stage bounds", () => {
+  const events: DomainEvent[] = [];
+  for (let i = 1; i <= 39; i++) {
+    events.push(ev("dispatched", { worker: `w${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `w${i}`, issue: i, next: "DRIVING", pr: 1000 + i }));
+  }
+  const { state } = run(events, 39);
+  const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
+  assert.equal(checkpointed.length, 39, "the fixture must actually produce 39 simultaneous checkpoint droplets — the reported scale");
+
+  const html = markup(state);
+  const drawnChips = [...html.matchAll(/class="hero-droplet" data-issue="(\d+)" data-at="checkpoint"/g)].map((m) => Number(m[1]));
+  // One row short of the grid's 3-row capacity (4, not 6) — the badge takes the whole last row
+  // to itself rather than sharing it with a real chip (label-width collision; see stage.tsx's
+  // `CHECKPOINT_OVERFLOW_REAL_CAP` doc).
+  assert.equal(drawnChips.length, 4, `expected 4 real chips drawn (one row reserved for the badge), got ${drawnChips.length}`);
+
+  const badgeMatch = html.match(/class="hero-checkpoint-overflow" data-count="(\d+)"/);
+  assert.ok(badgeMatch, "the overflow badge must render");
+  assert.equal(Number(badgeMatch?.[1]), 35, "the badge must read the true remainder: 39 total - 4 drawn = 35");
+  assert.match(html, /\+35 more/);
+
+  // Every DRAWN element — the 4 real chips AND the badge — must have its real rendered bbox
+  // fully inside the viewBox, AND none may collide with each other (the badge sharing no row
+  // with a real chip's label is exactly what this checks).
+  const boxes: { label: string; box: Box }[] = [];
+  for (const issue of drawnChips) {
+    const d = checkpointed.find((o) => o.issue === issue);
+    assert.ok(d, `drawn issue #${issue} must be one of the real checkpoint droplets`);
+    const { x, y } = dropletPoint(state, d as Droplet);
+    boxes.push({ label: `checkpoint #${issue} circle`, box: circleBox(x, y, 9) });
+    boxes.push({ label: `checkpoint #${issue} label`, box: textBox(`⤳ ${d?.pr}`, x, y - 14, 10) });
+  }
+  const badgePoint = checkpointOverflowPoint();
+  boxes.push({ label: "overflow badge", box: textBox("+35 more", badgePoint.x, badgePoint.y - 14, 10) });
+  assertNoOverlap(boxes);
+  for (const { label, box } of boxes) {
+    assert.ok(box.left >= 0 && box.right <= STAGE.w, `${label} left=${box.left} right=${box.right} lies outside [0, ${STAGE.w}]`);
+    assert.ok(box.top >= 0 && box.bottom <= STAGE.h, `${label} top=${box.top} bottom=${box.bottom} lies outside [0, ${STAGE.h}]`);
+  }
+});
+
+test("#745 gate② round 4 finding [0] secondary regression: a departed checkpoint droplet's origin for a later ring/escalate transition is the point it was ACTUALLY drawn at, not rank 0", () => {
+  const { state: afterCheckpoints } = run(
+    [
+      ev("dispatched", { worker: "w1", issue: 1 }),
+      ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 11 }),
+      ev("dispatched", { worker: "w2", issue: 2 }),
+      ev("reclaim-done", { worker: "w2", issue: 2, next: "DRIVING", pr: 12 }),
+      ev("dispatched", { worker: "w3", issue: 3 }),
+      ev("reclaim-done", { worker: "w3", issue: 3, next: "DRIVING", pr: 13 }),
+    ],
+    3,
+  );
+  const d3AtCheckpoint = droplet(afterCheckpoints, 3);
+  assert.ok(d3AtCheckpoint && d3AtCheckpoint.at === "checkpoint");
+  assert.equal(d3AtCheckpoint.checkpointRank, 2, "the fixture must actually put issue 3 at rank 2 (the 3rd checkpoint arrival)");
+  // The ground truth: where issue 3 was ACTUALLY drawn while genuinely at checkpoint.
+  const drawnAt = dropletPoint(afterCheckpoints, d3AtCheckpoint);
+
+  // Issue 3 escalates — `fix-rounds-capped` moves it OFF checkpoint onto needs-human, with no
+  // prior rendered position for `buildPlayback` to fall back to (fresh `Map()` — see
+  // playback.ts), forcing the checkpoint-origin lookup this regression affects.
+  const { state: escalated } = foldEvents(afterCheckpoints, [ev("fix-rounds-capped", { worker: "w3", issue: 3, pr: 13 })]);
+  const d3Escalated = droplet(escalated, 3);
+  assert.ok(d3Escalated && d3Escalated.at === "needs-human");
+  assert.equal(d3Escalated.checkpointRank, 2, "the frozen rank must survive the move off checkpoint");
+
+  const origin = dropletPoint(escalated, d3Escalated, "checkpoint");
+  assert.deepEqual(
+    origin,
+    drawnAt,
+    "a departed droplet's checkpoint ORIGIN must equal the point it was actually drawn at, never a re-derived (and now-missing) rank",
+  );
+
+  const rank0Point = dropletPoint(afterCheckpoints, droplet(afterCheckpoints, 1) as Droplet); // issue 1 is genuinely rank 0
+  assert.notDeepEqual(origin, rank0Point, "must NOT silently fall back to rank 0 just because issue 3 is no longer AT checkpoint");
 });
 
 // ── #744: lane status phrase / PR chip overlap (same defect family as #728, on the lane track) ──

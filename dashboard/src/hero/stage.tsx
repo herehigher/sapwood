@@ -15,7 +15,15 @@
 
 import type { Ref } from "react";
 import { readConfigPath } from "../config-captions.ts";
-import { activePlanningNode, activeReflectionNode, type Droplet, type DropletAt, type HeroState, withVisibleLanes } from "./state.ts";
+import {
+  activePlanningNode,
+  activeReflectionNode,
+  type Droplet,
+  type DropletAt,
+  type HeroState,
+  isPendingConfident,
+  withVisibleLanes,
+} from "./state.ts";
 
 // ── Geometry ──────────────────────────────────────────────────────────────────
 // One coordinate space, shared with Hero.tsx's timelines so travel always lands where
@@ -56,7 +64,7 @@ const PLANNING_NODES = [
   },
 ] as const;
 const LANES = { x: 330, w: 372, top: 92, gap: 44 } as const;
-const GATES = { ci: 762, review: 858, y: 156 } as const;
+export const GATES = { ci: 762, review: 858, y: 156 } as const;
 export const ESCALATION = { x: 810, y: 320 } as const;
 /**
  * #728 gate② finding [0]: caps the cluster's rightward spread so it stays clear of the trunk
@@ -82,6 +90,56 @@ export const ESCALATION = { x: 810, y: 320 } as const;
 const NEEDS_HUMAN_COLS = 2;
 const NEEDS_HUMAN_COL_STEP = 38;
 const NEEDS_HUMAN_ROW_STEP = 34;
+/**
+ * #745 gate② round 2 finding [1]: EVERY simultaneously-`at: "checkpoint"` droplet used to draw
+ * at one fixed point — unlike `backlog` (slot counter) and `needs-human` (this same col/row
+ * grid), `checkpoint` had no per-droplet offset at all. Two PRs out for review at once is the
+ * normal steady state, not an edge case, so this collided on the most common path — the exact
+ * "N chips staged at ONE coordinate" shape #745 reports. Same COLS/STEP magnitudes as
+ * NEEDS_HUMAN — same droplet label format (`⤳ 9999`/`⊙ 9999`), same verified-safe sizing;
+ * grows UPWARD (away from the CI/Review gates below), the same direction NEEDS_HUMAN grows away
+ * from its own anchor.
+ *
+ * #745 gate② round 4 finding [0]: an UNBOUNDED grid converts the reported pileup into a WORSE
+ * failure — rank ≥ 6 draws above the viewBox (y ≤ 8, a 9px-radius circle's top already
+ * negative), i.e. silently clipped, invisible work, exactly the failure mode this issue exists
+ * to kill. `CHECKPOINT_ROWS_MAX` caps the grid at its own previously-verified-safe 3 rows
+ * (`CHECKPOINT_DRAW_CAP` slots, no badge needed); once more droplets than that are
+ * simultaneously parked, only `CHECKPOINT_OVERFLOW_REAL_CAP` real chips draw — one row short of
+ * the grid's capacity — and the whole LAST row is spent on a single "+N more" badge instead of
+ * growing the grid further, the same "cap the drawn count, keep the true number in a small
+ * separate readout" mechanism `TRUNK.max` already uses for the ring cross-section (`ringRadii`
+ * below). The badge takes its OWN row rather than sharing the last real row (a droplet's label
+ * and the badge's own are both wide enough to collide by rendered text width sharing one row —
+ * caught by this file's own bbox test, not a guess). Never above-viewBox growth, never silent
+ * clipping. Verified collision-free AND in-bounds up to 39 simultaneous checkpoint droplets —
+ * the scale #745's own probe actually reported.
+ *
+ * #745 gate② round 5 PO pre-merge Tier-C probe (1700px, live DB): despite the above, a drawn
+ * checkpoint chip's label still bbox-intersected the Review gate's own "engine-agent" mode
+ * caption. `CHECKPOINT_BASE_OFFSET` (was a bare `-46` inline) widens the gap between the
+ * grid's row 0 (closest to the gates) and the gate row itself; paired with pushing the
+ * caption further down (stage.tsx's REVIEW node caption `y`) — the cheap half on each side.
+ * `hero.test.ts`'s own gate-cluster bbox check (covering every rank up to
+ * `CHECKPOINT_DRAW_CAP - 1`) is the regression guard for this specific pair.
+ */
+const CHECKPOINT_COLS = 2;
+const CHECKPOINT_COL_STEP = 38;
+const CHECKPOINT_ROW_STEP = 34;
+const CHECKPOINT_ROWS_MAX = 3;
+/** Vertical distance from `GATES.y` to checkpoint rank 0 — the grid's closest row to the gates. */
+const CHECKPOINT_BASE_OFFSET = 52;
+/** No badge needed at or under this many simultaneous checkpoint droplets — the grid draws all
+ *  of them normally, exactly as before. */
+const CHECKPOINT_DRAW_CAP = CHECKPOINT_COLS * CHECKPOINT_ROWS_MAX;
+/**
+ * How many REAL chips draw once there's overflow — one full row short of `CHECKPOINT_DRAW_CAP`,
+ * so the "+N more" badge can have the LAST row entirely to itself rather than sharing a row with
+ * a real chip: a droplet's label ("⤳ 9999") and the badge's own ("+34 more") are both wide
+ * enough that two side-by-side in the same row collide by rendered text width even though their
+ * anchor points don't (caught by this file's own bbox test, not a guess).
+ */
+const CHECKPOINT_OVERFLOW_REAL_CAP = CHECKPOINT_COLS * (CHECKPOINT_ROWS_MAX - 1);
 export const TRUNK = { x: 1006, y: 156, step: 7, max: 12 } as const;
 const REFLECTION = { x: 1118, bottom: 244 } as const;
 const REFLECTION_NODES = [
@@ -130,8 +188,34 @@ export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at)
     }
     case "lane":
       return { x: LANES.x + LANES.w * 0.55, y: laneY(laneIndex(state, d)) };
-    case "checkpoint":
-      return { x: (GATES.ci + GATES.review) / 2, y: GATES.y - 46 };
+    case "checkpoint": {
+      // #745 gate② round 2 [1]: rank among CURRENTLY checkpoint-parked droplets, same
+      // `Math.max(0, findIndex(...))` idiom NEEDS_HUMAN uses below — for a droplet genuinely AT
+      // checkpoint right now, live re-derivation is correct (it compacts as earlier droplets
+      // leave, same as NEEDS_HUMAN/backlog).
+      //
+      // #745 gate② round 4 finding [0] secondary regression: for a droplet whose real `at` has
+      // ALREADY moved on — an `escalate`/`ring` transition's checkpoint ORIGIN, looked up via
+      // this function's own `at` override — the CURRENT checkpoint list no longer contains it
+      // at all, so re-deriving from live membership always missed and fell back to rank 0,
+      // animating from the wrong point whenever its real rank was > 0. `checkpointRank` is the
+      // rank frozen at the droplet's own last checkpoint arrival (`toCheckpoint`) — exactly the
+      // point it was actually drawn at — and is what this branch reads once `d` is no longer AT
+      // checkpoint.
+      const rank =
+        d.at === "checkpoint"
+          ? Math.max(
+              0,
+              state.droplets.filter((o) => o.at === "checkpoint").findIndex((o) => o.issue === d.issue),
+            )
+          : (d.checkpointRank ?? 0);
+      const col = rank % CHECKPOINT_COLS;
+      const row = Math.floor(rank / CHECKPOINT_COLS);
+      return {
+        x: (GATES.ci + GATES.review) / 2 + col * CHECKPOINT_COL_STEP,
+        y: GATES.y - CHECKPOINT_BASE_OFFSET - row * CHECKPOINT_ROW_STEP,
+      };
+    }
     case "needs-human": {
       // #728: wraps after NEEDS_HUMAN_COLS instead of spreading rightward without limit — an
       // unbounded row used to run the cluster straight into the trunk rings and the OUTCOME
@@ -147,6 +231,21 @@ export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at)
     case "trunk":
       return { x: TRUNK.x, y: TRUNK.y };
   }
+}
+
+/**
+ * The fixed slot the checkpoint zone's "+N more" overflow badge draws at — the FIRST cell of
+ * the grid's LAST row (`CHECKPOINT_OVERFLOW_REAL_CAP`), which the real-chip draw loop leaves
+ * empty specifically so the badge never shares a row with a real chip's label (see that
+ * constant's own doc). Never a rank grown past the grid's capacity (#745 gate② round 4 finding
+ * [0]). Same coordinate formula `dropletPoint`'s checkpoint case uses, evaluated at a fixed rank
+ * rather than a per-droplet one.
+ */
+export function checkpointOverflowPoint(): { x: number; y: number } {
+  const rank = CHECKPOINT_OVERFLOW_REAL_CAP;
+  const col = rank % CHECKPOINT_COLS;
+  const row = Math.floor(rank / CHECKPOINT_COLS);
+  return { x: (GATES.ci + GATES.review) / 2 + col * CHECKPOINT_COL_STEP, y: GATES.y - CHECKPOINT_BASE_OFFSET - row * CHECKPOINT_ROW_STEP };
 }
 
 /** A droplet's fill token — §6/§5: `--sap` in motion, `--rust` stopped/escalated, `--moss` merged. */
@@ -178,6 +277,14 @@ export type HeroStageProps = {
   /** Test-injectable clock for the staleness caption (#716 gate② P2-8) — defaults to the real
    *  clock; never a real timer inside this component (repo bans timing-dependent tests). */
   now?: Date;
+  /**
+   * The engine's own live lane rows (`/api/loop/state`'s `lanes.items[]`) — the SAME rows
+   * `Hero.tsx` already threads through `withLanePrs` for the PR tag, passed straight through
+   * here too. `isPendingConfident` (state.ts) matches these by `issue`: a pending droplet the
+   * engine still names here is confident regardless of this fold's own `foldTruncated` state.
+   * Empty in replay, where the live overlay does not exist (§6).
+   */
+  liveLanes?: readonly { issue: number }[];
   ref?: Ref<SVGSVGElement>;
 };
 
@@ -212,6 +319,7 @@ export function HeroStage({
   reducedMotion = false,
   config = null,
   now,
+  liveLanes = [],
   ref,
 }: HeroStageProps) {
   // #716 gate② P1-9: every downstream position/render computation reads the CAPPED,
@@ -229,11 +337,40 @@ export function HeroStage({
   const reviewMode = config ? readConfigPath(config, "reviewer.mode") : undefined;
   // §6: "N merged · N pending · N needs human" — merged is THIS round's tally (never the
   // all-time ring count); pending/needs-human are the droplets currently in each state.
-  const pendingCount = state.droplets.filter((d) => d.at === "backlog" || d.at === "lane" || d.at === "checkpoint").length;
-  const outcomeTally = `${state.roundMerged} merged · ${pendingCount} pending · ${escalated} needs human`;
+  //
+  // #745 gate② round 5 PO pre-merge Tier-C probe: no event-age inference, in any form, AND no
+  // "fold isn't known truncated" inference either — `isPendingConfident` (state.ts) asks ONLY
+  // a POSITIVE voucher (fold-vouched backlog/handoff, or still named by the engine's live lane
+  // list); everything else renders qualified, ALWAYS, regardless of `state.foldTruncated`. A
+  // droplet the fold can't vouch for still stays drawn on stage exactly like any other pending
+  // droplet — only the confident "N pending" HEADLINE number excludes it, with the excluded
+  // count named separately. `foldTruncated` only picks the qualifier's WORDING: "in window"
+  // while genuinely still catching up (transient), "unverified" once caught up but still
+  // unvouched (persistent) — never a silent deletion, never a silently smaller or wrong number.
+  const pendingDroplets = state.droplets.filter((d) => d.at === "backlog" || d.at === "lane" || d.at === "checkpoint");
+  const liveIssues = new Set(liveLanes.map((l) => l.issue));
+  const windowedCount = pendingDroplets.filter((d) => !isPendingConfident(d, liveIssues)).length;
+  const pendingCount = pendingDroplets.length - windowedCount;
+  const windowedWord = state.foldTruncated ? "in window" : "unverified";
+  const outcomeTally =
+    windowedCount > 0
+      ? `${state.roundMerged} merged · ${pendingCount} pending (${windowedCount} ${windowedWord}) · ${escalated} needs human`
+      : `${state.roundMerged} merged · ${pendingCount} pending · ${escalated} needs human`;
   // #716 gate② round 2 P2-5: the fix-return arrow's own label (§6: "labeled with the send-back
   // reason") — the first currently-fixing lane, in channel order.
   const fixingReason = state.lanes.find((l) => l.phase === "fixing")?.reason ?? null;
+  // #745 gate② round 4 finding [0]: cap the checkpoint zone's DRAWN chips — never let a rank
+  // grow the grid above the viewBox. At or under `CHECKPOINT_DRAW_CAP`, every droplet draws
+  // normally (unchanged). Past it, only `CHECKPOINT_OVERFLOW_REAL_CAP` real chips draw — one row
+  // short of the grid's capacity — so the badge can take the whole last row for itself, never
+  // colliding by label width with a real chip's own (see that constant's own doc). `state.
+  // droplets`' order among checkpoint droplets IS rank order (the same array `dropletPoint`'s
+  // own rank derivation filters), so slicing here stays consistent with what gets drawn.
+  const checkpointDroplets = state.droplets.filter((d) => d.at === "checkpoint");
+  const checkpointOverflowCount = Math.max(0, checkpointDroplets.length - CHECKPOINT_DRAW_CAP);
+  const hiddenCheckpointIssues = new Set(
+    checkpointOverflowCount > 0 ? checkpointDroplets.slice(CHECKPOINT_OVERFLOW_REAL_CAP).map((d) => d.issue) : [],
+  );
 
   return (
     <svg
@@ -409,10 +546,15 @@ export function HeroStage({
           <text className="hero-gate-check" x={GATES.review + 32} y={GATES.y - 8} textAnchor="middle">
             ✓
           </text>
-          {/* §6: REVIEW carries the review MODE word (e.g. "codex"), not a model·effort pair —
-           * it isn't itself model-backed, the mode just names which reviewer runs. */}
+          {/* §6: REVIEW carries the review MODE word (e.g. "codex", "engine-agent"), not a
+           * model·effort pair — it isn't itself model-backed, the mode just names which
+           * reviewer runs.
+           * #745 gate② round 5 PO pre-merge Tier-C probe (1700px, live DB): a drawn checkpoint
+           * chip's label bbox-intersected this caption — pushed further from the gate box
+           * (was `GATES.y + 18`) as the cheap half of the fix, paired with the checkpoint
+           * grid's own extra clearance below (`dropletPoint`'s checkpoint case). */}
           {typeof reviewMode === "string" && (
-            <text className="hero-node-caption" x={GATES.review} y={GATES.y + 18} textAnchor="middle">
+            <text className="hero-node-caption" x={GATES.review} y={GATES.y + 26} textAnchor="middle">
               {reviewMode}
             </text>
           )}
@@ -501,6 +643,10 @@ export function HeroStage({
       {/* ── Droplets — real entities, moved only by real events ── */}
       <g className="hero-droplets">
         {state.droplets.map((d) => {
+          // #745 gate② round 4 finding [0]: overflow past the checkpoint grid's documented
+          // capacity draws NOTHING for this droplet individually — it's folded into the single
+          // "+N more" badge below instead, never an above-viewBox chip.
+          if (hiddenCheckpointIssues.has(d.issue)) return null;
           const { x, y } = dropletPoint(state, d);
           return (
             <g
@@ -530,6 +676,18 @@ export function HeroStage({
             </g>
           );
         })}
+        {checkpointOverflowCount > 0 &&
+          (() => {
+            const { x, y } = checkpointOverflowPoint();
+            const hiddenCount = checkpointDroplets.length - CHECKPOINT_OVERFLOW_REAL_CAP;
+            return (
+              <g className="hero-checkpoint-overflow" data-count={hiddenCount} transform={`translate(${x} ${y})`}>
+                <text className="hero-num hero-small hero-badge" x={0} y={-14} textAnchor="middle">
+                  +{hiddenCount} more
+                </text>
+              </g>
+            );
+          })()}
       </g>
     </svg>
   );

@@ -37,8 +37,11 @@ export type HeroProps = {
   /**
    * Live lane rows from `/api/loop/state`. The only source of a driving lane's PR number —
    * `reclaim-done` doesn't carry it (§6 overlay). Empty in replay, where later events do.
+   * `issue` (already present on every real `Lane` row `App.tsx` passes) is threaded straight
+   * through to `HeroStage` as `liveLanes` too — #745 gate② round 4 PO ruling's "engine's live
+   * lane list still tracks it" confidence check, matched by issue.
    */
-  lanes?: readonly { lane: string; pr: number | null }[];
+  lanes?: readonly { lane: string; pr: number | null; issue: number }[];
   /** `lanes.prFixCap` — the "round n of cap" denominator. */
   fixCap?: number;
   /** Live round-phase cursor (`/api/loop/state`'s `round.phase`); null when no round is open. */
@@ -99,6 +102,7 @@ export function Hero({
       dimmed={isStageDimmed(state, engine)}
       reducedMotion={reducedMotion}
       config={config}
+      liveLanes={lanes}
     />
   );
 }
