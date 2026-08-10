@@ -4916,9 +4916,8 @@ function groupAlive(pid: number): boolean {
 // #668 (controlled-exit child reaping): reapChildren's own escalation state machine, against
 // FAKE children — no real subprocess, no real timer (opts.sleep resolves immediately), per this
 // repo's test doctrine (no-timing-dependent assertions; a seam, not a real-clock race). The
-// WorkerSupervisor.reapAll() adapter wiring (real pid/process-group semantics, requestHandoff
-// idempotency, dispose() vs reapAll()) is covered separately below with real short-lived stub
-// subprocesses, the same convention this file already uses for every other kill-path test.
+// WorkerSupervisor.reapAll() adapter wiring (lane bookkeeping, requestHandoff idempotency, and
+// dispose() vs reapAll()) is covered below through the same injected liveness/signal boundary.
 // ─────────────────────────────────────────────────────────────────────────────
 function fakeChild(
   name: string,
@@ -4939,6 +4938,45 @@ function fakeChild(
   };
 }
 const INSTANT_SLEEP = async (): Promise<void> => {};
+
+/** A `this.lanes` entry with the process boundary replaced by deterministic liveness/signal
+ * fakes. This keeps the WorkerSupervisor adapter (including requestHandoff's bookkeeping) in
+ * the assertion path without depending on child-process delivery or exit scheduling. */
+function fakeReapAllLane(
+  name: string,
+  diesOn: NodeJS.Signals | "never",
+): {
+  dir: string;
+  s: WorkerSupervisor;
+  signals: NodeJS.Signals[];
+  isDead: () => boolean;
+} {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-fake-"));
+  const s = new WorkerSupervisor({
+    now: realClock,
+    cfg,
+    stateDir: dir,
+    claudeBin: "claude",
+    renderPrompt: () => "test prompt",
+    heartbeatMs: 50,
+    guardHookPath: mkHook(dir),
+    sleep: INSTANT_SLEEP,
+  });
+  const hooks = s as unknown as {
+    lanes: Map<string, { child: { pid: number }; handoffRequested: boolean }>;
+    pidGroupAlive: (pid: number | null | undefined) => boolean;
+    killGroup: (child: { pid: number }, sig: NodeJS.Signals) => void;
+  };
+  const signals: NodeJS.Signals[] = [];
+  let dead = false;
+  hooks.lanes.set(name, { child: { pid: 1 }, handoffRequested: false });
+  hooks.pidGroupAlive = () => !dead;
+  hooks.killGroup = (_child, sig) => {
+    signals.push(sig);
+    if (sig === diesOn) dead = true;
+  };
+  return { dir, s, signals, isDead: () => dead };
+}
 
 test("reapChildren (#668): a child already dead before reap starts is never signaled at all — AC5 (reap must not manufacture work against a leg that already exited on its own)", async () => {
   const c = fakeChild("lane-a", { startDead: true });
@@ -5025,11 +5063,10 @@ test("reapChildren (#668 gate② finding [1]): a mixed batch — a fresh lane ge
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// #668: WorkerSupervisor.reapAll() — the production adapter over reapChildren, against REAL
-// short-lived stub subprocesses (same convention as every other kill-path test in this file:
-// longRunningStub + trap TERM). reapChildren's own escalation state machine is exhaustively
-// covered above with fake children; these tests prove the adapter's isAlive/signal wiring
-// (real pid, real process group) and its composition with requestHandoff are correct.
+// #668: WorkerSupervisor.reapAll() — the production adapter over reapChildren, using injected
+// liveness/signal fakes. The state machine above is covered by fake ReapableChildren; these
+// tests prove the adapter's lane bookkeeping and its composition with requestHandoff without a
+// real process-delivery or child-exit scheduling race in any assertion path.
 // ─────────────────────────────────────────────────────────────────────────────
 
 test("WorkerSupervisor.reapAll (#668): no live lanes -> resolves to [] immediately, no-op", async () => {
@@ -5046,77 +5083,46 @@ test("WorkerSupervisor.reapAll (#668): no live lanes -> resolves to [] immediate
 });
 
 test("WorkerSupervisor.reapAll (#668): a lane that hands off cleanly on SIGTERM is reaped WITHOUT ever needing SIGKILL — reap composes with graceful handoff instead of overriding it (AC5)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
-  let s: WorkerSupervisor | undefined;
+  const { dir, s, signals, isDead } = fakeReapAllLane("lane-668", "SIGTERM");
   try {
-    // Cooperative: catches SIGTERM and exits 0, exactly like an ordinary graceful handoff.
-    const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
-    s = sup(dir, bin);
-    const { name } = await s.dispatch({ number: 668, title: "t", labels: [] });
-    await waitForFile(ready, "stub installed its TERM trap before reap");
-    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
-    assert.equal(alive(pid), true);
-
     const outcomes = await s.reapAll();
 
-    assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: false, confirmedDead: true }]);
-    assert.equal(alive(pid), false, "the process group is actually dead, not just assumed");
+    assert.deepEqual(signals, ["SIGTERM"], "a cooperative lane is never escalated to SIGKILL");
+    assert.deepEqual(outcomes, [{ name: "lane-668", alreadyDead: false, escalated: false, confirmedDead: true }]);
+    assert.equal(isDead(), true, "the injected process group is confirmed dead, not assumed");
   } finally {
-    killAnyRunningLanes(s);
-    s?.dispose();
+    s.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("WorkerSupervisor.reapAll (#668): a lane that IGNORES SIGTERM is escalated to a whole-process-group SIGKILL, and group death is proven before reapAll resolves — AC3/AC4", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
-  let s: WorkerSupervisor | undefined;
+  const { dir, s, signals, isDead } = fakeReapAllLane("lane-669", "SIGKILL");
   try {
-    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> only SIGKILL ends it
-    s = sup(dir, bin);
-    const { name } = await s.dispatch({ number: 669, title: "t", labels: [] });
-    await waitForFile(ready, "stub installed its TERM-ignoring trap before reap");
-    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
-    assert.equal(alive(pid), true);
-
-    // A small custom grace period keeps this test fast — the escalation timing itself (does the
-    // bound get honored) is already covered deterministically above via fake children.
     const outcomes = await s.reapAll({ graceMs: 100 });
 
-    assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: true, confirmedDead: true }]);
-    assert.equal(alive(pid), false, "the whole process group (negative pid) is dead, not just the leader");
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"], "a SIGTERM-resistant lane is escalated exactly once");
+    assert.deepEqual(outcomes, [{ name: "lane-669", alreadyDead: false, escalated: true, confirmedDead: true }]);
+    assert.equal(isDead(), true, "the injected process group is confirmed dead after SIGKILL");
   } finally {
-    killAnyRunningLanes(s);
-    s?.dispose();
+    s.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("WorkerSupervisor.reapAll (#668 gate② finding [1]): a lane ALREADY mid-drain (requestHandoff already sent by the existing ceiling/kill-switch path) is not double-SIGTERM'd, but reapAll still finishes the job — composes with, doesn't duplicate, the existing drain", async () => {
-  // The EXACT signal count (never two SIGTERMs into one lane) is proven deterministically above
-  // via reapChildren's own alreadySignaled fake-child tests — a real subprocess can't cheaply
-  // observe "how many SIGTERMs actually arrived" without patching the process-wide
-  // `process.kill`, which is too fragile against this suite's own heavy concurrent real-child
-  // usage. This test proves the REAL adapter still reaches the same end state end-to-end.
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
-  let s: WorkerSupervisor | undefined;
+  const { dir, s, signals, isDead } = fakeReapAllLane("lane-670", "SIGKILL");
   try {
-    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> can ONLY die via reapAll's own SIGKILL
-    s = sup(dir, bin);
-    const { name } = await s.dispatch({ number: 670, title: "t", labels: [] });
-    await waitForFile(ready, "stub installed its TERM-ignoring trap before drain");
-    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
-
-    assert.equal(s.requestHandoff(name), true); // simulates an EARLIER ceiling/kill-switch drain
-    assert.equal(alive(pid), true, "SIGTERM alone doesn't end a lane that ignores it");
+    assert.equal(s.requestHandoff("lane-670"), true); // simulates an EARLIER ceiling/kill-switch drain
+    assert.deepEqual(signals, ["SIGTERM"], "the earlier drain sends the lane's one SIGTERM");
 
     const outcomes = await s.reapAll({ graceMs: 100 });
 
-    assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: true, confirmedDead: true }]);
-    assert.equal(alive(pid), false, "reapAll still reaps a lane an earlier drain already signaled");
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"], "reapAll skips a second SIGTERM and escalates the already-draining lane once");
+    assert.deepEqual(outcomes, [{ name: "lane-670", alreadyDead: false, escalated: true, confirmedDead: true }]);
+    assert.equal(isDead(), true, "reapAll still reaps a lane an earlier drain already signaled");
   } finally {
-    killAnyRunningLanes(s);
-    s?.dispose();
+    s.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5159,23 +5165,11 @@ function peekSupervisor(s: WorkerSupervisor): {
 }
 
 test("WorkerSupervisor.reapAll (#668 r2[1]): a lane whose child is ALREADY dead at reapAll() time is never marked handoffRequested — the exact bookkeeping onExit reads to choose .handoff vs .done/.failed", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
-  let s: WorkerSupervisor | undefined;
+  const { dir, s } = fakeReapAllLane("lane-already-dead", "never");
   try {
-    s = sup(dir, "claude"); // dispatch() never called — this.lanes is populated directly below
-    // A REAL, detached, already-exited process group — confirmed dead via the SAME group check
-    // reapAll's own isAlive() uses, so this is a genuine "already dead" fact, not a guessed pid.
-    const trivial = spawn(mkStub(dir, "#!/usr/bin/env bash\nexit 0\n"), [], { detached: true, stdio: "ignore" });
-    const pid = trivial.pid!;
-    await new Promise<void>((resolve) => trivial.once("exit", () => resolve()));
-    await waitFor(() => !groupAlive(pid), "the trivial process group never actually died");
-
-    // #668 r2[1]: insert the lane DIRECTLY into `this.lanes`, reproducing the exact race the
-    // finding names — a lane still present at reapAll() time (its real onExit() hasn't run for
-    // this entry, mirroring "the pending 'exit' notification hasn't been processed yet") whose
-    // child has ALREADY exited.
-    const fakeLane = { child: { pid }, handoffRequested: false };
-    peekSupervisor(s).lanes.set("lane-already-dead", fakeLane);
+    const hooks = s as unknown as { pidGroupAlive: (pid: number | null | undefined) => boolean };
+    hooks.pidGroupAlive = () => false; // construct the pending-onExit/already-dead interleaving directly
+    const fakeLane = peekSupervisor(s).lanes.get("lane-already-dead")!;
 
     const outcomes = await s.reapAll();
 
@@ -5186,38 +5180,27 @@ test("WorkerSupervisor.reapAll (#668 r2[1]): a lane whose child is ALREADY dead 
       "an already-dead lane must never be marked handoffRequested — a later/pending onExit() must still see false and write .done/.failed honestly, never a fabricated .handoff",
     );
   } finally {
-    killAnyRunningLanes(s);
-    s?.dispose();
+    s.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("WorkerSupervisor.reapAll (#668 r2[1], gate② round 3 P2 rework — DISCRIMINATING mixed batch): in ONE reapAll() call, an alive+signaled lane's handoffRequested flips true while an already-dead lane's stays false — an outcome the pre-fix unconditional-set code (which flipped EVERY this.lanes entry's flag up front, before checking liveness) could never produce", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
-  let s: WorkerSupervisor | undefined;
-  let aliveChild: ChildProcess | undefined;
+  const { dir, s } = fakeReapAllLane("lane-dead", "never");
   try {
-    s = sup(dir, "claude"); // dispatch() never called — both lanes are injected directly
-
-    // Lane A: genuinely alive, cooperatively dies on SIGTERM (proves the flag DOES flip when a
-    // real signal is actually sent — the positive half of the discrimination).
-    const { bin: aliveBin, ready: aliveReady } = longRunningStub(dir, "trap 'exit 0' TERM\n");
-    aliveChild = spawn(aliveBin, [], { detached: true, stdio: "ignore" });
-    await waitForFile(aliveReady, "lane-alive stub did not install its TERM trap");
-    const aliveLane = { child: { pid: aliveChild.pid! }, handoffRequested: false };
-
-    // Lane B: already dead before reapAll() even starts (same real-death technique as the test
-    // above) — proves the flag does NOT flip for a lane reapChildren never signals, in the SAME
-    // call that DID flip lane A's.
-    const trivial = spawn(mkStub(dir, "#!/usr/bin/env bash\nexit 0\n"), [], { detached: true, stdio: "ignore" });
-    const deadPid = trivial.pid!;
-    await new Promise<void>((resolve) => trivial.once("exit", () => resolve()));
-    await waitFor(() => !groupAlive(deadPid), "lane-dead's process group never actually died");
-    const deadLane = { child: { pid: deadPid }, handoffRequested: false };
-
-    const peek = peekSupervisor(s);
-    peek.lanes.set("lane-alive", aliveLane);
-    peek.lanes.set("lane-dead", deadLane);
+    const hooks = s as unknown as {
+      lanes: Map<string, { child: { pid: number }; handoffRequested: boolean }>;
+      pidGroupAlive: (pid: number | null | undefined) => boolean;
+      killGroup: (child: { pid: number }, sig: NodeJS.Signals) => void;
+    };
+    const aliveLane = { child: { pid: 2 }, handoffRequested: false };
+    const deadLane = hooks.lanes.get("lane-dead")!;
+    let alive = true;
+    hooks.lanes.set("lane-alive", aliveLane);
+    hooks.pidGroupAlive = (pid) => pid === 2 && alive;
+    hooks.killGroup = (child, sig) => {
+      if (child.pid === 2 && sig === "SIGTERM") alive = false;
+    };
     assert.equal(aliveLane.handoffRequested, false, "sanity: neither flag is set before reapAll() runs");
     assert.equal(deadLane.handoffRequested, false, "sanity: neither flag is set before reapAll() runs");
 
@@ -5229,8 +5212,7 @@ test("WorkerSupervisor.reapAll (#668 r2[1], gate② round 3 P2 rework — DISCRI
     assert.equal(aliveLane.handoffRequested, true, "the genuinely alive, actually-signaled lane's flag DOES flip");
     assert.equal(deadLane.handoffRequested, false, "the already-dead, never-signaled lane's flag stays false — the differential proof");
   } finally {
-    killAnyRunningLanes(s, aliveChild);
-    s?.dispose();
+    s.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -5873,27 +5855,19 @@ test("WorkerSupervisor onExit + reapAll (#668 round 8, real end-to-end): a leade
 });
 
 test("WorkerSupervisor.reapAll (#668 round 8, unchanged-behavior pin): a lane STILL IN this.lanes (leader not yet waitpid'd) that IGNORES SIGTERM is STILL escalated to a whole-process-group SIGKILL — this.lanes' own full escalation path is untouched by round 8's descendant-path change", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
-  let s: WorkerSupervisor | undefined;
+  const { dir, s, signals, isDead } = fakeReapAllLane("lane-680", "SIGKILL");
   try {
-    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> only SIGKILL ends it
-    s = sup(dir, bin);
-    const { name } = await s.dispatch({ number: 680, title: "t", labels: [] });
-    await waitForFile(ready, "stub installed its TERM-ignoring trap before reap");
-    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
-    assert.equal(alive(pid), true);
-
     const outcomes = await s.reapAll({ graceMs: 100 });
 
-    assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: true, confirmedDead: true }]);
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+    assert.deepEqual(outcomes, [{ name: "lane-680", alreadyDead: false, escalated: true, confirmedDead: true }]);
     assert.equal(
-      alive(pid),
-      false,
+      isDead(),
+      true,
       "this.lanes' own path still escalates to SIGKILL and confirms death — round 8 did not touch this path at all",
     );
   } finally {
-    killAnyRunningLanes(s);
-    s?.dispose();
+    s.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
