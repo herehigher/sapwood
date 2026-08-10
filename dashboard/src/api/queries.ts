@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { type DomainEvent, toDomainEvent } from "../domain-event.ts";
 import type { EntityTitles, OpenAttention } from "../entities.ts";
-import { type FoldStep, type HeroState, withLaneCount } from "../hero/state.ts";
+import { type FoldStep, type HeroState, withFoldTruncated, withLaneCount } from "../hero/state.ts";
 import { DEFAULT_EVENT_WINDOW, foldReplay, initialReplayState } from "../replay/reducer.ts";
 import { fetchEvents, fetchLoopState, fetchRounds, fetchSpend } from "./client.ts";
 import type { EventsPage, LoopState, RoundsPage, SpendPage, SpendRow } from "./types.ts";
@@ -116,6 +116,13 @@ export const EMPTY_EVENT_HISTORY: EventHistory = {
  * `[]` whenever nothing fresh was folded (#740 gate① finding [0]) — a `lanesMax`-only refit must
  * never leave a PREVIOUS batch's transitions attached to a NEW hero snapshot, or Hero's animation
  * effect (keyed on `[steps, heroState]` by reference) replays a batch that already animated.
+ *
+ * #745 gate② round 4 PO ruling: `hero.foldTruncated` is set from THIS poll's own page size —
+ * a page landing at the full `EVENTS_PAGE` limit means the server had at least one more page
+ * beyond it that this call hasn't fetched yet, so the hero's own knowledge is a known-incomplete
+ * slice of the full history until a poll returns fewer than the limit (caught up). Re-evaluated
+ * every poll via `withFoldTruncated`'s own no-op-if-unchanged guard, so a settled feed doesn't
+ * churn `hero`'s object identity once caught up.
  */
 export function accumulateEventsPage(
   history: EventHistory,
@@ -126,7 +133,7 @@ export function accumulateEventsPage(
   const seen = new Set(history.events.map((e) => e.id));
   const freshWire = page.events.filter((e) => !seen.has(e.id));
   const after = Math.max(history.after, page.lastId);
-  const hero = withLaneCount(history.hero, lanesMax);
+  const hero = withFoldTruncated(withLaneCount(history.hero, lanesMax), page.events.length >= EVENTS_PAGE);
   if (freshWire.length === 0) {
     if (after === history.after && hero === history.hero) return history;
     return { ...history, after, hero, steps: [] };
