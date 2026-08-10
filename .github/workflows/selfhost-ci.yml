@@ -17,6 +17,9 @@ on:
           - mac-mini-docker-runner
           - ubuntu-latest
 
+permissions:
+  contents: read
+
 # Distinct group from ci.yml's `ci-*` group: dispatch runs are previews, not the merge
 # record, so always cancel a superseded one — no main-branch carve-out needed here.
 concurrency:
@@ -36,8 +39,10 @@ jobs:
     # worst case and still bounds a hang to a rounding error.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
