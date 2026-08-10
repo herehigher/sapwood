@@ -1,3 +1,4 @@
+import type { DemoBundle } from "../demo/types.ts";
 import type { ControlVerb, EventsPage, LoopState, RoundsPage, SpendPage } from "./types.ts";
 
 /**
@@ -29,6 +30,12 @@ export const fetchSpend = ({ after, limit }: { after: number; limit: number }, s
 /** `GET /api/rounds` — the replay chapter marks + round navigator's list (§8). Unpaged: one row
  *  per round, ascending, artifact-less rows included. */
 export const fetchRounds = (signal?: AbortSignal): Promise<RoundsPage> => getJson<RoundsPage>("/api/rounds", signal);
+
+/** `GET /demo-fixture.json` (#742) — a same-origin STATIC asset, never `/api/*`: the `?demo`
+ *  route's whole data source, built by `demo/export-cli.ts` and served verbatim by whatever
+ *  static host serves `dashboard/dist` (§8's own "anything outside /api/ is a static"), no
+ *  engine/DB required. One-shot fetch, no polling — the bundle never changes at runtime. */
+export const fetchDemoFixture = (signal?: AbortSignal): Promise<DemoBundle> => getJson<DemoBundle>("/demo-fixture.json", signal);
 
 /** `POST /api/control` (§3 Operations / §8) — the dashboard's one write path. The server defends
  *  itself independently of this client (same-origin `Origin` check, the `X-Sapwood-Control`

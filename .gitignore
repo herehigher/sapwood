@@ -1,6 +1,8 @@
 node_modules/
 dist/
 dist-server/
+# #742: dashboard/src/demo/export-cli.ts generates this from demo/source.ts at build time
+dashboard/public/
 *.tsbuildinfo
 data/
 *.sqlite

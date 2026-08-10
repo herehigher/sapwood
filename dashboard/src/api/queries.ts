@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
+import type { DemoBundle } from "../demo/types.ts";
 import { type DomainEvent, toDomainEvent } from "../domain-event.ts";
 import type { EntityTitles, OpenAttention } from "../entities.ts";
 import { type FoldStep, type HeroState, withLaneCount } from "../hero/state.ts";
 import { DEFAULT_EVENT_WINDOW, foldReplay, initialReplayState } from "../replay/reducer.ts";
-import { fetchEvents, fetchLoopState, fetchRounds, fetchSpend } from "./client.ts";
+import { fetchDemoFixture, fetchEvents, fetchLoopState, fetchRounds, fetchSpend } from "./client.ts";
 import type { EventsPage, LoopState, RoundsPage, SpendPage, SpendRow } from "./types.ts";
 
 /** §2 Transport: HTTP polling at 3 s. No WebSocket — that row is the acceptance bar. */
@@ -56,6 +57,15 @@ export const roundsQuery = () => ({
 });
 
 export const useRounds = () => useQuery(roundsQuery());
+
+/** `?demo`'s one-shot fixture load (#742) — no `refetchInterval`: the bundle is a static file,
+ *  never a live poll target. */
+export const demoFixtureQuery = () => ({
+  queryKey: ["demo-fixture"] as const,
+  queryFn: ({ signal }: { signal: AbortSignal }): Promise<DemoBundle> => fetchDemoFixture(signal),
+});
+
+export const useDemoFixture = () => useQuery(demoFixtureQuery());
 
 export interface EventHistory {
   after: number;
