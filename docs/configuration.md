@@ -559,10 +559,14 @@ does not count. The review session supplies the static half of a code-verifiable
 mapping it to a substantive, enabled test on the discovery path; the engine supplies the
 deterministic execution half from these trusted CheckRuns.
 
-An empty list is legal so configuration can be adopted incrementally. With
-`reviewer.mode: engine-agent`, config loading warns, and the shipped drive preflight queues
-fail-closed because it has no trusted execution evidence; no paid review session begins until at
-least one required check is configured and satisfied.
+An empty list is legal to **parse** so configuration can be adopted incrementally — config
+loading (and every read-only command built on it, e.g. `sapwood status`/`sapwood events`) only
+warns, and the shipped drive preflight queues fail-closed because it has no trusted execution
+evidence; no paid review session begins until at least one required check is configured and
+satisfied. `sapwood run` — the only entrypoint that would actually spawn that queue-forever
+loop — refuses to **start** on this combination instead of just warning (#784): a hard startup
+error naming the combination, the consequence, and both remedies (add `ci.requiredChecks`, or
+change `reviewer.mode`).
 
 **A check that never finishes (`pendingEscalateAfterSec`):** gate① is fail-closed — a queued or
 in-progress check is not green, so the lane waits. A check that hangs forever (a runner that never

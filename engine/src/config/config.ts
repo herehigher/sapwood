@@ -2059,6 +2059,24 @@ export function parseConfig(text: string): SapwoodConfig {
   return ConfigSchema.parse(raw);
 }
 
+// #784: reviewer.mode: engine-agent + empty ci.requiredChecks is legal to PARSE (the #286
+// warning above — an operator may be mid-adoption, and read-only loader consumers like `status`/
+// `events` must keep working against it) but is a queue-forever foot-gun for an actual RUN: with
+// no configured `ci.requiredChecks`, drive.ts's CI-evidence preflight can never produce trusted
+// execution evidence, so every PR queues fail-closed forever and gate② never fires — the parse-
+// time console.warn is easy to miss. `sapwood run` is the only entrypoint that would actually
+// spawn that loop, so it (and only it — never `loadConfig`/`parseConfig` themselves) must refuse
+// loudly at startup. Pure + exported for testing, same split as `tickOnlyFlagError` in cli.ts.
+export function engineAgentEmptyCiRequiredChecksError(cfg: SapwoodConfig): string | null {
+  if (cfg.reviewer.mode !== "engine-agent" || cfg.ci.requiredChecks.length > 0) return null;
+  return (
+    'sapwood run: reviewer.mode is "engine-agent" but ci.requiredChecks is empty — every PR will queue ' +
+    "fail-closed at the CI-evidence preflight forever, and nothing will ever be reviewed (design #279 §4.3). " +
+    "Fix one of: (1) add at least one entry to ci.requiredChecks naming this repo's required CI check(s), or " +
+    '(2) set reviewer.mode to something other than "engine-agent".'
+  );
+}
+
 // Default lookup order when no explicit path is given. The YAML parser handles all
 // three (YAML ⊃ JSON), so .json is real support, not just advertised. Exported so
 // callers (e.g. `sapwood validate`) can report which path was actually probed/used

@@ -9,7 +9,14 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
-import { configHash, DEFAULT_CONFIG_PATHS, dashboardConfigSubset, loadConfig, type SapwoodConfig } from "./config/config.js";
+import {
+  configHash,
+  DEFAULT_CONFIG_PATHS,
+  dashboardConfigSubset,
+  engineAgentEmptyCiRequiredChecksError,
+  loadConfig,
+  type SapwoodConfig,
+} from "./config/config.js";
 import { findRate, loadPricingTable, type PricingTable } from "./config/pricing.js";
 import {
   associateLanePr,
@@ -2903,6 +2910,15 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   // EngineOverrides.cfg is a tests-only injection seam and keeps its established precedence.
   // Production passes no override, so the CLI path is handed to loadConfig verbatim.
   const cfg = applyMilestoneOverride(argv, overrides.cfg ?? loadConfig(validatedRun.configPath));
+  // #784: fail closed BEFORE any other startup work — a config only `loadConfig`/`parseConfig`
+  // warn about (reviewer.mode: engine-agent + empty ci.requiredChecks) would otherwise queue
+  // every PR forever with no trusted CI evidence ever confirming it. See
+  // engineAgentEmptyCiRequiredChecksError's own doc for why this check lives at `run` only.
+  const ciConfigError = engineAgentEmptyCiRequiredChecksError(cfg);
+  if (ciConfigError) {
+    process.stderr.write(`${ciConfigError}\n`);
+    return 1;
+  }
   if (cfg.engine.driver !== "tick") {
     // Gate② P2: fail fast on tick-only flags BEFORE any collaborator is constructed or any
     // dispatch can happen — same abort-with-zero-dispatch stance as buildRenderPrompt /
