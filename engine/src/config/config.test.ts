@@ -3,7 +3,15 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { configHash, DEFAULT_GOAL_FILE, DEFAULT_REVIEWER_AGENT_MODEL, dashboardConfigSubset, loadConfig, parseConfig } from "./config.js";
+import {
+  configHash,
+  DEFAULT_GOAL_FILE,
+  DEFAULT_REVIEWER_AGENT_MODEL,
+  dashboardConfigSubset,
+  engineAgentEmptyCiRequiredChecksError,
+  loadConfig,
+  parseConfig,
+} from "./config.js";
 
 test("applies defaults when only required board fields given", () => {
   const cfg = parseConfig("board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
@@ -907,6 +915,52 @@ test("#286 (design #279 §4.3): reviewer.mode: engine-agent with ci.requiredChec
     console.warn = original;
   }
   assert.equal(calls.length, 0);
+});
+
+// ── #784: reviewer.mode: engine-agent + empty ci.requiredChecks — hard error at the `run`
+// entrypoint (NOT at parseConfig/loadConfig — the #286 tests above pin that parsing still only
+// warns) ─────────────────────────────────────────────────────────────────────────────────────
+
+test("#784: engineAgentEmptyCiRequiredChecksError fires for engine-agent + empty ci.requiredChecks, whether defaulted or explicit, naming the combination, the consequence, and both remedies", () => {
+  // Defaulted: zero-config parse resolves reviewer.mode to engine-agent AND ci.requiredChecks to
+  // [] without either being written — the AC's "whether those values are explicit or defaulted"
+  // case, and the exact shape of this repo's own committed sapwood.config.yaml foot-gun.
+  const defaulted = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  const defaultedError = engineAgentEmptyCiRequiredChecksError(defaulted);
+  assert.match(defaultedError!, /reviewer\.mode is "engine-agent"/);
+  assert.match(defaultedError!, /ci\.requiredChecks is empty/);
+  assert.match(defaultedError!, /queue fail-closed at the CI-evidence preflight forever/);
+  assert.match(defaultedError!, /nothing will ever be reviewed/);
+  assert.match(defaultedError!, /add at least one entry to ci\.requiredChecks/);
+  assert.match(defaultedError!, /set reviewer\.mode to something other than "engine-agent"/);
+
+  // Explicit: the same combination written out by hand must produce the same refusal.
+  const explicit = parseConfig(`${BASE_ENGINE_AGENT}ci: { requiredChecks: [] }`);
+  assert.ok(engineAgentEmptyCiRequiredChecksError(explicit));
+});
+
+test("#784 (reverse 1): engine-agent with non-empty ci.requiredChecks does NOT error — the hardening must not over-fire", () => {
+  const cfg = parseConfig(`${BASE_ENGINE_AGENT}ci: { requiredChecks: [{ name: test }] }`);
+  assert.equal(engineAgentEmptyCiRequiredChecksError(cfg), null);
+});
+
+test("#784 (reverse 2): a non-engine-agent reviewer.mode with empty ci.requiredChecks does NOT error — the hardening is specific to engine-agent, not empty ci.requiredChecks alone", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: human }");
+  assert.equal(cfg.reviewer.mode, "human");
+  assert.deepEqual(cfg.ci.requiredChecks, []);
+  assert.equal(engineAgentEmptyCiRequiredChecksError(cfg), null);
+});
+
+test("#784: parseConfig/loadConfig themselves still only WARN on this combination — the hard error lives only in engineAgentEmptyCiRequiredChecksError, called by the `run` entrypoint, never by the loader itself (so `status`/`events`/every other read-only loader consumer is unaffected)", () => {
+  const original = console.warn;
+  console.warn = () => {};
+  try {
+    const cfg = parseConfig(BASE_ENGINE_AGENT);
+    assert.equal(cfg.reviewer.mode, "engine-agent");
+    assert.deepEqual(cfg.ci.requiredChecks, []);
+  } finally {
+    console.warn = original;
+  }
 });
 
 test("#783: ci.inertEscalateAfterSec defaults to 900 and accepts an explicit override", () => {

@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { type EngineOverrides, runCli, runDryRun, runEngine, tickOnlyFlagError } from "../cli.js";
+import { type EngineOverrides, runCli, runDryRun, runEngine, runStatus, tickOnlyFlagError } from "../cli.js";
 import { ConfigSchema, configHash, dashboardConfigSubset, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus, StartupReconcileData } from "../forge/forge.js";
 import type { LabelSpec } from "../forge/labels.js";
@@ -33,10 +33,15 @@ const DEFAULT_TEST_GOAL_FILE = join(DEFAULT_TEST_GOAL_DIR, "PLAN.md");
 writeFileSync(DEFAULT_TEST_GOAL_FILE, "# Test goal\nHarmless default content for tests that don't care about plan.md.\n");
 after(() => rmSync(DEFAULT_TEST_GOAL_DIR, { recursive: true, force: true }));
 
+// #784: this file drives `runEngine` — the ONLY entrypoint the new hard error fires from — so
+// the shared fixture builder, not each of this file's ~40 call sites, is where the reviewer.mode:
+// engine-agent (this file's own default, unset) + ci.requiredChecks pairing gets a non-empty
+// value; no test here exercises CI-evidence gating itself, so an arbitrary check name is inert.
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 4 },
     goal: { file: DEFAULT_TEST_GOAL_FILE },
+    ci: { requiredChecks: [{ name: "test" }] },
     ...over,
   });
 const silentLogger = { log(_message: string): void {} };
@@ -866,7 +871,13 @@ test("sapwood run --config loads the named config and resolves worker.promptFile
     writeFileSync(join(dir, "worker.md"), "Implement issue #{{issue.number}}: {{issue.title}}\n{{issue.body}}\n");
     writeFileSync(
       join(dir, "alternate.yaml"),
-      ["board: { owner: o, repo: r, projectNumber: 4 }", "engine: { driver: tick }", "worker: { promptFile: worker.md }", ""].join("\n"),
+      [
+        "board: { owner: o, repo: r, projectNumber: 4 }",
+        "engine: { driver: tick }",
+        "worker: { promptFile: worker.md }",
+        "ci: { requiredChecks: [{ name: test }] }",
+        "",
+      ].join("\n"),
     );
     const forge = new FakeForge();
     const code = await runEngine(["node", "sapwood", "run", "--config", join(dir, "alternate.yaml"), "--once"], {
@@ -887,7 +898,10 @@ test("sapwood run without --config preserves the cwd probe", async () => {
   const previousCwd = process.cwd();
   const state = new State(":memory:");
   try {
-    writeFileSync(join(dir, "sapwood.config.yaml"), "board: { owner: o, repo: r, projectNumber: 4 }\nengine: { driver: tick }\n");
+    writeFileSync(
+      join(dir, "sapwood.config.yaml"),
+      "board: { owner: o, repo: r, projectNumber: 4 }\nengine: { driver: tick }\nci: { requiredChecks: [{ name: test }] }\n",
+    );
     process.chdir(dir);
     assert.equal(await runEngine(["node", "sapwood", "run", "--once"], { forge: new FakeForge(), state, logger: silentLogger }), 0);
   } finally {
@@ -947,6 +961,36 @@ test("sapwood run --config load errors occur before dispatch or state writes", a
     assert.equal(forge.readyReads, 0);
     assert.equal(state.activeWorkers().length, 0);
     assert.equal(state.getRound(1), undefined);
+  } finally {
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #784 Tier B: startup smoke — `sapwood run` refuses the engine-agent + empty ci.requiredChecks
+// foot-gun at the real CLI boundary (a fixture file loaded through `--config`, never the
+// committed sapwood.config.yaml — that file's own fix is the issue's human-owned remainder), and
+// `sapwood status` against the SAME fixture keeps working: the regression test for the refusal
+// staying scoped to `run` rather than the loader (`loadConfig`/`parseConfig` still only warn).
+test("#784: sapwood run --config <fixture reproducing engine-agent + empty ci.requiredChecks> refuses at startup — ZERO dispatch; sapwood status --config <same fixture> still succeeds", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-784-smoke-"));
+  const state = new State(":memory:");
+  try {
+    // Both offending values are DEFAULTED, not written — the shape #784 was filed over (this
+    // repo's own committed config sets neither key explicitly either).
+    writeFileSync(join(dir, "footgun.yaml"), "board: { owner: o, repo: r, projectNumber: 4 }\n");
+    const forge = new FakeForge();
+    const { code, stderr } = await captureStderr(() =>
+      runEngine(["node", "sapwood", "run", "--config", join(dir, "footgun.yaml")], { forge, state, logger: silentLogger }),
+    );
+    assert.equal(code, 1);
+    assert.deepEqual(forge.boardCalls, [], "refused before any dispatch or forge access");
+    assert.match(stderr, /reviewer\.mode is "engine-agent"/);
+    assert.match(stderr, /ci\.requiredChecks is empty/);
+
+    const status = runStatus(["node", "sapwood", "status", join(dir, "sapwood.sqlite"), "--config", join(dir, "footgun.yaml")]);
+    assert.equal(status.code, 0, "the loader still parses this combination fine — only `run` refuses");
+    assert.match(status.stdout, /no state DB/);
   } finally {
     state.close();
     rmSync(dir, { recursive: true, force: true });
