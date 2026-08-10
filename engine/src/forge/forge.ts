@@ -2380,6 +2380,8 @@ export interface LanePrOutcome {
    *  underlying forge response had no title. worker.ts's probe() carries this onto
    *  LaneProbe.prTitle, which conductor.ts's reclaim events persist. */
   title?: string;
+  /** True only when the engine itself opened `pr` from the lane's already-pushed branch. */
+  engineOpened?: boolean;
 }
 
 /**
@@ -2472,7 +2474,7 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
           const title = await forge.getIssueMeta(lane.issue).then((m) => m.title);
           const opened = await forge.openPR(lane.branch, title, engineAuthoredPrBody(lane.name, lane.issue, lane.branch));
           // #595: the PR the engine just opened carries the title it opened WITH — no re-read.
-          return { pr: opened, inconclusive: false, title };
+          return { pr: opened, inconclusive: false, title, engineOpened: true };
         } catch (e) {
           return unknown(`could not open a PR for pushed branch ${lane.branch} (${String(e)}) — branch preserved, retried later`);
         }

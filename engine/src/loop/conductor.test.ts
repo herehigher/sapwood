@@ -2539,6 +2539,56 @@ test("tick reclaim: DEAD lane whose dirty worktree was RETAINED -> needs-human l
   st.close();
 });
 
+test("#719: DEAD-lane rescue with an engine-opened PR applies its PR hold and writes the rescue reason on that PR", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-rescue", 719);
+  sup.probes["lane-rescue"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0, hasPr: true, prNumber: 716, engineOpenedPr: true };
+  sup.reclaimResults["lane-rescue"] = { worktreePath: "/wt/lane-rescue", worktreeRetained: true };
+
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  assert.deepEqual(forge.prLabelsAdded, [[716, "needs-human"]]);
+  const comment = forge.prComments.find(([pr]) => pr === 716)?.[1] ?? "";
+  assert.match(comment, /<!-- sapwood:needs-human-reason:dead-lane-rescue:lane-rescue:716 -->/);
+  assert.match(comment, /lane `lane-rescue` died mid-flight/);
+  assert.match(comment, /terminal reason: DEAD/);
+  assert.match(comment, /engine opened this PR from the pushed branch/);
+  assert.match(comment, /unreviewed producer work/);
+  assert.match(comment, /review and merge through the normal gates/i);
+  assert.match(comment, /hand it to a fresh lane/i);
+  assert.match(comment, /close it/i);
+  st.close();
+});
+
+test("#719: a DEAD-lane rescue PR comment failure is recorded while its hold still lands", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-rescue-failed-comment", 719);
+  sup.probes["lane-rescue-failed-comment"] = {
+    ...DEFAULT_PROBE,
+    hbAge: 99999,
+    wrapperAlive: 0,
+    hasPr: true,
+    prNumber: 716,
+    engineOpenedPr: true,
+  };
+  sup.reclaimResults["lane-rescue-failed-comment"] = { worktreePath: "/wt/lane-rescue-failed-comment", worktreeRetained: true };
+  forge.throwOnAddPRComment = true;
+
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  assert.deepEqual(forge.prLabelsAdded, [[716, "needs-human"]]);
+  assert.equal(st.getWorker("lane-rescue-failed-comment")?.state, "failed");
+  assert.deepEqual(
+    st.eventsAfterId(0, ["reclaim-dead-comment-failed"]).map((event) => event.payload),
+    [{ worker: "lane-rescue-failed-comment", issue: 719, pr: 716, error: "Error: simulated forge failure" }],
+  );
+  st.close();
+});
+
 test("tick reclaim: DEAD lane whose worktree was clean (deleted by reclaim) -> no comment, no needs-human (unchanged path)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

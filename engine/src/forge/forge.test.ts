@@ -3563,6 +3563,7 @@ test("associateLanePr (c): the branch is pushed with NO PR -> the engine opens o
   const forge = fakeLanePrForge([], { branches: ["feat/294-hold"], nextPr: 372 });
   const pr = await associateLanePr(forge, { name: "lane-294-a1b2c3d4", issue: 294, branch: "feat/294-hold", sessionOver: true });
   assert.equal(pr.pr, 372);
+  assert.equal(pr.engineOpened, true, "downstream rescue disposition can state the engine-opened provenance truthfully");
   const opened = forge.calls.find((c) => c.kind === "openPR");
   assert.ok(opened);
   assert.equal(opened.args[0], "feat/294-hold");
