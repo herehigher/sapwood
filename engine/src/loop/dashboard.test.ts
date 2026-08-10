@@ -487,12 +487,27 @@ test("startDashboardServer (real, e2e): an explicit --config is what's actually 
   });
 });
 
-test("startDashboardServer (real, e2e): an explicit --config naming a missing/invalid file fails the real server startup, never a silent config:null degrade", async () => {
+test("startDashboardServer (real, e2e): an explicit --config naming a MISSING file fails the real server startup, never a silent config:null degrade", async () => {
   await withDataDir(async (dir) => {
     const dbPath = join(dir, "sapwood.sqlite");
     seedDb(dbPath);
     const missingConfigPath = join(dir, "does-not-exist.yaml");
     await assert.rejects(() => startDashboardServer({ dbPath, configPath: missingConfigPath, port: 0 }));
+  });
+});
+
+// #743 gate② finding [1] (this round): the test above only ever named a MISSING path — AC3's
+// "missing/invalid" also covers a config that EXISTS but fails schema validation (a real file, a
+// real parse, a real Zod rejection), which is a genuinely different code path through loadConfig
+// than ENOENT. `lanes.max: -1` is syntactically valid YAML (so this isn't retesting the missing-
+// file case under a different name) but violates the schema (`z.number().int().positive()`).
+test("startDashboardServer (real, e2e): an explicit --config naming a SCHEMA-INVALID file fails the real server startup, never a silent config:null degrade", async () => {
+  await withDataDir(async (dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    seedDb(dbPath);
+    const invalidConfigPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(invalidConfigPath, "board: { owner: acme, repo: widgets, projectNumber: 7 }\nlanes: { max: -1 }\n");
+    await assert.rejects(() => startDashboardServer({ dbPath, configPath: invalidConfigPath, port: 0 }));
   });
 });
 
