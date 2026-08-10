@@ -3850,15 +3850,16 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
   }
 });
 
-test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285, #443): the ONLY child_process importers are worker.ts (spawn), gh.ts (execFile), review/materializer.ts (execFile), and review/codex-exec.ts (spawn, gate②'s cross-vendor review runner) — and the ONLY subprocess call site that may ever pass a cwd is spawnClaudeSession's own OPTIONAL, caller-supplied opt (#285 review session mode) — WorkerSupervisor's own dispatch()/resume() spawn() calls stay cwd-less, so the engine structurally CANNOT exec git in a worker worktree", () => {
+test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285, #443, #743): the ONLY child_process importers are worker.ts (spawn), gh.ts (execFile), review/materializer.ts (execFile), review/codex-exec.ts (spawn, gate②'s cross-vendor review runner), and loop/dashboard-launcher.ts (execFile + spawn, the `sapwood dashboard` launcher) — and the ONLY subprocess call site that may ever pass a cwd is spawnClaudeSession's own OPTIONAL, caller-supplied opt (#285 review session mode) — WorkerSupervisor's own dispatch()/resume() spawn() calls stay cwd-less, so the engine structurally CANNOT exec git in a worker worktree", () => {
   const srcDir = new URL("../", import.meta.url);
   const files = readdirSync(srcDir, { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
-  // Sanity: the four known subprocess modules are present in the scan set.
+  // Sanity: the five known subprocess modules are present in the scan set.
   assert.ok(
     files.includes("roles/worker.ts") &&
       files.includes("forge/gh.ts") &&
       files.includes("review/materializer.ts") &&
-      files.includes("review/codex-exec.ts"),
+      files.includes("review/codex-exec.ts") &&
+      files.includes("loop/dashboard-launcher.ts"),
   );
   for (const f of files) {
     const src = readFileSync(new URL(f, srcDir), "utf8");
@@ -3926,6 +3927,19 @@ test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285, #443): the
         ["cwd: req.treeDir"],
         "codex-exec.ts's only subprocess cwd is the caller-supplied materialized tree",
       );
+    } else if (f === "loop/dashboard-launcher.ts") {
+      // #743: a FIFTH legitimate importer — the ONLY module engine/src/cli.ts's `sapwood
+      // dashboard` verb reaches for a subprocess, so cli.ts itself stays exec-free (this
+      // invariant's own `else` branch below still applies to it). TWO call shapes, both
+      // legitimate here (unlike the other four modules, which each use exactly one):
+      //   - execFile: opens the platform browser (`open`/`xdg-open`/`cmd`) — never a shell;
+      //   - spawn: launches dashboard/start.ts under `node --import tsx` as a genuine
+      //     long-running child (the dashboard server), not a one-shot command.
+      // No sync variant of either, no shell, and no `cwd:` anywhere — neither call ever runs
+      // outside the engine's own checkout, let alone in a worker worktree.
+      assert.doesNotMatch(src, /\b(execFileSync|execSync|spawnSync)\b/, "dashboard-launcher.ts uses no sync exec/spawn variant");
+      assert.doesNotMatch(src, /shell\s*:/, "dashboard-launcher.ts never execs/spawns through a shell");
+      assert.doesNotMatch(src, /\bcwd\s*:/, "dashboard-launcher.ts passes no cwd to execFile/spawn");
     } else {
       // Every other engine module must not shell out at all.
       assert.equal(importsChildProcess, false, `${f} must not import node:child_process`);

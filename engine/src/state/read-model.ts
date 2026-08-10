@@ -333,6 +333,13 @@ export const MAX_PAGE_LIMIT = 1000;
  *  want different defaults, and the CAP (not the default) is what the semantic contract fixes. */
 export const DEFAULT_PAGE_LIMIT = 500;
 
+/** #743: the dashboard server's default bind port (dashboard/server.ts re-exports this as
+ *  `DEFAULT_PORT`). Lives here, not in dashboard/server.ts, so `engine/src/cli.ts`'s `sapwood
+ *  dashboard` launcher can name the port in a "port already in use" error without a static
+ *  `engine -> dashboard` import (dashboard/server.ts already imports one-way FROM engine; a static
+ *  import the other way would invert that into a cycle). */
+export const DEFAULT_DASHBOARD_PORT = 4517;
+
 // ── spend (#642 AC3: honest settled + unclassified + incompleteness; #645: real lanes/roles/
 //    review split, replacing the interim name-heuristic) ────────────────────────────────────
 

@@ -31,6 +31,7 @@ import {
   allowlistedConfig,
   CONFIG_ALLOWLIST,
   currentEngineState,
+  DEFAULT_DASHBOARD_PORT,
   deriveEngineState,
   type EngineFacts,
   type EngineState,
@@ -55,8 +56,10 @@ export {
   type RunTerminal,
 };
 
-/** §8 default; overridable so several data dirs can be inspected side by side. */
-export const DEFAULT_PORT = 4517;
+/** §8 default; overridable so several data dirs can be inspected side by side. #743: the value
+ *  itself now lives in engine/src/state/read-model.ts (DEFAULT_DASHBOARD_PORT) so the CLI launcher
+ *  can name it without a static import of this file — re-exported here under its original name. */
+export const DEFAULT_PORT = DEFAULT_DASHBOARD_PORT;
 
 const DEFAULT_PAGE_LIMIT = 500;
 
