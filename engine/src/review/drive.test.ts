@@ -9,6 +9,8 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { IForge, PRCheckItem, PRReviewData, PRStatus } from "../forge/forge.js";
 import type { ApprovalResult } from "../roles/reviewer.js";
 import {
+  buildCiInertEscalationComment,
+  buildCiInertEscalationPayload,
   checkPreflight,
   driveEngineAgentReview,
   type EngineAgentDriveDeps,
@@ -181,6 +183,67 @@ test("refetchStillValid: newly blocking (unresolved thread appeared) -> discard"
 test("refetchStillValid: CI regressed -> discard", () => {
   const r = refetchStillValid(status({ ciGreen: false }), data(), "H1", "B1");
   assert.equal(r.ok, false);
+});
+
+// ── #783: refetchStillValid's discard reason distinguishes never-green from no-longer-green ────
+
+test("refetchStillValid (#783): a red check -> discard reason is ci-no-longer-green (not ciInert)", () => {
+  const r = refetchStillValid(status({ ciGreen: false, ciRed: true, ciInert: false }), data(), "H1", "B1");
+  assert.deepEqual(r, { ok: false, reason: "ci-no-longer-green" });
+});
+
+test("refetchStillValid (#783): a still-pending rollup (neither ciRed nor ciInert) -> discard reason is ci-no-longer-green, unchanged from before #783", () => {
+  const r = refetchStillValid(status({ ciGreen: false, ciRed: false, ciInert: false }), data(), "H1", "B1");
+  assert.deepEqual(r, { ok: false, reason: "ci-no-longer-green" });
+});
+
+test("refetchStillValid (#783): an inert rollup (concluded, never green, never red) -> discard reason is ci-not-green — honest that this head was never green", () => {
+  const r = refetchStillValid(status({ ciGreen: false, ciRed: false, ciInert: true }), data(), "H1", "B1");
+  assert.deepEqual(r, { ok: false, reason: "ci-not-green" });
+});
+
+// ── #783: buildCiInertEscalationPayload / buildCiInertEscalationComment — pure, unwired ─────────
+
+test("buildCiInertEscalationPayload: names each non-passing check with its conclusion, drops passing ones", () => {
+  const payload = buildCiInertEscalationPayload([
+    { name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null },
+    { name: "lint", status: "COMPLETED", conclusion: "SKIPPED", state: null },
+    { name: "legacy-ctx", status: "COMPLETED", conclusion: null, state: "PENDING" },
+  ]);
+  assert.deepEqual(payload, {
+    checks: [
+      { name: "lint", conclusion: "SKIPPED" },
+      { name: "legacy-ctx", conclusion: "PENDING" },
+    ],
+  });
+});
+
+test("buildCiInertEscalationPayload: a malformed entry with neither conclusion nor state names UNKNOWN, never throws", () => {
+  const payload = buildCiInertEscalationPayload([{ name: "mystery", status: "COMPLETED", conclusion: null, state: null }]);
+  assert.deepEqual(payload, { checks: [{ name: "mystery", conclusion: "UNKNOWN" }] });
+});
+
+test("buildCiInertEscalationPayload: an all-passing rollup names nothing", () => {
+  const payload = buildCiInertEscalationPayload([{ name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null }]);
+  assert.deepEqual(payload, { checks: [] });
+});
+
+test("buildCiInertEscalationComment: names the remedy, cites docs/configuration.md's ci section, and cites PR #769", () => {
+  const comment = buildCiInertEscalationComment("abc123", [{ name: "lint", conclusion: "SKIPPED" }]);
+  assert.match(comment, /lint \(SKIPPED\)/);
+  assert.match(comment, /always run and skip its STEPS/);
+  assert.match(comment, /push-only workflow/);
+  assert.match(comment, /docs\/configuration\.md/);
+  assert.match(comment, /PR #769/);
+  assert.match(comment, /`abc123`/);
+});
+
+test("buildCiInertEscalationComment: names every non-passing check, comma-separated", () => {
+  const comment = buildCiInertEscalationComment("H1", [
+    { name: "lint", conclusion: "SKIPPED" },
+    { name: "legacy-ctx", conclusion: "PENDING" },
+  ]);
+  assert.match(comment, /lint \(SKIPPED\), legacy-ctx \(PENDING\)/);
 });
 
 // ── driveEngineAgentReview: the full composition, scripted with fakes ─────────────────────────

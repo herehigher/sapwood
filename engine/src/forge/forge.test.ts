@@ -1603,7 +1603,15 @@ test("parsePRStatus: clean mergeable PR with passing checks", () => {
       statusCheckRollup: [{ conclusion: "SUCCESS" }],
     }),
   );
-  assert.deepEqual(s, { number: 21, headOid: "d0ce0a5", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
+  assert.deepEqual(s, {
+    number: 21,
+    headOid: "d0ce0a5",
+    state: "OPEN",
+    mergeable: "MERGEABLE",
+    ciGreen: true,
+    ciRed: false,
+    ciInert: false,
+  });
 });
 
 test("parsePRStatus (#287, E4b): baseRefOid becomes PRStatus.baseOid — additive, older fixtures without it keep parsing with no baseOid key at all", () => {
@@ -1864,6 +1872,84 @@ test("parsePRStatus (#246): one red check among otherwise-passing ones is still 
   );
   assert.equal(s.ciRed, true);
   assert.equal(s.ciGreen, false);
+});
+
+// ── #783: ciInert — every check CONCLUDED, none red, still not green (can never resolve on its
+// own head, unlike a genuinely pending rollup) ─────────────────────────────────────────────────
+
+test("parsePRStatus (#783): a still-queued check alongside a SKIPPED check is NOT inert — the rollup hasn't concluded, still the long pending clock", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 12,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SKIPPED" }, { conclusion: null }],
+    }),
+  );
+  assert.equal(s.ciInert, false);
+  assert.equal(s.ciGreen, false);
+});
+
+test("parsePRStatus (#783): an all-SKIPPED rollup is inert and not green", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 13,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SKIPPED" }, { conclusion: "NEUTRAL" }],
+    }),
+  );
+  assert.equal(s.ciInert, true);
+  assert.equal(s.ciGreen, false);
+  assert.equal(s.ciRed, false);
+});
+
+test("parsePRStatus (#783): a CheckRun with conclusion: null and no state field at all fails closed to NOT inert (reads as pending, same as today)", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 14,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: null }],
+    }),
+  );
+  assert.equal(s.ciInert, false);
+});
+
+test("parsePRStatus (#783): a red rollup is not inert — ciRed already explains why it isn't green", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 15,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SUCCESS" }, { conclusion: "FAILURE" }],
+    }),
+  );
+  assert.equal(s.ciInert, false);
+  assert.equal(s.ciRed, true);
+});
+
+test("parsePRStatus (#783): an empty rollup is not inert — no checks reported is the pending clock, not a concluded-inert one", () => {
+  const s = parsePRStatus(JSON.stringify({ number: 16, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] }));
+  assert.equal(s.ciInert, false);
+});
+
+test("parsePRStatus (#783): a fully passing rollup is not inert — ciGreen already covers it", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 17,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SUCCESS" }, { state: "SUCCESS" }],
+    }),
+  );
+  assert.equal(s.ciInert, false);
+  assert.equal(s.ciGreen, true);
 });
 
 // ── #13 review-gate data: parsePRReviewView / parsePRReactions / parseUnresolvedThreads ──

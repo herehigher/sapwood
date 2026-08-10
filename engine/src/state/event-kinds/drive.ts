@@ -108,6 +108,22 @@ export const DRIVE_EVENT_KINDS = defineKinds({
       "a PR's CI stayed PENDING past the escalation bound while gate② was already decisive, so it can never progress on its own; labeled needs-human.",
     actionability: "intervene",
   },
+  // #783: the companion to ci-pending-escalated for the CONCLUDED-but-not-green rollup — every
+  // check finished, none failed, but at least one concluded without passing (SKIPPED/NEUTRAL/
+  // CANCELLED/STALE/ACTION_REQUIRED). Unlike a pending rollup this can never resolve on its own
+  // head no matter how long it waits, so it escalates on its own (shorter) bound, `ci.inertEscalateAfterSec`,
+  // rather than sharing `ci.pendingEscalateAfterSec`'s clock. Registration/schema only here — the
+  // live escalation that actually emits this kind is the human-owned remainder (merge-driver.ts/
+  // conductor.ts are guard-protected paths this issue does not touch); see drive.ts's
+  // buildCiInertEscalationPayload/buildCiInertEscalationComment for the producer-reachable
+  // building blocks this kind's eventual payload/comment are built from.
+  "ci-inert-escalated": {
+    tags: [],
+    meaning:
+      "a PR's CI concluded without ever going green (no check still running, none failed, at least one concluded without passing) — it can never progress on its own; labeled needs-human.",
+    actionability: "intervene",
+    see: "#783",
+  },
   "ci-pending-cleared": {
     tags: [],
     meaning: "a PR's CI-pending pin closed (resolved green/red, or the head moved) — cancels the escalation timer.",

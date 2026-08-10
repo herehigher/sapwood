@@ -28,7 +28,7 @@
 
 import { createHash } from "node:crypto";
 import type { SapwoodConfig } from "../config/config.js";
-import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
+import type { IForge, PRCheckItem, PRReviewData, PRStatus } from "../forge/forge.js";
 import { labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js";
 import type { ApprovalResult, ReviewerAdapter } from "../roles/reviewer.js";
 import { changesRequestedOnHead, deriveBlockingSignal } from "../roles/reviewer.js";
@@ -171,8 +171,56 @@ export function refetchStillValid(
   if (data.headOid !== H) return { ok: false, reason: `data-head-mismatch:${data.headOid}` };
   if ((status.baseOid ?? null) !== B) return { ok: false, reason: `base-moved:${status.baseOid ?? "unknown"}` };
   if (deriveBlockingSignal(data).blocked) return { ok: false, reason: "newly-blocking" };
-  if (!status.ciGreen) return { ok: false, reason: "ci-no-longer-green" };
+  // #783: the pre-existing single reason ("ci-no-longer-green") was honest for a red regression
+  // but a LIE for `ciInert` — PR #766's discard read that way even though its rollup was never
+  // green on this head at all (every check concluded, none failed, none passed — SKIPPED/NEUTRAL
+  // throughout). `ciInert` is the authoritative signal for "never green on this generation";
+  // everything else `!ciGreen` covers (a genuine `ciRed` failure, or a rollup still pending) keeps
+  // the original wording.
+  if (!status.ciGreen) return { ok: false, reason: status.ciInert ? "ci-not-green" : "ci-no-longer-green" };
   return { ok: true };
+}
+
+/** #783: one non-passing check named for the `ci-inert-escalated` payload/comment — the same
+ *  `{name, conclusion}` shape `merge-driver.ts:710-767`'s CI-red evidence already names checks
+ *  with, so a human reading either escalation sees the same vocabulary. `conclusion` is the
+ *  modern CheckRun's own conclusion, or the legacy StatusContext's `state`, or `"UNKNOWN"` for a
+ *  malformed entry that carries neither — never thrown, this is a display-string builder. */
+export interface CiInertEscalationCheck {
+  name: string;
+  conclusion: string;
+}
+
+/** Pure payload-builder for the `ci-inert-escalated` event (#783 AC4): given the PR's own check
+ *  list, names every check that did NOT pass — the same rollup `ciInert` was computed from,
+ *  fetched separately here (`PRStatus` itself carries no per-check detail) because the escalation
+ *  evidence needs names, not just the boolean. Takes the full check list rather than requiring the
+ *  caller to pre-filter to non-passing ones, so a caller can pass `getPRChecks`' page verbatim.
+ *  NOT wired to any live escalation — that wiring is the human-owned remainder (`merge-driver.ts`/
+ *  `conductor.ts` are guard-protected paths this issue does not touch); this is the
+ *  producer-reachable building block only. */
+export function buildCiInertEscalationPayload(checks: readonly PRCheckItem[]): { checks: CiInertEscalationCheck[] } {
+  const nonPassing = checks.filter((c) => (c.conclusion ?? c.state ?? "").toUpperCase() !== "SUCCESS");
+  return { checks: nonPassing.map((c) => ({ name: c.name, conclusion: c.conclusion ?? c.state ?? "UNKNOWN" })) };
+}
+
+/** Pure message-composition function for the `ci-inert-escalated` comment text (#783 AC5): names
+ *  the remedy (make the job always run and skip its STEPS, or move it to a dedicated push-only
+ *  workflow — `docs/configuration.md`'s `ci` section spells out both), and cites PR #769 as the
+ *  worked example (the hosted aux arm's job-level `if:` left a SKIPPED check wedging gate① until
+ *  it moved to its own push-only workflow). `head` and `checks` are the same evidence
+ *  `buildCiInertEscalationPayload` names — this function only composes the human-facing string, it
+ *  never fetches or decides anything. NOT wired to any live posting path — see that function's own
+ *  doc for why. */
+export function buildCiInertEscalationComment(head: string, checks: readonly CiInertEscalationCheck[]): string {
+  const named = checks.map((c) => `${c.name} (${c.conclusion})`).join(", ");
+  return (
+    `sapwood: gate① concluded on \`${head}\` without ever going green — ${named} concluded without passing, ` +
+    "and nothing in the rollup is still running, so this PR can never resolve on its own. Remedy: make the " +
+    "job always run and skip its STEPS (so it reports SUCCESS instead of SKIPPED), or move it to a dedicated " +
+    "push-only workflow — see docs/configuration.md's `ci` section for the pattern, and PR #769 for the " +
+    "worked example."
+  );
 }
 
 /** `resolveReviewVerdict`-shaped synthetic action, so the caller (merge-driver.ts's

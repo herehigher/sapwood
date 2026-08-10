@@ -119,6 +119,18 @@ export interface PRStatus {
    *  fixture/fake. Consumed by #420 (merge-driver.ts, human-merge-only) to stamp the `merged`
    *  event's `prTitle` — that wiring is explicitly out of scope here. */
   title?: string;
+  /** #783 (companion to #426's ciPending wiring): every check CONCLUDED, none is `ciRed`, and the
+   *  rollup still isn't `ciGreen` — a check completed without ever passing (SKIPPED, NEUTRAL,
+   *  CANCELLED, STALE, ACTION_REQUIRED anywhere in the rollup). Unlike a pending rollup, this state
+   *  can NEVER resolve on its own head — no amount of waiting turns a concluded SKIPPED into
+   *  SUCCESS. Complement-shaped (derived from `ciGreen`/`ciRed`, not a conclusion-name enumeration)
+   *  so it never needs updating when GitHub adds a new terminal conclusion. `concluded` for a
+   *  modern CheckRun is `conclusion != null`; for a legacy StatusContext it is
+   *  `state ∉ {PENDING, EXPECTED}`; anything else (including a CheckRun with neither field
+   *  populated) fails closed to NOT concluded, same fail-closed-to-pending stance `ciGreen` already
+   *  takes. Same "additive, pre-existing callers unaffected" convention as `ciRed` above — absent
+   *  on any pre-#783 fixture/fake, readers treat that the same as `false`. */
+  ciInert?: boolean;
 }
 
 /** #292: one rename-aware entry from GitHub's pull-request files API. The old path is retained
@@ -2931,6 +2943,15 @@ export function parsePRStatus(json: string): PRStatus {
   const ciRed =
     checks.length > 0 &&
     checks.some((c) => (c.conclusion != null ? FAILING.has(c.conclusion) : c.state === "FAILURE" || c.state === "ERROR"));
+  // #783: "concluded" is deliberately NOT "conclusion is a passing/failing name" — it is "GitHub
+  // is done deciding this check's outcome." A modern CheckRun signals that with a non-null
+  // `conclusion` (queued/in-progress CheckRuns report `conclusion: null`); a legacy StatusContext
+  // has no `conclusion` field at all and signals it via `state` being anything other than the two
+  // legacy in-flight states. Anything else (a CheckRun entry with neither populated) is NOT
+  // concluded — fail-closed to pending, so a mid-materialization rollup can never false-escalate.
+  const concluded = (c: { conclusion?: string | null; state?: string | null }) =>
+    c.conclusion !== undefined ? c.conclusion != null : c.state != null && c.state !== "PENDING" && c.state !== "EXPECTED";
+  const ciInert = checks.length > 0 && checks.every(concluded) && !ciGreen && !ciRed;
   return {
     number: d.number,
     headOid: d.headRefOid,
@@ -2938,6 +2959,7 @@ export function parsePRStatus(json: string): PRStatus {
     mergeable: d.mergeable === "MERGEABLE" || d.mergeable === "CONFLICTING" ? d.mergeable : "UNKNOWN",
     ciGreen,
     ciRed,
+    ciInert,
     ...(d.baseRefOid !== undefined ? { baseOid: d.baseRefOid } : {}),
     ...(d.title !== undefined ? { title: d.title } : {}),
   };

@@ -344,6 +344,15 @@ const Ci = z
     // passing (cancelled/skipped/neutral/stale/action_required) — gate① is SUCCESS-only (#401), so
     // that lane cannot progress on its own either and is aged, and escalated, exactly the same.
     pendingEscalateAfterSec: z.number().int().positive().default(21600),
+    // #783: the companion bound for a CONCLUDED-but-not-green rollup (`PRStatus.ciInert`) — every
+    // check finished, none failed, but at least one concluded without passing (SKIPPED/NEUTRAL/
+    // CANCELLED/STALE/ACTION_REQUIRED). Unlike `pendingEscalateAfterSec`'s target (a check that
+    // may still finish), this state can NEVER resolve on its own head, so it gets its own
+    // (shorter) default — 900s, not 21600s — rather than sharing the pending clock. Schema only
+    // here; the drive-loop wiring that actually reads this is the human-owned remainder (#783's
+    // issue body) — merge-driver.ts/conductor.ts are guard-protected paths this key's own PR does
+    // not touch.
+    inertEscalateAfterSec: z.number().int().positive().default(900),
     requiredChecks: z
       .array(
         z
