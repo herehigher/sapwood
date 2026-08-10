@@ -66,13 +66,11 @@ lanes:
   max: 3 # max CONCURRENT workers (the lane ceiling; never a per-round quota)
   roundDispatchCap: 6 # #124: total dispatch QUOTA for one round, refilled in waves as lanes
   #                     free (never a single one-shot batch) — a round can dispatch up to this
-  #                     many issues total, `lanes.max` at a time. Default = 2x lanes.max: two
-  #                     full concurrency-wide waves is enough work to amortize a round's
-  #                     peripheral (aligning/architect/harvest/retro) cost without letting a
-  #                     round run away before the retro loop reviews it — quota is retro
-  #                     FEEDBACK GRANULARITY, the trade-off this knob actually tunes. Raise it
-  #                     for bigger, less-frequently-reviewed rounds; lower it for tighter retro
-  #                     loops.
+  #                     many issues total, `lanes.max` at a time. This repo deliberately sets 6
+  #                     (two full concurrency-wide waves) to amortize peripheral
+  #                     (aligning/architect/harvest/retro) cost; the schema default is the more
+  #                     conservative 2. Raise it for bigger, less-frequently-reviewed rounds;
+  #                     lower it for tighter retro loops.
   reserveCap: 1 # lanes held back as reserve
   prFixCap: 2 # #246: max fix-leg rounds (review findings / CI-red) before escalating to
   #             needs-human for adjudication. 0 disables the FIXABLE gate outright — every

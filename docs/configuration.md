@@ -473,12 +473,13 @@ preflight —
 there is no trigger comment or hosted bot to poll. The session emits strictly structured per-AC
 judgments and findings; the engine validates that output, derives approval or rejection, writes a
 non-authoritative audit comment, then re-fetches the live gate state before consuming the verdict.
-Engine-agent review spend is capped per logical review by `agent.costCapUsd`. Every attempt in a
-logical review that reaches a decisive verdict is recorded in SQLite's `spend_ledger` under a
-distinct `lane-name:engine-review` worker key, one entry per attempt, with provider-reported,
-pinned-price-estimated, or explicitly unknown spend preserved. Its numeric entries therefore count
-toward `cost.roundBudgetUsd`, `cost.dailyBudgetUsd`, and `stop.afterSpendUsd`; non-decisive
-reviews produce no ledger entry. (See [`security.md`](security.md#producer--reviewer--merger)'s
+Engine-agent review spend is capped per logical review by `agent.costCapUsd`. Per-attempt spend
+evidence — provider-reported, pinned-price-estimated, or explicitly unknown — is preserved in the
+engine-review audit artifact's `sessionSpends`. For each decisive review, `spend_ledger` receives
+one aggregate settlement row under the distinct `lane-name:engine-review` worker key: estimated
+components collapse to one boolean, and unknown attempts contribute zero to the numeric sum. That
+aggregate row counts toward `cost.roundBudgetUsd`, `cost.dailyBudgetUsd`, and `stop.afterSpendUsd`;
+non-decisive reviews write no ledger row. (See [`security.md`](security.md#producer--reviewer--merger)'s
 "Single-identity limitation for engine-agent review".)
 
 ### Reviewer tier vs. worker tier

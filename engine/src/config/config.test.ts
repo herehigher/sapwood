@@ -11,7 +11,7 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.board.repo, "widgets");
   assert.equal(cfg.board.status.backlog, "Todo"); // #173: existing configs adopt the default backlog
   assert.equal(cfg.board.status.ready, "Ready"); // default
-  assert.equal(cfg.lanes.roundDispatchCap, 6); // #124: per-round quota, 2x lanes.max default
+  assert.equal(cfg.lanes.roundDispatchCap, 2); // #577: conservative default when the key is omitted
   assert.equal(cfg.worker.budgetUsdSoft, 10);
   assert.equal(cfg.worker.maxResumes, 2);
   // #501: default flipped different-model-codex -> engine-agent; a zero-config parse now
@@ -97,6 +97,8 @@ test("#292: escalation.instructionPaths has trust-chain defaults, is configurabl
     // either would previously reach autonomous merge (#538 was the reachable, if benign, instance).
     "engine/src/review/instruction-path-escalation.ts",
     "engine/src/config/config.ts",
+    // #577: init's starter template is on the escalation surface; #781 will add hard-guard coverage.
+    "sapwood.config.example.yaml",
     // #539: docs/security.md carries the canonical human-merge-only list and documents this
     // mechanism's own trust chain — the same self-reference class as the two paths above.
     "docs/security.md",
@@ -2119,7 +2121,7 @@ test("#210: dashboard.controls defaults to true, round-trips true/false through 
 test("dashboardConfigSubset: carries the drawer's groups + the per-role model/effort captions", () => {
   const subset = dashboardConfigSubset(parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\n"));
   assert.equal(subset.board.owner, "a");
-  assert.equal(subset.lanes.roundDispatchCap, 6);
+  assert.equal(subset.lanes.roundDispatchCap, 2);
   assert.equal(subset.worker.budgetUsdSoft, 10);
   assert.equal(subset.guard.mode, "hard");
   assert.equal(subset.cost.dailyBudgetUsd, 100);

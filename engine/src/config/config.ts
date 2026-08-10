@@ -70,13 +70,9 @@ const Board = z
 const Lanes = z
   .object({
     max: z.number().int().positive().default(3),
-    // #124: re-justified for MULTI-WAVE quota semantics (round.ts's runExecuting) — this is no
-    // longer "one batch = round size" (2 was sized for that single-batch model), it is the
-    // round's total work quota, refilled in waves as lanes free. Default = 2x lanes.max's own
-    // default: two full concurrency-wide waves is enough work to amortize a round's peripheral
-    // (aligning/architect/harvest/retro) cost without a round running away before the retro loop
-    // reviews it — quota is retro FEEDBACK GRANULARITY, the trade-off this knob actually tunes.
-    roundDispatchCap: z.number().int().positive().default(6),
+    // #577: conservative by design — cap new dispatches between retro-feedback opportunities at
+    // two unless an operator explicitly chooses a larger multi-wave quota for their deployment.
+    roundDispatchCap: z.number().int().positive().default(2),
     reserveCap: z.number().int().nonnegative().default(1),
     // #246: the FIXABLE gate's fix_rounds cap (predecessor-project LOOP_PR_FIX_CAP) — deriveGate
     // (merge-driver.ts) folds HANDLE_THREADS/CI_RED straight to its pre-#246 behavior
@@ -1502,6 +1498,9 @@ const ConfigSchemaRaw = z
           // one-bootstrap-PR exposure window.
           "engine/src/review/instruction-path-escalation.ts",
           "engine/src/config/config.ts",
+          // #577: sapwood init's starter template is an instruction carrier too. Escalation makes
+          // edits human-merge-only; the separate hard guard boundary is tracked by #781.
+          "sapwood.config.example.yaml",
           // #539: docs/security.md carries the canonical human-merge-only list and documents this
           // mechanism's own trust chain — the same self-reference class as the two paths above.
           "docs/security.md",

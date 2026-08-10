@@ -65,5 +65,5 @@ merge:
 #   # inert self-hosting coverage, not a path your repository is expected to contain.
 #   instructionPaths: [CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/**, AGENTS.md,
 #                      engine/prompts/**, engine/src/review/instruction-path-escalation.ts,
-#                      engine/src/config/config.ts, docs/security.md, engine/src/roles/skills-plugin.ts,
+#                      engine/src/config/config.ts, sapwood.config.example.yaml, docs/security.md, engine/src/roles/skills-plugin.ts,
 #                      engine/src/forge/labels.ts]
