@@ -2266,6 +2266,9 @@ export function referencedIssue(body: string): number | null {
 // learns its OWN name, via its worktree path), and a disagreeing second marker in one body reads
 // as null (fail closed) rather than resolving to either lane. This is a narrowing, not a proof.
 const PR_OWNER_MARKER_RE = /<!--\s*sapwood:pr-owner\s+lane="([^"]+)"\s+issue="(\d+)"\s*-->/g;
+// This is deliberately DISTINCT from PR_OWNER_MARKER_RE: the owner marker is stamped on both
+// worker-opened and engine-opened PRs, while this marker records only the latter provenance.
+const ENGINE_OPENED_PR_MARKER_RE = /<!--\s*sapwood:pr-engine-opened\s+lane="([^"]+)"\s+issue="(\d+)"\s*-->/g;
 
 /** Lane names are engine-generated (`lane-<issue>-<8 hex>`), so this always passes in practice;
  *  it exists so a name that could NOT be read back verbatim can never be written in the first
@@ -2277,6 +2280,21 @@ const LANE_NAME_RE = /^[A-Za-z0-9._-]+$/;
 export function prOwnerMarker(lane: string, issue: number): string {
   if (!LANE_NAME_RE.test(lane)) throw new Error(`prOwnerMarker: unusable lane name ${JSON.stringify(lane)}`);
   return `<!-- sapwood:pr-owner lane="${lane}" issue="${issue}" -->`;
+}
+
+/** Durable provenance for a PR the engine itself opened. This MUST NOT be added when the engine
+ * merely adopts a worker-opened PR: that path gets the owner marker above, but is not truthful
+ * evidence for the rescue comment's engine-opened statement. */
+export function engineOpenedPrMarker(lane: string, issue: number): string {
+  if (!LANE_NAME_RE.test(lane)) throw new Error(`engineOpenedPrMarker: unusable lane name ${JSON.stringify(lane)}`);
+  return `<!-- sapwood:pr-engine-opened lane="${lane}" issue="${issue}" -->`;
+}
+
+/** Reads the dedicated engine-opened marker back from an already-read PR body. Disagreeing
+ * markers fail closed, just as owner-marker disagreement does. */
+export function isEngineOpenedPr(body: string, lane: string, issue: number): boolean {
+  const found = [...body.matchAll(ENGINE_OPENED_PR_MARKER_RE)].map((m) => ({ lane: m[1]!, issue: Number(m[2]) }));
+  return found.length > 0 && found.every((marker) => marker.lane === lane && marker.issue === issue);
 }
 
 /** The pure read-back — paired with prOwnerMarker so the written and accepted syntax cannot
@@ -2380,6 +2398,8 @@ export interface LanePrOutcome {
    *  underlying forge response had no title. worker.ts's probe() carries this onto
    *  LaneProbe.prTitle, which conductor.ts's reclaim events persist. */
   title?: string;
+  /** True only when the engine itself opened `pr` from the lane's already-pushed branch. */
+  engineOpened?: boolean;
 }
 
 /**
@@ -2425,9 +2445,17 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
     const candidates = await forge.listOpenPrsForBranch(lane.branch);
     const owned = findLaneOwnedPr(candidates, lane.name, lane.issue);
     if (owned != null) {
-      // #595: the title rides this SAME candidates list — no extra lookup.
-      const title = candidates.find((c) => c.number === owned)?.title;
-      return { pr: owned, inconclusive: false, ...(title !== undefined ? { title } : {}) };
+      // #719: both title AND engine-opened provenance ride this SAME candidates list — no
+      // re-fetch after a crash between openPR and the rescue-reason comment.
+      const candidate = candidates.find((c) => c.number === owned);
+      const title = candidate?.title;
+      const engineOpened = candidate !== undefined && isEngineOpenedPr(candidate.body, lane.name, lane.issue);
+      return {
+        pr: owned,
+        inconclusive: false,
+        ...(title !== undefined ? { title } : {}),
+        ...(engineOpened ? { engineOpened: true } : {}),
+      };
     }
     // Stamp-and-adopt is eligible ONLY for a branch with exactly ONE open PR that carries no
     // marker at all. Both halves of that are load-bearing (gate② P1s on PR #423):
@@ -2472,23 +2500,31 @@ export async function associateLanePr(forge: LanePrForge, lane: LanePrRequest, l
           const title = await forge.getIssueMeta(lane.issue).then((m) => m.title);
           const opened = await forge.openPR(lane.branch, title, engineAuthoredPrBody(lane.name, lane.issue, lane.branch));
           // #595: the PR the engine just opened carries the title it opened WITH — no re-read.
-          return { pr: opened, inconclusive: false, title };
+          return { pr: opened, inconclusive: false, title, engineOpened: true };
         } catch (e) {
           return unknown(`could not open a PR for pushed branch ${lane.branch} (${String(e)}) — branch preserved, retried later`);
         }
       }
     }
   }
-  // #595: the marker-scan fallback's title rides this SAME listOpenPrBodies read.
+  // #595/#719: the marker-scan fallback's title and engine-opened provenance ride this SAME
+  // listOpenPrBodies read; a reclaimed worktree must not create a second read or lose provenance.
   const bodies = await forge.listOpenPrBodies();
   const marked = findLaneOwnedPr(bodies, lane.name, lane.issue);
-  const markedTitle = marked != null ? bodies.find((b) => b.number === marked)?.title : undefined;
-  return { pr: marked, inconclusive: false, ...(markedTitle !== undefined ? { title: markedTitle } : {}) };
+  const markedPr = marked != null ? bodies.find((b) => b.number === marked) : undefined;
+  const markedTitle = markedPr?.title;
+  const engineOpened = markedPr !== undefined && isEngineOpenedPr(markedPr.body, lane.name, lane.issue);
+  return {
+    pr: marked,
+    inconclusive: false,
+    ...(markedTitle !== undefined ? { title: markedTitle } : {}),
+    ...(engineOpened ? { engineOpened: true } : {}),
+  };
 }
 
-/** The body the engine writes when IT opens a lane's PR. Carries the human-facing closing keyword
- *  (GitHub's own auto-close semantics, unchanged by #377) plus the owner marker, and says plainly
- *  that only this description — not the code — is engine-authored. */
+/** The body the engine writes when IT opens a lane's PR. Carries the human-facing closing keyword,
+ * owner marker, and dedicated engine-opened marker; the latter lets restart association recover
+ * that fact without a new forge read. */
 function engineAuthoredPrBody(lane: string, issue: number, branch: string): string {
   return [
     `Closes #${issue}`,
@@ -2497,6 +2533,7 @@ function engineAuthoredPrBody(lane: string, issue: number, branch: string): stri
     "The commits are the worker's; this description is the engine's.",
     "",
     prOwnerMarker(lane, issue),
+    engineOpenedPrMarker(lane, issue),
     "",
   ].join("\n");
 }

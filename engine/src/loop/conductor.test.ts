@@ -13,6 +13,7 @@ import { ConfigSchema, loadConfig, type SapwoodConfig } from "../config/config.j
 import {
   associateLanePr,
   type CommitInfo,
+  engineOpenedPrMarker,
   type IForge,
   type Issue,
   type OpenPrBody,
@@ -2536,6 +2537,135 @@ test("tick reclaim: DEAD lane whose dirty worktree was RETAINED -> needs-human l
   assert.match(forge.issueComments[0]![1], /\/abs\/worktrees\/lane-dirty/); // the absolute path
   assert.match(forge.issueComments[0]![1], /lane-dirty/); // the lane name
   assert.match(forge.issueComments[0]![1], /remove the `Human-Hold` label/); // resolved configured label, not a literal default
+  st.close();
+});
+
+test("#719: a restart re-associates an engine-opened DEAD-lane PR and writes its rescue reason", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const lane = { name: "lane-rescue", issue: 719, branch: "feat/719-rescue", sessionOver: true };
+  const body = `${prOwnerMarker(lane.name, lane.issue)}\n${engineOpenedPrMarker(lane.name, lane.issue)}`;
+  const laneForge = {
+    async listOpenPrsForBranch() {
+      return [{ number: 716, body }];
+    },
+    async listOpenPrBodies() {
+      throw new Error("restart association found the branch PR; no fallback read should occur");
+    },
+    async updatePRBody() {
+      throw new Error("restart association must not rewrite the found PR");
+    },
+    async openPR() {
+      throw new Error("restart association must not open another PR");
+    },
+    async probePushedBranch(): Promise<"present" | "absent" | "unknown"> {
+      throw new Error("restart association found the PR before probing the branch");
+    },
+    async getIssueMeta() {
+      throw new Error("restart association must not fetch issue metadata");
+    },
+  };
+  const association = await associateLanePr(laneForge, lane);
+  assert.deepEqual(association, { pr: 716, inconclusive: false, engineOpened: true });
+  seedRunning(st, lane.name, lane.issue);
+  sup.probes[lane.name] = {
+    ...DEFAULT_PROBE,
+    hbAge: 99999,
+    wrapperAlive: 0,
+    hasPr: true,
+    prNumber: association.pr!,
+    engineOpenedPr: "engineOpened" in association && association.engineOpened === true,
+  };
+  sup.reclaimResults["lane-rescue"] = { worktreePath: "/wt/lane-rescue", worktreeRetained: true };
+
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  assert.deepEqual(forge.prLabelsAdded, [[716, "needs-human"]]);
+  const comment = forge.prComments.find(([pr]) => pr === 716)?.[1] ?? "";
+  assert.match(comment, /<!-- sapwood:needs-human-reason:dead-lane-rescue:lane-rescue:716 -->/);
+  assert.match(comment, /lane `lane-rescue` died mid-flight/);
+  assert.match(comment, /terminal reason: DEAD/);
+  assert.match(comment, /engine opened this PR from the pushed branch/);
+  assert.match(comment, /unreviewed producer work/);
+  assert.match(comment, /review and merge through the normal gates/i);
+  assert.match(comment, /hand it to a fresh lane/i);
+  assert.match(comment, /close it/i);
+  st.close();
+});
+
+test("#719: a re-associated worker-opened DEAD-lane PR gets its hold but never the engine-opened rescue comment", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const lane = { name: "lane-worker-opened", issue: 719, branch: "feat/719-worker", sessionOver: true };
+  // #377 stamps this owner marker after adopting a worker-opened PR. It is intentionally NOT the
+  // engine-opened marker, so the rescue comment would be factually false.
+  const body = prOwnerMarker(lane.name, lane.issue);
+  const laneForge = {
+    async listOpenPrsForBranch() {
+      return [{ number: 717, body }];
+    },
+    async listOpenPrBodies() {
+      throw new Error("worker PR was already found on the branch");
+    },
+    async updatePRBody() {
+      throw new Error("worker PR was already marked; no rewrite should occur");
+    },
+    async openPR() {
+      throw new Error("worker PR was already found; no second PR should open");
+    },
+    async probePushedBranch(): Promise<"present" | "absent" | "unknown"> {
+      throw new Error("worker PR was already found before branch probing");
+    },
+    async getIssueMeta() {
+      throw new Error("worker PR association does not need issue metadata");
+    },
+  };
+  const association = await associateLanePr(laneForge, lane);
+  assert.deepEqual(association, { pr: 717, inconclusive: false });
+  seedRunning(st, lane.name, lane.issue);
+  sup.probes[lane.name] = {
+    ...DEFAULT_PROBE,
+    hbAge: 99999,
+    wrapperAlive: 0,
+    hasPr: true,
+    prNumber: association.pr!,
+    engineOpenedPr: "engineOpened" in association && association.engineOpened === true,
+  };
+  sup.reclaimResults[lane.name] = { worktreePath: "/wt/lane-worker-opened", worktreeRetained: true };
+
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  assert.deepEqual(forge.prLabelsAdded, [[717, "needs-human"]]);
+  assert.deepEqual(forge.prComments, [], "the engine-opened rescue statement must not be posted for worker-authored PRs");
+  st.close();
+});
+
+test("#719: a DEAD-lane rescue PR comment failure is recorded while its hold still lands", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-rescue-failed-comment", 719);
+  sup.probes["lane-rescue-failed-comment"] = {
+    ...DEFAULT_PROBE,
+    hbAge: 99999,
+    wrapperAlive: 0,
+    hasPr: true,
+    prNumber: 716,
+    engineOpenedPr: true,
+  };
+  sup.reclaimResults["lane-rescue-failed-comment"] = { worktreePath: "/wt/lane-rescue-failed-comment", worktreeRetained: true };
+  forge.throwOnAddPRComment = true;
+
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  assert.deepEqual(forge.prLabelsAdded, [[716, "needs-human"]]);
+  assert.equal(st.getWorker("lane-rescue-failed-comment")?.state, "failed");
+  assert.deepEqual(
+    st.eventsAfterId(0, ["reclaim-dead-comment-failed"]).map((event) => event.payload),
+    [{ worker: "lane-rescue-failed-comment", issue: 719, pr: 716, error: "Error: simulated forge failure" }],
+  );
   st.close();
 });
 

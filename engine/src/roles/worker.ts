@@ -3601,6 +3601,7 @@ export class WorkerSupervisor implements Supervisor {
     let hasPr = false;
     let prNumber: number | undefined;
     let prTitle: string | undefined;
+    let engineOpenedPr = false;
     let prAssociationInconclusive = false;
     if (issue != null && this.deps.lanePr) {
       // #377: the lane's PR is resolved from what THIS lane structurally produced — its own
@@ -3623,6 +3624,7 @@ export class WorkerSupervisor implements Supervisor {
         prNumber = outcome.pr;
         // #595: rides the SAME association read outcome — no extra forge call.
         prTitle = outcome.title;
+        engineOpenedPr = outcome.engineOpened === true;
       }
       // Budget only counts once settlement is actually possible (gate② round 5): while the lane
       // is still running the conductor classifies it KEEP no matter what this says, so spending
@@ -3690,6 +3692,7 @@ export class WorkerSupervisor implements Supervisor {
       ...(costEstimated != null ? { costEstimated } : {}),
       ...(prNumber != null ? { prNumber } : {}),
       ...(prTitle != null ? { prTitle } : {}),
+      ...(engineOpenedPr ? { engineOpenedPr } : {}),
       ...(liveTelemetry ? { liveTelemetry } : {}),
       ...(failureText !== undefined ? { failureText } : {}),
       ...(resultText !== undefined ? { resultText } : {}),
