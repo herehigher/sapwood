@@ -66,6 +66,13 @@ must be `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` immediately af
   anything, so leaving them as ACs only manufactures unresolvable review findings (F36).
 - **The verification plan** (tests to write/run, commands to execute, observable
   outcomes) is specific enough to actually execute — "test it works" is not a plan.
+- **UI-conditional criteria need real-wiring evidence.** If a criterion describes how an
+  already-integrated component must render under a specific mode or data condition ("shows X in
+  replay mode", "greys out when disconnected"), the verification step must name a test through
+  the actual production entry point with distinguishable real-shaped values for the condition —
+  not just "add a test for X", which a standalone render with hand-built props would also
+  satisfy without ever exercising the real wiring. Bounce (outcome 2) a plan that leaves this
+  unstated for a criterion of this shape.
 - **The plan matches the issue's actual scope** — neither over-verifying trivial work nor
   under-verifying something that needs it.
 - **Mechanism assumptions are plan defects.** A verification plan satisfiable only by matching

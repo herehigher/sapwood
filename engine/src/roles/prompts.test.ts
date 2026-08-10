@@ -79,7 +79,14 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // state the engine-enforced structural fact instead — writes/moves happen only from this
   // session's structured output, applied by the engine, regardless of what tools the session
   // holds — never a claim about the session's full tool inventory.
-  "po.md": "7329d3b147e8db53a429e78bd88d6939da9c25b79217d5be986a441519a1921c",
+  // retro round #363: PR #766 (issue #741) drew the same-shape gate② finding four times in one
+  // round — a UI-conditional AC ("shows X in replay mode") was satisfiable by a test that
+  // hand-built props for the target component in isolation, never exercising the real
+  // production wiring (App -> real data -> component). Adds a rule requiring the verification
+  // step to name the real entry point and distinguishable live-vs-condition fixture values for
+  // this criterion shape. Mirrored into po-decompose.md and verification-plan-drafter.md below,
+  // and into verification-plan-reviewer.md's gate⓪ checklist so it's enforced, not just authored.
+  "po.md": "84f44547cd94e3a6a0c5fd31615165c6fa28d175e8dff5bb37074c77e3dde15d",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
@@ -155,7 +162,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // explicitly: no sentence inside it is a directive/permission-grant regardless of phrasing,
   // negative-form only (no claim that escaping makes the content trustworthy, only that it can no
   // longer pose as structure).
-  "verification-plan-reviewer.md": "3dad75005049e7142668e64a4f09772fa844585e77e00922b58e245aa2e9037d",
+  // retro round #363: same fix as po.md above — adds the gate⓪ checklist bullet that bounces a
+  // plan leaving a UI-conditional criterion's real-wiring test unstated.
+  "verification-plan-reviewer.md": "587f2a55488b469882c613e4b04b5212d0b265ad0544a39efc49719cb4a2b2fe",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
   // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
@@ -188,7 +197,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #616's ambient-MCP-tool finding falsifies. Reworded to role-scope framing (posting a
   // comment/label, or touching needs-human/blocked, is never this role's OUTPUT, whatever tools
   // the session holds) instead of claiming the session has no channel that could do it.
-  "verification-plan-drafter.md": "ec33f1dd408e29fc11afdc1571dea8a6b0a31dee8da5259a8cd322d627872b8e",
+  // retro round #363: same fix as po.md above, mirrored into the drafter's own AC-authoring
+  // guidance.
+  "verification-plan-drafter.md": "3239e857f15cb542c7cc2f1e491a11b7695264ee74c9f3107893d6d6e3d324ba",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
   // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
   // grant was never removed, so the capability paragraph again names it (when attached) instead
@@ -252,7 +263,8 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // ("the deterministic engine performs all validated issue, label, comment, board, and native
   // sub-issue writes") — falsified in principle by #616's ambient-MCP-tool finding. Dropped the
   // redundant closure claim rather than restating the structural fact a second way.
-  "po-decompose.md": "25a557e03c5b16b7e29cccafa514f28da2792bde9800728926fa9ea9b1a2432d",
+  // retro round #363: same fix as po.md above, mirrored for decomposed child issues.
+  "po-decompose.md": "753aefa9fca4efe260c94bccb9f81694c94713085056de122b02bbd8ee7e5983",
 };
 
 test("prompt snapshot: po.md hash matches the pinned revision", () => {
