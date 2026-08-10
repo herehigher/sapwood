@@ -148,7 +148,7 @@ reviewer:
   # engine-agent: a static, different-Claude-model review session the engine runs locally,
   # on the same Claude CLI sapwood itself needs — default (#501, 2026-08-01). No extra
   # install: a fresh sapwood user already has everything this kind requires.
-  # different-model-codex: 0day-style gate② instead — a fresh non-author review from the
+  # different-model-codex: predecessor-project-style gate② instead — a fresh non-author review from the
   # hosted `@codex review` GitHub App. Requires that App installed on this repo; was the
   # default before #501. same-model-trusted | human are the other reviewer kinds.
   # produce-pr-and-stop is configured separately at merge.mode.

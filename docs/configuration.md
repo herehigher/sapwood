@@ -422,7 +422,7 @@ Gate② — who reviews a PR before it can merge.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mode` | `engine-agent` (#501; was `different-model-codex` before 2026-08-01) | The reviewer kind: `engine-agent` (an engine-composed, static review session using a different Claude model, run locally on the same Claude CLI sapwood itself needs — no extra install), `different-model-codex` (0day-style fresh non-author Codex review, requires the hosted `@codex review` GitHub App), `same-model-trusted` (allowlisted reviewers only), or `human` (any non-author approval). **Cost note:** the `engine-agent` default makes gate② a paid local Claude session — see `agent.costCapUsd` below for its per-review ceiling. |
+| `mode` | `engine-agent` (#501; was `different-model-codex` before 2026-08-01) | The reviewer kind: `engine-agent` (an engine-composed, static review session using a different Claude model, run locally on the same Claude CLI sapwood itself needs — no extra install), `different-model-codex` (a predecessor-project-style fresh non-author Codex review, requiring the hosted `@codex review` GitHub App), `same-model-trusted` (allowlisted reviewers only), or `human` (any non-author approval). **Cost note:** the `engine-agent` default makes gate② a paid local Claude session — see `agent.costCapUsd` below for its per-review ceiling. |
 | `triggerCommand` | `"@codex review"` | The PR-comment text posted to request a review (`different-model-codex` mode). Non-empty string; rejected empty at parse. |
 | `deltaChainMax` | `3` | Maximum consecutive `X..Y` delta-scoped re-reviews. The next head move requests a full-PR review and resets the chain. Positive integer. |
 | `trustedReviewers` | `[]` | Allowlisted reviewer logins, used by `same-model-trusted`. |

@@ -4,7 +4,7 @@
 //
 // It implements the conductor's `Supervisor` seam (dispatch/probe/reclaim). Completion is
 // signalled by SENTINEL FILES the wrapper writes — never the model's self-report (the robust
-// part of 0day's loop_worker.sh, ported):
+// part of the predecessor project's loop worker, ported):
 //   <name>.running.json   — written at spawn (issue + session_id + pid); resume marker
 //   <name>.done.json      — clean exit (carries parsed total_cost_usd)
 //   <name>.failed.json    — non-zero exit
@@ -2189,7 +2189,7 @@ export class WorkerSupervisor implements Supervisor {
     // name); only matters for an explicitly caller-supplied `name` colliding with one.
     await this.awaitInFlightLeaderExitReapsFor(laneName);
     // Refuse name reuse — a stale sentinel under this name means a concurrent/old lane; a
-    // second worker would clobber its jsonl/sentinels (0day Codex #4).
+    // second worker would clobber its jsonl/sentinels (predecessor-project Codex #4).
     for (const ext of SENTINEL_EXTS) {
       if (existsSync(this.path(laneName, ext))) {
         throw new Error(`worker name in use (${laneName}.${ext} exists) — reassign a fresh name`);
@@ -3020,7 +3020,7 @@ export class WorkerSupervisor implements Supervisor {
     if (!lane || lane.reclaiming) return;
     // Wall-clock timeout: a hung/overlong claude must not hold a lane forever (without this,
     // a fresh heartbeat + live pid make classifyLane return KEEP indefinitely — Codex R2 P1;
-    // 0day wrapped claude in run_timeout). Past timeoutSec: stop refreshing AND kill the tree
+    // the predecessor project wrapped claude in run_timeout). Past timeoutSec: stop refreshing AND kill the tree
     // -> onExit writes .failed -> the conductor reclaims the lane.
     const elapsedSec = (this.now().getTime() - lane.startedMs) / 1000;
     if (!lane.timedOut && elapsedSec > this.deps.cfg.worker.timeoutSec) {

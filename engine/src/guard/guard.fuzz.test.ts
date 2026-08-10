@@ -1,4 +1,4 @@
-// Differential / fuzz test of guard.ts against 0day's guard.py (issue #8). The tokenizer
+// Differential / fuzz test of guard.ts against the predecessor project's guard.py (issue #8). The tokenizer
 // divergence (TS shlex-equivalent vs Python shlex) is the real bypass surface, so we run
 // thousands of generated commands through BOTH and assert the safety invariant:
 //
@@ -8,7 +8,7 @@
 //
 // We do NOT assert the reverse: sapwood is intentionally stricter (Bash write-path,
 // `gh pr review --approve`, rm/git rm of boundary files) and omits guard.py's
-// trading-domain categories A (funds) / B (private keys), so those are filtered out.
+// application-specific categories A/B, so those are filtered out.
 //
 // guard.py is vendored as a frozen fixture (fixtures/guard_py_snapshot/), so the only remaining
 // skip condition is a missing python3/python interpreter.
@@ -22,11 +22,11 @@ import { guardDecision } from "./guard.js";
 
 const CWD = "/repo";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-// Vendored, frozen snapshot of 0day's guard.py (provenance: fixtures/guard_py_snapshot/SOURCE.md).
+// Vendored, frozen snapshot of the predecessor project's guard.py (provenance: fixtures/guard_py_snapshot/SOURCE.md).
 // It ships in-repo so the differential tests run in CI and in a worker's ephemeral worktree,
-// neither of which has a sibling ../0day checkout (#427). SAPWOOD_ZERODAY_SRC overrides it for
+// neither of which has a sibling predecessor checkout (#427). SAPWOOD_ZERODAY_SRC overrides it for
 // ad-hoc local comparison against a newer guard.py, e.g.
-// SAPWOOD_ZERODAY_SRC=../0day/backend/src npm --workspace engine test.
+// SAPWOOD_ZERODAY_SRC=/path/to/predecessor/backend/src npm --workspace engine test.
 const VENDORED_SRC = resolve(repoRoot, "engine", "src", "guard", "fixtures", "guard_py_snapshot");
 const ZERODAY_SRC = process.env.SAPWOOD_ZERODAY_SRC ? resolve(process.env.SAPWOOD_ZERODAY_SRC) : VENDORED_SRC;
 const GUARD_PY = join(ZERODAY_SRC, "zeroday", "loop", "guard.py");
@@ -292,11 +292,11 @@ test("#353 corpus: issue lifecycle verbs (close/reopen/transfer/delete) block ev
   }
 });
 
-// #427: the two differential tests below used to skip whenever a sibling ../0day checkout was
+// #427: the two differential tests below used to skip whenever a sibling predecessor checkout was
 // absent — i.e. in CI and in every dogfood worker's worktree, so the safety-parity guarantee
 // docs/PLAN.md documents for M1 never actually ran there. Guard the fixture itself so a moved
 // or dropped snapshot fails loudly instead of silently reverting them to a permanent skip.
-test("#427: the guard.py reference implementation ships in-repo (no sibling ../0day needed)", () => {
+test("#427: the guard.py reference implementation ships in-repo (no sibling checkout needed)", () => {
   // The vendored fixture must be complete regardless; only the DEFAULT-resolution claim is
   // conditional, since an ad-hoc SAPWOOD_ZERODAY_SRC run deliberately points elsewhere.
   if (!process.env.SAPWOOD_ZERODAY_SRC) {
@@ -339,13 +339,13 @@ test("differential: sapwood is at least as strict as guard.py on opaque + Catego
   );
 });
 
-test("differential: 0day's shared-surface BLOCK cases all block in guard.ts", (t) => {
+test("differential: predecessor-project shared-surface BLOCK cases all block in guard.ts", (t) => {
   const bin = pythonAvailable();
   if (!bin) {
     t.skip("needs a python3/python interpreter");
     return;
   }
-  // The exact opaque + Category C commands from 0day's authoritative bypass matrix.
+  // The exact opaque + Category C commands from the predecessor project's authoritative bypass matrix.
   const cases = [
     'bash -c "python transfer.py"',
     "gh pr merge 143 --squash",
