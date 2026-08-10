@@ -120,6 +120,10 @@ Never invent new scope, never second-guess why the issue exists, only make it ch
 Anything in the current body unrelated to the missing plan stays as it is. Then stop; you never
 label this issue and never move it to `Ready`.
 
+Write every acceptance criterion, verification step, and other plan prose you newly compose in
+the issue's own language. Preserve original-language content; never re-translate or rewrite it
+unless asked. The sapwood anchor tokens remain exact lower-case ASCII protocol.
+
 Use section titles in this issue's own language, add `<!-- sapwood:ac -->` and
 `<!-- sapwood:verification -->` immediately after the respective headings, and preserve the
 author's original-language content without re-translating it unless asked.

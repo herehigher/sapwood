@@ -79,7 +79,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // state the engine-enforced structural fact instead — writes/moves happen only from this
   // session's structured output, applied by the engine, regardless of what tools the session
   // holds — never a claim about the session's full tool inventory.
-  "po.md": "7e46a394144b6bec45337525406a6b983a97345bb8322d457248a227ae62bcb2",
+  "po.md": "7329d3b147e8db53a429e78bd88d6939da9c25b79217d5be986a441519a1921c",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
@@ -719,21 +719,27 @@ test("verification-plan-drafter.md (#283): mandates literal `- [ ]` checkbox acc
 
 // ── #457 (F36): execution-class ACs are plan noise — CI enforces them unconditionally ─────────
 
-test("#457 verification-plan-reviewer.md: execution-class ACs are named as noise to FLAG AND STRIP within minor-correction latitude, moving the execution step to the Verification plan", () => {
+test("#457/#591 verification-plan-reviewer.md: execution-class ACs are named as noise to FLAG AND STRIP, moving execution into anchored language-free issue sections", () => {
   const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
   assert.ok(body.includes("Execution-class criteria are noise — flag and strip them."), "the flag-and-strip rule is present");
   assert.match(
     body,
     /"the test suite passes", "typecheck\/lint clean",\s+"CI green" and equivalents must never appear as acceptance criteria/,
   );
-  assert.match(body, /fold the execution step into\s+the `## Verification plan`/);
+  assert.ok(body.includes("`<!-- sapwood:ac -->`"), "requires the exact anchored acceptance section");
+  assert.ok(body.includes("`<!-- sapwood:verification -->`"), "requires the exact anchored verification section");
+  assert.match(body, /use the issue's own\s+language/);
+  assert.match(body, /preserve its\s+original-language content/);
 });
 
-test("#457 verification-plan-reviewer-confirm.md: an execution-class AC on a legacy approved plan is a standing invalidate-check, with the brief directing the move to the Verification plan", () => {
+test("#457/#591 verification-plan-reviewer-confirm.md: execution-class ACs invalidate a plan and retain the anchored language-free issue-body contract", () => {
   const body = readPrompt(defaultVerificationPlanConfirmPromptPath());
   assert.match(body, /A second standing check \(F36\): an execution-class acceptance\s+criterion/);
   assert.match(body, /a still-approved plan carrying one is `invalidate`/);
-  assert.match(body, /folded into the\s+`## Verification plan`/);
+  assert.ok(body.includes("`<!-- sapwood:ac -->`"), "requires the exact anchored acceptance section");
+  assert.ok(body.includes("`<!-- sapwood:verification -->`"), "requires the exact anchored verification section");
+  assert.match(body, /use the issue's own language/);
+  assert.match(body, /preserve its\s+original-language content/);
 });
 
 test("retro round #284: po.md (both modes) and po-decompose.md resolve a human-merge-only acceptance criterion at draft time — paste-ready patch or a carved-out remainder/section — instead of leaving it for gate⓪ to bounce", () => {
@@ -753,13 +759,16 @@ test("retro round #284: po.md (both modes) and po-decompose.md resolve a human-m
   assert.match(decompose, /carve the protected-path work into its own\s+`remainder` child/);
 });
 
-test("#457 verification-plan-drafter.md + po-decompose.md: AC-authoring guidance forbids CI/suite/typecheck status as a criterion — the Verification plan owns execution steps", () => {
+test("#457/#591 verification-plan-drafter.md + po-decompose.md: AC-authoring guidance forbids CI/suite/typecheck status and requires anchored own-language plans", () => {
   const drafter = readPrompt(defaultVerificationPlanDrafterPromptPath());
   assert.ok(
     drafter.includes("Never write CI/suite/typecheck status as an acceptance criterion"),
     "verification-plan-drafter carries the rule",
   );
-  assert.match(drafter, /execution steps\s+belong in the `## Verification plan`/);
+  assert.ok(drafter.includes("`<!-- sapwood:ac -->`"), "requires the exact anchored acceptance section");
+  assert.ok(drafter.includes("`<!-- sapwood:verification -->`"), "requires the exact anchored verification section");
+  assert.match(drafter, /issue's own language/);
+  assert.match(drafter, /Preserve the author's original-language content/);
   const decompose = readPrompt(defaultPoDecomposePromptPath());
   assert.ok(decompose.includes("Never write CI/suite/typecheck status itself as a criterion"), "po-decompose carries the rule");
 });

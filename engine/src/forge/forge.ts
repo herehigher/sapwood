@@ -2113,8 +2113,11 @@ function associateMarkedSections(body: string): MarkedSectionAssociation | null 
         if (heading) headings.push({ start: offset, level: heading[1]!.length, line: lineNumber });
 
         // The grammar is intentionally exact: lower-case ASCII protocol tokens, an otherwise
-        // empty line, and no normalization/case folding. Near-misses are ordinary prose.
-        const marker = /^<!-- sapwood:([a-z]+) -->$/.exec(line);
+        // empty line, and no normalization/case folding. Any plausible reserved-namespace
+        // token selects marked mode; only the two roles below are then accepted. This keeps
+        // future digit/hyphenated sapwood protocol attempts from falling through to legacy
+        // English-heading parsing.
+        const marker = /^<!-- sapwood:([a-z0-9][a-z0-9-]*) -->$/.exec(line);
         if (marker) {
           const previous = headings[headings.length - 1];
           anchors.push({
@@ -2145,16 +2148,21 @@ function associateMarkedSections(body: string): MarkedSectionAssociation | null 
   const verification = byRole.get("verification");
   if (!ac || !verification) return null;
 
-  const sectionText = (heading: MarkedSection): string => {
+  const sectionFor = (heading: MarkedSection) => {
     const end = headings.find((candidate) => candidate.start > heading.start && candidate.level <= heading.level)?.start ?? body.length;
-    return body.slice(heading.start, end).trim();
+    return { start: heading.start, end, text: body.slice(heading.start, end).trim() };
   };
-  const acText = sectionText(ac);
-  const verificationText = sectionText(verification);
+  const acSection = sectionFor(ac);
+  const verificationSection = sectionFor(verification);
+  const planSections = [acSection, verificationSection]
+    .sort((left, right) => left.start - right.start)
+    // Match extractMarkdownSections' legacy behavior: a matching section nested inside an
+    // already-emitted matching ancestor is present in that ancestor's text, never appended twice.
+    .filter((section, index, sections) => !sections.slice(0, index).some((prior) => section.end <= prior.end));
   return {
-    ac: acText,
-    verification: verificationText,
-    plan: (ac.start < verification.start ? [acText, verificationText] : [verificationText, acText]).join("\n\n"),
+    ac: acSection.text,
+    verification: verificationSection.text,
+    plan: planSections.map((section) => section.text).join("\n\n"),
   };
 }
 

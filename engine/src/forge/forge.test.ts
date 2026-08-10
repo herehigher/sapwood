@@ -892,6 +892,85 @@ test("#591 fixture matrix: partial, duplicate, unknown, and misplaced anchors fa
   }
 });
 
+test("#591: digit and hyphenated reserved-namespace anchors fail closed instead of dispatching through legacy headings", () => {
+  const legacyDispatchable = `## Acceptance criteria
+
+- [ ] legacy AC
+
+## Verification plan
+
+- run legacy test`;
+  const project = parseProject(
+    JSON.stringify({
+      data: {
+        user: {
+          projectV2: {
+            id: "PVT_591_RESERVED",
+            field: { id: "PVTF_status", options: [{ id: "ready", name: "Ready" }] },
+            items: {
+              nodes: ["v2", "future-role"].map((token, index) => ({
+                id: `ITEM_591_RESERVED_${index}`,
+                content: {
+                  number: 5913 + index,
+                  title: "reserved namespace attempt",
+                  state: "OPEN",
+                  body: `${legacyDispatchable}\n\n<!-- sapwood:${token} -->`,
+                  repository: { nameWithOwner: "herehigher/sapwood" },
+                  labels: { nodes: [{ name: "plan:approved" }] },
+                },
+                fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
+              })),
+            },
+          },
+        },
+      },
+    }),
+    "Status",
+  );
+  for (const issue of project.items) {
+    assert.equal(extractVerificationPlan(issue.body), null);
+    assert.equal(extractVerificationSection(issue.body), null);
+    assert.equal(extractAcceptanceCriteria(issue.body), null);
+  }
+  assert.deepEqual(selectReadyIssues(project, cfg), []);
+});
+
+test("#591: mixed-level anchored role sections preserve legacy non-duplication in both nesting directions", () => {
+  const acContainingVerification = `## 受け入れ条件
+<!-- sapwood:ac -->
+
+- [ ] 完了する
+
+### 検証
+<!-- sapwood:verification -->
+
+- テストを実行する
+
+## 注記
+
+対象外`;
+  const verificationContainingAc = `## 検証
+<!-- sapwood:verification -->
+
+- テストを実行する
+
+### 受け入れ条件
+<!-- sapwood:ac -->
+
+- [ ] 完了する
+
+## 注記
+
+対象外`;
+  for (const body of [acContainingVerification, verificationContainingAc]) {
+    const plan = extractVerificationPlan(body);
+    assert.ok(plan != null);
+    assert.equal(plan.match(/<!-- sapwood:ac -->/g)?.length, 1, "acceptance range is emitted once");
+    assert.equal(plan.match(/<!-- sapwood:verification -->/g)?.length, 1, "verification range is emitted once");
+    assert.ok(!plan.includes("対象外"));
+  }
+});
+
 test("#591: a partial anchor set enters PO triage instead of using an English-heading fallback", () => {
   const body = "## Acceptance criteria\n\n- [ ] ignored legacy AC\n\n## 受け入れ条件\n<!-- sapwood:ac -->\n\n- [ ] incomplete marker set";
   const project = parseProject(
