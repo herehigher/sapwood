@@ -4615,12 +4615,28 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             w.issue,
             pr,
             ciPendingCommentMarker(w.name, pr, s.head),
+            // #782 gate② round 1 (P2, CONFIRMED): the classic-shaped sentence below asserts "gate②
+            // is already decisive" — TRUE for the three original Reviewer kinds and for
+            // engine-agent's own decisive-pin-discard case (a verdict landed, gate① regressed
+            // after), but FALSE for engine-agent's pre-session evidence wait (`s.evidenceWait`,
+            // DriveOutcome.ciPendingEscalation's own doc): no review session has started at all,
+            // because review/drive.ts's own preflight CI-evidence gate blocks one from ever
+            // spawning. `s.evidenceWait` selects the truthful sentence for that phase; the `else`
+            // branch is BYTE-IDENTICAL to the pre-#782-gate②-round-1 text (existing conductor tests
+            // assert against it unchanged).
             `${ciPendingCommentMarker(w.name, pr, s.head)}\n` +
-              `sapwood: gate① has been PENDING for ${s.pendingSec}s on \`${s.head}\` (bound: ` +
-              `${cfg.ci.pendingEscalateAfterSec}s) while gate② is already decisive — CI is neither green ` +
-              `nor red, so this PR can never progress on its own (${evidence.note}). Escalating to ` +
-              `\`${cfg.labels.needsHuman}\`: re-run or fix the stuck check, then remove the label ` +
-              `${carrierNoun(carrier)} to reclaim this PR (#147 gated reentry).`,
+              (s.evidenceWait
+                ? `sapwood: gate① has been PENDING for ${s.pendingSec}s on \`${s.head}\` (bound: ` +
+                  `${cfg.ci.pendingEscalateAfterSec}s) — the configured \`ci.requiredChecks\` evidence has ` +
+                  `not been satisfied, so no review session has started yet and this PR can never progress ` +
+                  `on its own (${evidence.note}). Escalating to \`${cfg.labels.needsHuman}\`: re-run or fix ` +
+                  `the stuck check, then remove the label ${carrierNoun(carrier)} to reclaim this PR (#147 ` +
+                  `gated reentry).`
+                : `sapwood: gate① has been PENDING for ${s.pendingSec}s on \`${s.head}\` (bound: ` +
+                  `${cfg.ci.pendingEscalateAfterSec}s) while gate② is already decisive — CI is neither green ` +
+                  `nor red, so this PR can never progress on its own (${evidence.note}). Escalating to ` +
+                  `\`${cfg.labels.needsHuman}\`: re-run or fix the stuck check, then remove the label ` +
+                  `${carrierNoun(carrier)} to reclaim this PR (#147 gated reentry).`),
           );
           posted = true;
         } catch {
