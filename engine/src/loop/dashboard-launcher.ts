@@ -58,6 +58,10 @@ export async function openBrowserReal(url: string): Promise<BrowserOpenResult> {
 
 export interface DashboardServerHandle {
   port: number;
+  /** The real child process pid (#786) — exposed so a caller that needs to prove the child is
+   *  actually gone (a test's own suite-wide leak sweep, never production logic) can check it
+   *  directly, without reaching into this module's internals. */
+  pid: number;
   /** Sends SIGTERM and resolves once the child has ACTUALLY exited (not just once the signal was
    *  sent) — a caller that wants to immediately reuse the same port (a restart, or this module's
    *  own tests rebinding on an explicit port) must wait for the OS to actually release the
@@ -80,6 +84,14 @@ export interface StartDashboardServerOpts {
   dbPath: string;
   configPath?: string;
   port: number;
+  /** Optional hook (#786 gate② finding [ac2-prehandle-leak]): fires SYNCHRONOUSLY the instant the
+   *  child is spawned, before startup confirmation even begins — never only once the returned
+   *  promise resolves. A caller that needs to track the real pid for its own leak-cleanup registry
+   *  (a test, never production) must be able to do so before any `await` that could hang; waiting
+   *  for the resolved `DashboardServerHandle.pid` misses exactly the case where startup itself
+   *  hangs and the caller times out first, leaving the already-spawned child untracked. Never used
+   *  by production code (cli.ts's runDashboard doesn't pass it). */
+  onSpawn?: (pid: number) => void;
 }
 
 /** Spawns the bundled dashboard/dist-server/start.js (built from dashboard/start.ts, which calls
@@ -99,6 +111,7 @@ export function startDashboardServer(opts: StartDashboardServerOpts): Promise<Da
   const args = [entry, "--db-path", opts.dbPath, "--port", String(opts.port)];
   if (opts.configPath !== undefined) args.push("--config", opts.configPath);
   const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "inherit"] });
+  if (typeof child.pid === "number") opts.onSpawn?.(child.pid);
 
   function stop(): Promise<void> {
     // Already exited (e.g. it crashed on its own) — nothing to wait for, and attaching a listener
@@ -128,7 +141,7 @@ export function startDashboardServer(opts: StartDashboardServerOpts): Promise<Da
         return;
       }
       if (msg.ok && typeof msg.port === "number") {
-        resolvePromise({ port: msg.port, stop });
+        resolvePromise({ port: msg.port, pid: child.pid as number, stop });
       } else {
         const err = new Error(msg.message ?? "dashboard server failed to start") as NodeJS.ErrnoException;
         if (msg.code) err.code = msg.code;
