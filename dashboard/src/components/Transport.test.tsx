@@ -63,6 +63,15 @@ test("empty state: no rounds yet", () => {
   assert.match(html, /no rounds yet/);
 });
 
+// #766 gate② finding [2] (rounds-failure-renders-empty): a genuinely FAILED /api/rounds fetch
+// must never render as the honest "no rounds yet" empty history — same `disconnected` posture
+// LaneBoard/ActivityFeed already carry for their own failed data sources.
+test("disconnected=true renders the disconnected caption, never 'no rounds yet' — a fetch failure is not an honest empty history", () => {
+  const html = renderToStaticMarkup(<Transport rounds={[]} selectedRoundId={null} onSelectRound={() => {}} disconnected now={NOW} />);
+  assert.match(html, /disconnected — restart sapwood to reconnect/);
+  assert.doesNotMatch(html, /no rounds yet/);
+});
+
 test("lists every round from /api/rounds, one row each", () => {
   const rounds = [round({ roundId: 1 }), round({ roundId: 2 }), round({ roundId: 3, status: "in_progress" })];
   const html = renderToStaticMarkup(<Transport rounds={rounds} selectedRoundId={null} onSelectRound={() => {}} now={NOW} />);
@@ -162,4 +171,40 @@ test("'back to live' is offered whenever a round is selected", () => {
     <Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} onSelectRound={() => {}} cursorId={100} now={NOW} />,
   );
   assert.match(html, /back to live/);
+});
+
+// ── #766 gate② finding [3] (round-log-load-rejection-sticks): loading / error / retry ──────────
+
+test("loading=true shows an honest 'loading round…' caption, no play/speed/scrub controls yet (nothing to control)", () => {
+  const html = renderToStaticMarkup(
+    <Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} onSelectRound={() => {}} loading now={NOW} />,
+  );
+  assert.match(html, /loading round…/);
+  assert.doesNotMatch(html, /aria-label="play"/);
+  assert.doesNotMatch(html, /aria-label="scrub"/);
+  assert.match(html, /back to live/, "back to live stays available even while loading");
+});
+
+test("loadError (not loading) shows an honest failure caption and a retry control, never a silently blank panel", () => {
+  const html = renderToStaticMarkup(
+    <Transport
+      rounds={[round({ roundId: 1 })]}
+      selectedRoundId={1}
+      onSelectRound={() => {}}
+      loading={false}
+      loadError={new Error("network down")}
+      now={NOW}
+    />,
+  );
+  assert.match(html, /could not load this round/);
+  assert.match(html, /<button[^>]*>retry<\/button>/);
+  assert.doesNotMatch(html, /aria-label="scrub"/, "no scrub bar over a log that failed to load");
+});
+
+test("no loadError and not loading: the ordinary transport controls render, not the error state", () => {
+  const html = renderToStaticMarkup(
+    <Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} onSelectRound={() => {}} loading={false} loadError={null} now={NOW} />,
+  );
+  assert.doesNotMatch(html, /could not load this round/);
+  assert.match(html, /aria-label="scrub"/);
 });

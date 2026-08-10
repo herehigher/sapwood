@@ -3,12 +3,14 @@ import test, { mock } from "node:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { App, appContent, resolveActiveFold, resolveFixCap, resolveRoundSpend, toggleConfigOpen } from "./App.tsx";
-import { eventsQuery, loopStateQuery, spendQuery } from "./api/queries.ts";
+import { eventsQuery, loopStateQuery, roundsQuery, spendQuery } from "./api/queries.ts";
+import type { SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
 import type { DomainEvent } from "./domain-event.ts";
 import { initialHeroState } from "./hero/state.ts";
 import { initialReplayState } from "./replay/reducer.ts";
+import { bucketSpendByPhase, phaseSpendBars } from "./replay/spend-replay.ts";
 
 /** Same tree-walk IconRail.test.tsx uses — finds a node in a REAL React element tree (never a
  *  `renderToStaticMarkup` string, which strips function props) by exact `className`. */
@@ -125,16 +127,17 @@ function stubFetch(byPath: Record<string, { status: number; body: unknown }>) {
 }
 
 const SPEND_EMPTY = { "/api/spend": { status: 200, body: { spend: [], lastId: 0 } } };
+// #766 gate② finding [2] (rounds-failure-renders-empty): `/api/rounds` is now a FOURTH data
+// source `App` depends on — defaults to an empty, successful page for every test that isn't
+// specifically exercising rounds, same rationale `SPEND_EMPTY` already documents for `/api/spend`.
+const ROUNDS_EMPTY = { "/api/rounds": { status: 200, body: { rounds: [] } } };
 
 async function renderSettledApp(
   byPath: Record<string, { status: number; body: unknown }>,
   now?: Date,
   initialConfigOpen?: boolean,
 ): Promise<string> {
-  // `/api/spend` defaults to an empty, successful page — most tests here aren't exercising the
-  // cost strip and would otherwise fail on an unstubbed fetch now that App also polls it (#715
-  // gate② round 3 [2]). Callers exercising spend explicitly can still override it via `byPath`.
-  stubFetch({ ...SPEND_EMPTY, ...byPath });
+  stubFetch({ ...SPEND_EMPTY, ...ROUNDS_EMPTY, ...byPath });
   // `retryOnMount: false` matters as much as `retry: false` here: a query that has ONLY ever
   // errored (never succeeded) otherwise re-triggers a fresh fetch the instant a new observer
   // mounts (TanStack Query's default `retryOnMount: true`), which collapses `status` back to
@@ -145,6 +148,7 @@ async function renderSettledApp(
     client.prefetchQuery(loopStateQuery()),
     client.prefetchQuery(eventsQuery(0)),
     client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
   ]);
   return renderToStaticMarkup(
     <QueryClientProvider client={client}>
@@ -192,6 +196,22 @@ test("#715 gate② round 4 [2]: header ALSO shows disconnected when only /api/sp
   });
   assert.match(html, /disconnected — restart sapwood to reconnect/);
   assert.doesNotMatch(html, /503/, "the header must never leak the raw fetch-error message");
+});
+
+// #766 gate② finding [2] round 3 (rounds-failure-renders-empty): `useRounds()` introduced a
+// FOURTH required data source that `disconnected` didn't originally check — a failed `/api/rounds`
+// used to leave the header reading healthy while `rounds.data?.rounds ?? []` silently rendered the
+// truthful-empty "no rounds yet" caption, converting a real transport failure into an
+// honest-looking empty history.
+test("#766 gate② finding [2]: header ALSO shows disconnected when only /api/rounds fails (loop-state, events, and spend are fine)", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+    "/api/rounds": { status: 503, body: { error: "nope" } },
+  });
+  assert.match(html, /disconnected — restart sapwood to reconnect/);
+  assert.doesNotMatch(html, /503/, "the header must never leak the raw fetch-error message");
+  assert.doesNotMatch(html, /no rounds yet/, "a rounds FETCH failure must never be presented as an honest empty history");
 });
 
 test("both queries succeeding renders the normal header, not disconnected", async () => {
@@ -341,6 +361,55 @@ test("#727 gate②: every rail hash anchor resolves to exactly one matching targ
     const targets = html.match(new RegExp(`id="${id}"`, "g")) ?? [];
     assert.equal(targets.length, 1, `expected exactly one id="${id}" target, found ${targets.length}`);
   }
+});
+
+// #766 gate② finding [0] (rounds-api-ui-unexercised): the endpoint (server.test.ts) and the
+// navigator's rendering (Transport.test.tsx, hand-fed a Round[]) were only ever tested as
+// disconnected halves — nothing proved `fetchRounds`/`roundsQuery`'s response actually reaches
+// App's real `<Transport>`. This drives the REAL `App` component through the REAL query layer
+// (`renderSettledApp`'s `client.prefetchQuery(roundsQuery())`), stubbing `/api/rounds` with
+// distinguishable multi-round data — including an artifact-less row — and asserts the rendered
+// page shows both, tally and tally-less alike.
+test("#766 gate② finding [0]: /api/rounds data flows through fetchRounds/roundsQuery into App's real <Transport>, including an artifact-less row rendering tally-less", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+    "/api/rounds": {
+      status: 200,
+      body: {
+        rounds: [
+          {
+            roundId: 5,
+            status: "done",
+            startedAt: "2026-08-10T10:00:00Z",
+            endedAt: "2026-08-10T10:30:00Z",
+            startEventId: 100,
+            startSpendId: 50,
+            eventCount: 42,
+            schemaVersion: 1,
+            artifact: { prsMerged: 3, spendUsd: 4.5 },
+          },
+          {
+            // Artifact-less: closed without a persisted artifact (pre-#123 history, or a crash
+            // between closeRound and saveRoundArtifact) — §8's "render tally-less, never skip".
+            roundId: 6,
+            status: "done",
+            startedAt: "2026-08-10T11:00:00Z",
+            endedAt: "2026-08-10T11:30:00Z",
+            startEventId: 200,
+            startSpendId: 80,
+            eventCount: 10,
+            schemaVersion: null,
+            artifact: null,
+          },
+        ],
+      },
+    },
+  });
+  assert.match(html, /round 5/, "round 5's navigator row must render from the real /api/rounds response");
+  assert.match(html, /round 6/, "round 6's navigator row must render too");
+  assert.match(html, /3 merged/, "round 5's real artifact tally must render");
+  assert.match(html, /no summary yet/, "round 6's artifact-less row must render tally-less, not skipped or fabricated");
 });
 
 // ── #766 gate② finding [1] (header-replay-total-is-round-scoped): resolveRoundSpend ────────────
@@ -560,4 +629,49 @@ test("#766 gate② finding [2]: neither LaneBoard's nor ConfigDrawer's own rende
   const html = renderToStaticMarkup(appContent(vm));
   assert.doesNotMatch(html, /aria-label="lanes"/, "LaneBoard's own aria-label must not render while replaying");
   assert.doesNotMatch(html, /aria-label="config"/, "ConfigDrawer's own aria-label must not render while replaying");
+});
+
+// ── #766 gate② finding [1] (replay-spend-panel-unexercised) ────────────────────────────────────
+//
+// `spend-replay.test.ts` proves `bucketSpendByPhase`/`phaseSpendBars` as pure array transforms, and
+// `CostStrip.test.tsx` proves the component renders whatever `CostBarGroup[]` it's handed — but
+// nothing before this test passed timestamp-truncated, phase-bucketed spend THROUGH those real
+// functions and then through App's own `groups={mode === "replay" ? [byPhase] : [byModel, byLane]}`
+// wiring, checking the rendered strip actually shows the trailing `unattributed` bucket instead of
+// the live `by model`/`by lane` groups. This computes `byPhase` the EXACT way `App()` does — via
+// the real `bucketSpendByPhase`/`phaseSpendBars` pipeline over a realistic mixed spend set (one
+// attributed row inside a real `round-phase` window, one pre-#206 row before any window) — then
+// renders it through `appContent`'s real `mode === "replay"` branch.
+
+test("#766 gate② finding [1]: real timestamp-truncated, phase-bucketed spend renders through App's replay CostStrip branch, unattributed bucket included, live groups absent", () => {
+  const attributedRow: SpendRow = {
+    id: 1,
+    ts: "2026-08-10T10:15:00Z",
+    worker: "w1",
+    issue: 42,
+    usd: 12.5,
+    model: "opus",
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    actorKind: "worker",
+    role: null,
+    estimated: false,
+  };
+  const preHistoryRow: SpendRow = { ...attributedRow, id: 2, ts: "2026-08-01T00:00:00Z", usd: 3.25 }; // before any round-phase window
+  const phaseWindows = [{ phase: "executing", startTs: "2026-08-10T10:00:00Z", endTs: null }];
+  // The SAME functions App() itself calls (replay/spend-replay.ts) — not a hand-authored group.
+  const byPhase = { title: "by phase", bars: phaseSpendBars(bucketSpendByPhase([attributedRow, preHistoryRow], phaseWindows)) };
+
+  const vm = minimalAppViewModel({ mode: "replay" });
+  const html = renderToStaticMarkup(appContent({ ...vm, byPhase } as unknown as Parameters<typeof appContent>[0]));
+
+  assert.match(html, /executing/, "the real attributed phase bucket must render");
+  assert.match(html, /\$12\.50/, "the attributed row's real cursor-truncated sum must render");
+  assert.match(html, /unattributed/, "the pre-#206 row must land in the labeled unattributed bucket");
+  assert.match(html, /\$3\.25/, "the unattributed bucket's real sum must render");
+  assert.doesNotMatch(html, /by model/, "replay must show phase groups, never the live by-model group");
+  assert.doesNotMatch(html, /by lane/, "replay must show phase groups, never the live by-lane group");
+  assert.match(html, /cost · this round/, "the replay heading must read 'this round', not 'today'");
 });

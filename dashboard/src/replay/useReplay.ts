@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { fetchEvents, fetchSpend } from "../api/client.ts";
-import type { Round, SpendRow } from "../api/types.ts";
+import type { EventsPage, Round, SpendPage, SpendRow } from "../api/types.ts";
 import type { DomainEvent } from "../domain-event.ts";
 import { buildCheckpoints, type Checkpoint } from "./checkpoint.ts";
 import {
@@ -29,6 +29,40 @@ interface RoundLog {
   phaseWindows: PhaseWindow[];
 }
 
+export type RoundLogResult = { ok: true; log: RoundLog } | { ok: false; error: unknown };
+
+/**
+ * #766 gate② finding [3] (round-log-load-rejection-sticks): the actual `Promise.all([...]).then`
+ * composition, factored out of the effect below the same way `Controls.tsx`'s `runControlEffect`
+ * factors its own network call out of a `useEffect` — this repo's test harness has no jsdom, so a
+ * promise this repo actually awaits inside an effect is only directly testable once it's a plain
+ * function the effect calls, not inline `.then`/`.catch` logic a test can't reach. NEVER rejects
+ * itself: a rejected `fetchEvents`/`fetchSpend` page resolves to `{ ok: false, error }` rather than
+ * propagating, so the caller's effect never needs its own top-level `.catch` to avoid an unhandled
+ * rejection (same "never rejects itself" contract `runControlEffect` documents for the same reason).
+ */
+export async function loadRoundLog(
+  round: Round,
+  ceilingId: number | null,
+  spendCeilingId: number | null,
+  lanesMax: number | null,
+  fetchEventsPage: (after: number, limit: number) => Promise<EventsPage> = (after, limit) => fetchEvents({ after, limit }),
+  fetchSpendPage: (after: number, limit: number) => Promise<SpendPage> = (after, limit) => fetchSpend({ after, limit }),
+): Promise<RoundLogResult> {
+  try {
+    const [events, spend] = await Promise.all([
+      loadRoundEvents(round, ceilingId, fetchEventsPage),
+      loadRoundSpend(round, spendCeilingId, fetchSpendPage),
+    ]);
+    return {
+      ok: true,
+      log: { round, events, checkpoints: buildCheckpoints(events, lanesMax), spend, phaseWindows: buildPhaseWindows(events) },
+    };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
 /**
  * #766 gate② finding [0] (round-switch-retains-old-replay): switching directly from a loaded
  * round A to round B changes `selectedRoundId` synchronously, but the async `Promise.all` load
@@ -51,6 +85,14 @@ export interface ReplayView {
   selectedRoundId: number | null;
   selectRound: (roundId: number | null) => void;
   loading: boolean;
+  /** #766 gate② finding [3] (round-log-load-rejection-sticks): set when the selected round's
+   *  `/api/events`/`/api/spend` load rejected — `loading` is ALWAYS cleared on this terminal path
+   *  too (never left permanently `true`), so a UI reading `loading` alone can't get stuck
+   *  claiming "still loading" forever. `null` once nothing has failed for the CURRENT selection. */
+  loadError: unknown;
+  /** Re-runs the load for the currently selected round — the only way to recover from `loadError`,
+   *  since re-selecting the SAME round id is a no-op for the effect's own dependency array. */
+  retryLoad: () => void;
   position: ReplayPosition | null;
   playing: boolean;
   speed: PlaySpeed;
@@ -75,6 +117,11 @@ export function useReplay(rounds: Round[], lanesMax: number | null): ReplayView 
   const [log, setLog] = useState<RoundLog | null>(null);
   const [position, setPosition] = useState<ReplayPosition | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<unknown>(null);
+  // #766 gate② finding [3]: bumped by `retryLoad` to force the load effect below to re-run for
+  // the SAME `selectedRoundId` — re-selecting an already-selected round is a no-op for that
+  // effect's dependency array otherwise, so a failed load would have no way to retry at all.
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [transport, dispatch] = useReducer(transportReducer, INITIAL_TRANSPORT_STATE);
 
   // `rounds` keeps polling every 3 s (`useRounds`) while a round is selected — a ref, read only at
@@ -83,33 +130,46 @@ export function useReplay(rounds: Round[], lanesMax: number | null): ReplayView 
   const roundsRef = useRef(rounds);
   roundsRef.current = rounds;
 
-  // Load the round's full log once, whenever the selected round changes.
+  // Load the round's full log once, whenever the selected round changes (or a retry is requested).
+  // `loadAttempt` (in the dependency array below) is never read inside this effect — its only job
+  // is forcing a re-run for the SAME `selectedRoundId` after `retryLoad()` bumps it, since
+  // re-selecting an already-selected round is otherwise a no-op for this dependency array (#766
+  // gate② finding [3]).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `loadAttempt` is trigger-only, never read in the effect body — see the comment above.
   useEffect(() => {
     if (selectedRoundId === null) {
       setLog(null);
       setPosition(null);
+      setLoadError(null);
       return;
     }
     const round = roundsRef.current.find((r) => r.roundId === selectedRoundId);
     if (!round) return;
     let cancelled = false;
     setLoading(true);
+    setLoadError(null);
     const ceilingId = roundEventCeiling(round, roundsRef.current);
     const nextRound = roundsRef.current.filter((r) => r.roundId > round.roundId).sort((a, b) => a.roundId - b.roundId)[0];
     const spendCeilingId = nextRound ? nextRound.startSpendId : null;
-    Promise.all([
-      loadRoundEvents(round, ceilingId, (after, limit) => fetchEvents({ after, limit })),
-      loadRoundSpend(round, spendCeilingId, (after, limit) => fetchSpend({ after, limit })),
-    ]).then(([events, spend]) => {
+    // #766 gate② finding [3]: `loadRoundLog` never rejects itself (a failed fetch resolves to
+    // `{ok: false, error}`), so there is no unhandled-rejection path here to miss — every
+    // terminal outcome, success or failure, reaches exactly one of these two branches and always
+    // clears `loading`.
+    loadRoundLog(round, ceilingId, spendCeilingId, lanesMax).then((result) => {
       if (cancelled) return;
-      setLog({ round, events, checkpoints: buildCheckpoints(events, lanesMax), spend, phaseWindows: buildPhaseWindows(events) });
-      setPosition(initialReplayPosition(lanesMax));
-      setLoading(false);
+      if (result.ok) {
+        setLog(result.log);
+        setPosition(initialReplayPosition(lanesMax));
+        setLoading(false);
+      } else {
+        setLoading(false);
+        setLoadError(result.error);
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [selectedRoundId, lanesMax]);
+  }, [selectedRoundId, lanesMax, loadAttempt]);
 
   // #766 gate② finding [0]: every reader below goes through `activeLog` — a `log` whose OWN round
   // no longer matches `selectedRoundId` (the async load for a NEWLY selected round hasn't resolved
@@ -140,6 +200,8 @@ export function useReplay(rounds: Round[], lanesMax: number | null): ReplayView 
     setSelectedRoundId(roundId);
   };
 
+  const retryLoad = () => setLoadAttempt((n) => n + 1);
+
   const scrub = (eventId: number) => {
     if (!activeLog) return;
     dispatch({ type: "scrub" });
@@ -156,6 +218,8 @@ export function useReplay(rounds: Round[], lanesMax: number | null): ReplayView 
     selectedRoundId,
     selectRound,
     loading,
+    loadError,
+    retryLoad,
     position: activePosition,
     playing: transport.playing,
     speed: transport.speed,

@@ -210,6 +210,10 @@ export function appContent(vm: AppViewModel) {
           onPause={replay.pause}
           onSpeed={replay.setSpeed}
           onScrub={replay.scrub}
+          loading={replay.loading}
+          loadError={replay.loadError}
+          onRetry={replay.retryLoad}
+          disconnected={disconnected}
           now={clock}
         />
 
@@ -305,13 +309,16 @@ export function App({ now, initialConfigOpen }: { now?: Date | undefined; initia
     openAttention: activeOpenAttention,
   } = resolveActiveFold(mode, replay.position, events, initialReplayState(lanesMax));
 
-  // §3's documented `disconnected` header state: ANY of the three queries failing means the
+  // §3's documented `disconnected` header state: ANY of the FOUR queries failing means the
   // dashboard has lost part of its one data source, regardless of which one (#715 gate② [7] —
   // this used to render only `loop.error`'s raw message, and nothing at all when just the events
   // query failed; #715 gate② round 4 [2] — `spend` was still missing, so a lone `/api/spend`
   // failure left the header looking normal while the cost strip silently misreported "no spend
-  // yet today").
-  const disconnected = loop.isError || Boolean(events.error) || Boolean(spend.error);
+  // yet today"; #766 gate② finding [2] round 3 — `rounds` was still missing too: a failed
+  // `/api/rounds` fetch left the header reading healthy while `rounds.data?.rounds ?? []`
+  // silently rendered the truthful-empty "no rounds yet" caption, converting a real transport
+  // failure into an honest-looking empty history).
+  const disconnected = loop.isError || Boolean(events.error) || Boolean(spend.error) || rounds.isError;
   // §3 A: env-park folds into the standby/"waiting" tier rather than an eighth state word — read
   // straight off the SAME open-attention fold the needs-attention strip already renders, never a
   // second park signal. Read off whichever fold is active (live or replay) — mode purity (§11).

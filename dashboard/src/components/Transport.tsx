@@ -23,6 +23,17 @@ export interface TransportProps {
   onSpeed?: (speed: PlaySpeed) => void;
   /** Scrub bar drag target — an events.id within the selected round's window. */
   onScrub?: (eventId: number) => void;
+  /** #766 gate② finding [3]: the selected round's log is still fetching — no controls to show
+   *  yet, but the caption says so honestly rather than rendering nothing. */
+  loading?: boolean;
+  /** #766 gate② finding [3]: the load rejected — shown instead of the transport controls, with
+   *  a retry affordance, rather than leaving the panel permanently blank with no explanation. */
+  loadError?: unknown;
+  onRetry?: () => void;
+  /** #766 gate② finding [2]: the `/api/rounds` fetch itself failed — same documented
+   *  `disconnected` empty state `LaneBoard`/`ActivityFeed` already render, so a rounds-fetch
+   *  failure never gets mistaken for the honest "no rounds yet" empty history. */
+  disconnected?: boolean;
   now?: Date;
 }
 
@@ -88,10 +99,25 @@ export function Transport({
   onPause,
   onSpeed,
   onScrub,
+  loading = false,
+  loadError,
+  onRetry,
+  disconnected = false,
   now,
 }: TransportProps) {
   const clock = now ?? new Date();
   const selected = rounds.find((r) => r.roundId === selectedRoundId) ?? null;
+
+  if (disconnected) {
+    return (
+      <section className="panel transport" aria-label="replay">
+        <h2>rounds</h2>
+        <p className="muted" style={{ color: "var(--rust)" }}>
+          disconnected — restart sapwood to reconnect
+        </p>
+      </section>
+    );
+  }
 
   return (
     <section className="panel transport" aria-label="replay">
@@ -112,7 +138,28 @@ export function Transport({
         </ul>
       )}
 
-      {selected && (
+      {selected && loading && (
+        <fieldset className="transport-controls" aria-label="transport controls">
+          <button type="button" onClick={() => onSelectRound(null)}>
+            back to live
+          </button>
+          <p className="muted transport-loading">loading round…</p>
+        </fieldset>
+      )}
+
+      {selected && !loading && loadError !== undefined && loadError !== null && (
+        <fieldset className="transport-controls" aria-label="transport controls">
+          <button type="button" onClick={() => onSelectRound(null)}>
+            back to live
+          </button>
+          <p className="muted transport-load-error">could not load this round</p>
+          <button type="button" onClick={onRetry}>
+            retry
+          </button>
+        </fieldset>
+      )}
+
+      {selected && !loading && (loadError === undefined || loadError === null) && (
         <fieldset className="transport-controls" aria-label="transport controls">
           <button type="button" onClick={() => onSelectRound(null)}>
             back to live
