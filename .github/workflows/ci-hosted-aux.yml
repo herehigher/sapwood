@@ -1,0 +1,49 @@
+# PRE-PUBLIC ONLY: auxiliary hosted arm running alongside ci.yml's self-hosted-primary
+# `test` while that runner is primary (owner directive, 2026-08-10). This workflow is
+# advisory — its job is NOT in `ci.requiredChecks` (gate① keys on the job name `test`),
+# so a failure here does not block merge. It exists to keep the hosted-runner path
+# exercised on every merge to main during the self-hosted-primary window. AT go-public,
+# this workflow is DELETED along with the whole self-hosted setup: `test` reverts to
+# `ubuntu-latest`, `selfhost-ci.yml` and the actionlint label entry are removed, and the
+# runner is deregistered. Full removal list tracked on the go-public cutover checklist
+# (#329).
+#
+# Why a SEPARATE workflow rather than an `if: github.event_name == 'push'` job inside
+# ci.yml (the #768 shape): a job-level `if` still reports a SKIPPED check on every PR
+# head, and the engine's gate① predicate deliberately refuses "all checks green except a
+# skipped one" (engine/src/forge/forge.ts `ciGreen`, documented in
+# docs/configuration.md `ci`) — every engine-driven PR wedged in `ci-no-longer-green`
+# (live: PR #766, 2026-08-10). A push-only workflow produces NO check on PR rollups at
+# all: same runs, same minutes saved, no skipped-check residue.
+name: CI (hosted aux)
+on:
+  push:
+    branches: [main]
+
+# Main-branch runs are the merge record, never cancelled — same stance as ci.yml's
+# main carve-out; this workflow has no PR runs to supersede.
+concurrency:
+  group: ci-hosted-aux-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Steps mirror ci.yml `test`'s step list exactly (checkout, setup-node@v4 node 24 +
+  # npm cache, npm ci, both typechecks, lint, both timeout-wrapped test steps); `test`
+  # is the canonical source — if it changes, update this job too (drift check is
+  # manual, no automated diff).
+  test-hosted:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm --workspace engine run typecheck
+      - run: npm --workspace dashboard run typecheck
+      - run: npm run lint
+      - run: timeout --kill-after=30s 600 npm --workspace engine test
+      - run: timeout --kill-after=30s 300 npm --workspace dashboard test
