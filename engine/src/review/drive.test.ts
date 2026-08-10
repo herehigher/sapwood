@@ -11,6 +11,7 @@ import type { ApprovalResult } from "../roles/reviewer.js";
 import {
   buildCiInertEscalationComment,
   buildCiInertEscalationPayload,
+  CI_INERT_NAME_CAP,
   checkPreflight,
   driveEngineAgentReview,
   type EngineAgentDriveDeps,
@@ -231,6 +232,7 @@ test("refetchStillValid (gate② opus round 1 P2, #797): an inert rollup WITH ci
 test("buildCiInertEscalationPayload: names each non-passing check with its conclusion, drops passing ones", () => {
   const payload = buildCiInertEscalationPayload(
     status({
+      ciInert: true,
       ciChecks: [
         { name: "test", conclusion: "SUCCESS" },
         { name: "lint", conclusion: "SKIPPED" },
@@ -247,18 +249,64 @@ test("buildCiInertEscalationPayload: names each non-passing check with its concl
 });
 
 test("buildCiInertEscalationPayload: a malformed entry with neither conclusion nor state names UNKNOWN (parsePRStatus's own normalization), never throws", () => {
-  const payload = buildCiInertEscalationPayload(status({ ciChecks: [{ name: "mystery", conclusion: "UNKNOWN" }] }));
+  const payload = buildCiInertEscalationPayload(status({ ciInert: true, ciChecks: [{ name: "mystery", conclusion: "UNKNOWN" }] }));
   assert.deepEqual(payload, { checks: [{ name: "mystery", conclusion: "UNKNOWN" }] });
 });
 
-test("buildCiInertEscalationPayload: an all-passing rollup names nothing", () => {
-  const payload = buildCiInertEscalationPayload(status({ ciChecks: [{ name: "test", conclusion: "SUCCESS" }] }));
-  assert.deepEqual(payload, { checks: [] });
+// ── gate② opus round 1 on PR #806 (P3): an empty non-passing list is ALSO asserted, not silently
+// tolerated — `ciInert: true` from a real `parsePRStatus` read can never coexist with zero
+// non-passing checks (forge.ts's own derivation), so a status that does is a hand-built fixture
+// violating the invariant, the same class of caller bug the `ciInert`-gate assertion above catches ──
+
+test("buildCiInertEscalationPayload: throws on an all-passing rollup — ciInert:true with zero non-passing checks violates the invariant, never rendered as a degenerate empty-evidence payload", () => {
+  assert.throws(
+    () => buildCiInertEscalationPayload(status({ ciInert: true, ciChecks: [{ name: "test", conclusion: "SUCCESS" }] })),
+    /names no non-passing check/,
+  );
 });
 
-test("buildCiInertEscalationPayload: no ciChecks attached (pre-#797 fixture/absent-rollup case) names nothing, never throws", () => {
-  const payload = buildCiInertEscalationPayload(status({ ciChecks: undefined }));
-  assert.deepEqual(payload, { checks: [] });
+test("buildCiInertEscalationPayload: throws when no ciChecks are attached at all (a hand-built fixture violating the ciInert->ciChecks invariant) — same reasoning as the all-passing case", () => {
+  assert.throws(() => buildCiInertEscalationPayload(status({ ciInert: true, ciChecks: undefined })), /names no non-passing check/);
+});
+
+// ── gate② opus round 1 review note (b), carried into this wiring PR: the caller must gate on
+// `status.ciInert === true` — asserted, not silently tolerated ─────────────────────────────────
+
+test("buildCiInertEscalationPayload: throws when called with ciInert !== true — the caller forgot to gate (producer bug, not a runtime path a correctly-gated caller can ever reach)", () => {
+  assert.throws(
+    () => buildCiInertEscalationPayload(status({ ciInert: false, ciChecks: [{ name: "lint", conclusion: "SKIPPED" }] })),
+    /ciInert/,
+  );
+  assert.throws(() => buildCiInertEscalationPayload(status({ ciInert: undefined })), /ciInert/);
+});
+
+// ── gate② opus round 1 review note (a), carried into this wiring PR: cap the payload's name list
+// at CI_INERT_NAME_CAP (10), folding the rest into a `truncated` count ─────────────────────────
+
+test(`buildCiInertEscalationPayload: caps the name list at ${CI_INERT_NAME_CAP} and reports the remainder as truncated`, () => {
+  const many = Array.from({ length: 13 }, (_, i) => ({ name: `check-${i}`, conclusion: "SKIPPED" }));
+  const payload = buildCiInertEscalationPayload(status({ ciInert: true, ciChecks: many }));
+  assert.equal(payload.checks.length, CI_INERT_NAME_CAP);
+  assert.deepEqual(
+    payload.checks.map((c) => c.name),
+    many.slice(0, CI_INERT_NAME_CAP).map((c) => c.name),
+  );
+  assert.equal(payload.truncated, 3);
+});
+
+test("buildCiInertEscalationPayload: at or under the cap, truncated is omitted entirely (never 0)", () => {
+  const exactlyCap = Array.from({ length: CI_INERT_NAME_CAP }, (_, i) => ({ name: `check-${i}`, conclusion: "SKIPPED" }));
+  const payload = buildCiInertEscalationPayload(status({ ciInert: true, ciChecks: exactlyCap }));
+  assert.equal(payload.checks.length, CI_INERT_NAME_CAP);
+  assert.equal(payload.truncated, undefined);
+});
+
+test("refetchStillValid: the ci-inert reason string is also capped, with the same +M more suffix", () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({ name: `check-${i}`, conclusion: "SKIPPED" }));
+  const r = refetchStillValid(status({ ciGreen: false, ciRed: false, ciInert: true, ciChecks: many }), data(), "H1", "B1");
+  assert.equal(r.ok, false);
+  assert.match((r as { reason: string }).reason, /^ci-inert: check-0 \(SKIPPED\), check-1 \(SKIPPED\)/);
+  assert.match((r as { reason: string }).reason, /\+2 more$/);
 });
 
 test("buildCiInertEscalationComment: names the remedy, cites docs/configuration.md's ci section, and cites PR #769", () => {
@@ -277,6 +325,18 @@ test("buildCiInertEscalationComment: names every non-passing check, comma-separa
     { name: "legacy-ctx", conclusion: "PENDING" },
   ]);
   assert.match(comment, /lint \(SKIPPED\), legacy-ctx \(PENDING\)/);
+});
+
+test("buildCiInertEscalationComment: a truncated count appends a +M more tail after the joined names", () => {
+  const comment = buildCiInertEscalationComment("H1", [{ name: "lint", conclusion: "SKIPPED" }], 4);
+  assert.match(comment, /lint \(SKIPPED\), \+4 more concluded without passing/);
+});
+
+test("buildCiInertEscalationComment: an omitted/zero truncated count renders nothing extra — byte-identical to the uncapped case", () => {
+  const withoutArg = buildCiInertEscalationComment("H1", [{ name: "lint", conclusion: "SKIPPED" }]);
+  const withZero = buildCiInertEscalationComment("H1", [{ name: "lint", conclusion: "SKIPPED" }], 0);
+  assert.equal(withoutArg, withZero);
+  assert.doesNotMatch(withoutArg, /more/);
 });
 
 // ── driveEngineAgentReview: the full composition, scripted with fakes ─────────────────────────

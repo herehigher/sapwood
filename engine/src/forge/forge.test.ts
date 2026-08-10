@@ -1968,6 +1968,32 @@ test("parsePRStatus (#783/#797): a lone REAL in-flight CheckRun (empty-string co
   assert.equal(s.ciInert, false);
 });
 
+/** gate② opus round 1 review note (c) (#783 wiring): the real `gh pr view --json
+ *  statusCheckRollup` shape for a CONCLUDED CheckRun — carries a real `name`, unlike
+ *  REAL_IN_PROGRESS_CHECK above (which the production transport never populates with one while
+ *  the check is still in flight — `name` only shows up once GitHub has something to name). */
+const REAL_SKIPPED_CHECK = {
+  __typename: "CheckRun",
+  name: "aux-lint",
+  conclusion: "SKIPPED",
+  status: "COMPLETED",
+  completedAt: "2026-08-10T12:00:00Z",
+};
+
+test("parsePRStatus (gate② opus round 1 review note (c), #797/#783 wiring): ciChecks picks up a REAL check name from a live-shaped, concluded gh entry — never the empty-string placeholder an in-flight check normalizes to", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 18,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [REAL_SKIPPED_CHECK],
+    }),
+  );
+  assert.equal(s.ciInert, true);
+  assert.deepEqual(s.ciChecks, [{ name: "aux-lint", conclusion: "SKIPPED" }]);
+});
+
 test("parsePRStatus (#783): a CheckRun with conclusion: null and no state field at all fails closed to NOT inert — null-shaped variant, additional case (reads as pending, same as today)", () => {
   const s = parsePRStatus(
     JSON.stringify({
