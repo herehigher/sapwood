@@ -1,22 +1,38 @@
 // dashboard.test.ts (#743) — `sapwood dashboard`: the CLI verb that starts dashboard/server.ts
 // and opens a browser at the served URL. Covers: flag/env parsing (--port, --config, the fail-
 // closed conventions shared with run/status/events), the platform browser-opener argv (pure, no
-// real execFile), the orchestration order (#710 config resolution -> port -> dashboard/dist
-// bundle present -> start server -> open browser) via injected fakes (no real subprocess spawn),
-// and — separately — real end-to-end checks that the actual child-process mechanism
-// (dashboard/start.ts under `node --import tsx`) reports back the port it actually bound, both
-// for an OS-assigned port and an explicit one, matching dashboard/server.ts:427's own contract.
+// real execFile), the orchestration order (#710 config resolution -> port -> dashboard/dist +
+// compiled-server bundle present -> start server -> open browser) via injected fakes (no real
+// subprocess spawn), and — separately — real end-to-end checks that the actual child-process
+// mechanism (the compiled dashboard/dist-server/start.js, spawned with plain `node`) reports back
+// the port it actually bound, both for an OS-assigned port and an explicit one, matching
+// dashboard/server.ts:427's own contract.
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { before, test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { parseDashboardArgs, parseDashboardPortFlag, resolveDashboardPort, runCli, runDashboard } from "../cli.js";
 import { DEFAULT_DASHBOARD_PORT } from "../state/read-model.js";
 import { State } from "../state/state.js";
 import { type BrowserOpenResult, type DashboardServerHandle, openerArgv, startDashboardServer } from "./dashboard-launcher.js";
 
 const MINIMAL_CONFIG = "board: { owner: acme, repo: widgets, projectNumber: 7 }\nlanes: { max: 3 }\ncost: { dailyBudgetUsd: 50 }\n";
+
+const pExecFile = promisify(execFile);
+const DASHBOARD_DIR = fileURLToPath(new URL("../../../dashboard", import.meta.url));
+
+// The real end-to-end section below spawns the ACTUAL compiled dashboard/dist-server/start.js.
+// CI's own `npm --workspace engine test` step never runs `npm run build` for any workspace first
+// (.github/workflows/ci.yml only typechecks/lints/tests), so this suite builds its own fixture
+// here rather than assuming a pre-built artifact already exists on disk — the same build command
+// (`npm run build -w dashboard`) an operator would run, just triggered as test setup.
+before(async () => {
+  await pExecFile(process.execPath, ["build-server.mjs"], { cwd: DASHBOARD_DIR });
+});
 
 /** Temp dir, cleaned up after `fn` (which may be async — the caller awaits this). */
 async function withDataDir(fn: (dir: string) => Promise<void> | void): Promise<void> {
@@ -38,9 +54,18 @@ function stubDist(dir: string): string {
   return indexPath;
 }
 
+/** A dashboard/dist-server stub that satisfies runDashboard's compiled-server-present check —
+ *  same "existence only" probe as stubDist above; these fake-startServer tests never actually
+ *  spawn it. */
+function stubServerEntry(dir: string): string {
+  const entryPath = join(dir, "start-stub.js");
+  writeFileSync(entryPath, "");
+  return entryPath;
+}
+
 function fakeHandle(port: number): { handle: DashboardServerHandle; stopped: boolean[] } {
   const stopped: boolean[] = [];
-  return { handle: { port, stop: () => stopped.push(true) }, stopped };
+  return { handle: { port, stop: async () => void stopped.push(true) }, stopped };
 }
 
 function collectingLog(): { log: (message: string) => void; lines: string[] } {
@@ -210,6 +235,7 @@ test("runDashboard: a valid --config loads authoritatively and the run proceeds"
         openBrowser: async () => ({ opened: true }),
         waitForStop: async () => {},
         dashboardDistIndex: stubDist(dir),
+        dashboardServerEntry: stubServerEntry(dir),
         log: () => {},
       },
     );
@@ -265,6 +291,7 @@ test("runDashboard: port already in use — names the port and the --port flag/e
           return { opened: true };
         },
         dashboardDistIndex: stubDist(dir),
+        dashboardServerEntry: stubServerEntry(dir),
       },
     );
     assert.equal(code, 1);
@@ -276,25 +303,45 @@ test("runDashboard: port already in use — names the port and the --port flag/e
   });
 });
 
-test("runDashboard: headless — browser cannot open, logs the URL and the message, exits 0 rather than crashing (AC2)", async () => {
+// #743 gate② finding [1]: the previous version of this test injected `waitForStop: async () =>
+// {}` — an ALREADY-RESOLVED promise — which cannot distinguish the required behavior (the server
+// stays alive until the operator's Ctrl+C) from a bug that stops it immediately after the
+// browser-open failure. A deferred, manually-releasable seam makes the two distinguishable: assert
+// runDashboard is still pending and the handle is still NOT stopped before the seam releases, only
+// after. Deterministic seam control, not a real-timer race (review doctrine) — `setImmediate`
+// drains the microtask queue so every already-resolved step ahead of `await waitForStop()` has run.
+test("runDashboard: headless — the server stays alive until the stop seam resolves (Ctrl+C), not immediately after browser-open fails (AC2)", async () => {
   await withDataDir(async (dir) => {
     const { log, lines } = collectingLog();
     const { handle, stopped } = fakeHandle(4321);
-    const code = await runDashboard(
+    let releaseStop: (() => void) | undefined;
+    const waitForStop = () =>
+      new Promise<void>((resolveWait) => {
+        releaseStop = resolveWait;
+      });
+    const resultPromise = runDashboard(
       {},
       {
         log,
         startServer: async () => handle,
         openBrowser: async (): Promise<BrowserOpenResult> => ({ opened: false, reason: "no display" }),
-        waitForStop: async () => {},
+        waitForStop,
         dashboardDistIndex: stubDist(dir),
+        dashboardServerEntry: stubServerEntry(dir),
       },
     );
+    await new Promise((r) => setImmediate(r));
+    assert.ok(releaseStop, "waitForStop must have been reached (every step ahead of it already resolved)");
+    assert.deepEqual(stopped, [], "the server must not be stopped before the operator asks it to (Ctrl+C)");
+    const joinedBeforeRelease = lines.join("\n");
+    assert.match(joinedBeforeRelease, /http:\/\/127\.0\.0\.1:4321/);
+    assert.match(joinedBeforeRelease, /no display/);
+    assert.match(joinedBeforeRelease, /Ctrl\+C/);
+
+    releaseStop?.();
+    const code = await resultPromise;
     assert.equal(code, 0);
-    const joined = lines.join("\n");
-    assert.match(joined, /http:\/\/127\.0\.0\.1:4321/);
-    assert.match(joined, /no display/);
-    assert.deepEqual(stopped, [true]); // the server is stopped on exit, not left dangling
+    assert.deepEqual(stopped, [true]);
   });
 });
 
@@ -312,6 +359,7 @@ test("runDashboard: browser opens successfully — the opener is invoked with th
         },
         waitForStop: async () => {},
         dashboardDistIndex: stubDist(dir),
+        dashboardServerEntry: stubServerEntry(dir),
         log: () => {},
       },
     );
@@ -322,8 +370,8 @@ test("runDashboard: browser opens successfully — the opener is invoked with th
 
 // ── real end-to-end: the actual child-process mechanism reports back the bound port ────────
 // (Tier A per #743's verification plan — loopback-only network, no display. Spawns the real
-// `node --import tsx dashboard/start.ts` child; slower than the fakes above, so kept to the two
-// cases the AC actually asks for: an OS-assigned port and an explicit one.)
+// compiled dashboard/dist-server/start.js with plain `node` (built by this file's own `before`
+// hook, above); slower than the fakes above, so kept to the cases the AC actually asks for.)
 
 function seedDb(dbPath: string): void {
   const s = new State(dbPath);
@@ -340,7 +388,7 @@ test("startDashboardServer (real, e2e): an OS-assigned port (0) resolves with th
       const res = await fetch(`http://127.0.0.1:${handle.port}/api/loop/state`);
       assert.equal(res.status, 200);
     } finally {
-      handle.stop();
+      await handle.stop();
     }
   });
 });
@@ -356,7 +404,7 @@ test("startDashboardServer (real, e2e): a second bind on an already-occupied por
         (e: NodeJS.ErrnoException) => e.code === "EADDRINUSE",
       );
     } finally {
-      first.stop();
+      await first.stop();
     }
   });
 });
@@ -366,20 +414,26 @@ test("startDashboardServer (real, e2e): a second bind on an already-occupied por
 // proven through the real listen callback, not just the unspecified case. Discover a genuinely
 // free port the same way the EADDRINUSE test above reuses one (bind 0, release, reuse the number)
 // rather than a hardcoded literal that could collide with something else already listening in CI.
+//
+// #743 gate② finding [2]: `stop()` returning a real completion signal (dashboard-launcher.ts's own
+// doc) is what makes reusing `explicitPort` immediately below SAFE — a fire-and-forget stop() that
+// only sent SIGTERM without waiting for the child's actual exit raced this rebind against the OS
+// releasing the old listening socket, the "timing-dependent assertion" class review doctrine bans.
+// AWAITING stop() (not a bigger margin/sleep) is the fix: the port is only reused once it's real.
 test("startDashboardServer (real, e2e): an explicit nonzero --port resolves with that EXACT port, through the real child process", async () => {
   await withDataDir(async (dir) => {
     const dbPath = join(dir, "sapwood.sqlite");
     seedDb(dbPath);
     const probe = await startDashboardServer({ dbPath, port: 0 });
     const explicitPort = probe.port;
-    probe.stop();
+    await probe.stop();
     const handle = await startDashboardServer({ dbPath, port: explicitPort });
     try {
       assert.equal(handle.port, explicitPort);
       const res = await fetch(`http://127.0.0.1:${handle.port}/api/loop/state`);
       assert.equal(res.status, 200);
     } finally {
-      handle.stop();
+      await handle.stop();
     }
   });
 });
@@ -403,7 +457,7 @@ test("startDashboardServer (real, e2e): an explicit --config is what's actually 
       const body = (await res.json()) as any;
       assert.equal(body.lanes.max, 9, "the served config must be the explicitly-named file's, not null or a different default");
     } finally {
-      handle.stop();
+      await handle.stop();
     }
   });
 });

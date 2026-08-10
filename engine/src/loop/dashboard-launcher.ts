@@ -1,20 +1,25 @@
 // dashboard-launcher.ts (#743) — the ONLY child_process touchpoints `sapwood dashboard` needs:
-// opening the platform browser, and spawning dashboard/start.ts as a child process. Split out of
-// cli.ts (which otherwise stays exec-free) for the same reason worker.ts/gh.ts/materializer.ts/
-// review/codex-exec.ts are: worker.test.ts's "#69 grep-invariant" enumerates the ONLY engine
-// files allowed to `import ... from "node:child_process"` and fails closed on every other file —
-// this module is the fifth, dashboard-scoped entry in that list (see that test's own update).
+// opening the platform browser, and spawning dashboard/dist-server/start.js as a child process.
+// Split out of cli.ts (which otherwise stays exec-free) for the same reason worker.ts/gh.ts/
+// materializer.ts/review/codex-exec.ts are: worker.test.ts's "#69 grep-invariant" enumerates the
+// ONLY engine files allowed to `import ... from "node:child_process"` and fails closed on every
+// other file — this module is the fifth, dashboard-scoped entry in that list (see that test's own
+// update).
 //
-// DELIBERATE dependency-posture exception (gate② finding, flagged for human confirmation): the
-// child is spawned via `node --import tsx`, so `tsx` is now a real DEPENDENCY of
-// engine/package.json (moved out of devDependencies), not just yaml+zod. This is required because
-// dashboard/server.ts's NodeNext `.js` import specifiers point at uncompiled TypeScript siblings
-// (`../engine/src/config/config.js` etc — dashboard/tsconfig.server.json is typecheck-only, no
-// build emits that path) that plain `node` cannot resolve on its own (verified experimentally:
-// ERR_MODULE_NOT_FOUND). The alternative — a real compiled `dist` entry for the dashboard server,
-// so no loader is needed at all at runtime — is a separate, larger undertaking (a new
-// engine-vs-dashboard build/import convention, not a fix-round-sized change) and is left as
-// follow-up if this trade-off is rejected.
+// The child runs a COMPILED entry, not TypeScript source: dashboard/server.ts's NodeNext `.js`
+// import specifiers point at uncompiled TypeScript siblings (`../engine/src/config/config.js` etc
+// — dashboard/tsconfig.server.json is typecheck-only, no build emits that path), so plain `node`
+// cannot resolve them on its own (verified experimentally: ERR_MODULE_NOT_FOUND). An earlier
+// version of this launcher worked around that with `node --import tsx`, which a gate② review
+// correctly flagged as an undeclared/deviant runtime dependency (`tsx` is a dev tool, and the
+// issue's own "yaml+zod only" runtime posture predates this feature). `dashboard/build-server.mjs`
+// (run by `npm run build -w dashboard`, alongside the existing `vite build`) now bundles
+// dashboard/start.ts — and everything it transitively imports from dashboard/server.ts and
+// engine/src/** — into ONE self-contained plain-JS file at dashboard/dist-server/start.js, which
+// this function spawns with a bare `node`, no loader flag, no `tsx` dependency of any kind at
+// runtime. A missing dashboard/dist-server bundle is caught by engine/src/cli.ts's `runDashboard`
+// BEFORE this function is ever called (same "run the build command" message that already covers
+// the vite SPA bundle).
 import { execFile, spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
@@ -53,7 +58,22 @@ export async function openBrowserReal(url: string): Promise<BrowserOpenResult> {
 
 export interface DashboardServerHandle {
   port: number;
-  stop: () => void;
+  /** Sends SIGTERM and resolves once the child has ACTUALLY exited (not just once the signal was
+   *  sent) — a caller that wants to immediately reuse the same port (a restart, or this module's
+   *  own tests rebinding on an explicit port) must wait for the OS to actually release the
+   *  listening socket. An earlier version returned `void` here; a test that killed one server and
+   *  immediately started another on the SAME port raced the first child's real exit against the
+   *  second's bind attempt — the "timing-dependent assertion" class this repo's review doctrine
+   *  bans, now closed with a real completion signal instead of a bigger margin (gate② finding). */
+  stop: () => Promise<void>;
+}
+
+/** Path to the bundled server entry `npm run build -w dashboard` produces (dashboard/build-
+ *  server.mjs's own doc has the full rationale). Exported so cli.ts's `runDashboard` can check for
+ *  its existence with the SAME path this function spawns — a probe that drifted from the real
+ *  spawn target would be worse than no probe at all. */
+export function dashboardServerEntryPath(): string {
+  return resolve(import.meta.dirname, "..", "..", "..", "dashboard", "dist-server", "start.js");
 }
 
 export interface StartDashboardServerOpts {
@@ -62,27 +82,33 @@ export interface StartDashboardServerOpts {
   port: number;
 }
 
-/** Spawns dashboard/start.ts (which calls dashboard/server.ts's own `createDashboardServer`) as a
- *  CHILD PROCESS — never a static `import` here, which would invert dashboard/server.ts's
- *  existing one-way `dashboard -> engine` dependency into a cycle (#743's own constraint: no
- *  `engine -> dashboard` static import anywhere reachable from engine/src/cli.ts). The child is
- *  `node --import tsx dashboard/start.ts ...`: dashboard/server.ts uses NodeNext-style `.js`
- *  import specifiers that point at TypeScript siblings (e.g. `../engine/src/config/config.js`,
- *  which is never compiled — dashboard/tsconfig.server.json is typecheck-only), so plain `node`
- *  cannot resolve them (verified: ERR_MODULE_NOT_FOUND) — tsx's loader is what makes that
- *  resolution work, the same way it already does for this repo's own test suites. Argv array
- *  throughout, no shell involved anywhere.
+/** Spawns the bundled dashboard/dist-server/start.js (built from dashboard/start.ts, which calls
+ *  dashboard/server.ts's own `createDashboardServer`) as a CHILD PROCESS — never a static `import`
+ *  here, which would invert dashboard/server.ts's existing one-way `dashboard -> engine`
+ *  dependency into a cycle (#743's own constraint: no `engine -> dashboard` static import anywhere
+ *  reachable from engine/src/cli.ts). Plain `node`, no loader flag, argv array throughout, no
+ *  shell involved anywhere — see dashboardServerEntryPath's doc for why a COMPILED entry exists at
+ *  all rather than running start.ts's own TypeScript source directly.
  *
- *  start.ts reports its outcome as ONE JSON line on stdout — `{"ok":true,"port":N}` or
+ *  The child reports its outcome as ONE JSON line on stdout — `{"ok":true,"port":N}` or
  *  `{"ok":false,"code":"EADDRINUSE"|null,"message":"..."}` — so this function can tell "listening"
  *  apart from "port already in use" without scraping human-facing log text; stderr is inherited
  *  so a real crash still surfaces in the operator's terminal. */
 export function startDashboardServer(opts: StartDashboardServerOpts): Promise<DashboardServerHandle> {
-  const entry = resolve(import.meta.dirname, "..", "..", "..", "dashboard", "start.ts");
-  const args = ["--import", "tsx", entry, "--db-path", opts.dbPath, "--port", String(opts.port)];
+  const entry = dashboardServerEntryPath();
+  const args = [entry, "--db-path", opts.dbPath, "--port", String(opts.port)];
   if (opts.configPath !== undefined) args.push("--config", opts.configPath);
-  // Argv array, no shell involved — same discipline as this function's own execFile call above.
   const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "inherit"] });
+
+  function stop(): Promise<void> {
+    // Already exited (e.g. it crashed on its own) — nothing to wait for, and attaching a listener
+    // for an "exit" that already happened would wait forever.
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+    return new Promise((resolveStop) => {
+      child.once("exit", () => resolveStop());
+      child.kill("SIGTERM");
+    });
+  }
 
   return new Promise((resolvePromise, reject) => {
     let buffered = "";
@@ -102,7 +128,7 @@ export function startDashboardServer(opts: StartDashboardServerOpts): Promise<Da
         return;
       }
       if (msg.ok && typeof msg.port === "number") {
-        resolvePromise({ port: msg.port, stop: () => child.kill("SIGTERM") });
+        resolvePromise({ port: msg.port, stop });
       } else {
         const err = new Error(msg.message ?? "dashboard server failed to start") as NodeJS.ErrnoException;
         if (msg.code) err.code = msg.code;

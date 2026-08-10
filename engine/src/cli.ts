@@ -26,6 +26,7 @@ import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop
 import {
   type BrowserOpenResult,
   type DashboardServerHandle,
+  dashboardServerEntryPath,
   openBrowserReal,
   type StartDashboardServerOpts,
   startDashboardServer,
@@ -1591,6 +1592,13 @@ export interface DashboardDeps {
   /** Overrides the dashboard/dist bundle probe path — real default: \`dashboard/dist/index.html\`
    *  relative to cwd, matching how \`sapwood run\`/\`status\` read data/ relative to cwd too. */
   dashboardDistIndex?: string;
+  /** Overrides the compiled dashboard server entry probe path — real default:
+   *  dashboardServerEntryPath() (dashboard/dist-server/start.js), the SAME file startServer's real
+   *  implementation spawns. Checked alongside dashboardDistIndex above, before either the server
+   *  starts or any browser-open attempt (AC5) — a stale/half-built \`dashboard/dist\` with no
+   *  compiled server would otherwise fail confusingly deep inside startServer instead of with the
+   *  one actionable "run the build command" message. */
+  dashboardServerEntry?: string;
 }
 
 export interface ValidatedDashboardArgs {
@@ -1622,6 +1630,11 @@ export async function runDashboard(validated: ValidatedDashboardArgs, deps: Dash
   const distIndex = deps.dashboardDistIndex ?? join("dashboard", "dist", "index.html");
   if (!existsSync(distIndex)) {
     log(`sapwood dashboard: no dashboard build found at ${distIndex} — run \`${DASHBOARD_BUILD_HINT}\` first, then retry.`);
+    return 1;
+  }
+  const serverEntry = deps.dashboardServerEntry ?? dashboardServerEntryPath();
+  if (!existsSync(serverEntry)) {
+    log(`sapwood dashboard: no dashboard server build found at ${serverEntry} — run \`${DASHBOARD_BUILD_HINT}\` first, then retry.`);
     return 1;
   }
 
@@ -1660,7 +1673,7 @@ export async function runDashboard(validated: ValidatedDashboardArgs, deps: Dash
 
   const waitForStop = deps.waitForStop ?? waitForStopSignal;
   await waitForStop();
-  handle.stop();
+  await handle.stop();
   return 0;
 }
 
