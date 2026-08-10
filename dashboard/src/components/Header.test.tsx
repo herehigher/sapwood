@@ -141,6 +141,54 @@ test("the meter renders the run tier's numerator/denominator, never the daily pa
   assert.doesNotMatch(html, /999/);
 });
 
+// #766 gate② finding [1]: the `round` prop (replay's honest, correctly-scoped reading) always
+// wins over `spend`'s run/daily tiers when present — the header's own title attribute names the
+// tier explicitly, so a reader (and a test) can tell "round spend" apart from "run"/"daily".
+test("the `round` prop wins outright over `spend` — renders the round figures, never the run/daily pair also passed", () => {
+  const html = renderToStaticMarkup(
+    <Header
+      disconnected={false}
+      isPending={false}
+      engine={engine("running")}
+      spend={{ runUsd: 999, runBudgetUsd: 999, todayUsd: 999, dailyBudgetUsd: 999 }}
+      round={{ usedUsd: 12.5, budgetUsd: 250 }}
+      parked={false}
+    />,
+  );
+  assert.match(html, /\$12\.50/);
+  assert.match(html, /\$250/);
+  assert.doesNotMatch(html, /999/, "the run/daily spend passed alongside round must never leak through");
+  assert.match(html, /title="round spend"/, "the meter must be explicitly labeled 'round', never conflated with run/daily");
+});
+
+test("no `round` prop: the meter falls back to the ordinary run/daily resolution, unaffected", () => {
+  const html = renderToStaticMarkup(
+    <Header
+      disconnected={false}
+      isPending={false}
+      engine={engine("running")}
+      spend={{ runUsd: 5, runBudgetUsd: 50, todayUsd: 1, dailyBudgetUsd: 10 }}
+      parked={false}
+    />,
+  );
+  assert.match(html, /title="run spend"/);
+});
+
+test("a null budgetUsd on `round` (artifact-less round) renders the used amount alone, no '/ $x' suffix", () => {
+  const html = renderToStaticMarkup(
+    <Header
+      disconnected={false}
+      isPending={false}
+      engine={engine("running")}
+      spend={SPEND_OK}
+      round={{ usedUsd: 3.14, budgetUsd: null }}
+      parked={false}
+    />,
+  );
+  assert.match(html, /\$3\.14/);
+  assert.doesNotMatch(html, /\$3\.14 \//);
+});
+
 test("does not render, import, or re-implement the legend", () => {
   const html = renderToStaticMarkup(
     <Header disconnected={false} isPending={false} engine={engine("running")} spend={SPEND_OK} parked={false} />,

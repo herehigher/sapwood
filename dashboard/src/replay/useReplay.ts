@@ -29,6 +29,23 @@ interface RoundLog {
   phaseWindows: PhaseWindow[];
 }
 
+/**
+ * #766 gate② finding [0] (round-switch-retains-old-replay): switching directly from a loaded
+ * round A to round B changes `selectedRoundId` synchronously, but the async `Promise.all` load
+ * for B's log only RESOLVES later — during that window the effect's own `setLog`/`setPosition`
+ * calls haven't fired yet, so `log` (React state) still holds round A's fully-loaded data. Every
+ * caller reading `log` directly during that window would show round A's hero/feed/spend under a
+ * navigator/transport already marking round B selected. Rather than relying on effect-timing to
+ * clear the old state (racy — the effect can't synchronously invalidate state a PRIOR render already
+ * committed), this derives validity structurally: a log whose OWN round doesn't match the CURRENT
+ * selection is treated as absent by every reader, on every render, regardless of when the effect
+ * gets around to clearing it. Exported and pure so the "still on round A" window is directly
+ * testable without mounting the hook or racing a real fetch.
+ */
+export function resolveActiveLog<T extends { round: { roundId: number } }>(log: T | null, selectedRoundId: number | null): T | null {
+  return log && log.round.roundId === selectedRoundId ? log : null;
+}
+
 export interface ReplayView {
   mode: "live" | "replay";
   selectedRoundId: number | null;
@@ -94,22 +111,29 @@ export function useReplay(rounds: Round[], lanesMax: number | null): ReplayView 
     };
   }, [selectedRoundId, lanesMax]);
 
+  // #766 gate② finding [0]: every reader below goes through `activeLog` — a `log` whose OWN round
+  // no longer matches `selectedRoundId` (the async load for a NEWLY selected round hasn't resolved
+  // yet) reads as absent, synchronously, on this very render — never round A's data rendered under
+  // round B's selection.
+  const activeLog = resolveActiveLog(log, selectedRoundId);
+  const activePosition = activeLog ? position : null;
+
   // The playback frame loop — ticks only while playing; each tick folds one incremental slice
   // via `advanceFrame` (never `foldToPosition`, AC2), auto-pausing at the round's end.
   useEffect(() => {
-    if (!transport.playing || !log) return;
+    if (!transport.playing || !activeLog) return;
     const id = setInterval(() => {
       setPosition((prev) => {
         if (!prev) return prev;
-        if (isAtEnd(prev, log.events)) {
+        if (isAtEnd(prev, activeLog.events)) {
           dispatch({ type: "ended" });
           return prev;
         }
-        return advanceFrame(prev, log.events, transport.speed);
+        return advanceFrame(prev, activeLog.events, transport.speed);
       });
     }, TICK_MS);
     return () => clearInterval(id);
-  }, [transport.playing, transport.speed, log]);
+  }, [transport.playing, transport.speed, activeLog]);
 
   const selectRound = (roundId: number | null) => {
     dispatch({ type: "pause" });
@@ -117,19 +141,22 @@ export function useReplay(rounds: Round[], lanesMax: number | null): ReplayView 
   };
 
   const scrub = (eventId: number) => {
-    if (!log) return;
+    if (!activeLog) return;
     dispatch({ type: "scrub" });
-    setPosition(scrubTo(log.events, log.checkpoints, eventId, lanesMax));
+    setPosition(scrubTo(activeLog.events, activeLog.checkpoints, eventId, lanesMax));
   };
 
-  const spendThroughCursor = log && position ? spendThroughTs(log.spend, cursorTs(position, log.events, log.round.startedAt)) : [];
+  const spendThroughCursor =
+    activeLog && activePosition
+      ? spendThroughTs(activeLog.spend, cursorTs(activePosition, activeLog.events, activeLog.round.startedAt))
+      : [];
 
   return {
     mode: selectedRoundId === null ? "live" : "replay",
     selectedRoundId,
     selectRound,
     loading,
-    position,
+    position: activePosition,
     playing: transport.playing,
     speed: transport.speed,
     play: () => dispatch({ type: "play" }),
@@ -137,6 +164,6 @@ export function useReplay(rounds: Round[], lanesMax: number | null): ReplayView 
     setSpeed: (speed: PlaySpeed) => dispatch({ type: "setSpeed", speed }),
     scrub,
     spendThroughCursor,
-    phaseWindows: log?.phaseWindows ?? [],
+    phaseWindows: activeLog?.phaseWindows ?? [],
   };
 }

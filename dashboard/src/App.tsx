@@ -7,7 +7,7 @@ import { ConfigDrawer } from "./components/ConfigDrawer.tsx";
 import { Controls } from "./components/Controls.tsx";
 import type { CostBarGroup } from "./components/CostStrip.tsx";
 import { CostStrip } from "./components/CostStrip.tsx";
-import { Header, type SpendFacts } from "./components/Header.tsx";
+import { Header, type RoundSpend, type SpendFacts } from "./components/Header.tsx";
 import { IconRail } from "./components/IconRail.tsx";
 import { LaneBoard } from "./components/LaneBoard.tsx";
 import { LiveOnly } from "./components/LiveOnly.tsx";
@@ -39,25 +39,29 @@ export function resolveFixCap(config: Record<string, unknown> | null | undefined
 }
 
 /**
- * PR #766 gate② audit finding [0] (replay-header-spend-live): the header's spend meter used to
- * receive `loop.data?.spend` unconditionally — the CURRENT live run/today snapshot — even while
- * viewing a closed round, so the header showed present-day spend beside historical hero/feed
- * state. §11's own rule for the header meter is "spend as of the cursor within the replayed run,
- * over that run's budget" — this is that rule, as a pure function so the mode/cursor branch is
- * unit-testable without mounting a full replay session. `replayUsd` is the caller's own
- * `spendThroughCursor` sum (§8's timestamp-cursor alignment already truncated it; empty — hence
- * 0, never a fabricated stale number — while the round's log is still loading, #766 finding [2]).
- * The budget denominators (`runBudgetUsd`/`dailyBudgetUsd`) are config, which does not replay
- * (§10) — carried through from the live snapshot as the honest "current ceiling" either way.
+ * PR #766 gate② audit finding [1] (header-replay-total-is-round-scoped) — round 2 of the header
+ * meter fix. Round 1 (finding [0], addressed on the previous head) labeled the SELECTED round's
+ * own cursor-truncated spend as `runUsd`/`todayUsd`: still wrong, because a multi-round RUN's
+ * true cumulative total needs every EARLIER round's spend too, which this app never loads (only
+ * the selected round's own window). Building genuine run-tier reconstruction would need either a
+ * new server endpoint exposing run boundaries per round, or an expensive full-history walk for
+ * `run-started` events — neither of which this codebase has today (confirmed: `/api/loop/state`'s
+ * own `spend.runUsd` is unconditionally `null` server-side EVEN LIVE — `dashboard/server.ts`'s own
+ * comment: "there is no honest way to compute a run-scoped sum from the DB alone"). Inventing a
+ * "run" number replay itself cannot honestly produce would repeat the same mistake finding [0]
+ * already made. `Header.tsx`'s new `RoundSpend`/`"round"` tier is the honest alternative used
+ * here: the round's OWN persisted `roundBudgetUsd` (immutable, historically correct — never
+ * today's possibly-since-changed live config, the OTHER half of finding [1]) against the SAME
+ * `spendThroughCursor` sum the phase strip already reads. `artifact` is the selected round's own
+ * (possibly `null` for an artifact-less round — falls back to an honest `budgetUsd: null`, same
+ * never-guess posture as everywhere else in this app).
  */
-export function resolveHeaderSpend(mode: "live" | "replay", replayUsd: number, liveSpend: SpendFacts | undefined): SpendFacts | undefined {
-  if (mode === "live") return liveSpend;
-  return {
-    runUsd: replayUsd,
-    runBudgetUsd: liveSpend?.runBudgetUsd ?? null,
-    todayUsd: replayUsd,
-    dailyBudgetUsd: liveSpend?.dailyBudgetUsd ?? null,
-  };
+export function resolveRoundSpend(replayUsd: number, artifact: unknown): RoundSpend {
+  const budgetUsd =
+    artifact && typeof artifact === "object" && typeof (artifact as Record<string, unknown>).roundBudgetUsd === "number"
+      ? ((artifact as Record<string, unknown>).roundBudgetUsd as number)
+      : null;
+  return { usedUsd: replayUsd, budgetUsd };
 }
 
 type ActiveFold = {
@@ -123,10 +127,13 @@ type AppViewModel = {
   activeEvents: DomainEvent[];
   activeTitles: EntityTitles;
   activeOpenAttention: DomainEvent[];
-  /** #766 gate② finding [0]: the header meter's own mode-aware spend — `resolveHeaderSpend`'s
-   *  output, never `loop.data?.spend` directly (that would leak live "today" spend into a
-   *  replay view). */
+  /** The header meter's LIVE spend snapshot — used only in live mode; in replay `roundSpend`
+   *  below always wins (Header.tsx's own `RoundSpend`-overrides-`SpendFacts` contract). */
   spendFacts: SpendFacts | undefined;
+  /** #766 gate② finding [1]: the header meter's honest replay reading — `resolveRoundSpend`'s
+   *  output, present only in replay mode. `undefined` in live mode, where `spendFacts` alone
+   *  drives the meter. */
+  roundSpend: RoundSpend | undefined;
 };
 
 /**
@@ -163,6 +170,7 @@ export function appContent(vm: AppViewModel) {
     activeTitles,
     activeOpenAttention,
     spendFacts,
+    roundSpend,
   } = vm;
   return (
     <div className="app-shell">
@@ -182,6 +190,7 @@ export function appContent(vm: AppViewModel) {
                 : undefined
             }
             spend={spendFacts}
+            round={roundSpend}
             parked={parked}
           />
           {/* §3 Operations: the engine control verbs hide entirely while viewing a closed round —
@@ -334,15 +343,19 @@ export function App({ now, initialConfigOpen }: { now?: Date | undefined; initia
     title: "by phase",
     bars: phaseSpendBars(bucketSpendByPhase(replay.spendThroughCursor, replay.phaseWindows)),
   };
-  // #766 gate② finding [0]: the header meter must show REPLAY-cursor-truncated spend while
-  // replaying, never `loop.data?.spend`'s live "today"/"run" snapshot — `resolveHeaderSpend`
-  // sums the SAME `spendThroughCursor` rows the phase strip above already reads (0 during the
-  // round's-log-still-loading window, never a stale live figure).
-  const spendFacts = resolveHeaderSpend(
-    mode,
-    replay.spendThroughCursor.reduce((sum, r) => sum + r.usd, 0),
-    loop.data?.spend,
-  );
+  // #766 gate② finding [1]: the header meter's replay reading — the SAME `spendThroughCursor` rows
+  // the phase strip above already reads (0 during the round's-log-still-loading window), against
+  // the SELECTED round's own persisted `roundBudgetUsd` (never today's live config). `spendFacts`
+  // (live) is passed through unconditionally too — Header.tsx's `round` prop always wins over it
+  // when both are present, so live mode is unaffected.
+  const selectedRoundArtifact = rounds.data?.rounds.find((r) => r.roundId === replay.selectedRoundId)?.artifact ?? null;
+  const roundSpend =
+    mode === "replay"
+      ? resolveRoundSpend(
+          replay.spendThroughCursor.reduce((sum, r) => sum + r.usd, 0),
+          selectedRoundArtifact,
+        )
+      : undefined;
 
   return appContent({
     clock,
@@ -365,6 +378,7 @@ export function App({ now, initialConfigOpen }: { now?: Date | undefined; initia
     activeEvents,
     activeTitles,
     activeOpenAttention,
-    spendFacts,
+    spendFacts: loop.data?.spend,
+    roundSpend,
   });
 }
