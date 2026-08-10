@@ -180,6 +180,10 @@
   padding: var(--space-2) var(--space-3);
 }
 
+.controls-error {
+  color: var(--rust);
+}
+
 .config-drawer-head {
   display: flex;
   align-items: center;

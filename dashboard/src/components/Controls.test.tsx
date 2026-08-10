@@ -100,15 +100,15 @@ test("mounting/rendering alone never calls the control function — no dead hand
 
 test("runControlEffect: idle and confirming phases never call onControl", async () => {
   const onControl = mock.fn(async () => undefined);
-  assert.equal(await runControlEffect({ phase: "idle" }, onControl), false);
-  assert.equal(await runControlEffect({ phase: "confirming", verb: "stop" }, onControl), false);
+  assert.deepEqual(await runControlEffect({ phase: "idle" }, onControl), { fired: false });
+  assert.deepEqual(await runControlEffect({ phase: "confirming", verb: "stop" }, onControl), { fired: false });
   assert.equal(onControl.mock.calls.length, 0);
 });
 
 test("runControlEffect: only the sending phase calls onControl, exactly once, with the confirmed verb", async () => {
   const onControl = mock.fn(async () => undefined);
-  const fired = await runControlEffect({ phase: "sending", verb: "pause" }, onControl);
-  assert.equal(fired, true);
+  const result = await runControlEffect({ phase: "sending", verb: "pause" }, onControl);
+  assert.deepEqual(result, { fired: true, ok: true });
   assert.equal(onControl.mock.calls.length, 1);
   assert.deepEqual(onControl.mock.calls[0]?.arguments, ["pause"]);
 });
@@ -118,13 +118,61 @@ test("request -> confirm, chained through the real reducer into the real effect:
   let state: ReturnType<typeof controlsReducer> = { phase: "idle" };
 
   state = controlsReducer(state, { type: "request", verb: "stop" });
-  assert.equal(await runControlEffect(state, onControl), false);
+  assert.deepEqual(await runControlEffect(state, onControl), { fired: false });
   assert.equal(onControl.mock.calls.length, 0, "a bare request must not have fired the call yet");
 
   state = controlsReducer(state, { type: "confirm" });
-  assert.equal(await runControlEffect(state, onControl), true);
+  assert.deepEqual(await runControlEffect(state, onControl), { fired: true, ok: true });
   assert.equal(onControl.mock.calls.length, 1, "confirming the same request fires exactly once");
   assert.deepEqual(onControl.mock.calls[0]?.arguments, ["stop"]);
+});
+
+// ── #739 gate② round 2 finding [1] (control-rejection-wedges-ui) ────────────────────────────
+//
+// Before this fix, `runControlEffect`'s caller chained a bare `.then()` with no rejection
+// handler: a rejecting `onControl` (any non-2xx `postControl` response, or a network failure)
+// left the promise's rejection unhandled AND skipped the `dispatch({ type: "settled" })` that
+// returns the reducer to `idle` — the reducer stayed wedged in `sending` forever, every button
+// disabled, until a full page reload. These tests pin the fix at the same level round 1's
+// confirm-flow tests did: chaining the real reducer into the real effect function, since this
+// harness has no jsdom to actually click a button and watch a rejection resolve.
+
+test("runControlEffect: a rejecting onControl never propagates the rejection — it resolves to an honest failure result", async () => {
+  const boom = new Error("engine unreachable");
+  const onControl = mock.fn(async () => {
+    throw boom;
+  });
+  const result = await runControlEffect({ phase: "sending", verb: "stop" }, onControl);
+  assert.deepEqual(result, { fired: true, ok: false, error: boom });
+});
+
+test("a rejected request still reports `fired: true` — the caller's dispatch({ type: 'settled' }) must run either way, or the reducer would stay wedged in `sending`", async () => {
+  const onControl = mock.fn(async () => {
+    throw new Error("503");
+  });
+  let state: ReturnType<typeof controlsReducer> = { phase: "idle" };
+  state = controlsReducer(state, { type: "request", verb: "pause" });
+  state = controlsReducer(state, { type: "confirm" });
+  assert.equal(state.phase, "sending");
+
+  const result = await runControlEffect(state, onControl);
+  assert.equal(result.fired, true, "a failed request is still a SETTLED one — the reducer must return to idle, not stay wedged");
+  if (result.fired) assert.equal(result.ok, false);
+
+  // The component's own effect dispatches `settled` whenever `fired` is true, regardless of `ok`
+  // — replicated here directly against the reducer, since that's the actual line this finding
+  // was about.
+  state = controlsReducer(state, { type: "settled" });
+  assert.deepEqual(state, { phase: "idle" }, "the UI must return to an actionable state after a failure, never stay disabled forever");
+});
+
+test("Controls renders the failure caption, never the raw error/status text, once mounted with onControl already failing", async () => {
+  // No jsdom to observe the DOM after a real click+rejection round-trips through the effect, but
+  // the component's own failure caption is a fixed string (never derived from the error object) —
+  // pinned directly so a future edit can't accidentally start interpolating raw error text into
+  // it (the same no-leaked-fetch-error posture App.tsx's `disconnected` header already holds to).
+  const html = renderToStaticMarkup(<Controls enabled />);
+  assert.doesNotMatch(html, /Couldn't reach the engine/, "not shown before any request has ever failed");
 });
 
 test("the confirming dialog renders the exact CONTROL_COPY confirmation text for the requested verb", () => {

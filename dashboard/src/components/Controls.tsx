@@ -1,4 +1,4 @@
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { postControl } from "../api/client.ts";
 import { CONTROL_VERBS, type ControlVerb } from "../api/types.ts";
 import { CONTROL_COPY } from "../copy.ts";
@@ -30,19 +30,37 @@ export function controlsReducer(state: ControlsState, action: ControlsAction): C
   }
 }
 
+/** The outcome of one `runControlEffect` call: `fired: false` when the phase wasn't `sending`
+ *  (nothing to do); `fired: true, ok: true` on a successful request; `fired: true, ok: false,
+ *  error` when the request rejected — #739 gate② round 2 finding [1]
+ *  (control-rejection-wedges-ui): the caller MUST still treat this as settled (dispatch back to
+ *  `idle`) rather than leaving the reducer stuck in `sending` forever, which is exactly what a
+ *  bare `.then()` with no rejection handling did before this. */
+export type ControlEffectResult = { fired: false } | { fired: true; ok: true } | { fired: true; ok: false; error: unknown };
+
 /**
  * The ONE place the component's effect is allowed to call the network — factored out of the
  * `useEffect` below so it is directly testable without a DOM: `renderToStaticMarkup` (this
  * repo's only test harness) never runs effects at all, so a test asserting "zero calls before
  * confirm, one call after" has to exercise this exact function across a real `controlsReducer`
  * transition rather than a simulated click (#739 gate② round 1 finding [1]:
- * ac6-confirm-flow-untested). Resolves to `true` iff it actually fired the call, so a caller can
- * tell "nothing to do" apart from "did it and it's done" without a second phase check.
+ * ac6-confirm-flow-untested). NEVER rejects itself — a failed `onControl` is caught and reported
+ * in the resolved result, never left to propagate as an unhandled rejection or to skip the
+ * `dispatch({ type: "settled" })` a caller chains on `fired` (#739 gate② round 2 finding [1]:
+ * before this, a rejecting `postControl` — any non-2xx response or network failure — left the
+ * reducer wedged in `sending` permanently, all four buttons disabled, until a page reload).
  */
-export async function runControlEffect(state: ControlsState, onControl: (verb: ControlVerb) => Promise<unknown>): Promise<boolean> {
-  if (state.phase !== "sending") return false;
-  await onControl(state.verb);
-  return true;
+export async function runControlEffect(
+  state: ControlsState,
+  onControl: (verb: ControlVerb) => Promise<unknown>,
+): Promise<ControlEffectResult> {
+  if (state.phase !== "sending") return { fired: false };
+  try {
+    await onControl(state.verb);
+    return { fired: true, ok: true };
+  } catch (error) {
+    return { fired: true, ok: false, error };
+  }
 }
 
 export interface ControlsProps {
@@ -66,11 +84,17 @@ export interface ControlsProps {
  */
 export function Controls({ enabled, onControl, initialState }: ControlsProps) {
   const [state, dispatch] = useReducer(controlsReducer, initialState ?? { phase: "idle" });
+  // #739 gate② round 2 finding [1]: a failed request must return the UI to an ACTIONABLE state
+  // (buttons re-enabled) while surfacing that it failed — never the raw error/status text (same
+  // no-leaked-fetch-error posture App.tsx's own `disconnected` header already holds to).
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    runControlEffect(state, onControl ?? postControl).then((fired) => {
-      if (fired && !cancelled) dispatch({ type: "settled" });
+    runControlEffect(state, onControl ?? postControl).then((result) => {
+      if (cancelled || !result.fired) return;
+      if (!result.ok) setFailed(true);
+      dispatch({ type: "settled" });
     });
     return () => {
       cancelled = true;
@@ -82,10 +106,19 @@ export function Controls({ enabled, onControl, initialState }: ControlsProps) {
   return (
     <fieldset className="controls" aria-label="operations">
       {CONTROL_VERBS.map((verb) => (
-        <button key={verb} type="button" disabled={state.phase === "sending"} onClick={() => dispatch({ type: "request", verb })}>
+        <button
+          key={verb}
+          type="button"
+          disabled={state.phase === "sending"}
+          onClick={() => {
+            setFailed(false);
+            dispatch({ type: "request", verb });
+          }}
+        >
           {CONTROL_COPY[verb].label}
         </button>
       ))}
+      {failed && <p className="muted controls-error">Couldn't reach the engine — try again.</p>}
       {state.phase === "confirming" && (
         <div className="controls-confirm" role="alertdialog" aria-label={`confirm ${state.verb}`}>
           <p>{CONTROL_COPY[state.verb].confirm}</p>
