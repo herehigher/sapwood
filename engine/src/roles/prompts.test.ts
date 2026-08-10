@@ -164,7 +164,10 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // longer pose as structure).
   // retro round #363: same fix as po.md above — adds the gate⓪ checklist bullet that bounces a
   // plan leaving a UI-conditional criterion's real-wiring test unstated.
-  "verification-plan-reviewer.md": "587f2a55488b469882c613e4b04b5212d0b265ad0544a39efc49719cb4a2b2fe",
+  // retro round #365: adds outcome 4 (`needs_human`) — escalate directly, no draft cycle, when a
+  // human-merge-only path is a PREREQUISITE the whole plan depends on (issue #782 this round
+  // burned 2 wasted draft→re-review cycles reaching the identical verdict via outcome 2).
+  "verification-plan-reviewer.md": "9b99c5bc89502b6ef6b216a33617053202445084b942680191c9e8105aab1773",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
   // grant OR, now again, its forge lookup when attached; the prose no longer claims totality

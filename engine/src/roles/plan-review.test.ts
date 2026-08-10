@@ -1840,6 +1840,49 @@ test("createPlanReviewStub (#214 gate② review delta P2): verify_na write order
 //    (the dashboard needs-attention strip, frontend-design.md §3). One additive event, emitted
 //    only once the escalation PROVABLY landed (same ordering doctrine as fix-rounds-capped). ──
 
+// ── retro round #365: `needs_human` — the reviewer escalates directly, in ONE session, when a
+//    human-merge-only path is a PREREQUISITE the whole plan depends on. No drafter session runs
+//    (a single-entry ScriptedRunner proves it — a second session request would throw), unlike the
+//    old draft_request path which burned up to maxDraftCycles drafter+reviewer round-trips to
+//    reach the same needs-human outcome (issue #782 this round: 2 wasted cycles). ──
+
+test("createPlanReviewStub (retro #365): a needs_human decision applies needs-human and posts the reviewer's explanation, with NO drafter session run — a single-entry ScriptedRunner suffices", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 782, title: "protected-path prerequisite", labels: [ROUND_POOL_LABEL] }];
+  const runner = new ScriptedRunner([
+    {
+      result: doneResult(
+        "reviewer-782",
+        sapwoodResult(
+          { decision: "needs_human", issue: 782 },
+          "Every AC edits or depends on merge-driver.ts, a human-merge-only path — no redraft can fix this.",
+        ),
+      ),
+    },
+  ]);
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.ok((forge.issueLabels[782] ?? []).includes(cfg.labels.needsHuman));
+  assert.ok(!(forge.issueLabels[782] ?? []).includes(cfg.labels.planApproved));
+  const comment = forge.issueCommentsPosted.find(([n]) => n === 782)?.[1];
+  assert.ok(
+    comment?.includes("no redraft can fix this"),
+    "the reviewer's own explanation lands as the comment, not a generic attempt-trail message",
+  );
+
+  // origin "reviewer-verdict" (not "session-failure") — round-artifact.ts's degraded-phase
+  // breaker must never count this healthy, working-as-designed verdict as a provider/session failure.
+  const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
+  assert.equal(events.length, 1);
+  assert.equal((events[0]!.payload as { origin?: unknown }).origin, "reviewer-verdict");
+  state.close();
+});
+
 test("createPlanReviewStub (#296): a verify_na proposal appends verify-na-proposed exactly once, naming the round and issue", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();

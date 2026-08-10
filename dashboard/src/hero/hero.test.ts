@@ -1150,3 +1150,43 @@ test("#745 AC2: worker-id reuse on a never-rescued failed lane must not collide 
   const html = markup(rawState, { lanesMax: 3 });
   assert.equal(html.match(/class="hero-droplet"/g)?.length, 1, "the stranded droplet must not render alongside the fresh dispatch");
 });
+
+// ── #744: lane status phrase / PR chip overlap (same defect family as #728, on the lane track) ──
+
+test("#744: on a fixing track, the lane status phrase and the droplet's PR chip never overlap, by actual rendered extent", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 86 }),
+    ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 739 }),
+    ev("drive-fixup", {
+      worker: "w1",
+      issue: 86,
+      pr: 739,
+      fixRounds: 2,
+      reason: "gate:FIXABLE:REQUEST_CHANGES:unresolvedThreads=2:ciRed=false",
+    }),
+    ev("fix-leg-started", { worker: "w1", issue: 86, pr: 739, fixRounds: 2 }),
+  ]);
+  assert.equal(state.lanes[0]?.phase, "fixing");
+  assert.equal(state.lanes[0]?.fixRound, 2);
+  const d = droplet(state, 86);
+  assert.equal(d?.pr, 739);
+
+  const html = markup(state, { fixCap: 4 });
+  // The exact phrase the probe screenshotted colliding with "⤳ 739".
+  const statusMatch = html.match(/<text class="hero-num hero-small" x="(-?[\d.]+)" y="(-?[\d.]+)" text-anchor="end">(FIXING[^<]*)<\/text>/);
+  assert.ok(statusMatch, "lane status phrase must render");
+  const [, statusXRaw, statusYRaw, statusText] = statusMatch as unknown as [string, string, string, string];
+  assert.match(statusText, /FIXING · round 2 of 4 · review findings/);
+
+  const p = dropletPoint(state, d!);
+  assert.match(html, /⤳ 739/);
+
+  // text-anchor="end" means the captured x is the RIGHT edge, not the center textBox expects.
+  const statusWidth = statusText.length * 10 * CHAR_ADVANCE;
+  const statusCenterX = Number(statusXRaw) - statusWidth / 2;
+
+  assertNoOverlap([
+    { label: "lane status phrase", box: textBox(statusText, statusCenterX, Number(statusYRaw), 10) },
+    { label: "PR chip", box: textBox("⤳ 739", p.x, p.y - 14, 10) },
+  ]);
+});
