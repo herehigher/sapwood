@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { AA, checkContrast, contrastRatio, GROUNDS, parseColorTokens, parseTokens, readTokensCss, TEXT_TOKENS } from "./contrast.ts";
 
@@ -56,6 +57,18 @@ test("--bark is borders-only: it is deliberately not in the text set", () => {
   // "fixing" the contrast check by promoting it to a text token.
   assert.ok(!(TEXT_TOKENS as readonly string[]).includes("--bark"));
   assert.deepEqual([...GROUNDS], ["--heartwood", "--panel"]);
+});
+
+test("#728: the #144/#145 display-header font-token deviation is adjudicated in §5, matching the shipped face", () => {
+  const doc = readFileSync(new URL("../../docs/frontend-design.md", import.meta.url), "utf8");
+  assert.match(doc, /#144/);
+  assert.match(doc, /#145/);
+  assert.match(doc, /Fraunces/);
+  assert.match(doc, /all-mono/);
+
+  // The ruling says Fraunces stays — cross-check the shipped headers actually use it.
+  const appCss = readFileSync(new URL("./app.css", import.meta.url), "utf8");
+  assert.match(appCss, /h1,\s*\nh2,\s*\nh3\s*\{[^}]*font-family:\s*var\(--font-display\)/);
 });
 
 test("contrastRatio matches known WCAG values", () => {

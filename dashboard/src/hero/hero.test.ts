@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { DomainEvent } from "../domain-event.ts";
 import { LEGEND_ITEMS, Legend } from "./Legend.tsx";
-import { dropletPoint, HeroStage } from "./stage.tsx";
+import { BACKLOG, dropletPoint, HeroStage, TRUNK } from "./stage.tsx";
 import {
   activePlanningNode,
   activeReflectionNode,
@@ -200,6 +200,30 @@ test("§6 `fix-leg-started` → `drive-fixup`: PRODUCTION event order corrects t
   assert.equal(droplet(corrected.state, 86)?.sendBack, "checks failed");
   assert.match(markup(corrected.state), /checks failed/);
   assert.doesNotMatch(markup(corrected.state), /review findings/);
+});
+
+test("#728: the fix-return arc mounts only for an active fix loop and unmounts once it ends", () => {
+  // No fixing lane at all — not just the label, the arc PATH element itself must be absent
+  // (the AC's own wording: "render only during an active fix loop"), never a labelless arc
+  // left drawn as visual debris.
+  assert.doesNotMatch(markup(initialHeroState(3)), /<path id="hero-fixloop-path"/);
+
+  const fixing = run([
+    ev("dispatched", { worker: "w1", issue: 86 }),
+    ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
+    ev("drive-fixup", { worker: "w1", issue: 86, pr: 97, fixRounds: 1, reason: "gate:FIXABLE:merge-conflict" }),
+    ev("fix-leg-started", { worker: "w1", issue: 86, pr: 97, fixRounds: 1 }),
+  ]);
+  const fixingHtml = markup(fixing.state);
+  assert.match(fixingHtml, /<path id="hero-fixloop-path"/);
+  assert.match(fixingHtml, /<textPath[^>]*href="#hero-fixloop-path"[^>]*>merge conflict<\/textPath>/);
+
+  // The fix loop ends — the lane merges straight out of `fixing` — and folding that event
+  // must fold the arc itself away, not just its label.
+  const folded = foldEvents(fixing.state, [ev("merged", { worker: "w1", issue: 86, pr: 97 })]);
+  const foldedHtml = markup(folded.state);
+  assert.doesNotMatch(foldedHtml, /<path id="hero-fixloop-path"/);
+  assert.doesNotMatch(foldedHtml, /<textPath/);
 });
 
 test("§6 `fix-leg-resumed` re-lights the same fixing state after a handoff", () => {
@@ -929,4 +953,67 @@ test("the backlog renders this round's selection pool", () => {
 
   assert.equal(html.match(/class="hero-pool-chip"/g)?.length, 3);
   assert.match(html, /BACKLOG/);
+});
+
+// ── #728: backlog chip / needs-human / outcome-tally overlap ──────────────────
+//
+// The hero is one `viewBox`-scaled SVG (`.hero { width: 100%; height: auto }`, asserted
+// below) — every element scales together, so geometry that doesn't collide in the SVG's own
+// intrinsic coordinate space cannot collide at any rendered container width either. Checking
+// the intrinsic positions once is equivalent to checking it at 1440/1024/720px.
+
+test("#728: the stage scales as one unit — geometry checked once covers every rendered width, including 1440/1024/720", () => {
+  assert.match(heroCss, /\.hero\s*\{[^}]*width:\s*100%;[^}]*height:\s*auto;/);
+});
+
+test("#728: a handed-off backlog droplet claims its own row after the pool chips, never sharing one", () => {
+  const { state } = run([
+    ev("pool-selected", { round_id: 1, issues: [10, 11] }),
+    ev("dispatched", { worker: "w1", issue: 20 }),
+    ev("handoff", { worker: "w1", issue: 20 }),
+    ev("dispatched", { worker: "w2", issue: 21 }),
+    ev("handoff", { worker: "w2", issue: 21 }),
+  ]);
+  assert.deepEqual(state.pool, [10, 11]);
+
+  const d20 = droplet(state, 20);
+  const d21 = droplet(state, 21);
+  assert.ok(d20 && d21);
+  const p20 = dropletPoint(state, d20);
+  const p21 = dropletPoint(state, d21);
+
+  // Every pool chip owns a row (index 0..pool.length-1) — the first backlog droplet must
+  // start at least one full chip step past the last one, never doubling up on its row.
+  const lastPoolChipY = BACKLOG.y + 30 + (state.pool.length - 1) * BACKLOG.chip;
+  assert.ok(p20.y > lastPoolChipY, `${p20.y} must clear the last pool chip's row (${lastPoolChipY})`);
+
+  // A handed-off droplet carries a second line (the "saved for a successor" badge) — the
+  // next droplet's row must clear it by a full extra chip step, not the bare minimum.
+  assert.ok(p21.y - p20.y >= 2 * BACKLOG.chip, `handed-off droplets need double spacing: ${p20.y} -> ${p21.y}`);
+
+  const html = markup(state);
+  assert.equal(html.match(/saved for a successor/g)?.length, 2);
+});
+
+test("#728: the needs-human cluster wraps instead of running into the trunk rings or the outcome tally", () => {
+  const events: DomainEvent[] = [];
+  for (let i = 1; i <= 7; i++) {
+    events.push(ev("dispatched", { worker: `w${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `w${i}`, issue: i, next: "DRIVING", pr: i + 100 }));
+    events.push(ev("drive-needs-human", { worker: `w${i}`, issue: i, pr: i + 100 }));
+  }
+  const { state } = run(events, 7);
+  const escalated = state.droplets.filter((d) => d.at === "needs-human");
+  assert.equal(escalated.length, 7);
+
+  const trunkLeftEdge = TRUNK.x - TRUNK.max * TRUNK.step; // leftmost extent of the drawn rings
+  const tallyX = TRUNK.x - 30; // the outcome tally's own centered x (stage.tsx)
+  for (const d of escalated) {
+    const { x } = dropletPoint(state, d);
+    assert.ok(x < trunkLeftEdge, `needs-human droplet #${d.issue} at x=${x} must clear the trunk rings (${trunkLeftEdge})`);
+    assert.ok(x < tallyX - 40, `needs-human droplet #${d.issue} at x=${x} must clear the outcome tally (${tallyX})`);
+  }
+
+  const html = markup(state);
+  assert.match(html, /data-node="needs-human" data-count="7"/);
 });
