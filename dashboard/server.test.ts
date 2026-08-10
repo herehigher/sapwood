@@ -34,7 +34,7 @@ const FRESH: EngineFacts = {
   lastTickAt: "2026-07-24T11:59:30.000Z", // 30s ago — well inside the gap
   staleGapSec: 900,
   roundOpen: true,
-  standbyWaiting: false,
+  standbySignal: null,
   terminal: null,
 };
 
@@ -47,10 +47,36 @@ test("engine state: a ticking engine with an open round is running", () => {
   assert.equal(deriveEngineState(FRESH), "running");
 });
 
-test("engine state: no open round + a standby-wait newer than any standby-exit is standby, not stalled", () => {
-  assert.equal(deriveEngineState({ ...FRESH, roundOpen: false, standbyWaiting: true }), "standby");
-  // a closed round with no standby wait is still just running — standby is the PARKED signal
-  assert.equal(deriveEngineState({ ...FRESH, roundOpen: false, standbyWaiting: false }), "running");
+test("engine state: no open round + a fresh standby signal (within its own declared window) is standby, not stalled", () => {
+  assert.equal(deriveEngineState({ ...FRESH, roundOpen: false, standbySignal: { ageSec: 10, windowSec: 30 } }), "standby");
+  // a closed round with no standby signal at all is still just running — standby is the PARKED signal
+  assert.equal(deriveEngineState({ ...FRESH, roundOpen: false, standbySignal: null }), "running");
+});
+
+// #723: AC12 operator probe — standby deliberately stops ticking, so `lastTickAt` alone
+// misclassifies a healthy long backoff dwell as `stalled`. A standby-wait/standby-heartbeat
+// signal newer than its OWN declared window (waitSec / remainingSec) is liveness independent of
+// the tick heartbeat, and must render `standby`, never `stalled`, however stale the tick itself
+// has gone in the meantime.
+test("#723 engine state: a standby signal fresh within its own window overrides a stale tick — the standby dwell itself deliberately stops ticking", () => {
+  assert.equal(
+    deriveEngineState({ ...FRESH, roundOpen: false, lastTickAt: STALE_TICK, standbySignal: { ageSec: 60, windowSec: 1800 } }),
+    "standby",
+  );
+});
+
+// #723 AC boundary: the standby signal ITSELF goes stale beyond its own declared next-wait —
+// nothing has evidenced liveness for longer than the engine's own promise, and the tick is also
+// stale, so this is genuinely `stalled`, not an indefinitely-extended `standby`.
+test("#723 engine state boundary: a standby signal older than its own declared window, with the tick also stale, is stalled", () => {
+  assert.equal(
+    deriveEngineState({ ...FRESH, roundOpen: false, lastTickAt: STALE_TICK, standbySignal: { ageSec: 1900, windowSec: 1800 } }),
+    "stalled",
+  );
+});
+
+test("#723 engine state: a round OPEN cancels standby freshness — an in-flight round is running, never standby, whatever a lingering old standby signal says", () => {
+  assert.equal(deriveEngineState({ ...FRESH, roundOpen: true, standbySignal: { ageSec: 10, windowSec: 30 } }), "running");
 });
 
 test("engine state: a tick older than the stale gap is stalled (a dead engine must never read green)", () => {
@@ -225,7 +251,8 @@ test("/api/loop/state matches the §8 shape against a seeded DB", async () => {
     const body = await getJson(fx, "/api/loop/state");
 
     assert.deepEqual(Object.keys(body).sort(), ["config", "engine", "lanes", "logPath", "rings", "round", "spend"]);
-    assert.deepEqual(Object.keys(body.engine).sort(), ["lastTickAt", "reasons", "state", "terminal"]);
+    assert.deepEqual(Object.keys(body.engine).sort(), ["lastTickAt", "reasons", "standbyNextCheckSec", "state", "terminal"]);
+    assert.equal(body.engine.standbyNextCheckSec, null, "not in standby in this fixture");
     assert.deepEqual(body.engine.reasons, []);
     assert.equal(body.engine.terminal, null, "#407: no terminal has been written for the newest run");
 
@@ -311,7 +338,7 @@ test("#642 AC1: /api/loop/state, /api/events, /api/spend are byte-identical to t
     assert.deepEqual(loop, {
       // No heartbeat was ever seeded (lastTickAt null -> infinite tick age -> stale, and no
       // terminal event -> the bare "crashed or killed" reading, deriveEngineState's own doc).
-      engine: { state: "stalled", reasons: [], lastTickAt: null, terminal: null },
+      engine: { state: "stalled", reasons: [], lastTickAt: null, standbyNextCheckSec: null, terminal: null },
       lanes: {
         max: 3,
         items: [
@@ -440,6 +467,50 @@ test("#407 /api/loop/state serves the newest run's terminal event verbatim — t
       kind: "run-ended",
       payload: { stoppedBy: "stop-condition", stopCondition: "afterIssuesMerged" },
     });
+  } finally {
+    fx.close();
+  }
+});
+
+// #723: end-to-end through the real route + a real (unseeded, deliberately real-wall-clock)
+// standby-wait event — the AC12 operator scenario itself, not just the pure derivation. `before`
+// brackets the event's real write time (state.ts's appendEvent doc: deliberately unseeded), so
+// `now` can be set far enough past it that the countdown assertion is a generous bounded
+// passthrough, never a race against how long the write actually took (no-timing-dependent-tests
+// doctrine's FINE shape).
+test("#723 /api/loop/state: a healthy standby-wait renders standby, not stalled, with a next-check countdown in the payload — even though no tick has EVER landed", async () => {
+  const before = new Date();
+  const fx = await fixture(
+    (s) => {
+      s.appendEvent("standby-wait", { attempt: 3, waitSec: 1800 });
+    },
+    { now: new Date(before.getTime() + 30_000) }, // 30s buffer — the write itself is a sub-ms local insert
+  );
+  try {
+    const body = await getJson(fx, "/api/loop/state");
+    assert.equal(body.engine.lastTickAt, null, "no tick was ever written — without the #723 fix this would be `stalled`");
+    assert.equal(body.engine.state, "standby");
+    assert.equal(typeof body.engine.standbyNextCheckSec, "number");
+    // ageSec is at most ~30s (the `before`-anchored buffer); windowSec is 1800 — generously
+    // bounded, not a race between two uncontrolled operations.
+    assert.ok(body.engine.standbyNextCheckSec > 1700, `countdown was ${body.engine.standbyNextCheckSec}, expected close to 1800`);
+  } finally {
+    fx.close();
+  }
+});
+
+test("#723 /api/loop/state: a standby-wait signal older than its own declared waitSec renders stalled, not standby forever", async () => {
+  const before = new Date();
+  const fx = await fixture(
+    (s) => {
+      s.appendEvent("standby-wait", { attempt: 3, waitSec: 5 });
+    },
+    { now: new Date(before.getTime() + 30_000) }, // 30s later — well past the signal's own 5s window
+  );
+  try {
+    const body = await getJson(fx, "/api/loop/state");
+    assert.equal(body.engine.state, "stalled");
+    assert.equal(body.engine.standbyNextCheckSec, null);
   } finally {
     fx.close();
   }
@@ -908,6 +979,11 @@ interface FixtureOpts {
   /** Written as `dashboard.controls` — omitted leaves the schema default (true). */
   controls?: boolean;
   staticDir?: string;
+  /** #723: overrides the fixed clock the route reads `now` through — needed only by tests that
+   *  compare a real `appendEvent`-written `ts` (deliberately unseeded, state.ts's own doc)
+   *  against the route's `now`, e.g. the standby-countdown test below. Omitted keeps the same
+   *  fixed "2026-07-24T12:00:00.000Z" every other test in this file relies on. */
+  now?: Date;
 }
 
 /** A temp-dir DB seeded through a WRITABLE handle, then served through a read-only one. */
@@ -939,7 +1015,7 @@ async function fixture(seed?: (s: State) => void, opts: FixtureOpts = {}): Promi
     // Pinned to the same day every seeded spend/telemetry date in this file uses — todayUsd/
     // byModel are day-scoped reads against the REAL clock otherwise, which made the suite a
     // date-rollover time bomb (green on 2026-07-24, red from the 25th — caught live on main).
-    now: () => new Date("2026-07-24T12:00:00.000Z"),
+    now: () => opts.now ?? new Date("2026-07-24T12:00:00.000Z"),
     ...(opts.staticDir === undefined ? {} : { staticDir: opts.staticDir }),
   });
   return {

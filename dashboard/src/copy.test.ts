@@ -5,7 +5,7 @@ import test from "node:test";
 // engine's own tagged registry is the AUTHORITATIVE attention-membership signal, not frontend-
 // design.md §3's prose list, which has already drifted once (finding [2] below).
 import { ESCALATION_SOURCE_KINDS } from "../../engine/src/loop/escalation-reconcile.ts";
-import { COPY, copyFor, EVENT_KINDS, type EventKind, hasAttention, type SentencePart } from "./copy.ts";
+import { COPY, copyFor, EVENT_KINDS, type EventKind, engineStateCaption, hasAttention, type SentencePart } from "./copy.ts";
 
 const render = (kind: EventKind, payload: Record<string, unknown> = {}) =>
   COPY[kind]
@@ -455,4 +455,27 @@ test("table-driven §7 sentence oracle: every row (and every documented payload 
 test("the sentence oracle covers every current §7-table kind at least once", () => {
   const covered = new Set(SENTENCE_ORACLE.map(([kind]) => kind));
   assert.deepEqual([...covered].sort(), [...EVENT_KINDS].sort());
+});
+
+// ── #723: the header's engine-state caption (§7 convention, applied to the §3 A engine word) ──
+
+test("engineStateCaption: standby renders calm, never as an error, with the next-check countdown folded in", () => {
+  assert.equal(engineStateCaption("standby", 42), "idle — nothing to work on right now — checking again in 42s");
+});
+
+test("engineStateCaption: every other state ignores standbyNextCheckSec even if the server somehow sent one", () => {
+  assert.equal(engineStateCaption("running", null), "actively working");
+  assert.equal(engineStateCaption("stalled", 42), "not responding");
+  assert.equal(engineStateCaption("paused", null), "paused by operator");
+  assert.equal(engineStateCaption("winding-down", null), "finishing in-flight work, no new dispatch");
+  assert.equal(engineStateCaption("stopping", null), "shutting down");
+  assert.equal(engineStateCaption("stopped", null), "stopped");
+});
+
+test("engineStateCaption: standby with no countdown known yet renders the base caption alone, never a stray dash", () => {
+  assert.equal(engineStateCaption("standby", null), "idle — nothing to work on right now");
+});
+
+test("engineStateCaption: an unrecognized state falls back to itself, the same honest-unknown laneStateCaption uses", () => {
+  assert.equal(engineStateCaption("some-future-state", null), "some-future-state");
 });

@@ -6,6 +6,7 @@ import type { CostBarGroup } from "./components/CostStrip.tsx";
 import { CostStrip } from "./components/CostStrip.tsx";
 import { LaneBoard } from "./components/LaneBoard.tsx";
 import { readConfigPath } from "./config-captions.ts";
+import { engineStateCaption } from "./copy.ts";
 import { Hero } from "./hero/Hero.tsx";
 import { Legend } from "./hero/Legend.tsx";
 
@@ -82,7 +83,10 @@ export function App({ now }: { now?: Date | undefined } = {}) {
           loop.data && (
             <dl>
               <dt className="muted">engine</dt>
-              <dd className="data">{loop.data.engine.state}</dd>
+              <dd className="data">
+                {loop.data.engine.state}
+                <span className="muted"> — {engineStateCaption(loop.data.engine.state, loop.data.engine.standbyNextCheckSec)}</span>
+              </dd>
               <dt className="muted">rings</dt>
               <dd className="data">{loop.data.rings}</dd>
             </dl>

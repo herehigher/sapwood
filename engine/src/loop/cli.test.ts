@@ -1589,6 +1589,35 @@ test("formatStatus: kill-switch active and a recorded ceiling breach both render
   assert.match(out, /park: inactive/);
 });
 
+// #723 AC3 audit: "status CLI text (if it renders an engine state word from the same read) stays
+// consistent." It does not — formatStatus/StatusSnapshot report killSwitchActive/pauseActive/
+// ceilingBreach/parked as separate booleans/rows, never an aggregated §8 EngineState word
+// ("running"/"standby"/"stalled"/...), and never calls deriveEngineState/currentEngineState. So
+// there is no second derivation here that could drift from the read-model.ts fix, and nothing to
+// change — this test locks that finding: a future change that DOES teach formatStatus to render
+// an aggregated engine word must update this test, which is the point (drift becomes visible).
+test("#723 audit: formatStatus never renders an aggregated engine-state word — a healthy idle snapshot's text carries no 'stalled'/'standby'/'running' anywhere", () => {
+  const snapshot: StatusSnapshot = {
+    dbPath: "data/sapwood.sqlite",
+    schemaVersion: 7,
+    active: [],
+    driving: [],
+    killSwitchActive: false,
+    estopActive: false,
+    pauseActive: false,
+    ceilingBreach: null,
+    dailySpendUsd: 0,
+    lanesMax: 3,
+    dailyBudgetUsd: 100,
+    unadjudicatedConcerns: 0,
+    baseCiRed: null,
+    parked: [],
+  };
+  const out = formatStatus(snapshot);
+  assert.doesNotMatch(out, /\bstalled\b/i);
+  assert.doesNotMatch(out, /\bstandby\b/i);
+});
+
 test("formatStatus: PAUSE active renders distinctly from kill switch, both can be reported independently", () => {
   const snapshot: StatusSnapshot = {
     dbPath: "data/sapwood.sqlite",

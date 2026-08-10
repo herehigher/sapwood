@@ -472,3 +472,27 @@ export const LANE_STATE_CAPTION: Record<string, string> = {
 export function laneStateCaption(state: string): string {
   return LANE_STATE_CAPTION[state] ?? state;
 }
+
+/** #723: the same §7 caption convention applied to the header's ENGINE state word (frontend-
+ *  design.md §3 A: "engine state as one word + dot"). The word itself stays the raw §8
+ *  `EngineState` value (unchanged rendering); this is the plain-language phrase next to it — the
+ *  AC12 fix's whole point is that `standby` must read as calm, not as an error, and a bare word
+ *  with no caption leaves that to the reader's guess. An unrecognized state (a future engine
+ *  addition) falls back to itself, the same honest-unknown `laneStateCaption` uses above. */
+export const ENGINE_STATE_CAPTION: Record<string, string> = {
+  running: "actively working",
+  standby: "idle — nothing to work on right now",
+  stalled: "not responding",
+  paused: "paused by operator",
+  "winding-down": "finishing in-flight work, no new dispatch",
+  stopping: "shutting down",
+  stopped: "stopped",
+};
+
+/** `standbyNextCheckSec` (the #723 API payload field) only ever applies to `standby` itself —
+ *  every other state ignores it, so a stray non-null value elsewhere (should never happen,
+ *  server-side) can't leak into an unrelated caption. */
+export function engineStateCaption(state: string, standbyNextCheckSec: number | null): string {
+  const base = ENGINE_STATE_CAPTION[state] ?? state;
+  return state === "standby" && standbyNextCheckSec !== null ? `${base} — checking again in ${standbyNextCheckSec}s` : base;
+}

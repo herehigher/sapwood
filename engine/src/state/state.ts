@@ -3888,6 +3888,25 @@ export class State {
     return row ?? null;
   }
 
+  /** #723: the newest of standby-wait/standby-heartbeat/standby-exit, with its write-time `ts` —
+   *  read-model.ts's standby-liveness check needs BOTH the newest kind (an exit newest means
+   *  parking already ended) and the write-time clock (the SAME `latestHeartbeatForWorker`-style
+   *  events-table `ts`, not a payload field) to tell a genuinely fresh standby dwell from one
+   *  whose own last-seen signal has gone stale. `undefined` when none of the three kinds has
+   *  ever been written. */
+  latestStandbySignal(): { kind: "standby-wait" | "standby-heartbeat" | "standby-exit"; ts: string; payload: unknown } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT ts, kind, payload FROM events
+         WHERE kind IN ('standby-wait', 'standby-heartbeat', 'standby-exit')
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get() as { ts: string; kind: string; payload: string } | undefined;
+    return row
+      ? { kind: row.kind as "standby-wait" | "standby-heartbeat" | "standby-exit", ts: row.ts, payload: JSON.parse(row.payload) as unknown }
+      : undefined;
+  }
+
   /** #431 rounds 2-3: which side of the entered/cleared pair is newest FOR ONE CEILING REASON —
    *  the id-ordered transition read (the same event-log-as-memory shape
    *  latestHoldVisibilityEvent uses for pr-held/pr-released, #169/#294, and the same
