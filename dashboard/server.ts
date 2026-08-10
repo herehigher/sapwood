@@ -31,6 +31,7 @@ import {
   allowlistedConfig,
   CONFIG_ALLOWLIST,
   currentEngineState,
+  DEFAULT_DASHBOARD_PORT,
   deriveEngineState,
   type EngineFacts,
   type EngineState,
@@ -55,8 +56,10 @@ export {
   type RunTerminal,
 };
 
-/** §8 default; overridable so several data dirs can be inspected side by side. */
-export const DEFAULT_PORT = 4517;
+/** §8 default; overridable so several data dirs can be inspected side by side. #743: the value
+ *  itself now lives in engine/src/state/read-model.ts (DEFAULT_DASHBOARD_PORT) so the CLI launcher
+ *  can name it without a static import of this file — re-exported here under its original name. */
+export const DEFAULT_PORT = DEFAULT_DASHBOARD_PORT;
 
 const DEFAULT_PAGE_LIMIT = 500;
 
@@ -375,8 +378,20 @@ function serveStatic(root: string, pathname: string, res: ServerResponse): void 
 export interface DashboardServerOptions {
   dbPath: string;
   /** Passed to loadConfig; undefined probes the default sapwood.config.* names in cwd. An
-   *  unreadable config is NOT fatal — the affected fields report null (§8), same as `status`. */
+   *  unreadable config is NOT fatal — the affected fields report null (§8), same as `status`. This
+   *  best-effort posture is DELIBERATE and stays unchanged for every caller that omits `config`
+   *  below (the DB read is the point) — see `config` for the one caller (the `sapwood dashboard`
+   *  launcher) that needs a stricter contract. */
   configPath?: string;
+  /** #743 (gate② finding): a PRE-RESOLVED config, used verbatim instead of this function loading
+   *  `configPath` itself. Set by dashboard/start.ts when an explicit `--config` was already loaded
+   *  strictly (throwing on a bad path rather than degrading to null) — passing the already-loaded
+   *  object here means this function never re-reads the file, so there is no window between "the
+   *  launcher validated the path" and "the server actually uses it" for the file to change out
+   *  from under an explicit, supposedly-authoritative `--config`. `null` is a valid value (config
+   *  genuinely absent); omit the field entirely to keep the original best-effort `configPath`
+   *  load behavior. */
+  config?: SapwoodConfig | null;
   /** 0 asks the OS for a free port (tests). */
   port?: number;
   /** The vite build to serve; defaults to this package's own `dist`. */
@@ -387,11 +402,15 @@ export interface DashboardServerOptions {
 /** Open the read-only handle, bind loopback, resolve once the server is actually listening. */
 export async function createDashboardServer(opts: DashboardServerOptions): Promise<{ server: Server; state: State; port: number }> {
   const state = new State(opts.dbPath, { readOnly: true });
-  let config: SapwoodConfig | null = null;
-  try {
-    config = loadConfig(opts.configPath);
-  } catch {
-    config = null; // reported as null fields, never fatal — the DB read is the point
+  let config: SapwoodConfig | null;
+  if (opts.config !== undefined) {
+    config = opts.config;
+  } else {
+    try {
+      config = loadConfig(opts.configPath);
+    } catch {
+      config = null; // reported as null fields, never fatal — the DB read is the point
+    }
   }
   const ctx: Ctx = { state, config, now: opts.now };
   // Realpath'd ONCE here so every request compares a real path against a real root. Without it
