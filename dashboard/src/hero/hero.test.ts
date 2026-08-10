@@ -961,12 +961,53 @@ test("the backlog renders this round's selection pool", () => {
 // below) — every element scales together, so geometry that doesn't collide in the SVG's own
 // intrinsic coordinate space cannot collide at any rendered container width either. Checking
 // the intrinsic positions once is equivalent to checking it at 1440/1024/720px.
+//
+// #728 gate② finding [0]: comparing anchor-point CENTERS against a fixed-pixel margin (the
+// original version of these two tests) never actually establishes non-overlap — it passes
+// whether or not the rendered text/circles truly collide, since it ignores every element's
+// real width/height. These bounding-box helpers turn each element's font-size + character
+// count into an actual rendered extent and assert real rectangle intersection instead.
+type Box = { left: number; right: number; top: number; bottom: number };
+
+// Every element boxed below draws --font-data (ui-monospace: SF Mono/Menlo/Consolas), whose
+// glyphs run close to a fixed 0.62em advance — a monospace character count gives a
+// deterministic, no-browser width. The one exception, the "saved for a successor" badge, draws
+// --font-body (system-ui, proportional, narrower on average); reusing the same 0.62em advance
+// for it is deliberately conservative — an overestimate, never a too-tight one.
+const CHAR_ADVANCE = 0.62;
+const ASCENT = 0.8;
+const DESCENT = 0.25;
+
+const textBox = (text: string, centerX: number, baselineY: number, fontPx: number): Box => {
+  const halfWidth = (text.length * fontPx * CHAR_ADVANCE) / 2;
+  return { left: centerX - halfWidth, right: centerX + halfWidth, top: baselineY - fontPx * ASCENT, bottom: baselineY + fontPx * DESCENT };
+};
+
+const circleBox = (centerX: number, centerY: number, r: number): Box => ({
+  left: centerX - r,
+  right: centerX + r,
+  top: centerY - r,
+  bottom: centerY + r,
+});
+
+const boxesOverlap = (a: Box, b: Box): boolean => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+
+/** Every pairwise combination of `boxes` must be collision-free. */
+function assertNoOverlap(boxes: { label: string; box: Box }[]): void {
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i]!;
+      const b = boxes[j]!;
+      assert.ok(!boxesOverlap(a.box, b.box), `${a.label} ${JSON.stringify(a.box)} overlaps ${b.label} ${JSON.stringify(b.box)}`);
+    }
+  }
+}
 
 test("#728: the stage scales as one unit — geometry checked once covers every rendered width, including 1440/1024/720", () => {
   assert.match(heroCss, /\.hero\s*\{[^}]*width:\s*100%;[^}]*height:\s*auto;/);
 });
 
-test("#728: a handed-off backlog droplet claims its own row after the pool chips, never sharing one", () => {
+test("#728 gate② [0]: backlog chip/droplet text boxes never overlap, by actual rendered extent — not just anchor spacing", () => {
   const { state } = run([
     ev("pool-selected", { round_id: 1, issues: [10, 11] }),
     ev("dispatched", { worker: "w1", issue: 20 }),
@@ -981,39 +1022,64 @@ test("#728: a handed-off backlog droplet claims its own row after the pool chips
   assert.ok(d20 && d21);
   const p20 = dropletPoint(state, d20);
   const p21 = dropletPoint(state, d21);
+  const centerX = BACKLOG.x + BACKLOG.w / 2;
 
-  // Every pool chip owns a row (index 0..pool.length-1) — the first backlog droplet must
-  // start at least one full chip step past the last one, never doubling up on its row.
-  const lastPoolChipY = BACKLOG.y + 30 + (state.pool.length - 1) * BACKLOG.chip;
-  assert.ok(p20.y > lastPoolChipY, `${p20.y} must clear the last pool chip's row (${lastPoolChipY})`);
-
-  // A handed-off droplet carries a second line (the "saved for a successor" badge) — the
-  // next droplet's row must clear it by a full extra chip step, not the bare minimum.
-  assert.ok(p21.y - p20.y >= 2 * BACKLOG.chip, `handed-off droplets need double spacing: ${p20.y} -> ${p21.y}`);
+  // Mirrors stage.tsx's own draw formulas exactly (pool chip text y, droplet label -14 / badge
+  // +24 offsets) — the point is to box what actually gets drawn, not a paraphrase of it.
+  assertNoOverlap([
+    { label: "pool chip 10", box: textBox("⊙ 10", centerX, BACKLOG.y + 22 + 0 * BACKLOG.chip, 11) },
+    { label: "pool chip 11", box: textBox("⊙ 11", centerX, BACKLOG.y + 22 + 1 * BACKLOG.chip, 11) },
+    { label: "droplet 20 label", box: textBox("⊙ 20", centerX, p20.y - 14, 10) },
+    { label: "droplet 20 badge", box: textBox("saved for a successor", centerX, p20.y + 24, 10) },
+    { label: "droplet 21 label", box: textBox("⊙ 21", centerX, p21.y - 14, 10) },
+    { label: "droplet 21 badge", box: textBox("saved for a successor", centerX, p21.y + 24, 10) },
+  ]);
 
   const html = markup(state);
   assert.equal(html.match(/saved for a successor/g)?.length, 2);
 });
 
-test("#728: the needs-human cluster wraps instead of running into the trunk rings or the outcome tally", () => {
+test("#728 gate② [0]: the needs-human cluster's real circle/label extents never collide with each other, the trunk rings, or the outcome tally's actual rendered text", () => {
   const events: DomainEvent[] = [];
-  for (let i = 1; i <= 7; i++) {
-    events.push(ev("dispatched", { worker: `w${i}`, issue: i }));
-    events.push(ev("reclaim-done", { worker: `w${i}`, issue: i, next: "DRIVING", pr: i + 100 }));
-    events.push(ev("drive-needs-human", { worker: `w${i}`, issue: i, pr: i + 100 }));
+  // A deliberately inflated, multi-digit round (double-digit merged/pending, several distinct
+  // fix rounds) — the finding's own scenario ("a longer multi-digit tally... would leave every
+  // assertion green") — to stress the tally's real rendered width, not just today's small one.
+  for (let i = 1; i <= 24; i++) events.push(ev("merged", { worker: `m${i}`, issue: i, pr: i }));
+  for (let i = 1; i <= 13; i++) events.push(ev("dispatched", { worker: `p${i}`, issue: 100 + i }));
+  // 6, not an arbitrarily larger number: `stage.tsx`'s own NEEDS_HUMAN_COLS/ROW_STEP doc
+  // records this as the verified-safe ceiling (3 rows) before a 4th row would reach the
+  // CI/REVIEW gates above — this is the stress case that ceiling promises, not a random pick.
+  for (let i = 1; i <= 6; i++) {
+    events.push(ev("dispatched", { worker: `w${i}`, issue: 200 + i }));
+    events.push(ev("reclaim-done", { worker: `w${i}`, issue: 200 + i, next: "DRIVING", pr: 9000 + i }));
+    events.push(ev("drive-needs-human", { worker: `w${i}`, issue: 200 + i, pr: 9000 + i }));
   }
-  const { state } = run(events, 7);
+  const { state } = run(events, 43);
   const escalated = state.droplets.filter((d) => d.at === "needs-human");
-  assert.equal(escalated.length, 7);
+  assert.equal(escalated.length, 6);
+  assert.equal(state.roundMerged, 24);
 
-  const trunkLeftEdge = TRUNK.x - TRUNK.max * TRUNK.step; // leftmost extent of the drawn rings
-  const tallyX = TRUNK.x - 30; // the outcome tally's own centered x (stage.tsx)
+  const html = markup(state, { lanesMax: 43 });
+  const tallyMatch = html.match(/class="hero-num hero-small hero-outcome-tally" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
+  assert.ok(tallyMatch, "outcome tally must render");
+  const [, tallyXRaw, tallyYRaw, tallyText] = tallyMatch as unknown as [string, string, string, string];
+  assert.match(tallyText, /24 merged · 13 pending · 6 needs human/);
+
+  const boxes: { label: string; box: Box }[] = [
+    { label: "outcome tally", box: textBox(tallyText, Number(tallyXRaw), Number(tallyYRaw), 9) },
+    // Only the OUTERMOST drawn ring — concentric rings sharing one center are, by design,
+    // always nested/touching each other (that's the trunk cross-section, not a collision); the
+    // outermost one is simply the single furthest-reaching edge the escalation cluster/tally
+    // could actually run into, and the only ring box worth checking against them.
+    { label: "outermost trunk ring", box: circleBox(TRUNK.x, TRUNK.y, Math.min(state.rings, TRUNK.max) * TRUNK.step) },
+  ];
   for (const d of escalated) {
-    const { x } = dropletPoint(state, d);
-    assert.ok(x < trunkLeftEdge, `needs-human droplet #${d.issue} at x=${x} must clear the trunk rings (${trunkLeftEdge})`);
-    assert.ok(x < tallyX - 40, `needs-human droplet #${d.issue} at x=${x} must clear the outcome tally (${tallyX})`);
+    const { x, y } = dropletPoint(state, d);
+    const label = d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`;
+    boxes.push({ label: `needs-human #${d.issue} circle`, box: circleBox(x, y, 9) });
+    boxes.push({ label: `needs-human #${d.issue} label`, box: textBox(label, x, y - 14, 10) });
   }
+  assertNoOverlap(boxes);
 
-  const html = markup(state);
-  assert.match(html, /data-node="needs-human" data-count="7"/);
+  assert.match(html, /data-node="needs-human" data-count="6"/);
 });
