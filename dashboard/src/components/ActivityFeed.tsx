@@ -5,6 +5,13 @@ import { formatRelative } from "../format.ts";
 import { EntityRef } from "./EntityRef.tsx";
 import { StateGlyph } from "./icons.tsx";
 
+/** #722: the feed panel gets its own scroll container (`.feed-scroll`, panels.css) rather than
+ *  driving the whole page's height, but a scroll container alone still leaves thousands of `<li>`
+ *  DOM rows mounted — this caps what actually renders. Newest-first, pinned entries exempt (their
+ *  own contract, unchanged). Matches `EVENTS_PAGE` (queries.ts) — one fetched page is a "sane
+ *  window" per the issue, no virtualization library needed at this size. */
+export const FEED_RENDER_CAP = 200;
+
 export interface ActivityFeedProps {
   /** The bounded recent window — routine display, newest-first, capped for memory. `DomainEvent`,
    *  not the raw wire `LoopEvent` (#715 gate② round 5 [0]) — the parse boundary that classifies a
@@ -115,14 +122,27 @@ export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconn
   const pinnedIds = new Set(pinnedAttention.map((e) => e.id));
   const pinned = [...pinnedAttention].sort((a, b) => b.id - a.id);
   const rest = events.filter((e) => !pinnedIds.has(e.id)).sort((a, b) => b.id - a.id);
+  const total = pinned.length + rest.length;
+  // Pinned entries are exempt from the cap (their own durable contract, #715 gate② [0]) — the cap
+  // trims the routine tail that fills the remaining slots.
+  const visibleRest = rest.slice(0, Math.max(0, FEED_RENDER_CAP - pinned.length));
+  const rendered = [...pinned, ...visibleRest];
+  const truncated = rendered.length < total;
   return (
     <section className="panel activity-feed" aria-label="activity">
       <h2>activity</h2>
-      <ul aria-live="polite" className="feed-list">
-        {[...pinned, ...rest].map((event) => (
-          <FeedEntry key={event.id} event={event} titles={titles} repoUrl={repoUrl} now={clock} />
-        ))}
-      </ul>
+      {truncated && (
+        <p className="muted feed-cap-note">
+          showing latest {rendered.length} of {total}
+        </p>
+      )}
+      <div className="feed-scroll">
+        <ul aria-live="polite" className="feed-list">
+          {rendered.map((event) => (
+            <FeedEntry key={event.id} event={event} titles={titles} repoUrl={repoUrl} now={clock} />
+          ))}
+        </ul>
+      </div>
     </section>
   );
 }

@@ -49,6 +49,13 @@
   text-decoration: underline;
 }
 
+/* #722: the feed's own scroll container — bounds the panel's contribution to page height so the
+ * cost strip/config below it stay reachable without scrolling past thousands of feed rows. */
+.feed-scroll {
+  max-height: 420px;
+  overflow-y: auto;
+}
+
 .feed-list {
   list-style: none;
   margin: 0;
