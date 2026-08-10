@@ -175,6 +175,41 @@ configured lanes exist.
 For the operational distinction between a healthy wait, standby, a frozen ceiling, and a
 genuine wedge, use the [engine-state truth table in loop walkthrough §6](loop-walkthrough-v0.2.md#6-the-state-truth-table--reading-the-engine-at-a-glance).
 
+## Trust model prerequisites
+
+sapwood's plugin-enforced controls are necessary, but a fresh install does not configure
+the GitHub-side and identity boundaries that make unattended merge fully load-bearing.
+Complete this setup before choosing L3.
+
+**Provided out of the box:**
+
+- The default `guard.mode: hard` blocks the producer's covered GitHub governance commands,
+  and the conductor is the only sapwood process that calls the merge API.
+- The conductor requires its configured CI and fresh-review gates before it merges; an
+  unspecified CI requirement fails closed rather than becoming merge evidence.
+
+**Required deployment setup:**
+
+- Protect the repository's default branch in GitHub. Prohibit direct and force pushes,
+  require pull requests with the review and status checks you rely on, and do not give the
+  worker identity or deploy key a bypass. This is the mandatory platform backstop for the
+  producer's inherited host tool surface; sapwood can warn when protection is absent, but
+  does not enforce it.
+- Use a merger GitHub identity and credential distinct from the worker identity. Give the
+  worker the L1 deploy-key path (`worker.deployKeyPath` and `worker.deployKeyId`) rather than
+  a forge API credential, and keep the conductor's merger credential outside the worker's
+  readable environment. Both controls matter: branch protection prevents a producer from
+  bypassing review with a direct push, while a distinct merger identity prevents it from
+  acting as the conductor. Without both, producer ≠ merger is not a fully load-bearing
+  deployment guarantee.
+
+Credential isolation has deliberate limits: the L1 environment removes the normal forge
+credential path, but it is not OS-level confinement from arbitrary code or the host's
+credential store. Read Security's [Accepted blind spots](security.md#accepted-blind-spots),
+[Worker credential tiers (#351, #606)](security.md#worker-credential-tiers-351-606), and
+[Worker-leg user-settings persistence vector — detect & disclose (#615)](security.md#worker-leg-user-settings-persistence-vector--detect--disclose-615)
+before relying on unattended merge.
+
 ## L0–L3 autonomy ladder
 
 You do not have to hand sapwood a live backlog and full merge authority on day one.

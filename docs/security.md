@@ -2281,6 +2281,8 @@ point in its history."
 
 ## See also
 
+- [Trust model prerequisites](getting-started.md#trust-model-prerequisites) — the required
+  GitHub-side and identity setup before unattended merge.
 - [`configuration.md`](configuration.md) — the `guard`, `reviewer`, `merge`, `ci`,
   `escalation`, `cost`, `labels`, and `roles` config sections referenced above.
 - [`PLAN.md`](PLAN.md) — the full architecture, decision log, and the v0.2 round
