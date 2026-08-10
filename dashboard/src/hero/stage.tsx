@@ -64,7 +64,7 @@ const PLANNING_NODES = [
   },
 ] as const;
 const LANES = { x: 330, w: 372, top: 92, gap: 44 } as const;
-const GATES = { ci: 762, review: 858, y: 156 } as const;
+export const GATES = { ci: 762, review: 858, y: 156 } as const;
 export const ESCALATION = { x: 810, y: 320 } as const;
 /**
  * #728 gate② finding [0]: caps the cluster's rightward spread so it stays clear of the trunk
@@ -114,11 +114,21 @@ const NEEDS_HUMAN_ROW_STEP = 34;
  * caught by this file's own bbox test, not a guess). Never above-viewBox growth, never silent
  * clipping. Verified collision-free AND in-bounds up to 39 simultaneous checkpoint droplets —
  * the scale #745's own probe actually reported.
+ *
+ * #745 gate② round 5 PO pre-merge Tier-C probe (1700px, live DB): despite the above, a drawn
+ * checkpoint chip's label still bbox-intersected the Review gate's own "engine-agent" mode
+ * caption. `CHECKPOINT_BASE_OFFSET` (was a bare `-46` inline) widens the gap between the
+ * grid's row 0 (closest to the gates) and the gate row itself; paired with pushing the
+ * caption further down (stage.tsx's REVIEW node caption `y`) — the cheap half on each side.
+ * `hero.test.ts`'s own gate-cluster bbox check (covering every rank up to
+ * `CHECKPOINT_DRAW_CAP - 1`) is the regression guard for this specific pair.
  */
 const CHECKPOINT_COLS = 2;
 const CHECKPOINT_COL_STEP = 38;
 const CHECKPOINT_ROW_STEP = 34;
 const CHECKPOINT_ROWS_MAX = 3;
+/** Vertical distance from `GATES.y` to checkpoint rank 0 — the grid's closest row to the gates. */
+const CHECKPOINT_BASE_OFFSET = 52;
 /** No badge needed at or under this many simultaneous checkpoint droplets — the grid draws all
  *  of them normally, exactly as before. */
 const CHECKPOINT_DRAW_CAP = CHECKPOINT_COLS * CHECKPOINT_ROWS_MAX;
@@ -201,7 +211,10 @@ export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at)
           : (d.checkpointRank ?? 0);
       const col = rank % CHECKPOINT_COLS;
       const row = Math.floor(rank / CHECKPOINT_COLS);
-      return { x: (GATES.ci + GATES.review) / 2 + col * CHECKPOINT_COL_STEP, y: GATES.y - 46 - row * CHECKPOINT_ROW_STEP };
+      return {
+        x: (GATES.ci + GATES.review) / 2 + col * CHECKPOINT_COL_STEP,
+        y: GATES.y - CHECKPOINT_BASE_OFFSET - row * CHECKPOINT_ROW_STEP,
+      };
     }
     case "needs-human": {
       // #728: wraps after NEEDS_HUMAN_COLS instead of spreading rightward without limit — an
@@ -232,7 +245,7 @@ export function checkpointOverflowPoint(): { x: number; y: number } {
   const rank = CHECKPOINT_OVERFLOW_REAL_CAP;
   const col = rank % CHECKPOINT_COLS;
   const row = Math.floor(rank / CHECKPOINT_COLS);
-  return { x: (GATES.ci + GATES.review) / 2 + col * CHECKPOINT_COL_STEP, y: GATES.y - 46 - row * CHECKPOINT_ROW_STEP };
+  return { x: (GATES.ci + GATES.review) / 2 + col * CHECKPOINT_COL_STEP, y: GATES.y - CHECKPOINT_BASE_OFFSET - row * CHECKPOINT_ROW_STEP };
 }
 
 /** A droplet's fill token — §6/§5: `--sap` in motion, `--rust` stopped/escalated, `--moss` merged. */
@@ -325,21 +338,23 @@ export function HeroStage({
   // §6: "N merged · N pending · N needs human" — merged is THIS round's tally (never the
   // all-time ring count); pending/needs-human are the droplets currently in each state.
   //
-  // #745 gate② round 4 PO ruling: no event-age inference, in any form — `isPendingConfident`
-  // (state.ts) never deletes and never ages anything out; it only asks the two authoritative
-  // questions (fold-vouched backlog/handoff, or still named by the engine's live lane list) and,
-  // failing both, whether THIS fold's own input is known truncated (`state.foldTruncated`). A
+  // #745 gate② round 5 PO pre-merge Tier-C probe: no event-age inference, in any form, AND no
+  // "fold isn't known truncated" inference either — `isPendingConfident` (state.ts) asks ONLY
+  // a POSITIVE voucher (fold-vouched backlog/handoff, or still named by the engine's live lane
+  // list); everything else renders qualified, ALWAYS, regardless of `state.foldTruncated`. A
   // droplet the fold can't vouch for still stays drawn on stage exactly like any other pending
   // droplet — only the confident "N pending" HEADLINE number excludes it, with the excluded
-  // count named separately — an explicitly windowed/uncertain tally, never a silently smaller or
-  // a silently wrong one, and never present at all once the fold reports itself caught up.
+  // count named separately. `foldTruncated` only picks the qualifier's WORDING: "in window"
+  // while genuinely still catching up (transient), "unverified" once caught up but still
+  // unvouched (persistent) — never a silent deletion, never a silently smaller or wrong number.
   const pendingDroplets = state.droplets.filter((d) => d.at === "backlog" || d.at === "lane" || d.at === "checkpoint");
   const liveIssues = new Set(liveLanes.map((l) => l.issue));
-  const windowedCount = pendingDroplets.filter((d) => !isPendingConfident(d, state.foldTruncated, liveIssues)).length;
+  const windowedCount = pendingDroplets.filter((d) => !isPendingConfident(d, liveIssues)).length;
   const pendingCount = pendingDroplets.length - windowedCount;
+  const windowedWord = state.foldTruncated ? "in window" : "unverified";
   const outcomeTally =
     windowedCount > 0
-      ? `${state.roundMerged} merged · ${pendingCount} pending (${windowedCount} in window) · ${escalated} needs human`
+      ? `${state.roundMerged} merged · ${pendingCount} pending (${windowedCount} ${windowedWord}) · ${escalated} needs human`
       : `${state.roundMerged} merged · ${pendingCount} pending · ${escalated} needs human`;
   // #716 gate② round 2 P2-5: the fix-return arrow's own label (§6: "labeled with the send-back
   // reason") — the first currently-fixing lane, in channel order.
@@ -531,10 +546,15 @@ export function HeroStage({
           <text className="hero-gate-check" x={GATES.review + 32} y={GATES.y - 8} textAnchor="middle">
             ✓
           </text>
-          {/* §6: REVIEW carries the review MODE word (e.g. "codex"), not a model·effort pair —
-           * it isn't itself model-backed, the mode just names which reviewer runs. */}
+          {/* §6: REVIEW carries the review MODE word (e.g. "codex", "engine-agent"), not a
+           * model·effort pair — it isn't itself model-backed, the mode just names which
+           * reviewer runs.
+           * #745 gate② round 5 PO pre-merge Tier-C probe (1700px, live DB): a drawn checkpoint
+           * chip's label bbox-intersected this caption — pushed further from the gate box
+           * (was `GATES.y + 18`) as the cheap half of the fix, paired with the checkpoint
+           * grid's own extra clearance below (`dropletPoint`'s checkpoint case). */}
           {typeof reviewMode === "string" && (
-            <text className="hero-node-caption" x={GATES.review} y={GATES.y + 18} textAnchor="middle">
+            <text className="hero-node-caption" x={GATES.review} y={GATES.y + 26} textAnchor="middle">
               {reviewMode}
             </text>
           )}

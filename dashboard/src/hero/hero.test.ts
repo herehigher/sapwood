@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { DomainEvent } from "../domain-event.ts";
 import { LEGEND_ITEMS, Legend } from "./Legend.tsx";
-import { BACKLOG, checkpointOverflowPoint, dropletPoint, HeroStage, STAGE, TRUNK } from "./stage.tsx";
+import { BACKLOG, checkpointOverflowPoint, dropletPoint, GATES, HeroStage, STAGE, TRUNK } from "./stage.tsx";
 import {
   activePlanningNode,
   activeReflectionNode,
@@ -1083,7 +1083,12 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   assert.equal(escalated.length, 6);
   assert.equal(state.roundMerged, 24);
 
-  const html = markup(state, { lanesMax: 43 });
+  // #745 gate② round 5: this test's own point is the tally TEXT's real rendered extent, not the
+  // confident/qualified split — the 13 dispatched-but-not-yet-checkpointed issues are the
+  // realistic "engine still actively tracking them" shape (`isPendingConfident`'s live-lane-list
+  // voucher), matching what `/api/loop/state`'s `lanes.items[]` would actually carry for a real
+  // in-flight lane, so the tally stays the unqualified double-digit stress case this test wants.
+  const html = markup(state, { lanesMax: 43, liveLanes: Array.from({ length: 13 }, (_, i) => ({ issue: 100 + i + 1 })) });
   const tallyMatch = html.match(/class="hero-num hero-small hero-outcome-tally" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
   assert.ok(tallyMatch, "outcome tally must render");
   const [, tallyXRaw, tallyYRaw, tallyText] = tallyMatch as unknown as [string, string, string, string];
@@ -1110,20 +1115,17 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
 
 // ── #745: a droplet the fold can no longer vouch for must not be COUNTED as confident pending ──
 //
-// #745 gate② round 4 PO ruling (design re-entry, superseding rounds 1-3's threshold tuning):
-// event-age/threshold inference is DELETED entirely — no constant, no band, in any form. The
-// reachable shape a droplet reaches `at: "checkpoint"`/`"lane"` and its PR is later merged or
-// closed directly on GitHub, bypassing conductor.ts's own merge-driver — so the terminal `merged`
-// row genuinely exists in the DB (`gh pr list` would show it) but NO domain event this fold reads
-// ever gets appended for it — is real, but resolving it from event AGE (rounds 1-3's approach)
-// either silently deleted live work or was inert at the reported scale and wrongly flagged
-// fold-vouched backlog/handoff droplets too. The honest-label arm instead asks two authoritative
-// questions only (`isPendingConfident`, state.ts): is this a fold-vouched backlog/handoff
-// droplet, or does the engine's OWN live lane list still name it — and, failing both, whether
-// THIS fold's caller has explicitly reported its own input as truncated (`withFoldTruncated`,
-// never inferred from event distance). A droplet the fold can't vouch for still stays drawn on
-// stage — only the confident "N pending" headline excludes it, under an explicit windowed
-// qualifier, and only while the fold is known truncated.
+// #745 gate② round 5 PO pre-merge Tier-C probe (superseding round 4's ruling on this ONE point):
+// event-age/threshold inference is DELETED entirely — no constant, no band, in any form — AND
+// so is "the fold isn't currently known truncated" as a confidence source. Round 4's own first
+// cut still tried that third disjunct, measured from live tail-catch-up (`page.events.length >=
+// EVENTS_PAGE`); the live probe caught it wrongly confidently-tallying 40 long-terminal PRs once
+// the catch-up flag flipped false a minute after load — tail-caught-up is not the same claim as
+// "this droplet's lifecycle is fully covered" (schema-era gaps, external merges bypassing
+// conductor.ts). `isPendingConfident` (state.ts) now asks ONLY a positive voucher: is this a
+// fold-vouched backlog/handoff droplet, or does the engine's OWN live lane list still name it.
+// Everything else renders under the qualified form, ALWAYS — `state.foldTruncated` only tunes
+// the qualifier's WORDING ("in window" vs "unverified"), never whether one appears at all.
 
 test("#745 AC1: a PR's terminal event, when actually folded, resolves the droplet cleanly — proving the derivation below is honest, not just broken in a way that happens to pass", () => {
   const events = [
@@ -1141,10 +1143,10 @@ test("#745 AC1: a PR's terminal event, when actually folded, resolves the drople
   );
 });
 
-test("#745 AC1: merges outside the folded input, on a fold the caller reports truncated, are qualified — never counted in the confident figure — with NO age inference involved", () => {
+test("#745 AC1: merges outside the folded input, on a fold the caller reports truncated, are qualified 'in window' — never counted in the confident figure — with NO age inference involved", () => {
   // Deliberately a SMALL event-id gap (the terminal `merged` row was never folded at all, not
   // "folded a long time ago") — an age-based mutant would see nothing to flag here and this
-  // assertion would fail, proving the split is driven by `foldTruncated`, not event distance.
+  // assertion would fail, proving the split is driven by a positive voucher, not event distance.
   const dispatch422 = ev("dispatched", { worker: "w-422", issue: 422 });
   const toCheckpoint422 = ev("reclaim-done", { worker: "w-422", issue: 422, next: "DRIVING", pr: 900 });
   // Issue 422's own terminal event genuinely falls OUTSIDE this fold's input (a human
@@ -1159,14 +1161,20 @@ test("#745 AC1: merges outside the folded input, on a fold the caller reports tr
   assert.match(
     markup(truncated).match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
     /0 merged · 0 pending \(1 in window\) · 0 needs human/,
+    "'in window' is the transient-catch-up wording, chosen only because this fixture explicitly reports truncated=true",
   );
 });
 
-test("#745 AC1: the SAME missing-terminal-event droplet, when the fold is NOT reported truncated, stays in the unqualified confident tally — no age inference either", () => {
+// #745 gate② round 5 PO pre-merge Tier-C probe: THIS is the test that inverts round 1's own
+// (round-4-era) expectation — a fully-caught-up fold (`foldTruncated: false`) is NOT, by itself,
+// a confidence voucher. A droplet with no terminal event and no live-lane-list backing must
+// render QUALIFIED regardless — "unverified" is the caught-up-but-still-unvouched wording. The
+// mutation-kill pair for finding [1]: restoring `|| !foldTruncated` inside `isPendingConfident`
+// makes this specific assertion fail (both droplets would read back as unqualified "2 pending").
+test("#745 AC1: the SAME missing-terminal-event droplet, even when the fold is NOT reported truncated, still renders qualified 'unverified' — a caught-up fold is not a confidence voucher", () => {
   // Deliberately a LARGE event-id gap (thousands of unrelated events between arrival and now) —
-  // an age-based mutant would flag this one stale/uncertain on distance alone; this fold is
-  // explicitly told it is NOT truncated, so the honest answer is "still confidently pending",
-  // exactly like any other genuinely-quiet-but-real PR.
+  // proves this has nothing to do with event age either: qualified regardless of how old or how
+  // fresh the droplet's last touch is, because neither age NOR "not truncated" ever vouches for it.
   const dispatch422 = ev("dispatched", { worker: "w-422", issue: 422 });
   const toCheckpoint422 = ev("reclaim-done", { worker: "w-422", issue: 422, next: "DRIVING", pr: 900 });
   const farLater = { ...ev("dispatched", { worker: "w-other-1", issue: 1 }), id: toCheckpoint422.id + 3000 };
@@ -1176,22 +1184,28 @@ test("#745 AC1: the SAME missing-terminal-event droplet, when the fold is NOT re
   assert.ok(droplet(state, 422), "still drawn, as always");
   assert.match(
     markup(state).match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
-    /0 merged · 2 pending · 0 needs human/,
-    "no windowed qualifier at all when the fold is not known truncated, regardless of how large the id gap is",
+    /0 merged · 0 pending \(2 unverified\) · 0 needs human/,
+    "'unverified' is the caught-up-but-still-unvouched wording — neither droplet has a positive voucher, so BOTH are qualified even though the fold is not truncated",
   );
 });
 
-test("#745 AC1: a droplet the engine's live lane list still tracks stays in the confident figure even on a truncated fold", () => {
+test("#745 AC1: a droplet the engine's live lane list still tracks stays in the confident figure EITHER WAY — truncated or not", () => {
   const dispatch422 = ev("dispatched", { worker: "w-422", issue: 422 });
   const toCheckpoint422 = ev("reclaim-done", { worker: "w-422", issue: 422, next: "DRIVING", pr: 900 });
   const untruncated = run([dispatch422, toCheckpoint422], 3).state;
-  const truncated = withFoldTruncated(untruncated, true);
 
-  const html = markup(truncated, { liveLanes: [{ issue: 422 }] });
+  const htmlTruncated = markup(withFoldTruncated(untruncated, true), { liveLanes: [{ issue: 422 }] });
   assert.match(
-    html.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    htmlTruncated.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
     /0 merged · 1 pending · 0 needs human/,
     "the engine still naming this issue is authoritative — no windowed qualifier even though the fold is truncated",
+  );
+
+  const htmlUntruncated = markup(untruncated, { liveLanes: [{ issue: 422 }] });
+  assert.match(
+    htmlUntruncated.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /0 merged · 1 pending · 0 needs human/,
+    "and equally so when the fold reports itself caught up — the live voucher, not the truncation flag, is what's doing the work",
   );
 });
 
@@ -1276,6 +1290,55 @@ test("#745 AC2: six simultaneous checkpoint droplets — CHECKPOINT_COLS/STEP's 
   for (const { label, box } of boxes) {
     assert.ok(box.left >= 0 && box.right <= STAGE.w, `${label} left=${box.left} right=${box.right} lies outside [0, ${STAGE.w}]`);
     assert.ok(box.top >= 0 && box.bottom <= STAGE.h, `${label} top=${box.top} bottom=${box.bottom} lies outside [0, ${STAGE.h}]`);
+  }
+});
+
+// #745 gate② round 5 PO pre-merge Tier-C probe (1700px, live DB): a drawn checkpoint chip's
+// label bbox-intersected the Review gate's own "engine-agent" mode caption — the same defect
+// family as #728/#744 (real rendered extent, not anchor-point spacing). Checked at every rank up
+// to `CHECKPOINT_DRAW_CAP - 1` (the pre-overflow ceiling) against the FULL CI/Review gate
+// cluster: both rects, both node labels, and the Review caption (rendered with `reviewer.mode`
+// set, the exact live shape — the caption doesn't even mount without it).
+test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any rank up to the grid's capacity, intersects the CI/Review gate cluster (rect, label, or mode caption)", () => {
+  const events: DomainEvent[] = [];
+  for (let i = 1; i <= 6; i++) {
+    events.push(ev("dispatched", { worker: `w${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `w${i}`, issue: i, next: "DRIVING", pr: 100 + i }));
+  }
+  const { state } = run(events, 6);
+  const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
+  assert.equal(checkpointed.length, 6, "exercise every rank up to CHECKPOINT_DRAW_CAP - 1 (0..5)");
+
+  const html = markup(state, { config: { reviewer: { mode: "engine-agent" } } });
+  const captionMatch = html.match(/class="hero-node-caption" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">engine-agent</);
+  assert.ok(captionMatch, "the fixture must actually mount the Review gate's mode caption (the live shape under test)");
+  const [, capXRaw, capYRaw] = captionMatch as unknown as [string, string, string];
+
+  const gateBoxes: { label: string; box: Box }[] = [
+    { label: "CI gate rect", box: { left: GATES.ci - 34, right: GATES.ci + 34, top: GATES.y - 20, bottom: GATES.y + 20 } },
+    { label: "CI gate label", box: textBox("CI", GATES.ci, GATES.y + 5, 12) },
+    { label: "Review gate rect", box: { left: GATES.review - 42, right: GATES.review + 42, top: GATES.y - 20, bottom: GATES.y + 20 } },
+    { label: "Review gate label", box: textBox("Review", GATES.review, GATES.y + 5, 12) },
+    { label: "Review gate mode caption (engine-agent)", box: textBox("engine-agent", Number(capXRaw), Number(capYRaw), 9) },
+  ];
+
+  const checkpointBoxes: { label: string; box: Box }[] = [];
+  for (const d of checkpointed) {
+    const { x, y } = dropletPoint(state, d);
+    checkpointBoxes.push({ label: `checkpoint #${d.issue} circle`, box: circleBox(x, y, 9) });
+    checkpointBoxes.push({ label: `checkpoint #${d.issue} label`, box: textBox(`⤳ ${d.pr}`, x, y - 14, 10) });
+  }
+
+  // Cross-product only — gate rect/label/caption overlapping EACH OTHER is by design (the
+  // caption and label are drawn inside/beside their own rect); what must never overlap is a
+  // checkpoint chip against any piece of the gate cluster.
+  for (const chip of checkpointBoxes) {
+    for (const gate of gateBoxes) {
+      assert.ok(
+        !boxesOverlap(chip.box, gate.box),
+        `${chip.label} ${JSON.stringify(chip.box)} overlaps ${gate.label} ${JSON.stringify(gate.box)}`,
+      );
+    }
   }
 });
 

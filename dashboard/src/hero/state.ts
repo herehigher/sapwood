@@ -112,10 +112,15 @@ export type HeroState = {
    * never inferred by this module from event age or distance. `foldEvents` only ever carries
    * this flag through unchanged — no event kind sets or clears it.
    *
-   * #745 gate② round 4 PO ruling: the honest-label arm. A droplet this fold cannot otherwise
-   * vouch for (see `isPendingConfident`) is rendered under an explicit windowed/uncertain
-   * qualifier ONLY while this is true; once the caller reports the fold caught up, the plain
-   * unqualified tally resumes — never a silent deletion, never an age-derived guess either way.
+   * #745 gate② round 5 PO pre-merge Tier-C probe: this field does NOT gate confidence anymore
+   * (`isPendingConfident` never reads it) — round 5's first cut treated "not currently
+   * truncated" as a THIRD confidence voucher, which measures tail-catch-up, not per-droplet
+   * lifecycle coverage, and a live probe caught it wrongly confidently-tallying 40 long-terminal
+   * PRs once the tail caught up. Its only remaining job is tuning the QUALIFIED caption's
+   * wording in `stage.tsx`: "(N in window)" while genuinely still catching up (this flag true —
+   * transient, self-resolving) vs "(N unverified)" once caught up but still unvouched (this
+   * flag false — persistent, needs the live lane list or a manual check) — two different honest
+   * REASONS a droplet is unconfident, never two different confidence levels.
    */
   foldTruncated: boolean;
 };
@@ -640,41 +645,44 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
 }
 
 /**
- * #745 gate② round 2 finding [1] / round 3 finding [1] / round 4 PO ruling (design re-entry):
- * event-age is NOT an authoritative terminal-state signal — the LIVE hero fold
- * (`accumulateEventsPage`/`foldReplay`) accumulates every ascending page DURABLY, so a droplet
- * that's gone many event ids without its own next event is exactly as often a genuinely still-
- * open PR sitting quiet while OTHER lanes stay busy. Two successive age-threshold attempts at
- * this problem both failed for that reason: the first silently DELETED a droplet past its
- * threshold (traded a false "pending" for a worse false "vanished, uncounted"); the second kept
- * it drawn but was inert at the reported scale (borrowed constant compared against the wrong
- * quantity) and wrongly flagged fold-vouched `backlog`/handoff droplets stale too. Doctrine 4
- * (`docs/REVIEW-DOCTRINE.md`): after that many rounds tuning the SAME threshold, the fix is
- * design re-entry, not another number — the PO's ruling deletes threshold inference entirely.
+ * #745 gate② round 2 finding [1] / round 3 finding [1] / round 4 PO ruling (design re-entry) /
+ * round 5 PO pre-merge Tier-C probe: event-age is NOT an authoritative terminal-state signal —
+ * the LIVE hero fold (`accumulateEventsPage`/`foldReplay`) accumulates every ascending page
+ * DURABLY, so a droplet that's gone many event ids without its own next event is exactly as
+ * often a genuinely still-open PR sitting quiet while OTHER lanes stay busy. Three successive
+ * attempts at this problem each failed differently: round 1 silently DELETED a droplet past a
+ * threshold; round 3 kept it drawn but was inert at the reported scale and wrongly flagged
+ * fold-vouched `backlog`/handoff droplets stale too; round 5's own first cut ADDED A THIRD
+ * disjunct — "the caller's `foldTruncated` flag is false ⇒ confident" — measured from
+ * `page.events.length >= EVENTS_PAGE` (live catch-up), which is a TAIL-CATCH-UP signal, not a
+ * per-droplet LIFECYCLE-COVERAGE one: a minute after page load the flag flips false and every
+ * untracked droplet became confidently pending again, even though a fully-caught-up fold still
+ * can't vouch for a droplet whose terminal kind predates this schema (old history has gaps
+ * where a terminal event simply never existed) or was written by a path outside this event log
+ * entirely (a PR merged/closed directly on GitHub). The live Tier-C probe caught exactly this:
+ * 40 long-terminal PRs read as a confident "40 pending" once the tail caught up.
  *
- * `isPendingConfident` decides the split from two authoritative FACTS only, never event
- * distance:
+ * `isPendingConfident` now decides the split from a POSITIVE VOUCHER only — never a negative
+ * ("fold isn't KNOWN incomplete") one:
  *
  *   1. A `backlog` droplet is state the fold knows EXACTLY — it only ever reaches `backlog` via
- *      `handoff` ("saved for a successor"), and nothing else moves it. Always confident,
- *      regardless of `foldTruncated` (round 4 finding [1]: this is the specific regression the
- *      age heuristic introduced).
+ *      `handoff` ("saved for a successor"), and nothing else moves it. Always confident.
  *   2. A droplet the engine's own live lane list (`/api/loop/state`'s `lanes.items[]`, matched
  *      by issue — the same rows `withLanePrs` already consumes for the PR tag) still names is
  *      confident: the engine itself has not moved on from that issue's work RIGHT NOW,
  *      independent of whatever this fold's own event history has or hasn't caught up to.
  *
- * Everything else stays confident too, UNLESS the caller reports this fold's input as currently
- * truncated (`HeroState.foldTruncated`) — a droplet's mere silence in a COMPLETE fold's own
- * knowledge was never honestly in doubt; only a KNOWN-incomplete fold has reason to qualify it.
+ * Everything else renders under the qualified form, ALWAYS — `HeroState.foldTruncated` no
+ * longer participates in confidence at all; it only tunes the qualifier's WORDING in
+ * `stage.tsx` ("in window" while genuinely still catching up vs "unverified" once caught up but
+ * still unvouched — two different honest reasons, not two different confidence levels).
  * `stage.tsx` reads the result to keep every pending droplet drawn regardless, moving only the
- * unconfident ones out of the headline "N pending" figure and into an explicitly windowed/
- * uncertain qualifier — never a silent deletion, never a silently smaller or wrong number.
+ * unconfident ones out of the headline "N pending" figure — never a silent deletion, never a
+ * silently smaller or wrong number.
  */
-export function isPendingConfident(d: Droplet, foldTruncated: boolean, liveIssues: ReadonlySet<number>): boolean {
+export function isPendingConfident(d: Droplet, liveIssues: ReadonlySet<number>): boolean {
   if (d.at === "backlog") return true;
-  if (liveIssues.has(d.issue)) return true;
-  return !foldTruncated;
+  return liveIssues.has(d.issue);
 }
 
 /** Freeze a `Draft` in progress into a real, independent `HeroState` snapshot — used both for
