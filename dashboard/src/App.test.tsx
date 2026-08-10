@@ -37,7 +37,11 @@ function stubFetch(byPath: Record<string, { status: number; body: unknown }>) {
 
 const SPEND_EMPTY = { "/api/spend": { status: 200, body: { spend: [], lastId: 0 } } };
 
-async function renderSettledApp(byPath: Record<string, { status: number; body: unknown }>, now?: Date): Promise<string> {
+async function renderSettledApp(
+  byPath: Record<string, { status: number; body: unknown }>,
+  now?: Date,
+  initialConfigOpen?: boolean,
+): Promise<string> {
   // `/api/spend` defaults to an empty, successful page — most tests here aren't exercising the
   // cost strip and would otherwise fail on an unstubbed fetch now that App also polls it (#715
   // gate② round 3 [2]). Callers exercising spend explicitly can still override it via `byPath`.
@@ -55,7 +59,7 @@ async function renderSettledApp(byPath: Record<string, { status: number; body: u
   ]);
   return renderToStaticMarkup(
     <QueryClientProvider client={client}>
-      <App now={now} />
+      <App now={now} initialConfigOpen={initialConfigOpen} />
     </QueryClientProvider>,
   );
 }
@@ -161,4 +165,44 @@ test("#715 gate② round 3 [2]: a completed lane's settled spend still renders i
   );
   assert.match(html, /w1/);
   assert.match(html, /\$3\.40/);
+});
+
+// #727 gate② finding config-trigger-test-is-static: IconRail.test.tsx's own render-only test
+// can only prove the gear's markup exists, never that clicking it drives App's real `configOpen`
+// state into the SAME `ConfigDrawer` #145 built (`renderToStaticMarkup` runs no effects and
+// dispatches no real click — this repo's test harness has no jsdom, same limitation
+// Controls.test.tsx documents for its own confirm flow). `initialConfigOpen` is the equivalent
+// test seam Controls.tsx already established for exactly this class of problem: put the
+// component directly into the state a click would produce, and assert the render for that state.
+test("#727 gate②: configOpen=true renders the SAME ConfigDrawer the rail gear drives; the removed header trigger never reappears", async () => {
+  const closedHtml = await renderSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  assert.doesNotMatch(closedHtml, /Config ▸/, "the header trigger #727 removed must never come back");
+  assert.doesNotMatch(closedHtml, /aria-label="config"/, "closed by default — ConfigDrawer returns null while !open");
+  assert.match(closedHtml, /aria-label="open config"/, "the rail gear is the only remaining trigger");
+
+  const openHtml = await renderSettledApp(
+    { "/api/loop/state": { status: 200, body: LOOP_STATE_OK }, "/api/events": { status: 200, body: { events: [], lastId: 0 } } },
+    undefined,
+    true,
+  );
+  assert.match(openHtml, /aria-label="config"/, "the exact #145 ConfigDrawer component renders once configOpen is true");
+  assert.doesNotMatch(openHtml, /Config ▸/);
+});
+
+// #727 gate② finding anchor-targets-not-tested: the previous IconRail-only test proved the two
+// hrefs exist and nothing else does, but never checked the OTHER end — a target id renamed or
+// deleted elsewhere in App would leave a dead `#overview`/`#cost` link with that test still green.
+test("#727 gate②: every rail hash anchor resolves to exactly one matching target id in the rendered page", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  for (const id of ["overview", "cost"]) {
+    assert.match(html, new RegExp(`href="#${id}"`), `rail must link to #${id}`);
+    const targets = html.match(new RegExp(`id="${id}"`, "g")) ?? [];
+    assert.equal(targets.length, 1, `expected exactly one id="${id}" target, found ${targets.length}`);
+  }
 });

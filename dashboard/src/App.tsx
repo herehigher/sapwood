@@ -31,14 +31,19 @@ export function resolveFixCap(config: Record<string, unknown> | null | undefined
  * The header (A) + hero (B, #144) + lane board (C) + activity feed (D) + cost strip/config
  * drawer (E) from frontend-design.md §3, all against the same §8 data hooks. `now` is
  * test-only (defaults to the real clock) — the cost strip's "by lane" day boundary needs a
- * fixed instant to assert against.
+ * fixed instant to assert against. `initialConfigOpen` is test-only too, same posture as
+ * `now` and as Controls.tsx's own `initialState` seam: `renderToStaticMarkup` (this app's only
+ * test harness) never runs effects OR dispatches a real click, so a test proving the rail's
+ * config gear and the header's old `Config ▸` button drive the SAME `ConfigDrawer` has to put
+ * the component directly into the "open" state rather than simulate the click that would
+ * normally produce it (#727 gate② finding config-trigger-test-is-static).
  */
-export function App({ now }: { now?: Date | undefined } = {}) {
+export function App({ now, initialConfigOpen }: { now?: Date | undefined; initialConfigOpen?: boolean | undefined } = {}) {
   const clock = now ?? new Date();
   const loop = useLoopState();
   const events = useEventHistory();
   const spend = useSpendHistory();
-  const [configOpen, setConfigOpen] = useState(false);
+  const [configOpen, setConfigOpen] = useState(initialConfigOpen ?? false);
 
   // §3's documented `disconnected` header state: ANY of the three queries failing means the
   // dashboard has lost part of its one data source, regardless of which one (#715 gate② [7] —

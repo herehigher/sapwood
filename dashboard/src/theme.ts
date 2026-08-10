@@ -28,11 +28,16 @@ export function readStoredTheme(): ThemeOverride {
   }
 }
 
+/** The DOM-only half of `applyTheme` — no storage write, so it's safe to call on every mount
+ *  (including with a freshly-read stored value) without re-persisting what's already there. */
+function applyThemeToDom(theme: ThemeOverride): void {
+  if (typeof document === "undefined") return;
+  if (theme === null) document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", theme);
+}
+
 export function applyTheme(theme: ThemeOverride): void {
-  if (typeof document !== "undefined") {
-    if (theme === null) document.documentElement.removeAttribute("data-theme");
-    else document.documentElement.setAttribute("data-theme", theme);
-  }
+  applyThemeToDom(theme);
   if (typeof localStorage === "undefined") return;
   try {
     if (theme === null) localStorage.removeItem(STORAGE_KEY);
@@ -40,4 +45,17 @@ export function applyTheme(theme: ThemeOverride): void {
   } catch {
     /* storage unavailable (private mode, quota) — the attribute still applies for the session */
   }
+}
+
+/**
+ * Gate② finding theme-override-not-restored: reading the stored override into React state is
+ * not the same as re-applying it to `<html data-theme>` — without this, a page loaded under a
+ * `heartwood` override but a light system theme rendered light while the rail's own label said
+ * "dark (heartwood)". Called on mount (IconRail) so a reload re-asserts the stored override on
+ * the DOM, not just on the button's caption.
+ */
+export function restoreTheme(): ThemeOverride {
+  const stored = readStoredTheme();
+  applyThemeToDom(stored);
+  return stored;
 }

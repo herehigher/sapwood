@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { applyTheme, nextTheme, readStoredTheme, type ThemeOverride } from "../theme.ts";
+import { applyTheme, nextTheme, restoreTheme, type ThemeOverride } from "../theme.ts";
 
 /**
  * frontend-design.md §3: "wordmark at top, anchor / drawer entries (overview, cost, config) and
@@ -85,10 +85,13 @@ export interface IconRailProps {
 
 export function IconRail({ onOpenConfig }: IconRailProps) {
   const [theme, setTheme] = useState<ThemeOverride>(null);
-  // Reads any stored override once on mount — SSR/first paint renders "system", then settles,
-  // same posture as every other client-only-state seam in this app (no flash-relevant test
-  // depends on the pre-mount value since `renderToStaticMarkup` never runs effects at all).
-  useEffect(() => setTheme(readStoredTheme()), []);
+  // Reads AND re-applies any stored override once on mount — SSR/first paint renders "system",
+  // then settles, same posture as every other client-only-state seam in this app (no
+  // flash-relevant test depends on the pre-mount value since `renderToStaticMarkup` never runs
+  // effects at all). `restoreTheme` (not just `readStoredTheme`) matters here: reading the value
+  // into state without re-applying it to `<html data-theme>` left a reloaded page rendering the
+  // SYSTEM theme while the button's own label claimed the stored override was active.
+  useEffect(() => setTheme(restoreTheme()), []);
 
   const themeKey = theme ?? "system";
 
