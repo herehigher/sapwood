@@ -1,4 +1,4 @@
-import type { ControlVerb, EventsPage, LoopState, SpendPage } from "./types.ts";
+import type { ControlVerb, EventsPage, LoopState, RoundsPage, SpendPage } from "./types.ts";
 
 /**
  * Fetch wrappers for the §8 read-only endpoints. Same-origin relative paths only: the
@@ -25,6 +25,10 @@ export const fetchEvents = ({ after, limit }: { after: number; limit: number }, 
  *  from today's total the instant it stops being active. */
 export const fetchSpend = ({ after, limit }: { after: number; limit: number }, signal?: AbortSignal): Promise<SpendPage> =>
   getJson<SpendPage>(`/api/spend?after=${after}&limit=${limit}`, signal);
+
+/** `GET /api/rounds` — the replay chapter marks + round navigator's list (§8). Unpaged: one row
+ *  per round, ascending, artifact-less rows included. */
+export const fetchRounds = (signal?: AbortSignal): Promise<RoundsPage> => getJson<RoundsPage>("/api/rounds", signal);
 
 /** `POST /api/control` (§3 Operations / §8) — the dashboard's one write path. The server defends
  *  itself independently of this client (same-origin `Origin` check, the `X-Sapwood-Control`

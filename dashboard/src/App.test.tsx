@@ -2,10 +2,15 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
-import { App, appContent, resolveFixCap, toggleConfigOpen } from "./App.tsx";
-import { eventsQuery, loopStateQuery, spendQuery } from "./api/queries.ts";
+import { App, appContent, resolveActiveFold, resolveFixCap, resolveRoundSpend, toggleConfigOpen } from "./App.tsx";
+import { eventsQuery, loopStateQuery, roundsQuery, spendQuery } from "./api/queries.ts";
+import type { SpendRow } from "./api/types.ts";
+import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
+import type { DomainEvent } from "./domain-event.ts";
 import { initialHeroState } from "./hero/state.ts";
+import { initialReplayState } from "./replay/reducer.ts";
+import { bucketSpendByPhase, phaseSpendBars } from "./replay/spend-replay.ts";
 
 /** Same tree-walk IconRail.test.tsx uses — finds a node in a REAL React element tree (never a
  *  `renderToStaticMarkup` string, which strips function props) by exact `className`. */
@@ -38,10 +43,18 @@ function findByType(node: unknown, type: unknown): { props: Record<string, unkno
 /** A minimal-but-real `Parameters<typeof appContent>[0]` — `loop` only needs the two fields
  *  `appContent` actually reads (`isPending`, `data`); the full TanStack `UseQueryResult` shape
  *  isn't worth hand-implementing for a fixture, so it's cast rather than fully typed. */
-function minimalAppViewModel(overrides: { configOpen?: boolean; setConfigOpen?: (updater: unknown) => void } = {}) {
+function minimalAppViewModel(
+  overrides: {
+    configOpen?: boolean;
+    setConfigOpen?: (updater: unknown) => void;
+    mode?: "live" | "replay";
+    loop?: unknown;
+    roundSpend?: unknown;
+  } = {},
+) {
   return {
     clock: new Date("2026-01-01T00:00:00Z"),
-    loop: { data: undefined, isPending: false },
+    loop: overrides.loop ?? { data: undefined, isPending: false },
     events: { events: [], titles: {}, openAttention: [], hero: initialHeroState(null), steps: [], error: undefined, isPending: false },
     disconnected: false,
     parked: false,
@@ -49,8 +62,37 @@ function minimalAppViewModel(overrides: { configOpen?: boolean; setConfigOpen?: 
     fixCap: 2,
     byModel: { title: "by model", bars: [] },
     byLane: { title: "by lane", bars: [] },
+    byPhase: { title: "by phase", bars: [] },
     configOpen: overrides.configOpen ?? false,
     setConfigOpen: overrides.setConfigOpen ?? (() => {}),
+    // #741: a minimal live-mode replay view — this fixture never exercises replay itself, only
+    // App's config-trigger wiring, so every replay field is the same "nothing selected" shape
+    // `useReplay` starts in.
+    mode: overrides.mode ?? "live",
+    rounds: [],
+    replay: {
+      mode: overrides.mode ?? "live",
+      selectedRoundId: null,
+      selectRound: () => {},
+      loading: false,
+      position: null,
+      playing: false,
+      speed: 1,
+      play: () => {},
+      pause: () => {},
+      setSpeed: () => {},
+      scrub: () => {},
+      spendThroughCursor: [],
+      phaseWindows: [],
+    },
+    activeHero: initialHeroState(null),
+    activeSteps: [],
+    activeEvents: [],
+    activeTitles: {},
+    activeOpenAttention: [],
+    // Mirrors real `App()`: `spendFacts` is always `loop.data?.spend`, straight through.
+    spendFacts: (overrides.loop as { data?: { spend?: unknown } } | undefined)?.data?.spend,
+    roundSpend: overrides.roundSpend,
   } as unknown as Parameters<typeof appContent>[0];
 }
 
@@ -85,16 +127,17 @@ function stubFetch(byPath: Record<string, { status: number; body: unknown }>) {
 }
 
 const SPEND_EMPTY = { "/api/spend": { status: 200, body: { spend: [], lastId: 0 } } };
+// #766 gate② finding [2] (rounds-failure-renders-empty): `/api/rounds` is now a FOURTH data
+// source `App` depends on — defaults to an empty, successful page for every test that isn't
+// specifically exercising rounds, same rationale `SPEND_EMPTY` already documents for `/api/spend`.
+const ROUNDS_EMPTY = { "/api/rounds": { status: 200, body: { rounds: [] } } };
 
 async function renderSettledApp(
   byPath: Record<string, { status: number; body: unknown }>,
   now?: Date,
   initialConfigOpen?: boolean,
 ): Promise<string> {
-  // `/api/spend` defaults to an empty, successful page — most tests here aren't exercising the
-  // cost strip and would otherwise fail on an unstubbed fetch now that App also polls it (#715
-  // gate② round 3 [2]). Callers exercising spend explicitly can still override it via `byPath`.
-  stubFetch({ ...SPEND_EMPTY, ...byPath });
+  stubFetch({ ...SPEND_EMPTY, ...ROUNDS_EMPTY, ...byPath });
   // `retryOnMount: false` matters as much as `retry: false` here: a query that has ONLY ever
   // errored (never succeeded) otherwise re-triggers a fresh fetch the instant a new observer
   // mounts (TanStack Query's default `retryOnMount: true`), which collapses `status` back to
@@ -105,6 +148,7 @@ async function renderSettledApp(
     client.prefetchQuery(loopStateQuery()),
     client.prefetchQuery(eventsQuery(0)),
     client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
   ]);
   return renderToStaticMarkup(
     <QueryClientProvider client={client}>
@@ -152,6 +196,22 @@ test("#715 gate② round 4 [2]: header ALSO shows disconnected when only /api/sp
   });
   assert.match(html, /disconnected — restart sapwood to reconnect/);
   assert.doesNotMatch(html, /503/, "the header must never leak the raw fetch-error message");
+});
+
+// #766 gate② finding [2] round 3 (rounds-failure-renders-empty): `useRounds()` introduced a
+// FOURTH required data source that `disconnected` didn't originally check — a failed `/api/rounds`
+// used to leave the header reading healthy while `rounds.data?.rounds ?? []` silently rendered the
+// truthful-empty "no rounds yet" caption, converting a real transport failure into an
+// honest-looking empty history.
+test("#766 gate② finding [2]: header ALSO shows disconnected when only /api/rounds fails (loop-state, events, and spend are fine)", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+    "/api/rounds": { status: 503, body: { error: "nope" } },
+  });
+  assert.match(html, /disconnected — restart sapwood to reconnect/);
+  assert.doesNotMatch(html, /503/, "the header must never leak the raw fetch-error message");
+  assert.doesNotMatch(html, /no rounds yet/, "a rounds FETCH failure must never be presented as an honest empty history");
 });
 
 test("both queries succeeding renders the normal header, not disconnected", async () => {
@@ -301,4 +361,317 @@ test("#727 gate②: every rail hash anchor resolves to exactly one matching targ
     const targets = html.match(new RegExp(`id="${id}"`, "g")) ?? [];
     assert.equal(targets.length, 1, `expected exactly one id="${id}" target, found ${targets.length}`);
   }
+});
+
+// #766 gate② finding [0] (rounds-api-ui-unexercised): the endpoint (server.test.ts) and the
+// navigator's rendering (Transport.test.tsx, hand-fed a Round[]) were only ever tested as
+// disconnected halves — nothing proved `fetchRounds`/`roundsQuery`'s response actually reaches
+// App's real `<Transport>`. This drives the REAL `App` component through the REAL query layer
+// (`renderSettledApp`'s `client.prefetchQuery(roundsQuery())`), stubbing `/api/rounds` with
+// distinguishable multi-round data — including an artifact-less row — and asserts the rendered
+// page shows both, tally and tally-less alike.
+test("#766 gate② finding [0]: /api/rounds data flows through fetchRounds/roundsQuery into App's real <Transport>, including an artifact-less row rendering tally-less", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+    "/api/rounds": {
+      status: 200,
+      body: {
+        rounds: [
+          {
+            roundId: 5,
+            status: "done",
+            startedAt: "2026-08-10T10:00:00Z",
+            endedAt: "2026-08-10T10:30:00Z",
+            startEventId: 100,
+            startSpendId: 50,
+            eventCount: 42,
+            schemaVersion: 1,
+            artifact: { prsMerged: 3, spendUsd: 4.5 },
+          },
+          {
+            // Artifact-less: closed without a persisted artifact (pre-#123 history, or a crash
+            // between closeRound and saveRoundArtifact) — §8's "render tally-less, never skip".
+            roundId: 6,
+            status: "done",
+            startedAt: "2026-08-10T11:00:00Z",
+            endedAt: "2026-08-10T11:30:00Z",
+            startEventId: 200,
+            startSpendId: 80,
+            eventCount: 10,
+            schemaVersion: null,
+            artifact: null,
+          },
+        ],
+      },
+    },
+  });
+  assert.match(html, /round 5/, "round 5's navigator row must render from the real /api/rounds response");
+  assert.match(html, /round 6/, "round 6's navigator row must render too");
+  assert.match(html, /3 merged/, "round 5's real artifact tally must render");
+  assert.match(html, /no summary yet/, "round 6's artifact-less row must render tally-less, not skipped or fabricated");
+});
+
+// ── #766 gate② finding [1] (header-replay-total-is-round-scoped): resolveRoundSpend ────────────
+//
+// Round 1's fix (finding [0], previous head) mislabeled the SELECTED round's own cursor-truncated
+// spend as "run" spend — wrong scope, since a multi-round run's true total needs every earlier
+// round too, which this app has no honest way to reconstruct (confirmed: even LIVE mode's own
+// `spend.runUsd` is unconditionally `null` server-side — `dashboard/server.ts` has no run-anchor
+// machinery at all). `resolveRoundSpend` is the honest replacement: a real number, correctly
+// scoped and labeled as "round" (Header.tsx's new third tier), against the round's OWN persisted
+// `roundBudgetUsd` — never today's live config, and never claiming a scope this app can't measure.
+
+test("resolveRoundSpend: reads usedUsd straight from the caller's cursor-truncated sum", () => {
+  const artifact = { roundBudgetUsd: 100 };
+  assert.deepEqual(resolveRoundSpend(12.5, artifact), { usedUsd: 12.5, budgetUsd: 100 });
+});
+
+test("resolveRoundSpend: reads budgetUsd from the round's OWN artifact — never today's live config", () => {
+  // Deliberately distinguishable: if this read the live config's budget instead of the round's
+  // own historical `roundBudgetUsd`, a config change since the round closed would show the WRONG
+  // ceiling. $250 here is the round's real historical budget; nothing about "today's config" is
+  // ever consulted.
+  const artifact = { roundBudgetUsd: 250, prsMerged: 3 };
+  const result = resolveRoundSpend(200, artifact);
+  assert.equal(result.budgetUsd, 250);
+});
+
+test("resolveRoundSpend: an artifact-less round (null artifact) reports an honest null budget, never a guessed one", () => {
+  assert.deepEqual(resolveRoundSpend(5, null), { usedUsd: 5, budgetUsd: null });
+});
+
+test("resolveRoundSpend: an artifact missing roundBudgetUsd (malformed/unexpected shape) also falls back to null, never throws", () => {
+  assert.deepEqual(resolveRoundSpend(5, { someOtherField: 1 }), { usedUsd: 5, budgetUsd: null });
+  assert.deepEqual(resolveRoundSpend(5, "not an object"), { usedUsd: 5, budgetUsd: null });
+});
+
+test("resolveRoundSpend: usedUsd is 0 (never a stale figure) while the round's log is still loading — spendThroughCursor is empty until then", () => {
+  assert.deepEqual(resolveRoundSpend(0, { roundBudgetUsd: 100 }), { usedUsd: 0, budgetUsd: 100 });
+});
+
+// ── appContent integration: Header receives the round-scoped reading, and it WINS over live spend ──
+
+test("#766 gate② finding [1]: appContent's REAL <Header round> prop is the round-scoped reading, distinguishable from the live spend also passed through", () => {
+  const distinguishableRoundSpend = { usedUsd: 12.5, budgetUsd: 250 };
+  const vm = minimalAppViewModel({
+    mode: "replay",
+    loop: { data: { ...LOOP_STATE_OK, spend: { runUsd: 999, runBudgetUsd: 500, todayUsd: 999, dailyBudgetUsd: 500 } }, isPending: false },
+    roundSpend: distinguishableRoundSpend,
+  });
+  const tree = appContent(vm);
+
+  const header = findByType(tree, Header);
+  assert.ok(header, "Header not found in appContent's real tree");
+  assert.deepEqual(header!.props.round, distinguishableRoundSpend, "Header must receive vm.roundSpend");
+  // `spend` is still passed through (Header.tsx's own `round`-wins-over-`spend` contract handles
+  // the precedence) — this pins that the OVERRIDE, not a mutation of `spend` itself, is the fix.
+  assert.deepEqual((header!.props.spend as { runUsd: number }).runUsd, 999);
+});
+
+test("resolveSpendMeter's run/daily reading is what LIVE mode alone uses: appContent passes round=undefined in live mode, so Header falls through to spend", () => {
+  const vm = minimalAppViewModel({
+    mode: "live",
+    loop: { data: { ...LOOP_STATE_OK, spend: { runUsd: 42, runBudgetUsd: 100, todayUsd: 42, dailyBudgetUsd: 100 } }, isPending: false },
+  });
+  const tree = appContent(vm);
+  const header = findByType(tree, Header);
+  assert.equal(header!.props.round, undefined, "live mode must never populate the round override");
+});
+
+// ── #766 gate② finding [2] (replay-loading-leaks-live-fold): resolveActiveFold ─────────────────
+
+function domainEvent(id: number, kind: string): DomainEvent {
+  return { known: false, id, ts: "2026-08-10T10:00:00Z", kind, payload: {} };
+}
+
+test("resolveActiveFold: live mode returns the live fold's own fields, untouched", () => {
+  const live = {
+    hero: initialHeroState(3),
+    steps: [],
+    events: [domainEvent(1, "merged")],
+    titles: { 1: { issueTitle: "live issue" } },
+    openAttention: [domainEvent(2, "drive-needs-human")],
+  };
+  const result = resolveActiveFold("live", null, live, initialReplayState(3));
+  assert.equal(result, live);
+});
+
+test("resolveActiveFold: replay mode with a loaded position returns THAT position's state, never the live fold", () => {
+  const live = {
+    hero: initialHeroState(3),
+    steps: [],
+    events: [domainEvent(999, "merged")], // distinguishable "live" event id
+    titles: { 999: { issueTitle: "LIVE — must not leak" } },
+    openAttention: [],
+  };
+  const replayState = { ...initialReplayState(3), events: [domainEvent(1, "dispatched")], titles: { 1: { issueTitle: "replayed issue" } } };
+  const result = resolveActiveFold("replay", { state: replayState, cursorId: 1, cursorIndex: 1 }, live, initialReplayState(3));
+  assert.deepEqual(result.events, replayState.events);
+  assert.deepEqual(result.titles, replayState.titles);
+  assert.notDeepEqual(result.events, live.events, "the live event must never leak into a loaded replay position");
+});
+
+test("resolveActiveFold: replay mode with NO position yet (round still loading) returns the neutral empty replay state — never falls through to live's distinguishable values", () => {
+  const live = {
+    hero: initialHeroState(3),
+    steps: [],
+    events: [domainEvent(999, "merged")],
+    titles: { 999: { issueTitle: "LIVE — must not leak during load" } },
+    openAttention: [domainEvent(998, "drive-needs-human")],
+  };
+  const emptyReplay = initialReplayState(3);
+  const result = resolveActiveFold("replay", null, live, emptyReplay);
+  assert.deepEqual(result.events, emptyReplay.events);
+  assert.deepEqual(result.titles, emptyReplay.titles);
+  assert.deepEqual(result.openAttention, []);
+  assert.notDeepEqual(result.events, live.events, "the loading window must never show the live fold's events");
+  assert.notDeepEqual(result.titles, live.titles, "the loading window must never show the live fold's titles");
+});
+
+// ── #766 gate② finding [2] (live-only-test-does-not-cover-app-wiring) ──────────────────────────
+//
+// The previous round's `LiveOnly.test.tsx` coverage only proved the COMPONENT greys out synthetic
+// children — it never rendered a REAL snapshot-backed panel (`LaneBoard`, `ConfigDrawer`) through
+// `App`/`appContent`, so it would have stayed green even if App.tsx's actual `<LiveOnly>` wrapper
+// around those two panels were ever removed or wired with a hardcoded `mode="live"`. These render
+// the REAL `appContent` tree with distinguishable live lane/config values present in the view
+// model, and assert those exact values are ABSENT from the replay-mode markup while the greyed
+// `live only` panel IS present — proof of the actual App-level wiring, not just the component.
+
+const DISTINGUISHABLE_LANE_ISSUE = 424242;
+const DISTINGUISHABLE_WORKER = "w-distinguishable-live-only";
+const DISTINGUISHABLE_CONFIG_OWNER = "distinguishable-live-only-owner";
+
+function loopDataWithDistinguishableLiveSnapshot() {
+  return {
+    ...LOOP_STATE_OK,
+    lanes: {
+      max: 1,
+      items: [
+        {
+          lane: DISTINGUISHABLE_WORKER,
+          issue: DISTINGUISHABLE_LANE_ISSUE,
+          state: "running",
+          pr: null,
+          startedAt: "2026-08-10T10:00:00Z",
+          endedAt: null,
+          costUsd: null,
+          estCostUsd: null,
+          contextTokens: null,
+          tokenComposition: null,
+        },
+      ],
+    },
+    config: { board: { owner: DISTINGUISHABLE_CONFIG_OWNER, repo: "sapwood" } },
+  };
+}
+
+test("#766 gate② finding [2]: LaneBoard's REAL App-wired distinguishable live lane never renders while replaying — the live-only panel replaces it", () => {
+  const vm = minimalAppViewModel({ mode: "replay", loop: { data: loopDataWithDistinguishableLiveSnapshot(), isPending: false } });
+  const html = renderToStaticMarkup(appContent(vm));
+
+  assert.doesNotMatch(
+    html,
+    new RegExp(String(DISTINGUISHABLE_LANE_ISSUE)),
+    "the live lane's distinguishable issue number must never render in replay",
+  );
+  assert.doesNotMatch(html, new RegExp(DISTINGUISHABLE_WORKER), "the live lane's distinguishable worker id must never render in replay");
+  assert.match(html, /live only/, "the LaneBoard slot must show the greyed live-only panel instead");
+
+  // Sanity: the SAME view model in LIVE mode DOES render the distinguishable lane — proves the
+  // fixture itself is real (a broken fixture that never renders anything would pass the assertions
+  // above for the wrong reason).
+  const liveHtml = renderToStaticMarkup(appContent({ ...vm, mode: "live" } as unknown as Parameters<typeof appContent>[0]));
+  assert.match(
+    liveHtml,
+    new RegExp(String(DISTINGUISHABLE_LANE_ISSUE)),
+    "live mode must actually render the lane — proves this is a real regression guard",
+  );
+});
+
+test("#766 gate② finding [2]: ConfigDrawer's REAL App-wired distinguishable live config never renders while replaying — the live-only panel replaces it", () => {
+  const vm = minimalAppViewModel({
+    mode: "replay",
+    configOpen: true,
+    loop: { data: loopDataWithDistinguishableLiveSnapshot(), isPending: false },
+  });
+  const html = renderToStaticMarkup(appContent(vm));
+
+  assert.doesNotMatch(
+    html,
+    new RegExp(DISTINGUISHABLE_CONFIG_OWNER),
+    "the live config's distinguishable owner value must never render in replay",
+  );
+  assert.match(html, /live only/, "the ConfigDrawer slot must show the greyed live-only panel instead");
+
+  const liveHtml = renderToStaticMarkup(appContent({ ...vm, mode: "live" } as unknown as Parameters<typeof appContent>[0]));
+  assert.match(
+    liveHtml,
+    new RegExp(DISTINGUISHABLE_CONFIG_OWNER),
+    "live mode must actually render the config value — proves this is a real regression guard",
+  );
+});
+
+// Markup-signature proof, complementing the distinguishable-value tests above: LaneBoard's own
+// `aria-label="lanes"` and ConfigDrawer's own `aria-label="config"` — each component's own
+// rendered signature, not just its data — are absent from the RENDERED replay markup too. (A
+// `findByType` walk of the pre-render JSX tree would find these elements regardless of mode,
+// since `<LiveOnly>`'s `children` prop is constructed by JSX before `LiveOnly` ever decides
+// whether to use it — `renderToStaticMarkup` is what actually reflects `LiveOnly`'s runtime
+// branching, same reasoning `LiveOnly.test.tsx` itself relies on.)
+test("#766 gate② finding [2]: neither LaneBoard's nor ConfigDrawer's own rendered signature (aria-label) appears anywhere in the replay markup", () => {
+  const vm = minimalAppViewModel({
+    mode: "replay",
+    configOpen: true,
+    loop: { data: loopDataWithDistinguishableLiveSnapshot(), isPending: false },
+  });
+  const html = renderToStaticMarkup(appContent(vm));
+  assert.doesNotMatch(html, /aria-label="lanes"/, "LaneBoard's own aria-label must not render while replaying");
+  assert.doesNotMatch(html, /aria-label="config"/, "ConfigDrawer's own aria-label must not render while replaying");
+});
+
+// ── #766 gate② finding [1] (replay-spend-panel-unexercised) ────────────────────────────────────
+//
+// `spend-replay.test.ts` proves `bucketSpendByPhase`/`phaseSpendBars` as pure array transforms, and
+// `CostStrip.test.tsx` proves the component renders whatever `CostBarGroup[]` it's handed — but
+// nothing before this test passed timestamp-truncated, phase-bucketed spend THROUGH those real
+// functions and then through App's own `groups={mode === "replay" ? [byPhase] : [byModel, byLane]}`
+// wiring, checking the rendered strip actually shows the trailing `unattributed` bucket instead of
+// the live `by model`/`by lane` groups. This computes `byPhase` the EXACT way `App()` does — via
+// the real `bucketSpendByPhase`/`phaseSpendBars` pipeline over a realistic mixed spend set (one
+// attributed row inside a real `round-phase` window, one pre-#206 row before any window) — then
+// renders it through `appContent`'s real `mode === "replay"` branch.
+
+test("#766 gate② finding [1]: real timestamp-truncated, phase-bucketed spend renders through App's replay CostStrip branch, unattributed bucket included, live groups absent", () => {
+  const attributedRow: SpendRow = {
+    id: 1,
+    ts: "2026-08-10T10:15:00Z",
+    worker: "w1",
+    issue: 42,
+    usd: 12.5,
+    model: "opus",
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    actorKind: "worker",
+    role: null,
+    estimated: false,
+  };
+  const preHistoryRow: SpendRow = { ...attributedRow, id: 2, ts: "2026-08-01T00:00:00Z", usd: 3.25 }; // before any round-phase window
+  const phaseWindows = [{ phase: "executing", startTs: "2026-08-10T10:00:00Z", endTs: null }];
+  // The SAME functions App() itself calls (replay/spend-replay.ts) — not a hand-authored group.
+  const byPhase = { title: "by phase", bars: phaseSpendBars(bucketSpendByPhase([attributedRow, preHistoryRow], phaseWindows)) };
+
+  const vm = minimalAppViewModel({ mode: "replay" });
+  const html = renderToStaticMarkup(appContent({ ...vm, byPhase } as unknown as Parameters<typeof appContent>[0]));
+
+  assert.match(html, /executing/, "the real attributed phase bucket must render");
+  assert.match(html, /\$12\.50/, "the attributed row's real cursor-truncated sum must render");
+  assert.match(html, /unattributed/, "the pre-#206 row must land in the labeled unattributed bucket");
+  assert.match(html, /\$3\.25/, "the unattributed bucket's real sum must render");
+  assert.doesNotMatch(html, /by model/, "replay must show phase groups, never the live by-model group");
+  assert.doesNotMatch(html, /by lane/, "replay must show phase groups, never the live by-lane group");
+  assert.match(html, /cost · this round/, "the replay heading must read 'this round', not 'today'");
 });

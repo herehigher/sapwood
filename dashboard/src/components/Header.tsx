@@ -18,8 +18,25 @@ export interface SpendFacts {
 }
 
 export interface SpendMeterView {
-  tier: "run" | "daily";
+  tier: "run" | "daily" | "round";
   usedUsd: number | null;
+  budgetUsd: number | null;
+}
+
+/** #766 gate② finding [1] (header-replay-total-is-round-scoped): the ONLY spend anchor this
+ *  codebase actually persists is per-round (`spend_ledger`'s id cursors + the round artifact's own
+ *  `roundBudgetUsd`) — the #206 run-started anchor this file's earlier `runUsd`/`runBudgetUsd`
+ *  fields were meant to serve was never wired server-side (`dashboard/server.ts`'s own comment:
+ *  "there is no honest way to compute a run-scoped sum from the DB alone", `spend.runUsd` is
+ *  unconditionally `null` today, live included). Labeling a round-scoped, cursor-truncated total
+ *  as "run" spend (the previous fix's mistake) claims a scope this app cannot actually measure.
+ *  `round` is the honest alternative: a THIRD, explicitly-named tier carrying the replay cursor's
+ *  own round-scoped total against that SAME round's own persisted `roundBudgetUsd` (immutable,
+ *  historically correct — never today's possibly-since-changed live config) — real numbers, never
+ *  a mislabeled scope. When provided, it wins outright; `resolveSpendMeter`'s run/daily logic
+ *  (§3 A, live-only) never even runs. */
+export interface RoundSpend {
+  usedUsd: number;
   budgetUsd: number | null;
 }
 
@@ -31,8 +48,8 @@ export function resolveSpendMeter(spend: SpendFacts): SpendMeterView {
   return { tier: "daily", usedUsd: spend.todayUsd, budgetUsd: spend.dailyBudgetUsd };
 }
 
-function SpendMeter({ spend }: { spend: SpendFacts }) {
-  const view = resolveSpendMeter(spend);
+function SpendMeter({ spend, round }: { spend: SpendFacts; round?: RoundSpend | undefined }) {
+  const view: SpendMeterView = round ? { tier: "round", usedUsd: round.usedUsd, budgetUsd: round.budgetUsd } : resolveSpendMeter(spend);
   const usedLabel = view.usedUsd === null ? "—" : formatUsd(view.usedUsd);
   const budgetLabel = view.budgetUsd === null ? null : formatUsd(view.budgetUsd);
   const pct = view.usedUsd !== null && view.budgetUsd ? Math.min(100, (view.usedUsd / view.budgetUsd) * 100) : 0;
@@ -60,6 +77,10 @@ export interface HeaderProps {
   isPending: boolean;
   engine?: EngineFacts | undefined;
   spend?: SpendFacts | undefined;
+  /** #766 gate② finding [1]: the replay transport's own round-scoped spend reading — present only
+   *  while replaying a round, and always wins over `spend`'s run/daily tiers when given (see
+   *  `RoundSpend`'s own doc for why). */
+  round?: RoundSpend | undefined;
   /** §3 A: an env-park episode adds its own small sub-caption alongside the standby caption
    *  rather than a new state word — this is the caller's own read of whether `park-escalated`
    *  is currently open (the needs-attention fold already tracks that; this component adds no
@@ -72,7 +93,7 @@ export interface HeaderProps {
  * render the "?" legend (#144's `Legend`) — this band composes with it at the call site instead
  * of duplicating it (#361 AC).
  */
-export function Header({ disconnected, isPending, engine, spend, parked }: HeaderProps) {
+export function Header({ disconnected, isPending, engine, spend, round, parked }: HeaderProps) {
   if (disconnected) {
     return (
       <p className="muted" style={{ color: "var(--rust)" }}>
@@ -90,7 +111,7 @@ export function Header({ disconnected, isPending, engine, spend, parked }: Heade
       <span className="muted engine-caption"> — {engineStateCaption(engine.state, engine.standbyNextCheckSec)}</span>
       {engine.state === "standby" && parked && <span className="muted engine-park-caption">park</span>}
       {showsPauseChip(engine.state, engine.pauseActive) && <span className="muted data engine-pause-chip">PAUSE set</span>}
-      <SpendMeter spend={spend} />
+      <SpendMeter spend={spend} round={round} />
     </div>
   );
 }

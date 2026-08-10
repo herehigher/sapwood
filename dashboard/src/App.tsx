@@ -1,18 +1,28 @@
 import type { Dispatch, SetStateAction } from "react";
 import { useState } from "react";
-import { spendByWorkerForDay, useEventHistory, useLoopState, useSpendHistory } from "./api/queries.ts";
+import { spendByWorkerForDay, useEventHistory, useLoopState, useRounds, useSpendHistory } from "./api/queries.ts";
+import type { Round } from "./api/types.ts";
 import { ActivityFeed } from "./components/ActivityFeed.tsx";
 import { ConfigDrawer } from "./components/ConfigDrawer.tsx";
 import { Controls } from "./components/Controls.tsx";
 import type { CostBarGroup } from "./components/CostStrip.tsx";
 import { CostStrip } from "./components/CostStrip.tsx";
-import { Header } from "./components/Header.tsx";
+import { Header, type RoundSpend, type SpendFacts } from "./components/Header.tsx";
 import { IconRail } from "./components/IconRail.tsx";
 import { LaneBoard } from "./components/LaneBoard.tsx";
+import { LiveOnly } from "./components/LiveOnly.tsx";
 import { NeedsAttention } from "./components/NeedsAttention.tsx";
+import { Transport } from "./components/Transport.tsx";
 import { readConfigPath } from "./config-captions.ts";
+import type { DomainEvent } from "./domain-event.ts";
+import type { EntityTitles } from "./entities.ts";
 import { Hero } from "./hero/Hero.tsx";
 import { Legend } from "./hero/Legend.tsx";
+import type { FoldStep, HeroState } from "./hero/state.ts";
+import type { ReplayPosition } from "./replay/player.ts";
+import { initialReplayState } from "./replay/reducer.ts";
+import { bucketSpendByPhase, phaseSpendBars } from "./replay/spend-replay.ts";
+import { type ReplayView, useReplay } from "./replay/useReplay.ts";
 
 /**
  * #716 gate② P1-3: pulls `lanes.prFixCap` through the same nested-path reader `board.owner`/
@@ -26,6 +36,62 @@ import { Legend } from "./hero/Legend.tsx";
 export function resolveFixCap(config: Record<string, unknown> | null | undefined): number {
   const raw = config ? readConfigPath(config, "lanes.prFixCap") : undefined;
   return typeof raw === "number" && Number.isFinite(raw) ? raw : 2;
+}
+
+/**
+ * PR #766 gate② audit finding [1] (header-replay-total-is-round-scoped) — round 2 of the header
+ * meter fix. Round 1 (finding [0], addressed on the previous head) labeled the SELECTED round's
+ * own cursor-truncated spend as `runUsd`/`todayUsd`: still wrong, because a multi-round RUN's
+ * true cumulative total needs every EARLIER round's spend too, which this app never loads (only
+ * the selected round's own window). Building genuine run-tier reconstruction would need either a
+ * new server endpoint exposing run boundaries per round, or an expensive full-history walk for
+ * `run-started` events — neither of which this codebase has today (confirmed: `/api/loop/state`'s
+ * own `spend.runUsd` is unconditionally `null` server-side EVEN LIVE — `dashboard/server.ts`'s own
+ * comment: "there is no honest way to compute a run-scoped sum from the DB alone"). Inventing a
+ * "run" number replay itself cannot honestly produce would repeat the same mistake finding [0]
+ * already made. `Header.tsx`'s new `RoundSpend`/`"round"` tier is the honest alternative used
+ * here: the round's OWN persisted `roundBudgetUsd` (immutable, historically correct — never
+ * today's possibly-since-changed live config, the OTHER half of finding [1]) against the SAME
+ * `spendThroughCursor` sum the phase strip already reads. `artifact` is the selected round's own
+ * (possibly `null` for an artifact-less round — falls back to an honest `budgetUsd: null`, same
+ * never-guess posture as everywhere else in this app).
+ */
+export function resolveRoundSpend(replayUsd: number, artifact: unknown): RoundSpend {
+  const budgetUsd =
+    artifact && typeof artifact === "object" && typeof (artifact as Record<string, unknown>).roundBudgetUsd === "number"
+      ? ((artifact as Record<string, unknown>).roundBudgetUsd as number)
+      : null;
+  return { usedUsd: replayUsd, budgetUsd };
+}
+
+type ActiveFold = {
+  hero: HeroState;
+  steps: FoldStep[];
+  events: DomainEvent[];
+  titles: EntityTitles;
+  openAttention: DomainEvent[];
+};
+
+/**
+ * PR #766 gate② audit finding [2] (replay-loading-leaks-live-fold): `mode` flips to `"replay"`
+ * the instant a round is selected, but `replay.position` stays `null` until the round's full
+ * event/spend log finishes loading (`useReplay`'s async fetch) — the previous code's
+ * `mode === "replay" && replay.position ? ... : events.*` fell through to the LIVE fold for that
+ * whole window, so a screen labeled as a closed-round replay silently showed present live data
+ * until the load resolved. `emptyReplay` (the caller's `initialReplayState(lanesMax)`) is what
+ * every replayable panel renders instead during that window — a neutral, honestly-empty replay
+ * state, never a borrowed live one. Pure and directly testable: no hooks, no async load required
+ * to prove the loading window never leaks `live`'s values.
+ */
+export function resolveActiveFold(
+  mode: "live" | "replay",
+  replayPosition: ReplayPosition | null,
+  live: ActiveFold,
+  emptyReplay: ReturnType<typeof initialReplayState>,
+): ActiveFold {
+  if (mode === "live") return live;
+  const state = replayPosition?.state ?? emptyReplay;
+  return { hero: state.hero, steps: [], events: state.events, titles: state.titles, openAttention: Object.values(state.openAttention) };
 }
 
 /**
@@ -48,8 +114,26 @@ type AppViewModel = {
   fixCap: number;
   byModel: CostBarGroup;
   byLane: CostBarGroup;
+  byPhase: CostBarGroup;
   configOpen: boolean;
   setConfigOpen: Dispatch<SetStateAction<boolean>>;
+  // #741: the round navigator's list + the replay transport/mode it drives — §3 A's "the round
+  // navigator IS the mode", so every replayable panel below reads whichever fold is active.
+  mode: "live" | "replay";
+  rounds: Round[];
+  replay: ReplayView;
+  activeHero: HeroState;
+  activeSteps: FoldStep[];
+  activeEvents: DomainEvent[];
+  activeTitles: EntityTitles;
+  activeOpenAttention: DomainEvent[];
+  /** The header meter's LIVE spend snapshot — used only in live mode; in replay `roundSpend`
+   *  below always wins (Header.tsx's own `RoundSpend`-overrides-`SpendFacts` contract). */
+  spendFacts: SpendFacts | undefined;
+  /** #766 gate② finding [1]: the header meter's honest replay reading — `resolveRoundSpend`'s
+   *  output, present only in replay mode. `undefined` in live mode, where `spendFacts` alone
+   *  drives the meter. */
+  roundSpend: RoundSpend | undefined;
 };
 
 /**
@@ -65,8 +149,29 @@ type AppViewModel = {
  * `onOpenConfig` prop directly.
  */
 export function appContent(vm: AppViewModel) {
-  const { clock, loop, events, disconnected, parked, repoUrl, fixCap, byModel, byLane, configOpen, setConfigOpen } = vm;
-  const { titles, openAttention } = events;
+  const {
+    clock,
+    loop,
+    disconnected,
+    parked,
+    repoUrl,
+    fixCap,
+    byModel,
+    byLane,
+    byPhase,
+    configOpen,
+    setConfigOpen,
+    mode,
+    rounds,
+    replay,
+    activeHero,
+    activeSteps,
+    activeEvents,
+    activeTitles,
+    activeOpenAttention,
+    spendFacts,
+    roundSpend,
+  } = vm;
   return (
     <div className="app-shell">
       <IconRail onOpenConfig={() => setConfigOpen(toggleConfigOpen)} />
@@ -84,47 +189,81 @@ export function appContent(vm: AppViewModel) {
                   }
                 : undefined
             }
-            spend={loop.data?.spend}
+            spend={spendFacts}
+            round={roundSpend}
             parked={parked}
           />
-          <Controls enabled={loop.data?.controlsEnabled ?? false} />
+          {/* §3 Operations: the engine control verbs hide entirely while viewing a closed round —
+              they act on the PRESENT engine while every other pixel shows an as-of-cursor past. */}
+          <Controls enabled={(loop.data?.controlsEnabled ?? false) && mode === "live"} />
           <Legend />
         </header>
 
-        <NeedsAttention items={openAttention} titles={titles} repoUrl={repoUrl} now={clock} />
+        <Transport
+          rounds={rounds}
+          selectedRoundId={replay.selectedRoundId}
+          onSelectRound={replay.selectRound}
+          cursorId={replay.position?.cursorId ?? 0}
+          playing={replay.playing}
+          speed={replay.speed}
+          onPlay={replay.play}
+          onPause={replay.pause}
+          onSpeed={replay.setSpeed}
+          onScrub={replay.scrub}
+          loading={replay.loading}
+          loadError={replay.loadError}
+          onRetry={replay.retryLoad}
+          disconnected={disconnected}
+          now={clock}
+        />
+
+        <NeedsAttention items={activeOpenAttention} titles={activeTitles} repoUrl={repoUrl} now={clock} />
 
         {loop.data && (
           <Hero
-            heroState={events.hero}
-            steps={events.steps}
+            heroState={activeHero}
+            steps={activeSteps}
             lanesMax={loop.data.lanes.max}
             engine={loop.data.engine.state}
-            lanes={loop.data.lanes.items}
+            lanes={mode === "live" ? loop.data.lanes.items : []}
             fixCap={fixCap}
-            roundPhase={loop.data.round?.phase ?? null}
+            roundPhase={mode === "live" ? (loop.data.round?.phase ?? null) : null}
             config={loop.data.config}
           />
         )}
 
-        <LaneBoard
-          lanesMax={loop.data?.lanes.max ?? null}
-          lanes={loop.data?.lanes.items ?? []}
-          titles={titles}
-          repoUrl={repoUrl}
-          disconnected={disconnected}
-        />
+        {/* §11 boundary rule: `workers` is a mutable snapshot, not an append-only source — a lane
+            card's state/PR/elapsed/settled-cost has no replay-reconstructed equivalent today, so
+            the whole board is live-only rather than risk rendering a stale live snapshot under a
+            replay cursor. */}
+        <LiveOnly mode={mode}>
+          <LaneBoard
+            lanesMax={loop.data?.lanes.max ?? null}
+            lanes={loop.data?.lanes.items ?? []}
+            titles={activeTitles}
+            repoUrl={repoUrl}
+            disconnected={disconnected}
+          />
+        </LiveOnly>
 
         <ActivityFeed
-          events={events.events}
-          pinnedAttention={openAttention}
-          titles={titles}
+          events={activeEvents}
+          pinnedAttention={activeOpenAttention}
+          titles={activeTitles}
           repoUrl={repoUrl}
           disconnected={disconnected}
         />
 
-        <CostStrip groups={[byModel, byLane]} />
+        <CostStrip
+          groups={mode === "replay" ? [byPhase] : [byModel, byLane]}
+          heading={mode === "replay" ? "cost · this round" : "cost · today"}
+        />
 
-        <ConfigDrawer config={loop.data?.config ?? null} open={configOpen} onClose={() => setConfigOpen(false)} />
+        {configOpen && (
+          <LiveOnly mode={mode}>
+            <ConfigDrawer config={loop.data?.config ?? null} open onClose={() => setConfigOpen(false)} />
+          </LiveOnly>
+        )}
       </main>
     </div>
   );
@@ -143,29 +282,55 @@ export function App({ now, initialConfigOpen }: { now?: Date | undefined; initia
   const loop = useLoopState();
   // #740: `lanesMax` flows into the shared reducer so its hero slice re-fits its channel count
   // the same way `Hero.tsx` used to do internally — see `useEventHistory`'s own doc.
-  const events = useEventHistory(loop.data?.lanes.max ?? null);
+  const lanesMax = loop.data?.lanes.max ?? null;
+  const events = useEventHistory(lanesMax);
   const spend = useSpendHistory();
   const [configOpen, setConfigOpen] = useState(initialConfigOpen ?? false);
 
-  // §3's documented `disconnected` header state: ANY of the three queries failing means the
+  // #741: the round navigator's list (§8 `/api/rounds`) and the replay transport it drives
+  // (play/pause/speed/scrub, §6). `mode` is carried by round selection, not a separate toggle —
+  // §3 A's "the round navigator IS the mode".
+  const rounds = useRounds();
+  const replay = useReplay(rounds.data?.rounds ?? [], lanesMax);
+  const { mode } = replay;
+
+  // §9/§11: one reducer, live and replay both feed it — every replayable panel below reads
+  // whichever of these two folds is active, never a mix. `resolveActiveFold` (#766 gate② finding
+  // [2]) is what keeps the LOADING window (mode already "replay", `replay.position` still null
+  // while the round's log fetches) from falling through to live's values — it renders the
+  // neutral empty replay state instead. ponytail: replay does not yet narrate per-frame Hero
+  // animation (steps stay empty even once loaded) — add when a replay-specific playback plan is
+  // worth the complexity; §6's coalescing policy already treats ≥×4 replay as instant swaps.
+  const {
+    hero: activeHero,
+    steps: activeSteps,
+    events: activeEvents,
+    titles: activeTitles,
+    openAttention: activeOpenAttention,
+  } = resolveActiveFold(mode, replay.position, events, initialReplayState(lanesMax));
+
+  // §3's documented `disconnected` header state: ANY of the FOUR queries failing means the
   // dashboard has lost part of its one data source, regardless of which one (#715 gate② [7] —
   // this used to render only `loop.error`'s raw message, and nothing at all when just the events
   // query failed; #715 gate② round 4 [2] — `spend` was still missing, so a lone `/api/spend`
   // failure left the header looking normal while the cost strip silently misreported "no spend
-  // yet today").
-  const disconnected = loop.isError || Boolean(events.error) || Boolean(spend.error);
+  // yet today"; #766 gate② finding [2] round 3 — `rounds` was still missing too: a failed
+  // `/api/rounds` fetch left the header reading healthy while `rounds.data?.rounds ?? []`
+  // silently rendered the truthful-empty "no rounds yet" caption, converting a real transport
+  // failure into an honest-looking empty history).
+  const disconnected = loop.isError || Boolean(events.error) || Boolean(spend.error) || rounds.isError;
   // §3 A: env-park folds into the standby/"waiting" tier rather than an eighth state word — read
   // straight off the SAME open-attention fold the needs-attention strip already renders, never a
-  // second park signal.
-  const parked = events.openAttention.some((e) => e.kind === "park-escalated");
+  // second park signal. Read off whichever fold is active (live or replay) — mode purity (§11).
+  const parked = activeOpenAttention.some((e) => e.kind === "park-escalated");
   const owner = loop.data?.config ? readConfigPath(loop.data.config, "board.owner") : undefined;
   const repo = loop.data?.config ? readConfigPath(loop.data.config, "board.repo") : undefined;
   const repoUrl = typeof owner === "string" && typeof repo === "string" ? `https://github.com/${owner}/${repo}` : undefined;
   const fixCap = resolveFixCap(loop.data?.config);
 
   // §3 E specifies a "by phase" bucket; `/api/loop/state` serves no phase-bucketed spend today
-  // (only `spend.byModel`), so this ships "by lane" instead — ponytail: upgrade to "by phase"
-  // once the engine serves a phase-bucketed spend aggregate. Sourced from the append-only
+  // (only `spend.byModel`), so LIVE ships "by lane" instead — ponytail: upgrade to "by phase" live
+  // too once the engine serves a phase-bucketed spend aggregate. Sourced from the append-only
   // `/api/spend` ledger, NOT `loop.data.lanes.items` (#715 gate② round 3 [2]: the active-worker
   // read model drops a lane's settled spend the instant it stops being active, and renders an
   // in-flight lane with no settled/estimated cost as a fabricated `$0` — the ledger only ever
@@ -178,6 +343,49 @@ export function App({ now, initialConfigOpen }: { now?: Date | undefined; initia
     title: "by model",
     bars: (loop.data?.spend.byModel ?? []).map((m) => ({ label: m.model, usd: m.usd })),
   };
+  // #741 §8/§11: replay's cost strip is "THIS ROUND BY PHASE" — `spendThroughCursor` is already
+  // timestamp-cursor-truncated by `useReplay`; `phaseWindows` comes from the SAME round's own
+  // `round-phase` trail, so "unattributed" only ever appears for genuinely pre-#206 history.
+  const byPhase: CostBarGroup = {
+    title: "by phase",
+    bars: phaseSpendBars(bucketSpendByPhase(replay.spendThroughCursor, replay.phaseWindows)),
+  };
+  // #766 gate② finding [1]: the header meter's replay reading — the SAME `spendThroughCursor` rows
+  // the phase strip above already reads (0 during the round's-log-still-loading window), against
+  // the SELECTED round's own persisted `roundBudgetUsd` (never today's live config). `spendFacts`
+  // (live) is passed through unconditionally too — Header.tsx's `round` prop always wins over it
+  // when both are present, so live mode is unaffected.
+  const selectedRoundArtifact = rounds.data?.rounds.find((r) => r.roundId === replay.selectedRoundId)?.artifact ?? null;
+  const roundSpend =
+    mode === "replay"
+      ? resolveRoundSpend(
+          replay.spendThroughCursor.reduce((sum, r) => sum + r.usd, 0),
+          selectedRoundArtifact,
+        )
+      : undefined;
 
-  return appContent({ clock, loop, events, disconnected, parked, repoUrl, fixCap, byModel, byLane, configOpen, setConfigOpen });
+  return appContent({
+    clock,
+    loop,
+    events,
+    disconnected,
+    parked,
+    repoUrl,
+    fixCap,
+    byModel,
+    byLane,
+    byPhase,
+    configOpen,
+    setConfigOpen,
+    mode,
+    rounds: rounds.data?.rounds ?? [],
+    replay,
+    activeHero,
+    activeSteps,
+    activeEvents,
+    activeTitles,
+    activeOpenAttention,
+    spendFacts: loop.data?.spend,
+    roundSpend,
+  });
 }

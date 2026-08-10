@@ -30,6 +30,15 @@ test("an empty group renders a no-spend caption, not a blank chart", () => {
   assert.match(html, /no spend yet today/);
 });
 
+test("defaults to the live heading, and accepts a replay-mode override (§11: 'THIS ROUND BY ...' in replay)", () => {
+  const liveHtml = renderToStaticMarkup(<CostStrip groups={[{ title: "by model", bars: [] }]} />);
+  assert.match(liveHtml, /cost · today/);
+
+  const replayHtml = renderToStaticMarkup(<CostStrip groups={[{ title: "by phase", bars: [] }]} heading="cost · this round" />);
+  assert.match(replayHtml, /cost · this round/);
+  assert.doesNotMatch(replayHtml, /cost · today/);
+});
+
 test("bar widths are proportional to the group's own max, never overflow 100%", () => {
   const html = renderToStaticMarkup(
     <CostStrip

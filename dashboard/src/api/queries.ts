@@ -4,8 +4,8 @@ import { type DomainEvent, toDomainEvent } from "../domain-event.ts";
 import type { EntityTitles, OpenAttention } from "../entities.ts";
 import { type FoldStep, type HeroState, withLaneCount } from "../hero/state.ts";
 import { DEFAULT_EVENT_WINDOW, foldReplay, initialReplayState } from "../replay/reducer.ts";
-import { fetchEvents, fetchLoopState, fetchSpend } from "./client.ts";
-import type { EventsPage, LoopState, SpendPage, SpendRow } from "./types.ts";
+import { fetchEvents, fetchLoopState, fetchRounds, fetchSpend } from "./client.ts";
+import type { EventsPage, LoopState, RoundsPage, SpendPage, SpendRow } from "./types.ts";
 
 /** §2 Transport: HTTP polling at 3 s. No WebSocket — that row is the acceptance bar. */
 export const POLL_MS = 3000;
@@ -44,6 +44,18 @@ export const spendQuery = (after: number) => ({
 });
 
 export const useLoopState = () => useQuery(loopStateQuery());
+
+/** `GET /api/rounds` — the round navigator's list + replay chapter marks (§8). Unpaged, so this
+ *  polls the same 3 s cadence as everything else rather than accumulating a cursor like the
+ *  events/spend feeds: a round transitioning `in_progress` -> `done`, or a fresh round opening,
+ *  is a small, bounded row set, not an append-only stream to page through. */
+export const roundsQuery = () => ({
+  queryKey: ["rounds"] as const,
+  queryFn: ({ signal }: { signal: AbortSignal }): Promise<RoundsPage> => fetchRounds(signal),
+  refetchInterval: POLL_MS,
+});
+
+export const useRounds = () => useQuery(roundsQuery());
 
 export interface EventHistory {
   after: number;
