@@ -38,6 +38,7 @@ import {
   latestRunTerminal,
   MAX_PAGE_LIMIT,
   type RunTerminal,
+  standbySignal,
 } from "../engine/src/state/read-model.js";
 import { State, type WorkerRow } from "../engine/src/state/state.js";
 
@@ -95,6 +96,11 @@ export function loopState(state: State, cfg: SapwoodConfig | null, now: Date): R
   const round = state.openRound();
   const lastTickAt = state.lastTickAt();
   const engineState = currentEngineState(state, cfg, now);
+  // #723: the next-check countdown, served ONLY while the derived state is actually `standby` —
+  // a lingering standby-wait/heartbeat signal from a round that has since reopened (roundOpen)
+  // or an engine that has since gone truly stale beyond its own window must not leak a stale
+  // countdown into an unrelated state's payload.
+  const standby = engineState === "standby" ? standbySignal(state, now) : null;
   return {
     engine: {
       state: engineState,
@@ -105,6 +111,10 @@ export function loopState(state: State, cfg: SapwoodConfig | null, now: Date): R
       // dashboard from surfacing an irrelevant budget/kill reason (Codex review P2).
       reasons: engineState === "winding-down" ? (breach?.reasons ?? []) : [],
       lastTickAt,
+      // #723 AC: "with the next-check countdown available in the payload" — the standby signal's
+      // own declared window minus its age, floored at 0 (a countdown never reads negative even
+      // if the signal is a hair past its window at the exact instant this reads it).
+      standbyNextCheckSec: standby ? Math.max(0, Math.round(standby.windowSec - standby.ageSec)) : null,
       // #407 (item 5): the newest run's terminal event, verbatim — how the UI attaches a REASON
       // to a dead engine. `run-ended` carries {stoppedBy, stopCondition?}; `engine-stalled`
       // carries the watchdog's fire-time enrichment (round/phase, last event, lastTickAt);

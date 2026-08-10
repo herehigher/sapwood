@@ -4374,6 +4374,37 @@ test("latestHeartbeatForWorker (#705 gate② P1-1 regression): a lane name carry
   st.close();
 });
 
+// ── #723: standby liveness read (latestStandbySignal) ───────────────────────────────────────
+
+test("latestStandbySignal: no standby events at all -> undefined", () => {
+  const st = new State(":memory:");
+  assert.equal(st.latestStandbySignal(), undefined);
+  st.close();
+});
+
+test("latestStandbySignal: newest of the three kinds wins by id, carrying the events table's own id/ts and the payload verbatim", () => {
+  const st = new State(":memory:");
+  st.appendEvent("standby-wait", { attempt: 0, waitSec: 30 });
+  st.appendEvent("standby-heartbeat", { attempt: 0, remainingSec: 15 });
+  const sig = st.latestStandbySignal();
+  assert.ok(sig);
+  assert.equal(sig.kind, "standby-heartbeat");
+  assert.ok(typeof sig.id === "number" && sig.id > 0);
+  assert.ok(typeof sig.ts === "string" && sig.ts.length > 0);
+  assert.deepEqual(sig.payload, { attempt: 0, remainingSec: 15 });
+  st.close();
+});
+
+test("latestStandbySignal: a standby-exit newer than any wait/heartbeat is reported as the newest kind — the caller decides that means parking ended", () => {
+  const st = new State(":memory:");
+  st.appendEvent("standby-wait", { attempt: 0, waitSec: 30 });
+  st.appendEvent("standby-exit", { attempts: 1 });
+  const sig = st.latestStandbySignal();
+  assert.ok(sig);
+  assert.equal(sig.kind, "standby-exit");
+  st.close();
+});
+
 // ── #705 gate② P2-3: recordDispatch / recordLaneRowAndSpawnFact / registerCanaryDispatch commit
 // the worker-row transition and the lane-spawned fact atomically ────────────────────────────
 

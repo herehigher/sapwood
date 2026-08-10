@@ -6,7 +6,7 @@
 // a bare `process.kill` call in a test (no timing/subprocess-speed dependence, repo doctrine).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildLaneAnchors, probePidAlive } from "./read-model.js";
+import { buildLaneAnchors, currentEngineState, probePidAlive } from "./read-model.js";
 
 // ── probePidAlive ───────────────────────────────────────────────────────────────────────────
 //
@@ -182,4 +182,123 @@ test("buildLaneAnchors (#705 gate② P1-1 regression): the SAME (worker, issue) 
   );
   assert.equal(buildLaneAnchors(state, "lane-x", 1, () => true, new Date()).pid, 111);
   assert.equal(buildLaneAnchors(state, "lane-x", 2, () => true, new Date()).pid, 222);
+});
+
+// ── #723: currentEngineState's standby-liveness read, end to end through a fake State ─────────
+//
+// dashboard/server.test.ts's deriveEngineState suite covers the pure precedence logic against
+// synthetic EngineFacts; this exercises the PRODUCTION `currentEngineState` entry point (the one
+// `/api/loop/state` and `status --json` actually call) against a fake `latestStandbySignal`, an
+// INJECTED `now`, and no real DB/wall clock anywhere — same no-timing-dependence discipline as
+// buildLaneAnchors above.
+
+function fakeEngineState(opts: {
+  standby?: { id: number; kind: "standby-wait" | "standby-heartbeat" | "standby-exit"; ts: string; payload: unknown } | undefined;
+  lastTickAt: string | null;
+  roundOpen: boolean;
+  /** run-lifecycle trail for `latestRunTerminal`'s own fold, id-ordered 1..n — same shape
+   *  dashboard/server.test.ts's `fold` helper uses. Defaults to empty (no terminal, never run). */
+  runTrail?: [string, Record<string, unknown>][];
+}) {
+  const trail = opts.runTrail ?? [];
+  return {
+    openRound: () => (opts.roundOpen ? { round_id: 1, phase: "executing" } : undefined),
+    isKillSwitchActive: () => false,
+    activeWorkers: () => [],
+    ceilingBreach: () => null,
+    isPauseActive: () => false,
+    lastTickAt: () => opts.lastTickAt,
+    eventsAfterId: (_after: number, _kinds: string[]) => trail.map(([kind, payload], i) => ({ id: i + 1, kind, payload })),
+    latestStandbySignal: () => opts.standby,
+  };
+}
+
+test("#723 currentEngineState: a standby-wait event fresh within its own waitSec renders standby even though the tick has gone stale", () => {
+  const state = fakeEngineState({
+    standby: { id: 1, kind: "standby-wait", ts: "2026-08-10T12:00:00.000Z", payload: { attempt: 2, waitSec: 900 } },
+    lastTickAt: "2026-08-10T11:00:00.000Z", // an hour stale
+    roundOpen: false,
+  });
+  // 300s after the standby-wait fired — well inside its own 900s window.
+  const now = new Date("2026-08-10T12:05:00.000Z");
+  assert.equal(currentEngineState(state as never, null, now), "standby");
+});
+
+test("#723 currentEngineState: a standby-heartbeat's remainingSec is the freshness window too, not just standby-wait's waitSec", () => {
+  const state = fakeEngineState({
+    standby: { id: 1, kind: "standby-heartbeat", ts: "2026-08-10T12:00:00.000Z", payload: { attempt: 2, remainingSec: 120 } },
+    lastTickAt: "2026-08-10T11:00:00.000Z",
+    roundOpen: false,
+  });
+  assert.equal(currentEngineState(state as never, null, new Date("2026-08-10T12:01:00.000Z")), "standby");
+});
+
+test("#723 currentEngineState boundary: a standby-wait older than its own waitSec, with a stale tick, is stalled — not standby forever", () => {
+  const state = fakeEngineState({
+    standby: { id: 1, kind: "standby-wait", ts: "2026-08-10T12:00:00.000Z", payload: { attempt: 2, waitSec: 900 } },
+    lastTickAt: "2026-08-10T11:00:00.000Z",
+    roundOpen: false,
+  });
+  // 901s later — one second past its own declared window.
+  assert.equal(currentEngineState(state as never, null, new Date("2026-08-10T12:15:01.000Z")), "stalled");
+});
+
+test("#723 currentEngineState: a standby-exit newer than the last standby-wait is running, never standby, whatever its age", () => {
+  const state = fakeEngineState({
+    standby: { id: 1, kind: "standby-exit", ts: "2026-08-10T12:00:00.000Z", payload: { attempts: 3 } },
+    lastTickAt: "2026-08-10T12:00:10.000Z", // fresh tick, round reopened after exiting standby
+    roundOpen: true,
+  });
+  assert.equal(currentEngineState(state as never, null, new Date("2026-08-10T12:00:20.000Z")), "running");
+});
+
+// #746 gate② finding [0]: a process that exits mid-standby-dwell never appends `standby-exit`
+// (round.ts's exit-append site is reached only on a normal resume, never on process death), so
+// the FULL production path — currentEngineState reading a real `latestRunTerminal` fold alongside
+// `latestStandbySignal` — must still stop rendering `standby` once a terminal proves the dwell was
+// cut short, even though the lingering standby-heartbeat's own window hasn't elapsed yet.
+
+test("#746 currentEngineState: a run-ended terminal appended AFTER the last standby-heartbeat (no standby-exit ever written) renders stopped, not an indefinitely-extended standby", () => {
+  const state = fakeEngineState({
+    // The standby-heartbeat is still fresh by its own 900s remainingSec window...
+    standby: { id: 2, kind: "standby-heartbeat", ts: "2026-08-10T12:00:00.000Z", payload: { attempt: 1, remainingSec: 900 } },
+    lastTickAt: "2026-08-10T11:00:00.000Z", // stale — ticking stopped when standby began
+    roundOpen: false,
+    // ...but the process died mid-dwell: run-ended landed AFTER the heartbeat (id 3 > id 2),
+    // with no standby-exit ever appended (round.ts's exit-append site is unreachable from here).
+    runTrail: [
+      ["run-started", {}],
+      ["run-ended", { stoppedBy: "signal" }],
+    ],
+  });
+  assert.equal(currentEngineState(state as never, null, new Date("2026-08-10T12:05:00.000Z")), "stopped");
+});
+
+test("#746 currentEngineState: an engine-stalled terminal AFTER the last standby signal renders stalled, not standby", () => {
+  const state = fakeEngineState({
+    standby: { id: 2, kind: "standby-wait", ts: "2026-08-10T12:00:00.000Z", payload: { attempt: 1, waitSec: 900 } },
+    lastTickAt: "2026-08-10T11:00:00.000Z",
+    roundOpen: false,
+    runTrail: [
+      ["run-started", {}],
+      ["engine-stalled", { openRoundPhase: "executing" }],
+    ],
+  });
+  assert.equal(currentEngineState(state as never, null, new Date("2026-08-10T12:05:00.000Z")), "stalled");
+});
+
+test("#746 currentEngineState: a terminal OLDER than the current standby signal does not invalidate it — still standby", () => {
+  const state = fakeEngineState({
+    // This run's own standby-wait (id 4) is newer than the trail's terminal (id 2) below —
+    // pins deriveEngineState's eventId-ordering branch directly: terminal.eventId (2) <
+    // standbySignal.eventId (4) leaves standbySignalCurrent true.
+    standby: { id: 4, kind: "standby-wait", ts: "2026-08-10T12:00:00.000Z", payload: { attempt: 1, waitSec: 900 } },
+    lastTickAt: "2026-08-10T11:00:00.000Z",
+    roundOpen: false,
+    runTrail: [
+      ["run-started", {}],
+      ["run-ended", { stoppedBy: "signal" }],
+    ],
+  });
+  assert.equal(currentEngineState(state as never, null, new Date("2026-08-10T12:05:00.000Z")), "standby");
 });

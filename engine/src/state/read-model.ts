@@ -39,10 +39,15 @@ export type EngineState = "running" | "standby" | "stalled" | "paused" | "windin
  *  (cli.ts's appendRunEnded doc): `run-ended` on a clean stop (payload: stoppedBy +
  *  stopCondition?), `engine-stalled` when the watchdog self-diagnosed a stall (payload: the
  *  fire-time enrichment — round/phase, last event, lastTickAt), and NOTHING on a crash/kill —
- *  so a null here under a stale tick age honestly means "crashed or killed". */
+ *  so a null here under a stale tick age honestly means "crashed or killed".
+ *
+ *  #746 gate② finding [0]: `eventId` is carried alongside kind/payload — deriveEngineState needs
+ *  it to order this terminal against a standby signal (see EngineFacts.standbySignal's own doc):
+ *  an id cursor, not a timestamp, per the repo's own crash-rerun doctrine. */
 export interface RunTerminal {
   kind: "run-ended" | "engine-stalled";
   payload: Record<string, unknown>;
+  eventId: number;
 }
 
 /** Everything §8's derivation reads, lifted out of the DB so the rules are unit-testable
@@ -58,8 +63,24 @@ export interface EngineFacts {
   lastTickAt: string | null;
   staleGapSec: number;
   roundOpen: boolean;
-  /** The newest standby-wait is newer than any standby-exit (#125: parked, healthy). */
-  standbyWaiting: boolean;
+  /** #723: the newest standby-wait/standby-heartbeat signal, when it is newer than any
+   *  standby-exit (#125: parked) — `ageSec` is that signal's age at `now`, `windowSec` is ITS
+   *  OWN declared next-check window (standby-wait's `waitSec` / standby-heartbeat's
+   *  `remainingSec`). `null` when there is no such signal, or the newest of the three standby
+   *  kinds is an exit (parking already ended). A standby dwell deliberately stops the tick
+   *  heartbeat for up to `cfg.round.standby.backoffCapSec` (default 1800s) — well past
+   *  `heartbeatStaleGapSec`'s 900s floor — so `ageSec <= windowSec` is the derivation's OWN
+   *  liveness signal for that dwell, independent of `lastTickAt`.
+   *
+   *  #746 gate② finding [0]: `eventId` is the signal event's own ledger id. round.ts's standby
+   *  loop appends NO `standby-exit` when the process exits mid-dwell (cleanly via `run-ended`, or
+   *  self-diagnosed via `engine-stalled`) — its exit-append site is only reached on a NORMAL
+   *  resume out of the wait loop, never on process death — so kind/ts alone cannot distinguish
+   *  "still genuinely parked" from "parking was cut short by the process dying" while the
+   *  signal's own window hasn't elapsed yet. deriveEngineState orders this id against
+   *  `terminal.eventId` to tell them apart: a terminal STRICTLY NEWER than this signal proves the
+   *  dwell was interrupted, and must invalidate an otherwise-still-fresh standby reading. */
+  standbySignal: { ageSec: number; windowSec: number; eventId: number } | null;
   /** #407: latestRunTerminal(state) — null while the newest run has no terminal yet (alive, or
    *  crashed; the tick age decides which reading the derivation gives it). */
   terminal: RunTerminal | null;
@@ -79,7 +100,8 @@ export function heartbeatStaleGapSec(tickIntervalSec: number): number {
 
 /** §8's engine-state derivation, verbatim, in its fixed precedence order:
  *
- *    KILL_SWITCH  >  ceiling breach  >  staleness  >  PAUSE  >  standby  >  running
+ *    KILL_SWITCH  >  ceiling breach  >  staleness (UNLESS a fresh standby signal)  >  PAUSE  >
+ *    standby  >  running
  *
  *  Two orderings in there are decisions, not accidents. STALENESS BEATS PAUSE (the 2026-07-21
  *  fix resolving §8 against loop-walkthrough §6): a dead engine that happens to have a PAUSE
@@ -90,6 +112,16 @@ export function heartbeatStaleGapSec(tickIntervalSec: number): number {
  *  An engine that has never ticked (`lastTickAt === null`) counts as stale — the fail-honest
  *  direction: nothing is ticking, so nothing may render green.
  *
+ *  #723 (AC12 operator probe): a healthy standby backoff dwell deliberately stops the tick
+ *  heartbeat for up to `cfg.round.standby.backoffCapSec` (default 1800s), well past the
+ *  staleness gap's 900s floor — so tick staleness ALONE misreads a calm, healthy dwell as the
+ *  alarm word `stalled` (the exact misread #687's runbook warns kills healthy engines). A
+ *  `standbySignal` FRESH within its own declared window (`ageSec <= windowSec`) is therefore
+ *  evaluated BEFORE the staleness branch decides, and overrides it — the standby dwell's own
+ *  heartbeat, not the tick's, is the correct liveness proof for that dwell. A standby signal that
+ *  has itself gone stale beyond its own declared window is NOT fresh, so a genuinely stale tick
+ *  with no fresh standby signal still falls through to `stalled`, unchanged.
+ *
  *  #407 (item 5): the stale branch now consults the newest run's terminal event (RunTerminal) to
  *  partition the three dead-engine states instead of one undifferentiated `stalled`:
  *    - `run-ended` -> "stopped": a CLEAN stop, with the stop reason in the terminal payload;
@@ -98,25 +130,52 @@ export function heartbeatStaleGapSec(tickIntervalSec: number): number {
  *      the engine died without getting to write anything, and that absence IS the record.
  *  Deliberately INSIDE the staleness branch only (the issue's own scoping): a just-stopped
  *  engine keeps its existing within-gap rendering until the tick age crosses the same threshold
- *  every other dead-engine reading already waits for. */
+ *  every other dead-engine reading already waits for.
+ *
+ *  #746 gate② finding [0]: a terminal STRICTLY NEWER than the standby signal (higher `eventId`)
+ *  invalidates that signal's freshness — the process died (cleanly or via self-diagnosed stall)
+ *  mid-standby-dwell, round.ts's standby loop never got to append `standby-exit` on that path
+ *  (its exit-append site is only reached on a normal resume, never on process death), and without
+ *  this check the stale-but-terminal engine would keep rendering `standby` until the dwell's OWN
+ *  window happened to elapse, even though it is provably no longer parked — it is dead. A
+ *  terminal OLDER than (or absent relative to) the signal leaves the signal's freshness
+ *  untouched: that terminal belongs to a prior run this standby dwell has already outlived. */
 export function deriveEngineState(f: EngineFacts): EngineState {
   if (f.killSwitch) return f.activeLanes > 0 ? "stopping" : "stopped";
   if (f.ceilingBreach) return "winding-down";
+  const standbySignalCurrent = f.terminal === null || f.standbySignal === null || f.terminal.eventId < f.standbySignal.eventId;
+  const standbyFresh =
+    !f.roundOpen && f.standbySignal !== null && f.standbySignal.ageSec <= f.standbySignal.windowSec && standbySignalCurrent;
   const tickAgeSec = f.lastTickAt === null ? Number.POSITIVE_INFINITY : (f.now.getTime() - Date.parse(f.lastTickAt)) / 1000;
-  if (!(tickAgeSec <= f.staleGapSec)) {
+  if (!(tickAgeSec <= f.staleGapSec) && !standbyFresh) {
     // NaN (unparseable timestamp) is stale too
     return f.terminal?.kind === "run-ended" ? "stopped" : "stalled";
   }
   if (f.pause) return "paused";
-  if (!f.roundOpen && f.standbyWaiting) return "standby";
+  if (standbyFresh) return "standby";
   return "running";
 }
 
-/** #125: the newest standby-wait is newer than any standby-exit — read off the SAME two events
- *  round.ts appends, in id order, so "parked" here means exactly what it means to the engine. */
-function standbyWaiting(state: Pick<State, "eventsAfterId">): boolean {
-  const trail = state.eventsAfterId(0, ["standby-wait", "standby-exit"]);
-  return trail[trail.length - 1]?.kind === "standby-wait";
+/** #723: the newest standby-wait/standby-heartbeat signal (age vs its own declared window), or
+ *  null when there is none or the newest of the three standby kinds is an exit — read off
+ *  `state.latestStandbySignal()`'s single newest-of-three-kinds row, so this stays a one-query
+ *  read exactly like `latestRunTerminal` below. `waitSec` (standby-wait) / `remainingSec`
+ *  (standby-heartbeat) are round.ts's own payload fields for these kinds (engine-authored,
+ *  engine-read — an authoritative structured signal, not inferred text); a payload missing or
+ *  mistyping that field yields `null` rather than a fabricated window (fail-honest, same
+ *  direction as an unparseable `lastTickAt` counting as stale). Exported so dashboard/server.ts
+ *  can turn `windowSec - ageSec` into the next-check countdown the AC asks be carried in
+ *  `/api/loop/state`'s payload, without re-deriving the standby-vs-exit fold itself. */
+export function standbySignal(
+  state: Pick<State, "latestStandbySignal">,
+  now: Date,
+): { ageSec: number; windowSec: number; eventId: number } | null {
+  const sig = state.latestStandbySignal();
+  if (sig === undefined || sig.kind === "standby-exit") return null;
+  const payload = sig.payload as Record<string, unknown>;
+  const windowSec = sig.kind === "standby-wait" ? payload.waitSec : payload.remainingSec;
+  if (typeof windowSec !== "number" || !Number.isFinite(windowSec)) return null;
+  return { ageSec: (now.getTime() - Date.parse(sig.ts)) / 1000, windowSec, eventId: sig.id };
 }
 
 /** #407 (item 5): the newest run's terminal event, or null — the same last-event-wins fold shape
@@ -131,7 +190,7 @@ export function latestRunTerminal(state: Pick<State, "eventsAfterId">): RunTermi
   const trail = state.eventsAfterId(0, ["run-started", "run-ended", "engine-stalled"]);
   const last = trail[trail.length - 1];
   if (last === undefined || last.kind === "run-started") return null;
-  return { kind: last.kind as RunTerminal["kind"], payload: (last.payload ?? {}) as Record<string, unknown> };
+  return { kind: last.kind as RunTerminal["kind"], payload: (last.payload ?? {}) as Record<string, unknown>, eventId: last.id };
 }
 
 /** Read the live facts out of the DB + sentinels and derive §8's engine state word. Shared by
@@ -140,7 +199,14 @@ export function latestRunTerminal(state: Pick<State, "eventsAfterId">): RunTermi
 export function currentEngineState(
   state: Pick<
     State,
-    "openRound" | "isKillSwitchActive" | "activeWorkers" | "ceilingBreach" | "isPauseActive" | "lastTickAt" | "eventsAfterId"
+    | "openRound"
+    | "isKillSwitchActive"
+    | "activeWorkers"
+    | "ceilingBreach"
+    | "isPauseActive"
+    | "lastTickAt"
+    | "eventsAfterId"
+    | "latestStandbySignal"
   >,
   cfg: Pick<SapwoodConfig, "engine"> | null,
   now: Date,
@@ -155,7 +221,7 @@ export function currentEngineState(
     lastTickAt: state.lastTickAt(),
     staleGapSec: heartbeatStaleGapSec(cfg?.engine.tickIntervalSec ?? 0),
     roundOpen: round !== undefined,
-    standbyWaiting: standbyWaiting(state),
+    standbySignal: standbySignal(state, now),
     terminal: latestRunTerminal(state),
   });
 }
