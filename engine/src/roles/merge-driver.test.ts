@@ -3088,6 +3088,64 @@ test("MergeDriver.driveOne (engine-agent, #782 gate② round 1 P2 AC3b): during 
   assert.deepEqual(outcome.ciPendingObservation, { pending: false, head: "HEAD" });
 });
 
+test("MergeDriver.driveOne (engine-agent, #782 gate② round 2 P1): a MID-READ head move — getPRChecks answers for a NEWER head (H2) than the status0/data0 pair (H1) it's paired with — must NOT attribute H2's evidence gap to H1's ALREADY-AGED durable pin; no pending:true and no escalation for H1", async () => {
+  const forge = new EngineAgentFakeForge();
+  const h1Status = { ...forge.status, headOid: "HEAD", ciGreen: true, ciRed: false, baseOid: "BASE" };
+  const h2Status = { ...forge.status, headOid: "HEAD2", ciGreen: true, ciRed: false, baseOid: "BASE" };
+  // Call order inside driveEngineAgentReview: (1) the top-of-function `Promise.all` — status0 is
+  // H1 — then (2), after `getPRChecks` answers (unbound to any head — forge.ts's `PRChecksPage`
+  // carries no head/sha at all, the gap this fix closes) and evidence reads unsatisfied, the NEW
+  // round-2 same-head revalidation read — H2, simulating a push that landed in between.
+  forge.statusSequence = [h1Status, h2Status];
+  forge.status = h1Status; // fallback for any THIRD call — should not be reached
+  forge.reviewData = { ...forge.reviewData, headOid: "HEAD" }; // data0's OWN read, the other half of the Promise.all pair, still H1
+  // What `getPRChecks` actually answers — GitHub gives the CURRENT (H2) head's checks regardless
+  // of which head this pass is "about": `aux` has not materialized there yet.
+  forge.checksPage = { checks: [{ name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null, appSlug: "github-actions" }] };
+  let evaluated = false;
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "pending" as const, headOid: "HEAD" };
+    },
+  };
+  const cfg = mkEngineAgentCfg({
+    ci: {
+      requiredChecks: [
+        { name: "test", app: "github-actions" },
+        { name: "aux", app: "github-actions" },
+      ],
+      pendingEscalateAfterSec: 3600,
+    },
+  });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(
+    7,
+    46,
+    ALREADY_TRIGGERED,
+    noopRecord,
+    undefined,
+    undefined,
+    undefined,
+    mkEngineAgentDeps(recorded),
+    {
+      head: "HEAD",
+      at: "2026-07-15T00:00:00.000Z", // H1's durable pin, ALREADY well past any reasonable bound
+    },
+  );
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /preflight CI-evidence not satisfied/);
+  // The load-bearing assertions: NEVER {pending:true, head:"HEAD"} off H2's evidence, and NEVER an
+  // immediate escalation of H1's already-aged pin.
+  if (outcome.ciPendingObservation != null) {
+    assert.notEqual(outcome.ciPendingObservation.pending, true, "must not report H1 as pending off H2's evidence gap");
+  }
+  assert.equal(outcome.ciPendingEscalation, undefined, "must never escalate H1's already-aged pin off H2's mid-read evidence");
+  assert.equal(evaluated, false);
+});
+
 test("#782 AC2: aging-arm exclusivity invariant — engineAgentCiPending's HONEST input space: {no pin, unavailable pin, decisive-delivered pin} x the THREE meaningful (ciGreen,ciRed) boolean pairs a real rollup ever produces, PLUS the independent `evidenceUnsatisfied` override (#782 gate② round 1 P1) that is NOT reducible to that grid. Review-silence is the OTHER arm, opened by driveEngineAgentOne's own firstAt/backoff block under the EXACT SAME `attemptPinKind === \"unavailable\"` condition this function forces closed on — so the two can never both be open for the same pass.", () => {
   // HONEST INPUT SPACE (#782 gate② round 1 P2, CONFIRMED — the original version of this test
   // claimed a "3x3 matrix" but only had SIX unique rows: "ci pending" and "ci concluded-but-not-

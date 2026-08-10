@@ -572,15 +572,40 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     // either way, where staying silent cost the 1.5h.
     const basePin = deps.getBaseRedPin?.() ?? null;
     const baseNote = basePin ? ` (base-inherited: the default branch is CI-red at ${basePin.sha} — ${basePin.failing.join(", ")})` : "";
+    // #782 gate② round 2 (P1, CONFIRMED): `getPRChecks` is NOT scoped to `status0`'s head the way
+    // `getPRStatus`/`getPRReviewData` are to each other (the `Promise.all` pair at the top of this
+    // function) — GitHub answers with whatever the CURRENT head's checks are whenever queried, and
+    // `PRChecksPage` (forge.ts) carries no head/sha to bind against. A push landing between the
+    // status0/data0 read and THIS read would silently misattribute a NEWER head's (still-forming)
+    // evidence gap to status0's (older, possibly already-decided) head — the durable #426 pin is
+    // keyed on `status0.headOid`, so that misattribution would age/escalate the WRONG head's clock.
+    // Revalidated with one cheap `getPRStatus` re-read; on ANY mismatch (or a failed revalidation —
+    // fail-closed, "cannot prove same-head" reads the same as "not same-head") the `status`/`data`
+    // pair is OMITTED — this module's own `queued` doc: an absent pair means "this pass learned
+    // nothing", the same discipline every other mixed-read site in this file already follows,
+    // never a signal merge-driver.ts could act on for the wrong head.
+    let sameHead = false;
+    try {
+      const revalidated = await deps.forge.getPRStatus(pr);
+      sameHead = revalidated.headOid === status0.headOid;
+    } catch {
+      // sameHead stays false — cannot prove it, fail closed.
+    }
     return {
       kind: "queued",
       reason: `engine-agent: preflight CI-evidence not satisfied${baseNote}: ${ciEvidence.unsatisfied.join(", ")}`,
-      status: status0,
-      data: data0,
-      // #782 gate② round 1 (P1): this branch KNOWS gate① evidence is unsatisfied — see the type's
-      // own doc above for why merge-driver.ts must use this directly rather than re-deriving from
-      // the aggregate ciGreen/ciRed rollup (an absent required check can leave ciGreen === true).
-      ciEvidenceUnsatisfied: true,
+      ...(sameHead
+        ? {
+            status: status0,
+            data: data0,
+            // #782 gate② round 1 (P1): this branch KNOWS gate① evidence is unsatisfied — see the
+            // type's own doc above for why merge-driver.ts must use this directly rather than
+            // re-deriving from the aggregate ciGreen/ciRed rollup (an absent required check can
+            // leave ciGreen === true). Only attached once round 2's same-head revalidation (above)
+            // has actually confirmed the checks page describes THIS status0/data0 pair's head.
+            ciEvidenceUnsatisfied: true as const,
+          }
+        : {}),
     };
   }
 
