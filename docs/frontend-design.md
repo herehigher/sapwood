@@ -423,6 +423,17 @@ stroked in `--bark` at 40% alpha; the growing (current) ring in `--sap`.
 | Body | `system-ui` stack | All UI prose. Native feel, zero bytes — the honest choice for a local tool. |
 | Data | `ui-monospace` stack | Issue/PR numbers, costs, timestamps, config keys. A tool dashboard is mostly data; the mono face does the daily work. |
 
+Adjudicated 2026-08-10 (#728, token adjudication): the h1/h2/h3 module headers (`app.css`)
+and the hero's PLAN/IMPLEMENT/OUTCOME captions and ring count (`hero.css`) render in
+**Fraunces**, the display face above — this row already blessed exactly that use ("section
+labels, the big ring count"). The #144 and #145 gate② frozen-baseline probes (`hero-panel-*`,
+the dashboard concept renders) both recorded the shipped headers as a deviation because the
+baseline mockups render all-mono; both probes filed it as non-blocking and pointed at one
+shared adjudication rather than two. Ruling: the token table stands as specced — Fraunces for
+display headers — and the baseline PNGs are the out-of-date artifact, not the implementation.
+No code change follows from this entry; it exists so #144/#145's "recorded for adjudication"
+deviation has a resolved answer on file.
+
 Scale: 13 px base (data-dense surface), 1.25 ratio up to the 33 px display
 size; line-height 1.5 body, 1.2 display. Weights: 400/600 only.
 
