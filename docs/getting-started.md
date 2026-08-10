@@ -7,7 +7,9 @@ first autonomous run.
 ## Requirements
 
 - **Node.js ≥ 24** (the engine uses the built-in `node:sqlite`, no native build step).
-- **Claude Code CLI ≥ 2.0** — workers run as headless `claude -p` sessions.
+- **Claude Code CLI ≥ 2.0**, authenticated and able to run the configured models with
+  `claude -p` in a non-interactive shell. Workers and the default `engine-agent` reviewer
+  are headless Claude sessions; this is a real Anthropic usage path and incurs real spend.
 - **GitHub CLI (`gh`)**, authenticated with the `project` scope:
   ```
   gh auth login
@@ -17,24 +19,21 @@ first autonomous run.
 
 ## Install
 
-Add sapwood as a Claude Code plugin (see the
-[Claude Code plugin docs](https://claude.com/claude-code) for how your setup loads
-plugins — e.g. `claude plugin add` or a marketplace entry pointing at this repo).
-Once installed, the slash commands `/sapwood-run`, `/sapwood-status`, and
-`/sapwood-stop` are available inside any Claude Code session opened in the target
-repo — they invoke the engine for you, no PATH setup needed.
+**Current production-install status: no install command is available yet.** The repository
+ships `.claude-plugin/plugin.json`, but it does not ship a marketplace manifest or an npm
+package. Its `engine/dist/` directory is build output and is not in the repository. The
+`sapwood` executable is declared by the engine workspace as `engine/dist/cli.js`, so a normal
+Claude Code plugin install has neither a PATH binary nor a prebuilt CLI to run.
 
-**About the bare `sapwood` command**: installing the plugin does NOT put a `sapwood`
-binary on your PATH. Throughout these docs, `sapwood <cmd>` is shorthand for running
-the engine's CLI directly from the plugin checkout:
+Do not substitute a sapwood development checkout and local build for a production installation:
+that is useful to contributors, but it is not an onboarding path for an adopter. In particular,
+there is currently no public marketplace coordinate to give to `claude plugin install`, and the
+three documented plugin wrappers (`/sapwood-run`, `/sapwood-status`, `/sapwood-stop`) cannot
+replace the missing bare `sapwood init` and `sapwood validate` commands.
 
-```
-npm ci && npm --workspace engine run build   # once
-node <plugin-root>/engine/dist/cli.js <cmd>  # every "sapwood <cmd>" in these docs
-```
-
-or put it on PATH yourself with `npm link --workspace engine` from the plugin root.
-If you only ever use the slash commands, you can skip this entirely.
+The rest of this page records the prerequisites and operating sequence that a released install
+must satisfy. The available CLI verbs, once the distribution supplies the engine, are
+`sapwood init`, `sapwood validate`, `sapwood run`, `sapwood status`, and `sapwood events`.
 
 ## `sapwood init`
 
@@ -109,6 +108,49 @@ Edit the `sapwood.config.yaml` init wrote — at minimum, set `board.owner`,
 Every other key has a sensible default. See [`configuration.md`](configuration.md) for
 the full reference.
 
+## Prepare the board and gates before your first run
+
+### Create the ProjectV2 board
+
+Create a board for the repository, then record its project number:
+
+```
+gh project create --owner YOU --title NAME
+gh project list --owner YOU
+```
+
+Replace `YOU` with the GitHub user or organization that owns the board. The project number is
+also in the board URL. In the board UI, ensure its `Status` single-select field contains a
+`Ready` option (the default sapwood lanes are `Todo`, `Ready`, `In Progress`, and `Done`). Set
+that number in `board.projectNumber`, with the same owner and repository in `board.owner` and
+`board.repo`.
+
+### Before your first run: make gate① real
+
+> [!IMPORTANT]
+> Hand-author and merge at least one CI workflow before your first sapwood run. It must run on
+> pull requests and report a successful check with a stable name. Workflows under
+> `.github/workflows/**` are human-merge-only: sapwood workers must not be able to weaken or
+> create the merge evidence that gate① trusts. An empty repository therefore needs this human
+> bootstrap PR before sapwood can produce a mergeable result.
+>
+> Then configure the check that your workflow actually reports, for example:
+>
+> ```yaml
+> ci:
+>   requiredChecks:
+>     - name: test
+>       app: github-actions
+> ```
+>
+> `reviewer.mode` defaults to `engine-agent`, which is a second paid, headless Claude session.
+> With the shipped empty `ci.requiredChecks` list, the reviewer gate queues fail-closed rather
+> than treating an unspecified check as evidence. Do not start an unattended run until the
+> pull-request check above is visible and green on a human-authored test PR.
+
+For the operational distinction between a healthy wait, standby, a frozen ceiling, and a
+genuine wedge, use the [engine-state truth table in loop walkthrough §6](loop-walkthrough-v0.2.md#6-the-state-truth-table--reading-the-engine-at-a-glance).
+
 ## L0–L3 autonomy ladder
 
 You do not have to hand sapwood a live backlog and full merge authority on day one.
@@ -171,6 +213,13 @@ human decision.
   ```
 
   `--until-idle` is available only with `engine.driver: tick`.
+
+  **The tick driver runs no peripherals.** Before starting this L1 recipe, hand-apply
+  `sapwood:plan:approved` to a normal issue after checking its plan, or hand-apply
+  `sapwood:verify:n/a` to an inherently unverifiable docs/chore issue; otherwise a `Ready`
+  issue is not dispatchable. With the shipped label names, the corresponding GitHub CLI commands
+  are `gh issue edit ISSUE --add-label "sapwood:plan:approved"` and
+  `gh issue edit ISSUE --add-label "sapwood:verify:n/a"`.
 - **Risk profile:** sapwood changes the issue/board, runs one coding worker, pushes its
   branch, opens a PR, and drives the configured review gate, but it never calls the
   merge API. Keeping exactly one issue `Ready` is the dispatch-scope boundary;
