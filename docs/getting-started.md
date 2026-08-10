@@ -7,7 +7,9 @@ first autonomous run.
 ## Requirements
 
 - **Node.js ≥ 24** (the engine uses the built-in `node:sqlite`, no native build step).
-- **Claude Code CLI ≥ 2.0** — workers run as headless `claude -p` sessions.
+- **Claude Code CLI ≥ 2.0**, authenticated and able to run the configured models with
+  `claude -p` in a non-interactive shell. Workers and the default `engine-agent` reviewer
+  are headless Claude sessions; this is a real Anthropic usage path and incurs real spend.
 - **GitHub CLI (`gh`)**, authenticated with the `project` scope:
   ```
   gh auth login
@@ -17,30 +19,63 @@ first autonomous run.
 
 ## Install
 
-Add sapwood as a Claude Code plugin (see the
-[Claude Code plugin docs](https://claude.com/claude-code) for how your setup loads
-plugins — e.g. `claude plugin add` or a marketplace entry pointing at this repo).
-Once installed, the slash commands `/sapwood-run`, `/sapwood-status`, and
-`/sapwood-stop` are available inside any Claude Code session opened in the target
-repo — they invoke the engine for you, no PATH setup needed.
+### Channel A — install from source (current, supported)
 
-**About the bare `sapwood` command**: installing the plugin does NOT put a `sapwood`
-binary on your PATH. Throughout these docs, `sapwood <cmd>` is shorthand for running
-the engine's CLI directly from the plugin checkout:
+Clone sapwood wherever you want it to live, then build its CLI:
 
 ```
-npm ci && npm --workspace engine run build   # once
-node <plugin-root>/engine/dist/cli.js <cmd>  # every "sapwood <cmd>" in these docs
+git clone https://github.com/herehigher/sapwood
+cd sapwood
+npm ci
+npm --workspace engine run build
 ```
 
-or put it on PATH yourself with `npm link --workspace engine` from the plugin root.
-If you only ever use the slash commands, you can skip this entirely.
-
-## `sapwood init`
-
-Run init once, from the repo you want sapwood to operate on:
+This is the supported pre-v1 install channel: the clone stays on disk wherever you placed it,
+and the build creates `engine/dist/` there (it is not shipped in the repository). To put
+`sapwood` on your PATH for the commands below, run:
 
 ```
+npm link --workspace engine
+```
+
+Alternatively, do not link it and replace every `sapwood <cmd>` below with
+`node <clone>/engine/dist/cli.js <cmd>`, where `<clone>` is the path to your clone. The available
+CLI verbs include `sapwood init`, `sapwood validate`, `sapwood run`, `sapwood status`,
+`sapwood events`, and `sapwood park clear`.
+
+### Channel B — Claude Code plugin/marketplace install: not yet available
+
+There is no marketplace coordinate, npm package, or prebuilt `engine/dist`; the three shipped
+plugin wrappers (`/sapwood-run`, `/sapwood-status`, `/sapwood-stop`) additionally require
+`npm ci` at the plugin root and cover only `run`, `status`, and `stop`, not `init` or `validate`.
+
+## Bootstrap the target repo, then run `sapwood init`
+
+`init` loads an existing config before it can provision anything. From the repo you want
+sapwood to operate on, create its ProjectV2 board first and note the number:
+
+```
+gh project create --owner YOU --title NAME
+gh project list --owner YOU
+```
+
+Replace `YOU` with the GitHub user or organization that owns the board. The project number
+is also in the board URL. Then create the minimal valid config below, replacing all-caps
+values with your target repository and the board number you just created:
+
+```sh
+cat > sapwood.config.yaml <<'YAML'
+board:
+  owner: YOU
+  repo: REPOSITORY
+  projectNumber: PROJECT_NUMBER
+YAML
+```
+
+Verify that config and then initialize from the target repo:
+
+```
+sapwood validate
 sapwood init
 ```
 
@@ -65,10 +100,8 @@ sapwood init
 4. **Ensures any configured milestones exist** (`config.milestones`; empty by default —
    sapwood only needs labels + board lanes, milestones are your organizational choice).
 5. **Ensures the ProjectV2 board's `Status` field has the configured lanes**
-   (`Ready` / `In Progress` / `Done` by default) — if the board doesn't exist at the
-   configured `board.projectNumber`, init reports what to create rather than guessing.
-6. **Writes a starter `sapwood.config.yaml`** (with inline comments) if none exists yet.
-7. **Provisions the L1 worker deploy key (#606 gate② round 1–2) — the default onboarding path
+   (`Ready` / `In Progress` / `Done` by default).
+6. **Provisions the L1 worker deploy key (#606 gate② round 1–2) — the default onboarding path
    for the worker's write capability.** `init` generates a per-repo ed25519 SSH key
    (`ssh-keygen`), registers it as a **write** deploy key (`gh repo deploy-key add --allow-write
    --title sapwood-worker`) under your own logged-in `gh` credential (requires repo admin), runs a
@@ -93,9 +126,9 @@ sapwood init
    existing remote key — from an interactive terminal
    it offers to register an additional key just for this machine (titled
    `sapwood-worker-<hostname>`); non-interactively it degrades to L0 and names the manual steps.
-8. **Scaffolds starter goal and review-doctrine files** at their configured paths
+7. **Scaffolds starter goal and review-doctrine files** at their configured paths
    (`goal.file`, `doctrine.file`) if missing — never overwrites an existing file.
-9. **Scaffolds `.github/ISSUE_TEMPLATE/`** (feature / fix / docs / chore, matching the
+8. **Scaffolds `.github/ISSUE_TEMPLATE/`** (feature / fix / docs / chore, matching the
    structure the gate⓪ verification-plan-drafter normalizes toward) — each template is written only
    if that file is missing, so repos with their own templates are untouched.
 
@@ -104,10 +137,43 @@ re-run — every step is detect-before-create, so nothing is duplicated.
 
 ## Configure
 
-Edit the `sapwood.config.yaml` init wrote — at minimum, set `board.owner`,
-`board.repo`, and `board.projectNumber` to your repo and its ProjectV2 board number.
-Every other key has a sensible default. See [`configuration.md`](configuration.md) for
-the full reference.
+Review and expand the `sapwood.config.yaml` you created for bootstrap. Only
+`board.owner`, `board.repo`, and `board.projectNumber` are required; every other key has a
+sensible default. See [`configuration.md`](configuration.md) for the full reference.
+
+## Prepare the board and gates before your first run
+
+### Confirm the ProjectV2 board
+
+In the board UI, ensure its `Status` single-select field contains a `Ready` option (the
+default sapwood lanes are `Todo`, `Ready`, `In Progress`, and `Done`). `init` ensures the
+configured lanes exist.
+
+### Before your first run: make gate① real
+
+> [!IMPORTANT]
+> Hand-author and merge at least one CI workflow before your first sapwood run. It must run on
+> pull requests and report a successful check with a stable name. Workflows under
+> `.github/workflows/**` are human-merge-only: sapwood workers must not be able to weaken or
+> create the merge evidence that gate① trusts. An empty repository therefore needs this human
+> bootstrap PR before sapwood can produce a mergeable result.
+>
+> Then configure the check that your workflow actually reports, for example:
+>
+> ```yaml
+> ci:
+>   requiredChecks:
+>     - name: test
+>       app: github-actions
+> ```
+>
+> `reviewer.mode` defaults to `engine-agent`, which is a second paid, headless Claude session.
+> With the shipped empty `ci.requiredChecks` list, the reviewer gate queues fail-closed rather
+> than treating an unspecified check as evidence. Do not start an unattended run until the
+> pull-request check above is visible and green on a human-authored test PR.
+
+For the operational distinction between a healthy wait, standby, a frozen ceiling, and a
+genuine wedge, use the [engine-state truth table in loop walkthrough §6](loop-walkthrough-v0.2.md#6-the-state-truth-table--reading-the-engine-at-a-glance).
 
 ## L0–L3 autonomy ladder
 
@@ -171,6 +237,13 @@ human decision.
   ```
 
   `--until-idle` is available only with `engine.driver: tick`.
+
+  **The tick driver runs no peripherals.** Before starting this L1 recipe, hand-apply
+  `sapwood:plan:approved` to a normal issue after checking its plan, or hand-apply
+  `sapwood:verify:n/a` to an inherently unverifiable docs/chore issue; otherwise a `Ready`
+  issue is not dispatchable. With the shipped label names, the corresponding GitHub CLI commands
+  are `gh issue edit ISSUE --add-label "sapwood:plan:approved"` and
+  `gh issue edit ISSUE --add-label "sapwood:verify:n/a"`.
 - **Risk profile:** sapwood changes the issue/board, runs one coding worker, pushes its
   branch, opens a PR, and drives the configured review gate, but it never calls the
   merge API. Keeping exactly one issue `Ready` is the dispatch-scope boundary;
@@ -272,9 +345,20 @@ shapes are:
 - `sapwood run` ticks on `engine.tickIntervalSec` indefinitely, with the same
   signal/stop-condition exit behavior as the round driver.
 
-At every level, `sapwood status` (below) tells you what's happening without needing a
-live session, and `/sapwood-stop` is always available to freeze or gently pause the
-engine — see [`security.md`](security.md) for exactly what each control does.
+At every level, `sapwood status` tells you what's happening without needing a live
+session. Channel A's controls are file sentinels in the target repo (the repo containing
+`data/`):
+
+```sh
+mkdir -p data
+touch data/KILL_SWITCH  # emergency: freeze new dispatch and merges; drain workers
+rm -f data/KILL_SWITCH  # lift the kill switch on the next tick
+touch data/PAUSE        # gentle: stop new dispatch; in-flight work continues
+rm -f data/PAUSE        # resume dispatch on the next tick
+```
+
+See [`security.md`](security.md#two-tier-human-controls) for the full semantics, including
+how pause interacts with `--until-idle`.
 
 ## Running under a supervisor
 
@@ -349,10 +433,12 @@ On macOS, launchd's equivalents are `KeepAlive` with
 burst, which makes the engine's own two backstops — and checking
 `sapwood status` after any unattended stretch — matter more there.
 
-## Slash commands
+## Plugin-only slash commands (Channel B)
 
-These are thin wrappers around the `sapwood` CLI, meant to be run from inside a Claude
-Code session opened in the target repo:
+These thin wrappers are available only in a Claude Code session that has loaded the sapwood
+plugin. They are **not** loaded by Channel A's clone/build/link install, and Channel B's
+marketplace installation is not yet available. Channel A users should use the file-sentinel
+commands above for stop/pause control and the linked CLI for run/status.
 
 - **`/sapwood-run [--once|--until-idle|--dry-run]`** — runs `sapwood run` with the given
   mode and reports its output. No flags = daemon mode.
