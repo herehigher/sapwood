@@ -34,7 +34,9 @@ function Bar({ bar, max }: { bar: CostBar; max: number }) {
 export function CostStrip({ groups, heading = "cost · today" }: { groups: CostBarGroup[]; heading?: string }) {
   const max = Math.max(0, ...groups.flatMap((g) => g.bars.map((b) => b.usd)));
   return (
-    <section className="panel cost-strip" aria-label="cost">
+    // `id="cost"` is the §3 rail's "cost" anchor target (#727) — this is the ONE cost-strip
+    // instance the app renders, so a hardcoded id beats a prop no caller would ever vary.
+    <section id="cost" className="panel cost-strip" aria-label="cost">
       <h2>{heading}</h2>
       <div className="cost-strip-groups">
         {groups.map((group) => (

@@ -1,20 +1,26 @@
+import type { Dispatch, SetStateAction } from "react";
 import { useState } from "react";
 import { spendByWorkerForDay, useEventHistory, useLoopState, useRounds, useSpendHistory } from "./api/queries.ts";
+import type { Round } from "./api/types.ts";
 import { ActivityFeed } from "./components/ActivityFeed.tsx";
 import { ConfigDrawer } from "./components/ConfigDrawer.tsx";
 import { Controls } from "./components/Controls.tsx";
 import type { CostBarGroup } from "./components/CostStrip.tsx";
 import { CostStrip } from "./components/CostStrip.tsx";
 import { Header } from "./components/Header.tsx";
+import { IconRail } from "./components/IconRail.tsx";
 import { LaneBoard } from "./components/LaneBoard.tsx";
 import { LiveOnly } from "./components/LiveOnly.tsx";
 import { NeedsAttention } from "./components/NeedsAttention.tsx";
 import { Transport } from "./components/Transport.tsx";
 import { readConfigPath } from "./config-captions.ts";
+import type { DomainEvent } from "./domain-event.ts";
+import type { EntityTitles } from "./entities.ts";
 import { Hero } from "./hero/Hero.tsx";
 import { Legend } from "./hero/Legend.tsx";
+import type { FoldStep, HeroState } from "./hero/state.ts";
 import { bucketSpendByPhase, phaseSpendBars } from "./replay/spend-replay.ts";
-import { useReplay } from "./replay/useReplay.ts";
+import { type ReplayView, useReplay } from "./replay/useReplay.ts";
 
 /**
  * #716 gate② P1-3: pulls `lanes.prFixCap` through the same nested-path reader `board.owner`/
@@ -31,12 +37,175 @@ export function resolveFixCap(config: Record<string, unknown> | null | undefined
 }
 
 /**
+ * The exact toggle `onOpenConfig` runs — extracted (#727 gate② finding
+ * config-trigger-wiring-unexercised) so a test can drive `IconRail`'s REAL rendered gear
+ * (`components/IconRail.tsx#railContent`) through this SAME function and observe `configOpen`
+ * flip, rather than only asserting the gear's markup exists or presetting `configOpen` directly.
+ */
+export function toggleConfigOpen(open: boolean): boolean {
+  return !open;
+}
+
+type AppViewModel = {
+  clock: Date;
+  loop: ReturnType<typeof useLoopState>;
+  events: ReturnType<typeof useEventHistory>;
+  disconnected: boolean;
+  parked: boolean;
+  repoUrl: string | undefined;
+  fixCap: number;
+  byModel: CostBarGroup;
+  byLane: CostBarGroup;
+  byPhase: CostBarGroup;
+  configOpen: boolean;
+  setConfigOpen: Dispatch<SetStateAction<boolean>>;
+  // #741: the round navigator's list + the replay transport/mode it drives — §3 A's "the round
+  // navigator IS the mode", so every replayable panel below reads whichever fold is active.
+  mode: "live" | "replay";
+  rounds: Round[];
+  replay: ReplayView;
+  activeHero: HeroState;
+  activeSteps: FoldStep[];
+  activeEvents: DomainEvent[];
+  activeTitles: EntityTitles;
+  activeOpenAttention: DomainEvent[];
+};
+
+/**
+ * The ACTUAL markup `App` renders, factored out as a plain, hooks-free function (#727 gate②
+ * finding config-app-wiring-still-unexercised) — the same treatment `IconRail.tsx#railContent`
+ * already got, one level up. Calling `App(...)` directly outside a real render throws (hooks
+ * need a dispatcher), and `renderToStaticMarkup` strips event-handler props from its HTML
+ * output, so neither route let a test reach the REAL `<IconRail onOpenConfig={...}>` prop this
+ * function creates — every previous round's "interaction" test could only exercise a
+ * test-reconstructed equivalent (a hand-built `railContent(...)` call, a `configOpen` preset),
+ * never App's own wiring. This function IS that wiring: a test can call it with a spy in place
+ * of `setConfigOpen`, walk to the real `IconRail` element it returns, and call its real
+ * `onOpenConfig` prop directly.
+ */
+export function appContent(vm: AppViewModel) {
+  const {
+    clock,
+    loop,
+    disconnected,
+    parked,
+    repoUrl,
+    fixCap,
+    byModel,
+    byLane,
+    byPhase,
+    configOpen,
+    setConfigOpen,
+    mode,
+    rounds,
+    replay,
+    activeHero,
+    activeSteps,
+    activeEvents,
+    activeTitles,
+    activeOpenAttention,
+  } = vm;
+  return (
+    <div className="app-shell">
+      <IconRail onOpenConfig={() => setConfigOpen(toggleConfigOpen)} />
+      <main className="stack">
+        <header id="overview" className="panel app-header">
+          <Header
+            disconnected={disconnected}
+            isPending={loop.isPending}
+            engine={
+              loop.data
+                ? {
+                    state: loop.data.engine.state,
+                    pauseActive: loop.data.engine.pauseActive,
+                    standbyNextCheckSec: loop.data.engine.standbyNextCheckSec,
+                  }
+                : undefined
+            }
+            spend={loop.data?.spend}
+            parked={parked}
+          />
+          {/* §3 Operations: the engine control verbs hide entirely while viewing a closed round —
+              they act on the PRESENT engine while every other pixel shows an as-of-cursor past. */}
+          <Controls enabled={(loop.data?.controlsEnabled ?? false) && mode === "live"} />
+          <Legend />
+        </header>
+
+        <Transport
+          rounds={rounds}
+          selectedRoundId={replay.selectedRoundId}
+          onSelectRound={replay.selectRound}
+          cursorId={replay.position?.cursorId ?? 0}
+          playing={replay.playing}
+          speed={replay.speed}
+          onPlay={replay.play}
+          onPause={replay.pause}
+          onSpeed={replay.setSpeed}
+          onScrub={replay.scrub}
+          now={clock}
+        />
+
+        <NeedsAttention items={activeOpenAttention} titles={activeTitles} repoUrl={repoUrl} now={clock} />
+
+        {loop.data && (
+          <Hero
+            heroState={activeHero}
+            steps={activeSteps}
+            lanesMax={loop.data.lanes.max}
+            engine={loop.data.engine.state}
+            lanes={mode === "live" ? loop.data.lanes.items : []}
+            fixCap={fixCap}
+            roundPhase={mode === "live" ? (loop.data.round?.phase ?? null) : null}
+            config={loop.data.config}
+          />
+        )}
+
+        {/* §11 boundary rule: `workers` is a mutable snapshot, not an append-only source — a lane
+            card's state/PR/elapsed/settled-cost has no replay-reconstructed equivalent today, so
+            the whole board is live-only rather than risk rendering a stale live snapshot under a
+            replay cursor. */}
+        <LiveOnly mode={mode}>
+          <LaneBoard
+            lanesMax={loop.data?.lanes.max ?? null}
+            lanes={loop.data?.lanes.items ?? []}
+            titles={activeTitles}
+            repoUrl={repoUrl}
+            disconnected={disconnected}
+          />
+        </LiveOnly>
+
+        <ActivityFeed
+          events={activeEvents}
+          pinnedAttention={activeOpenAttention}
+          titles={activeTitles}
+          repoUrl={repoUrl}
+          disconnected={disconnected}
+        />
+
+        <CostStrip
+          groups={mode === "replay" ? [byPhase] : [byModel, byLane]}
+          heading={mode === "replay" ? "cost · this round" : "cost · today"}
+        />
+
+        {configOpen && (
+          <LiveOnly mode={mode}>
+            <ConfigDrawer config={loop.data?.config ?? null} open onClose={() => setConfigOpen(false)} />
+          </LiveOnly>
+        )}
+      </main>
+    </div>
+  );
+}
+
+/**
  * The header (A) + hero (B, #144) + lane board (C) + activity feed (D) + cost strip/config
  * drawer (E) from frontend-design.md §3, all against the same §8 data hooks. `now` is
  * test-only (defaults to the real clock) — the cost strip's "by lane" day boundary needs a
- * fixed instant to assert against.
+ * fixed instant to assert against. `initialConfigOpen` is test-only too, same posture as `now`.
+ * All rendering lives in `appContent` above; this function only resolves the live queries/state
+ * hooks require and hands the result straight through.
  */
-export function App({ now }: { now?: Date | undefined } = {}) {
+export function App({ now, initialConfigOpen }: { now?: Date | undefined; initialConfigOpen?: boolean | undefined } = {}) {
   const clock = now ?? new Date();
   const loop = useLoopState();
   // #740: `lanesMax` flows into the shared reducer so its hero slice re-fits its channel count
@@ -44,7 +213,7 @@ export function App({ now }: { now?: Date | undefined } = {}) {
   const lanesMax = loop.data?.lanes.max ?? null;
   const events = useEventHistory(lanesMax);
   const spend = useSpendHistory();
-  const [configOpen, setConfigOpen] = useState(false);
+  const [configOpen, setConfigOpen] = useState(initialConfigOpen ?? false);
 
   // #741: the round navigator's list (§8 `/api/rounds`) and the replay transport it drives
   // (play/pause/speed/scrub, §6). `mode` is carried by round selection, not a separate toggle —
@@ -104,95 +273,26 @@ export function App({ now }: { now?: Date | undefined } = {}) {
     bars: phaseSpendBars(bucketSpendByPhase(replay.spendThroughCursor, replay.phaseWindows)),
   };
 
-  return (
-    <main className="stack">
-      <header className="panel app-header">
-        <h1>sapwood</h1>
-        <Header
-          disconnected={disconnected}
-          isPending={loop.isPending}
-          engine={
-            loop.data
-              ? {
-                  state: loop.data.engine.state,
-                  pauseActive: loop.data.engine.pauseActive,
-                  standbyNextCheckSec: loop.data.engine.standbyNextCheckSec,
-                }
-              : undefined
-          }
-          spend={loop.data?.spend}
-          parked={parked}
-        />
-        {/* §3 Operations: the engine control verbs hide entirely while viewing a closed round —
-            they act on the PRESENT engine while every other pixel shows an as-of-cursor past. */}
-        <Controls enabled={(loop.data?.controlsEnabled ?? false) && mode === "live"} />
-        <Legend />
-        <button type="button" onClick={() => setConfigOpen((v) => !v)}>
-          Config ▸
-        </button>
-      </header>
-
-      <Transport
-        rounds={rounds.data?.rounds ?? []}
-        selectedRoundId={replay.selectedRoundId}
-        onSelectRound={replay.selectRound}
-        cursorId={replay.position?.cursorId ?? 0}
-        playing={replay.playing}
-        speed={replay.speed}
-        onPlay={replay.play}
-        onPause={replay.pause}
-        onSpeed={replay.setSpeed}
-        onScrub={replay.scrub}
-        now={clock}
-      />
-
-      <NeedsAttention items={activeOpenAttention} titles={activeTitles} repoUrl={repoUrl} now={clock} />
-
-      {loop.data && (
-        <Hero
-          heroState={activeHero}
-          steps={activeSteps}
-          lanesMax={loop.data.lanes.max}
-          engine={loop.data.engine.state}
-          lanes={mode === "live" ? loop.data.lanes.items : []}
-          fixCap={fixCap}
-          roundPhase={mode === "live" ? (loop.data.round?.phase ?? null) : null}
-          config={loop.data.config}
-        />
-      )}
-
-      {/* §11 boundary rule: `workers` is a mutable snapshot, not an append-only source — a lane
-          card's state/PR/elapsed/settled-cost has no replay-reconstructed equivalent today, so the
-          whole board is live-only rather than risk rendering a stale live snapshot under a replay
-          cursor. */}
-      <LiveOnly mode={mode}>
-        <LaneBoard
-          lanesMax={loop.data?.lanes.max ?? null}
-          lanes={loop.data?.lanes.items ?? []}
-          titles={activeTitles}
-          repoUrl={repoUrl}
-          disconnected={disconnected}
-        />
-      </LiveOnly>
-
-      <ActivityFeed
-        events={activeEvents}
-        pinnedAttention={activeOpenAttention}
-        titles={activeTitles}
-        repoUrl={repoUrl}
-        disconnected={disconnected}
-      />
-
-      <CostStrip
-        groups={mode === "replay" ? [byPhase] : [byModel, byLane]}
-        heading={mode === "replay" ? "cost · this round" : "cost · today"}
-      />
-
-      {configOpen && (
-        <LiveOnly mode={mode}>
-          <ConfigDrawer config={loop.data?.config ?? null} open onClose={() => setConfigOpen(false)} />
-        </LiveOnly>
-      )}
-    </main>
-  );
+  return appContent({
+    clock,
+    loop,
+    events,
+    disconnected,
+    parked,
+    repoUrl,
+    fixCap,
+    byModel,
+    byLane,
+    byPhase,
+    configOpen,
+    setConfigOpen,
+    mode,
+    rounds: rounds.data?.rounds ?? [],
+    replay,
+    activeHero,
+    activeSteps,
+    activeEvents,
+    activeTitles,
+    activeOpenAttention,
+  });
 }
