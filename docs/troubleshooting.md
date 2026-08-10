@@ -2,6 +2,24 @@
 
 What common failures mean and how to respond.
 
+## Operator intervention routing
+
+Choose the scenario that matches. This index links to the source procedure; it does not
+replace it.
+
+- **Stop everything:** [Stop ritual](supervision.md#stop-ritual) · [human
+  controls](security.md#two-tier-human-controls)
+- **Stop new dispatch only:** [Stop ritual](supervision.md#stop-ritual) · [human
+  controls](security.md#two-tier-human-controls)
+- **A lane looks stuck:** [Stale heartbeat reclaim (and restart
+  adoption)](#stale-heartbeat-reclaim-and-restart-adoption) · [Interpretation
+  pointers](supervision.md#interpretation-pointers)
+- **Crashed mid-round:** [Crash & resume semantics
+  (rerun-not-resume)](loop-walkthrough-v0.2.md#4-crash--resume-semantics-rerun-not-resume)
+- **I want to change direction:** Mid-round redirection is not supported; pause, edit
+  the issue, and re-dispatch. See [human controls](security.md#two-tier-human-controls)
+  and [Ready issue never dispatches](#ready-issue-never-dispatches).
+
 ## Ready issue never dispatches
 
 First distinguish an issue that is not eligible from one that is eligible but waiting for
