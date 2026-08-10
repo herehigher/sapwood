@@ -291,7 +291,34 @@ test("#730 AC2: an in-scope gated candidate with no human block still holds the 
   assert.equal(await firstWorkSignal(ctx), "gated-reentry-candidates");
 });
 
-test("#730 AC1: issue and PR human blocks all leave gated re-entry out of the probe", async () => {
+test("#730 gate② P1: an issue-side hold with needs-human cleared and a clean PR remains probe work — #400 carrier parity reaches RECLAIM", async () => {
+  const cfg = allOnCfg();
+  const ctx: ProbeCtx = {
+    ...baseCtx(),
+    cfg,
+    state: { ...baseCtx().state, gatedFailedWorkers: () => [{ issue: 730, pr: 731 } as WorkerRow] },
+    forge: {
+      ...baseCtx().forge,
+      getIssueMeta: async (issue) => ({
+        number: issue,
+        title: "issue-held but reentry-ready gated PR",
+        state: "OPEN",
+        labels: [cfg.escalation.holdLabels[0]!],
+        milestone: "M-X",
+        updatedAt: "2026-08-10T00:00:00Z",
+      }),
+      getPRLabels: async () => [],
+    },
+  };
+
+  assert.equal(
+    await firstWorkSignal(ctx),
+    "gated-reentry-candidates",
+    "#400: an issue-side hold is not part of conductor.ts:3982's issue carrier holdSet, so the next tick can RECLAIM",
+  );
+});
+
+test("#730 AC1: issue human labels and PR human/hold labels leave gated re-entry out of the probe", async () => {
   const cfg = allOnCfg();
   const ctx: ProbeCtx = {
     ...baseCtx(),
