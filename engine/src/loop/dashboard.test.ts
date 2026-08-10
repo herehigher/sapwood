@@ -399,7 +399,15 @@ function seedDb(dbPath: string): void {
 // hangs and the caller times out before the resolved handle (and its `.pid`) ever arrives, leaving
 // the already-spawned real child untracked and unreachable by `after()`.
 const spawnedDashboardServerPids = new Set<number>();
-after(() => {
+
+/** The fallback sweep `after()` runs, extracted so a test can invoke it directly (see "exercises
+ *  the after() fallback" below) and prove it actually finds + kills a tracked child, rather than
+ *  trusting an untested code path to fire correctly only during a real, slow timeout — mirrors
+ *  worker.test.ts's identical `sweepTermImmuneRegistry` (#786 gate② finding [ac2-timeout-fallback-
+ *  untested]). Only untracks the pids it actually killed — a still-alive, still-owned entry (none
+ *  should exist by the time `after()` calls this, but a mid-suite test-initiated call might have
+ *  siblings) is left for its own owner to untrack via `waitForUntrackedDeath`/`.stop()`. */
+function sweepDashboardServerRegistry(): number[] {
   const forceKilled: number[] = [];
   for (const pid of spawnedDashboardServerPids) {
     try {
@@ -414,11 +422,17 @@ after(() => {
       /* exited between the liveness check and here */
     }
   }
-  spawnedDashboardServerPids.clear();
+  for (const pid of forceKilled) spawnedDashboardServerPids.delete(pid);
+  return forceKilled;
+}
+
+after(() => {
   // The sweep above always runs (cleanup is unconditional); this assertion only fires AFTER
   // cleanup, so it reports a real regression rather than masking one — every test's own `finally`
   // should already have reaped its own child via `handle.stop()`, so `after()` finding one still
   // alive means some test's own teardown didn't run (e.g. a hang past `--test-timeout`).
+  const forceKilled = sweepDashboardServerRegistry();
+  spawnedDashboardServerPids.clear();
   assert.deepEqual(
     forceKilled,
     [],
@@ -461,6 +475,38 @@ async function startTrackedDashboardServer(opts: Parameters<typeof startDashboar
     },
   };
 }
+
+// #786 gate② finding [ac2-timeout-fallback-untested]: invokes `sweepDashboardServerRegistry()` —
+// the exact function `after()` calls — directly, against a real spawned dist-server/start.js child
+// deliberately left tracked with nothing else about to reap it (standing in for a test whose own
+// `finally`/`.stop()` never runs, e.g. a hang past `--test-timeout`), proving the fallback mechanism
+// itself actually finds, kills, and untracks a survivor — without needing a real 60s hang.
+test("sweepDashboardServerRegistry (#786): finds, SIGKILLs, and untracks a real dist-server child nothing else has reaped — the exact fallback after() relies on for a test that hung past its own teardown", async () => {
+  await withDataDir(async (dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    seedDb(dbPath);
+    let spawnedPid: number | undefined;
+    const handle = await startDashboardServer({
+      dbPath,
+      port: 0,
+      onSpawn: (pid) => {
+        spawnedPid = pid;
+        spawnedDashboardServerPids.add(pid);
+      },
+    });
+    assert.equal(spawnedPid, handle.pid, "onSpawn must report the exact same pid the resolved handle carries");
+
+    // Deliberately NO handle.stop() here — standing in for exactly what a hung test's own
+    // unreachable `finally` looks like: the real child is alive and tracked, with nothing else
+    // about to reap it, at the moment the sweep runs.
+    const forceKilled = sweepDashboardServerRegistry();
+
+    assert.deepEqual(forceKilled, [handle.pid], "the sweep must find and report this exact child, no more no less");
+    // Confirms the sweep's SIGKILL actually ended it (SIGKILL delivery isn't synchronous) — reuses
+    // the same bounded-poll-then-untrack helper the reject-path tests already trust for this.
+    await waitForUntrackedDeath(handle.pid);
+  });
+});
 
 test("startDashboardServer (real, e2e): an OS-assigned port (0) resolves with the actual bound port", async () => {
   await withDataDir(async (dir) => {
