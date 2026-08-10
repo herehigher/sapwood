@@ -38,10 +38,26 @@ checker (`npm run contrast`); the one bundled display face is committed under
 **Tests and CI.** The workspace has its own suite — `server.test.ts` (the engine-state
 derivation truth table, every route's shape and paging contract, the read-only
 handle, the loopback bind, the control route's defenses) plus `src/api/api.test.ts`,
-`src/scaffold.test.ts` and `src/tokens.test.ts` — 60 tests, run with `node --test`
+`src/scaffold.test.ts` and `src/tokens.test.ts`, run with `node --test`
 like the engine's. `.github/workflows/ci.yml` runs `npm --workspace dashboard run
 typecheck` and `npm --workspace dashboard test`, so the workspace is gated, not
 merely present.
+
+**Proving click/effect wiring: `src/test-dom.ts`.** For most of the dashboard's history the
+only render path in tests was `react-dom/server`'s `renderToStaticMarkup` — no effects, no real
+events — so a test proving "clicking X calls Y" had no way to click anything; it could only
+chain the component's extracted pure functions and hope the JSX wiring on top matched. That gap
+was gate②'s single most repeated finding class in the tendency table (retro round #355): the
+same "this test doesn't actually exercise the real onClick/composition" shape recurring across
+rounds and PRs, each round's fix adding another hand-rolled React-element tree-walker rather
+than closing the gap. A test file that needs to click something real now calls
+`registerRealDom()` from `src/test-dom.ts` (registers happy-dom in `test.before`/unregisters in
+`test.after`) and mounts with `react-dom/client`'s `createRoot`, driving clicks through React's
+`act()` — see `Controls.test.tsx`'s own "real DOM" test for the pattern. It is opt-in **per
+file**, deliberately: Node's test runner isolates each `*.test.ts(x)` file into its own process,
+and happy-dom's `fetch` enforces same-origin/CORS against `window.location`, which breaks
+`server.test.ts`'s real network calls if registered process-wide — do not add it to the root
+`test` script's `--import`.
 
 **Upstream of all of it,** the engine already persists the enabling sources:
 append-only `events` and `spend_ledger`, `rounds`/`round_artifacts`, live worker

@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CONTROL_VERBS } from "../api/types.ts";
 import { CONTROL_COPY } from "../copy.ts";
+import { registerRealDom } from "../test-dom.ts";
 import { Controls, controlsReducer, runControlEffect } from "./Controls.tsx";
 
+registerRealDom();
 test.afterEach(() => mock.restoreAll());
 
 // ── controlsReducer: the misfire-protection state machine (§3 Operations) ───────────────────
@@ -186,4 +190,49 @@ test("the confirming dialog renders the exact CONTROL_COPY confirmation text for
 test("the confirming dialog does NOT render while idle — the dialog only appears once a verb is actually requested", () => {
   const html = renderToStaticMarkup(<Controls enabled initialState={{ phase: "idle" }} />);
   assert.doesNotMatch(html, /role="alertdialog"/);
+});
+
+// ── real DOM (retro #355) ────────────────────────────────────────────────────────────────────
+//
+// Every test above that touches the click/effect wiring says, in its own comment, that it's
+// working around "no jsdom in this harness" by chaining pure functions instead of clicking a
+// real button. That's exactly the class of gap gate② kept re-finding across rounds (#727/#739's
+// own "wiring unexercised" findings): a test can be green while the production onClick/useEffect
+// composition is broken, because nothing here ever dispatched a real event. `test-dom-setup.ts`
+// (registered via the `test` script's `--import`) now provides a real minimal DOM, so this proves
+// the actual button-click round trip once, directly against the reducer-chaining tests above.
+test("real DOM: clicking a verb button opens the confirm dialog; clicking Confirm fires onControl exactly once with that verb, then the dialog closes", async () => {
+  const onControl = mock.fn(async () => undefined);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<Controls enabled onControl={onControl} />);
+    });
+
+    const stopButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === CONTROL_COPY.stop.label);
+    assert.ok(stopButton, "the real stop button renders");
+    await act(async () => {
+      stopButton?.click();
+    });
+
+    assert.equal(container.querySelector('[role="alertdialog"]')?.getAttribute("aria-label"), "confirm stop");
+    assert.equal(onControl.mock.calls.length, 0, "no call before the confirm click");
+
+    const confirmButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Confirm");
+    assert.ok(confirmButton, "the real confirm button renders");
+    await act(async () => {
+      confirmButton?.click();
+    });
+
+    assert.equal(onControl.mock.calls.length, 1, "the production onClick -> reducer -> effect chain fired exactly once");
+    assert.deepEqual(onControl.mock.calls[0]?.arguments, ["stop"]);
+    assert.equal(container.querySelector('[role="alertdialog"]'), null, "the dialog closes once the request settles");
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
 });
