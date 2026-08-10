@@ -439,6 +439,14 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
     case "dispatched": {
       if (issue === null || worker === null) return null;
       const lane = claimLane(draft, worker);
+      // #745: `claimLane` finds a lane purely by worker-string match — a lane still pinned to
+      // a DIFFERENT issue means that issue's own resolving event never arrived (the FAILURE_KINDS
+      // non-rescue path sets `phase: "failed"` but never calls `releaseLane`, so the droplet
+      // stays parked at `at: "lane"` forever — `moveDroplet`'s own doc). The engine reusing this
+      // worker for fresh work IS the signal that the old attempt is over: drop its stranded
+      // droplet rather than let it keep counting as pending and colliding with the new droplet
+      // at the same stage position (§6, same worker → same `dropletPoint`).
+      if (lane.issue !== null && lane.issue !== issue) draft.droplets.delete(lane.issue);
       lane.issue = issue;
       lane.phase = "writing";
       lane.fixRound = 0;

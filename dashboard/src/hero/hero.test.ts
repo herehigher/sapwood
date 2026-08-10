@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { DomainEvent } from "../domain-event.ts";
 import { LEGEND_ITEMS, Legend } from "./Legend.tsx";
-import { BACKLOG, dropletPoint, HeroStage, TRUNK } from "./stage.tsx";
+import { BACKLOG, dropletPoint, HeroStage, STAGE, TRUNK } from "./stage.tsx";
 import {
   activePlanningNode,
   activeReflectionNode,
@@ -1092,4 +1092,61 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   assertNoOverlap(boxes);
 
   assert.match(html, /data-node="needs-human" data-count="6"/);
+});
+
+// ── #745: a reused worker id must not strand its old droplet as forever-pending ────────────
+//
+// A non-rescue `reclaim-failed` (`next` not "DRIVING") marks a lane `failed` but never calls
+// `releaseLane` — `moveDroplet`'s own doc: a failed, never-revisited channel keeps its droplet
+// parked at `at: "lane"` forever. `claimLane` finds a lane purely by worker-string match, so a
+// later `dispatched` on the SAME worker id (an engine cycling a small worker pool over a long
+// event history routinely does this) hands the channel straight to the new issue without ever
+// touching the old, stranded droplet. That droplet's own resolving event has, in effect,
+// permanently fallen outside anything this fold will ever see again — the same
+// window-truncation condition #745's issue body describes for a merge event that never gets
+// folded, just reached via lane reuse instead of a bounded event page.
+
+test("#745 AC1: a stale, never-rescued lane droplet stops counting as pending once its worker id is reused for a fresh dispatch", () => {
+  const events = [
+    ev("dispatched", { worker: "w1", issue: 422 }),
+    ev("reclaim-failed", { worker: "w1", issue: 422, next: "ESCALATE" }),
+    ev("dispatched", { worker: "w1", issue: 999 }),
+  ];
+  const { state } = run(events, 3);
+
+  assert.equal(droplet(state, 422), undefined, "the stranded droplet must not linger once its lane is reused for new work");
+  assert.ok(droplet(state, 999), "the fresh dispatch's own droplet must exist");
+
+  const html = markup(state);
+  const tallyMatch = html.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</);
+  assert.ok(tallyMatch, "outcome tally must render");
+  assert.match(tallyMatch[1] as string, /0 merged · 1 pending · 0 needs human/);
+});
+
+test("#745 AC2: worker-id reuse on a never-rescued failed lane must not collide the stranded droplet with the fresh dispatch's chip", () => {
+  const events = [
+    ev("dispatched", { worker: "w1", issue: 111 }),
+    ev("reclaim-failed", { worker: "w1", issue: 111, next: "ESCALATE" }),
+    ev("dispatched", { worker: "w1", issue: 222 }),
+  ];
+  const { state: rawState } = run(events, 3);
+  const state = withVisibleLanes(rawState, 3);
+
+  // Every visible chip's position, computed through the real `dropletPoint` — never hand-placed.
+  const points = state.droplets.map((d) => ({ issue: d.issue, ...dropletPoint(state, d) }));
+
+  const seen = new Map<string, number>();
+  for (const p of points) {
+    const key = `${p.x},${p.y}`;
+    const prior = seen.get(key);
+    assert.equal(prior, undefined, `droplet #${p.issue} collides with droplet #${prior} at ${key}`);
+    seen.set(key, p.issue);
+  }
+  for (const p of points) {
+    assert.ok(p.x >= 0 && p.x <= STAGE.w, `droplet #${p.issue} x=${p.x} lies outside [0, ${STAGE.w}]`);
+    assert.ok(p.y >= 0 && p.y <= STAGE.h, `droplet #${p.issue} y=${p.y} lies outside [0, ${STAGE.h}]`);
+  }
+
+  const html = markup(rawState, { lanesMax: 3 });
+  assert.equal(html.match(/class="hero-droplet"/g)?.length, 1, "the stranded droplet must not render alongside the fresh dispatch");
 });
