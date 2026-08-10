@@ -374,7 +374,7 @@ function toCheckpoint(draft: Draft, id: number, issue: number, worker: string | 
  * Any move clears `failed` unless the patch re-asserts it: the ✕ marks the state a droplet is
  * *in*, not a scar it carries. A lane that failed, was re-dispatched and merged must not keep
  * rendering ✕ beside a merged PR. `id` (the event doing the moving) always stamps `touchedAt` —
- * see `dropStalePending`'s doc for what that's for.
+ * see `isPendingStale`'s doc for what that's for.
  */
 function moveDroplet(draft: Draft, issue: number, id: number, patch: Partial<Droplet>): Droplet {
   const current = draft.droplets.get(issue) ?? {
@@ -593,29 +593,33 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
 }
 
 /**
- * #745 gate② finding [0]: a droplet's own resolving event can permanently fall outside
- * anything this fold will ever see — a PR merged or closed through a path that never writes a
- * domain event this vocabulary reads (a human closing/merging on GitHub directly, bypassing
- * conductor.ts's own merge-driver), or, before a freshly-opened dashboard session catches up,
- * simply not-yet-folded history. Trusting every still-unresolved `at: "backlog"/"lane"/
- * "checkpoint"` droplet as live, current work — no matter how long the fold has gone without
- * touching it again — is exactly the belief-vs-reality misword #745 reports: real, terminal PRs
- * misread as still pending. Once a droplet's own last touch (`touchedAt`) falls this many event
- * ids behind the fold's current position, its lifecycle is treated as truncated and it is
- * dropped — from the tally AND the stage — rather than counted forever on the strength of
- * events that may never arrive. 2000 mirrors `replay/reducer.ts`'s `DEFAULT_EVENT_WINDOW` (the
- * dashboard's own bound on how much event history it commits to treating as "recent") —
- * declared independently here since that module imports FROM this one, never the reverse.
+ * #745 gate② round 2 finding [1]: event-age is NOT an authoritative terminal-state signal. The
+ * LIVE hero fold (`accumulateEventsPage`/`foldReplay`) accumulates every ascending page
+ * DURABLY — only the separate `ReplayState.events` display tail is capped at
+ * `DEFAULT_EVENT_WINDOW`; `state.hero` itself never drops an event once folded. So a droplet
+ * that's gone this many event ids without its own next event is NOT reliably "its terminal
+ * event fell outside a window" (there is no such window on the live path) — it is exactly as
+ * often just a genuinely still-open PR sitting quiet while OTHER lanes stay busy. This fold's
+ * first attempt at this problem SILENTLY DELETED a droplet past this threshold, which the
+ * finding correctly named as trading one belief-vs-reality misword (terminal work read as
+ * pending) for a worse one (live work silently vanishing, undercounting the tally). Neither
+ * direction is something event age alone can arbitrate — so this fold does not decide it
+ * either way: `isPendingStale` only flags a droplet old enough that the fold should stop
+ * CLAIMING to know its state. The droplet is never deleted — `stage.tsx` reads this flag to
+ * keep it drawn while moving it out of the confident "N pending" count and into an explicitly
+ * uncertain label, honest about not knowing rather than guessing in either direction. 2000
+ * mirrors `replay/reducer.ts`'s `DEFAULT_EVENT_WINDOW` (the dashboard's own bound on how much
+ * event history it commits to treating as "recent") — declared independently here since that
+ * module imports FROM this one, never the reverse.
  */
 export const PENDING_STALE_AFTER = 2000;
 
-/** Exactly `stage.tsx`'s own "pending" set (`outcomeTally`'s `pendingCount`). */
-const PENDING_AT: ReadonlySet<DropletAt> = new Set(["backlog", "lane", "checkpoint"]);
-
-function dropStalePending(draft: Draft, lastId: number): void {
-  for (const [issue, d] of draft.droplets) {
-    if (PENDING_AT.has(d.at) && lastId - d.touchedAt > PENDING_STALE_AFTER) draft.droplets.delete(issue);
-  }
+/** Whether a droplet has gone long enough without its own event that the fold should stop
+ *  confidently claiming to know its state — see this constant's own doc for what that does
+ *  and, just as importantly, does not mean. Callers decide how to render that honestly; this
+ *  fold never deletes on the strength of it alone. */
+export function isPendingStale(d: Droplet, lastId: number): boolean {
+  return lastId - d.touchedAt > PENDING_STALE_AFTER;
 }
 
 /** Freeze a `Draft` in progress into a real, independent `HeroState` snapshot — used both for
@@ -683,8 +687,6 @@ export function foldEvents(state: HeroState, events: DomainEvent[]): { state: He
       steps.push({ transition: t, state: snapshotDraft(draft, state.laneCountUnknown, lastId) });
     }
   }
-
-  dropStalePending(draft, lastId);
 
   return {
     state: snapshotDraft(draft, state.laneCountUnknown, lastId),

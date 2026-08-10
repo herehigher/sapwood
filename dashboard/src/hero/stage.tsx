@@ -15,7 +15,15 @@
 
 import type { Ref } from "react";
 import { readConfigPath } from "../config-captions.ts";
-import { activePlanningNode, activeReflectionNode, type Droplet, type DropletAt, type HeroState, withVisibleLanes } from "./state.ts";
+import {
+  activePlanningNode,
+  activeReflectionNode,
+  type Droplet,
+  type DropletAt,
+  type HeroState,
+  isPendingStale,
+  withVisibleLanes,
+} from "./state.ts";
 
 // ── Geometry ──────────────────────────────────────────────────────────────────
 // One coordinate space, shared with Hero.tsx's timelines so travel always lands where
@@ -229,8 +237,20 @@ export function HeroStage({
   const reviewMode = config ? readConfigPath(config, "reviewer.mode") : undefined;
   // §6: "N merged · N pending · N needs human" — merged is THIS round's tally (never the
   // all-time ring count); pending/needs-human are the droplets currently in each state.
-  const pendingCount = state.droplets.filter((d) => d.at === "backlog" || d.at === "lane" || d.at === "checkpoint").length;
-  const outcomeTally = `${state.roundMerged} merged · ${pendingCount} pending · ${escalated} needs human`;
+  //
+  // #745 gate② round 2 finding [1]: `isPendingStale` (state.ts) never deletes — a droplet this
+  // far past its own last event is honestly UNKNOWN, not confirmed terminal, so it stays drawn
+  // on stage exactly like any other pending droplet. Only the confident "N pending" HEADLINE
+  // number excludes it (never counting a droplet the fold can't vouch for as though its state
+  // were certain), with the excluded count named separately — an explicitly uncertain tally,
+  // never a silently smaller or a silently wrong one.
+  const pendingDroplets = state.droplets.filter((d) => d.at === "backlog" || d.at === "lane" || d.at === "checkpoint");
+  const staleCount = pendingDroplets.filter((d) => isPendingStale(d, state.lastId)).length;
+  const pendingCount = pendingDroplets.length - staleCount;
+  const outcomeTally =
+    staleCount > 0
+      ? `${state.roundMerged} merged · ${pendingCount} pending (${staleCount} stale) · ${escalated} needs human`
+      : `${state.roundMerged} merged · ${pendingCount} pending · ${escalated} needs human`;
   // #716 gate② round 2 P2-5: the fix-return arrow's own label (§6: "labeled with the send-back
   // reason") — the first currently-fixing lane, in channel order.
   const fixingReason = state.lanes.find((l) => l.phase === "fixing")?.reason ?? null;

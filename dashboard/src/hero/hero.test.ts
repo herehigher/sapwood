@@ -1106,43 +1106,66 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   assert.match(html, /data-node="needs-human" data-count="6"/);
 });
 
-// ── #745: window-truncated lifecycles must not be misread as still-pending ─────────────────
+// ── #745: a droplet the fold can no longer vouch for must not be COUNTED as confident pending ──
 //
-// #745 gate② finding [0]: `dispatch()` (engine/src/roles/worker.ts) mints a fresh
-// `lane-${issue}-${randomUUID}` name on every real dispatch and conductor.ts never passes an
-// explicit `name`, so literal worker-STRING reuse across two different issues never happens on
-// the production dispatch path — a fixture built on it proves nothing about the reported "39
-// long-terminal PRs read as pending" symptom. The reachable shape is a droplet that reaches
-// `at: "checkpoint"` (PR open, out for review) or `at: "lane"` and then never receives another
-// event naming its issue at all — e.g. a PR merged/closed by a human directly on GitHub, which
-// never runs through conductor.ts's own merge-driver and so never appends a `merged` event this
-// fold can ever read. No amount of "keep folding" fixes that: the terminal event genuinely does
-// not exist in this vocabulary. `dropStalePending` (state.ts) is the honest response — once a
-// droplet's own last touch falls `PENDING_STALE_AFTER` event ids behind the fold's current
-// position, it stops being trusted as live work.
+// #745 gate② round 2 finding [0]/[1] (re-diagnosed from round 1): `dispatch()`
+// (engine/src/roles/worker.ts) mints a fresh `lane-${issue}-${randomUUID}` name on every real
+// dispatch and conductor.ts never passes an explicit `name`, so literal worker-STRING reuse
+// across two different issues never happens on the production dispatch path — round 1's fixture
+// proved nothing about the reported "39 long-terminal PRs read as pending" symptom. The
+// reachable shape: a droplet reaches `at: "checkpoint"`/`"lane"` and its PR is later merged or
+// closed directly on GitHub, bypassing conductor.ts's own merge-driver — so the terminal `merged`
+// row genuinely exists in the DB (`gh pr list` would show it) but NO domain event this fold reads
+// ever gets appended for it. Round 1's fix (`dropStalePending`) then over-corrected: finding [1]
+// established the LIVE hero fold accumulates every event DURABLY (only the separate
+// `ReplayState.events` display tail is capped) — there is no real "window" that silently excludes
+// an event from `state.hero`, so a droplet untouched for a long stretch is exactly as often a
+// perfectly real, still-open PR quietly waiting while OTHER lanes stay busy. Deleting it
+// unconditionally traded one belief-vs-reality misword for a worse one: live work silently
+// vanishing, undercounting the tally. `isPendingStale` (state.ts) never deletes; it only flags a
+// droplet old enough that the fold should stop claiming certainty either way. `stage.tsx` reads
+// that flag to keep the chip drawn while excluding it from the confident "N pending" headline —
+// an explicitly uncertain tally, never a silently wrong or silently smaller one.
 
-test("#745 AC1: a checkpoint droplet with no further event stays pending inside the retained window, and drops once its own last touch falls outside it", () => {
+test("#745 AC1: a PR's terminal event, when actually folded, resolves the droplet cleanly — proving the derivation below is honest, not just broken in a way that happens to pass", () => {
+  const events = [
+    ev("dispatched", { worker: "w-422", issue: 422 }),
+    ev("reclaim-done", { worker: "w-422", issue: 422, next: "DRIVING", pr: 900 }),
+    ev("merged", { worker: "w-422", issue: 422, pr: 900 }),
+  ];
+  const { state } = run(events, 3);
+
+  assert.equal(droplet(state, 422)?.at, "trunk", "a PR whose terminal event IS folded resolves out of pending, exactly as it always did");
+  const html = markup(state);
+  assert.match(
+    html.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /1 merged · 0 pending · 0 needs human/,
+  );
+});
+
+test("#745 AC1: a terminal event that never gets folded (merged/closed outside the loop's own event log) must not be counted as confident pending, but the droplet stays drawn rather than silently vanishing", () => {
   const dispatch422 = ev("dispatched", { worker: "w-422", issue: 422 });
   const toCheckpoint422 = ev("reclaim-done", { worker: "w-422", issue: 422, next: "DRIVING", pr: 900 });
-  // Nothing ever names issue 422 again — its own terminal event (however it actually resolved
-  // in GitHub) never lands in this fold, exactly like a human-merged PR that bypassed the loop.
+  // Nothing ever names issue 422 again — the terminal row genuinely exists in the DB (a human
+  // merged/closed it directly on GitHub), but no domain event for it was ever appended, so no
+  // amount of "keep folding" can ever surface it. Unrelated lanes keep working meanwhile.
   const justInsideWindow = { ...ev("dispatched", { worker: "w-other-1", issue: 1 }), id: toCheckpoint422.id + PENDING_STALE_AFTER };
   const justOutsideWindow = { ...justInsideWindow, id: justInsideWindow.id + 1 };
 
   const inside = run([dispatch422, toCheckpoint422, justInsideWindow], 3).state;
-  assert.ok(droplet(inside, 422), "still within the retained window, the never-resolved checkpoint droplet must still count as pending");
-  const insideHtml = markup(inside);
+  assert.ok(droplet(inside, 422), "well within the threshold, the droplet is still confidently counted");
   assert.match(
-    insideHtml.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    markup(inside).match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
     /0 merged · 2 pending · 0 needs human/,
   );
 
   const outside = run([dispatch422, toCheckpoint422, justOutsideWindow], 3).state;
-  assert.equal(droplet(outside, 422), undefined, "once its own last touch falls outside the retained window, the droplet must be dropped");
-  const outsideHtml = markup(outside);
+  const stillThere = droplet(outside, 422);
+  assert.ok(stillThere, "past the threshold, the droplet must still be drawn — never silently deleted (finding [1])");
+  assert.equal(stillThere?.at, "checkpoint", "its position is untouched — only the confident tally count excludes it, not the stage");
   assert.match(
-    outsideHtml.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
-    /0 merged · 1 pending · 0 needs human/,
+    markup(outside).match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /0 merged · 1 pending \(1 stale\) · 0 needs human/,
   );
 });
 
