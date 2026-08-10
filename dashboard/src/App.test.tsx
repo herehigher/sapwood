@@ -3,10 +3,11 @@ import test, { mock } from "node:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { App, appContent, resolveActiveFold, resolveFixCap, resolveRoundSpend, toggleConfigOpen } from "./App.tsx";
-import { eventsQuery, loopStateQuery, roundsQuery, spendQuery } from "./api/queries.ts";
+import { demoFixtureQuery, eventsQuery, loopStateQuery, roundsQuery, spendQuery } from "./api/queries.ts";
 import type { SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
+import type { DemoBundle } from "./demo/types.ts";
 import type { DomainEvent } from "./domain-event.ts";
 import { initialHeroState } from "./hero/state.ts";
 import { initialReplayState } from "./replay/reducer.ts";
@@ -674,4 +675,117 @@ test("#766 gate② finding [1]: real timestamp-truncated, phase-bucketed spend r
   assert.doesNotMatch(html, /by model/, "replay must show phase groups, never the live by-model group");
   assert.doesNotMatch(html, /by lane/, "replay must show phase groups, never the live by-lane group");
   assert.match(html, /cost · this round/, "the replay heading must read 'this round', not 'today'");
+});
+
+// ── #742 (split 3/4 of #146): `?demo` static fixture bundle ────────────────────────────────────
+//
+// A fixture double (not the real committed `demo/source.ts` recording) — small, self-contained,
+// and carrying a distinguishable round id no other test uses, so these tests stay stable
+// regardless of future edits to the shipped recording's own content.
+
+const DEMO_ROUND_ID = 987654;
+const DEMO_ISSUE_TITLE = "Distinguishable demo fixture issue — round 987654";
+
+function demoBundleFixture(): DemoBundle {
+  return {
+    loopState: {
+      engine: { state: "stopped", reasons: [], lastTickAt: null, pauseActive: false, standbyNextCheckSec: null },
+      lanes: { max: 1, items: [] },
+      round: null,
+      spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
+      rings: 1,
+      logPath: null,
+      config: {},
+      controlsEnabled: false,
+    },
+    rounds: [
+      {
+        roundId: DEMO_ROUND_ID,
+        status: "done",
+        startedAt: "2026-08-09T09:00:00Z",
+        endedAt: "2026-08-09T09:10:00Z",
+        // #793 gate② finding [1]: EXCLUSIVE cursors (`e.id > startEventId`) — 0, not the first
+        // included row's own id (1), or that row would be wrongly excluded from its own round.
+        startEventId: 0,
+        startSpendId: 0,
+        eventCount: 2,
+        schemaVersion: 1,
+        artifact: { prsMerged: 1, spendUsd: 1 },
+      },
+    ],
+    events: [
+      { id: 1, ts: "2026-08-09T09:00:05Z", kind: "dispatched", payload: { worker: "lane-a", issue: 1, issueTitle: DEMO_ISSUE_TITLE } },
+      { id: 2, ts: "2026-08-09T09:05:00Z", kind: "merged", payload: { issue: 1, pr: 1, worker: "lane-a" } },
+    ],
+    spend: [
+      {
+        id: 1,
+        ts: "2026-08-09T09:05:00Z",
+        worker: "lane-a",
+        issue: 1,
+        usd: 1,
+        model: "claude-sonnet-5",
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        actorKind: "worker",
+        role: null,
+        estimated: false,
+      },
+    ],
+  };
+}
+
+async function renderSettledDemoApp(bundle: DemoBundle): Promise<string> {
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const path = url.split("?")[0]!;
+    if (path === "/demo-fixture.json") {
+      return new Response(JSON.stringify(bundle), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`?demo must never call ${url} — it is not a static asset`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await client.prefetchQuery(demoFixtureQuery());
+  return renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <App demo />
+    </QueryClientProvider>,
+  );
+}
+
+test("#742: ?demo makes zero network calls to /api/loop/state or /api/events — fully static", async () => {
+  const calledUrls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    calledUrls.push(url);
+    if (url.split("?")[0] === "/demo-fixture.json") {
+      return new Response(JSON.stringify(demoBundleFixture()), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`unstubbed fetch: ${url}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await client.prefetchQuery(demoFixtureQuery());
+  renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <App demo />
+    </QueryClientProvider>,
+  );
+  assert.ok(
+    calledUrls.every((u) => !u.startsWith("/api/loop/state") && !u.startsWith("/api/events")),
+    `?demo must never call /api/loop/state or /api/events; called: ${calledUrls.join(", ")}`,
+  );
+});
+
+test("#742: ?demo's fixture data actually drives the transport player — a fixture-unique round id and issue title render", async () => {
+  const html = await renderSettledDemoApp(demoBundleFixture());
+  assert.match(
+    html,
+    new RegExp(`round ${DEMO_ROUND_ID}`),
+    "the fixture's distinguishable round id must reach Transport's real chapter-mark row",
+  );
+  assert.match(
+    html,
+    new RegExp(DEMO_ISSUE_TITLE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    "the fixture's distinguishable issue title must be folded and rendered — proof the fixture's events actually reached the shared reducer, not just its rounds list",
+  );
 });

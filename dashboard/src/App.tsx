@@ -1,6 +1,6 @@
 import type { Dispatch, SetStateAction } from "react";
 import { useState } from "react";
-import { spendByWorkerForDay, useEventHistory, useLoopState, useRounds, useSpendHistory } from "./api/queries.ts";
+import { spendByWorkerForDay, useDemoFixture, useEventHistory, useLoopState, useRounds, useSpendHistory } from "./api/queries.ts";
 import type { Round } from "./api/types.ts";
 import { ActivityFeed } from "./components/ActivityFeed.tsx";
 import { ConfigDrawer } from "./components/ConfigDrawer.tsx";
@@ -14,11 +14,12 @@ import { LiveOnly } from "./components/LiveOnly.tsx";
 import { NeedsAttention } from "./components/NeedsAttention.tsx";
 import { Transport } from "./components/Transport.tsx";
 import { readConfigPath } from "./config-captions.ts";
+import { useDemoReplay } from "./demo/useDemoReplay.ts";
 import type { DomainEvent } from "./domain-event.ts";
 import type { EntityTitles } from "./entities.ts";
 import { Hero } from "./hero/Hero.tsx";
 import { Legend } from "./hero/Legend.tsx";
-import type { FoldStep, HeroState } from "./hero/state.ts";
+import { type FoldStep, type HeroState, initialHeroState } from "./hero/state.ts";
 import type { ReplayPosition } from "./replay/player.ts";
 import { initialReplayState } from "./replay/reducer.ts";
 import { bucketSpendByPhase, phaseSpendBars } from "./replay/spend-replay.ts";
@@ -269,6 +270,8 @@ export function appContent(vm: AppViewModel) {
   );
 }
 
+type AppProps = { now?: Date | undefined; initialConfigOpen?: boolean | undefined };
+
 /**
  * The header (A) + hero (B, #144) + lane board (C) + activity feed (D) + cost strip/config
  * drawer (E) from frontend-design.md §3, all against the same §8 data hooks. `now` is
@@ -277,7 +280,7 @@ export function appContent(vm: AppViewModel) {
  * All rendering lives in `appContent` above; this function only resolves the live queries/state
  * hooks require and hands the result straight through.
  */
-export function App({ now, initialConfigOpen }: { now?: Date | undefined; initialConfigOpen?: boolean | undefined } = {}) {
+function LiveApp({ now, initialConfigOpen }: AppProps) {
   const clock = now ?? new Date();
   const loop = useLoopState();
   // #740: `lanesMax` flows into the shared reducer so its hero slice re-fits its channel count
@@ -388,4 +391,119 @@ export function App({ now, initialConfigOpen }: { now?: Date | undefined; initia
     spendFacts: loop.data?.spend,
     roundSpend,
   });
+}
+
+/**
+ * `?demo` (#742, split 3/4 of #146): the SAME `appContent` shell `LiveApp` renders, sourced from a
+ * static, build-time-exported `DemoBundle` instead of the four live `/api/*` queries —
+ * `useDemoFixture` is a ONE-SHOT fetch of `/demo-fixture.json` (never `/api/loop/state` or
+ * `/api/events`), and `useDemoReplay` folds it through the identical replay/player machinery
+ * `LiveApp`'s own `useReplay` uses (§9 "one state reducer"). `mode` is always `"replay"` once the
+ * fixture loads — there is no live engine to fall back to — which is exactly why every "live only"
+ * panel (`LaneBoard`, `ConfigDrawer`, the engine control verbs) already greys out for free: the
+ * SAME wiring `appContent` already uses whenever a closed round is selected under live mode.
+ */
+function DemoApp({ now, initialConfigOpen }: AppProps) {
+  const clock = now ?? new Date();
+  const [configOpen, setConfigOpen] = useState(initialConfigOpen ?? false);
+
+  const fixture = useDemoFixture();
+  const bundle = fixture.data;
+  const lanesMax = bundle?.loopState.lanes.max ?? null;
+  const replay = useDemoReplay(bundle, lanesMax);
+  const { mode } = replay;
+
+  // A neutral, honestly-empty stand-in for BOTH `appContent`'s (unused-by-it) `events` field and
+  // `resolveActiveFold`'s `live` argument — demo mode has no live source at all, so this is what
+  // renders during the brief window before the fixture fetch settles (mode reads "live" only
+  // until `useDemoReplay` picks the bundle's first round), same neutral-empty posture #766 gate②
+  // finding [2] established for the equivalent live-mode loading window.
+  const emptyLive = {
+    hero: initialHeroState(lanesMax),
+    steps: [] as FoldStep[],
+    events: [] as DomainEvent[],
+    titles: {} as EntityTitles,
+    openAttention: [] as DomainEvent[],
+    error: undefined as unknown,
+    isPending: fixture.isPending,
+  };
+
+  const {
+    hero: activeHero,
+    steps: activeSteps,
+    events: activeEvents,
+    titles: activeTitles,
+    openAttention: activeOpenAttention,
+  } = resolveActiveFold(mode, replay.position, emptyLive, initialReplayState(lanesMax));
+
+  const rounds = bundle?.rounds ?? [];
+  // The fixture itself is the only thing that can fail to load — never `/api/loop/state`/
+  // `/api/events`/`/api/spend`/`/api/rounds`, none of which this route ever calls.
+  const disconnected = fixture.isError;
+  const parked = activeOpenAttention.some((e) => e.kind === "park-escalated");
+  const owner = bundle?.loopState.config ? readConfigPath(bundle.loopState.config, "board.owner") : undefined;
+  const repo = bundle?.loopState.config ? readConfigPath(bundle.loopState.config, "board.repo") : undefined;
+  const repoUrl = typeof owner === "string" && typeof repo === "string" ? `https://github.com/${owner}/${repo}` : undefined;
+  const fixCap = resolveFixCap(bundle?.loopState.config);
+
+  // §3 E's "by phase" bucket is the only cost strip group demo mode ever shows (`mode` is always
+  // "replay" once loaded) — `byModel`/`byLane` are unreachable placeholders, same reasoning
+  // `appContent`'s own `mode === "replay" ? [byPhase] : [byModel, byLane]` branch already encodes.
+  const byPhase: CostBarGroup = {
+    title: "by phase",
+    bars: phaseSpendBars(bucketSpendByPhase(replay.spendThroughCursor, replay.phaseWindows)),
+  };
+  const selectedRoundArtifact = rounds.find((r) => r.roundId === replay.selectedRoundId)?.artifact ?? null;
+  const roundSpend =
+    mode === "replay"
+      ? resolveRoundSpend(
+          replay.spendThroughCursor.reduce((sum, r) => sum + r.usd, 0),
+          selectedRoundArtifact,
+        )
+      : undefined;
+
+  return appContent({
+    clock,
+    loop: { data: bundle?.loopState, isPending: fixture.isPending } as unknown as ReturnType<typeof useLoopState>,
+    events: emptyLive,
+    disconnected,
+    parked,
+    repoUrl,
+    fixCap,
+    byModel: { title: "by model", bars: [] },
+    byLane: { title: "by lane", bars: [] },
+    byPhase,
+    configOpen,
+    setConfigOpen,
+    mode,
+    rounds,
+    replay,
+    activeHero,
+    activeSteps,
+    activeEvents,
+    activeTitles,
+    activeOpenAttention,
+    spendFacts: bundle?.loopState.spend,
+    roundSpend,
+  });
+}
+
+/** `?demo` (#742): true when the URL's query string carries `demo`. `window` is absent under this
+ *  repo's `renderToStaticMarkup`-only test harness (no jsdom) — a real browser is the only
+ *  environment where this reads anything but the explicit `demo` prop `App` accepts below. */
+function isDemoRoute(): boolean {
+  return typeof window !== "undefined" && new URLSearchParams(window.location.search).has("demo");
+}
+
+/**
+ * The one production entry point (`main.tsx`) renders. Routes to `DemoApp` or `LiveApp` — never
+ * both, never a shared hook call between them (`isDemo` is fixed for the lifetime of a mounted
+ * `App` instance, since the URL this reads never changes without a full page reload) — so neither
+ * branch ever calls a hook the other doesn't, which is what keeps this rules-of-hooks-safe despite
+ * looking like a runtime branch. `demo` is a test-only override, same posture as `now`/
+ * `initialConfigOpen`: a real `?demo` visit never sets it, relying on `isDemoRoute()` instead.
+ */
+export function App({ now, initialConfigOpen, demo }: AppProps & { demo?: boolean | undefined } = {}) {
+  const isDemo = demo ?? isDemoRoute();
+  return isDemo ? <DemoApp now={now} initialConfigOpen={initialConfigOpen} /> : <LiveApp now={now} initialConfigOpen={initialConfigOpen} />;
 }

@@ -6,9 +6,9 @@
   "type": "module",
   "engines": { "node": ">=24.0.0" },
   "scripts": {
-    "dev": "vite",
+    "dev": "node --import tsx src/demo/export-cli.ts && vite",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json",
-    "build": "vite build && node build-server.mjs",
+    "build": "node --import tsx src/demo/export-cli.ts && vite build && node build-server.mjs",
     "test": "node --import tsx --test --test-timeout=60000 \"*.test.ts\" \"src/**/*.test.ts\" \"src/**/*.test.tsx\"",
     "contrast": "node --import tsx src/contrast.ts"
   },
