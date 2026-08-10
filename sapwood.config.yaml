@@ -1,9 +1,12 @@
+# sapwood's live dogfood configuration — non-default values for this repository only.
+# It is not a copy source for another repository; use sapwood.config.example.yaml instead.
+#
 # sapwood configuration — hand-edited, inline comments. Validated by a Zod schema
 # (engine/src/config.ts) after parse. This file is YAML, but the parser also accepts
 # JSON (YAML ⊃ JSON), so a sapwood.config.json works with zero extra code.
 #
 # Only `board.owner`, `board.repo`, and `board.projectNumber` are required; everything
-# else has a default shown below. `sapwood init` writes a starter copy of this file.
+# else has a default shown below.
 
 board:
   owner: herehigher # GitHub user or org that owns the repo + ProjectV2 board

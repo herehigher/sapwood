@@ -327,9 +327,9 @@ function ensureConfig(cwd: string): string | null {
 }
 
 function sampleConfig(): string {
-  // Ship the committed commented sample (repo root) with the package.
+  // Ship the target-repository example (repo root) with the package.
   const here = dirname(fileURLToPath(import.meta.url));
-  const sample = join(here, "..", "..", "..", "sapwood.config.yaml");
+  const sample = join(here, "..", "..", "..", "sapwood.config.example.yaml");
   if (existsSync(sample)) return readFileSync(sample, "utf8");
   return "board:\n  owner: CHANGEME\n  repo: CHANGEME\n  projectNumber: 0\n";
 }
