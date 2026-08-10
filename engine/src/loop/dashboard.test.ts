@@ -25,13 +25,15 @@ const MINIMAL_CONFIG = "board: { owner: acme, repo: widgets, projectNumber: 7 }\
 const pExecFile = promisify(execFile);
 const DASHBOARD_DIR = fileURLToPath(new URL("../../../dashboard", import.meta.url));
 
-// The real end-to-end section below spawns the ACTUAL compiled dashboard/dist-server/start.js.
-// CI's own `npm --workspace engine test` step never runs `npm run build` for any workspace first
-// (.github/workflows/ci.yml only typechecks/lints/tests), so this suite builds its own fixture
-// here rather than assuming a pre-built artifact already exists on disk — the same build command
-// (`npm run build -w dashboard`) an operator would run, just triggered as test setup.
+// The real end-to-end section below spawns the ACTUAL compiled dashboard/dist-server/start.js —
+// including a request to "/", which needs the REAL vite SPA build (dashboard/dist/index.html) on
+// disk to prove anything (a stub would just move the 404 site, not catch it). CI's own `npm
+// --workspace engine test` step never runs `npm run build` for any workspace first
+// (.github/workflows/ci.yml only typechecks/lints/tests), so this suite builds BOTH halves itself
+// — the exact `npm run build -w dashboard` command (`vite build && node build-server.mjs`) an
+// operator would run, just triggered as test setup instead of assumed pre-built.
 before(async () => {
-  await pExecFile(process.execPath, ["build-server.mjs"], { cwd: DASHBOARD_DIR });
+  await pExecFile("npm", ["run", "build"], { cwd: DASHBOARD_DIR });
 });
 
 /** Temp dir, cleaned up after `fn` (which may be async — the caller awaits this). */
@@ -387,6 +389,29 @@ test("startDashboardServer (real, e2e): an OS-assigned port (0) resolves with th
       assert.ok(Number.isInteger(handle.port) && handle.port > 0, `expected a real bound port, got ${handle.port}`);
       const res = await fetch(`http://127.0.0.1:${handle.port}/api/loop/state`);
       assert.equal(res.status, 200);
+    } finally {
+      await handle.stop();
+    }
+  });
+});
+
+// #743 gate② finding [0] (this round): bundling server.ts into dashboard/dist-server/start.js
+// moves its `import.meta.dirname`-derived default static root one level deeper than where vite
+// actually writes (dashboard/dist/) — start.ts now passes an explicit `staticDir` computed from
+// its OWN post-bundle location to correct for that (start.ts's own doc has the full mechanics).
+// The `/api/...` requests above never would have caught this — only a REAL request for the SPA
+// shell proves the built UI is actually reachable, not just the API.
+test("startDashboardServer (real, e2e): GET / serves the real built dashboard SPA (index.html), not a 404 from a mis-rooted static dir", async () => {
+  await withDataDir(async (dir) => {
+    const dbPath = join(dir, "sapwood.sqlite");
+    seedDb(dbPath);
+    const handle = await startDashboardServer({ dbPath, port: 0 });
+    try {
+      const res = await fetch(`http://127.0.0.1:${handle.port}/`);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+      const body = await res.text();
+      assert.match(body, /<!doctype html>/i, "expected the real vite-built index.html, not a 404 JSON error");
     } finally {
       await handle.stop();
     }

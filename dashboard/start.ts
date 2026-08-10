@@ -1,17 +1,25 @@
 #!/usr/bin/env node
 // start.ts (#743) — the tiny process entry `sapwood dashboard` (engine/src/cli.ts) spawns as a
-// child: `node --import tsx start.ts --db-path P --port N [--config C]`. A child, not a static
-// import, because dashboard/server.ts's NodeNext `.js` import specifiers point at TypeScript
-// siblings (e.g. `../engine/src/config/config.js`, never compiled — tsconfig.server.json is
-// noEmit-only) that plain `node` cannot resolve; tsx's loader is what makes that resolution work,
-// the same way it already does for this repo's own test suites.
+// child: `node dist-server/start.js --db-path P --port N [--config C]` (build-server.mjs's own
+// doc has the full "why bundled, not run as TypeScript source" rationale).
 //
 // Reports its outcome as ONE JSON line on stdout — `{"ok":true,"port":N}` or
 // `{"ok":false,"code":"EADDRINUSE"|null,"message":"..."}` — so the parent CLI process can tell
 // "listening" apart from "port already in use" without scraping human-facing log text. Nothing
 // else ever writes to stdout from this process.
+import { resolve } from "node:path";
 import { loadConfig, type SapwoodConfig } from "../engine/src/config/config.js";
 import { createDashboardServer } from "./server.js";
+
+// #743 gate② finding: server.ts's own default static root is `join(import.meta.dirname, "dist")`
+// — correct when server.ts runs from ITS OWN source location (dashboard/, a sibling of dashboard/
+// dist/), which is still true for server.test.ts's direct unbundled import and stays unchanged.
+// Once bundled, THIS file's `import.meta.dirname` denotes wherever the bundle actually sits
+// (dashboard/dist-server/, one level DEEPER than dashboard/ — build-server.mjs's OUT_DIR), so
+// leaving `staticDir` unset here would make server.ts look for the SPA under dashboard/dist-server/
+// dist/, which vite never writes to, 404ing "/" even with a real build present. Pass it explicitly,
+// computed relative to THIS file's own (post-bundle) runtime location rather than assumed.
+const staticDir = resolve(import.meta.dirname, "..", "dist");
 
 function arg(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
@@ -66,6 +74,7 @@ async function main(): Promise<void> {
       dbPath,
       ...(config !== undefined ? { config } : {}),
       port: Number(portArg),
+      staticDir,
       now: () => new Date(),
     });
     process.stdout.write(`${JSON.stringify({ ok: true, port })}\n`);
