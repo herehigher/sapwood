@@ -392,8 +392,8 @@ const SITE_INVENTORY: Record<
   },
   "roles/merge-driver.ts#8": {
     bucket: "needs-human",
-    src: 'if (conflictGate === "HUMAN") return { kind: "needs-human", pr, reason: "gate:HUMAN:merge-conflict" };',
-    why: "#460: the engine-agent route's own CONFLICTING block (driveEngineAgentOne) — same reason as #2, fix loop disabled",
+    src: 'if (conflictGate === "HUMAN") return withCi({ kind: "needs-human", pr, reason: "gate:HUMAN:merge-conflict" });',
+    why: "#460: the engine-agent route's own CONFLICTING block (driveEngineAgentOne) — same reason as #2, fix loop disabled. #782: wrapped in `withCi` to attach ciPendingObservation (`\"unknown\"` — a CONFLICTING head has no meaningful gate① signal, same stance driveOne's own `observed()` default takes for this route).",
   },
   "review/drive.ts#0": {
     bucket: "needs-human",

@@ -342,12 +342,72 @@ export function ciPendingDuration(input: {
   needsHumanLabelPresent: boolean;
   holdLabelPresent: boolean;
 }): number | null {
-  if (!ciPendingOnDecisiveReview(input)) return null;
+  return ciPendingAge({ ...input, pending: ciPendingOnDecisiveReview(input) });
+}
+
+/** #782 (F26 extension, EXTRACTED from `ciPendingDuration` above for reuse): the pin-elapsed/
+ *  bound/label-latch arithmetic ALONE, taking an already-resolved `pending` boolean rather than
+ *  re-deriving it from `action`/`ciGreen`/`ciRed` itself. `ciPendingDuration` above is now a thin
+ *  wrapper over this (`pending: ciPendingOnDecisiveReview(input)`) — byte-for-byte the same
+ *  arithmetic for every classic caller, zero behavior change (merge-driver.test.ts's existing
+ *  `ciPendingDuration` suite is the regression pin).
+ *
+ *  The extraction exists so `driveEngineAgentOne`'s own CI-pending arm (`engineAgentCiPending`,
+ *  below) can reuse this EXACT aging/label-latch/bound machinery for its `pending` value —
+ *  "reuse the classic path's machinery, no parallel state machine" (#782 AC1) applied to the
+ *  escalation half, not just the observation half. */
+export function ciPendingAge(input: {
+  pending: boolean;
+  headOid: string;
+  pin: CiPendingPin;
+  now: Date;
+  escalateAfterSec: number;
+  needsHumanLabelPresent: boolean;
+  holdLabelPresent: boolean;
+}): number | null {
+  if (!input.pending) return null;
   if (input.needsHumanLabelPresent || input.holdLabelPresent) return null;
   if (input.pin.head !== input.headOid) return null;
   const pendingSec = pinElapsedSec(input.pin.at, input.now);
   if (pendingSec == null || pendingSec < input.escalateAfterSec) return null;
   return pendingSec;
+}
+
+/** #782 (F26 extension): the engine-agent CI-pending arm — the engine-agent analog of
+ *  `ciPendingOnDecisiveReview` above, WIDENED because engine-agent's own preflight (review/
+ *  drive.ts's `checkPreflight` + `requiredChecksSatisfied`) blocks a review session from ever
+ *  STARTING until CI evidence is satisfied. A repo whose REQUIRED check concludes non-green
+ *  (skipped/neutral/cancelled — #401's SUCCESS-only gate①, same class `ciPendingOnDecisiveReview`'s
+ *  own doc names) can then sit with NO attempt ever made and therefore no engine-agent equivalent
+ *  of a decisive verdict (`action === "MERGE_OK"`) to scope the classic predicate against — the
+ *  live P1 this issue exists to close (PR #766 ev#12058/ev#12059: a CI-wedged engine-agent lane
+ *  was permanently silent because neither arm had anything to latch onto).
+ *
+ *  AGING-ARM EXCLUSIVITY INVARIANT (#782 AC2): at most one of {review-silence, ci-pending} may be
+ *  open for a given pass. `attemptPinKind === "unavailable"` means a review ATTEMPT is genuinely
+ *  outstanding (a session is running, crashed mid-flight, or is in its retry backoff window) —
+ *  review-silence owns the clock in that state (`driveEngineAgentOne`'s own firstAt/backoff
+ *  block, the engine-agent analog of `reviewSilenceDuration`), so this arm is FORCED CLOSED
+ *  (`false`) regardless of the live CI rollup — the exact "while review is non-decisive,
+ *  review-silence owns the aging clock" rule `ciPendingOnDecisiveReview`'s own doc states,
+ *  generalized from "a decisive verdict exists" to "an attempt is outstanding" because
+ *  engine-agent's attempt pin IS its verdict lifecycle (review/drive.ts's own AttemptPin doc).
+ *  `null` (never attempted — no session has EVER been spawned for this head, e.g. blocked at the
+ *  CI-evidence gate forever) or `"decisive"` (an attempt settled, one way or the other — including
+ *  a JUST-DISCARDED decisive-pin consume, #782 AC1's "decisive-pin discard" case, where the
+ *  verdict itself is no longer in question but CI/mergeability is) both mean nothing is
+ *  outstanding on the review side, so THIS arm evaluates the live rollup — same
+ *  `!ciGreen && !ciRed` shape `ciPendingOnDecisiveReview` uses, deliberately including a
+ *  concluded-without-passing check (skipped/neutral/cancelled) exactly as that function's own doc
+ *  explains: such a lane cannot progress on its own any more than one waiting on a job that never
+ *  finishes. */
+export function engineAgentCiPending(input: {
+  ciGreen: boolean;
+  ciRed: boolean;
+  attemptPinKind: "unavailable" | "decisive" | null;
+}): boolean {
+  if (input.attemptPinKind === "unavailable") return false;
+  return !input.ciGreen && !input.ciRed;
 }
 
 /** #287 (E4b): `driveOne`'s reviewer dep now additionally accepts the engine-agent kind —
@@ -440,7 +500,11 @@ export class MergeDriver {
     const { forge, reviewer, cfg } = this.deps;
 
     if (reviewer.kind === "engine-agent") {
-      return this.driveEngineAgentOne(pr, issue, reviewer, engineAgent);
+      // #782: thread the SAME durable CI-pending pin the classic branch below reads — the
+      // conductor already supplies it unconditionally at its one `driveOne` call site (it has no
+      // idea which reviewer kind a lane uses), so this was always available; only the engine-agent
+      // branch never consumed it.
+      return this.driveEngineAgentOne(pr, issue, reviewer, engineAgent, ciPendingPin);
     }
 
     let status: PRStatus;
@@ -891,25 +955,93 @@ export class MergeDriver {
    * converges on the SAME CONFLICTING deriveGate block driveOne's classic path uses, below.
    * Never throws (mirrors driveOne's own never-throws contract) — a missing `engineAgentDeps`
    * fails closed to `queued` rather than crashing the tick loop.
+   *
+   * #782: every outcome derived from a coherent same-head status/data pair now also carries
+   * `ciPendingObservation` (+ `ciPendingEscalation` past the bound) — the engine-agent twin of
+   * driveOne's own `observed()`/`withSignals`, via the `ciAging`/`resolvePending` closures below.
+   * `ciPendingPin` is threaded in by `driveOne` above, unchanged from what the conductor already
+   * supplies at its one call site.
    */
   private async driveEngineAgentOne(
     pr: number,
     issue: number,
     reviewerAdapter: Extract<MergeDriverReviewer, { kind: "engine-agent" }>,
     engineAgentDeps: Omit<EngineAgentDriveDeps, "forge" | "cfg" | "reviewerAdapter"> | undefined,
+    ciPendingPin: CiPendingPin = NO_CI_PENDING_PIN,
   ): Promise<DriveOutcome> {
     if (!engineAgentDeps) {
       return { kind: "queued", pr, reason: "engine-agent: no drive context supplied for this lane (missing engineAgentDeps)" };
     }
+    // #782: the attempt pin as it stood BEFORE this pass — the one piece of state `resolvePending`
+    // below needs from OUTSIDE the returned outcome to detect a head move (review/drive.ts's own
+    // attempt-gate clears/rewrites the pin internally; this method never observes that directly,
+    // only its effect on the head this pass's outcome carries).
+    const pinBefore = engineAgentDeps.getAttemptPin();
     const outcome = await driveEngineAgentReview(
       { ...engineAgentDeps, forge: this.deps.forge, cfg: this.deps.cfg, reviewerAdapter },
       pr,
       issue,
     );
+    // #782: read AFTER `driveEngineAgentReview` returns — that pipeline may itself have just
+    // written a fresh pin this same tick (a head-move clear, a provisional 'unavailable' write, a
+    // decisive upgrade). This is what `engineAgentCiPending`'s exclusivity invariant reads.
+    const pinAfter = engineAgentDeps.getAttemptPin();
+
+    /** #782 AC1/AC2: resolve this pass's three-value `pending` for `head`, applying the head-move
+     *  episode-cancel FIRST (same shape as driveOne's own `headMoveCancel`, #426 review round 2) —
+     *  a pin recorded for a head other than the one this pass observed means the episode is over,
+     *  unconditionally, regardless of what the live CI rollup or an `override` would otherwise say.
+     *  `override` lets callers hand in an already-resolved value: `"unknown"` for outcomes reached
+     *  before ANY gate/verdict is derivable (mirrors driveOne's own `observed()` default for its
+     *  pre-verdict branches — the CONFLICTING route here does the same), or a boolean from
+     *  `ciPendingOnDecisiveReview` for a genuinely decisive verdict (the `consume` branch and the
+     *  fallback-switch branch below) — reusing the CLASSIC predicate byte-for-byte rather than
+     *  `engineAgentCiPending`, because a decisive verdict IS the classic arm's exact scope. Omitted
+     *  -> `engineAgentCiPending` derives it from the live rollup + `pinAfter.kind`. */
+    const resolvePending = (
+      head: string,
+      ci: { ciGreen: boolean; ciRed: boolean } | undefined,
+      override?: boolean | "unknown",
+    ): boolean | "unknown" => {
+      if (pinBefore != null && pinBefore.head !== head) return false;
+      if (override !== undefined) return override;
+      return engineAgentCiPending({ ciGreen: ci!.ciGreen, ciRed: ci!.ciRed, attemptPinKind: pinAfter?.kind ?? null });
+    };
+    /** #782: attach `ciPendingObservation` (+ `ciPendingEscalation` once past
+     *  `cfg.ci.pendingEscalateAfterSec`, via `ciPendingAge` — the SAME durable-pin arithmetic
+     *  `ciPendingDuration` uses for the classic path) to `outcome`. A `"unknown"` `pending` never
+     *  escalates (matches classic: `ciPendingDuration` only ever sees a boolean). */
+    const ciAging = (base: DriveOutcome, head: string, pending: boolean | "unknown", labels: readonly string[]): DriveOutcome => {
+      const withObservation: DriveOutcome = { ...base, ciPendingObservation: { pending, head } };
+      if (pending !== true && pending !== false) return withObservation;
+      const gateNow = (this.deps.now ?? (() => new Date()))();
+      const pendingSec = ciPendingAge({
+        pending,
+        headOid: head,
+        pin: ciPendingPin,
+        now: gateNow,
+        escalateAfterSec: this.deps.cfg.ci.pendingEscalateAfterSec,
+        needsHumanLabelPresent: labelsInclude(labels, this.deps.cfg.labels.needsHuman),
+        holdLabelPresent: labelsIncludeAny(labels, this.deps.cfg.escalation.holdLabels),
+      });
+      return pendingSec != null ? { ...withObservation, ciPendingEscalation: { head, pendingSec } } : withObservation;
+    };
+
     // #303 review round 2 (P1): terminal-state outcomes (merged/needs-human) map directly —
     // same shape the classic path's own MERGED early-return already produces (no finalizeVerdict
     // involvement, mirroring merge-driver.ts's own MERGED check above in the classic branch).
     if (outcome.kind === "queued") {
+      // #782 AC1: `status`/`data`, when review/drive.ts attached them (a coherent same-head pair
+      // at the point that branch returned — preflight-failed, decisive-pin discard, and
+      // CI-evidence-unsatisfied all do; a mixed-read/forge-outage queue deliberately does not, the
+      // same "never derive a signal from mixed reads" stance driveOne's own bare mixed-read
+      // queues take). `head`/`ci` computed once, reused by every exit below unless a branch reads
+      // its OWN fresher status/data (the fallback-switch and silence-escalation exits do).
+      const head = outcome.status && outcome.data && outcome.status.headOid === outcome.data.headOid ? outcome.status.headOid : undefined;
+      const ci = outcome.status ? { ciGreen: outcome.status.ciGreen, ciRed: outcome.status.ciRed ?? false } : undefined;
+      const labels = outcome.data?.labels ?? [];
+      const observe = (base: DriveOutcome): DriveOutcome => (head == null ? base : ciAging(base, head, resolvePending(head, ci), labels));
+
       // The receipted-audit-comment invariant governs ENGINE-AGENT-DERIVED outcomes only: a
       // decisive verdict never reaches merge/FIXABLE/escalation before its receipted audit
       // comment. This block enforces that ordering by running BEFORE fallback consultation.
@@ -920,7 +1052,7 @@ export class MergeDriver {
       // agent artifact is an audit-delivery queue, not reviewer silence (#288 ordering AC).
       const pendingAuditWal = engineAgentDeps.getWal();
       if (pendingAuditWal?.decisiveOutcome != null && pendingAuditWal.auditCommentId == null) {
-        return { kind: "queued", pr, reason: outcome.reason };
+        return observe({ kind: "queued", pr, reason: outcome.reason });
       }
       // #288 scope addition (#54/#170): engine-agent's unavailable pin uses the persisted FIRST
       // attempt clock (not the retry pin's latest-at) to consult each configured fallback's
@@ -928,7 +1060,7 @@ export class MergeDriver {
       // approval logic: the fallback objects are the same factory-built Reviewer instances used
       // by the classic path.
       const firstAt = engineAgentDeps.getFirstAttemptAt?.() ?? null;
-      const pin = engineAgentDeps.getAttemptPin();
+      const pin = pinAfter;
       if (firstAt && pin?.kind === "unavailable") {
         const gateNow = (this.deps.now ?? (() => new Date()))();
         const silenceSec = (gateNow.getTime() - Date.parse(firstAt)) / 1000;
@@ -937,7 +1069,7 @@ export class MergeDriver {
         try {
           [status, data] = await Promise.all([this.deps.forge.getPRStatus(pr), this.deps.forge.getPRReviewData(pr)]);
         } catch {
-          return { kind: "queued", pr, reason: outcome.reason };
+          return observe({ kind: "queued", pr, reason: outcome.reason });
         }
         if (status.headOid === data.headOid && status.state === data.state && data.headOid === pin.head) {
           if (silenceSec >= this.deps.cfg.reviewer.failoverAfterSec) {
@@ -946,7 +1078,20 @@ export class MergeDriver {
               const verdict = fallback.verdictFromData(data, triggerPin);
               if (verdict.action === "MERGE_OK" || verdict.action === "HANDLE_THREADS") {
                 const gated = await this.finalizeVerdict(pr, status, data, verdict);
-                return { ...gated, reviewerTransition: { kind: "switch", mode: fallback.kind, head: data.headOid } };
+                // #782: a fallback verdict IS a genuinely decisive review — reuse the CLASSIC
+                // `ciPendingOnDecisiveReview` predicate (not `engineAgentCiPending`) for the exact
+                // same reason the `consume` branch below does.
+                const pending = resolvePending(
+                  data.headOid,
+                  undefined,
+                  ciPendingOnDecisiveReview({ action: verdict.action, ciGreen: status.ciGreen, ciRed: status.ciRed ?? false }),
+                );
+                return ciAging(
+                  { ...gated, reviewerTransition: { kind: "switch", mode: fallback.kind, head: data.headOid } },
+                  data.headOid,
+                  pending,
+                  data.labels,
+                );
               }
             }
           }
@@ -961,14 +1106,31 @@ export class MergeDriver {
             failoverAfterSec: this.deps.cfg.reviewer.failoverAfterSec,
           });
           if (escalation != null) {
-            return { kind: "queued", pr, reason: outcome.reason, reviewSilenceEscalation: { head: data.headOid, silenceSec: escalation } };
+            // #782: a review attempt is genuinely outstanding (silence just escalated) — the CI
+            // arm is FORCED CLOSED here, the exclusivity invariant's defining case
+            // (`engineAgentCiPending`'s own doc).
+            return ciAging(
+              { kind: "queued", pr, reason: outcome.reason, reviewSilenceEscalation: { head: data.headOid, silenceSec: escalation } },
+              data.headOid,
+              resolvePending(data.headOid, undefined, false),
+              data.labels,
+            );
           }
         }
       }
-      return { kind: "queued", pr, reason: outcome.reason };
+      return observe({ kind: "queued", pr, reason: outcome.reason });
     }
-    if (outcome.kind === "merged")
-      return { kind: "merged", pr, headOid: outcome.headOid, ...(outcome.title !== undefined ? { title: outcome.title } : {}) };
+    if (outcome.kind === "merged") {
+      // #782 AC1: pending:false unconditionally — a merged lane's episode is over, same stance
+      // driveOne's own MERGED early-return effectively takes (that branch predates #426 entirely
+      // and never needed a pin at all; this one explicitly cancels rather than leaving it silent).
+      return ciAging(
+        { kind: "merged", pr, headOid: outcome.headOid, ...(outcome.title !== undefined ? { title: outcome.title } : {}) },
+        outcome.headOid,
+        false,
+        [],
+      );
+    }
     if (outcome.kind === "needs-human") return { kind: "needs-human", pr, reason: outcome.reason };
     if (outcome.kind === "conflict") {
       // #460 (F37): mirror driveOne's own CONFLICTING block above BYTE-FOR-BYTE — same
@@ -990,12 +1152,17 @@ export class MergeDriver {
         holdLabels: this.deps.cfg.escalation.holdLabels,
         prFixCap: this.deps.cfg.lanes.prFixCap,
       });
-      if (conflictGate === "WAIT") return { kind: "queued", pr, reason: "gate-pending:merge-conflict-held" };
-      if (conflictGate === "HUMAN") return { kind: "needs-human", pr, reason: "gate:HUMAN:merge-conflict" };
+      // #782: a CONFLICTING head has no meaningful merge-ref CI to speak of — "unknown", the same
+      // default driveOne's own `observed()` gives every branch reached before a gate/verdict is
+      // derivable (this route is checked BEFORE the review-action switch, deliberately).
+      const pending = resolvePending(outcome.data.headOid, undefined, "unknown");
+      const withCi = (base: DriveOutcome): DriveOutcome => ciAging(base, outcome.data.headOid, pending, outcome.data.labels);
+      if (conflictGate === "WAIT") return withCi({ kind: "queued", pr, reason: "gate-pending:merge-conflict-held" });
+      if (conflictGate === "HUMAN") return withCi({ kind: "needs-human", pr, reason: "gate:HUMAN:merge-conflict" });
       if (this.deps.cfg.merge.mode === "produce-pr-and-stop") {
-        return { kind: "stopped", pr, reason: "gates-passed:FIXABLE:merge-conflict" };
+        return withCi({ kind: "stopped", pr, reason: "gates-passed:FIXABLE:merge-conflict" });
       }
-      return { kind: "fixable", pr, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" };
+      return withCi({ kind: "fixable", pr, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" });
     }
     if (outcome.kind === "ci-red") {
       // #503: mirror of the #460 conflict route above, for a required check that CONCLUDED
@@ -1006,14 +1173,28 @@ export class MergeDriver {
       // session (design #279 §4.3): red at preflight would otherwise wait forever. prFixCap
       // still governs: cap 0 preserves the pre-#503 queued wait (aged by the #426 pin), exactly
       // as #246 preserved pre-#246 folds.
+      // #782: `false` — trusted evidence (`requiredChecksRed`) already proved a required check
+      // FAILING, so gate① is decisively resolved (not-green, genuinely red), not pending.
+      const pending = resolvePending(outcome.data.headOid, undefined, false);
+      const withCi = (base: DriveOutcome): DriveOutcome => ciAging(base, outcome.data.headOid, pending, outcome.data.labels);
       if (this.deps.cfg.lanes.prFixCap === 0) {
-        return { kind: "queued", pr, reason: "gate-pending:ci-red-held" };
+        return withCi({ kind: "queued", pr, reason: "gate-pending:ci-red-held" });
       }
       if (this.deps.cfg.merge.mode === "produce-pr-and-stop") {
-        return { kind: "stopped", pr, reason: "gates-passed:FIXABLE:CI_RED" };
+        return withCi({ kind: "stopped", pr, reason: "gates-passed:FIXABLE:CI_RED" });
       }
-      return { kind: "fixable", pr, reason: `gate:FIXABLE:CI_RED:${outcome.failing.join(",")}`, prescription: "ci-red" };
+      return withCi({ kind: "fixable", pr, reason: `gate:FIXABLE:CI_RED:${outcome.failing.join(",")}`, prescription: "ci-red" });
     }
-    return this.finalizeVerdict(pr, outcome.status, outcome.data, outcome.verdict);
+    // outcome.kind === "consume": a decisive, delivered, refetch-validated verdict — converge on
+    // the SAME `finalizeVerdict` the classic path uses, then attach the SAME `ciPendingOnDecisiveReview`
+    // predicate the classic path's own `withSignals` computes (#782: reused byte-for-byte, not
+    // `engineAgentCiPending` — a `consume` outcome IS the decisive-verdict case that predicate scopes to).
+    const pending = resolvePending(
+      outcome.data.headOid,
+      undefined,
+      ciPendingOnDecisiveReview({ action: outcome.verdict.action, ciGreen: outcome.status.ciGreen, ciRed: outcome.status.ciRed ?? false }),
+    );
+    const finalized = await this.finalizeVerdict(pr, outcome.status, outcome.data, outcome.verdict);
+    return ciAging(finalized, outcome.data.headOid, pending, outcome.data.labels);
   }
 }

@@ -227,7 +227,15 @@ export interface EngineAgentDriveDeps {
 }
 
 export type EngineAgentDriveOutcome =
-  | { kind: "queued"; reason: string }
+  // #782: `status`/`data`, when attached, are a COHERENT same-head pair at the point this outcome
+  // was returned (same "never derive a signal from mixed reads" discipline the rest of this
+  // module already follows) — merge-driver.ts's `driveEngineAgentOne` reads them to report
+  // `DriveOutcome.ciPendingObservation`/`ciPendingEscalation` for the queued shapes AC1 names
+  // (preflight-failed, decisive-pin discard, CI-evidence-unsatisfied) and every other coherent-read
+  // queue in this pipeline. Omitted on genuinely mixed/unavailable reads (a forge outage before
+  // either read landed, a split-generation identity mismatch) — that omission IS the signal:
+  // merge-driver.ts treats an absent pair as "this pass learned nothing", never a cancel.
+  | { kind: "queued"; reason: string; status?: PRStatus; data?: PRReviewData }
   // #420: `title` from the same PRStatus read that proved the merge (omitted when absent).
   | { kind: "merged"; headOid: string; title?: string }
   | { kind: "needs-human"; reason: string }
@@ -325,7 +333,7 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   // helper keeps classic and engine-agent matching/write semantics identical.
   const instructionEscalation = await escalateInstructionPathChanges({ forge: deps.forge, pr, labels: data0.labels, cfg: deps.cfg });
   if (instructionEscalation.kind === "unavailable") {
-    return { kind: "queued", reason: `engine-agent: ${instructionEscalation.reason}` };
+    return { kind: "queued", reason: `engine-agent: ${instructionEscalation.reason}`, status: status0, data: data0 };
   }
   if (instructionEscalation.kind === "latched") {
     // The latch cannot distinguish sapwood's own #292 label write from a human-applied label,
@@ -433,7 +441,7 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     try {
       checksPage0 = await deps.forge.getPRChecks(pr, deps.ciChecksCap);
     } catch (e) {
-      return { kind: "queued", reason: `engine-agent: CI-checks fetch failed: ${String(e)}` };
+      return { kind: "queued", reason: `engine-agent: CI-checks fetch failed: ${String(e)}`, status: status0, data: data0 };
     }
     const failing = requiredChecksRed(checksPage0.checks, deps.cfg.ci.requiredChecks);
     if (failing.length > 0) {
@@ -448,6 +456,8 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
         return {
           kind: "queued",
           reason: `engine-agent: CI-red is base-inherited (the default branch is CI-red at ${basePin.sha} — ${basePin.failing.join(", ")}): ${failing.join(", ")}`,
+          status: status0,
+          data: data0,
         };
       }
       return { kind: "ci-red", status: status0, data: data0, failing };
@@ -462,11 +472,25 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     // Reuses the SAME status0/data0 fetched above (#303 review round 2) — no separate fetch.
     const wal = deps.getWal();
     if (!wal || wal.runId !== pin.runId || wal.head !== status0.headOid || wal.decisiveOutcome == null || wal.auditCommentId == null) {
-      return { kind: "queued", reason: "engine-agent: decisive pin has no matching delivered WAL record — anomaly, fail-closed" };
+      return {
+        kind: "queued",
+        reason: "engine-agent: decisive pin has no matching delivered WAL record — anomaly, fail-closed",
+        status: status0,
+        data: data0,
+      };
     }
     const revalidate = refetchStillValid(status0, data0, wal.head, wal.base);
     if (!revalidate.ok) {
-      return { kind: "queued", reason: `engine-agent: decisive-pin consume attempt discarded this tick — ${revalidate.reason}` };
+      // #782 AC1 ("decisive-pin discard"): `status0`/`data0` are attached unconditionally here —
+      // merge-driver.ts's own `status.headOid === data.headOid` coherence check (mirrored from
+      // this module's own "never derive a signal from mixed reads" discipline) safely no-ops the
+      // rare `data-head-mismatch` discard reason where they in fact disagree.
+      return {
+        kind: "queued",
+        reason: `engine-agent: decisive-pin consume attempt discarded this tick — ${revalidate.reason}`,
+        status: status0,
+        data: data0,
+      };
     }
     return {
       kind: "consume",
@@ -479,7 +503,12 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     const retryAfterSec = deps.cfg.reviewer.agent?.retryAfterSec ?? 900;
     const elapsedSec = (now.getTime() - Date.parse(pin.at)) / 1000;
     if (elapsedSec < retryAfterSec) {
-      return { kind: "queued", reason: `engine-agent: backoff — ${Math.ceil(retryAfterSec - elapsedSec)}s remaining` };
+      return {
+        kind: "queued",
+        reason: `engine-agent: backoff — ${Math.ceil(retryAfterSec - elapsedSec)}s remaining`,
+        status: status0,
+        data: data0,
+      };
     }
     // Backoff expired: this IS the primary-recovery probe — proceed to preflight below.
   }
@@ -502,13 +531,15 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   // pair. Every reason reaching this line (transient ones like UNKNOWN mergeability, and
   // standing ones like a draft/label/unresolved-thread that persists until a human or the
   // producer changes it) gets the SAME outcome: queued, retried next tick, no session spawned.
-  if (!preflight.ok) return { kind: "queued", reason: `engine-agent: preflight failed: ${preflight.reason}` };
+  if (!preflight.ok) {
+    return { kind: "queued", reason: `engine-agent: preflight failed: ${preflight.reason}`, status: status0, data: data0 };
+  }
 
   let checksPage: { checks: import("../forge/forge.js").PRCheckItem[] };
   try {
     checksPage = await deps.forge.getPRChecks(pr, deps.ciChecksCap);
   } catch (e) {
-    return { kind: "queued", reason: `engine-agent: preflight CI-checks fetch failed: ${String(e)}` };
+    return { kind: "queued", reason: `engine-agent: preflight CI-checks fetch failed: ${String(e)}`, status: status0, data: data0 };
   }
   const ciEvidence = requiredChecksSatisfied(checksPage.checks, deps.cfg.ci.requiredChecks);
   if (!ciEvidence.ok) {
@@ -533,6 +564,8 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     return {
       kind: "queued",
       reason: `engine-agent: preflight CI-evidence not satisfied${baseNote}: ${ciEvidence.unsatisfied.join(", ")}`,
+      status: status0,
+      data: data0,
     };
   }
 
@@ -580,7 +613,12 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     // but a generic ReviewerAdapter could — never silently skip the pin/backoff for an
     // actionable, non-decisive result.
     const reason = approvalResult.kind === "unavailable" ? approvalResult.reason : "pending (no decisive artifact yet)";
-    return { kind: "queued", reason: `engine-agent: ${reason}` };
+    // #782: CI evidence was ALREADY satisfied for this attempt to reach the session at all (the
+    // preflight CI-evidence gate above), so `status0`/`data0` here reflect a genuinely
+    // CI-resolved head — merge-driver.ts's `engineAgentCiPending` reads `pinAfter.kind ===
+    // "unavailable"` (true here, the pin this call just wrote/left) to force the CI arm closed
+    // regardless, so attaching the pair is safe/correct either way.
+    return { kind: "queued", reason: `engine-agent: ${reason}`, status: status0, data: data0 };
   }
 
   // #303 review (PM P1, defense in depth): the #273 OID-binding lesson applied to this internal
@@ -612,7 +650,7 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   // immediately merely because delivery, not the review itself, is what's broken.
   const delivery = await deps.auditDelivery(approvalResult);
   if (!delivery.delivered) {
-    return { kind: "queued", reason: `engine-agent: audit delivery unavailable — ${delivery.reason}` };
+    return { kind: "queued", reason: `engine-agent: audit delivery unavailable — ${delivery.reason}`, status: status0, data: data0 };
   }
 
   // Delivered: the decisive pin is now PERMANENT for H (design #279 §2) — never rerun, even if
@@ -630,7 +668,15 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   }
   const revalidate = refetchStillValid(status1, data1, H, B);
   if (!revalidate.ok) {
-    return { kind: "queued", reason: `engine-agent: post-session refetch discarded this tick's consume — ${revalidate.reason}` };
+    // #782 AC1 ("decisive-pin discard", the fresh-attempt twin of the decisive-pin CONSUME
+    // discard above): `status1`/`data1` attached unconditionally, same "merge-driver.ts's own
+    // head-agreement check safely no-ops a rare mismatch" reasoning as that site.
+    return {
+      kind: "queued",
+      reason: `engine-agent: post-session refetch discarded this tick's consume — ${revalidate.reason}`,
+      status: status1,
+      data: data1,
+    };
   }
 
   return {
