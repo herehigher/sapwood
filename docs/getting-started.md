@@ -198,10 +198,11 @@ Complete this setup before choosing L3.
 - Use a merger GitHub identity and credential distinct from the worker identity. Give the
   worker the L1 deploy-key path (`worker.deployKeyPath` and `worker.deployKeyId`) rather than
   a forge API credential, and keep the conductor's merger credential outside the worker's
-  readable environment. Both controls matter: branch protection prevents a producer from
-  bypassing review with a direct push, while a distinct merger identity prevents it from
-  acting as the conductor. Without both, producer ≠ merger is not a fully load-bearing
-  deployment guarantee.
+  normal credential lookup paths. Actual unreadability requires the L2 [enterprise posture
+  checklist](security.md#l2-enterprise-posture-checklist). Both controls
+  matter: branch protection prevents a producer from bypassing review with a direct push, while
+  a distinct merger identity prevents it from acting as the conductor. Without both, producer ≠
+  merger is not a fully load-bearing deployment guarantee.
 
 Credential isolation has deliberate limits: the L1 environment removes the normal forge
 credential path, but it is not OS-level confinement from arbitrary code or the host's
