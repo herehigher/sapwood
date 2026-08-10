@@ -7,9 +7,10 @@ What common failures mean and how to respond.
 Choose the scenario that matches. This index links to the source procedure; it does not
 replace it.
 
-- **Stop everything:** [Stop ritual](supervision.md#stop-ritual) · [human
-  controls](security.md#two-tier-human-controls)
-- **Stop new dispatch only:** [Stop ritual](supervision.md#stop-ritual) · [human
+- **Stop everything:** [Kill switch (drain-first)](supervision.md#stop-ritual) ·
+  [Emergency stop (if unsafe work must die this tick)](supervision.md#stop-ritual) ·
+  [human controls](security.md#two-tier-human-controls)
+- **Stop new dispatch only:** [Pause](supervision.md#stop-ritual) · [human
   controls](security.md#two-tier-human-controls)
 - **A lane looks stuck:** [Stale heartbeat reclaim (and restart
   adoption)](#stale-heartbeat-reclaim-and-restart-adoption) · [Interpretation
