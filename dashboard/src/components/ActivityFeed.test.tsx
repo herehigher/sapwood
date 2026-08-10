@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { EventKind } from "../copy.ts";
 import type { DomainEvent, KnownDomainEvent, UnknownDomainEvent } from "../domain-event.ts";
 import { foldOpenAttention } from "../entities.ts";
-import { ActivityFeed } from "./ActivityFeed.tsx";
+import { ActivityFeed, FEED_RENDER_CAP } from "./ActivityFeed.tsx";
+
+const panelsCss = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
 
 const NOW = new Date("2026-08-06T12:00:00.000Z");
 
@@ -249,4 +252,90 @@ test("an unknown-kind event (a wire kind newer than this client's copy map) rend
   // an escalation or a gate outcome it never claimed to be.
   assert.doesNotMatch(html, /feed-entry-attention/);
   assert.doesNotMatch(html, /glyph-ok|glyph-fail/);
+});
+
+// ── #722: bound the feed's rendered surface — cap + scroll container ────────────────────────────
+
+test("#722: a fixture of thousands of events renders no more than FEED_RENDER_CAP <li> rows", () => {
+  const events = Array.from({ length: 5000 }, (_, i) => ev(i + 1, "dispatched", { issue: i + 1 }));
+  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[]} titles={{}} now={NOW} />);
+  const rowCount = html.match(/class="feed-entry/g)?.length ?? 0;
+  assert.ok(rowCount <= FEED_RENDER_CAP, `expected at most ${FEED_RENDER_CAP} rendered rows, got ${rowCount}`);
+  assert.equal(rowCount, FEED_RENDER_CAP);
+});
+
+test("#722: truncation is disclosed honestly — 'showing latest N of M', never silent", () => {
+  const events = Array.from({ length: 5000 }, (_, i) => ev(i + 1, "dispatched", { issue: i + 1 }));
+  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[]} titles={{}} now={NOW} />);
+  assert.match(html, new RegExp(`showing latest ${FEED_RENDER_CAP} of 5000`));
+});
+
+test("#722: no disclosure line renders when the event count is within the cap", () => {
+  const events = [ev(1, "dispatched", { issue: 1 }), ev(2, "dispatched", { issue: 2 })];
+  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={pinnedOf(events)} titles={{}} now={NOW} />);
+  assert.doesNotMatch(html, /showing latest/);
+});
+
+test("#722: the feed has its own scroll container, fixed max-height, distinct from the panel", () => {
+  const events = [ev(1, "dispatched", { issue: 1 })];
+  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={pinnedOf(events)} titles={{}} now={NOW} />);
+  assert.match(html, /class="feed-scroll"/);
+  assert.match(panelsCss, /\.feed-scroll\s*\{[^}]*max-height:[^}]*\}/s);
+  assert.match(panelsCss, /\.feed-scroll\s*\{[^}]*overflow-y:\s*auto[^}]*\}/s);
+});
+
+test("#722: needs-human pinning still holds entries at the top of the (now capped) render", () => {
+  const escalation = ev(1, "drive-needs-human", { issue: 1, pr: 10 });
+  const routine = Array.from({ length: 500 }, (_, i) => ev(i + 100, "dispatched", { issue: i + 100 }));
+  const events = [escalation, ...routine];
+  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[escalation]} titles={{}} now={NOW} />);
+  assert.ok(html.indexOf("needs a human decision") < html.indexOf("Started work on issue"));
+});
+
+test("#722: a pinned item that has aged out of the render window's cap still renders, pinned", () => {
+  // The escalation is the OLDEST event (id 1) and would be cut by a naive newest-N-of-events
+  // cap — `pinnedAttention` must still surface it (durable fold, same contract as the existing
+  // aged-out-of-`events` tests above).
+  const escalation = ev(1, "drive-needs-human", { issue: 1, pr: 10 });
+  const routine = Array.from({ length: FEED_RENDER_CAP + 50 }, (_, i) => ev(i + 100, "dispatched", { issue: i + 100 }));
+  const events = [escalation, ...routine];
+  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[escalation]} titles={{}} now={NOW} />);
+  assert.match(html, /needs a human decision/);
+  assert.equal(html.match(/needs a human decision/g)?.length, 1);
+});
+
+// ── #722 gate② [0]: pinned-bypasses-cap — pinned is durable/unbounded, so pinned count can itself
+// exceed FEED_RENDER_CAP, and a pinned entry mixed into a truncated render breaks the "latest N"
+// framing (a pinned row need not be among the newest). Both must be disclosed honestly, never
+// silently mis-stated. ──────────────────────────────────────────────────────────────────────────
+
+test("#722 gate② [0]: more pinned entries than FEED_RENDER_CAP all render — the cap is intentionally exceeded, and says so", () => {
+  const escalations = Array.from({ length: FEED_RENDER_CAP + 50 }, (_, i) => ev(i + 1, "drive-needs-human", { issue: i + 1, pr: i + 1 }));
+  const html = renderToStaticMarkup(<ActivityFeed events={escalations} pinnedAttention={escalations} titles={{}} now={NOW} />);
+  const rowCount = html.match(/class="feed-entry/g)?.length ?? 0;
+  // An open escalation must never be silently dropped by the display cap (durable pin contract) —
+  // but that means more than FEED_RENDER_CAP rows can mount, so it must be disclosed, not silent.
+  assert.equal(rowCount, escalations.length, "every pinned entry renders — pinning is never truncated");
+  assert.match(html, new RegExp(`${escalations.length} pinned`));
+  assert.match(html, new RegExp(`exceed[s]? the ${FEED_RENDER_CAP}`));
+});
+
+test("#722 gate② [0]: with zero routine rows, pinned-over-cap is STILL disclosed (not masked by the truncated-rest check)", () => {
+  const escalations = Array.from({ length: FEED_RENDER_CAP + 10 }, (_, i) => ev(i + 1, "drive-needs-human", { issue: i + 1, pr: i + 1 }));
+  // No routine events at all — `rest` is empty, so a disclosure gated only on "was `rest` cut?"
+  // would wrongly stay silent even though the cap was blown by pinned entries alone.
+  const html = renderToStaticMarkup(<ActivityFeed events={escalations} pinnedAttention={escalations} titles={{}} now={NOW} />);
+  assert.match(html, /pinned/);
+  assert.match(html, new RegExp(`exceed[s]? the ${FEED_RENDER_CAP}`));
+});
+
+test("#722 gate② [0]: the disclosure names the pinned exception rather than implying pure recency", () => {
+  // The pinned escalation is the OLDEST event (id 1) yet occupies a render slot alongside the
+  // newest routine entries — "showing latest N of M" alone would misdescribe that slot as
+  // recency-selected when it is actually a pinned exception.
+  const escalation = ev(1, "drive-needs-human", { issue: 1, pr: 10 });
+  const routine = Array.from({ length: FEED_RENDER_CAP + 50 }, (_, i) => ev(i + 100, "dispatched", { issue: i + 100 }));
+  const events = [escalation, ...routine];
+  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[escalation]} titles={{}} now={NOW} />);
+  assert.match(html, /1 pinned always included/);
 });
