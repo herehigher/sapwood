@@ -28,6 +28,16 @@ export function resolveFixCap(config: Record<string, unknown> | null | undefined
 }
 
 /**
+ * The exact toggle `onOpenConfig` runs — extracted (#727 gate② finding
+ * config-trigger-wiring-unexercised) so a test can drive `IconRail`'s REAL rendered gear
+ * (`components/IconRail.tsx#railContent`) through this SAME function and observe `configOpen`
+ * flip, rather than only asserting the gear's markup exists or presetting `configOpen` directly.
+ */
+export function toggleConfigOpen(open: boolean): boolean {
+  return !open;
+}
+
+/**
  * The header (A) + hero (B, #144) + lane board (C) + activity feed (D) + cost strip/config
  * drawer (E) from frontend-design.md §3, all against the same §8 data hooks. `now` is
  * test-only (defaults to the real clock) — the cost strip's "by lane" day boundary needs a
@@ -83,7 +93,7 @@ export function App({ now, initialConfigOpen }: { now?: Date | undefined; initia
 
   return (
     <div className="app-shell">
-      <IconRail onOpenConfig={() => setConfigOpen((v) => !v)} />
+      <IconRail onOpenConfig={() => setConfigOpen(toggleConfigOpen)} />
       <main className="stack">
         <header id="overview" className="panel app-header">
           <Header

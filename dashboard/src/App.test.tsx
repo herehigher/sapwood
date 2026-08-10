@@ -2,8 +2,23 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
-import { App, resolveFixCap } from "./App.tsx";
+import { App, resolveFixCap, toggleConfigOpen } from "./App.tsx";
 import { eventsQuery, loopStateQuery, spendQuery } from "./api/queries.ts";
+import { railContent } from "./components/IconRail.tsx";
+
+/** Same tree-walk IconRail.test.tsx uses — finds a node in a REAL React element tree (never a
+ *  `renderToStaticMarkup` string, which strips function props) by exact `className`. */
+function findByClassName(node: unknown, className: string): { props: Record<string, unknown> } | null {
+  if (node === null || typeof node !== "object") return null;
+  const props = (node as { props?: Record<string, unknown> }).props;
+  if (props?.className === className) return node as { props: Record<string, unknown> };
+  const children = props?.children;
+  for (const child of Array.isArray(children) ? children : [children]) {
+    const found = findByClassName(child, className);
+    if (found) return found;
+  }
+  return null;
+}
 
 /**
  * #715 gate② [7]: the documented `disconnected` header state (frontend-design.md §3's closing
@@ -190,6 +205,28 @@ test("#727 gate②: configOpen=true renders the SAME ConfigDrawer the rail gear 
   );
   assert.match(openHtml, /aria-label="config"/, "the exact #145 ConfigDrawer component renders once configOpen is true");
   assert.doesNotMatch(openHtml, /Config ▸/);
+});
+
+// #727 gate② finding config-trigger-wiring-unexercised (round 2): the test above proves "IF
+// configOpen is true THEN ConfigDrawer renders" but never touches the gear's ACTUAL onClick — it
+// presets state directly. This closes that gap by driving the rail's REAL rendered gear (the
+// exact element tree `railContent` returns, not a stub) through `toggleConfigOpen`, the SAME
+// function App wires as `onOpenConfig`, and observing that ONE call flips `configOpen` to true —
+// the identical state the test above already proved renders the SAME ConfigDrawer #145 built.
+test("#727 gate②: one call to the rail's REAL gear onClick, run through App's own toggleConfigOpen, flips configOpen — the state that opens ConfigDrawer", () => {
+  let configOpen = false;
+  const tree = railContent(
+    "system",
+    () => {},
+    () => {
+      configOpen = toggleConfigOpen(configOpen);
+    },
+  );
+  const gear = findByClassName(tree, "icon-rail-item icon-rail-config");
+  assert.ok(gear, "config gear not found in the rail's real element tree");
+  assert.equal(configOpen, false);
+  (gear!.props.onClick as () => void)();
+  assert.equal(configOpen, true, "one gear click must flip configOpen exactly like App's own handler does");
 });
 
 // #727 gate② finding anchor-targets-not-tested: the previous IconRail-only test proved the two

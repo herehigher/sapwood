@@ -2,7 +2,26 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { IconRail } from "./IconRail.tsx";
+import { IconRail, railContent } from "./IconRail.tsx";
+
+/**
+ * Walks a REAL React element tree (as returned by `railContent` — never a `renderToStaticMarkup`
+ * HTML string, which strips function props) looking for a node with an exact `className` match.
+ * This is what lets a test call the actual `onClick` prop IconRail wires onto its rendered gear,
+ * instead of only asserting that button markup exists (#727 gate② finding
+ * config-trigger-wiring-unexercised).
+ */
+function findByClassName(node: unknown, className: string): { props: Record<string, unknown> } | null {
+  if (node === null || typeof node !== "object") return null;
+  const props = (node as { props?: Record<string, unknown> }).props;
+  if (props?.className === className) return node as { props: Record<string, unknown> };
+  const children = props?.children;
+  for (const child of Array.isArray(children) ? children : [children]) {
+    const found = findByClassName(child, className);
+    if (found) return found;
+  }
+  return null;
+}
 
 // #727 AC1/AC5: rail contents per §3 — wordmark, overview/cost anchors, theme switch, config gear.
 
@@ -21,9 +40,44 @@ test("the rail is a <nav>, not routed links to a different page — no href besi
   assert.deepEqual(hrefs.sort(), ["#cost", "#overview"]);
 });
 
-test("config gear is a button wired to the passed-in open handler (relocated §3 E trigger, #145's drawer)", () => {
+test("config gear renders as a button (relocated §3 E trigger, #145's drawer) — markup smoke check", () => {
   const html = renderToStaticMarkup(<IconRail onOpenConfig={() => {}} />);
   assert.match(html, /<button type="button" class="icon-rail-item icon-rail-config"/);
+});
+
+// #727 gate② finding config-trigger-wiring-unexercised: the test above only proves the button
+// exists — it stays green even with `onClick` deleted entirely, since SSR never serializes
+// event-handler props. This calls the gear's REAL onClick (pulled off the actual element tree
+// `IconRail` returns via `railContent`) and proves it invokes the exact `onOpenConfig` passed in.
+test("the config gear's REAL onClick calls the passed-in onOpenConfig, not a copy or no-op", () => {
+  let calls = 0;
+  const tree = railContent(
+    "system",
+    () => {},
+    () => {
+      calls++;
+    },
+  );
+  const gear = findByClassName(tree, "icon-rail-item icon-rail-config");
+  assert.ok(gear, "config gear not found in the rail's real element tree");
+  assert.equal(calls, 0);
+  (gear!.props.onClick as () => void)();
+  assert.equal(calls, 1, "one call to the gear's actual onClick must call onOpenConfig exactly once");
+});
+
+test("the theme switch's REAL onClick likewise calls the passed-in onToggleTheme, not a copy", () => {
+  let calls = 0;
+  const tree = railContent(
+    "system",
+    () => {
+      calls++;
+    },
+    () => {},
+  );
+  const themeButton = findByClassName(tree, "icon-rail-item icon-rail-theme");
+  assert.ok(themeButton, "theme switch not found in the rail's real element tree");
+  (themeButton!.props.onClick as () => void)();
+  assert.equal(calls, 1);
 });
 
 /** Pulls one `selector { ... }` block's declaration body out of a larger CSS chunk — used below

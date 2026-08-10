@@ -83,18 +83,17 @@ export interface IconRailProps {
   onOpenConfig: () => void;
 }
 
-export function IconRail({ onOpenConfig }: IconRailProps) {
-  const [theme, setTheme] = useState<ThemeOverride>(null);
-  // Reads AND re-applies any stored override once on mount — SSR/first paint renders "system",
-  // then settles, same posture as every other client-only-state seam in this app (no
-  // flash-relevant test depends on the pre-mount value since `renderToStaticMarkup` never runs
-  // effects at all). `restoreTheme` (not just `readStoredTheme`) matters here: reading the value
-  // into state without re-applying it to `<html data-theme>` left a reloaded page rendering the
-  // SYSTEM theme while the button's own label claimed the stored override was active.
-  useEffect(() => setTheme(restoreTheme()), []);
-
-  const themeKey = theme ?? "system";
-
+/**
+ * The rail's actual markup, factored out of `IconRail` as a plain, hooks-free function (#727
+ * gate② finding config-trigger-wiring-unexercised): calling `IconRail` itself outside a real
+ * React render throws ("invalid hook call" — no dispatcher installed), and `renderToStaticMarkup`
+ * (this repo's only test harness) strips event-handler props from its HTML string output, so
+ * neither route lets a test prove the gear's `onClick` is really wired to the caller's
+ * `onOpenConfig`. This function returns the REAL element tree — the exact object React would
+ * otherwise render — with real function props still attached, so a test can walk it and call
+ * `onClick` directly rather than merely asserting the button's markup exists.
+ */
+export function railContent(themeKey: "system" | "sapwood" | "heartwood", onToggleTheme: () => void, onOpenConfig: () => void) {
   return (
     <nav className="icon-rail" aria-label="sapwood">
       <span className="icon-rail-wordmark" title="sapwood">
@@ -111,11 +110,7 @@ export function IconRail({ onOpenConfig }: IconRailProps) {
         className="icon-rail-item icon-rail-theme"
         title={THEME_LABEL[themeKey]}
         aria-label={THEME_LABEL[themeKey]}
-        onClick={() => {
-          const next = nextTheme(theme);
-          applyTheme(next);
-          setTheme(next);
-        }}
+        onClick={onToggleTheme}
       >
         <ThemeGlyph />
       </button>
@@ -124,4 +119,23 @@ export function IconRail({ onOpenConfig }: IconRailProps) {
       </button>
     </nav>
   );
+}
+
+export function IconRail({ onOpenConfig }: IconRailProps) {
+  const [theme, setTheme] = useState<ThemeOverride>(null);
+  // Reads AND re-applies any stored override once on mount — SSR/first paint renders "system",
+  // then settles, same posture as every other client-only-state seam in this app (no
+  // flash-relevant test depends on the pre-mount value since `renderToStaticMarkup` never runs
+  // effects at all). `restoreTheme` (not just `readStoredTheme`) matters here: reading the value
+  // into state without re-applying it to `<html data-theme>` left a reloaded page rendering the
+  // SYSTEM theme while the button's own label claimed the stored override was active.
+  useEffect(() => setTheme(restoreTheme()), []);
+
+  const onToggleTheme = () => {
+    const next = nextTheme(theme);
+    applyTheme(next);
+    setTheme(next);
+  };
+
+  return railContent(theme ?? "system", onToggleTheme, onOpenConfig);
 }
