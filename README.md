@@ -1,5 +1,8 @@
 # sapwood
 
+[![CI](https://github.com/herehigher/sapwood/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/herehigher/sapwood/actions/workflows/ci.yml?query=branch%3Amain)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **The autonomous coding loop with governance built in.**
 
 sapwood turns a GitHub backlog into merged, reviewed code: *issues in → reviewed
