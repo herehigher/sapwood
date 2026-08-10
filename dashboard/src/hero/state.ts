@@ -31,6 +31,10 @@ export type Droplet = {
    * handoff frees the lane, and `fix-leg-resumed` must re-light the *same* state (§6).
    */
   sendBack: string | null;
+  /** The event id that last actually moved this droplet (`moveDroplet`'s own id argument) —
+   *  #745 gate② finding [0]: the fold's basis for deciding a still-unresolved droplet has gone
+   *  stale (`PENDING_STALE_AFTER`), the droplet-level counterpart to `LaneView.touchedAt`. */
+  touchedAt: number;
 };
 
 export type LanePhase = "idle" | "writing" | "driving" | "fixing" | "failed";
@@ -360,7 +364,7 @@ function toCheckpoint(draft: Draft, id: number, issue: number, worker: string | 
     lane.phase = "driving";
     lane.touchedAt = id;
   }
-  const d = moveDroplet(draft, issue, { at: "checkpoint", ...(pr !== null ? { pr } : {}) });
+  const d = moveDroplet(draft, issue, id, { at: "checkpoint", ...(pr !== null ? { pr } : {}) });
   return { kind: "to-checkpoint", id, issue, lane: worker ?? "", pr: d.pr };
 }
 
@@ -369,9 +373,10 @@ function toCheckpoint(draft: Draft, id: number, issue: number, worker: string | 
  *
  * Any move clears `failed` unless the patch re-asserts it: the ✕ marks the state a droplet is
  * *in*, not a scar it carries. A lane that failed, was re-dispatched and merged must not keep
- * rendering ✕ beside a merged PR.
+ * rendering ✕ beside a merged PR. `id` (the event doing the moving) always stamps `touchedAt` —
+ * see `dropStalePending`'s doc for what that's for.
  */
-function moveDroplet(draft: Draft, issue: number, patch: Partial<Droplet>): Droplet {
+function moveDroplet(draft: Draft, issue: number, id: number, patch: Partial<Droplet>): Droplet {
   const current = draft.droplets.get(issue) ?? {
     issue,
     pr: null,
@@ -380,8 +385,9 @@ function moveDroplet(draft: Draft, issue: number, patch: Partial<Droplet>): Drop
     failed: false,
     handedOff: false,
     sendBack: null,
+    touchedAt: id,
   };
-  const next = { ...current, failed: false, ...patch };
+  const next = { ...current, failed: false, ...patch, touchedAt: id };
   draft.droplets.set(issue, next);
 
   // The lane's ✕ is the same mark on the other end of the wire: a channel still pinned to an
@@ -452,7 +458,7 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       lane.fixRound = 0;
       lane.reason = null;
       lane.touchedAt = id;
-      moveDroplet(draft, issue, { lane: worker, at: "lane", failed: false, handedOff: false });
+      moveDroplet(draft, issue, id, { lane: worker, at: "lane", failed: false, handedOff: false });
       draft.pool = draft.pool.filter((i) => i !== issue);
       return { kind: "dispatch", id, issue, lane: worker };
     }
@@ -486,7 +492,7 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       const lane = laneOf(draft, worker);
       const alreadyFixing = lane?.phase === "fixing" && lane.issue === issue;
       if (lane) lane.reason = reason;
-      moveDroplet(draft, issue, { sendBack: reason, ...(pr !== null ? { pr } : {}) });
+      moveDroplet(draft, issue, id, { sendBack: reason, ...(pr !== null ? { pr } : {}) });
       if (alreadyFixing && worker) return { kind: "fix-reason", id, issue, lane: worker, reason };
       return null;
     }
@@ -502,7 +508,13 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       lane.fixRound = round;
       lane.reason = reason;
       lane.touchedAt = id;
-      const d = moveDroplet(draft, issue, { lane: worker, at: "lane", handedOff: false, sendBack: reason, ...(pr !== null ? { pr } : {}) });
+      const d = moveDroplet(draft, issue, id, {
+        lane: worker,
+        at: "lane",
+        handedOff: false,
+        sendBack: reason,
+        ...(pr !== null ? { pr } : {}),
+      });
       return { kind: "fix-return", id, issue, lane: worker, pr: d.pr, reason, round };
     }
 
@@ -513,14 +525,14 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       draft.roundMerged += 1;
       // Only the newest merge keeps its tag on the trunk — older ones *are* the rings now.
       for (const [key, d] of draft.droplets) if (d.at === "trunk") draft.droplets.delete(key);
-      const d = moveDroplet(draft, issue, { at: "trunk", ...(pr !== null ? { pr } : {}) });
+      const d = moveDroplet(draft, issue, id, { at: "trunk", ...(pr !== null ? { pr } : {}) });
       return { kind: "ring", id, issue, pr: d.pr, ring: draft.rings };
     }
 
     case "handoff": {
       if (issue === null) return null;
       releaseLane(laneOf(draft, worker));
-      moveDroplet(draft, issue, { at: "backlog", handedOff: true });
+      moveDroplet(draft, issue, id, { at: "backlog", handedOff: true });
       return { kind: "handoff", id, issue, lane: worker };
     }
 
@@ -561,7 +573,7 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       if (ESCALATION_KINDS.has(e.kind)) {
         if (issue === null) return null;
         releaseLane(laneOf(draft, worker));
-        const d = moveDroplet(draft, issue, { at: "needs-human", ...(pr !== null ? { pr } : {}) });
+        const d = moveDroplet(draft, issue, id, { at: "needs-human", ...(pr !== null ? { pr } : {}) });
         return { kind: "escalate", id, issue, pr: d.pr };
       }
 
@@ -574,9 +586,35 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
         lane.phase = "failed";
         lane.touchedAt = id;
       }
-      moveDroplet(draft, issue, { failed: true });
+      moveDroplet(draft, issue, id, { failed: true });
       return { kind: "fail", id, issue, lane: worker };
     }
+  }
+}
+
+/**
+ * #745 gate② finding [0]: a droplet's own resolving event can permanently fall outside
+ * anything this fold will ever see — a PR merged or closed through a path that never writes a
+ * domain event this vocabulary reads (a human closing/merging on GitHub directly, bypassing
+ * conductor.ts's own merge-driver), or, before a freshly-opened dashboard session catches up,
+ * simply not-yet-folded history. Trusting every still-unresolved `at: "backlog"/"lane"/
+ * "checkpoint"` droplet as live, current work — no matter how long the fold has gone without
+ * touching it again — is exactly the belief-vs-reality misword #745 reports: real, terminal PRs
+ * misread as still pending. Once a droplet's own last touch (`touchedAt`) falls this many event
+ * ids behind the fold's current position, its lifecycle is treated as truncated and it is
+ * dropped — from the tally AND the stage — rather than counted forever on the strength of
+ * events that may never arrive. 2000 mirrors `replay/reducer.ts`'s `DEFAULT_EVENT_WINDOW` (the
+ * dashboard's own bound on how much event history it commits to treating as "recent") —
+ * declared independently here since that module imports FROM this one, never the reverse.
+ */
+export const PENDING_STALE_AFTER = 2000;
+
+/** Exactly `stage.tsx`'s own "pending" set (`outcomeTally`'s `pendingCount`). */
+const PENDING_AT: ReadonlySet<DropletAt> = new Set(["backlog", "lane", "checkpoint"]);
+
+function dropStalePending(draft: Draft, lastId: number): void {
+  for (const [issue, d] of draft.droplets) {
+    if (PENDING_AT.has(d.at) && lastId - d.touchedAt > PENDING_STALE_AFTER) draft.droplets.delete(issue);
   }
 }
 
@@ -645,6 +683,8 @@ export function foldEvents(state: HeroState, events: DomainEvent[]): { state: He
       steps.push({ transition: t, state: snapshotDraft(draft, state.laneCountUnknown, lastId) });
     }
   }
+
+  dropStalePending(draft, lastId);
 
   return {
     state: snapshotDraft(draft, state.laneCountUnknown, lastId),

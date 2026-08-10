@@ -14,6 +14,7 @@ import {
   initialHeroState,
   isStageDimmed,
   type LaneView,
+  PENDING_STALE_AFTER,
   planTransitions,
   sendBackReason,
   type Transition,
@@ -53,10 +54,21 @@ const heroCss = readFileSync(new URL("./hero.css", import.meta.url), "utf8");
 // animation implemented, matching the described behavior".
 
 test("§6 `dispatched`: droplet leaves the backlog for a lane channel, lane lights", () => {
-  const { state, transitions } = run([ev("pool-selected", { issues: [86, 88] }), ev("dispatched", { worker: "w1", issue: 86 })]);
+  const poolEv = ev("pool-selected", { issues: [86, 88] });
+  const dispatchEv = ev("dispatched", { worker: "w1", issue: 86 });
+  const { state, transitions } = run([poolEv, dispatchEv]);
 
   assert.deepEqual(kinds(transitions), ["dispatch"]);
-  assert.deepEqual(droplet(state, 86), { issue: 86, pr: null, lane: "w1", at: "lane", failed: false, handedOff: false, sendBack: null });
+  assert.deepEqual(droplet(state, 86), {
+    issue: 86,
+    pr: null,
+    lane: "w1",
+    at: "lane",
+    failed: false,
+    handedOff: false,
+    sendBack: null,
+    touchedAt: dispatchEv.id,
+  });
   assert.equal(state.lanes[0]?.phase, "writing");
   assert.equal(state.lanes[0]?.issue, 86);
   // a dispatched issue is no longer a pending selection
@@ -1094,36 +1106,57 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   assert.match(html, /data-node="needs-human" data-count="6"/);
 });
 
-// ── #745: a reused worker id must not strand its old droplet as forever-pending ────────────
+// ── #745: window-truncated lifecycles must not be misread as still-pending ─────────────────
 //
-// A non-rescue `reclaim-failed` (`next` not "DRIVING") marks a lane `failed` but never calls
-// `releaseLane` — `moveDroplet`'s own doc: a failed, never-revisited channel keeps its droplet
-// parked at `at: "lane"` forever. `claimLane` finds a lane purely by worker-string match, so a
-// later `dispatched` on the SAME worker id (an engine cycling a small worker pool over a long
-// event history routinely does this) hands the channel straight to the new issue without ever
-// touching the old, stranded droplet. That droplet's own resolving event has, in effect,
-// permanently fallen outside anything this fold will ever see again — the same
-// window-truncation condition #745's issue body describes for a merge event that never gets
-// folded, just reached via lane reuse instead of a bounded event page.
+// #745 gate② finding [0]: `dispatch()` (engine/src/roles/worker.ts) mints a fresh
+// `lane-${issue}-${randomUUID}` name on every real dispatch and conductor.ts never passes an
+// explicit `name`, so literal worker-STRING reuse across two different issues never happens on
+// the production dispatch path — a fixture built on it proves nothing about the reported "39
+// long-terminal PRs read as pending" symptom. The reachable shape is a droplet that reaches
+// `at: "checkpoint"` (PR open, out for review) or `at: "lane"` and then never receives another
+// event naming its issue at all — e.g. a PR merged/closed by a human directly on GitHub, which
+// never runs through conductor.ts's own merge-driver and so never appends a `merged` event this
+// fold can ever read. No amount of "keep folding" fixes that: the terminal event genuinely does
+// not exist in this vocabulary. `dropStalePending` (state.ts) is the honest response — once a
+// droplet's own last touch falls `PENDING_STALE_AFTER` event ids behind the fold's current
+// position, it stops being trusted as live work.
 
-test("#745 AC1: a stale, never-rescued lane droplet stops counting as pending once its worker id is reused for a fresh dispatch", () => {
-  const events = [
-    ev("dispatched", { worker: "w1", issue: 422 }),
-    ev("reclaim-failed", { worker: "w1", issue: 422, next: "ESCALATE" }),
-    ev("dispatched", { worker: "w1", issue: 999 }),
-  ];
-  const { state } = run(events, 3);
+test("#745 AC1: a checkpoint droplet with no further event stays pending inside the retained window, and drops once its own last touch falls outside it", () => {
+  const dispatch422 = ev("dispatched", { worker: "w-422", issue: 422 });
+  const toCheckpoint422 = ev("reclaim-done", { worker: "w-422", issue: 422, next: "DRIVING", pr: 900 });
+  // Nothing ever names issue 422 again — its own terminal event (however it actually resolved
+  // in GitHub) never lands in this fold, exactly like a human-merged PR that bypassed the loop.
+  const justInsideWindow = { ...ev("dispatched", { worker: "w-other-1", issue: 1 }), id: toCheckpoint422.id + PENDING_STALE_AFTER };
+  const justOutsideWindow = { ...justInsideWindow, id: justInsideWindow.id + 1 };
 
-  assert.equal(droplet(state, 422), undefined, "the stranded droplet must not linger once its lane is reused for new work");
-  assert.ok(droplet(state, 999), "the fresh dispatch's own droplet must exist");
+  const inside = run([dispatch422, toCheckpoint422, justInsideWindow], 3).state;
+  assert.ok(droplet(inside, 422), "still within the retained window, the never-resolved checkpoint droplet must still count as pending");
+  const insideHtml = markup(inside);
+  assert.match(
+    insideHtml.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /0 merged · 2 pending · 0 needs human/,
+  );
 
-  const html = markup(state);
-  const tallyMatch = html.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</);
-  assert.ok(tallyMatch, "outcome tally must render");
-  assert.match(tallyMatch[1] as string, /0 merged · 1 pending · 0 needs human/);
+  const outside = run([dispatch422, toCheckpoint422, justOutsideWindow], 3).state;
+  assert.equal(droplet(outside, 422), undefined, "once its own last touch falls outside the retained window, the droplet must be dropped");
+  const outsideHtml = markup(outside);
+  assert.match(
+    outsideHtml.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /0 merged · 1 pending · 0 needs human/,
+  );
 });
 
-test("#745 AC2: worker-id reuse on a never-rescued failed lane must not collide the stranded droplet with the fresh dispatch's chip", () => {
+// ── #745 (defensive): a lane found by worker-string match must never carry a stale occupant ──
+//
+// #745 gate② finding [0] confirmed the production dispatch path never reuses a worker string
+// across two different issues, so this cannot reproduce the *reported* symptom — but
+// `claimLane` (state.ts) still finds a lane purely by worker-string match, so if a lane were
+// ever handed back with a different issue still attached (a future dispatch() caller passing an
+// explicit `name`, a replay/test double, or a bug elsewhere), the fold must not let that stale
+// occupant collide with the new one. Kept as a regression test for that invariant, not as AC1's
+// own evidence.
+
+test("#745 (defensive): a lane reused while still pinned to a different issue must not collide chips or count the stale occupant as pending", () => {
   const events = [
     ev("dispatched", { worker: "w1", issue: 111 }),
     ev("reclaim-failed", { worker: "w1", issue: 111, next: "ESCALATE" }),
@@ -1131,24 +1164,25 @@ test("#745 AC2: worker-id reuse on a never-rescued failed lane must not collide 
   ];
   const { state: rawState } = run(events, 3);
   const state = withVisibleLanes(rawState, 3);
-
-  // Every visible chip's position, computed through the real `dropletPoint` — never hand-placed.
-  const points = state.droplets.map((d) => ({ issue: d.issue, ...dropletPoint(state, d) }));
-
-  const seen = new Map<string, number>();
-  for (const p of points) {
-    const key = `${p.x},${p.y}`;
-    const prior = seen.get(key);
-    assert.equal(prior, undefined, `droplet #${p.issue} collides with droplet #${prior} at ${key}`);
-    seen.set(key, p.issue);
-  }
-  for (const p of points) {
-    assert.ok(p.x >= 0 && p.x <= STAGE.w, `droplet #${p.issue} x=${p.x} lies outside [0, ${STAGE.w}]`);
-    assert.ok(p.y >= 0 && p.y <= STAGE.h, `droplet #${p.issue} y=${p.y} lies outside [0, ${STAGE.h}]`);
-  }
+  assert.equal(droplet(rawState, 111), undefined, "the stale occupant must not linger once its lane is reused");
 
   const html = markup(rawState, { lanesMax: 3 });
-  assert.equal(html.match(/class="hero-droplet"/g)?.length, 1, "the stranded droplet must not render alongside the fresh dispatch");
+  assert.equal(html.match(/class="hero-droplet"/g)?.length, 1, "the stale occupant must not render alongside the fresh dispatch");
+
+  // Every visible chip's REAL rendered extent (circle + label), never just its anchor point —
+  // an in-bounds center can still draw an offstage-visible label (`.hero` is `overflow: visible`).
+  const boxes: { label: string; box: Box }[] = [];
+  for (const d of state.droplets) {
+    const { x, y } = dropletPoint(state, d);
+    const label = d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`;
+    boxes.push({ label: `droplet #${d.issue} circle`, box: circleBox(x, y, 9) });
+    boxes.push({ label: `droplet #${d.issue} label`, box: textBox(label, x, y - 14, 10) });
+  }
+  assertNoOverlap(boxes);
+  for (const { label, box } of boxes) {
+    assert.ok(box.left >= 0 && box.right <= STAGE.w, `${label} left=${box.left} right=${box.right} lies outside [0, ${STAGE.w}]`);
+    assert.ok(box.top >= 0 && box.bottom <= STAGE.h, `${label} top=${box.top} bottom=${box.bottom} lies outside [0, ${STAGE.h}]`);
+  }
 });
 
 // ── #744: lane status phrase / PR chip overlap (same defect family as #728, on the lane track) ──
