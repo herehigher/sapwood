@@ -10097,6 +10097,85 @@ test("#426 AC1: a permanently IN_PROGRESS check opens the pin ONCE, ages across 
   }
 });
 
+// ── #782 gate② round 1 (P2, AC3c): engine-agent's PRE-SESSION evidence wait flows through the
+// SAME conductor wiring (#426) the classic decisive wait does — comment, label, event, and drain
+// terminality — but the comment must be truthful for a phase where NO review session has ever
+// started (`DriveOutcome.ciPendingEscalation.evidenceWait`, merge-driver.ts's own doc). Uses
+// FakeMergeGate (an injected DriveOutcome) rather than a real engine-agent MergeDriver: the
+// conductor-side wiring under test here reads ONLY `outcome.ciPendingEscalation`/
+// `ciPendingObservation`, so this exercises the exact code path #782 gate② round 1 changed without
+// needing the full driveEngineAgentOne pipeline (already covered by merge-driver.test.ts's own
+// #782 suite). ──
+
+test("#782 gate② round 1 (P2): an engine-agent evidence-wait escalation posts a TRUTHFUL comment (not the classic 'gate② is already decisive' wording, since no session ever ran), labels needs-human, and records ci-pending-escalated — same mechanism as #426 AC1, evidenceWait-flavored", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  const pendingOutcome: DriveOutcome = {
+    kind: "queued",
+    pr: 55,
+    reason: "engine-agent: preflight CI-evidence not satisfied: aux@github-actions",
+    ciPendingObservation: { pending: true, head: "H1" },
+  };
+  gate.outcomes[55] = pendingOutcome;
+  const cfg = mkCfg({ ci: { pendingEscalateAfterSec: 3600 } });
+  let clock = new Date("2026-07-20T00:00:00Z");
+  const now = () => clock;
+  const tickOpts = { forge, state: st, supervisor: sup, cfg, mergeGate: gate, now };
+
+  // Tick 1: the pin opens — no session-related pin machinery is even in play (this is the "no pin"
+  // row of #782's own exclusivity matrix: no attempt has ever been made for this head).
+  await tick(tickOpts);
+  assert.equal(st.lastCiPendingEvent("lane-a", 55)?.kind, "ci-pending-observed");
+
+  // Past the bound: driveOne now ALSO reports the escalation, `evidenceWait`-flagged — the exact
+  // shape merge-driver.ts's `ciAging` produces for this phase.
+  clock = new Date("2026-07-20T01:00:00Z"); // exactly 3600s pending
+  gate.outcomes[55] = { ...pendingOutcome, ciPendingEscalation: { head: "H1", pendingSec: 3600, evidenceWait: true } };
+  await tick(tickOpts);
+
+  assert.deepEqual(forge.prLabelsAdded, [[55, "needs-human"]]);
+  const comment = forge.prComments.find(([pr]) => pr === 55)?.[1] ?? "";
+  assert.match(comment, /`ci\.requiredChecks` evidence has not been satisfied/);
+  assert.match(comment, /no review session has started yet/);
+  assert.doesNotMatch(comment, /gate② is already decisive/);
+  const ev = st.latestEvent("ci-pending-escalated") as { payload: { pendingSec: number; head: string } } | undefined;
+  assert.deepEqual([ev?.payload.pendingSec, ev?.payload.head], [3600, "H1"]);
+});
+
+test("#782 gate② round 1 (P2, AC3c): the SAME evidence-wait wedge is drain-terminal past the bound — ciPendingWedgedForDrain reads only the durable pin, so the #426 AC2 CEILING-drain contract applies unchanged to an engine-agent-shaped reason string", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55); // fix_rounds 0 — the evidence wedge is the ONLY reason it is stuck
+  st.appendEvent("ci-pending-observed", { worker: "lane-a", issue: 2, pr: 55, head: "H1", at: "2026-07-19T00:00:00.000Z" });
+  st.recordSpend("lane-earlier", 99, 500, "2026-07-20T00:00:01.000Z"); // over a tiny daily cap
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = {
+    kind: "queued",
+    pr: 55,
+    reason: "engine-agent: preflight CI-evidence not satisfied: aux@github-actions",
+    ciPendingObservation: { pending: true, head: "H1" },
+  };
+  const cfg = mkCfg({ cost: { drainWindowSec: 60, dailyBudgetUsd: 10 }, ci: { pendingEscalateAfterSec: 3600 } });
+  let clock = new Date("2026-07-20T00:00:00Z");
+  const now = () => clock;
+  const tickOpts = { forge, state: st, supervisor: sup, cfg, mergeGate: gate, now };
+
+  const r1 = await tick(tickOpts);
+  assert.equal(r1.ceilingBreached, true);
+  assert.deepEqual(r1.escalated, []); // still inside the drain window
+
+  clock = new Date(clock.getTime() + 61_000); // past drainWindowSec, breach still standing
+  const r2 = await tick(tickOpts);
+  assert.deepEqual(r2.escalated, ["lane-a"]);
+  assert.equal(st.getWorker("lane-a")?.state, "failed");
+  const ev = st.latestEvent("drive-needs-human") as { payload: { reason: string } } | undefined;
+  assert.match(ev!.payload.reason, /drain-ci-pending-wedged:fix-rounds=0/);
+});
+
 test("#426 AC3: a check reaching a real conclusion CANCELS the pin — the next pending episode ages from its own start, never inheriting the cancelled one's clock", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

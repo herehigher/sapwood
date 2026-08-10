@@ -242,8 +242,15 @@ export type DriveOutcome =
      *  loop-wide gh outage must not silently reset every lane's clock. */
     ciPendingObservation?: { pending: boolean | "unknown"; head: string };
     /** #426 (F26): stateless aging escalation for a lane held WAIT-on-CI past `ci.pendingEscalateAfterSec`
-     *  — the gate① twin of `reviewSilenceEscalation`, with the same PR-label latch closing it. */
-    ciPendingEscalation?: { head: string; pendingSec: number };
+     *  — the gate① twin of `reviewSilenceEscalation`, with the same PR-label latch closing it.
+     *  #782 gate② round 1 (P2): `evidenceWait` distinguishes the TWO shapes this escalation can
+     *  mean for an engine-agent lane — omitted (or `false`) is the classic shape shared with the
+     *  three original Reviewer kinds ("a decisive gate② verdict is in, gate① alone is stuck");
+     *  `true` is engine-agent-only and means NO review session has ever started for this head at
+     *  all (the `ci.requiredChecks` evidence gate itself is the blocker — review/drive.ts's
+     *  preflight never even reaches the paid session). The conductor's escalation comment (#426)
+     *  reads this to avoid asserting "gate② is already decisive" when it never ran. */
+    ciPendingEscalation?: { head: string; pendingSec: number; evidenceWait?: true };
   };
 
 /** #170: pure aging decision. A configured failover gets its full evaluation window first;
@@ -400,13 +407,30 @@ export function ciPendingAge(input: {
  *  `!ciGreen && !ciRed` shape `ciPendingOnDecisiveReview` uses, deliberately including a
  *  concluded-without-passing check (skipped/neutral/cancelled) exactly as that function's own doc
  *  explains: such a lane cannot progress on its own any more than one waiting on a job that never
- *  finishes. */
+ *  finishes.
+ *
+ *  #782 gate② round 1 (P1, CONFIRMED): the live rollup fallback (`!ciGreen && !ciRed`) is wrong
+ *  for an ABSENT required check — `ci.requiredChecks` names a check that never materializes any
+ *  CheckRun at all on this head (as opposed to one that materialized and concluded non-green,
+ *  e.g. SKIPPED). `status.ciGreen` (forge.ts) is computed over only the checks that DID report,
+ *  so it can read `true` while `requiredChecksSatisfied` is still `false` — the aggregate rollup
+ *  has no way to know a NAMED check is missing entirely. `evidenceUnsatisfied` is the fix: when
+ *  the caller has DIRECT knowledge that review/drive.ts's own preflight CI-evidence gate is what's
+ *  blocking (the `queued` outcome's `ciEvidenceUnsatisfied` flag, EngineAgentDriveOutcome's own
+ *  doc), that fact is used DIRECTLY instead of re-derived from the aggregate rollup booleans —
+ *  still subject to the SAME exclusivity precedence as the rollup path (an outstanding review
+ *  attempt still forces this arm closed first). `ciGreen`/`ciRed` remain load-bearing for every
+ *  OTHER caller of this function (the decisive-pin-discard case has no `ciEvidenceUnsatisfied`
+ *  signal at all — it genuinely reads the rollup, exactly as `refetchStillValid` did to discard
+ *  it), so this is additive, not a replacement. */
 export function engineAgentCiPending(input: {
   ciGreen: boolean;
   ciRed: boolean;
   attemptPinKind: "unavailable" | "decisive" | null;
+  evidenceUnsatisfied?: boolean;
 }): boolean {
   if (input.attemptPinKind === "unavailable") return false;
+  if (input.evidenceUnsatisfied) return true;
   return !input.ciGreen && !input.ciRed;
 }
 
@@ -991,27 +1015,56 @@ export class MergeDriver {
      *  episode-cancel FIRST (same shape as driveOne's own `headMoveCancel`, #426 review round 2) —
      *  a pin recorded for a head other than the one this pass observed means the episode is over,
      *  unconditionally, regardless of what the live CI rollup or an `override` would otherwise say.
+     *
+     *  #782 gate② round 1 (P2, CONFIRMED): TWO pins are consulted for the cancel, not one —
+     *  `pinBefore` (the engine-agent ATTEMPT pin, meaningful only once a review has actually been
+     *  attempted at least once) AND `ciPendingPin` (the DURABLE conductor-tracked pin threaded
+     *  into `driveOne`, meaningful even when NO attempt has EVER been made — the live-wedge shape:
+     *  a lane stuck at the preflight CI-evidence gate forever has `pinBefore` permanently `null`,
+     *  so relying on the attempt pin alone would never detect that a push moved such a lane to a
+     *  new, still-pending head — the pin would just keep reporting `pending: true` under the OLD
+     *  head's clock, never resetting it). Checked in both places because they answer genuinely
+     *  different questions (has a REVIEW attempt been superseded vs. has the CI-PENDING episode's
+     *  own tracked head been superseded) and either alone is sufficient to end the episode.
+     *
      *  `override` lets callers hand in an already-resolved value: `"unknown"` for outcomes reached
      *  before ANY gate/verdict is derivable (mirrors driveOne's own `observed()` default for its
      *  pre-verdict branches — the CONFLICTING route here does the same), or a boolean from
      *  `ciPendingOnDecisiveReview` for a genuinely decisive verdict (the `consume` branch and the
      *  fallback-switch branch below) — reusing the CLASSIC predicate byte-for-byte rather than
      *  `engineAgentCiPending`, because a decisive verdict IS the classic arm's exact scope. Omitted
-     *  -> `engineAgentCiPending` derives it from the live rollup + `pinAfter.kind`. */
+     *  -> `engineAgentCiPending` derives it from the live rollup (or the `ciEvidenceUnsatisfied`
+     *  signal, #782 gate② round 1 P1) + `pinAfter.kind`. */
     const resolvePending = (
       head: string,
-      ci: { ciGreen: boolean; ciRed: boolean } | undefined,
+      ci: { ciGreen: boolean; ciRed: boolean; evidenceUnsatisfied?: boolean } | undefined,
       override?: boolean | "unknown",
     ): boolean | "unknown" => {
       if (pinBefore != null && pinBefore.head !== head) return false;
+      if (ciPendingPin.head != null && ciPendingPin.head !== head) return false;
       if (override !== undefined) return override;
-      return engineAgentCiPending({ ciGreen: ci!.ciGreen, ciRed: ci!.ciRed, attemptPinKind: pinAfter?.kind ?? null });
+      return engineAgentCiPending({
+        ciGreen: ci!.ciGreen,
+        ciRed: ci!.ciRed,
+        attemptPinKind: pinAfter?.kind ?? null,
+        ...(ci!.evidenceUnsatisfied !== undefined ? { evidenceUnsatisfied: ci!.evidenceUnsatisfied } : {}),
+      });
     };
     /** #782: attach `ciPendingObservation` (+ `ciPendingEscalation` once past
      *  `cfg.ci.pendingEscalateAfterSec`, via `ciPendingAge` — the SAME durable-pin arithmetic
      *  `ciPendingDuration` uses for the classic path) to `outcome`. A `"unknown"` `pending` never
-     *  escalates (matches classic: `ciPendingDuration` only ever sees a boolean). */
-    const ciAging = (base: DriveOutcome, head: string, pending: boolean | "unknown", labels: readonly string[]): DriveOutcome => {
+     *  escalates (matches classic: `ciPendingDuration` only ever sees a boolean). `evidenceWait`
+     *  (#782 gate② round 1 P2) rides onto `ciPendingEscalation` only — see that field's own doc —
+     *  and defaults to `false`: every caller except the queued branch's own `observe` below is a
+     *  decisive-review-shaped outcome (conflict/ci-red/consume/fallback-switch), so they never set
+     *  it, keeping the classic-shaped escalation comment byte-identical for those. */
+    const ciAging = (
+      base: DriveOutcome,
+      head: string,
+      pending: boolean | "unknown",
+      labels: readonly string[],
+      evidenceWait = false,
+    ): DriveOutcome => {
       const withObservation: DriveOutcome = { ...base, ciPendingObservation: { pending, head } };
       if (pending !== true && pending !== false) return withObservation;
       const gateNow = (this.deps.now ?? (() => new Date()))();
@@ -1024,7 +1077,9 @@ export class MergeDriver {
         needsHumanLabelPresent: labelsInclude(labels, this.deps.cfg.labels.needsHuman),
         holdLabelPresent: labelsIncludeAny(labels, this.deps.cfg.escalation.holdLabels),
       });
-      return pendingSec != null ? { ...withObservation, ciPendingEscalation: { head, pendingSec } } : withObservation;
+      return pendingSec != null
+        ? { ...withObservation, ciPendingEscalation: { head, pendingSec, ...(evidenceWait ? { evidenceWait: true as const } : {}) } }
+        : withObservation;
     };
 
     // #303 review round 2 (P1): terminal-state outcomes (merged/needs-human) map directly —
@@ -1038,9 +1093,23 @@ export class MergeDriver {
       // queues take). `head`/`ci` computed once, reused by every exit below unless a branch reads
       // its OWN fresher status/data (the fallback-switch and silence-escalation exits do).
       const head = outcome.status && outcome.data && outcome.status.headOid === outcome.data.headOid ? outcome.status.headOid : undefined;
-      const ci = outcome.status ? { ciGreen: outcome.status.ciGreen, ciRed: outcome.status.ciRed ?? false } : undefined;
+      const ci = outcome.status
+        ? {
+            ciGreen: outcome.status.ciGreen,
+            ciRed: outcome.status.ciRed ?? false,
+            evidenceUnsatisfied: outcome.ciEvidenceUnsatisfied === true,
+          }
+        : undefined;
       const labels = outcome.data?.labels ?? [];
-      const observe = (base: DriveOutcome): DriveOutcome => (head == null ? base : ciAging(base, head, resolvePending(head, ci), labels));
+      const observe = (base: DriveOutcome): DriveOutcome => {
+        if (head == null) return base;
+        const pending = resolvePending(head, ci);
+        // #782 gate② round 1 (P2): the escalation comment needs to know WHICH phase this pending
+        // came from — only true when the resolved pending is actually attributable to the direct
+        // evidence signal (not, say, forced `false` by a head move or an outstanding attempt).
+        const evidenceWait = pending === true && ci?.evidenceUnsatisfied === true;
+        return ciAging(base, head, pending, labels, evidenceWait);
+      };
 
       // The receipted-audit-comment invariant governs ENGINE-AGENT-DERIVED outcomes only: a
       // decisive verdict never reaches merge/FIXABLE/escalation before its receipted audit

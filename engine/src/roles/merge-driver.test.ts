@@ -2845,7 +2845,9 @@ test("MergeDriver.driveOne (engine-agent, #782 live-shaped): rollup {test:SUCCES
     at: "2026-07-15T00:00:00.000Z",
   });
   assert.equal(aged.kind, "queued");
-  assert.deepEqual(aged.ciPendingEscalation, { head: "HEAD", pendingSec: 7200 });
+  // #782 gate② round 1 (P2): `evidenceWait: true` — no review session has EVER run for this lane,
+  // so the conductor's escalation comment must not claim "gate② is already decisive".
+  assert.deepEqual(aged.ciPendingEscalation, { head: "HEAD", pendingSec: 7200, evidenceWait: true });
   assert.equal(evaluated, false, "the escalation is visibility-only — still no session spawned");
 });
 
@@ -2967,16 +2969,140 @@ test("MergeDriver.driveOne (engine-agent, #782 regression): the CI-pending obser
   assert.deepEqual(resolved.ciPendingObservation, { pending: false, head: "HEAD" });
 });
 
-test("#782 AC2: aging-arm exclusivity invariant — engineAgentCiPending's 3x3 matrix ({no pin, unavailable pin, decisive-delivered pin} x {ci pending, ci concluded-but-not-green, ci green}). Review-silence is the OTHER arm, opened by driveEngineAgentOne's own firstAt/backoff block under the EXACT SAME `attemptPinKind === \"unavailable\"` condition this function forces closed on — so the two can never both be open for the same pass.", () => {
-  // #782's own dispatch note: under CURRENT rollup parsing, a check that CONCLUDED WITHOUT
-  // PASSING (e.g. SKIPPED) reads identically to "still pending" (ciGreen:false, ciRed:false —
-  // forge.ts's SKIPPED-is-not-FAILING stance, #401's SUCCESS-only gate①). A fourth, DISTINGUISHED
-  // `ciInert` state is #783, explicitly out of this issue's scope — the two middle-column cells
-  // below are deliberately the SAME (ciGreen, ciRed) input, not a bug in this test.
+// ── #782 gate② round 1 (Codex sol high, PO-adjudicated CONFIRMED, 1 P1 + 3 P2) ──────────────────
+
+test("MergeDriver.driveOne (engine-agent, #782 gate② round 1 P1): an ABSENT required check (no CheckRun materializes at all — distinct from one that materialized and concluded non-green) opens the CI arm even though the AGGREGATE rollup reads ciGreen:true, because it's computed over only the checks that DID report", async () => {
+  const forge = new EngineAgentFakeForge();
+  // `aux` NEVER reports at all — only `test` does, and it's SUCCESS. forge.ts's `ciGreen` is
+  // computed over the checks that DID report, so this rollup reads GREEN despite `ci.requiredChecks`
+  // (test + aux) being unsatisfied — the exact aggregate-rollup blind spot #782 gate② round 1's P1
+  // finding names. Before this fix, `engineAgentCiPending` would derive `pending: false` here
+  // (re-deriving from `ciGreen:true`), reproducing the original silent wedge for this shape.
+  forge.status = { ...forge.status, ciGreen: true, ciRed: false };
+  forge.checksPage = { checks: [{ name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null, appSlug: "github-actions" }] };
+  let evaluated = false;
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "pending" as const, headOid: "HEAD" };
+    },
+  };
+  const cfg = mkEngineAgentCfg({
+    ci: {
+      requiredChecks: [
+        { name: "test", app: "github-actions" },
+        { name: "aux", app: "github-actions" },
+      ],
+      pendingEscalateAfterSec: 3600,
+    },
+  });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /preflight CI-evidence not satisfied.*aux@github-actions/);
+  // The load-bearing assertion: pending:true DESPITE forge.status.ciGreen === true.
+  assert.deepEqual(outcome.ciPendingObservation, { pending: true, head: "HEAD" });
+  assert.equal(evaluated, false, "no attempt pin is ever created for this lane — CI evidence blocks the session forever");
+  assert.equal(recorded.pin, null);
+});
+
+test("MergeDriver.driveOne (engine-agent, #782 gate② round 1 P2): the durable CI-pending pin cancels the episode on a head move EVEN WHEN NO attempt pin has ever existed — the actual live-wedge regression path (pinBefore alone, #782's original head-move test, never covers this: it always seeds a pre-existing attempt pin)", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, headOid: "HEAD2", ciGreen: true, ciRed: false }; // still an absent-check wedge at the NEW head
+  forge.reviewData = { ...forge.reviewData, headOid: "HEAD2" };
+  forge.checksPage = { checks: [{ name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null, appSlug: "github-actions" }] }; // `aux` still absent at HEAD2
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD2" }) };
+  const cfg = mkEngineAgentCfg({
+    ci: {
+      requiredChecks: [
+        { name: "test", app: "github-actions" },
+        { name: "aux", app: "github-actions" },
+      ],
+      pendingEscalateAfterSec: 3600,
+    },
+  });
+  const recorded: EARecorded = { pin: null, wal: null }; // NO attempt pin ever existed — the live wedge's actual shape
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(
+    7,
+    46,
+    ALREADY_TRIGGERED,
+    noopRecord,
+    undefined,
+    undefined,
+    undefined,
+    mkEngineAgentDeps(recorded),
+    {
+      head: "HEAD", // the durable conductor pin, opened at the OLD head by an earlier pass
+      at: "2020-01-01T00:00:00.000Z", // ancient — must not age through the move
+    },
+  );
+  assert.equal(outcome.kind, "queued");
+  // Without the #782 gate② round 1 P2 fix (cancel keyed on `ciPendingPin`, not just the — here
+  // permanently null — attempt pin), this would report `pending: true` at HEAD2, inheriting the
+  // OLD head's clock instead of starting a fresh one.
+  assert.deepEqual(outcome.ciPendingObservation, { pending: false, head: "HEAD2" });
+  assert.equal(outcome.ciPendingEscalation, undefined);
+});
+
+test("MergeDriver.driveOne (engine-agent, #782 gate② round 1 P2 AC3b): a STILL-RUNNING required check (IN_PROGRESS, a distinct check-page shape from SKIPPED) also opens the CI arm on the very first pass — no attempt pin ever created, same as the SKIPPED live-shaped test", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, ciGreen: false, ciRed: false };
+  forge.checksPage = { checks: [{ name: "test", status: "IN_PROGRESS", conclusion: null, state: null, appSlug: "github-actions" }] };
+  let evaluated = false;
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "pending" as const, headOid: "HEAD" };
+    },
+  };
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkEngineAgentCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /preflight CI-evidence not satisfied/);
+  assert.deepEqual(outcome.ciPendingObservation, { pending: true, head: "HEAD" });
+  assert.equal(evaluated, false);
+});
+
+test("MergeDriver.driveOne (engine-agent, #782 gate② round 1 P2 AC3b): during an UNAVAILABLE-pin backoff window, the CI arm stays forced CLOSED even when the live rollup happens to read GREEN — review-silence owns the clock regardless of what CI is doing, backoff never even re-reads CI evidence", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, ciGreen: true, ciRed: false }; // CI resolved green WHILE the review attempt is still outstanding
+  const cfg = mkEngineAgentCfg({ reviewer: { mode: "engine-agent", agent: { model: "opus", retryAfterSec: 900 }, escalateAfterSec: 60 } });
+  const recorded: EARecorded = { pin: { head: "HEAD", at: "2026-01-01T00:05:00Z", runId: "run-1", kind: "unavailable" }, wal: null };
+  const deps = { ...mkEngineAgentDeps(recorded), getFirstAttemptAt: () => "2026-01-01T00:00:00Z" };
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => ({ kind: "unavailable" as const, headOid: "HEAD", reason: "pin unavailable" }),
+  };
+  const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [], now: () => new Date("2026-01-01T00:06:00Z") }); // still inside the 900s backoff
+  const outcome = await driver.driveOne(7, 1, ALREADY_TRIGGERED, noopRecord, undefined, false, undefined, deps);
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /backoff/);
+  // The CI arm is closed DESPITE ciGreen:true — the exclusivity precedence (an outstanding review
+  // attempt forces it closed) applies unconditionally, not merely as an accident of a non-green
+  // rollup.
+  assert.deepEqual(outcome.ciPendingObservation, { pending: false, head: "HEAD" });
+});
+
+test("#782 AC2: aging-arm exclusivity invariant — engineAgentCiPending's HONEST input space: {no pin, unavailable pin, decisive-delivered pin} x the THREE meaningful (ciGreen,ciRed) boolean pairs a real rollup ever produces, PLUS the independent `evidenceUnsatisfied` override (#782 gate② round 1 P1) that is NOT reducible to that grid. Review-silence is the OTHER arm, opened by driveEngineAgentOne's own firstAt/backoff block under the EXACT SAME `attemptPinKind === \"unavailable\"` condition this function forces closed on — so the two can never both be open for the same pass.", () => {
+  // HONEST INPUT SPACE (#782 gate② round 1 P2, CONFIRMED — the original version of this test
+  // claimed a "3x3 matrix" but only had SIX unique rows: "ci pending" and "ci concluded-but-not-
+  // green" are the IDENTICAL (ciGreen, ciRed) pair at this pure-function layer). A real rollup only
+  // ever produces THREE meaningful (ciGreen, ciRed) pairs (they are never both true): "not resolved"
+  // — covering BOTH "still running" (e.g. IN_PROGRESS) and "concluded WITHOUT passing" (e.g.
+  // SKIPPED/NEUTRAL/CANCELLED, #401's SUCCESS-only gate①) — "concluded FAILING", and "concluded
+  // SUCCESS". The still-running/concluded-without-passing distinction is real (see the
+  // driveOne-level IN_PROGRESS-vs-SKIPPED tests above), but it lives ONE LAYER DOWN, in the
+  // check-PAGE shape driveEngineAgentReview reads — not in these two booleans, which is exactly why
+  // it collapses HERE. A fourth, DISTINGUISHED `ciInert` state is #783, out of this issue's scope.
   const CI_COLUMNS: Array<{ label: string; ciGreen: boolean; ciRed: boolean }> = [
-    { label: "ci pending", ciGreen: false, ciRed: false },
-    { label: "ci concluded-but-not-green (e.g. skipped)", ciGreen: false, ciRed: false },
-    { label: "ci green", ciGreen: true, ciRed: false },
+    { label: "not resolved (still running, OR concluded without passing e.g. skipped)", ciGreen: false, ciRed: false },
+    { label: "concluded FAILING", ciGreen: false, ciRed: true },
+    { label: "concluded SUCCESS (green)", ciGreen: true, ciRed: false },
   ];
   const PIN_ROWS: Array<{ label: string; attemptPinKind: "unavailable" | "decisive" | null }> = [
     { label: "no pin", attemptPinKind: null },
@@ -2991,15 +3117,30 @@ test("#782 AC2: aging-arm exclusivity invariant — engineAgentCiPending's 3x3 m
       const silenceArmOpen = row.attemptPinKind === "unavailable";
       assert.notEqual(ciArmOpen && silenceArmOpen, true, `${row.label} x ${col.label}: BOTH arms open`);
       assert.equal(
-        ciArmOpen || silenceArmOpen || col.ciGreen,
+        ciArmOpen || silenceArmOpen || col.ciGreen || col.ciRed,
         true,
-        `${row.label} x ${col.label}: NEITHER arm open while CI is not green — the #782 wedge`,
+        `${row.label} x ${col.label}: NEITHER arm open while gate① has not resolved — the #782 wedge`,
       );
       if (row.attemptPinKind === "unavailable") {
         assert.equal(ciArmOpen, false, `${row.label} x ${col.label}: CI arm must be forced closed while a review attempt is outstanding`);
       } else {
         assert.equal(ciArmOpen, !col.ciGreen && !col.ciRed, `${row.label} x ${col.label}: CI arm should track the live rollup`);
       }
+    }
+  }
+
+  // #782 gate② round 1 (P1, CONFIRMED): `evidenceUnsatisfied` is an INDEPENDENT override signal —
+  // NOT reducible to the (ciGreen, ciRed) grid above. An ABSENT required check can leave the
+  // aggregate rollup `ciGreen: true` (forge.ts computes it over only the checks that DID report),
+  // while `ci.requiredChecks` is still unsatisfied — see the driveOne-level absent-check test
+  // above for the real-pipeline shape this covers structurally here. Same exclusivity precedence:
+  // an outstanding review attempt still forces the arm closed FIRST, even with this override set.
+  for (const row of PIN_ROWS) {
+    const armOpen = engineAgentCiPending({ ciGreen: true, ciRed: false, attemptPinKind: row.attemptPinKind, evidenceUnsatisfied: true });
+    if (row.attemptPinKind === "unavailable") {
+      assert.equal(armOpen, false, `${row.label}: evidenceUnsatisfied still yields to an outstanding review attempt`);
+    } else {
+      assert.equal(armOpen, true, `${row.label}: evidenceUnsatisfied opens the arm even though ciGreen reads true`);
     }
   }
 });

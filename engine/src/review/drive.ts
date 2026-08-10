@@ -235,7 +235,18 @@ export type EngineAgentDriveOutcome =
   // queue in this pipeline. Omitted on genuinely mixed/unavailable reads (a forge outage before
   // either read landed, a split-generation identity mismatch) — that omission IS the signal:
   // merge-driver.ts treats an absent pair as "this pass learned nothing", never a cancel.
-  | { kind: "queued"; reason: string; status?: PRStatus; data?: PRReviewData }
+  // #782 gate② round 1 (P1): `ciEvidenceUnsatisfied` marks the ONE queued shape that KNOWS,
+  // directly, that gate① evidence itself is the blocker — the preflight CI-evidence gate below
+  // (requiredChecksSatisfied() failed) — as opposed to every other queued reason, where "is gate①
+  // pending" has to be INFERRED from the aggregate rollup (`status.ciGreen`/`ciRed`). That
+  // inference is wrong for an ABSENT required check: a check that never materializes at all (no
+  // CheckRun for it on this head — as opposed to one that materialized and concluded non-green,
+  // e.g. SKIPPED) leaves the aggregate rollup `ciGreen` computed over only the checks that DID
+  // report, which can read `true` even though `ci.requiredChecks` is still unsatisfied — the
+  // aggregate-rollup-derived CI arm (`engineAgentCiPending`) would then see `ciGreen: true` and
+  // report `pending: false`, the exact silent-wedge shape #782 exists to close, just for a
+  // different CI-evidence gap than the SKIPPED one #782's own tests originally covered.
+  | { kind: "queued"; reason: string; status?: PRStatus; data?: PRReviewData; ciEvidenceUnsatisfied?: true }
   // #420: `title` from the same PRStatus read that proved the merge (omitted when absent).
   | { kind: "merged"; headOid: string; title?: string }
   | { kind: "needs-human"; reason: string }
@@ -566,6 +577,10 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
       reason: `engine-agent: preflight CI-evidence not satisfied${baseNote}: ${ciEvidence.unsatisfied.join(", ")}`,
       status: status0,
       data: data0,
+      // #782 gate② round 1 (P1): this branch KNOWS gate① evidence is unsatisfied — see the type's
+      // own doc above for why merge-driver.ts must use this directly rather than re-deriving from
+      // the aggregate ciGreen/ciRed rollup (an absent required check can leave ciGreen === true).
+      ciEvidenceUnsatisfied: true,
     };
   }
 
