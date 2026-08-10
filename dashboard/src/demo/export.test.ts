@@ -21,6 +21,41 @@ test("export gate: fails on a planted host-absolute path with no recognized repo
   assert.throws(() => exportDemoBundle(planted), ExportGateError);
 });
 
+// #793 gate② finding [2] (export-gate-secret-echo): `export-cli.ts` deliberately lets an
+// `ExportGateError` reach the build log uncaught — a real planted secret must never round-trip
+// into that log verbatim just because THIS gate is what caught it. These pin the redaction
+// directly on the thrown error's own message, not just on the (already-covered) fact that a throw
+// happens at all.
+
+test("export gate: the thrown error never echoes the matched credential value — only its class", () => {
+  const secret = "sk-ant-api03-FAKESENTINEL1234567890abcdefgh";
+  assert.throws(
+    () => exportDemoBundle(withLogPath(secret)),
+    (err: unknown) => {
+      assert.ok(err instanceof ExportGateError);
+      assert.doesNotMatch(err.message, /sk-ant-api03-FAKESENTINEL/, "the credential value itself must never appear in the error message");
+      assert.match(err.message, /Anthropic API key/, "the error should still name WHICH signature class matched");
+      return true;
+    },
+  );
+});
+
+test("export gate: the thrown error never echoes the matched host-absolute path's private segments", () => {
+  assert.throws(
+    () => exportDemoBundle(withLogPath("/Users/someone-elses-machine/private-notes/todo.txt")),
+    (err: unknown) => {
+      assert.ok(err instanceof ExportGateError);
+      assert.doesNotMatch(
+        err.message,
+        /someone-elses-machine/,
+        "the path's private username/hostname must never appear in the error message",
+      );
+      assert.doesNotMatch(err.message, /private-notes/, "no fragment of the leaked path may appear in the error message");
+      return true;
+    },
+  );
+});
+
 test("export gate: passes once both sentinels are removed — the real bundled source is clean", () => {
   const result = exportDemoBundle(DEMO_SOURCE);
   assert.equal(JSON.stringify(result).includes("sk-ant-"), false);

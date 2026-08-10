@@ -39,8 +39,8 @@ test("the built bundle carries no chart-library code", () => {
 // as part of the real build, and its output is what actually got copied into `dist/`.
 test("the shipped ?demo fixture contains no credential-shaped string or host-absolute path", () => {
   const content = readFileSync(new URL("../dist/demo-fixture.json", import.meta.url), "utf8");
-  for (const pattern of CREDENTIAL_PATTERNS) {
-    assert.doesNotMatch(content, pattern, `dist/demo-fixture.json matches a credential-shaped pattern: ${pattern}`);
+  for (const { pattern, label } of CREDENTIAL_PATTERNS) {
+    assert.doesNotMatch(content, pattern, `dist/demo-fixture.json matches a credential-shaped pattern: ${label}`);
   }
   assert.doesNotMatch(content, HOST_ABSOLUTE_PATH, "dist/demo-fixture.json contains a host-absolute path");
 });

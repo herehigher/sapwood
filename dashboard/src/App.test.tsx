@@ -704,8 +704,10 @@ function demoBundleFixture(): DemoBundle {
         status: "done",
         startedAt: "2026-08-09T09:00:00Z",
         endedAt: "2026-08-09T09:10:00Z",
-        startEventId: 1,
-        startSpendId: 1,
+        // #793 gate② finding [1]: EXCLUSIVE cursors (`e.id > startEventId`) — 0, not the first
+        // included row's own id (1), or that row would be wrongly excluded from its own round.
+        startEventId: 0,
+        startSpendId: 0,
         eventCount: 2,
         schemaVersion: 1,
         artifact: { prsMerged: 1, spendUsd: 1 },

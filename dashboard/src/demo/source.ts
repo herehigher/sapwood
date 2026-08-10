@@ -26,8 +26,11 @@ export const DEMO_SOURCE: DemoBundle = {
       status: "done",
       startedAt: "2026-08-09T09:00:00Z",
       endedAt: "2026-08-09T09:42:00Z",
-      startEventId: 1,
-      startSpendId: 1,
+      // #793 gate② finding [1]: EXCLUSIVE cursors (`engine/src/state/state.ts`'s `listRounds()`:
+      // `e.id > r.start_event_id`) — 0, the id of the (nonexistent) row before this fixture's
+      // first real row (id 1), not the first included row's own id.
+      startEventId: 0,
+      startSpendId: 0,
       eventCount: 9,
       schemaVersion: 1,
       artifact: { prsMerged: 1, spendUsd: 4.2 },

@@ -19,12 +19,16 @@ export class ExportGateError extends Error {}
 /** Recognized credential-shaped signatures — provider-specific prefixes/lengths, not a generic
  *  "looks like a secret" heuristic. Exported so the Tier B post-build check (`bundle.test.ts`)
  *  greps the SHIPPED bundle with the exact same patterns this gate itself enforces, rather than a
- *  second, hand-copied list that could silently drift from what the gate actually checks. */
-export const CREDENTIAL_PATTERNS: readonly RegExp[] = [
-  /sk-ant-[A-Za-z0-9_-]{20,}/, // Anthropic API key
-  /gh[oprsu]_[A-Za-z0-9]{36}/, // GitHub token (personal/oauth/user-to-server/server-to-server/refresh)
-  /AKIA[0-9A-Z]{16}/, // AWS access key id
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/, // PEM private key block
+ *  second, hand-copied list that could silently drift from what the gate actually checks. Each
+ *  entry carries a `label` — #793 gate② finding [2] (export-gate-secret-echo): the gate's own
+ *  thrown error names WHICH class matched, never the matched VALUE (see `matchedCredentialClass`
+ *  below) — a planted real secret must never round-trip into a CI build log verbatim just because
+ *  this gate caught it. */
+export const CREDENTIAL_PATTERNS: readonly { readonly pattern: RegExp; readonly label: string }[] = [
+  { pattern: /sk-ant-[A-Za-z0-9_-]{20,}/, label: "Anthropic API key" },
+  { pattern: /gh[oprsu]_[A-Za-z0-9]{36}/, label: "GitHub token" }, // personal/oauth/user-to-server/server-to-server/refresh
+  { pattern: /AKIA[0-9A-Z]{16}/, label: "AWS access key id" },
+  { pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/, label: "PEM private key block" },
 ];
 
 /** A host filesystem path — `/Users/<name>/…` or `/home/<name>/…` — never a URL route like
@@ -51,17 +55,24 @@ export function rewriteAbsolutePaths(value: string): string {
   });
 }
 
-function findCredential(text: string): string | null {
-  for (const pattern of CREDENTIAL_PATTERNS) {
-    const match = text.match(pattern);
-    if (match) return match[0];
+/** Returns the matched signature's CLASS LABEL only ("Anthropic API key", …) — never the matched
+ *  substring itself. #793 gate② finding [2]: the caller (`exportDemoBundle`) interpolates this
+ *  into the thrown `ExportGateError`, which `export-cli.ts` deliberately lets reach the build log
+ *  uncaught — a real planted secret must never be reproduced there just because this gate is what
+ *  caught it. */
+function matchedCredentialClass(text: string): string | null {
+  for (const { pattern, label } of CREDENTIAL_PATTERNS) {
+    if (pattern.test(text)) return label;
   }
   return null;
 }
 
-function findResidualAbsolutePath(text: string): string | null {
-  const match = text.match(HOST_ABSOLUTE_PATH);
-  return match ? match[0] : null;
+/** Same redaction stance as `matchedCredentialClass` above, for the residual-path scan: a survived
+ *  host-absolute path routinely carries a real operator's OS username/hostname (`/Users/<name>/…`)
+ *  — private host data with no safe "class" to name, so this reports presence only, never the
+ *  path's own text. */
+function hasResidualAbsolutePath(text: string): boolean {
+  return text.match(HOST_ABSOLUTE_PATH) !== null;
 }
 
 function walkStrings(value: unknown, fn: (s: string) => string): unknown {
@@ -84,11 +95,20 @@ export function exportDemoBundle(source: DemoBundle): DemoBundle {
   const rewritten = walkStrings(source, rewriteAbsolutePaths) as DemoBundle;
   const serialized = JSON.stringify(rewritten);
 
-  const credential = findCredential(serialized);
-  if (credential) throw new ExportGateError(`export gate: credential-shaped string found in demo bundle export: ${credential}`);
+  // #793 gate② finding [2]: neither error interpolates the matched VALUE — only a class label
+  // (credentials) or nothing at all (paths, which routinely carry a real username/hostname).
+  const credentialClass = matchedCredentialClass(serialized);
+  if (credentialClass) {
+    throw new ExportGateError(
+      `export gate: a ${credentialClass}-shaped credential string was found in the demo bundle export (value redacted)`,
+    );
+  }
 
-  const residualPath = findResidualAbsolutePath(serialized);
-  if (residualPath) throw new ExportGateError(`export gate: host-absolute path survived rewrite in demo bundle export: ${residualPath}`);
+  if (hasResidualAbsolutePath(serialized)) {
+    throw new ExportGateError(
+      "export gate: a host-absolute path survived rewrite in the demo bundle export (value redacted — may carry a private username/hostname)",
+    );
+  }
 
   return rewritten;
 }

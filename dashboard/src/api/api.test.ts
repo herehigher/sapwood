@@ -4,7 +4,7 @@ import type { EventKind } from "../copy.ts";
 import { type DomainEvent, toDomainEvent } from "../domain-event.ts";
 import { foldEntityTitles, foldOpenAttention } from "../entities.ts";
 import { foldEvents, initialHeroState, withLaneCount } from "../hero/state.ts";
-import { fetchEvents, fetchLoopState, fetchSpend } from "./client.ts";
+import { demoFixtureUrl, fetchDemoFixture, fetchEvents, fetchLoopState, fetchSpend } from "./client.ts";
 import {
   accumulateEventsPage,
   accumulateSpendPage,
@@ -474,6 +474,31 @@ test("#715 gate② round 3 [2]'s core regression: a lane's settled spend survive
 test("spendByWorkerForDay never fabricates a $0 bar for a lane with no settled spend", () => {
   const bars = spendByWorkerForDay([], new Date("2026-08-06T12:00:00Z"));
   assert.deepEqual(bars, []);
+});
+
+// ── #793 gate② finding [0] (demo-static-base-path): the `?demo` fixture must resolve against
+// Vite's configured `base`, not a root-absolute `/demo-fixture.json` — a page mounted under a
+// sub-path (GitHub Pages project pages: `/sapwood/?demo`) must request `/sapwood/demo-fixture.json`.
+// `import.meta.env` doesn't exist under this repo's `node --import tsx` test harness (no Vite
+// pipeline runs), so these pass `base` explicitly — the one seam `demoFixtureUrl` exposes for
+// exactly this — rather than relying on the harness to fake Vite's own env injection.
+
+test("demoFixtureUrl: resolves relative to an explicit non-root base (a sub-path mount)", () => {
+  assert.equal(demoFixtureUrl("/sapwood/"), "/sapwood/demo-fixture.json");
+});
+
+test("demoFixtureUrl: resolves relative to Vite's own relative-base convention ('./')", () => {
+  assert.equal(demoFixtureUrl("./"), "./demo-fixture.json");
+});
+
+test("demoFixtureUrl: defaults to root '/' when called with no base and no import.meta.env (this test harness)", () => {
+  assert.equal(demoFixtureUrl(), "/demo-fixture.json");
+});
+
+test("fetchDemoFixture: requests the SAME URL demoFixtureUrl() resolves to — never a hardcoded root-absolute path", async () => {
+  const calls = stubFetch({ loopState: {}, rounds: [], events: [], spend: [] });
+  await fetchDemoFixture();
+  assert.equal(calls[0]?.url, demoFixtureUrl());
 });
 
 test("#715 gate② round 4 [3]: spendByWorkerForDay excludes non-lane actorKind rows — mixed-attribution regression", () => {
