@@ -13,6 +13,26 @@ up or down through the [L0–L3 autonomy ladder](docs/getting-started.md#l0l3-au
 read-only preview, one supervised issue, human-merged PRs, or governed unattended
 merge.
 
+## Design principles
+
+- **producer ≠ reviewer ≠ merger** — **plugin-enforced:** a worker is prevented
+  from approving or merging its own work by the fail-closed guard, rather than
+  being asked to refrain in a prompt.
+- **GitHub is the source of truth** — **plugin-enforced:** the engine uses the
+  ProjectV2 board, issues, pull requests, and checks as process state; it does
+  not keep a second workflow database.
+- **fail-closed, not advisory** — **plugin-enforced:** an invalid or blocked
+  guarded action is denied, and the merge path waits for its configured gates.
+  Unlike advisory-only AI review, its conclusion is not merely a recommendation
+  that the producer can act around.
+- **bounded, legible cost** — **plugin-enforced:** configured spend ceilings,
+  dry-run preview, and a kill switch make a run's limits visible and controllable.
+
+**Deployment prerequisite.** The plugin's guard is only one part of a load-bearing
+merge boundary. For unattended merge, configure protected branches and a distinct
+merger identity as described in [Trust model prerequisites](docs/getting-started.md#trust-model-prerequisites).
+A fresh installation does not establish those repository settings.
+
 > Status: **early development** (pre-v1). The framework is being extracted and
 > re-implemented from a proven private project; see [`docs/PLAN.md`](docs/PLAN.md)
 > for the full goals, architecture, and roadmap.
@@ -32,31 +52,33 @@ protection in between.
 ## Why it's different
 
 Most autonomous coding tools ask you to trust the model and let it merge. sapwood's
-core is the opposite: a **fail-closed safety layer** that structurally separates the
-roles in the loop.
+plugin enforces a governance path instead of treating review as advice.
 
-- **producer ≠ reviewer ≠ merger** — the worker that writes the code can never
-  approve or merge it. Enforced by a fail-closed PreToolUse hook, not a prompt.
-- **GitHub is the source of truth** — a ProjectV2 board's `Status` field + issue
-  labels *are* the work queue. No hidden database, no opaque state.
-- **Configurable review chain** — by default the merge is gated on an independent
-  (different-model) code review, the way the source project works: CI green + a fresh
-  review → the conductor merges. The reviewer is pluggable, and a *produce-PR-and-stop*
-  mode (a human clicks merge) is available when you want a tighter leash.
-- **Cost is bounded and legible** — engine-enforced spend ceilings, a dry-run
-  preview, and a kill switch.
+- **Configurable review chain** — **plugin-enforced:** the merge path is gated on
+  CI and a fresh review before the conductor can merge. The reviewer is pluggable,
+  and a *produce-PR-and-stop* mode (a human clicks merge) is available when you
+  want a tighter leash. The protected-branch and distinct-identity requirements
+  remain [deployment prerequisites](docs/getting-started.md#trust-model-prerequisites).
+
+## Prior art & inspiration
+
+sapwood acknowledges [loop-engineering](https://github.com/cobusgreyling/loop-engineering)
+and the [loop-engineering orange book](https://github.com/alchaincyf/loop-engineering-orange-book)
+as methodological prior art, including the threads they collect. They inform the
+craft of building and documenting agent loops; they are not sapwood's category label.
 
 ## How it works
 
 A nested loop dispatches one **headless worker per issue**, each in its own git
-worktree. Workers do TDD, open a PR, and request review — but never merge. Worker
-completion is signaled by the wrapper writing sentinel files, not by the model's
-self-report. The conductor reclaims finished lanes, drives PRs through the review
-gate, and (in autonomous mode) merges.
+worktree. Workers do TDD and push their branch, but do not approve or merge. The
+engine opens the PR, and worker completion is signaled by the wrapper writing sentinel
+files, not by the model's self-report. The conductor reclaims finished lanes, drives
+PRs through the review gate, and (in autonomous mode) merges when the deployment
+prerequisites above are in place.
 
 ```
 GitHub issue (Ready)
-   → claim → isolated worktree → TDD → PR (Closes #N) → independent review
+   → claim → isolated worktree → TDD → push → engine opens PR (Closes #N) → independent review
    → [default] CI green + review → conductor merges   |   [opt] stop for human merge
    → board: Done
 ```
