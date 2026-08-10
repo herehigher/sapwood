@@ -15,7 +15,12 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # PRE-PUBLIC ONLY: this job runs on the owner's self-hosted runner while the repo
+    # is private (all PR authors are trusted collaborators). BEFORE the repo goes
+    # public this MUST be flipped back to `ubuntu-latest` — a fork PR must never
+    # execute on the self-hosted runner. Tracked on the go-public cutover checklist
+    # (#329).
+    runs-on: [self-hosted, mac-mini-docker-runner]
     # #691: GitHub's default job ceiling is 360 minutes. The whole suite runs in ~3.5
     # minutes, so that default is not a ceiling — it is six hours of billable runner time
     # for one wedged test (which is exactly what it cost). 20 minutes is ~5x the real
@@ -37,7 +42,10 @@ jobs:
       # what wedged; a job-level timeout cancels the run and reports nothing useful.
       # node:test's own `--test-timeout` (#667) cannot do this — measured 2026-08-05, it
       # prints the verdict on time and the runner keeps running. `timeout` is GNU
-      # coreutils, present on ubuntu-latest.
+      # coreutils. While this job runs on the self-hosted mac-mini-docker-runner
+      # (pre-public), `timeout` is provided by that runner's Linux Docker execution
+      # environment — the same assumption selfhost-ci.yml documents for its own
+      # self-hosted arm.
       #
       # `--kill-after=30s` escalates to SIGKILL when the group survives the initial
       # SIGTERM. Not hypothetical here: this suite DELIBERATELY spawns SIGTERM-immune
@@ -48,5 +56,35 @@ jobs:
       # grandchild — `--foreground` would WEAKEN that (Codex gate② review of PR #692).
       # Residual, stated honestly: a descendant that detaches into its OWN process group
       # (setsid) escapes either form — that is the test-side half of #691, not this file's.
+      - run: timeout --kill-after=30s 600 npm --workspace engine test
+      - run: timeout --kill-after=30s 300 npm --workspace dashboard test
+
+  # PRE-PUBLIC ONLY: auxiliary hosted arm running in parallel with `test` while the
+  # self-hosted runner is primary (owner directive, 2026-08-10). This job is advisory
+  # — it is NOT in `ci.requiredChecks` (gate① keys on the job name `test`), so a
+  # failure here does not block merge. It exists to keep the hosted-runner path
+  # exercised on every PR during the self-hosted-primary window. BEFORE the repo goes
+  # public, `test` reverts to `ubuntu-latest` and this job should be removed (or kept
+  # as redundant belt-and-suspenders — owner's call at that point). Tracked on the
+  # go-public cutover checklist (#329).
+  #
+  # Steps below mirror `test`'s step list exactly (checkout, setup-node@v4 node 24 +
+  # npm cache, npm ci, both typechecks, lint, both timeout-wrapped test steps); `test`
+  # is the canonical source — if it changes, update this job too (drift check is
+  # manual, no automated diff).
+  test-hosted:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm --workspace engine run typecheck
+      - run: npm --workspace dashboard run typecheck
+      - run: npm run lint
       - run: timeout --kill-after=30s 600 npm --workspace engine test
       - run: timeout --kill-after=30s 300 npm --workspace dashboard test
