@@ -15,22 +15,30 @@ merge.
 
 ## Design principles
 
-- **producer ≠ reviewer ≠ merger** — **plugin-enforced:** a worker is prevented
-  from approving or merging its own work by the fail-closed guard, rather than
-  being asked to refrain in a prompt.
-- **GitHub is the source of truth** — **plugin-enforced:** the engine uses the
-  ProjectV2 board, issues, pull requests, and checks as process state; it does
-  not keep a second workflow database.
+- **producer ≠ reviewer ≠ merger** — **plugin-enforced for covered built-in
+  Bash/file-tool actions:** the fail-closed guard prevents a worker from
+  approving or merging its own work, rather than asking it to refrain in a
+  prompt. Ambient MCP tools and unknown servers are documented accepted blind
+  spots; protected branches and a distinct merger identity are the mandatory
+  deployment backstop for the full boundary.
+- **GitHub is the source of truth for the cross-actor development process** —
+  **plugin-enforced:** the engine uses the ProjectV2 board, issues, pull
+  requests, and checks as process state, with no hidden second work queue to
+  maintain. Its local SQLite ledger holds single-machine runtime state (lanes,
+  events, and spend), not a parallel task board.
 - **fail-closed, not advisory** — **plugin-enforced:** an invalid or blocked
   guarded action is denied, and the merge path waits for its configured gates.
   Unlike advisory-only AI review, its conclusion is not merely a recommendation
   that the producer can act around.
-- **bounded, legible cost** — **plugin-enforced:** configured spend ceilings,
-  dry-run preview, and a kill switch make a run's limits visible and controllable.
+- **legible, ceiling-checked cost** — **plugin-enforced:** configured spend
+  ceilings, dry-run preview, and a kill switch make the controls visible. The
+  ceilings are checked at admission/drain points, so in-flight work can
+  overshoot; spawned-subagent spend is a documented unbounded blind spot.
 
-**Deployment prerequisite.** The plugin's guard is only one part of a load-bearing
-merge boundary. For unattended merge, configure protected branches and a distinct
-merger identity as described in [Trust model prerequisites](docs/getting-started.md#trust-model-prerequisites).
+**Deployment prerequisite.** The plugin's guard mediates the covered built-in
+Bash/file-tool family, not inherited ambient MCP tools or unknown servers. For
+unattended merge, protected branches and a distinct merger identity establish the
+load-bearing boundary described in [Trust model prerequisites](docs/getting-started.md#trust-model-prerequisites).
 A fresh installation does not establish those repository settings.
 
 > Status: **early development** (pre-v1). The framework is being extracted and
@@ -45,9 +53,10 @@ heartwood: the stable core that holds the tree up.
 
 That is this loop. Bark — the fail-closed guard — protects the living layer from
 the outside. Sapwood is where the work grows: workers producing new code in
-parallel. Heartwood is `main` — and nothing becomes heartwood until it has passed
-the review gate and hardened. Growth at the edge, structure at the core,
-protection in between.
+parallel. Heartwood is `main` — with the [Trust model
+prerequisites](docs/getting-started.md#trust-model-prerequisites) in place, nothing
+becomes heartwood until it has passed the review gate and hardened. Growth at the
+edge, structure at the core, protection in between.
 
 ## Why it's different
 
@@ -108,7 +117,7 @@ flowchart LR
   end
 
   subgraph SESSIONS["Headless Claude sessions"]
-    WORKER["Workers<br/>one git worktree per issue<br/>TDD → PR, never merge"]
+    WORKER["Workers<br/>one git worktree per issue<br/>TDD → push, never merge"]
     GUARD["guard.ts<br/>fail-closed PreToolUse hook"]
     WORKER --- GUARD
   end
@@ -118,7 +127,8 @@ flowchart LR
   ISSUES -->|Ready| CONDUCTOR
   ROUND -->|"drives ticks (executing phase)"| CONDUCTOR
   CONDUCTOR -->|dispatch| WORKER
-  WORKER -->|"push branch, open PR (gh)"| PRS
+  WORKER -->|"push branch"| PRS
+  FORGE -->|"open PR"| PRS
   WORKER -.->|"sentinel files (local)"| CONDUCTOR
   CONDUCTOR --> GATE
   GATE -->|trigger review| REVIEWER
