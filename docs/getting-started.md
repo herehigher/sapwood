@@ -40,8 +40,8 @@ npm link --workspace engine
 
 Alternatively, do not link it and replace every `sapwood <cmd>` below with
 `node <clone>/engine/dist/cli.js <cmd>`, where `<clone>` is the path to your clone. The available
-CLI verbs are `sapwood init`, `sapwood validate`, `sapwood run`, `sapwood status`, and
-`sapwood events`.
+CLI verbs include `sapwood init`, `sapwood validate`, `sapwood run`, `sapwood status`,
+`sapwood events`, and `sapwood park clear`.
 
 ### Channel B — Claude Code plugin/marketplace install: not yet available
 
@@ -49,11 +49,33 @@ There is no marketplace coordinate, npm package, or prebuilt `engine/dist`; the 
 plugin wrappers (`/sapwood-run`, `/sapwood-status`, `/sapwood-stop`) additionally require
 `npm ci` at the plugin root and cover only `run`, `status`, and `stop`, not `init` or `validate`.
 
-## `sapwood init`
+## Bootstrap the target repo, then run `sapwood init`
 
-Run init once, from the repo you want sapwood to operate on:
+`init` loads an existing config before it can provision anything. From the repo you want
+sapwood to operate on, create its ProjectV2 board first and note the number:
 
 ```
+gh project create --owner YOU --title NAME
+gh project list --owner YOU
+```
+
+Replace `YOU` with the GitHub user or organization that owns the board. The project number
+is also in the board URL. Then create the minimal valid config below, replacing all-caps
+values with your target repository and the board number you just created:
+
+```sh
+cat > sapwood.config.yaml <<'YAML'
+board:
+  owner: YOU
+  repo: REPOSITORY
+  projectNumber: PROJECT_NUMBER
+YAML
+```
+
+Verify that config and then initialize from the target repo:
+
+```
+sapwood validate
 sapwood init
 ```
 
@@ -78,10 +100,8 @@ sapwood init
 4. **Ensures any configured milestones exist** (`config.milestones`; empty by default —
    sapwood only needs labels + board lanes, milestones are your organizational choice).
 5. **Ensures the ProjectV2 board's `Status` field has the configured lanes**
-   (`Ready` / `In Progress` / `Done` by default) — if the board doesn't exist at the
-   configured `board.projectNumber`, init reports what to create rather than guessing.
-6. **Writes a starter `sapwood.config.yaml`** (with inline comments) if none exists yet.
-7. **Provisions the L1 worker deploy key (#606 gate② round 1–2) — the default onboarding path
+   (`Ready` / `In Progress` / `Done` by default).
+6. **Provisions the L1 worker deploy key (#606 gate② round 1–2) — the default onboarding path
    for the worker's write capability.** `init` generates a per-repo ed25519 SSH key
    (`ssh-keygen`), registers it as a **write** deploy key (`gh repo deploy-key add --allow-write
    --title sapwood-worker`) under your own logged-in `gh` credential (requires repo admin), runs a
@@ -106,9 +126,9 @@ sapwood init
    existing remote key — from an interactive terminal
    it offers to register an additional key just for this machine (titled
    `sapwood-worker-<hostname>`); non-interactively it degrades to L0 and names the manual steps.
-8. **Scaffolds starter goal and review-doctrine files** at their configured paths
+7. **Scaffolds starter goal and review-doctrine files** at their configured paths
    (`goal.file`, `doctrine.file`) if missing — never overwrites an existing file.
-9. **Scaffolds `.github/ISSUE_TEMPLATE/`** (feature / fix / docs / chore, matching the
+8. **Scaffolds `.github/ISSUE_TEMPLATE/`** (feature / fix / docs / chore, matching the
    structure the gate⓪ verification-plan-drafter normalizes toward) — each template is written only
    if that file is missing, so repos with their own templates are untouched.
 
@@ -117,27 +137,17 @@ re-run — every step is detect-before-create, so nothing is duplicated.
 
 ## Configure
 
-Edit the `sapwood.config.yaml` init wrote — at minimum, set `board.owner`,
-`board.repo`, and `board.projectNumber` to your repo and its ProjectV2 board number.
-Every other key has a sensible default. See [`configuration.md`](configuration.md) for
-the full reference.
+Review and expand the `sapwood.config.yaml` you created for bootstrap. Only
+`board.owner`, `board.repo`, and `board.projectNumber` are required; every other key has a
+sensible default. See [`configuration.md`](configuration.md) for the full reference.
 
 ## Prepare the board and gates before your first run
 
-### Create the ProjectV2 board
+### Confirm the ProjectV2 board
 
-Create a board for the repository, then record its project number:
-
-```
-gh project create --owner YOU --title NAME
-gh project list --owner YOU
-```
-
-Replace `YOU` with the GitHub user or organization that owns the board. The project number is
-also in the board URL. In the board UI, ensure its `Status` single-select field contains a
-`Ready` option (the default sapwood lanes are `Todo`, `Ready`, `In Progress`, and `Done`). Set
-that number in `board.projectNumber`, with the same owner and repository in `board.owner` and
-`board.repo`.
+In the board UI, ensure its `Status` single-select field contains a `Ready` option (the
+default sapwood lanes are `Todo`, `Ready`, `In Progress`, and `Done`). `init` ensures the
+configured lanes exist.
 
 ### Before your first run: make gate① real
 
@@ -335,9 +345,20 @@ shapes are:
 - `sapwood run` ticks on `engine.tickIntervalSec` indefinitely, with the same
   signal/stop-condition exit behavior as the round driver.
 
-At every level, `sapwood status` (below) tells you what's happening without needing a
-live session, and `/sapwood-stop` is always available to freeze or gently pause the
-engine — see [`security.md`](security.md) for exactly what each control does.
+At every level, `sapwood status` tells you what's happening without needing a live
+session. Channel A's controls are file sentinels in the target repo (the repo containing
+`data/`):
+
+```sh
+mkdir -p data
+touch data/KILL_SWITCH  # emergency: freeze new dispatch and merges; drain workers
+rm -f data/KILL_SWITCH  # lift the kill switch on the next tick
+touch data/PAUSE        # gentle: stop new dispatch; in-flight work continues
+rm -f data/PAUSE        # resume dispatch on the next tick
+```
+
+See [`security.md`](security.md#two-tier-human-controls) for the full semantics, including
+how pause interacts with `--until-idle`.
 
 ## Running under a supervisor
 
@@ -412,10 +433,12 @@ On macOS, launchd's equivalents are `KeepAlive` with
 burst, which makes the engine's own two backstops — and checking
 `sapwood status` after any unattended stretch — matter more there.
 
-## Slash commands
+## Plugin-only slash commands (Channel B)
 
-These are thin wrappers around the `sapwood` CLI, meant to be run from inside a Claude
-Code session opened in the target repo:
+These thin wrappers are available only in a Claude Code session that has loaded the sapwood
+plugin. They are **not** loaded by Channel A's clone/build/link install, and Channel B's
+marketplace installation is not yet available. Channel A users should use the file-sentinel
+commands above for stop/pause control and the linked CLI for run/status.
 
 - **`/sapwood-run [--once|--until-idle|--dry-run]`** — runs `sapwood run` with the given
   mode and reports its output. No flags = daemon mode.

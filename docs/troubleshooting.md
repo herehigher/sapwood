@@ -18,13 +18,18 @@ capacity. A `Ready` board status alone is not enough.
   deliberately fail-closed. A `verify:n/a` proposal accompanied by `needs-human` still needs a
   human adjudication (remove `needs-human`) before it can proceed.
 - **Lane and holds:** the issue must be open and on this configured ProjectV2 board's `Ready`
-  lane. `sapwood:needs-human`, `sapwood:blocked`, and `sapwood:planless` keep it out of the
-  queue; resolve the stated problem, then remove the appropriate hold yourself.
+  lane. `sapwood:needs-human` and `sapwood:blocked` keep it out of either dispatch path; resolve
+  the stated problem, then remove the appropriate hold yourself. `sapwood:planless` is excluded
+  by the `rounds` driver's pooled selection, but the L1 `tick` driver's unpooled `Ready` path does
+  not test that label. Do not diagnose a tick candidate as skipped because it is `planless`.
 - **Snapshot drift:** `ac-snapshot-drift` is a later, fail-closed condition: a worker was
   already dispatched, then the issue body changed before review. It adds `needs-human`; inspect
   its durable record with `sapwood events --issue ISSUE --kind ac-snapshot-drift`, resolve the
-  body change, and follow the re-entry instructions in the issue/PR comment. It is not evidence
-  that a fresh `Ready` issue was silently skipped.
+  body change by restoring the original plan/acceptance criteria or explicitly re-approving the
+  new body, then remove `sapwood:needs-human` to request gated re-entry. If the original
+  `needs-human` label write failed, that lane is permanently outside automatic re-entry even if a
+  human later adds or removes the label; review and merge its PR manually. It is not evidence that
+  a fresh `Ready` issue was silently skipped.
 
 The run narrative defaults to `data/logs/sapwood.log` and is also teed to stderr; use
 `sapwood status` for active lanes and `sapwood events --issue ISSUE` for durable escalation
@@ -124,15 +129,15 @@ the directory; nothing in the loop waits on either.
 
 ## Kill switch recovery
 
-If `data/KILL_SWITCH` is set (via `/sapwood-stop` or by hand), all new dispatch and
+If `data/KILL_SWITCH` is set (by a loaded plugin slash command or by hand), all new dispatch and
 merges are frozen and running workers are being drained. The switch is part of the stateful
 data directory; see [Data directory is stateful](configuration.md#data-directory-is-stateful)
 before moving, deleting, or restoring `data/`. Recovery:
 
 1. Check `sapwood status` — it reports `kill switch: ACTIVE` and shows any in-flight
    lanes still draining.
-2. Once you're satisfied it's safe to resume, run `/sapwood-stop --lift` (or
-   `rm -f data/KILL_SWITCH`).
+2. Once you're satisfied it's safe to resume, run `rm -f data/KILL_SWITCH` (or
+   `/sapwood-stop --lift` in a session where the plugin is loaded).
 3. Dispatch and merges resume on the **next tick** — a switch lifted mid-tick doesn't
    take effect within that same tick.
 
