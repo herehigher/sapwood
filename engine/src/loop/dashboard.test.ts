@@ -12,7 +12,7 @@ import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { before, test } from "node:test";
+import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parseDashboardArgs, parseDashboardPortFlag, resolveDashboardPort, runCli, runDashboard } from "../cli.js";
@@ -67,7 +67,7 @@ function stubServerEntry(dir: string): string {
 
 function fakeHandle(port: number): { handle: DashboardServerHandle; stopped: boolean[] } {
   const stopped: boolean[] = [];
-  return { handle: { port, stop: async () => void stopped.push(true) }, stopped };
+  return { handle: { port, pid: -1, stop: async () => void stopped.push(true) }, stopped };
 }
 
 function collectingLog(): { log: (message: string) => void; lines: string[] } {
@@ -380,11 +380,62 @@ function seedDb(dbPath: string): void {
   s.close();
 }
 
+// #786 (batch-12 close-out sweep): a suite-wide safety net for every real dist-server/start.js
+// child the tests below spawn. Each test's own `finally` already awaits `handle.stop()` — but that
+// line is unreachable if the test hangs on an earlier `await` (e.g. a stuck `fetch`) past
+// `--test-timeout`: node:test reports a timed-out test as failed WITHOUT unwinding its still-
+// pending promise chain, yet subsequent tests and this file's own `after()` hook still run
+// (verified empirically against worker.test.ts's identical shape). Registering the real pid the
+// instant a handle resolves — before any further `await` that could hang — closes that gap: even
+// if `finally` is never reached, `after()` still SIGKILLs the real child, re-verifying liveness
+// immediately before signaling (never a stale pid, never a group signal).
+const spawnedDashboardServerPids = new Set<number>();
+after(() => {
+  const forceKilled: number[] = [];
+  for (const pid of spawnedDashboardServerPids) {
+    try {
+      process.kill(pid, 0); // still alive? never signal a pid this check didn't just confirm
+    } catch {
+      continue;
+    }
+    try {
+      process.kill(pid, "SIGKILL");
+      forceKilled.push(pid);
+    } catch {
+      /* exited between the liveness check and here */
+    }
+  }
+  spawnedDashboardServerPids.clear();
+  // The sweep above always runs (cleanup is unconditional); this assertion only fires AFTER
+  // cleanup, so it reports a real regression rather than masking one — every test's own `finally`
+  // should already have reaped its own child via `handle.stop()`, so `after()` finding one still
+  // alive means some test's own teardown didn't run (e.g. a hang past `--test-timeout`).
+  assert.deepEqual(
+    forceKilled,
+    [],
+    `after() had to SIGKILL dashboard/dist-server/start.js pid(s) no test's own teardown reaped: ${forceKilled.join(", ")}`,
+  );
+});
+
+/** Wraps startDashboardServer so every real e2e test below tracks its child in the suite-wide
+ *  registry above, and stops tracking it once `stop()` has actually confirmed the child exited. */
+async function startTrackedDashboardServer(opts: Parameters<typeof startDashboardServer>[0]): Promise<DashboardServerHandle> {
+  const handle = await startDashboardServer(opts);
+  spawnedDashboardServerPids.add(handle.pid);
+  return {
+    ...handle,
+    stop: async () => {
+      await handle.stop();
+      spawnedDashboardServerPids.delete(handle.pid);
+    },
+  };
+}
+
 test("startDashboardServer (real, e2e): an OS-assigned port (0) resolves with the actual bound port", async () => {
   await withDataDir(async (dir) => {
     const dbPath = join(dir, "sapwood.sqlite");
     seedDb(dbPath);
-    const handle = await startDashboardServer({ dbPath, port: 0 });
+    const handle = await startTrackedDashboardServer({ dbPath, port: 0 });
     try {
       assert.ok(Number.isInteger(handle.port) && handle.port > 0, `expected a real bound port, got ${handle.port}`);
       const res = await fetch(`http://127.0.0.1:${handle.port}/api/loop/state`);
@@ -405,7 +456,7 @@ test("startDashboardServer (real, e2e): GET / serves the real built dashboard SP
   await withDataDir(async (dir) => {
     const dbPath = join(dir, "sapwood.sqlite");
     seedDb(dbPath);
-    const handle = await startDashboardServer({ dbPath, port: 0 });
+    const handle = await startTrackedDashboardServer({ dbPath, port: 0 });
     try {
       const res = await fetch(`http://127.0.0.1:${handle.port}/`);
       assert.equal(res.status, 200);
@@ -422,7 +473,7 @@ test("startDashboardServer (real, e2e): a second bind on an already-occupied por
   await withDataDir(async (dir) => {
     const dbPath = join(dir, "sapwood.sqlite");
     seedDb(dbPath);
-    const first = await startDashboardServer({ dbPath, port: 0 });
+    const first = await startTrackedDashboardServer({ dbPath, port: 0 });
     try {
       await assert.rejects(
         () => startDashboardServer({ dbPath, port: first.port }),
@@ -449,10 +500,10 @@ test("startDashboardServer (real, e2e): an explicit nonzero --port resolves with
   await withDataDir(async (dir) => {
     const dbPath = join(dir, "sapwood.sqlite");
     seedDb(dbPath);
-    const probe = await startDashboardServer({ dbPath, port: 0 });
+    const probe = await startTrackedDashboardServer({ dbPath, port: 0 });
     const explicitPort = probe.port;
     await probe.stop();
-    const handle = await startDashboardServer({ dbPath, port: explicitPort });
+    const handle = await startTrackedDashboardServer({ dbPath, port: explicitPort });
     try {
       assert.equal(handle.port, explicitPort);
       const res = await fetch(`http://127.0.0.1:${handle.port}/api/loop/state`);
@@ -475,7 +526,7 @@ test("startDashboardServer (real, e2e): an explicit --config is what's actually 
     const configPath = join(dir, "sapwood.config.yaml");
     // lanes.max: 9 is a value nothing else in this fixture would produce by coincidence.
     writeFileSync(configPath, "board: { owner: acme, repo: widgets, projectNumber: 7 }\nlanes: { max: 9 }\ncost: { dailyBudgetUsd: 50 }\n");
-    const handle = await startDashboardServer({ dbPath, configPath, port: 0 });
+    const handle = await startTrackedDashboardServer({ dbPath, configPath, port: 0 });
     try {
       const res = await fetch(`http://127.0.0.1:${handle.port}/api/loop/state`);
       // biome-ignore lint/suspicious/noExplicitAny: test-side JSON, asserted field by field below

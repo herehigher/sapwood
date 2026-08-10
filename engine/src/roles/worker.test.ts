@@ -18,7 +18,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
@@ -5338,6 +5338,50 @@ function reapPollSleep(opts: { held?: boolean } = {}): { sleep: (ms: number) => 
  *  test-process death (or a stop-file write that never lands) leaves the descendant running for at
  *  most 600s, never indefinitely — the same bounded-straggler ceiling every other stub in this file
  *  already carries. */
+// #786 (batch-12 close-out sweep): a suite-wide safety net for every descendant `leaderExitStub`
+// spawns, TERM-immune or not. Each test above already asks its own descendant to leave through the
+// stopFile door in its own `finally` — but `finally` never runs for a test that hangs past
+// `--test-timeout` (verified empirically: node:test reports a timed-out test as failed WITHOUT
+// unwinding its still-pending promise chain — no cancellation, nothing forces a stuck `await` to
+// reject — yet subsequent tests and this file's `after()` hook still run). That is exactly the
+// batch-12 finding: TERM-immune stubs surviving multiple full local `npm test` runs. Each
+// descendant self-registers its OWN freshly-spawned pid into this directory the instant it starts
+// (never a stale/persisted pid, never a process-group signal against a leader already waitpid'd —
+// the exact identity-proof concerns #691/#668 already drove this file's design toward); `after()`
+// re-verifies liveness immediately before signaling, then SIGKILLs directly by pid, closing the gap
+// a cooperative-only door leaves open when nothing is left to run the cooperative side of it.
+const termImmuneRegistryDir = mkdtempSync(join(tmpdir(), "sapwood-reap-pid-registry-"));
+after(() => {
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(termImmuneRegistryDir);
+  } catch {
+    entries = [];
+  }
+  const forceKilled: number[] = [];
+  for (const entry of entries) {
+    const pid = Number(entry);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    try {
+      process.kill(pid, 0); // still alive? never signal a pid this check didn't just confirm
+    } catch {
+      continue; // already gone
+    }
+    try {
+      process.kill(pid, "SIGKILL");
+      forceKilled.push(pid);
+    } catch {
+      /* exited between the liveness check and here */
+    }
+  }
+  rmSync(termImmuneRegistryDir, { recursive: true, force: true });
+  // The sweep above always runs (cleanup is unconditional); this assertion only fires AFTER
+  // cleanup, so it reports a real regression rather than masking one — every test's own `finally`
+  // should already have reaped its own descendant, so `after()` finding one still alive means some
+  // test's own teardown didn't run (e.g. a hang past `--test-timeout`), worth failing loudly on.
+  assert.deepEqual(forceKilled, [], `after() had to SIGKILL descendant pid(s) no test's own teardown reaped: ${forceKilled.join(", ")}`);
+});
+
 function leaderExitStub(dir: string, descendantReadyFile: string, opts: { ignoreTerm?: boolean; stopFile?: string } = {}): string {
   const sigtermHandler = opts.ignoreTerm
     ? "process.on('SIGTERM',()=>{});"
@@ -5346,11 +5390,14 @@ function leaderExitStub(dir: string, descendantReadyFile: string, opts: { ignore
     ? `setInterval(()=>{if(require('fs').existsSync('${opts.stopFile}'))process.exit(0);},50);`
     : "setInterval(()=>{},1000);";
   const selfBound = "setTimeout(()=>process.exit(0),600000);"; // real 600s ceiling — see this function's own doc
+  // #786: self-register into termImmuneRegistryDir under this file's own pid, so after()'s sweep
+  // can find and SIGKILL it even if the spawning test never reaches its own `finally`.
+  const selfRegister = `require('fs').writeFileSync(require('path').join('${termImmuneRegistryDir}',String(process.pid)),'');`;
   return mkStub(
     dir,
     [
       "#!/usr/bin/env bash",
-      `( exec node -e "${sigtermHandler}require('fs').writeFileSync('${descendantReadyFile}','1');${idleLoop}${selfBound}" ) &`,
+      `( exec node -e "${sigtermHandler}require('fs').writeFileSync('${descendantReadyFile}','1');${selfRegister}${idleLoop}${selfBound}" ) &`,
       `while [ ! -f "${descendantReadyFile}" ]; do sleep 0.01; done`,
       "exit 0",
       "",

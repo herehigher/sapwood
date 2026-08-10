@@ -58,6 +58,10 @@ export async function openBrowserReal(url: string): Promise<BrowserOpenResult> {
 
 export interface DashboardServerHandle {
   port: number;
+  /** The real child process pid (#786) — exposed so a caller that needs to prove the child is
+   *  actually gone (a test's own suite-wide leak sweep, never production logic) can check it
+   *  directly, without reaching into this module's internals. */
+  pid: number;
   /** Sends SIGTERM and resolves once the child has ACTUALLY exited (not just once the signal was
    *  sent) — a caller that wants to immediately reuse the same port (a restart, or this module's
    *  own tests rebinding on an explicit port) must wait for the OS to actually release the
@@ -128,7 +132,7 @@ export function startDashboardServer(opts: StartDashboardServerOpts): Promise<Da
         return;
       }
       if (msg.ok && typeof msg.port === "number") {
-        resolvePromise({ port: msg.port, stop });
+        resolvePromise({ port: msg.port, pid: child.pid as number, stop });
       } else {
         const err = new Error(msg.message ?? "dashboard server failed to start") as NodeJS.ErrnoException;
         if (msg.code) err.code = msg.code;
