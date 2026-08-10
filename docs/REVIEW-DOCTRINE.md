@@ -114,6 +114,24 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   ask: does the test's verdict itself depend on which of two uncontrolled real operations finishes
   first? If yes, it needs a seam. If the timing is only a generous, documented backstop around a
   deterministic fake or a bounded real passthrough, it is doctrine-compliant as written.
+- **Model the real thing, not a convenient proxy.** A test that encodes an acceptance criterion
+  must assert against the value the runtime actually produces — the real computed style after
+  cascade, the real rendered bounding extents, the real count after every filtering/capping rule
+  — never a value the test additionally models or assumes alongside the system under test. Two
+  failure shapes recur, both from round #353: (1) the test computes its expected value outside
+  the thing it's testing (a hand-picked font-size, a center-point distance) instead of reading it
+  from the actual render/computed style, so the two silently diverge the moment the real source
+  changes — PR #728's `hero-small`/`hero-outcome-tally` CSS-cascade reorder left the actual
+  computed size at 10px while the overlap test still modeled 9px, and stayed green until a
+  reviewer read the cascade by hand; the same PR's first round modeled overlap from element
+  *centers* rather than the elements' actual rendered extents, so a wider label or a longer
+  multi-digit tally could pass every assertion while visually colliding. (2) the test exercises
+  only the easy/nominal instance of a rule while the AC's own wording names a combinatorial or
+  boundary case it never constructs — PR #737's render-cap test used a single pinned row, so an
+  over-cap or aged-out pin (the exact case the AC's "showing latest N of M" disclosure exists
+  for) was never exercised. When an AC's claim is about geometry, a rendered count, or a boundary
+  condition, assert it from the actual rendered/computed output at that boundary, not from a
+  value modeled alongside it.
 - **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
   be prominently flagged in review, with a recommendation to route it needs-human rather than
   auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
