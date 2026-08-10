@@ -90,6 +90,24 @@ export const ESCALATION = { x: 810, y: 320 } as const;
 const NEEDS_HUMAN_COLS = 2;
 const NEEDS_HUMAN_COL_STEP = 38;
 const NEEDS_HUMAN_ROW_STEP = 34;
+/**
+ * #745 gate② round 2 finding [1]: EVERY simultaneously-`at: "checkpoint"` droplet used to draw
+ * at one fixed point — unlike `backlog` (slot counter) and `needs-human` (this same col/row
+ * grid), `checkpoint` had no per-droplet offset at all. Two PRs out for review at once is the
+ * normal steady state, not an edge case, so this collided on the most common path — the exact
+ * "N chips staged at ONE coordinate" shape #745 reports. #745 gate② round 2 [0]'s staleness fix
+ * (never deleting a droplet the fold can't vouch for) makes any such pileup durable rather than
+ * self-clearing, so this can no longer stay a fixed point. Same COLS/STEP magnitudes as
+ * NEEDS_HUMAN — same droplet label format (`⤳ 9999`/`⊙ 9999`), same verified-safe sizing;
+ * grows UPWARD (away from the CI/Review gates below), the same direction NEEDS_HUMAN grows away
+ * from its own anchor.
+ *
+ * ponytail: verified collision-free up to 6 simultaneous checkpoint droplets (3 rows) — the
+ * same lanesMax-shaped ceiling NEEDS_HUMAN documents. Revisit if a live probe reports more.
+ */
+const CHECKPOINT_COLS = 2;
+const CHECKPOINT_COL_STEP = 38;
+const CHECKPOINT_ROW_STEP = 34;
 export const TRUNK = { x: 1006, y: 156, step: 7, max: 12 } as const;
 const REFLECTION = { x: 1118, bottom: 244 } as const;
 const REFLECTION_NODES = [
@@ -138,8 +156,20 @@ export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at)
     }
     case "lane":
       return { x: LANES.x + LANES.w * 0.55, y: laneY(laneIndex(state, d)) };
-    case "checkpoint":
-      return { x: (GATES.ci + GATES.review) / 2, y: GATES.y - 46 };
+    case "checkpoint": {
+      // #745 gate② round 2 [1]: rank among CURRENTLY checkpoint-parked droplets, same
+      // `Math.max(0, findIndex(...))` idiom NEEDS_HUMAN uses below — a droplet whose real `at`
+      // has already moved on (an `escalate`/`ring` transition's hypothetical checkpoint ORIGIN,
+      // looked up via this function's own `at` override) simply isn't found and falls back to
+      // rank 0, the base position, rather than throwing or miscounting.
+      const rank = Math.max(
+        0,
+        state.droplets.filter((o) => o.at === "checkpoint").findIndex((o) => o.issue === d.issue),
+      );
+      const col = rank % CHECKPOINT_COLS;
+      const row = Math.floor(rank / CHECKPOINT_COLS);
+      return { x: (GATES.ci + GATES.review) / 2 + col * CHECKPOINT_COL_STEP, y: GATES.y - 46 - row * CHECKPOINT_ROW_STEP };
+    }
     case "needs-human": {
       // #728: wraps after NEEDS_HUMAN_COLS instead of spreading rightward without limit — an
       // unbounded row used to run the cluster straight into the trunk rings and the OUTCOME

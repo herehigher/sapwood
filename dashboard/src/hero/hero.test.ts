@@ -1169,37 +1169,69 @@ test("#745 AC1: a terminal event that never gets folded (merged/closed outside t
   );
 });
 
-// ── #745 (defensive): a lane found by worker-string match must never carry a stale occupant ──
+// ── #745 AC2: simultaneous checkpoint droplets must not collide at one shared coordinate ───
 //
-// #745 gate② finding [0] confirmed the production dispatch path never reuses a worker string
-// across two different issues, so this cannot reproduce the *reported* symptom — but
-// `claimLane` (state.ts) still finds a lane purely by worker-string match, so if a lane were
-// ever handed back with a different issue still attached (a future dispatch() caller passing an
-// explicit `name`, a replay/test double, or a bug elsewhere), the fold must not let that stale
-// occupant collide with the new one. Kept as a regression test for that invariant, not as AC1's
-// own evidence.
+// #745 gate② round 2 finding [1]: EVERY `at: "checkpoint"` droplet drew at one fixed point —
+// unlike `backlog`/`needs-human`, `checkpoint` had no per-droplet offset at all, so two PRs out
+// for review at once (the normal steady state, not an edge case) already collided before this
+// fix. Round 2 [0]'s never-delete staleness policy (previous test block) makes any such pileup
+// durable rather than self-clearing, so a fixed point was no longer tenable. Reproduced through
+// the real fold exactly as the finding's own repro: two separate issues each reach checkpoint
+// via their own dispatch+reclaim-done pair — no hand-placed state.
+//
+// #745 gate② round 2 finding [2]: the round-1 `dispatched`-case lane-reuse eviction is removed
+// (state.ts) — confirmed dead code on the production path (worker names embed the issue number
+// plus a UUID, so `lane.issue !== issue` can never hold for a fresh dispatch) and, worse, unsafe
+// in the hypothetical it claimed to guard: `claimLane`'s worker-string match doesn't check lane
+// phase, so it could have deleted a genuinely live `at: "checkpoint"` droplet outright. The
+// checkpoint offset above is the real, reachable fix for the reported pileup; this file no
+// longer carries a test for the removed branch.
 
-test("#745 (defensive): a lane reused while still pinned to a different issue must not collide chips or count the stale occupant as pending", () => {
-  const events = [
-    ev("dispatched", { worker: "w1", issue: 111 }),
-    ev("reclaim-failed", { worker: "w1", issue: 111, next: "ESCALATE" }),
-    ev("dispatched", { worker: "w1", issue: 222 }),
+test("#745 AC2: two PRs simultaneously out for review render at distinct stage positions, never the identical coordinate", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 11 }),
+    ev("dispatched", { worker: "w2", issue: 2 }),
+    ev("reclaim-done", { worker: "w2", issue: 2, next: "DRIVING", pr: 12 }),
+  ]);
+  const d1 = droplet(state, 1);
+  const d2 = droplet(state, 2);
+  assert.ok(d1 && d2);
+  assert.equal(d1.at, "checkpoint");
+  assert.equal(d2.at, "checkpoint");
+
+  const p1 = dropletPoint(state, d1);
+  const p2 = dropletPoint(state, d2);
+  assert.notDeepEqual(p1, p2, "two simultaneously-checkpointed droplets must not share a stage position");
+
+  const boxes: { label: string; box: Box }[] = [
+    { label: "checkpoint #1 circle", box: circleBox(p1.x, p1.y, 9) },
+    { label: "checkpoint #1 label", box: textBox("⤳ 11", p1.x, p1.y - 14, 10) },
+    { label: "checkpoint #2 circle", box: circleBox(p2.x, p2.y, 9) },
+    { label: "checkpoint #2 label", box: textBox("⤳ 12", p2.x, p2.y - 14, 10) },
   ];
-  const { state: rawState } = run(events, 3);
-  const state = withVisibleLanes(rawState, 3);
-  assert.equal(droplet(rawState, 111), undefined, "the stale occupant must not linger once its lane is reused");
+  assertNoOverlap(boxes);
+  for (const { label, box } of boxes) {
+    assert.ok(box.left >= 0 && box.right <= STAGE.w, `${label} left=${box.left} right=${box.right} lies outside [0, ${STAGE.w}]`);
+    assert.ok(box.top >= 0 && box.bottom <= STAGE.h, `${label} top=${box.top} bottom=${box.bottom} lies outside [0, ${STAGE.h}]`);
+  }
+});
 
-  const html = markup(rawState, { lanesMax: 3 });
-  assert.equal(html.match(/class="hero-droplet"/g)?.length, 1, "the stale occupant must not render alongside the fresh dispatch");
+test("#745 AC2: six simultaneous checkpoint droplets — CHECKPOINT_COLS/STEP's own documented verified-safe ceiling — stay collision-free and within stage bounds", () => {
+  const events: DomainEvent[] = [];
+  for (let i = 1; i <= 6; i++) {
+    events.push(ev("dispatched", { worker: `w${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `w${i}`, issue: i, next: "DRIVING", pr: 100 + i }));
+  }
+  const { state } = run(events, 6);
+  const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
+  assert.equal(checkpointed.length, 6);
 
-  // Every visible chip's REAL rendered extent (circle + label), never just its anchor point —
-  // an in-bounds center can still draw an offstage-visible label (`.hero` is `overflow: visible`).
   const boxes: { label: string; box: Box }[] = [];
-  for (const d of state.droplets) {
+  for (const d of checkpointed) {
     const { x, y } = dropletPoint(state, d);
-    const label = d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`;
-    boxes.push({ label: `droplet #${d.issue} circle`, box: circleBox(x, y, 9) });
-    boxes.push({ label: `droplet #${d.issue} label`, box: textBox(label, x, y - 14, 10) });
+    boxes.push({ label: `checkpoint #${d.issue} circle`, box: circleBox(x, y, 9) });
+    boxes.push({ label: `checkpoint #${d.issue} label`, box: textBox(`⤳ ${d.pr}`, x, y - 14, 10) });
   }
   assertNoOverlap(boxes);
   for (const { label, box } of boxes) {

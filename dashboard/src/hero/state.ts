@@ -445,14 +445,6 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
     case "dispatched": {
       if (issue === null || worker === null) return null;
       const lane = claimLane(draft, worker);
-      // #745: `claimLane` finds a lane purely by worker-string match — a lane still pinned to
-      // a DIFFERENT issue means that issue's own resolving event never arrived (the FAILURE_KINDS
-      // non-rescue path sets `phase: "failed"` but never calls `releaseLane`, so the droplet
-      // stays parked at `at: "lane"` forever — `moveDroplet`'s own doc). The engine reusing this
-      // worker for fresh work IS the signal that the old attempt is over: drop its stranded
-      // droplet rather than let it keep counting as pending and colliding with the new droplet
-      // at the same stage position (§6, same worker → same `dropletPoint`).
-      if (lane.issue !== null && lane.issue !== issue) draft.droplets.delete(lane.issue);
       lane.issue = issue;
       lane.phase = "writing";
       lane.fixRound = 0;
@@ -603,16 +595,30 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
  * first attempt at this problem SILENTLY DELETED a droplet past this threshold, which the
  * finding correctly named as trading one belief-vs-reality misword (terminal work read as
  * pending) for a worse one (live work silently vanishing, undercounting the tally). Neither
- * direction is something event age alone can arbitrate — so this fold does not decide it
- * either way: `isPendingStale` only flags a droplet old enough that the fold should stop
- * CLAIMING to know its state. The droplet is never deleted — `stage.tsx` reads this flag to
- * keep it drawn while moving it out of the confident "N pending" count and into an explicitly
- * uncertain label, honest about not knowing rather than guessing in either direction. 2000
- * mirrors `replay/reducer.ts`'s `DEFAULT_EVENT_WINDOW` (the dashboard's own bound on how much
- * event history it commits to treating as "recent") — declared independently here since that
- * module imports FROM this one, never the reverse.
+ * direction is something event age alone can arbitrate with certainty — so this fold does not
+ * decide it either way: `isPendingStale` only flags a droplet old enough that the fold should
+ * stop CLAIMING to know its state. The droplet is never deleted — `stage.tsx` reads this flag
+ * to keep it drawn while moving it out of the confident "N pending" count and into an
+ * explicitly uncertain label, honest about not knowing rather than guessing in either
+ * direction.
+ *
+ * #745 gate② round 2 finding [0]: the PREVIOUS value (2000, borrowed from
+ * `replay/reducer.ts`'s unrelated `DEFAULT_EVENT_WINDOW` display-tail cap) made the mechanism
+ * inert at the exact scale #745 was reported at — the probed DB's own `lastId` (feed cap "200
+ * of 2002") is ≈2002, so a droplet needed a last-touch event id below ~2 to ever qualify;
+ * none of the reported ⤳422…⤳707 cohort could. 500 is derived from that SAME probe instead of
+ * borrowed from an unrelated cap: 2 merged + 39 pending + 6 needs human ≈ 47 items total drawn
+ * from ≈2002 events is ≈40 events/item on average, so 500 (≈12x that average) comfortably
+ * clears a typical still-moving PR's own event cadence — dispatch, drive, fix rounds, reclaim —
+ * while catching anything that has gone many multiples of a typical item's own footprint
+ * without a touch, exactly the reported multi-hundred-event-old stragglers. This still trades
+ * in ONE direction only, and says so rather than claiming both: a threshold this size favors
+ * flagging real-but-slow work as uncertain (false "stale") over leaving terminal-but-unmodeled
+ * work in the confident count (false "pending") — deliberately, since the reported defect IS a
+ * false-confident tally, and `stage.tsx`'s honest-uncertainty label (never a deletion) makes a
+ * false "stale" cheap: the droplet stays fully visible, just not vouched for.
  */
-export const PENDING_STALE_AFTER = 2000;
+export const PENDING_STALE_AFTER = 500;
 
 /** Whether a droplet has gone long enough without its own event that the fold should stop
  *  confidently claiming to know its state — see this constant's own doc for what that does
