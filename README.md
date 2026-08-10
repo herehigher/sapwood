@@ -13,6 +13,36 @@ up or down through the [L0–L3 autonomy ladder](docs/getting-started.md#l0l3-au
 read-only preview, one supervised issue, human-merged PRs, or governed unattended
 merge.
 
+## Design principles
+
+- **producer ≠ reviewer ≠ merger** — **plugin-enforced for covered built-in
+  Bash/file-tool actions:** the fail-closed guard prevents a worker from
+  approving or merging its own work, rather than asking it to refrain in a
+  prompt. Ambient MCP tools and unknown servers are documented accepted blind
+  spots; protected branches and a distinct merger identity are the mandatory
+  deployment backstop for the full boundary.
+- **GitHub is the source of truth for the cross-actor development process** —
+  **plugin-enforced:** the engine uses the ProjectV2 board, issues, pull
+  requests, and checks as process state, with no hidden second work queue to
+  maintain. Its local SQLite ledger holds single-machine runtime state (lanes,
+  events, and spend), not a parallel task board.
+- **fail-closed, not advisory** — **plugin-enforced:** an invalid or blocked
+  guarded action is denied, and the merge path waits for its configured gates.
+  Unlike advisory-only AI review, its conclusion is not merely a recommendation
+  that the producer can act around.
+- **legible, ledger-checked cost** — **plugin-enforced for recorded worker,
+  round, and daily spend:** ledger-based ceilings are checked post-hoc at
+  admission/drain points; dry-run preview and a kill switch make the controls
+  visible. The `codex-exec` review cost cap is advisory (with a hard wall-clock
+  timeout); non-decisive review attempts are unledgered, and subagent fan-out
+  is a documented blind spot.
+
+**Deployment prerequisite.** The plugin's guard mediates the covered built-in
+Bash/file-tool family, not inherited ambient MCP tools or unknown servers. For
+unattended merge, protected branches and a distinct merger identity establish the
+load-bearing boundary described in [Trust model prerequisites](docs/getting-started.md#trust-model-prerequisites).
+A fresh installation does not establish those repository settings.
+
 > Status: **early development** (pre-v1). The framework is being extracted and
 > re-implemented from a proven private project; see [`docs/PLAN.md`](docs/PLAN.md)
 > for the full goals, architecture, and roadmap.
@@ -25,38 +55,41 @@ heartwood: the stable core that holds the tree up.
 
 That is this loop. Bark — the fail-closed guard — protects the living layer from
 the outside. Sapwood is where the work grows: workers producing new code in
-parallel. Heartwood is `main` — and nothing becomes heartwood until it has passed
-the review gate and hardened. Growth at the edge, structure at the core,
-protection in between.
+parallel. Heartwood is `main` — with the [Trust model
+prerequisites](docs/getting-started.md#trust-model-prerequisites) in place, nothing
+becomes heartwood until it has passed the review gate and hardened. Growth at the
+edge, structure at the core, protection in between.
 
 ## Why it's different
 
 Most autonomous coding tools ask you to trust the model and let it merge. sapwood's
-core is the opposite: a **fail-closed safety layer** that structurally separates the
-roles in the loop.
+plugin enforces a governance path instead of treating review as advice.
 
-- **producer ≠ reviewer ≠ merger** — the worker that writes the code can never
-  approve or merge it. Enforced by a fail-closed PreToolUse hook, not a prompt.
-- **GitHub is the source of truth** — a ProjectV2 board's `Status` field + issue
-  labels *are* the work queue. No hidden database, no opaque state.
-- **Configurable review chain** — by default the merge is gated on an independent
-  (different-model) code review, the way the source project works: CI green + a fresh
-  review → the conductor merges. The reviewer is pluggable, and a *produce-PR-and-stop*
-  mode (a human clicks merge) is available when you want a tighter leash.
-- **Cost is bounded and legible** — engine-enforced spend ceilings, a dry-run
-  preview, and a kill switch.
+- **Configurable review chain** — **plugin-enforced:** the merge path is gated on
+  CI and a fresh review before the conductor can merge. The reviewer is pluggable,
+  and a *produce-PR-and-stop* mode (a human clicks merge) is available when you
+  want a tighter leash. The protected-branch and distinct-identity requirements
+  remain [deployment prerequisites](docs/getting-started.md#trust-model-prerequisites).
+
+## Prior art & inspiration
+
+sapwood acknowledges [loop-engineering](https://github.com/cobusgreyling/loop-engineering)
+and the [loop-engineering orange book](https://github.com/alchaincyf/loop-engineering-orange-book)
+as methodological prior art, including the threads they collect. They inform the
+craft of building and documenting agent loops; they are not sapwood's category label.
 
 ## How it works
 
 A nested loop dispatches one **headless worker per issue**, each in its own git
-worktree. Workers do TDD, open a PR, and request review — but never merge. Worker
-completion is signaled by the wrapper writing sentinel files, not by the model's
-self-report. The conductor reclaims finished lanes, drives PRs through the review
-gate, and (in autonomous mode) merges.
+worktree. Workers do TDD and push their branch, but do not approve or merge. The
+engine opens the PR, and worker completion is signaled by the wrapper writing sentinel
+files, not by the model's self-report. The conductor reclaims finished lanes, drives
+PRs through the review gate, and (in autonomous mode) merges when the deployment
+prerequisites above are in place.
 
 ```
 GitHub issue (Ready)
-   → claim → isolated worktree → TDD → PR (Closes #N) → independent review
+   → claim → isolated worktree → TDD → push → engine opens PR (Closes #N) → independent review
    → [default] CI green + review → conductor merges   |   [opt] stop for human merge
    → board: Done
 ```
@@ -86,7 +119,7 @@ flowchart LR
   end
 
   subgraph SESSIONS["Headless Claude sessions"]
-    WORKER["Workers<br/>one git worktree per issue<br/>TDD → PR, never merge"]
+    WORKER["Workers<br/>one git worktree per issue<br/>TDD → push, never merge"]
     GUARD["guard.ts<br/>fail-closed PreToolUse hook"]
     WORKER --- GUARD
   end
@@ -96,7 +129,8 @@ flowchart LR
   ISSUES -->|Ready| CONDUCTOR
   ROUND -->|"drives ticks (executing phase)"| CONDUCTOR
   CONDUCTOR -->|dispatch| WORKER
-  WORKER -->|"push branch, open PR (gh)"| PRS
+  WORKER -->|"push branch"| PRS
+  FORGE -->|"open PR"| PRS
   WORKER -.->|"sentinel files (local)"| CONDUCTOR
   CONDUCTOR --> GATE
   GATE -->|trigger review| REVIEWER
