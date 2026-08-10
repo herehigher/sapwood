@@ -1,4 +1,4 @@
-// Parity tests for the conductor's pure scheduling core — a faithful port of 0day's
+// Parity tests for the conductor's pure scheduling core — a faithful port of the predecessor project's
 // ops/loop/test_loop_conductor.sh assert table. Same semantics, TS types (booleans for
 // the bash 0/1 sentinel/flag args, string[] for the CSV label args). If a row here
 // disagrees with the bash row it mirrors, that's a parity regression.

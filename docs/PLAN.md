@@ -2,11 +2,10 @@
 
 ## Context
 
-`0day` (github.com/herehigher/0day) is a Polymarket quant system, but its most
-reusable asset is the **autonomous development framework** it was built with: an
-AI-led, GitHub-native, self-directed dev loop. Today that framework is ~4,700
-lines of macOS-bash (~3,400 non-test) entangled with the trading domain, hard to
-read, hard to maintain, and not packaged for anyone else to use.
+A private predecessor project’s most reusable asset is the **autonomous development
+framework** it was built with: an AI-led, GitHub-native, self-directed dev loop. Today
+that framework is ~4,700 lines of macOS-bash (~3,400 non-test), hard to read, hard to
+maintain, and not packaged for anyone else to use.
 
 **sapwood** extracts that framework, re-implements the engine in TypeScript, and
 ships it as a **public, production-usable Claude Code plugin** so any repo can run
@@ -18,7 +17,8 @@ product is the trust/governance layer, not a dashboard.** producer≠reviewer≠
 enforced by a fail-closed hook, is the thing no competitor (Sweep, OpenHands,
 Copilot Workspace, Claude's own `/loop`) ships. We lead with that.
 
-The trading domain stays behind in 0day. sapwood is the method, not the money.
+The predecessor’s application-specific behavior stays behind. sapwood is the method,
+not the original product.
 
 ## Positioning & vision
 
@@ -30,7 +30,7 @@ The trading domain stays behind in 0day. sapwood is the method, not the money.
 - **Target user (v1):** a solo dev or small-team lead who actively uses Claude
   Code, maintains a GitHub repo with a live issue backlog, and is comfortable with
   AI opening PRs. **Trust context = trusted repos first** (your own / your team's),
-  where issue authors are trusted — matching 0day's proven context.
+  where issue authors are trusted — matching the predecessor project's proven context.
 - **Long-term arc:** evolve into a **governance layer for AI-led development** —
   pluggable forge (GitLab/Gitea), pluggable reviewer, public-repo hardening
   (untrusted-input safe), a real supervisor, and eventually a dashboard. The forge
@@ -45,7 +45,7 @@ The trading domain stays behind in 0day. sapwood is the method, not the money.
   artifact (the tool building the thing that visualizes it). This is stronger
   evidence than any test suite that the loop handles real, non-trivial work.
 
-## What the framework does (extracted from 0day)
+## What the framework does (extracted from a private predecessor project)
 
 A 3-layer nested loop: `/loop` (harness) ⊃ `/dev-round` (one full round A–E) ⊃
 `/dev-loop` → `loop_conductor.sh tick` (one scheduling beat).
@@ -55,16 +55,12 @@ A 3-layer nested loop: `/loop` (harness) ⊃ `/dev-round` (one full round A–E)
 - **Workers = headless `claude -p`** in isolated git worktrees, one per issue.
   Completion signaled by the wrapper writing `.done.json`/`.failed.json` sentinels
   — **not** the model's self-report (keep this; it's the robust part).
-- **Safety core = fail-closed PreToolUse hook** (`backend/src/zeroday/loop/guard.py`)
-  enforcing **producer≠reviewer≠merger**.
+- **Safety core = fail-closed PreToolUse hook** enforcing **producer≠reviewer≠merger**.
 - **State** = `data/sessions/run-state.json` + per-worker sentinels + per-round
   `metrics.json`/`events.jsonl`.
 
-Reference files in 0day (port from): `ops/loop/loop_conductor.sh` (1,392 lines),
-`ops/loop/loop_worker.sh`, `ops/loop/loop_merge_driver.sh`, `ops/loop/lib.sh`, and
-`scripts/{claim_issue,pr_gate,board_ready,board_done,board_selffeed,
-bootstrap_github,session_start}.sh`. Guard: `backend/src/zeroday/loop/guard.py`
-+ `backend/tests/loop/test_guard.py`.
+Reference files in the private predecessor repo include its loop conductor, worker,
+merge-driver, shared library, GitHub-plumbing scripts, safety hook, and guard tests.
 
 ## Locked decisions
 
@@ -74,8 +70,8 @@ bootstrap_github,session_start}.sh`. Guard: `backend/src/zeroday/loop/guard.py`
 | 2 | Engine language | TypeScript (whole stack) |
 | 3 | Trust context | **Trusted repos first**, architected toward public-repo hardening |
 | 4 | Dashboard | **Deferred to v0.2.** v1 ships a CLI/terminal status view; validate demand, then build the dashboard from real usage |
-| 5 | Default merge gate | **Autonomous-merge gated on a fresh, different-model PR review** — gate① CI green + gate② a fresh non-author review → the Conductor merges (producer≠merger). Reviewer is pluggable: the local **engine-agent** session (Decision #10 — **default**, #501), hosted different-model Codex, same-model-trusted, or human; **produce-PR-and-stop** remains selectable when a human must merge. **Amended 2026-08-01 (#501):** originally 0day-style hosted-Codex-by-default (matching 0day and the original security review's recommendation); flipped to the local engine-agent kind — production-validated (E4c, #434 retro trial) and runs on the Claude CLI every sapwood user already has, where hosted Codex required a separate `@codex review` GitHub App install most fresh users wouldn't have. Hosted Codex stays fully selectable (`reviewer.mode: different-model-codex`). |
-| 6 | Method | 0day's TDD + two-gate + taxonomy as overridable defaults |
+| 5 | Default merge gate | **Autonomous-merge gated on a fresh, different-model PR review** — gate① CI green + gate② a fresh non-author review → the Conductor merges (producer≠merger). Reviewer is pluggable: the local **engine-agent** session (Decision #10 — **default**, #501), hosted different-model Codex, same-model-trusted, or human; **produce-PR-and-stop** remains selectable when a human must merge. **Amended 2026-08-01 (#501):** originally predecessor-project-style hosted-Codex-by-default (matching the predecessor project and the original security review's recommendation); flipped to the local engine-agent kind — production-validated (E4c, #434 retro trial) and runs on the Claude CLI every sapwood user already has, where hosted Codex required a separate `@codex review` GitHub App install most fresh users wouldn't have. Hosted Codex stays fully selectable (`reviewer.mode: different-model-codex`). |
+| 6 | Method | The predecessor project's TDD + two-gate + taxonomy as overridable defaults |
 | 7 | Config format | **YAML default** — `sapwood.config.yaml`, hand-edited with inline comments (serves "易读易配置"). Zod-validated after parse. The YAML parser also reads JSON for free (YAML ⊃ JSON), so `.json` works with zero extra code; no separate `.ts` config. |
 | 8 | Dispatch readiness | **An issue is not `Ready` until it carries a verification plan** — acceptance criteria + how to prove them (tests to write/run, commands, observable outcomes). Authored by the issue author/triage *before* the producer starts (keeps producer≠author). Enforced at the `Ready` gate (`getReadyIssues` refuses issues without one) **and** re-checked by the reviewer at gate② (the PR must satisfy the stated plan). Inherently-unverifiable issues (docs/knowledge, chore) are labelled `verify:n/a` and use the round-close doc gate / a lighter definition-of-done instead, so the gate never blocks legitimate work. Cheap (plan written once, read by worker + reviewer who already read the diff); net-saves by killing wrong-direction PRs and rework. **Amended 2026-07-09 (gate⓪, lands in v0.2 — see the v0.2 chapter):** presence alone is no longer the bar — a **verification-plan-reviewer peripheral (gate⓪)** reviews each plan's quality/feasibility post-`Ready`, pre-dispatch, and `getReadyIssues` requires the plan **and** its `plan:approved` label (fail-closed). `verify:n/a` is never self-declared: gate⓪ can only *propose* it, always paired with `needs-human`, and a human finalizes the adjudication by removing `needs-human` (→ doc-gate path). |
 | 9 | Edge-case handling | **Rare edge cases degrade to `needs-human`, never to more machinery** (CTO, 2026-07-07, #69). Automation covers the common path only; when a low-probability edge would require new hardening/persistence/recovery code, the correct handling is: preserve the evidence, label `needs-human`, stop. First application: the drain path never runs git in worker worktrees (the whole #59–#68 issue family collapsed into sentinel-only handoff + dirty-worktree retention). |
@@ -90,7 +86,7 @@ bootstrap_github,session_start}.sh`. Guard: `backend/src/zeroday/loop/guard.py`
 ```
 sapwood/
 ├── .claude-plugin/          # plugin manifest (skills, commands, hooks)
-├── skills/                  # dev-round, dev-loop (ported from 0day skills)
+├── skills/                  # dev-round, dev-loop (ported from predecessor-project skills)
 ├── commands/                # /sapwood-init, /sapwood-run, /sapwood-status, /sapwood-stop ...
 ├── engine/                  # TS orchestration engine (the port)
 │   ├── conductor.ts         # scheduler: tick (reclaim→drive→resume→dispatch), state machine
@@ -117,9 +113,9 @@ sapwood/
   checks and provisioning use the `gh`/`ghText` helper directly. GitLab/Gitea would be
   a semantic port, not an endpoint swap. Do not regroup or abstract the interface while
   there is exactly one implementation; revisit the boundary when a second forge is
-  actually scheduled. Config still removes 0day's repository-specific hard-coding
+  actually scheduled. Config still removes the predecessor project's repository-specific hard-coding
   (`PROJECT_NUMBER`, owner kind, literal board lane names, trusted-reviewer login).
-- **SQLite (WAL) state.** Replaces 0day's non-atomic `jq` read-modify-write with no
+- **SQLite (WAL) state.** Replaces the predecessor project's non-atomic `jq` read-modify-write with no
   locking (`loop_conductor.sh:738-762`). Conductor stays single-writer-serial;
   WAL gives atomic writes + concurrent reads (for `sapwood status`). Fully durable
   → engine restart is always a clean resume. Schema is versioned (migration path).
@@ -152,7 +148,7 @@ Zero-runtime-dependency-where-possible, fail-closed-by-default:
 - **Config:** YAML default (JSON parses for free), Zod-validated and **`.strict()`**
   (unknown keys / typos error, never silently drop) and **`.finite()`** on budget
   ceilings (overflow can't disable the cap). `loadConfig()` probes
-  `sapwood.config.{yaml,yml,json}`. Every 0day `LOOP_*` env var is a named, defaulted,
+  `sapwood.config.{yaml,yml,json}`. Every predecessor-project `LOOP_*` env var is a named, defaulted,
   documented field (mapping in `engine/src/config/config.ts`).
 - **Forge:** all subprocess calls use `execFile` with argv arrays — never `shell:true`.
 - **CI-green is fail-closed:** an empty `statusCheckRollup` is **not** green (checks
@@ -184,8 +180,8 @@ Zero-runtime-dependency-where-possible, fail-closed-by-default:
 **M1 guard (locked, delivered in PRs #27 / #28)**
 
 `guard.ts` is the fail-closed PreToolUse safety core — a pure, zero-dep, deterministic
-`guardDecision(tool, input, cwd)`. Ported the *generic safety mechanism* from 0day's
-`guard.py`, **not the trading domain** (CLAUDE.md):
+`guardDecision(tool, input, cwd)`. Ported the *generic safety mechanism* from the
+predecessor project's `guard.py`, **not proprietary application behavior** (CLAUDE.md):
 
 - **Ported:** shlex-equivalent tokenizer, fragment splitting (`$()`/`` `` `` recurse),
   recursive exec-prefix stripping (env/uv/npx/poetry/`command`/`stdbuf`/leading
@@ -194,13 +190,13 @@ Zero-runtime-dependency-where-possible, fail-closed-by-default:
   C — gh overreach** = the structural producer≠merger/reviewer enforcement (`gh pr
   merge|ready`, `gh pr review --approve/-r`, `gh release`, `gh api` mutating
   merge/release paths + graphql mutations + `@file`/`--input` fail-closed).
-- **Omitted:** 0day's Category A (on-chain funds) / B (private keys).
+- **Omitted:** the predecessor project's application-specific categories.
 - **Write-path protection (#9):** denies writes to boundary files — `.claude/settings*.json`,
   `.github/workflows/**`, `guard.ts`/`guard-hook.ts`/`reviewer.ts` — across **both** the
   Write/Edit tools **and** Bash (redirections incl. `>|`/`&>`/`>&`, `tee`/`sed -i`/`dd`/
   `cp -t`/`mv`/`rm`/`git rm|mv|restore|checkout`), scanned position-independently so a
   wrapper can't hide the write. These files are human-merge-only.
-- **Fail-closed (a deliberate divergence from 0day, which fails open):** the hook denies
+- **Fail-closed (a deliberate divergence from the predecessor project, which fails open):** the hook denies
   on malformed JSON, a non-object payload, a guarded tool with malformed `tool_input`, or
   any thrown guard. A safety hook disable-able with garbage isn't one.
 - **Verification:** a BLOCK/ALLOW bypass matrix (`guard.test.ts`) **plus** a differential
@@ -211,15 +207,15 @@ Zero-runtime-dependency-where-possible, fail-closed-by-default:
 
 **M2 engine core (locked, delivered in PRs #30 / #32 / #34, dogfood #35→#36)**
 
-The scheduler + worker + live guard. TS port of 0day's `loop_conductor.sh` +
-`loop_worker.sh` — the *generic scheduling/worker mechanics only*, never the trading
-domain (no reserve/SLA/eval-report/HTML machinery).
+The scheduler + worker + live guard. TS port of the predecessor project's
+`loop_conductor.sh` + `loop_worker.sh` — the *generic scheduling/worker mechanics
+only*, never application-specific behavior.
 
 - **`conductor.ts`** — pure scheduling core mirrors `test_loop_conductor.sh` row-for-row
   (`classifyLane` 4-signal lane state, `issuePriority` [matches configured-prefix `prio:N`, bare when the prefix is empty, and suffixed],
   `labelsBlockers`, `budgetExceeded`, `codingFloor`/`isCodingRank`/`metaLaneAllowed`
   anti-starvation, `laneOnReclaim*`, `driveDecision`). **Structured discriminated-union tick
-  result** replaces 0day's stringly-typed `DISPATCHED/RECLAIMED` text protocol. `tick()` =
+  result** replaces the predecessor project's stringly-typed `DISPATCHED/RECLAIMED` text protocol. `tick()` =
   reclaim→drive→resume→dispatch with **dependency injection** (`IForge` + `Supervisor` + `State`
   injected → the whole tick is unit-testable with no real `claude`/`gh`). New **`driving`**
   lane state: a PR-backed reclaimed lane keeps occupying a lane against `lanes.max` until the
@@ -230,7 +226,7 @@ domain (no reserve/SLA/eval-report/HTML machinery).
 - **`worker.ts`** — the only module touching the Claude CLI: headless `claude -p` in a git
   worktree (argv array, **no shell**, **detached process group**), atomic sentinels
   (`.running`/`.done`/`.failed`/`.handoff`, tmp+rename), heartbeat + PID liveness,
-  **process-tree kill** via `kill(-pid)` (the tree 0day couldn't on bash 3.2), stream-json cost
+  **process-tree kill** via `kill(-pid)` (the predecessor project could not on bash 3.2), stream-json cost
   parse, name-reuse reject, wall-clock **timeout enforcement**, spawn-error handling.
   Completion is signaled by the WRAPPER, not the model — and there is **no `--add-dir data`**,
   so a worker cannot forge its own sentinels or mutate engine state.
@@ -243,7 +239,7 @@ domain (no reserve/SLA/eval-report/HTML machinery).
   `disableAllHooks` → forced `false`; and three self-protection writes now blocked by the guard
   boundary — `sapwood.config.*`, the compiled `engine/dist/guard/guard*.js` artifact, and (removed
   entirely) the settings file. Dispatch **fails closed** if the compiled hook is missing.
-- **Scope boundaries:** `drive_decision` only — the PR-gate ACTION→action map (0day
+- **Scope boundaries:** `drive_decision` only — the PR-gate ACTION→action map (the predecessor project
   `merge_decision`/`pr_gate`) + parity vs `test_loop_merge_driver.sh` move to **M3** with
   `merge-driver.ts`. Deferred follow-ups: **#31** (double-failure rollback/requeue hardening),
   **#33** (soft-budget *auto*-enforcement — needs a live cost signal, which stream-json does not
@@ -263,7 +259,7 @@ domain (no reserve/SLA/eval-report/HTML machinery).
 
 The gates + the ceiling: the engine can now *finish* work autonomously — review-gate a
 PR, merge it under the locked two-gate policy, and stop itself when spend or a human
-says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.sh`.
+says stop. TS port of the predecessor project's `pr_gate.sh` ACTION protocol + `loop_merge_driver.sh`.
 
 - **`reviewer.ts` (#13)** — pluggable gate②: **different-model Codex** (default) /
   same-model-trusted-only / human (engine-agent added in M10 — Decision #10). A verdict is pinned
@@ -879,19 +875,19 @@ more-privileged audit grant. sapwood has no standing "audit role" with elevated 
 scope; if one is ever justified, it is an addition to this recorded posture, not
 evidence that today's posture was incomplete.
 
-The committee's keystone finding remains: 0day's guard was built for a *trusted* model
+The committee's keystone finding remains: the predecessor project's guard was built for a *trusted* model
 on a *private* repo. v1 stays in that deployment context, **but we build the seams so
 public-repo hardening is additive, not a rewrite.** v1 requirements:
 
 - **Guard port hardening (M1, ships green before anything autonomous runs):**
-  `guard.ts` is a **zero-dependency** module; reproduce 0day's ~100 bypass cases
+  `guard.ts` is a **zero-dependency** module; reproduce the predecessor project's ~100 bypass cases
   **and** add differential/fuzz testing against `guard.py` on random shell strings
   (the tokenizer divergence — `shlex` vs TS — is the real bypass surface, e.g.
   `guard.py:36-93`). **Fail-closed on hook error/timeout/malformed output** is a
   tested requirement. Engine must use `execFile`/`spawn` with arg arrays — never
   `child_process.exec`/`shell:true`.
 - **Structural producer≠merger (not just the argv guard):** the merge is always
-  executed by the Conductor, never the worker (matches 0day's `loop_merge_driver.sh`),
+  executed by the Conductor, never the worker (matches the predecessor project's `loop_merge_driver.sh`),
   backed by branch protection + a merge identity distinct from the worker, so the
   invariant holds even if the guard is bypassed. gate② is a fresh non-author review from
   the configured reviewer kind (the local engine-agent session by default, #501; or hosted
@@ -910,7 +906,7 @@ public-repo hardening is additive, not a rewrite.** v1 requirements:
     Conductor treats handoff as "incomplete, resumable" and may `--resume` later. Work
     is always durable because the worker checkpoints (commit + push + note) at **every
     green step**, not just at exit — so the latest pushed state is itself a handoff.
-    This improves on 0day, which passes `--max-budget-usd` as a hard cut
+    This improves on the predecessor project, which passes `--max-budget-usd` as a hard cut
     (`loop_worker.sh:81`) and only has crash-`--resume` (no pre-budget handoff).
     **Auto-enforced (#33) via live token estimation:** stream-json carries no in-progress
     `total_cost_usd` (only the terminal result line has it), so `worker.ts` accumulates a
@@ -1028,7 +1024,7 @@ marker idempotency, output schema, escalation path) see
      the exact fix (`gh auth refresh -s project`) and exit cleanly.
   2. **User-vs-org detection** before any ProjectV2 mutation.
   3. **Idempotent, recovery-safe provisioning:** detect existing board/fields/options
-     before creating; tolerate partial failure; safely re-runnable. (0day stops here
+     before creating; tolerate partial failure; safely re-runnable. (The predecessor project stops here
      and asks the human to make the board by hand — `bootstrap_github.sh:89`; we
      automate it.)
   4. Writes a starter `sapwood.config.yaml` (with explanatory comments) and wires the guard hook.
@@ -1056,7 +1052,7 @@ marker idempotency, output schema, escalation path) see
   `verify:n/a` label, config write). Provisions the **inputs** for the Decision #8
   `Ready` gate (the `verify:n/a` label, board lanes); the gate is *enforced* once
   `getReadyIssues` is implemented in M2 (it fails closed until then). Automates the
-  manual board step 0day left to the human (`bootstrap_github.sh:89`). Key behaviors
+  manual board step the predecessor project left to the human (`bootstrap_github.sh:89`). Key behaviors
   (see "M0.5 init" above). Early so real users can try it and feedback the config
   schema before it locks.
 - **M1 — Guard port (safety first):** ✅ **delivered (PRs #27, #28).** zero-dep
@@ -1067,12 +1063,12 @@ marker idempotency, output schema, escalation path) see
 - **M2 — Engine core:** ✅ **delivered (PRs #30, #32, #34; dogfood #35→#36).**
   `conductor.ts` (tick: reclaim→drive→resume→dispatch, structured results, parity core), `worker.ts`
   (headless `claude -p` in a worktree), and the guard **wired live** into worker sessions
-  (#26, hard-default/soft-opt-in). Parity tests against 0day's pure-function tests
+  (#26, hard-default/soft-opt-in). Parity tests against the predecessor project's pure-function tests
   (`test_loop_conductor.sh`); **dogfooded end-to-end** (claim→worktree→TDD→PR, guard live, no
   self-merge). Key decisions + deferrals (#31/#33/#37) in "M2 engine core" above.
   `merge_decision` + parity vs `test_loop_merge_driver.sh` move to M3 with the merge-driver.
 - **M3 — Review gate + merge modes:** ✅ **delivered (PRs #41, #42, #43, #44; hardening
-  #39, #40).** `reviewer.ts` + `merge-driver.ts` with the **0day-style default**:
+  #39, #40).** `reviewer.ts` + `merge-driver.ts` with the **predecessor-project-style default**:
   autonomous-merge gated on a fresh non-author Codex review (gate②) + CI green (gate①),
   merged by the Conductor; produce-PR-and-stop selectable. Pluggable reviewer
   (different-model Codex / same-model-trusted-only / human; engine-agent added in M10 —
@@ -1256,9 +1252,9 @@ marker idempotency, output schema, escalation path) see
   entire dashboard build through sapwood's own loop on the sapwood repo, and
   **record the run** as the launch artifact. Scope: event schema + `GET /api/loop/state`
   & `/events` (current-state, from SQLite) → React views (lane board, event feed)
-  reusing 0day's TanStack Query polling + replay player + charts (chart/domain
+  reusing the predecessor project's TanStack Query polling + replay player + charts (chart/application
   components are *new* design, not a port). History-aggregation metrics
-  (merge/rework/cycle-time) are a later phase, gated on the GitHub-history work 0day
+  (merge/rework/cycle-time) are a later phase, gated on the GitHub-history work the predecessor project
   never finished (`ops/loop/README.md:109`). Because workers may touch security-
   sensitive files, the human-merge-only rule for guard/hook/reviewer/security config
   (see Security model) stays in force during this dogfood. The frontend itself —
@@ -1645,7 +1641,7 @@ to when v0.2 implementation issues are cut, not locked here.
 - **Persistence:** v1 workers are session-bound (die on SIGHUP); durable SQLite makes
   restart clean; `sapwood status` surfaces dead workers. Real supervisor = v1.1.
 - **Process-tree kill:** `worker.ts` must kill the whole `claude` subtree (process
-  groups) — 0day couldn't on bash 3.2.
+  groups) — the predecessor project could not on bash 3.2.
 - **Dashboard scope inflation (v0.2):** estimate as new frontend work, not a port.
 - **Naming:** "sapwood" communicates nothing to a stranger; revisit before public
   launch (minor, pre-launch).
@@ -1662,16 +1658,16 @@ to when v0.2 implementation issues are cut, not locked here.
 
 ## Verification (how we'll prove v1)
 
-- **Guard:** `guard.ts` reproduces all 0day bypass attempts; differential/fuzz vs
+- **Guard:** `guard.ts` reproduces all predecessor-project bypass attempts; differential/fuzz vs
   `guard.py` passes; every mutation path denied fail-closed; hook error/timeout →
   deny. `Write` to `.claude/settings.json` / `.github/workflows/**` blocked.
-- **Engine parity:** 0day pure-function tests (priority/blocker/selffeed/merge-decision)
+- **Engine parity:** predecessor-project pure-function tests (priority/blocker/selffeed/merge-decision)
   pass in TS.
 - **Session-death recovery (explicit test):** kill the conductor mid-run, restart,
   confirm stale-heartbeat reclaim resets lanes to claimable, and `sapwood status`
   shows the dead workers.
 - **End-to-end dogfood:** on a trusted throwaway repo — `init` (zero manual GitHub UI
-  steps, from clean `gh auth`), seed 2–3 issues. Default 0day-style run:
+  steps, from clean `gh auth`), seed 2–3 issues. Default predecessor-project-style run:
   claim → worktree → PR → **configured independent review** → CI green + fresh review → **Conductor
   merges** (confirm the worker never self-merges). Also exercise the conservative
   produce-PR-and-stop mode (stops for human merge).

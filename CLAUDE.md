@@ -7,16 +7,15 @@ detail lives in [`docs/PLAN.md`](docs/PLAN.md) — **read that first.**
 
 sapwood = "the autonomous coding loop with governance built in." A Claude Code
 plugin that turns a GitHub backlog into reviewed PRs: *issues in → reviewed PRs
-out*. It is the dev-loop **framework** extracted from the `0day` project and
+out*. It is the dev-loop **framework** extracted from a private predecessor project and
 re-implemented as a standalone, public tool. Status: **early development, pre-v1.**
 
 ## Where things are
 
 - `docs/PLAN.md` — full goals, architecture, security model, milestones, verification.
-- Source to port FROM: the `0day` repo (sibling: `../0day`). The framework lives in
-  its `ops/loop/*.sh` (conductor/worker/merge-driver), `scripts/*.sh` (GitHub
-  plumbing), and `backend/src/zeroday/loop/guard.py` (the safety hook). Port the
-  *logic*, not the trading domain.
+- Source to port FROM: the private predecessor repo (sibling checkout). The framework
+  lives in its loop conductor, worker, merge-driver, GitHub-plumbing, and safety-hook
+  sources. Port the *generic logic*, not application-specific behavior.
 
 ## Non-negotiables
 
@@ -62,10 +61,10 @@ part of an issue's definition-of-done. Distilled outcomes, never issue transcrip
 TypeScript engine · Claude Code plugin form factor · trusted repos first · default
 merge gate: Conductor merges on CI green + a fresh local **engine-agent** review, a
 different Claude model (#501, 2026-08-01; hosted different-model Codex review stays
-selectable — the pre-#501 0day-style default; produce-PR-and-stop also selectable) ·
+selectable — the pre-#501 predecessor-project-style default; produce-PR-and-stop also selectable) ·
 dashboard deferred to
 v0.2 (built *by* sapwood as the flagship dogfood) · YAML config default (commented;
-JSON also accepted) · 0day's
+JSON also accepted) · the predecessor project's
 TDD/two-gate method as overridable defaults.
 
 ## This repo's own governance

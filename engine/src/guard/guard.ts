@@ -5,12 +5,12 @@
 // "Host-delegated capability management" section (DR #616). Pure function: zero IO, zero
 // deps, deterministic.
 //
-// Ported from 0day's guard.py (backend/src/zeroday/loop/guard.py). We port the *generic
+// Ported from the predecessor project's guard.py. We port the *generic
 // safety mechanism* — command tokenizing, fragment splitting, exec-prefix stripping,
 // opaque-construct fail-closed detection, and the gh-overreach category (the worker, a
 // PR *producer*, must never merge/approve/release) — plus a Write-path protection for the
-// guard's own boundary files. 0day's trading-domain categories (on-chain funds, private
-// keys) are intentionally NOT ported (CLAUDE.md: "port the logic, not the trading domain").
+// guard's own boundary files. The predecessor project's application-specific categories are
+// intentionally NOT ported (CLAUDE.md: "port the generic logic, not application-specific behavior").
 //
 // Decision order for a Bash command:
 //   1. split into fragments by shell chain operators; $()/`` substitutions recurse.

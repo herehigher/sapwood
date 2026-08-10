@@ -31,8 +31,8 @@ test("applyGuardMode: hard enforces (deny passes through); soft allows but logs 
 const CWD = "/repo";
 const bash = (command: string, cwd = CWD) => guardDecision("Bash", { command }, cwd);
 
-// ── BLOCK matrix (category C gh-overreach + opaque), ported from 0day test_guard.py,
-// trading-domain (funds/keys) cases omitted; reason must name the keyword. ──────────
+// ── BLOCK matrix (category C gh-overreach + opaque), ported from the predecessor project's test_guard.py,
+// application-specific cases omitted; reason must name the keyword. ──────────
 const BLOCK: [string, string, string][] = [
   // opaque shell/interpreter/process-sub wrappers (fail-closed, inner not parsed)
   ['bash -c "echo hi"', CWD, "opaque"],

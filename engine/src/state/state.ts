@@ -1,4 +1,4 @@
-// Durable engine state. Replaces 0day's non-atomic jq read-modify-write
+// Durable engine state. Replaces the predecessor project's non-atomic jq read-modify-write
 // (loop_conductor.sh:738-762). Conductor stays single-writer-serial; WAL gives atomic
 // writes + concurrent reads (so `sapwood status` reads a live DB without blocking).
 // Fully durable -> engine restart is a clean resume.

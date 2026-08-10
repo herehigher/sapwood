@@ -1,5 +1,5 @@
 // merge-driver.ts tests:
-//  1. mergeDecision parity suite — a TS port of 0day's matrix, with #273's stricter
+//  1. mergeDecision parity suite — a TS port of the predecessor project's matrix, with #273's stricter
 //     OID-bound rejection of the legacy bare-reaction action.
 //  2. deriveGate — the scheduling-gate glue (gate①/gate②/labels/state -> MERGE/WAIT/HUMAN).
 //  3. MergeDriver.driveOne — end-to-end with a fake IForge + fake Reviewer (no real gh calls).
@@ -23,7 +23,7 @@ import type {
 import { CODEX_REVIEWER_LOGINS, CodexReviewer, HumanReviewer, SameModelTrustedReviewer } from "./reviewer.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
-// 1) mergeDecision parity suite (0day ops/loop/test_loop_merge_driver.sh, 23 assertions)
+// 1) mergeDecision parity suite (predecessor-project loop merge-driver tests, 23 assertions)
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
 test("mergeDecision parity: MERGE_OK + OPEN + clean label -> MERGE (trustedApproval irrelevant to MERGE_OK)", () => {
@@ -37,12 +37,12 @@ test("mergeDecision #273: APPROVED_PR_LEVEL (bare 👍) always fails closed beca
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", "type:ops,infra", "OPEN", true), "ESCALATE");
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "OPEN", false), "ESCALATE");
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", ""), "ESCALATE"); // default trustedApproval=false
-  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "risk:fund-path", "OPEN", true), "ESCALATE"); // trusted 👍 but risk label still blocks
+  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "risk:example", "OPEN", true), "ESCALATE"); // trusted 👍 regardless of label
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "MERGED", true), "ESCALATE"); // trusted 👍 but non-OPEN still blocks
 });
 
-test("mergeDecision parity: risk/fund/needs-human/blocked labels -> ESCALATE even on MERGE_OK", () => {
-  assert.equal(mergeDecision("MERGE_OK", "risk:fund-path"), "ESCALATE");
+test("mergeDecision parity: risk/needs-human/blocked labels -> ESCALATE even on MERGE_OK", () => {
+  assert.equal(mergeDecision("MERGE_OK", "risk:example"), "ESCALATE");
   assert.equal(mergeDecision("MERGE_OK", "needs-human"), "ESCALATE");
   assert.equal(mergeDecision("MERGE_OK", "blocked,infra"), "ESCALATE");
 });
@@ -70,7 +70,7 @@ test("mergeDecision parity: fail-safe — unknown/empty ACTION never auto-merges
   assert.equal(mergeDecision("", ""), "ESCALATE");
 });
 
-test("mergeDecision (sapwood extension beyond 0day parity): REVIEW_UNAVAILABLE queues (WAIT), never escalates or merges (#13)", () => {
+test("mergeDecision (sapwood extension beyond predecessor-project parity): REVIEW_UNAVAILABLE queues (WAIT), never escalates or merges (#13)", () => {
   assert.equal(mergeDecision("REVIEW_UNAVAILABLE", ""), "WAIT");
   assert.equal(mergeDecision("REVIEW_UNAVAILABLE", "needs-human"), "WAIT"); // even with a risk label present
 });

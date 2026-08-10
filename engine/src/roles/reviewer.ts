@@ -1,11 +1,11 @@
 // reviewer.ts — gate②: pluggable review verdict. Default = a fresh, different-model Codex
-// review (0day-style: trigger `@codex review`, poll reaction/review state, parse the verdict
+// review (predecessor-project-style: trigger `@codex review`, poll reaction/review state, parse the verdict
 // against a SPECIFIC head oid). Alternatives selectable via config (reviewer.mode):
 // same-model-trusted (a named trusted-reviewer login must approve) and human (any non-author
 // human approval). produce-pr-and-stop is NOT a reviewer kind — it's merge.mode
 // (merge-driver.ts): whether the Conductor merges once gates pass, independent of who reviews.
 //
-// This is a TS port of the REVIEW HALF of 0day's scripts/pr_gate.sh ACTION protocol — CI
+// This is a TS port of the REVIEW HALF of the predecessor project's scripts/pr_gate.sh ACTION protocol — CI
 // (gate①) is a separate, already-existing signal (forge.getPRStatus().ciGreen) folded in by
 // merge-driver.ts, not duplicated here.
 //
@@ -35,7 +35,7 @@ export interface ReviewVerdict {
 }
 
 /**
- * Legacy timestamp classifier for PR-level `+1` reactions — 0day pr_gate.sh's
+ * Legacy timestamp classifier for PR-level `+1` reactions — the predecessor project's pr_gate.sh's
  * `fresh_thumb_count`. #273 deliberately removed reactions from gate② because they cannot
  * carry a commit OID; this exported helper remains only for compatibility and unit coverage.
  * A reaction created at/before `cutoffIso` is stale: it predates the engine's review trigger,
@@ -59,7 +59,7 @@ export function freshThumbCount(reactions: { content: string; createdAt: string 
 
 /**
  * Non-author reviews whose `commitOid` equals the CURRENT `headOid`, restricted to
- * `acceptStates` — port of 0day pr_gate.sh's `fresh_head_review_count` (#101). A review left on
+ * `acceptStates` — port of the predecessor project's pr_gate.sh's `fresh_head_review_count` (#101). A review left on
  * an older head does NOT count (a stale review must never look like a review of the current
  * head — the exact bypass gate② exists to close). Author self-review never counts
  * (producer != reviewer, even if the author is also a configured "trusted" login).
@@ -156,7 +156,7 @@ export interface Reviewer {
 
 /** GitHub bot logins vary by API surface: REST reactions report `foo[bot]`, GraphQL/pr-view
  *  reviews report `foo`. Normalize by stripping the suffix so an allowlist entry written
- *  either way matches (0day's LOOP_TRUSTED_REVIEWERS default was the `[bot]`-suffixed form). */
+ *  either way matches (the predecessor project's LOOP_TRUSTED_REVIEWERS default was the `[bot]`-suffixed form). */
 export function normalizeLogin(login: string): string {
   return login.replace(/\[bot\]$/, "");
 }
@@ -690,7 +690,7 @@ function verdictFrom(
   };
 }
 
-/** Default reviewer (0day-style): triggers `@codex review`; an accepted verdict is a
+/** Default reviewer (predecessor-project-style): triggers `@codex review`; an accepted verdict is a
  *  COMMENTED-or-APPROVED review on the current head (Codex's normal review state is COMMENTED,
  *  not APPROVED — matching pr_gate.sh's fresh_head_review_count) from the CODEX BOT or a
  *  configured trusted login — never from an arbitrary non-author account (Codex PR #42 P1:
