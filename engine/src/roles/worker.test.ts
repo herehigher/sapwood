@@ -5217,7 +5217,7 @@ test("WorkerSupervisor.reapAll (#668 r2[1], gate② round 3 P2 rework — DISCRI
   }
 });
 
-test("WorkerSupervisor.reapAll (#668 r2[1], real end-to-end outcome integrity): a genuinely alive, reap-signaled lane still lands the REAL .handoff sentinel via a full dispatch()+onExit() round trip — the fix's mechanism produces the correct file, not just the correct in-memory flag", async () => {
+test("WorkerSupervisor.reapAll (#668 r2[1], real end-to-end sentinel integration): a genuinely alive, reap-signaled lane lands the REAL .handoff sentinel via a full dispatch()+onExit() round trip — the fix's mechanism produces the correct file, not just the correct in-memory flag", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
   let s: WorkerSupervisor | undefined;
   try {
@@ -5226,8 +5226,10 @@ test("WorkerSupervisor.reapAll (#668 r2[1], real end-to-end outcome integrity): 
     const { name } = await s.dispatch({ number: 673, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before reap");
 
-    const outcomes = await s.reapAll();
-    assert.deepEqual(outcomes, [{ name, alreadyDead: false, escalated: false, confirmedDead: true }]);
+    // This integration proof deliberately asserts only the onExit sentinel contract. The
+    // scheduling-sensitive reap outcome (including whether escalation was needed) is covered by
+    // the injected `fakeReapAllLane` seam above, not across a real signal/timer boundary.
+    await s.reapAll();
 
     await waitForFile(join(dir, `${name}.handoff.json`), "a genuinely alive, reap-signaled lane must land .handoff, not .done/.failed");
     assert.equal(existsSync(join(dir, `${name}.done.json`)), false);
@@ -5388,41 +5390,68 @@ test("WorkerSupervisor onExit (#668 round 8): a leader that exits ON ITS OWN whi
   }
 });
 
-test("WorkerSupervisor.reapAll (#668 round 8): an in-flight leader-exit reap (onExit()'s single SIGTERM already sent, the cooperative descendant still mid-death on its own real internal delay) is AWAITED by reapAll(), never abandoned — the group is confirmed dead by the time reapAll() resolves, and its outcome is included", async () => {
+test("WorkerSupervisor.reapAll (#668 round 8): an in-flight leader-exit reap held at the injected poll seam is AWAITED by reapAll(), never abandoned — its reported outcome is included only after the held collaborator releases", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
   let s: WorkerSupervisor | undefined;
+  let leaderPid = -1;
+  const stopFile = join(dir, "stop-descendant");
   try {
     const descendantReadyFile = join(dir, "descendant.ready");
-    const bin = leaderExitStub(dir, descendantReadyFile); // cooperative — its own REAL internal delay is the timing source here
-    s = sup(dir, bin); // real default sleep — an artificial gate would race PAST the descendant's real delay every time (round 8's own lesson: instant-resolving sleep exhausts the WHOLE virtual grace budget in microseconds, never giving a real subprocess timer a chance to fire)
+    // This collaborator ignores SIGTERM, so the held injected poll is the only thing that
+    // controls when its in-flight reap settles; no assertion races the child's own timer.
+    const bin = leaderExitStub(dir, descendantReadyFile, { ignoreTerm: true, stopFile });
+    const { sleep, release } = reapPollSleep({ held: true });
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      sleep,
+    });
     const { name } = await s.dispatch({ number: 676, title: "t", labels: [] });
-    const leaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    leaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
 
     await waitForFile(join(dir, `${name}.done.json`), "leader never exited / onExit never ran");
 
-    // onExit()'s SIGTERM fires synchronously the instant the leader exits — done.json landing is
-    // proof that already happened. The descendant's own internal delay (well over any file-poll +
-    // scheduling overhead here) makes this a reliable "still genuinely in flight" window, not an
-    // artificial one.
-    assert.equal(groupAlive(leaderPid), true, "sanity: the descendant is still alive — its own internal delay hasn't elapsed yet");
+    // onExit() sends its SIGTERM before registering the promise. This descendant intentionally
+    // ignores it, while the held sleep keeps the subsequent observation genuinely in flight.
+    assert.equal(groupAlive(leaderPid), true, "sanity: the TERM-ignoring collaborator is still alive");
     // #668 (round 6 P1b): keyed by `${name}#${pid}`, not the bare name — see inFlightLeaderExitReaps' own doc.
     assert.ok(
       [...peekSupervisor(s).inFlightLeaderExitReaps.keys()].some((k) => k.startsWith(`${name}#`)),
       "onExit() must have registered the in-flight reap synchronously",
     );
 
-    const outcomes = await s.reapAll(); // must AWAIT the in-flight reap, not race past it
+    let reapAllResolved = false;
+    const reapAllPromise = s.reapAll().then((outcomes) => {
+      reapAllResolved = true;
+      return outcomes;
+    });
+    await Promise.resolve();
+    assert.equal(reapAllResolved, false, "reapAll() must wait while the injected poll collaborator is held");
+
+    release();
+    const outcomes = await reapAllPromise;
 
     const byName = new Map(outcomes.map((o) => [o.name, o]));
-    assert.equal(byName.get(name)?.confirmedDead, true, "reapAll()'s own outcome set must include the leader-exit reap it waited for");
-    assert.equal(groupAlive(leaderPid), false, "the descendant is actually dead by the time reapAll() resolves — never abandoned at exit");
+    assert.equal(byName.get(name)?.confirmedDead, false, "reapAll()'s own outcome set must include the leader-exit reap it waited for");
+    assert.equal(groupAlive(leaderPid), true, "the TERM-ignoring collaborator is reported, never force-killed");
     assert.equal(
       [...peekSupervisor(s).inFlightLeaderExitReaps.keys()].some((k) => k.startsWith(`${name}#`)),
       false,
       "the settled entry is removed, never left registered",
     );
   } finally {
-    killAnyRunningLanes(s); // no-op by construction — reapAll() above already confirmed group death
+    try {
+      writeFileSync(stopFile, "1");
+    } catch {
+      /* dir already gone */
+    }
+    if (leaderPid !== -1) await waitBrieflyForGroupDeath(leaderPid);
+    killAnyRunningLanes(s);
     s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
