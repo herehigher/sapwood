@@ -32,7 +32,7 @@ import {
   computeFlatStreak,
   countBlocking,
 } from "../review/convergence.js";
-import type { EngineAgentDriveDeps } from "../review/drive.js";
+import { buildCiInertEscalationComment, type EngineAgentDriveDeps } from "../review/drive.js";
 import { effectiveSeverity, type FindingKind, type FindingSeverity } from "../review/finding-axes.js";
 import { boundRecords, classicThreadFindingKey, engineAgentFindingKey } from "../review/finding-key.js";
 import type { CiPendingPin, DriveOutcome } from "../roles/merge-driver.js";
@@ -964,11 +964,25 @@ const CI_PENDING_RESET_KINDS = ["gated-reentry", "lane-revived"];
  *  No drive-layer fix can close that — no pass ran. Blast radius is one recoverable false
  *  `needs-human` during an active drain; the recovery is the standard label-clear + #147 gated
  *  reentry, with the lane, PR, and branch all preserved. Verifying the head here would mean a forge
- *  read on the one code path that must never make one. */
+ *  read on the one code path that must never make one.
+ *
+ *  #783 wiring (gate② opus round 1, PM-direct human-owned remainder): this predicate is ALSO
+ *  rollup-blind, for the exact same reason it is head-blind — the durable `ci-pending-observed`
+ *  event carries no `inert` flag (adding one would be new machinery for a bounded, already-
+ *  accepted blind spot), so a frozen drain tick cannot tell whether the pin it is reading is
+ *  merely pending or already inert. Comparing against the SHORTER of the two bounds
+ *  (`Math.min`, the same choice `ciEscalationBound` in merge-driver.ts makes for the live aging
+ *  arm) is the conservative, fail-safe direction specifically for a DRAIN-terminality check: it
+ *  can only make a still-pending (not-yet-6h, but past-900s) lane terminal for drain purposes
+ *  EARLIER than the classic-only bound would, never later — a drain's whole purpose is to finish
+ *  rather than hang, so erring toward "terminal sooner" here is the safe side, exactly the "one
+ *  recoverable false needs-human during an active drain" blast radius this function's own doc
+ *  already accepts for its pre-existing head-blind spot. */
 function ciPendingWedgedForDrain(state: State, cfg: SapwoodConfig, worker: string, pr: number, now: Date): boolean {
   const pin = openCiPendingPin(state, worker, pr);
   const pendingSec = pinElapsedSec(pin?.at ?? null, now);
-  return pendingSec != null && pendingSec >= cfg.ci.pendingEscalateAfterSec;
+  const escalateAfterSec = Math.min(cfg.ci.pendingEscalateAfterSec, cfg.ci.inertEscalateAfterSec);
+  return pendingSec != null && pendingSec >= escalateAfterSec;
 }
 
 /** #426 (F26): the lane's OPEN CI-pending pin, or null when none stands — the single reader both
@@ -1023,6 +1037,16 @@ function describeCheck(c: PRCheckItem): string {
  *  so a later wedge on a NEW head is a genuinely new escalation and must comment again. */
 function ciPendingCommentMarker(worker: string, pr: number, head: string): string {
   return `<!-- sapwood:ci-pending:${worker}:${pr}:${head} -->`;
+}
+
+/** #783 wiring (gate② opus round 1, PM-direct human-owned remainder): the INERT twin of
+ *  `ciPendingCommentMarker` above — a DISTINCT marker (never the pending one) so the two
+ *  escalation shapes can never dedupe against each other's comment: a lane that escalated
+ *  pending-shaped on head H and later, on the SAME head, somehow reads inert-shaped (or vice
+ *  versa — mutually exclusive per `ciEscalationBound`'s own invariant, but the marker stays
+ *  independent regardless, defense in depth) still gets its own, correctly-worded comment. */
+function ciInertCommentMarker(worker: string, pr: number, head: string): string {
+  return `<!-- sapwood:ci-inert:${worker}:${pr}:${head} -->`;
 }
 
 async function describePendingChecks(forge: IForge, pr: number): Promise<{ names: string[]; blocked: string[]; note: string }> {
@@ -4604,62 +4628,109 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // `review-silence-escalated` above.
       if (outcome.ciPendingEscalation) {
         const s = outcome.ciPendingEscalation;
-        const evidence = await describePendingChecks(forge, pr);
         const carrier = escalationCarrier(pr);
         let posted = false;
-        try {
-          await commentOnEscalationCarrier(
-            forge,
-            cfg,
-            carrier,
-            w.issue,
-            pr,
-            ciPendingCommentMarker(w.name, pr, s.head),
-            // #782 gate② round 1 (P2, CONFIRMED): the classic-shaped sentence below asserts "gate②
-            // is already decisive" — TRUE for the three original Reviewer kinds and for
-            // engine-agent's own decisive-pin-discard case (a verdict landed, gate① regressed
-            // after), but FALSE for engine-agent's pre-session evidence wait (`s.evidenceWait`,
-            // DriveOutcome.ciPendingEscalation's own doc): no review session has started at all,
-            // because review/drive.ts's own preflight CI-evidence gate blocks one from ever
-            // spawning. `s.evidenceWait` selects the truthful sentence for that phase; the `else`
-            // branch is BYTE-IDENTICAL to the pre-#782-gate②-round-1 text (existing conductor tests
-            // assert against it unchanged).
-            `${ciPendingCommentMarker(w.name, pr, s.head)}\n` +
-              (s.evidenceWait
-                ? `sapwood: gate① has been PENDING for ${s.pendingSec}s on \`${s.head}\` (bound: ` +
-                  `${cfg.ci.pendingEscalateAfterSec}s) — the configured \`ci.requiredChecks\` evidence has ` +
-                  `not been satisfied, so no review session has started yet and this PR can never progress ` +
-                  `on its own (${evidence.note}). Escalating to \`${cfg.labels.needsHuman}\`: re-run or fix ` +
-                  `the stuck check, then remove the label ${carrierNoun(carrier)} to reclaim this PR (#147 ` +
-                  `gated reentry).`
-                : `sapwood: gate① has been PENDING for ${s.pendingSec}s on \`${s.head}\` (bound: ` +
-                  `${cfg.ci.pendingEscalateAfterSec}s) while gate② is already decisive — CI is neither green ` +
-                  `nor red, so this PR can never progress on its own (${evidence.note}). Escalating to ` +
-                  `\`${cfg.labels.needsHuman}\`: re-run or fix the stuck check, then remove the label ` +
-                  `${carrierNoun(carrier)} to reclaim this PR (#147 gated reentry).`),
-          );
-          posted = true;
-        } catch {
-          // No comment means no latch and no event: retry next tick. Never let a visibility-write
-          // outage turn a queued gate into a terminal lane transition.
-        }
-        if (posted) {
+        if (s.inert) {
+          // #783 wiring (gate② opus round 1, PM-direct human-owned remainder): the INERT-shaped
+          // escalation. Evidence comes ENTIRELY from `s.inert` — `buildCiInertEscalationPayload`'s
+          // own output, built by merge-driver.ts off the SAME `PRStatus` read that decided
+          // `ciInert` — never a second `getPRChecks` call the way the classic branch's
+          // `describePendingChecks` below makes (#797 gate② P2's whole point: evidence and
+          // decision from one read, by construction). This branch and the classic `else` branch
+          // are MUTUALLY EXCLUSIVE by construction — `ciEscalationBound` (merge-driver.ts) never
+          // sets BOTH `evidenceWait` and `inert` on the same `s` (see that function's own
+          // precedence-invariant doc) — so this code never has to choose a wording for a `s` that
+          // is simultaneously both shapes; that choice is made upstream, once.
+          const marker = ciInertCommentMarker(w.name, pr, s.head);
           try {
-            await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
-            state.appendEvent("ci-pending-escalated", {
-              worker: w.name,
-              issue: w.issue,
+            await commentOnEscalationCarrier(
+              forge,
+              cfg,
+              carrier,
+              w.issue,
               pr,
-              head: s.head,
-              pendingSec: s.pendingSec,
-              checks: evidence.names,
-              // #426 review round 2 (P1-1b): a check that concluded WITHOUT passing keeps gate①
-              // not-green, so it wedges the lane exactly like a never-finishing one — recorded
-              // separately (with each check's own conclusion) so the audit row says which.
-              ...(evidence.blocked.length > 0 ? { blockedChecks: evidence.blocked } : {}),
-            });
+              marker,
+              `${marker}\n${buildCiInertEscalationComment(s.head, s.inert.checks, s.inert.truncated)} Escalating to ` +
+                `\`${cfg.labels.needsHuman}\`: fix the check, then remove the label ${carrierNoun(carrier)} to ` +
+                `reclaim this PR (#147 gated reentry).`,
+            );
+            posted = true;
           } catch {
-            // Same as above: no label, no latch, no event — retried next tick.
+            // No comment means no latch and no event: retry next tick. Never let a visibility-
+            // write outage turn a queued gate into a terminal lane transition.
+          }
+          if (posted) {
+            try {
+              await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
+              state.appendEvent("ci-inert-escalated", {
+                worker: w.name,
+                issue: w.issue,
+                pr,
+                head: s.head,
+                pendingSec: s.pendingSec,
+                checks: s.inert.checks,
+                ...(s.inert.truncated ? { truncated: s.inert.truncated } : {}),
+              });
+            } catch {
+              // Same as above: no label, no latch, no event — retried next tick.
+            }
+          }
+        } else {
+          const evidence = await describePendingChecks(forge, pr);
+          try {
+            await commentOnEscalationCarrier(
+              forge,
+              cfg,
+              carrier,
+              w.issue,
+              pr,
+              ciPendingCommentMarker(w.name, pr, s.head),
+              // #782 gate② round 1 (P2, CONFIRMED): the classic-shaped sentence below asserts
+              // "gate② is already decisive" — TRUE for the three original Reviewer kinds and for
+              // engine-agent's own decisive-pin-discard case (a verdict landed, gate① regressed
+              // after), but FALSE for engine-agent's pre-session evidence wait (`s.evidenceWait`,
+              // DriveOutcome.ciPendingEscalation's own doc): no review session has started at
+              // all, because review/drive.ts's own preflight CI-evidence gate blocks one from
+              // ever spawning. `s.evidenceWait` selects the truthful sentence for that phase; the
+              // `else` branch is BYTE-IDENTICAL to the pre-#782-gate②-round-1 text (existing
+              // conductor tests assert against it unchanged).
+              `${ciPendingCommentMarker(w.name, pr, s.head)}\n` +
+                (s.evidenceWait
+                  ? `sapwood: gate① has been PENDING for ${s.pendingSec}s on \`${s.head}\` (bound: ` +
+                    `${cfg.ci.pendingEscalateAfterSec}s) — the configured \`ci.requiredChecks\` evidence has ` +
+                    `not been satisfied, so no review session has started yet and this PR can never progress ` +
+                    `on its own (${evidence.note}). Escalating to \`${cfg.labels.needsHuman}\`: re-run or fix ` +
+                    `the stuck check, then remove the label ${carrierNoun(carrier)} to reclaim this PR (#147 ` +
+                    `gated reentry).`
+                  : `sapwood: gate① has been PENDING for ${s.pendingSec}s on \`${s.head}\` (bound: ` +
+                    `${cfg.ci.pendingEscalateAfterSec}s) while gate② is already decisive — CI is neither green ` +
+                    `nor red, so this PR can never progress on its own (${evidence.note}). Escalating to ` +
+                    `\`${cfg.labels.needsHuman}\`: re-run or fix the stuck check, then remove the label ` +
+                    `${carrierNoun(carrier)} to reclaim this PR (#147 gated reentry).`),
+            );
+            posted = true;
+          } catch {
+            // No comment means no latch and no event: retry next tick. Never let a visibility-write
+            // outage turn a queued gate into a terminal lane transition.
+          }
+          if (posted) {
+            try {
+              await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
+              state.appendEvent("ci-pending-escalated", {
+                worker: w.name,
+                issue: w.issue,
+                pr,
+                head: s.head,
+                pendingSec: s.pendingSec,
+                checks: evidence.names,
+                // #426 review round 2 (P1-1b): a check that concluded WITHOUT passing keeps gate①
+                // not-green, so it wedges the lane exactly like a never-finishing one — recorded
+                // separately (with each check's own conclusion) so the audit row says which.
+                ...(evidence.blocked.length > 0 ? { blockedChecks: evidence.blocked } : {}),
+              });
+            } catch {
+              // Same as above: no label, no latch, no event — retried next tick.
+            }
           }
         }
       }

@@ -115,11 +115,11 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   // once inert. gate② opus round 1 P2 (#797) correction: this does NOT get an independent clock —
   // it selects the shorter bound against the SAME shared CI-aging pin `ci-pending-escalated` uses
   // (stamped once, at first not-green); see `ci.inertEscalateAfterSec`'s own config.ts/
-  // docs/configuration.md doc for the full semantics. Registration/schema only here — the
-  // live escalation that actually emits this kind is the human-owned remainder (merge-driver.ts/
-  // conductor.ts are guard-protected paths this issue does not touch); see drive.ts's
-  // buildCiInertEscalationPayload/buildCiInertEscalationComment for the producer-reachable
-  // building blocks this kind's eventual payload/comment are built from.
+  // docs/configuration.md doc for the full semantics. #783 wiring (gate② opus round 1, PM-direct
+  // human-owned remainder, 2026-08-11): WIRED — merge-driver.ts's `ciEscalationBound` selects this
+  // bound and conductor.ts's escalation branch actually emits this kind, labels needs-human, and
+  // posts the actionable comment (`buildCiInertEscalationPayload`/`buildCiInertEscalationComment`,
+  // drive.ts).
   "ci-inert-escalated": {
     tags: [],
     meaning:

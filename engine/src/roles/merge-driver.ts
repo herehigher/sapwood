@@ -29,8 +29,8 @@
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
 import { labelsInclude, labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js";
-import type { EngineAgentDriveDeps } from "../review/drive.js";
-import { driveEngineAgentReview } from "../review/drive.js";
+import type { CiInertEscalationPayload, EngineAgentDriveDeps } from "../review/drive.js";
+import { buildCiInertEscalationPayload, driveEngineAgentReview } from "../review/drive.js";
 import { escalateInstructionPathChanges } from "../review/instruction-path-escalation.js";
 import type {
   ReviewAction,
@@ -249,8 +249,20 @@ export type DriveOutcome =
      *  `true` is engine-agent-only and means NO review session has ever started for this head at
      *  all (the `ci.requiredChecks` evidence gate itself is the blocker — review/drive.ts's
      *  preflight never even reaches the paid session). The conductor's escalation comment (#426)
-     *  reads this to avoid asserting "gate② is already decisive" when it never ran. */
-    ciPendingEscalation?: { head: string; pendingSec: number; evidenceWait?: true };
+     *  reads this to avoid asserting "gate② is already decisive" when it never ran.
+     *
+     *  #783 wiring (gate② opus round 1, PM-direct human-owned remainder): `inert` is present
+     *  exactly when `ciEscalationBound` (below) chose the SHORTER `ci.inertEscalateAfterSec`
+     *  bound for this escalation — i.e. `status.ciInert === true` at the deciding observation AND
+     *  `evidenceWait` was NOT also true. Carries `buildCiInertEscalationPayload`'s own output (the
+     *  SAME `PRStatus.ciChecks` read that decided `ciInert`, capped), so the conductor never needs
+     *  a second forge read to build the `ci-inert-escalated` event/comment. MUTUALLY EXCLUSIVE
+     *  with `evidenceWait` by construction — `ciEscalationBound` never returns `inert: true` when
+     *  `evidenceWait` is true, even when the underlying rollup also happens to read `ciInert:
+     *  true` (see that function's own doc for why both CAN independently be true and why
+     *  `evidenceWait` wins). The conductor's job is simple because of this: `inert` present ->
+     *  `ci-inert-escalated`; absent -> the classic `ci-pending-escalated`, unconditionally. */
+    ciPendingEscalation?: { head: string; pendingSec: number; evidenceWait?: true; inert?: CiInertEscalationPayload };
   };
 
 /** #170: pure aging decision. A configured failover gets its full evaluation window first;
@@ -378,6 +390,58 @@ export function ciPendingAge(input: {
   const pendingSec = pinElapsedSec(input.pin.at, input.now);
   if (pendingSec == null || pendingSec < input.escalateAfterSec) return null;
   return pendingSec;
+}
+
+/** #783 wiring (gate② opus round 1, PM-direct human-owned remainder — issue #783's own bound-
+ *  selection deliverable, dispatched separately from #797 because `merge-driver.ts` is guard-
+ *  protected): which bound `ciPendingAge`/`ciPendingDuration` should age against, and whether the
+ *  resulting escalation (if any) is inert-shaped. Reused BYTE-FOR-BYTE by both aging arms — the
+ *  classic path's `withSignals` and the engine-agent path's `ciAging` — so the two can never
+ *  independently drift on how inertness selects a bound (the same "reuse the classic path's
+ *  machinery, no parallel state machine" discipline #782's `ciPendingAge` extraction already
+ *  established for the pending arm itself).
+ *
+ *  PIN SEMANTICS UNCHANGED (docs/configuration.md's `inertEscalateAfterSec` row is the contract
+ *  this matches exactly): the durable CI-pending pin is stamped ONCE, at whichever moment gate①
+ *  FIRST goes not-green — pending or inert, whichever comes first — and is NEVER re-stamped when
+ *  a pending rollup later flips inert (or an inert one flips back to pending: neither transition
+ *  touches the pin, only a head move or gate① actually resolving green/red does, both handled
+ *  entirely by the CALLER's own pin-cancel logic, untouched by this function). This function only
+ *  chooses which BOUND to compare that one pin's age against, on THIS pass's own current-state
+ *  read — never a history claim (the same "describe current state only" discipline
+ *  `refetchStillValid`'s #797 fix already established for its reason string). Consequence,
+ *  DOCUMENTED AND INTENDED: a rollup that sat pending for 20 minutes and then flips inert
+ *  escalates on the very next pass that observes it inert, IF the pin (aged from the ORIGINAL
+ *  first-not-green moment) has already exceeded the shorter bound — the shorter bound was already
+ *  overdue the whole time, this pass is simply the first one that learns the rollup can never
+ *  self-resolve either.
+ *
+ *  MUTUAL EXCLUSIVITY / PRECEDENCE INVARIANT (#783 wiring, composing with #792's `evidenceWait`):
+ *  `evidenceWait` means a NAMED required check never materialized any CheckRun at all on this head
+ *  (missing evidence — review/drive.ts's preflight never even reached a paid session).
+ *  `ciInert` means every check that DID materialize on the rollup concluded, and none passed
+ *  (`PRStatus.ciInert`'s own doc). These describe DIFFERENT checks by construction (an absent
+ *  check vs. checks that DID report) and so ARE mutually exclusive per named check — but the
+ *  aggregate `evidenceWait` flag and the aggregate `ciInert` boolean are each computed over the
+ *  WHOLE rollup, so they CAN both independently read `true` on the SAME PR: a required check named
+ *  in `ci.requiredChecks` that never appears at all (evidenceWait), while some OTHER, non-required
+ *  check on the same rollup concluded SKIPPED (ciInert, computed rollup-wide, not scoped to
+ *  `requiredChecks`). `evidenceWait` WINS this precedence: it is checked FIRST and its truth
+ *  forces `inert: false` unconditionally, regardless of what `ciInert` says — a missing-evidence
+ *  escalation must never be relabeled "inert" (which would name the wrong check(s): the ones that
+ *  DID run and concluded, not the one that never showed up at all, which is the actual blocker).
+ *  This is a documented precedence RULE, not a proof that the two conditions can never coincide. */
+export function ciEscalationBound(input: {
+  ciInert: boolean;
+  evidenceWait: boolean;
+  pendingEscalateAfterSec: number;
+  inertEscalateAfterSec: number;
+}): { escalateAfterSec: number; inert: boolean } {
+  const inert = !input.evidenceWait && input.ciInert;
+  return {
+    escalateAfterSec: inert ? Math.min(input.pendingEscalateAfterSec, input.inertEscalateAfterSec) : input.pendingEscalateAfterSec,
+    inert,
+  };
 }
 
 /** #782 (F26 extension): the engine-agent CI-pending arm — the engine-agent analog of
@@ -813,6 +877,14 @@ export class MergeDriver {
       // and the SAME `gateNow`. The observation is reported unconditionally (it is what lets the
       // conductor cancel the pin the instant gate① resolves); the escalation only past the bound.
       const ciPending = ciPendingOnDecisiveReview({ action: verdict.action, ciGreen: status.ciGreen, ciRed: status.ciRed ?? false });
+      // #783 wiring: the classic path has no `evidenceWait` concept (that is engine-agent-only,
+      // #782) — always `false` here, so `ciEscalationBound` only ever consults `status.ciInert`.
+      const bound = ciEscalationBound({
+        ciInert: status.ciInert === true,
+        evidenceWait: false,
+        pendingEscalateAfterSec: cfg.ci.pendingEscalateAfterSec,
+        inertEscalateAfterSec: cfg.ci.inertEscalateAfterSec,
+      });
       const ciPendingSec = ciPendingDuration({
         action: verdict.action,
         ciGreen: status.ciGreen,
@@ -820,16 +892,22 @@ export class MergeDriver {
         headOid: data.headOid,
         pin: ciPendingPin,
         now: gateNow,
-        escalateAfterSec: cfg.ci.pendingEscalateAfterSec,
+        escalateAfterSec: bound.escalateAfterSec,
         needsHumanLabelPresent: labelsInclude(data.labels, cfg.labels.needsHuman),
         holdLabelPresent: labelsIncludeAny(data.labels, cfg.escalation.holdLabels),
       });
+      // #783 wiring: `buildCiInertEscalationPayload` asserts `status.ciInert === true` — safe here
+      // unconditionally because `bound.inert` is `true` only when that already holds (see
+      // `ciEscalationBound`'s own doc).
+      const inertPayload = bound.inert && ciPendingSec != null ? buildCiInertEscalationPayload(status) : undefined;
       return {
         ...outcome,
         ...(resolved.transition ? { reviewerTransition: resolved.transition } : {}),
         ...(silenceSec != null ? { reviewSilenceEscalation: { head: data.headOid, silenceSec } } : {}),
         ciPendingObservation: { pending: ciPending, head: data.headOid },
-        ...(ciPendingSec != null ? { ciPendingEscalation: { head: data.headOid, pendingSec: ciPendingSec } } : {}),
+        ...(ciPendingSec != null
+          ? { ciPendingEscalation: { head: data.headOid, pendingSec: ciPendingSec, ...(inertPayload ? { inert: inertPayload } : {}) } }
+          : {}),
         // #294: the shared per-pass observation, computed once right after the PR-data read
         // (see `holdObservation` above) — identical here and on every early-return site.
         holdObservation,
@@ -1057,29 +1135,52 @@ export class MergeDriver {
      *  (#782 gate② round 1 P2) rides onto `ciPendingEscalation` only — see that field's own doc —
      *  and defaults to `false`: every caller except the queued branch's own `observe` below is a
      *  decisive-review-shaped outcome (conflict/ci-red/consume/fallback-switch), so they never set
-     *  it, keeping the classic-shaped escalation comment byte-identical for those. */
+     *  it, keeping the classic-shaped escalation comment byte-identical for those.
+     *
+     *  #783 wiring: `status`, when the caller has a coherent live rollup for THIS head, feeds
+     *  `ciEscalationBound` the SAME way the classic path's `withSignals` does — omitted (or
+     *  head-mismatched — never trusted blindly) reduces to the pre-#783 classic-bound-only
+     *  behavior, byte-identical for every call site that has no live rollup to consult. */
     const ciAging = (
       base: DriveOutcome,
       head: string,
       pending: boolean | "unknown",
       labels: readonly string[],
       evidenceWait = false,
+      status?: PRStatus,
     ): DriveOutcome => {
       const withObservation: DriveOutcome = { ...base, ciPendingObservation: { pending, head } };
       if (pending !== true && pending !== false) return withObservation;
       const gateNow = (this.deps.now ?? (() => new Date()))();
+      const bound = ciEscalationBound({
+        ciInert: status != null && status.headOid === head && status.ciInert === true,
+        evidenceWait,
+        pendingEscalateAfterSec: this.deps.cfg.ci.pendingEscalateAfterSec,
+        inertEscalateAfterSec: this.deps.cfg.ci.inertEscalateAfterSec,
+      });
       const pendingSec = ciPendingAge({
         pending,
         headOid: head,
         pin: ciPendingPin,
         now: gateNow,
-        escalateAfterSec: this.deps.cfg.ci.pendingEscalateAfterSec,
+        escalateAfterSec: bound.escalateAfterSec,
         needsHumanLabelPresent: labelsInclude(labels, this.deps.cfg.labels.needsHuman),
         holdLabelPresent: labelsIncludeAny(labels, this.deps.cfg.escalation.holdLabels),
       });
-      return pendingSec != null
-        ? { ...withObservation, ciPendingEscalation: { head, pendingSec, ...(evidenceWait ? { evidenceWait: true as const } : {}) } }
-        : withObservation;
+      if (pendingSec == null) return withObservation;
+      // #783 wiring: `buildCiInertEscalationPayload` asserts `status.ciInert === true` — safe
+      // unconditionally because `bound.inert` is `true` only when `status` is present, head-
+      // matched, AND `status.ciInert === true` (see the `ciInert:` line above).
+      const inertPayload = bound.inert && status ? buildCiInertEscalationPayload(status) : undefined;
+      return {
+        ...withObservation,
+        ciPendingEscalation: {
+          head,
+          pendingSec,
+          ...(evidenceWait ? { evidenceWait: true as const } : {}),
+          ...(inertPayload ? { inert: inertPayload } : {}),
+        },
+      };
     };
 
     // #303 review round 2 (P1): terminal-state outcomes (merged/needs-human) map directly —
@@ -1108,7 +1209,7 @@ export class MergeDriver {
         // came from — only true when the resolved pending is actually attributable to the direct
         // evidence signal (not, say, forced `false` by a head move or an outstanding attempt).
         const evidenceWait = pending === true && ci?.evidenceUnsatisfied === true;
-        return ciAging(base, head, pending, labels, evidenceWait);
+        return ciAging(base, head, pending, labels, evidenceWait, outcome.status);
       };
 
       // The receipted-audit-comment invariant governs ENGINE-AGENT-DERIVED outcomes only: a
@@ -1160,6 +1261,8 @@ export class MergeDriver {
                   data.headOid,
                   pending,
                   data.labels,
+                  false,
+                  status,
                 );
               }
             }
@@ -1264,6 +1367,6 @@ export class MergeDriver {
       ciPendingOnDecisiveReview({ action: outcome.verdict.action, ciGreen: outcome.status.ciGreen, ciRed: outcome.status.ciRed ?? false }),
     );
     const finalized = await this.finalizeVerdict(pr, outcome.status, outcome.data, outcome.verdict);
-    return ciAging(finalized, outcome.data.headOid, pending, outcome.data.labels);
+    return ciAging(finalized, outcome.data.headOid, pending, outcome.data.labels, false, outcome.status);
   }
 }

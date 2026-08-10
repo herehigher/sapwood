@@ -10176,6 +10176,142 @@ test("#782 gate② round 1 (P2, AC3c): the SAME evidence-wait wedge is drain-ter
   assert.match(ev!.payload.reason, /drain-ci-pending-wedged:fix-rounds=0/);
 });
 
+// ── #783 wiring (gate② opus round 1, PM-direct human-owned remainder): the INERT escalation flows
+// through the SAME #426 conductor mechanism as the classic pending one, but with the shorter
+// bound, a distinct event kind (ci-inert-escalated, never ci-pending-escalated), the actionable
+// inert comment (buildCiInertEscalationComment), and evidence sourced from `s.inert` — never a
+// second `describePendingChecks` forge call. Uses FakeMergeGate (an injected DriveOutcome) rather
+// than a real MergeDriver, the same pattern the #782 evidence-wait suite above uses: the
+// conductor-side wiring under test here reads ONLY `outcome.ciPendingEscalation`, so this exercises
+// the exact branch #783 wiring added without needing the full driveOne pipeline (already covered
+// by merge-driver.test.ts's own #783-wiring suite). ──
+
+test("#783 wiring: an INERT escalation posts the actionable inert comment (remedy, docs/configuration.md citation, PR #769 worked example), labels needs-human, and records ci-inert-escalated — NEVER ci-pending-escalated", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  const pendingOutcome: DriveOutcome = {
+    kind: "queued",
+    pr: 55,
+    reason: "gate-pending:MERGE_OK",
+    ciPendingObservation: { pending: true, head: "H1" },
+  };
+  gate.outcomes[55] = pendingOutcome;
+  const cfg = mkCfg({ ci: { pendingEscalateAfterSec: 21600, inertEscalateAfterSec: 900 } });
+  let clock = new Date("2026-08-11T00:00:00Z");
+  const now = () => clock;
+  const tickOpts = { forge, state: st, supervisor: sup, cfg, mergeGate: gate, now };
+
+  await tick(tickOpts);
+  assert.equal(st.lastCiPendingEvent("lane-a", 55)?.kind, "ci-pending-observed");
+
+  // Past the shorter 900s inert bound: driveOne now reports the inert-shaped escalation — the
+  // exact shape merge-driver.ts's `ciAging`/`ciEscalationBound` produce.
+  clock = new Date("2026-08-11T00:15:00Z"); // exactly 900s
+  gate.outcomes[55] = {
+    ...pendingOutcome,
+    ciPendingEscalation: { head: "H1", pendingSec: 900, inert: { checks: [{ name: "aux-lint", conclusion: "SKIPPED" }] } },
+  };
+  await tick(tickOpts);
+
+  assert.deepEqual(forge.prLabelsAdded, [[55, "needs-human"]]);
+  const comment = forge.prComments.find(([pr]) => pr === 55)?.[1] ?? "";
+  assert.match(comment, /aux-lint \(SKIPPED\)/);
+  assert.match(comment, /without ever going green/);
+  assert.match(comment, /always run and skip its STEPS/);
+  assert.match(comment, /docs\/configuration\.md/);
+  assert.match(comment, /PR #769/);
+  assert.match(comment, /Escalating to `needs-human`/);
+  assert.doesNotMatch(comment, /gate② is already decisive/); // never the classic pending wording
+  assert.doesNotMatch(comment, /has been PENDING for/); // never the classic pending wording either
+
+  const inertEvents = st.eventsAfterId(0, ["ci-inert-escalated"]);
+  assert.equal(inertEvents.length, 1);
+  assert.deepEqual(inertEvents[0]!.payload, {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    head: "H1",
+    pendingSec: 900,
+    checks: [{ name: "aux-lint", conclusion: "SKIPPED" }],
+  });
+  // The classic event NEVER fires for an inert-shaped escalation — the two are mutually exclusive
+  // outcomes for the same episode, decided once upstream (merge-driver.ts's `ciEscalationBound`).
+  assert.equal(st.eventsAfterId(0, ["ci-pending-escalated"]).length, 0);
+  // The comment itself is marker-deduped (commentOnEscalationCarrier's own scan) — a would-be
+  // repeat post of the SAME episode's comment is silently skipped, exactly like the classic
+  // branch's pre-existing dedup contract (#451 round 3). The one-per-episode LATCH that stops the
+  // conductor from even trying again is `needsHumanLabelPresent`, read from LIVE PR data inside
+  // `ciPendingAge`/`ciPendingDuration` (merge-driver.ts) once the label actually lands on the
+  // PR — proven at the driveOne level, through a REAL MergeDriver, by merge-driver.test.ts's own
+  // #783-wiring "20 minutes... flip BACK to pending" test (a FakeMergeGate here has no live PR
+  // state for that arithmetic to read, so it is not the right harness for the latch itself).
+  assert.equal(forge.prComments.filter(([pr]) => pr === 55).length, 1);
+});
+
+test("#783 wiring: an inert escalation's payload/comment respect the CI_INERT_NAME_CAP truncation, carrying the +M more count through to both the event payload and the comment text", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-b", 3, 66);
+  const gate = new FakeMergeGate();
+  const cfg = mkCfg({ ci: { pendingEscalateAfterSec: 21600, inertEscalateAfterSec: 900 } });
+  let clock = new Date("2026-08-11T00:00:00Z");
+  const now = () => clock;
+  const tickOpts = { forge, state: st, supervisor: sup, cfg, mergeGate: gate, now };
+
+  gate.outcomes[66] = { kind: "queued", pr: 66, reason: "gate-pending:MERGE_OK", ciPendingObservation: { pending: true, head: "H1" } };
+  await tick(tickOpts);
+
+  clock = new Date("2026-08-11T00:15:00Z");
+  gate.outcomes[66] = {
+    kind: "queued",
+    pr: 66,
+    reason: "gate-pending:MERGE_OK",
+    ciPendingObservation: { pending: true, head: "H1" },
+    ciPendingEscalation: { head: "H1", pendingSec: 900, inert: { checks: [{ name: "check-0", conclusion: "SKIPPED" }], truncated: 4 } },
+  };
+  await tick(tickOpts);
+
+  const comment = forge.prComments.find(([pr]) => pr === 66)?.[1] ?? "";
+  assert.match(comment, /check-0 \(SKIPPED\), \+4 more/);
+  const inertEvents = st.eventsAfterId(0, ["ci-inert-escalated"]);
+  assert.equal((inertEvents[0]!.payload as { truncated?: number }).truncated, 4);
+});
+
+test("#783 wiring: an inert-shaped wedge is drain-terminal at the SHORTER 900s bound — ciPendingWedgedForDrain's own head/rollup-blind Math.min fail-safe applies even though the classic pendingEscalateAfterSec bound (6h) has not been reached", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55); // fix_rounds 0 — the inert wedge is the ONLY reason it is stuck
+  st.appendEvent("ci-pending-observed", { worker: "lane-a", issue: 2, pr: 55, head: "H1", at: "2026-08-11T00:00:00.000Z" });
+  st.recordSpend("lane-earlier", 99, 500, "2026-08-11T00:00:01.000Z"); // over a tiny daily cap
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:MERGE_OK", ciPendingObservation: { pending: true, head: "H1" } };
+  const cfg = mkCfg({
+    cost: { drainWindowSec: 60, dailyBudgetUsd: 10 },
+    ci: { pendingEscalateAfterSec: 21600, inertEscalateAfterSec: 900 },
+  });
+  // 950s after the pin opened: PAST the 900s inert bound, well short of the 6h pending one. The
+  // drain predicate cannot see whether this pin is pending or inert (event-log-only, forge-free —
+  // ciPendingWedgedForDrain's own doc), so it conservatively compares against the SHORTER bound.
+  let clock = new Date("2026-08-11T00:15:50Z");
+  const now = () => clock;
+  const tickOpts = { forge, state: st, supervisor: sup, cfg, mergeGate: gate, now };
+
+  const r1 = await tick(tickOpts);
+  assert.equal(r1.ceilingBreached, true);
+  assert.deepEqual(r1.escalated, []); // still inside the drain window
+
+  clock = new Date(clock.getTime() + 61_000); // past drainWindowSec, breach still standing
+  const r2 = await tick(tickOpts);
+  assert.deepEqual(r2.escalated, ["lane-a"]);
+  const ev = st.latestEvent("drive-needs-human") as { payload: { reason: string } } | undefined;
+  assert.match(ev!.payload.reason, /drain-ci-pending-wedged:fix-rounds=0/);
+});
+
 test("#426 AC3: a check reaching a real conclusion CANCELS the pin — the next pending episode ages from its own start, never inheriting the cancelled one's clock", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

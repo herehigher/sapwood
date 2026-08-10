@@ -358,10 +358,12 @@ const Ci = z
     // gate① actually resolving green/red does). Once an episode has escalated at this shorter
     // bound, the `needsHuman` label latch — the same suppression `pendingEscalateAfterSec` already
     // relies on — is what prevents a SECOND escalation later at the longer `pendingEscalateAfterSec`
-    // bound on that same episode, not a separate pin reset. Schema only here — the drive-loop wiring
-    // that reads this (and must implement this "shorter bound, same pin" semantics, not a fresh
-    // per-inertness timer) is the human-owned remainder (#783's issue body) — merge-driver.ts/
-    // conductor.ts are guard-protected paths this key's own PR does not touch.
+    // bound on that same episode, not a separate pin reset.
+    // #783 wiring (gate② opus round 1, PM-direct human-owned remainder, 2026-08-11): WIRED —
+    // merge-driver.ts's `ciEscalationBound` implements exactly this "shorter bound, same pin"
+    // semantics (never a fresh per-inertness timer), and conductor.ts's escalation branch emits
+    // `ci-inert-escalated` with the actionable comment when it fires. See `ciEscalationBound`'s
+    // own doc for the precedence rule composing this with #792's engine-agent `evidenceWait`.
     inertEscalateAfterSec: z.number().int().positive().default(900),
     requiredChecks: z
       .array(

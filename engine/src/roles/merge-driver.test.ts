@@ -11,6 +11,7 @@ import { findingDigest } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { AuditDeliveryResult } from "../review/drive.js";
 import {
+  ciEscalationBound,
   ciPendingDuration,
   type DriveOutcome,
   deriveGate,
@@ -685,6 +686,35 @@ test("#426 ciPendingDuration: a hold suppresses purely — the pin is untouched,
   assert.equal(ciPendingDuration({ ...base, holdLabelPresent: false }), 43200); // the FULL elapsed age, once
 });
 
+// ── #783 wiring (gate② opus round 1, PM-direct human-owned remainder): ciEscalationBound — the
+// pure "which bound, and is this escalation inert-shaped" decision, reused byte-for-byte by both
+// the classic path (withSignals) and the engine-agent path (ciAging) ────────────────────────────
+
+test("ciEscalationBound: a pending-only rollup (ciInert false) always selects the plain pendingEscalateAfterSec bound and is never inert-shaped", () => {
+  const r = ciEscalationBound({ ciInert: false, evidenceWait: false, pendingEscalateAfterSec: 21600, inertEscalateAfterSec: 900 });
+  assert.deepEqual(r, { escalateAfterSec: 21600, inert: false });
+});
+
+test("ciEscalationBound: an inert rollup selects the SHORTER of the two bounds and is inert-shaped", () => {
+  const r = ciEscalationBound({ ciInert: true, evidenceWait: false, pendingEscalateAfterSec: 21600, inertEscalateAfterSec: 900 });
+  assert.deepEqual(r, { escalateAfterSec: 900, inert: true });
+});
+
+test("ciEscalationBound: still selects the shorter bound even when inertEscalateAfterSec is configured LARGER than pendingEscalateAfterSec — Math.min, not 'always inert wins'", () => {
+  const r = ciEscalationBound({ ciInert: true, evidenceWait: false, pendingEscalateAfterSec: 900, inertEscalateAfterSec: 21600 });
+  assert.deepEqual(r, { escalateAfterSec: 900, inert: true });
+});
+
+test("ciEscalationBound (exclusivity precedence invariant): evidenceWait forces the classic bound and inert:false EVEN WHEN ciInert also reads true on the same rollup — a missing required check outranks an unrelated non-required check concluding non-green", () => {
+  const r = ciEscalationBound({ ciInert: true, evidenceWait: true, pendingEscalateAfterSec: 21600, inertEscalateAfterSec: 900 });
+  assert.deepEqual(r, { escalateAfterSec: 21600, inert: false });
+});
+
+test("ciEscalationBound: evidenceWait with ciInert false is the ordinary evidence-wait case — classic bound, not inert", () => {
+  const r = ciEscalationBound({ ciInert: false, evidenceWait: true, pendingEscalateAfterSec: 21600, inertEscalateAfterSec: 900 });
+  assert.deepEqual(r, { escalateAfterSec: 21600, inert: false });
+});
+
 test("#426 MergeDriver.driveOne: a MERGE_OK verdict with neither CI state reports the pending observation every pass, and escalates once the threaded pin is past the bound", async () => {
   const forge = new FakeForge();
   const reviewer = new FakeReviewer(); // MERGE_OK by default
@@ -741,6 +771,147 @@ test("#426 MergeDriver.driveOne: a check that reaches a real conclusion reports 
   assert.equal(redOutcome.kind, "fixable"); // CI-red is the fix loop's business, not the aging arm's
   assert.deepEqual(redOutcome.ciPendingObservation, { pending: false, head: "HEAD" });
   assert.equal(redOutcome.ciPendingEscalation, undefined);
+});
+
+// ── #783 wiring (gate② opus round 1, PM-direct human-owned remainder): bound selection through
+// the REAL MergeDriver.driveOne classic path — fake-clock, multi-pass, mirroring #426's own
+// driveOne-level pattern above ─────────────────────────────────────────────────────────────────
+
+test("#783 wiring: a pending-only rollup (ciInert false) escalates only at the FULL 6h pendingEscalateAfterSec bound, never at the shorter 900s inert bound", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer(); // MERGE_OK by default
+  forge.status = { ...forge.status, ciGreen: false, ciRed: false, ciInert: false }; // merely pending, not inert
+  const cfg = mkCfg({
+    ci: { pendingEscalateAfterSec: 21600, inertEscalateAfterSec: 900 },
+    labels: { needsHuman: "needs-human" },
+    escalation: { humanLabels: HUMAN_LABELS },
+  });
+  const pin = { head: "HEAD", at: "2026-08-11T00:00:00.000Z" };
+
+  // 900s in: past the (inapplicable) inert bound, well short of the 6h pending one.
+  const past900 = await new MergeDriver({ forge, reviewer, cfg, now: () => new Date("2026-08-11T00:15:00.000Z") }).driveOne(
+    7,
+    46,
+    ALREADY_TRIGGERED,
+    noopRecord,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    pin,
+  );
+  assert.equal(past900.ciPendingEscalation, undefined, "900s is past the inert bound, but this rollup is not inert — the 6h bound governs");
+
+  // Exactly 21600s in: the full pending bound fires, and carries no `inert` payload.
+  const pastFull = await new MergeDriver({ forge, reviewer, cfg, now: () => new Date("2026-08-11T06:00:00.000Z") }).driveOne(
+    7,
+    46,
+    ALREADY_TRIGGERED,
+    noopRecord,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    pin,
+  );
+  assert.deepEqual(pastFull.ciPendingEscalation, { head: "HEAD", pendingSec: 21600 });
+});
+
+test("#783 wiring: an inert rollup escalates at the SHORTER 900s bound, carrying buildCiInertEscalationPayload's own output", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  forge.status = {
+    ...forge.status,
+    ciGreen: false,
+    ciRed: false,
+    ciInert: true,
+    ciChecks: [
+      { name: "aux-lint", conclusion: "SKIPPED" },
+      { name: "test", conclusion: "SUCCESS" },
+    ],
+  };
+  const cfg = mkCfg({
+    ci: { pendingEscalateAfterSec: 21600, inertEscalateAfterSec: 900 },
+    labels: { needsHuman: "needs-human" },
+    escalation: { humanLabels: HUMAN_LABELS },
+  });
+  const driver = new MergeDriver({ forge, reviewer, cfg, now: () => new Date("2026-08-11T00:15:00.000Z") }); // exactly 900s
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, undefined, {
+    head: "HEAD",
+    at: "2026-08-11T00:00:00.000Z",
+  });
+  assert.deepEqual(outcome.ciPendingEscalation, {
+    head: "HEAD",
+    pendingSec: 900,
+    inert: { checks: [{ name: "aux-lint", conclusion: "SKIPPED" }] },
+  });
+});
+
+test("#783 wiring: a rollup pending for 20 minutes that then flips inert escalates on the FIRST inert-observing pass — the pin's age was already past the shorter bound the whole time (documented, intended: docs/configuration.md's inertEscalateAfterSec row); a later flip BACK to pending never un-escalates or double-fires, the needsHuman latch covers it", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  const cfg = mkCfg({
+    ci: { pendingEscalateAfterSec: 21600, inertEscalateAfterSec: 900 },
+    labels: { needsHuman: "needs-human" },
+    escalation: { humanLabels: HUMAN_LABELS },
+  });
+  const pin = { head: "HEAD", at: "2026-08-11T00:00:00.000Z" };
+
+  // T+20min (1200s): still merely pending — no check has concluded non-passing yet. Past the
+  // inert bound, short of the pending one, but NOT inert, so no escalation.
+  forge.status = { ...forge.status, ciGreen: false, ciRed: false, ciInert: false };
+  const stillPending = await new MergeDriver({ forge, reviewer, cfg, now: () => new Date("2026-08-11T00:20:00.000Z") }).driveOne(
+    7,
+    46,
+    ALREADY_TRIGGERED,
+    noopRecord,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    pin,
+  );
+  assert.equal(stillPending.ciPendingEscalation, undefined);
+
+  // A check concludes SKIPPED at this same instant — the SAME pin, unmoved (pin semantics are
+  // unchanged, docs/configuration.md's own contract: stamped once, at first not-green). The very
+  // next pass that observes the now-inert rollup escalates IMMEDIATELY: the pin (1200s old)
+  // already exceeds the 900s inert bound — no fresh 15-minute clock starts.
+  forge.status = { ...forge.status, ciInert: true, ciChecks: [{ name: "aux-lint", conclusion: "SKIPPED" }] };
+  const nowInert = await new MergeDriver({ forge, reviewer, cfg, now: () => new Date("2026-08-11T00:20:00.000Z") }).driveOne(
+    7,
+    46,
+    ALREADY_TRIGGERED,
+    noopRecord,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    pin,
+  );
+  assert.deepEqual(nowInert.ciPendingEscalation, {
+    head: "HEAD",
+    pendingSec: 1200,
+    inert: { checks: [{ name: "aux-lint", conclusion: "SKIPPED" }] },
+  });
+
+  // The needsHuman label latches it, exactly like every other aging arm (#170/#426): a later pass
+  // that flips BACK to merely pending must not un-escalate, re-escalate, or double-fire.
+  forge.reviewData = { ...forge.reviewData, labels: ["Needs-Human"] };
+  forge.status = { ...forge.status, ciInert: false };
+  const latched = await new MergeDriver({ forge, reviewer, cfg, now: () => new Date("2026-08-11T00:21:00.000Z") }).driveOne(
+    7,
+    46,
+    ALREADY_TRIGGERED,
+    noopRecord,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    pin,
+  );
+  assert.equal(latched.kind, "needs-human");
+  assert.equal(latched.ciPendingEscalation, undefined);
 });
 
 test("#170 MergeDriver: an aged silent current-head review signals once; a fresh head resets the clock", async () => {

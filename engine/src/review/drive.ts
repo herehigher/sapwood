@@ -186,10 +186,8 @@ export function refetchStillValid(
   if (!status.ciGreen) {
     if (status.ciRed) return { ok: false, reason: "ci-red" };
     if (status.ciInert) {
-      const named = (status.ciChecks ?? [])
-        .filter((c) => c.conclusion.toUpperCase() !== "SUCCESS")
-        .map((c) => `${c.name} (${c.conclusion})`)
-        .join(", ");
+      const { shown, truncated } = capNonPassingChecks(status.ciChecks ?? []);
+      const named = shown.map((c) => `${c.name} (${c.conclusion})`).join(", ") + (truncated > 0 ? `, +${truncated} more` : "");
       return { ok: false, reason: named ? `ci-inert: ${named}` : "ci-inert" };
     }
     return { ok: false, reason: "ci-pending" };
@@ -207,6 +205,37 @@ export interface CiInertEscalationCheck {
   conclusion: string;
 }
 
+/** #783 wiring (gate② opus round 1 review note (a), carried from the #797 approval into this
+ *  wiring PR): a rollup with dozens of non-passing checks (a monorepo's `needs:` cascade, e.g.)
+ *  must never let a reason string, an escalation payload, or a PR comment grow unboundedly — cap
+ *  displayed/payload names at the first N, folding the rest into a "+M more" count. N=10 is picked
+ *  as "enough to be actionable at a glance, small enough that a reason string or PR comment never
+ *  becomes illegible" — the SAME cap and the SAME shared helper are used everywhere a non-passing
+ *  check list is rendered (`refetchStillValid`'s discard reason, `buildCiInertEscalationPayload`'s
+ *  event payload, `buildCiInertEscalationComment`'s PR comment), so the three surfaces can never
+ *  independently disagree about how many names is "enough". */
+export const CI_INERT_NAME_CAP = 10;
+
+function capNonPassingChecks(
+  checks: readonly { name: string; conclusion: string }[],
+  cap = CI_INERT_NAME_CAP,
+): { shown: CiInertEscalationCheck[]; truncated: number } {
+  const nonPassing = checks.filter((c) => c.conclusion.toUpperCase() !== "SUCCESS");
+  return {
+    shown: nonPassing.slice(0, cap).map((c) => ({ name: c.name, conclusion: c.conclusion })),
+    truncated: Math.max(0, nonPassing.length - cap),
+  };
+}
+
+/** #783 wiring: `buildCiInertEscalationPayload`'s own return shape, reused verbatim as the
+ *  `DriveOutcome.ciPendingEscalation.inert` field's type (merge-driver.ts) so the two ends of the
+ *  wiring can never drift on what "the inert payload" contains. `truncated` is present (and > 0)
+ *  only when `CI_INERT_NAME_CAP` actually cut names — absent, never `0`, on an uncapped rollup. */
+export interface CiInertEscalationPayload {
+  checks: CiInertEscalationCheck[];
+  truncated?: number;
+}
+
 /** Pure payload-builder for the `ci-inert-escalated` event (#783 AC4): given the PR's own status
  *  rollup, names every check that did NOT pass — read off `status.ciChecks`, the EXACT SAME
  *  rollup entries `ciInert` was computed from, not a second, separately-timed `getPRChecks` call.
@@ -222,12 +251,21 @@ export interface CiInertEscalationCheck {
  *  caller still asserts `ciInert: true`, an escalation comment with no evidence in it. Sourcing
  *  from `PRStatus.ciChecks` instead makes both impossible BY CONSTRUCTION: it is the same object,
  *  from the same read, that already proved `ciInert`, so evidence and decision can never split.
- *  NOT wired to any live escalation — that wiring is the human-owned remainder (`merge-driver.ts`/
- *  `conductor.ts` are guard-protected paths this issue does not touch); this is the
- *  producer-reachable building block only. */
-export function buildCiInertEscalationPayload(status: PRStatus): { checks: CiInertEscalationCheck[] } {
-  const nonPassing = (status.ciChecks ?? []).filter((c) => c.conclusion.toUpperCase() !== "SUCCESS");
-  return { checks: nonPassing.map((c) => ({ name: c.name, conclusion: c.conclusion })) };
+ *
+ *  gate② opus round 1 review note (b), carried from the #797 approval into this wiring PR: the
+ *  CALLER must gate on `status.ciInert === true` before ever calling this — asserted here, not
+ *  silently tolerated. `ciInert`'s own derivation (forge.ts) guarantees every entry in `ciChecks`
+ *  is CONCLUDED (an in-flight CheckRun fails `concluded()` and keeps `ciInert` false), so an
+ *  `"UNKNOWN"`-conclusion entry reaching this function can only mean a genuinely malformed rollup
+ *  row (neither `conclusion` nor `state` populated) — NEVER an in-flight check being mislabeled
+ *  UNKNOWN. A caller that forgets the `ciInert` gate is a producer bug: better a loud throw here
+ *  than a human reading a fabricated "still running, but the engine called it UNKNOWN" comment. */
+export function buildCiInertEscalationPayload(status: PRStatus): CiInertEscalationPayload {
+  if (status.ciInert !== true) {
+    throw new Error("buildCiInertEscalationPayload: caller must gate on status.ciInert === true before calling this");
+  }
+  const { shown, truncated } = capNonPassingChecks(status.ciChecks ?? []);
+  return { checks: shown, ...(truncated > 0 ? { truncated } : {}) };
 }
 
 /** Pure message-composition function for the `ci-inert-escalated` comment text (#783 AC5): names
@@ -236,10 +274,11 @@ export function buildCiInertEscalationPayload(status: PRStatus): { checks: CiIne
  *  worked example (the hosted aux arm's job-level `if:` left a SKIPPED check wedging gate① until
  *  it moved to its own push-only workflow). `head` and `checks` are the same evidence
  *  `buildCiInertEscalationPayload` names — this function only composes the human-facing string, it
- *  never fetches or decides anything. NOT wired to any live posting path — see that function's own
- *  doc for why. */
-export function buildCiInertEscalationComment(head: string, checks: readonly CiInertEscalationCheck[]): string {
-  const named = checks.map((c) => `${c.name} (${c.conclusion})`).join(", ");
+ *  never fetches or decides anything. `truncated` (review note (a)) appends a "+M more" tail after
+ *  the joined names when the caller's own payload was capped — pass `payload.truncated` straight
+ *  through; omitted/0 renders nothing extra, byte-identical to the uncapped case. */
+export function buildCiInertEscalationComment(head: string, checks: readonly CiInertEscalationCheck[], truncated = 0): string {
+  const named = checks.map((c) => `${c.name} (${c.conclusion})`).join(", ") + (truncated > 0 ? `, +${truncated} more` : "");
   return (
     `sapwood: gate① concluded on \`${head}\` without ever going green — ${named} concluded without passing, ` +
     "and nothing in the rollup is still running, so this PR can never resolve on its own. Remedy: make the " +
