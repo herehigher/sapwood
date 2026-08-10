@@ -82,7 +82,15 @@ export function App({ now }: { now?: Date | undefined } = {}) {
         <Header
           disconnected={disconnected}
           isPending={loop.isPending}
-          engine={loop.data ? { state: loop.data.engine.state, pauseActive: loop.data.engine.pauseActive } : undefined}
+          engine={
+            loop.data
+              ? {
+                  state: loop.data.engine.state,
+                  pauseActive: loop.data.engine.pauseActive,
+                  standbyNextCheckSec: loop.data.engine.standbyNextCheckSec,
+                }
+              : undefined
+          }
           spend={loop.data?.spend}
           parked={parked}
         />

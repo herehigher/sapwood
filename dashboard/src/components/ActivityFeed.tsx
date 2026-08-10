@@ -5,6 +5,13 @@ import { formatRelative } from "../format.ts";
 import { EntityRef } from "./EntityRef.tsx";
 import { StateGlyph } from "./icons.tsx";
 
+/** #722: the feed panel gets its own scroll container (`.feed-scroll`, panels.css) rather than
+ *  driving the whole page's height, but a scroll container alone still leaves thousands of `<li>`
+ *  DOM rows mounted — this caps what actually renders. Newest-first, pinned entries exempt (their
+ *  own contract, unchanged). Matches `EVENTS_PAGE` (queries.ts) — one fetched page is a "sane
+ *  window" per the issue, no virtualization library needed at this size. */
+export const FEED_RENDER_CAP = 200;
+
 export interface ActivityFeedProps {
   /** The bounded recent window — routine display, newest-first, capped for memory. `DomainEvent`,
    *  not the raw wire `LoopEvent` (#715 gate② round 5 [0]) — the parse boundary that classifies a
@@ -119,14 +126,37 @@ export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconn
   const pinnedIds = new Set(pinnedAttention.map((e) => e.id));
   const pinned = [...pinnedAttention].sort((a, b) => b.id - a.id);
   const rest = events.filter((e) => !pinnedIds.has(e.id)).sort((a, b) => b.id - a.id);
+  const total = pinned.length + rest.length;
+  // Pinned entries are exempt from the cap (their own durable contract, #715 gate② [0]) — an open
+  // escalation must never be silently dropped by the display cap. That means `pinned.length` alone
+  // can exceed `FEED_RENDER_CAP` (#722 gate② [0] pinned-bypasses-cap) — the cap is intentionally
+  // blown to keep every pin visible, and the disclosure below says so rather than staying silent.
+  const visibleRest = rest.slice(0, Math.max(0, FEED_RENDER_CAP - pinned.length));
+  const rendered = [...pinned, ...visibleRest];
+  const pinnedExceedsCap = pinned.length > FEED_RENDER_CAP;
+  const restTruncated = rendered.length < total;
+  // A pinned row need not be among the newest — mixing it into a capped render breaks the "latest
+  // N" framing, so the note names the pinned exception instead of implying pure recency ordering.
+  let capNote: string | null = null;
+  if (pinnedExceedsCap) {
+    capNote = `showing all ${rendered.length} — ${pinned.length} pinned exceed the ${FEED_RENDER_CAP}-row display cap`;
+  } else if (restTruncated) {
+    capNote =
+      pinned.length > 0
+        ? `showing ${rendered.length} of ${total} — ${pinned.length} pinned always included, latest ${visibleRest.length} of ${rest.length} routine`
+        : `showing latest ${rendered.length} of ${total}`;
+  }
   return (
     <section className="panel activity-feed" aria-label="activity">
       <h2>activity</h2>
-      <ul aria-live="polite" className="feed-list">
-        {[...pinned, ...rest].map((event) => (
-          <FeedEntry key={event.id} event={event} titles={titles} repoUrl={repoUrl} now={clock} />
-        ))}
-      </ul>
+      {capNote && <p className="muted feed-cap-note">{capNote}</p>}
+      <div className="feed-scroll">
+        <ul aria-live="polite" className="feed-list">
+          {rendered.map((event) => (
+            <FeedEntry key={event.id} event={event} titles={titles} repoUrl={repoUrl} now={clock} />
+          ))}
+        </ul>
+      </div>
     </section>
   );
 }

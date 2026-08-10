@@ -120,7 +120,12 @@ item becomes a routed page, that is a scope amendment to this section.
 - **A — Header.** Wordmark; engine state as one word + dot (`running` /
   `standby` / `stalled` / `paused` / `winding down` / `stopping` / `stopped` —
   derived from sentinels, ceiling breach, standby events, and `lastTickAt`
-  age, §8; `standby` renders calm, never as an error); the spend meter —
+  age, §8; `standby` renders calm, never as an error — #723: a standby
+  backoff dwell deliberately stops ticking, so a FRESH standby signal
+  overrides tick staleness rather than misreading a healthy dwell as
+  `stalled`) with its §7 plain-language caption next to it (`standby`'s
+  caption folds in the next-check countdown, e.g. "checking again in 42s");
+  the spend meter —
   **run-cumulative vs the per-run stop budget** (`stop.afterSpendUsd`, the
   #154 run-scoped ledger sum): numerator and denominator must always come
   from the **same budget tier** (§11); with no run budget configured the
@@ -422,6 +427,17 @@ stroked in `--bark` at 40% alpha; the growing (current) ring in `--sap`.
 | Display | **Fraunces** (subset woff2, bundled — offline-safe) | Wordmark, section labels, the big ring count. Used sparingly; its warmth carries the organic identity. |
 | Body | `system-ui` stack | All UI prose. Native feel, zero bytes — the honest choice for a local tool. |
 | Data | `ui-monospace` stack | Issue/PR numbers, costs, timestamps, config keys. A tool dashboard is mostly data; the mono face does the daily work. |
+
+Adjudicated 2026-08-10 (#728, token adjudication): the h1/h2/h3 module headers (`app.css`)
+and the hero's PLAN/IMPLEMENT/OUTCOME captions and ring count (`hero.css`) render in
+**Fraunces**, the display face above — this row already blessed exactly that use ("section
+labels, the big ring count"). The #144 and #145 gate② frozen-baseline probes (`hero-panel-*`,
+the dashboard concept renders) both recorded the shipped headers as a deviation because the
+baseline mockups render all-mono; both probes filed it as non-blocking and pointed at one
+shared adjudication rather than two. Ruling: the token table stands as specced — Fraunces for
+display headers — and the baseline PNGs are the out-of-date artifact, not the implementation.
+No code change follows from this entry; it exists so #144/#145's "recorded for adjudication"
+deviation has a resolved answer on file.
 
 Scale: 13 px base (data-dense surface), 1.25 ratio up to the 33 px display
 size; line-height 1.5 body, 1.2 display. Weights: 400/600 only.
@@ -762,21 +778,46 @@ mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
                                     // derived: KILL_SWITCH + active lanes → stopping (drain in
                                     // progress); KILL_SWITCH + none → stopped; ceiling_breach →
                                     // winding-down; PAUSE → paused; lastTickAt older than the
-                                    // engine's stale-gap threshold → stalled (dead engine must
-                                    // not read as a green "running"); no open round + newest
-                                    // standby-wait newer than any standby-exit → standby
-                                    // (parked, healthy — #125); else running.
+                                    // engine's stale-gap threshold → stalled UNLESS a standby
+                                    // signal is fresh (see below); no open round + newest
+                                    // standby-wait/standby-heartbeat newer than any standby-exit
+                                    // AND within its own declared window (waitSec/remainingSec)
+                                    // → standby (parked, healthy — #125, #723); else running.
+                                    // #723 (AC12 operator probe): a standby backoff dwell
+                                    // deliberately stops the tick heartbeat for up to
+                                    // round.standby.backoffCapSec (default 1800s) — well past
+                                    // the stale-gap's 900s floor — so the standby-freshness
+                                    // check runs BEFORE staleness decides and overrides it; a
+                                    // standby signal that has itself gone stale beyond its own
+                                    // window is NOT fresh, and a stale tick with no fresh
+                                    // standby signal still renders stalled, unchanged. #746: a
+                                    // run-ended/engine-stalled terminal STRICTLY NEWER (by event
+                                    // id) than the standby signal ALSO invalidates its freshness
+                                    // — a process that exits mid-standby-dwell never appends
+                                    // standby-exit (round.ts's exit-append site is reached only
+                                    // on a normal resume, never on process death), so without
+                                    // this check a dead engine would keep rendering `standby`
+                                    // until the lingering signal's own window happened to elapse.
                                     // Precedence (fixed 2026-07-21, resolving §8 vs
                                     // walkthrough §6): STALENESS BEATS PAUSE — a dead engine
                                     // with a PAUSE file renders stalled, the sentinel demoted
                                     // to a secondary chip ("PAUSE set"); KILL_SWITCH + stale
                                     // stays stopped (truthful either way). Derivation is
                                     // server-side only, so `sapwood status` and the dashboard
-                                    // can never disagree. Env-park folds into the standby
-                                    // display tier ("waiting") with a park sub-caption —
-                                    // no eighth state word.
+                                    // can never disagree (`sapwood status`'s text does not
+                                    // itself render this word today, #723 audit — see the
+                                    // engine-state derivation module's own doc). Env-park folds
+                                    // into the standby display tier ("waiting") with a park
+                                    // sub-caption — no eighth state word.
     "reasons": [],                  // ceiling_breach.reasons when winding-down
-    "lastTickAt": "2026-07-09T08:12:00Z"   // engine_session.last_tick_at
+    "lastTickAt": "2026-07-09T08:12:00Z",  // engine_session.last_tick_at
+    "standbyNextCheckSec": 42       // #723: seconds until the next standby probe — the standby
+                                    // signal's own declared window minus its age, floored at 0.
+                                    // null unless state === "standby" (never a stale countdown
+                                    // left over from a prior dwell). The header caption folds
+                                    // this into "idle — nothing to work on right now — checking
+                                    // again in 42s" (§7's copy convention applied to the engine
+                                    // word, dashboard/src/copy.ts's engineStateCaption).
   },
   "lanes": {
     "max": 3,                       // config lanes.max (null if config unreadable)

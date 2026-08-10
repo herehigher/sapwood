@@ -16,7 +16,7 @@ import { eventsQuery, loopStateQuery, spendQuery } from "./api/queries.ts";
  */
 
 const LOOP_STATE_OK = {
-  engine: { state: "running", reasons: [], lastTickAt: null, pauseActive: false },
+  engine: { state: "running", reasons: [], lastTickAt: null, pauseActive: false, standbyNextCheckSec: null },
   lanes: { max: 1, items: [] },
   round: null,
   spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
@@ -108,6 +108,21 @@ test("both queries succeeding renders the normal header, not disconnected", asyn
   });
   assert.doesNotMatch(html, /disconnected/);
   assert.match(html, />running</);
+});
+
+// #723: AC12 operator probe — the header must render `standby` (with its calm caption and the
+// next-check countdown), never `stalled`, during a healthy backoff dwell.
+test("#723: header renders the standby word with its plain-language caption and next-check countdown, not stalled", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: { ...LOOP_STATE_OK, engine: { state: "standby", reasons: [], lastTickAt: null, pauseActive: false, standbyNextCheckSec: 42 } },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  assert.match(html, />standby</);
+  assert.match(html, /idle — nothing to work on right now — checking again in 42s/);
+  assert.doesNotMatch(html, /stalled/);
 });
 
 test("#715 gate② round 3 [2]: a completed lane's settled spend still renders in the by-lane cost strip", async () => {

@@ -2,24 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { EngineState } from "../api/types.ts";
-import { displayEngineWord, Header, resolveSpendMeter, showsPauseChip } from "./Header.tsx";
+import { type EngineFacts, Header, resolveSpendMeter, showsPauseChip } from "./Header.tsx";
 
 // ── pure helpers (§3 A / §8) ────────────────────────────────────────────────────────────────
-
-test("displayEngineWord: the seven §8 words collapse to the documented display vocabulary", () => {
-  const cases: [EngineState, string][] = [
-    ["running", "running"],
-    ["standby", "waiting"],
-    ["stalled", "stalled"],
-    ["paused", "paused"],
-    ["winding-down", "stopping"],
-    ["stopping", "stopping"],
-    ["stopped", "stopped"],
-  ];
-  for (const [state, word] of cases) {
-    assert.equal(displayEngineWord(state), word, `${state} -> ${word}`);
-  }
-});
 
 test("showsPauseChip: the precedence case — a masked PAUSE (state isn't `paused`) still shows the secondary chip", () => {
   assert.equal(showsPauseChip("stalled", true), true, "stale engine + PAUSE file — staleness beats PAUSE in the word, not the fact");
@@ -51,17 +36,23 @@ test("resolveSpendMeter: daily tier with no configured ceiling at all reports an
 // ── rendering ────────────────────────────────────────────────────────────────────────────────
 
 const SPEND_OK = { runUsd: null, runBudgetUsd: null, todayUsd: 12, dailyBudgetUsd: 100 };
+const engine = (state: EngineState, extra: Partial<EngineFacts> = {}): EngineFacts => ({
+  state,
+  pauseActive: false,
+  standbyNextCheckSec: null,
+  ...extra,
+});
 
 test("renders the state word as text, not color alone", () => {
   const html = renderToStaticMarkup(
-    <Header disconnected={false} isPending={false} engine={{ state: "running", pauseActive: false }} spend={SPEND_OK} parked={false} />,
+    <Header disconnected={false} isPending={false} engine={engine("running")} spend={SPEND_OK} parked={false} />,
   );
   assert.match(html, />running</);
 });
 
 test('the precedence case: stalled + PAUSE set renders `stalled` plus a secondary "PAUSE set" chip', () => {
   const html = renderToStaticMarkup(
-    <Header disconnected={false} isPending={false} engine={{ state: "stalled", pauseActive: true }} spend={SPEND_OK} parked={false} />,
+    <Header disconnected={false} isPending={false} engine={engine("stalled", { pauseActive: true })} spend={SPEND_OK} parked={false} />,
   );
   assert.match(html, />stalled</);
   assert.match(html, /PAUSE set/);
@@ -69,46 +60,62 @@ test('the precedence case: stalled + PAUSE set renders `stalled` plus a secondar
 
 test("paused alone renders no secondary chip", () => {
   const html = renderToStaticMarkup(
-    <Header disconnected={false} isPending={false} engine={{ state: "paused", pauseActive: true }} spend={SPEND_OK} parked={false} />,
+    <Header disconnected={false} isPending={false} engine={engine("paused", { pauseActive: true })} spend={SPEND_OK} parked={false} />,
   );
   assert.match(html, />paused</);
   assert.doesNotMatch(html, /PAUSE set/);
 });
 
-test("standby collapses to the display word `waiting`, with a park sub-caption only when parked", () => {
-  const waiting = renderToStaticMarkup(
-    <Header disconnected={false} isPending={false} engine={{ state: "standby", pauseActive: false }} spend={SPEND_OK} parked={false} />,
-  );
-  assert.match(waiting, />waiting</);
-  assert.doesNotMatch(waiting, /park/);
-
-  const parked = renderToStaticMarkup(
-    <Header disconnected={false} isPending={false} engine={{ state: "standby", pauseActive: false }} spend={SPEND_OK} parked={true} />,
-  );
-  assert.match(parked, />waiting</);
-  assert.match(parked, /park/);
-});
-
-test("winding-down and stopping both collapse to the display word `stopping`", () => {
-  const windingDown = renderToStaticMarkup(
+// #723: the raw §8 word renders unchanged, with `engineStateCaption`'s plain-language phrase
+// (and, for standby, the next-check countdown) alongside it — App.test.tsx's own #723 test pins
+// this same contract at the App level; this is the component-level half.
+test("standby renders its own raw word plus the calm plain-language caption and next-check countdown", () => {
+  const html = renderToStaticMarkup(
     <Header
       disconnected={false}
       isPending={false}
-      engine={{ state: "winding-down", pauseActive: false }}
+      engine={engine("standby", { standbyNextCheckSec: 42 })}
       spend={SPEND_OK}
       parked={false}
     />,
   );
-  assert.match(windingDown, />stopping</);
-  const stopping = renderToStaticMarkup(
-    <Header disconnected={false} isPending={false} engine={{ state: "stopping", pauseActive: false }} spend={SPEND_OK} parked={false} />,
+  assert.match(html, />standby</);
+  assert.match(html, /idle — nothing to work on right now — checking again in 42s/);
+});
+
+test("an env-park episode adds its own small sub-caption alongside standby, never a new state word", () => {
+  const notParked = renderToStaticMarkup(
+    <Header disconnected={false} isPending={false} engine={engine("standby")} spend={SPEND_OK} parked={false} />,
   );
-  assert.match(stopping, />stopping</);
+  assert.doesNotMatch(notParked, /engine-park-caption/);
+
+  const parked = renderToStaticMarkup(
+    <Header disconnected={false} isPending={false} engine={engine("standby")} spend={SPEND_OK} parked={true} />,
+  );
+  assert.match(parked, />standby</);
+  assert.match(parked, /engine-park-caption/);
+});
+
+test("park never adds its sub-caption outside the standby word (no second, unrelated tier)", () => {
+  const html = renderToStaticMarkup(
+    <Header disconnected={false} isPending={false} engine={engine("running")} spend={SPEND_OK} parked={true} />,
+  );
+  assert.doesNotMatch(html, /engine-park-caption/);
+});
+
+test("every §8 state renders its own raw word", () => {
+  const states: EngineState[] = ["running", "standby", "stalled", "paused", "winding-down", "stopping", "stopped"];
+  for (const state of states) {
+    const html = renderToStaticMarkup(
+      <Header disconnected={false} isPending={false} engine={engine(state)} spend={SPEND_OK} parked={false} />,
+    );
+    assert.match(html, new RegExp(`>${state}<`), `${state} must render its own word`);
+  }
 });
 
 test("disconnected pre-empts the state word and meter entirely", () => {
   const html = renderToStaticMarkup(
-    <Header disconnected={true} isPending={false} engine={{ state: "running", pauseActive: false }} spend={SPEND_OK} parked={false} />,
+    <Header disconnected={true} isPending={false} engine={engine("running")} spend={SPEND_OK} parked={false} />,
   );
   assert.match(html, /disconnected — restart sapwood to reconnect/);
   assert.doesNotMatch(html, />running</);
@@ -124,7 +131,7 @@ test("the meter renders the run tier's numerator/denominator, never the daily pa
     <Header
       disconnected={false}
       isPending={false}
-      engine={{ state: "running", pauseActive: false }}
+      engine={engine("running")}
       spend={{ runUsd: 12, runBudgetUsd: 100, todayUsd: 999, dailyBudgetUsd: 999 }}
       parked={false}
     />,
@@ -136,7 +143,7 @@ test("the meter renders the run tier's numerator/denominator, never the daily pa
 
 test("does not render, import, or re-implement the legend", () => {
   const html = renderToStaticMarkup(
-    <Header disconnected={false} isPending={false} engine={{ state: "running", pauseActive: false }} spend={SPEND_OK} parked={false} />,
+    <Header disconnected={false} isPending={false} engine={engine("running")} spend={SPEND_OK} parked={false} />,
   );
   assert.doesNotMatch(html, /droplet = an issue moving through the loop/);
   assert.doesNotMatch(html, /aria-label="Legend"/);

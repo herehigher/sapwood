@@ -38,6 +38,9 @@ export type LoopState = {
      *  rule can mask a live PAUSE file from `state` (a stale/kill-switched engine never reads
      *  `paused`), so the header's secondary "PAUSE set" chip needs this independently. */
     pauseActive: boolean;
+    /** #723: seconds until the next standby probe, served only while `state === "standby"` —
+     *  null otherwise (never a stale countdown left over from a prior standby dwell). */
+    standbyNextCheckSec: number | null;
   };
   /** `max` is null when the config is unreadable. */
   lanes: { max: number | null; items: Lane[] };

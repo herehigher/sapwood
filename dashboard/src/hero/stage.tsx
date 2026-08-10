@@ -27,7 +27,7 @@ export const STAGE = { w: 1200, h: 380 } as const;
 // thing that hangs off a droplet — still fits inside the viewBox.
 // #716 gate② round 2 PO probe P3: chip step bumped 22 → 26 — labels like "⊙ 725" stacked at
 // the old 22px step were measured colliding with the next chip's label at small render sizes.
-const BACKLOG = { x: 46, y: 62, w: 96, chip: 26 } as const;
+export const BACKLOG = { x: 46, y: 62, w: 96, chip: 26 } as const;
 /** `note` clears the tallest lane stack (`lanes.max` 6) rather than sitting under 3 lanes. */
 const PLANNING = { x: 224, note: 300, noteX: 152 } as const;
 /** §7: plain word first, internal term never. `role` is the config-captions.ts `roles.<role>`
@@ -57,8 +57,32 @@ const PLANNING_NODES = [
 ] as const;
 const LANES = { x: 330, w: 372, top: 92, gap: 44 } as const;
 const GATES = { ci: 762, review: 858, y: 156 } as const;
-const ESCALATION = { x: 810, y: 320 } as const;
-const TRUNK = { x: 1006, y: 156, step: 7, max: 12 } as const;
+export const ESCALATION = { x: 810, y: 320 } as const;
+/**
+ * #728 gate② finding [0]: caps the cluster's rightward spread so it stays clear of the trunk
+ * rings (leftmost extent `TRUNK.x - TRUNK.max * TRUNK.step` = 922) AND the OUTCOME tally
+ * text's actual rendered extent (not just its anchor point) — a wide escalation list wraps
+ * into a new row (upward, away from the ESCALATION node) instead of running into either.
+ *
+ * All three numbers below come from `hero.test.ts`'s bounding-box check, not a guess:
+ * - 2 columns, not 3: a droplet's own label ("⤳ 9999") has real rendered width — 3 columns'
+ *   worth of that width crosses the tally's actual left edge once its string grows past a
+ *   couple of digits per number, even though the 3rd column's own bare X coordinate looked
+ *   clear.
+ * - 38px column step: below a label's own worst-case rendered width, adjacent same-row
+ *   droplets' labels would overlap EACH OTHER, independent of the tally/rings entirely.
+ * - 34px row step: below a droplet's label-top-to-circle-bottom span, consecutive rows'
+ *   droplets would overlap each other the same way.
+ *
+ * ponytail: verified collision-free up to 6 simultaneously escalated droplets (3 rows) —
+ * the 4th row would reach the CI/REVIEW gates above. No live probe has reported anywhere near
+ * that many at once; revisit (spill sideways past the gates, or cap+overflow-badge) if one
+ * does.
+ */
+const NEEDS_HUMAN_COLS = 2;
+const NEEDS_HUMAN_COL_STEP = 38;
+const NEEDS_HUMAN_ROW_STEP = 34;
+export const TRUNK = { x: 1006, y: 156, step: 7, max: 12 } as const;
 const REFLECTION = { x: 1118, bottom: 244 } as const;
 const REFLECTION_NODES = [
   { node: "summary" as const, y: 110, label: "Summary", role: "roles.harvest" },
@@ -89,16 +113,36 @@ const laneIndex = (state: HeroState, d: Droplet) => state.lanes.find((l) => l.wo
 export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at): { x: number; y: number } {
   switch (at) {
     case "backlog": {
-      const rank = state.droplets.filter((o) => o.at === "backlog").findIndex((o) => o.issue === d.issue);
-      return { x: BACKLOG.x + BACKLOG.w / 2, y: BACKLOG.y + 30 + Math.max(0, rank) * BACKLOG.chip };
+      // #728 gate② finding [0]: shares ONE vertical counter with the pool chips drawn in the
+      // same narrow column (stage.tsx's `state.pool.map`) — a backlog droplet's row starts
+      // only after every pool chip's own row, so the two lists can never land on the same
+      // slot. A handed-off droplet carries a second line (the "saved for a successor" badge,
+      // by far the widest/tallest text this column ever draws), so it claims THREE rows'
+      // worth of room — `hero.test.ts`'s bounding-box check is what set this number: two rows
+      // left only a few px of clearance between the badge and the next label.
+      const backlogDroplets = state.droplets.filter((o) => o.at === "backlog");
+      let slot = state.pool.length;
+      for (const o of backlogDroplets) {
+        if (o.issue === d.issue) break;
+        slot += o.handedOff ? 3 : 1;
+      }
+      return { x: BACKLOG.x + BACKLOG.w / 2, y: BACKLOG.y + 30 + slot * BACKLOG.chip };
     }
     case "lane":
       return { x: LANES.x + LANES.w * 0.55, y: laneY(laneIndex(state, d)) };
     case "checkpoint":
       return { x: (GATES.ci + GATES.review) / 2, y: GATES.y - 46 };
     case "needs-human": {
-      const rank = state.droplets.filter((o) => o.at === "needs-human").findIndex((o) => o.issue === d.issue);
-      return { x: ESCALATION.x + Math.max(0, rank) * 26, y: ESCALATION.y - 30 };
+      // #728: wraps after NEEDS_HUMAN_COLS instead of spreading rightward without limit — an
+      // unbounded row used to run the cluster straight into the trunk rings and the OUTCOME
+      // tally text once several issues escalated at once.
+      const rank = Math.max(
+        0,
+        state.droplets.filter((o) => o.at === "needs-human").findIndex((o) => o.issue === d.issue),
+      );
+      const col = rank % NEEDS_HUMAN_COLS;
+      const row = Math.floor(rank / NEEDS_HUMAN_COLS);
+      return { x: ESCALATION.x + col * NEEDS_HUMAN_COL_STEP, y: ESCALATION.y - 30 - row * NEEDS_HUMAN_ROW_STEP };
     }
     case "trunk":
       return { x: TRUNK.x, y: TRUNK.y };
@@ -305,23 +349,27 @@ export function HeroStage({
           ));
         })()}
 
-        {/* The fix loop, drawn as the engine's true shape: back into the lane itself. */}
-        <path
-          id="hero-fixloop-path"
-          className="hero-fixloop"
-          d={`M ${GATES.ci - 30} ${GATES.y + 26} C ${640} ${GATES.y + 78}, ${430} ${GATES.y + 78}, ${LANES.x + 40} ${laneY(0) + 12}`}
-        />
-        {/* #716 gate② round 2 P2-5: the AC wants the send-back reason word ON the return
-         * arrow itself, via textPath — the per-lane caption flash (above) narrates WHICH
-         * lane, this narrates WHAT the loop is doing. One shared path draws one label; when
-         * several lanes are fixing at once, the first (channel order) wins rather than
-         * concatenating an ambiguous list. */}
+        {/* The fix loop, drawn as the engine's true shape: back into the lane itself.
+         * #728: mounted only while a lane is actually fixing — an unlabeled arc left drawn
+         * after the fix loop ends read as stray, unexplained stage furniture. */}
         {fixingReason && (
-          <text className="hero-fixloop-label">
-            <textPath href="#hero-fixloop-path" startOffset="50%" textAnchor="middle">
-              {fixingReason}
-            </textPath>
-          </text>
+          <>
+            <path
+              id="hero-fixloop-path"
+              className="hero-fixloop"
+              d={`M ${GATES.ci - 30} ${GATES.y + 26} C ${640} ${GATES.y + 78}, ${430} ${GATES.y + 78}, ${LANES.x + 40} ${laneY(0) + 12}`}
+            />
+            {/* #716 gate② round 2 P2-5: the AC wants the send-back reason word ON the return
+             * arrow itself, via textPath — the per-lane caption flash (above) narrates WHICH
+             * lane, this narrates WHAT the loop is doing. One shared path draws one label; when
+             * several lanes are fixing at once, the first (channel order) wins rather than
+             * concatenating an ambiguous list. */}
+            <text className="hero-fixloop-label">
+              <textPath href="#hero-fixloop-path" startOffset="50%" textAnchor="middle">
+                {fixingReason}
+              </textPath>
+            </text>
+          </>
         )}
       </g>
 

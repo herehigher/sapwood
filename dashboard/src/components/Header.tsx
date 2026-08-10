@@ -1,23 +1,6 @@
 import type { EngineState } from "../api/types.ts";
+import { engineStateCaption } from "../copy.ts";
 import { formatUsd } from "../format.ts";
-
-/** frontend-design.md §3 A: "Display vocabulary collapses for the glance" — `standby` + env-park
- *  render as `waiting` (park adds its own sub-caption below), `winding-down` + `stopping` both
- *  render as `stopping`; the full internal word still rides the element's `title` (hover), so
- *  nothing is lost, only deferred behind a glance-vs-detail split. */
-const DISPLAY_WORD: Record<EngineState, string> = {
-  running: "running",
-  standby: "waiting",
-  stalled: "stalled",
-  paused: "paused",
-  "winding-down": "stopping",
-  stopping: "stopping",
-  stopped: "stopped",
-};
-
-export function displayEngineWord(state: EngineState): string {
-  return DISPLAY_WORD[state];
-}
 
 /** §8 precedence: staleness, a ceiling breach, and the kill switch all outrank PAUSE in the
  *  DERIVED word — a dead engine with a PAUSE file renders `stalled`, never `paused`. The sentinel
@@ -67,6 +50,9 @@ function SpendMeter({ spend }: { spend: SpendFacts }) {
 export interface EngineFacts {
   state: EngineState;
   pauseActive: boolean;
+  /** #723: seconds until the next standby probe — only meaningful while `state === "standby"`;
+   *  null otherwise. Folded into the caption via `engineStateCaption`. */
+  standbyNextCheckSec: number | null;
 }
 
 export interface HeaderProps {
@@ -74,9 +60,10 @@ export interface HeaderProps {
   isPending: boolean;
   engine?: EngineFacts | undefined;
   spend?: SpendFacts | undefined;
-  /** §3 A: env-park folds into the standby/"waiting" tier rather than an eighth word — this is
-   *  the caller's own read of whether `park-escalated` is currently open (the needs-attention
-   *  fold already tracks that; this component adds no second signal). */
+  /** §3 A: an env-park episode adds its own small sub-caption alongside the standby caption
+   *  rather than a new state word — this is the caller's own read of whether `park-escalated`
+   *  is currently open (the needs-attention fold already tracks that; this component adds no
+   *  second signal). */
   parked: boolean;
 }
 
@@ -96,14 +83,12 @@ export function Header({ disconnected, isPending, engine, spend, parked }: Heade
   if (isPending || !engine || !spend) {
     return <p className="muted">connecting…</p>;
   }
-  const word = displayEngineWord(engine.state);
   return (
     <div className="engine-status">
       <span className="feed-dot" style={{ background: "var(--sap)" }} aria-hidden="true" />
-      <span className="data engine-word" title={engine.state}>
-        {word}
-      </span>
-      {word === "waiting" && parked && <span className="muted engine-park-caption">park</span>}
+      <span className="data engine-word">{engine.state}</span>
+      <span className="muted engine-caption"> — {engineStateCaption(engine.state, engine.standbyNextCheckSec)}</span>
+      {engine.state === "standby" && parked && <span className="muted engine-park-caption">park</span>}
       {showsPauseChip(engine.state, engine.pauseActive) && <span className="muted data engine-pause-chip">PAUSE set</span>}
       <SpendMeter spend={spend} />
     </div>
