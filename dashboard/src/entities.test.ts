@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+// Test-only import (same pattern as copy.test.ts's ESCALATION_SOURCE_KINDS cross-check): the
+// engine's own tagged registry is the AUTHORITATIVE issue-scoped-clear signal, not an issue's own
+// prose, which can name a kind the engine never actually tags this way.
+import { CLEAR_KINDS } from "../../engine/src/loop/escalation-reconcile.ts";
 import type { EventKind } from "./copy.ts";
 import type { DomainEvent, KnownDomainEvent, UnknownDomainEvent } from "./domain-event.ts";
-import { foldEntityTitles, foldOpenAttention } from "./entities.ts";
+import { foldEntityTitles, foldOpenAttention, ISSUE_CLEAR_KINDS } from "./entities.ts";
 
 // `kind: EventKind`, not a bare `string` — #715 gate② round 4 [0] / round 5 [0]: `entities.ts`
 // consumes `DomainEvent`, so its fixtures are `KnownDomainEvent`s directly (the shape
@@ -192,6 +196,22 @@ test("foldOpenAttention: `gated-reentry` and `lane-revived` also clear open issu
     event(2, "lane-revived", { issue: 5 }),
   ]);
   assert.deepEqual(laneRevived, {});
+});
+
+// #739 gate② round 1 finding [0] (ac4-missing-clear-kinds) asked for `pr-released` and
+// `plan-approved` to join ISSUE_CLEAR_KINDS, quoting the issue's own AC text. This drift guard is
+// the disputed reply's actual evidence: the engine's own `escalation-clear` tag — the tag
+// `CLEAR_KINDS` is derived from (escalation-reconcile.ts), and the SAME authoritative-registry
+// pattern `copy.test.ts` already uses for `ESCALATION_SOURCE_KINDS` — carries neither kind
+// (`drive.ts`'s `pr-released` and `governance.ts`'s `plan-approved` are both `tags: []`, routine
+// bookkeeping, not `escalation-clear`). Widening ISSUE_CLEAR_KINDS to match the issue's prose
+// instead of the engine's own tagged ground truth would make the dashboard's strip clear ITSELF
+// on events the engine never designed as resolution signals — the opposite of a fix. If the
+// engine ever DOES tag either kind `escalation-clear`, this test goes red and says so.
+test("#739: ISSUE_CLEAR_KINDS matches the engine's own escalation-clear tag exactly — neither `pr-released` nor `plan-approved` belongs, despite the issue text naming them", () => {
+  assert.deepEqual([...ISSUE_CLEAR_KINDS].sort(), [...CLEAR_KINDS].sort());
+  assert.ok(!ISSUE_CLEAR_KINDS.has("pr-released"), "pr-released carries tags: [] in drive.ts — routine, not escalation-clear");
+  assert.ok(!ISSUE_CLEAR_KINDS.has("plan-approved"), "plan-approved carries tags: [] in governance.ts — routine, not escalation-clear");
 });
 
 test("foldOpenAttention: an issue-clear event never touches a DIFFERENT issue's open attention", () => {

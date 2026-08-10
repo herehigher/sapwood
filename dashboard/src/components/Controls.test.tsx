@@ -3,7 +3,7 @@ import test, { mock } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CONTROL_VERBS } from "../api/types.ts";
 import { CONTROL_COPY } from "../copy.ts";
-import { Controls, controlsReducer } from "./Controls.tsx";
+import { Controls, controlsReducer, runControlEffect } from "./Controls.tsx";
 
 test.afterEach(() => mock.restoreAll());
 
@@ -89,4 +89,53 @@ test("mounting/rendering alone never calls the control function — no dead hand
   const onControl = mock.fn(async () => ({ state: "running" }));
   renderToStaticMarkup(<Controls enabled onControl={onControl} />);
   assert.equal(onControl.mock.calls.length, 0);
+});
+
+// ── #739 gate② round 1 finding [1] (ac6-confirm-flow-untested) ──────────────────────────────
+//
+// The reducer proves the STATE MACHINE never reaches `sending` without a confirm; these tests
+// prove the actual EFFECT wiring on top of it — zero calls before confirmation, exactly one call
+// after — by chaining the real `controlsReducer` transitions into the real `runControlEffect`
+// the component's `useEffect` delegates to (the same function, not a parallel reimplementation).
+
+test("runControlEffect: idle and confirming phases never call onControl", async () => {
+  const onControl = mock.fn(async () => undefined);
+  assert.equal(await runControlEffect({ phase: "idle" }, onControl), false);
+  assert.equal(await runControlEffect({ phase: "confirming", verb: "stop" }, onControl), false);
+  assert.equal(onControl.mock.calls.length, 0);
+});
+
+test("runControlEffect: only the sending phase calls onControl, exactly once, with the confirmed verb", async () => {
+  const onControl = mock.fn(async () => undefined);
+  const fired = await runControlEffect({ phase: "sending", verb: "pause" }, onControl);
+  assert.equal(fired, true);
+  assert.equal(onControl.mock.calls.length, 1);
+  assert.deepEqual(onControl.mock.calls[0]?.arguments, ["pause"]);
+});
+
+test("request -> confirm, chained through the real reducer into the real effect: zero calls before confirm, one call after", async () => {
+  const onControl = mock.fn(async () => undefined);
+  let state: ReturnType<typeof controlsReducer> = { phase: "idle" };
+
+  state = controlsReducer(state, { type: "request", verb: "stop" });
+  assert.equal(await runControlEffect(state, onControl), false);
+  assert.equal(onControl.mock.calls.length, 0, "a bare request must not have fired the call yet");
+
+  state = controlsReducer(state, { type: "confirm" });
+  assert.equal(await runControlEffect(state, onControl), true);
+  assert.equal(onControl.mock.calls.length, 1, "confirming the same request fires exactly once");
+  assert.deepEqual(onControl.mock.calls[0]?.arguments, ["stop"]);
+});
+
+test("the confirming dialog renders the exact CONTROL_COPY confirmation text for the requested verb", () => {
+  for (const verb of CONTROL_VERBS) {
+    const html = renderToStaticMarkup(<Controls enabled initialState={{ phase: "confirming", verb }} />);
+    assert.match(html, /role="alertdialog"/);
+    assert.ok(html.includes(CONTROL_COPY[verb].confirm), `${verb}'s dialog must render its own CONTROL_COPY confirm text verbatim`);
+  }
+});
+
+test("the confirming dialog does NOT render while idle — the dialog only appears once a verb is actually requested", () => {
+  const html = renderToStaticMarkup(<Controls enabled initialState={{ phase: "idle" }} />);
+  assert.doesNotMatch(html, /role="alertdialog"/);
 });

@@ -30,12 +30,32 @@ export function controlsReducer(state: ControlsState, action: ControlsAction): C
   }
 }
 
+/**
+ * The ONE place the component's effect is allowed to call the network — factored out of the
+ * `useEffect` below so it is directly testable without a DOM: `renderToStaticMarkup` (this
+ * repo's only test harness) never runs effects at all, so a test asserting "zero calls before
+ * confirm, one call after" has to exercise this exact function across a real `controlsReducer`
+ * transition rather than a simulated click (#739 gate② round 1 finding [1]:
+ * ac6-confirm-flow-untested). Resolves to `true` iff it actually fired the call, so a caller can
+ * tell "nothing to do" apart from "did it and it's done" without a second phase check.
+ */
+export async function runControlEffect(state: ControlsState, onControl: (verb: ControlVerb) => Promise<unknown>): Promise<boolean> {
+  if (state.phase !== "sending") return false;
+  await onControl(state.verb);
+  return true;
+}
+
 export interface ControlsProps {
   /** `dashboard.controls` (§8) — when false, no buttons render and no handler is ever wired
    *  (the component returns before the button markup, not merely hiding it with CSS). */
   enabled: boolean;
   /** Injection seam for tests; defaults to the real `POST /api/control`. */
   onControl?: (verb: ControlVerb) => Promise<unknown>;
+  /** Test-only seam (same posture as `App`'s own `now` prop): lets a render-only test put the
+   *  component directly into a given phase — e.g. `confirming`, to assert the rendered dialog
+   *  carries the matching `CONTROL_COPY` text — without needing a simulated click. Production
+   *  callers never pass this; it defaults to the real starting phase. */
+  initialState?: ControlsState;
 }
 
 /**
@@ -44,15 +64,13 @@ export interface ControlsProps {
  * emergency-stop button (out of scope for #361: the server exposes no client-readable allowlist
  * signal for it to gate on).
  */
-export function Controls({ enabled, onControl }: ControlsProps) {
-  const [state, dispatch] = useReducer(controlsReducer, { phase: "idle" });
+export function Controls({ enabled, onControl, initialState }: ControlsProps) {
+  const [state, dispatch] = useReducer(controlsReducer, initialState ?? { phase: "idle" });
 
   useEffect(() => {
-    if (state.phase !== "sending") return;
     let cancelled = false;
-    const run = onControl ? onControl(state.verb) : postControl(state.verb);
-    run.finally(() => {
-      if (!cancelled) dispatch({ type: "settled" });
+    runControlEffect(state, onControl ?? postControl).then((fired) => {
+      if (fired && !cancelled) dispatch({ type: "settled" });
     });
     return () => {
       cancelled = true;
