@@ -115,9 +115,11 @@ shell's job table — this defeats `SIGHUP`-on-shell-exit and any other signal t
 would otherwise deliver to its own job, nothing more (the pgid/session/cgroup hierarchy
 below says precisely what it does and doesn't cover). `run`'s data dir
 (`data/sapwood.sqlite`, `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, worktree roots) resolves
-**relative to the process's cwd, not to `--config`'s directory** — the CLI's own `run
---help` says so (`docs/configuration.md`'s loader-resolution note carries the same
-rule) — so `cd` into the deployment checkout FIRST, or the detached process silently
+**relative to the process's cwd, not to `--config`'s directory** — today's `run --help`
+names the DB, `KILL_SWITCH`/`PAUSE`, sessions, and worktree roots; its `EMERGENCY_STOP`
+mention is tracked in [#778](https://github.com/herehigher/sapwood/issues/778)
+(`docs/configuration.md`'s loader-resolution note carries the full rule) — so `cd` into
+the deployment checkout FIRST, or the detached process silently
 takes root wherever the launching shell happened to be sitting. Use an absolute `node`
 here too (the lazy-load gotcha below applies to this line exactly as much as a script).
 Create the shell redirect's log directory before backgrounding, too: the shell performs
@@ -409,11 +411,13 @@ discipline layered on top:
   mkdir -p data && touch data/EMERGENCY_STOP
   ```
 
-  It is checked before `data/KILL_SWITCH` every tick and wins when both are present. On
-  that tick, it hard-kills every running/fixing lane's process group: there is no drain
+  It is checked before `data/KILL_SWITCH` every tick and wins when both are present. In the normal
+  path, it hard-kills every running/fixing lane's process group on that same tick: there is no drain
   window, in-flight WIP is lost, and killed lanes escalate to `needs-human` with their
-  evidence preserved. Clear it only after human review of the emergency and of those
-  escalations:
+  evidence preserved. The current kill path traverses terminal-reclaim and probe-before-reclaim
+  forge reads, so a hung forge call can delay the kill
+  ([#778](https://github.com/herehigher/sapwood/issues/778)). Clear it only after human review of
+  the emergency and of those escalations:
 
   ```bash
   rm -f data/EMERGENCY_STOP

@@ -44,7 +44,7 @@ repo root's `.nvmrc` pins the Node major for version managers.
 
 ## commands/ — Claude Code plugin surface
 
-`commands/sapwood-run.md` invokes `engine/src/cli.ts run` through the plugin's own `tsx`, preserving the target repository as the working directory. `commands/sapwood-status.md` similarly invokes `status` and reads SQLite without starting an engine. `commands/sapwood-stop.md` manages `data/KILL_SWITCH` and `data/PAUSE` directly; there is no separate CLI `stop` subcommand.
+`commands/sapwood-run.md` invokes `engine/src/cli.ts run` through the plugin's own `tsx`, preserving the target repository as the working directory. `commands/sapwood-status.md` similarly invokes `status` and reads SQLite without starting an engine. `commands/sapwood-stop.md` manages `data/EMERGENCY_STOP`, `data/KILL_SWITCH`, and `data/PAUSE` directly; there is no separate CLI `stop` subcommand.
 
 ## docs/ — documentation partition
 

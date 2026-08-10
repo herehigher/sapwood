@@ -24,7 +24,7 @@ never a silent fallback to the probe — the opposite of the no-flag case, which
 best-effort (a missing config there degrades to "unknown" fields, not a failure). Relative
 `logging.path`, `promptFile`, `goal.file`, `doctrine.file`, and `worker.deployKeyPath` keys
 resolve from the selected config's directory, so an alternate config's default log lands
-beside it; the DB (`data/sapwood.sqlite`), `KILL_SWITCH`/`PAUSE`, sessions, and worktree
+beside it; the DB (`data/sapwood.sqlite`), `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree
 roots stay cwd-relative.
 Only `board.owner`, `board.repo`, and `board.projectNumber` are
 required; every other key has a default.
@@ -33,8 +33,8 @@ required; every other key has a default.
 
 Treat `data/` as durable runtime state: back it up, and never delete it while sapwood is
 running. SQLite worker rows are the recovery truth; the GitHub board is only a management
-view and sapwood deliberately never rebuilds local state from it. `KILL_SWITCH`, `PAUSE`, and
-`ESCALATION` also live in this directory and disappear with it. So does `sapwood.lock`, the
+view and sapwood deliberately never rebuilds local state from it. `EMERGENCY_STOP`, `KILL_SWITCH`,
+`PAUSE`, and `ESCALATION` also live in this directory and disappear with it. So does `sapwood.lock`, the
 single-instance lock (#382): one data dir = one board = at most one running engine — a second
 `sapwood run` against the same data dir refuses to start, and a stale lock from a crashed
 engine is taken over automatically once its pid is dead (see

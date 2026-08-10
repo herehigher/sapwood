@@ -1725,12 +1725,17 @@ same review scrutiny as review-gate configuration (`reviewer.*`, `merge.*`). It 
 deliberately not sanitized — it's prose written *for* LLM readers, and gate② stays
 semantic, not a rules engine.
 
-## Two-tier human controls
+## Human controls (three tiers)
 
-sapwood has two independent file-sentinel controls, both living next to the engine's
-state DB (`data/`), neither requiring a config edit:
+sapwood has three independent file-sentinel controls, all living next to the engine's
+state DB (`data/`), without requiring a config edit:
 
-- **Kill switch** (`data/KILL_SWITCH`) — the strict tier. Freezes *all* new dispatch and
+- **Emergency stop** (`data/EMERGENCY_STOP`) — the strictest tier. It takes precedence over the
+  kill switch every tick and hard-kills running/fixing lane process groups without a drain
+  window. In-flight WIP is lost; killed lanes escalate to `needs-human` with their evidence
+  preserved. Use `/sapwood-stop --emergency` to set it and `--clear-emergency` only after human
+  review.
+- **Kill switch** (`data/KILL_SWITCH`) — the drain-first tier. Freezes *all* new dispatch and
   merges. Running workers are asked to hand off gracefully within
   `cost.drainWindowSec`; past that window the conductor escalates to a hard
   process-tree kill. Everything else freezes too: no dispatch, no drive/merge, no
@@ -1743,7 +1748,8 @@ state DB (`data/`), neither requiring a config edit:
   on new issues while letting the current round finish (e.g. before a maintenance
   window). Set/lift with `/sapwood-stop --pause` / `--resume`.
 
-If both sentinels are present, the kill switch's stricter behavior governs.
+The precedence order is emergency stop, then kill switch, then pause: emergency stop wins over
+the kill switch, and either strict tier subsumes pause's dispatch restriction.
 
 **Interaction with `--until-idle`:** a paused engine dispatches nothing, so once its
 in-flight lanes finish it counts as idle and the run exits on its own — "finish the
@@ -1753,11 +1759,14 @@ and `--resume` takes effect on the very next tick.
 
 ### Sentinel isolation boundary (honest statement)
 
-The engine's `data/` directory (which holds both sentinels and the state DB) sits
+The engine's `data/` directory (which holds all three sentinels and the state DB) sits
 outside worker git worktrees as a **permission-layer boundary** — the worker process is
 not launched with `--add-dir data`, so it has no `claude`-tool path into that directory.
 This is **not an OS-level sandbox**, so the guard (`engine/src/guard/guard.ts`) adds
-defense-in-depth (#81) on top of that boundary: any `Write`/`Edit` targeting
+defense-in-depth (#81) on top of that boundary. The guard's control-sentinel rule currently
+covers **only** `data/KILL_SWITCH` and `data/PAUSE`; `data/EMERGENCY_STOP` is not yet covered,
+and that guard coverage is tracked in [#779](https://github.com/herehigher/sapwood/issues/779).
+For the two covered sentinels, any `Write`/`Edit` targeting
 `data/KILL_SWITCH` or `data/PAUSE` (including via relative traversal, e.g.
 `../../data/PAUSE`) is denied, as is `Bash` `touch`/`rm`/`mv`/`git rm`/redirect-to-path
 targeting either sentinel, and a sentinel path appearing as a literal argument to any

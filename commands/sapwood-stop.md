@@ -8,10 +8,13 @@ sapwood has three tiers of human control, all plain file sentinels next to the e
 state DB (`engine/src/state/state.ts`) — no config edit needed for any of them:
 
 - **emergency stop** (`data/EMERGENCY_STOP`, `estopPath`) — the strictest tier. It is checked
-  before the kill switch every tick and wins when both sentinels are present. It hard-kills every
-  running/fixing lane's process group on that same tick: there is no drain window, in-flight WIP
-  is lost, and killed lanes escalate to `needs-human` with their evidence preserved. Use it only
-  for credential exposure, destructive calls, or a cost blowout faster than the drain window.
+  before the kill switch every tick and wins when both sentinels are present. In the normal path,
+  it hard-kills every running/fixing lane's process group on that same tick: there is no drain
+  window, in-flight WIP is lost, and killed lanes escalate to `needs-human` with their evidence
+  preserved. The current kill path traverses terminal-reclaim and probe-before-reclaim forge
+  reads, so a hung forge call can delay the kill ([#778](https://github.com/herehigher/sapwood/issues/778)).
+  Use it only for credential exposure, destructive calls, or a cost blowout faster than the drain
+  window.
 - **kill switch** (`data/KILL_SWITCH`, `killSwitchPath`) — the drain-first tier. Freezes ALL new
   dispatch and merges; running workers are asked to hand off gracefully within
   `cfg.cost.drainWindowSec`, then the conductor escalates to a hard kill. Use this to stop
@@ -36,7 +39,7 @@ effect on the next tick as described below.
 If the argument is `--emergency`, set the emergency-stop sentinel:
 
 ```bash
-mkdir -p data && touch data/EMERGENCY_STOP && echo "EMERGENCY STOP SET (data/EMERGENCY_STOP) — running/fixing lane process groups hard-kill this tick; no drain window and in-flight WIP is lost. Clear with /sapwood-stop --clear-emergency only after human review."
+mkdir -p data && touch data/EMERGENCY_STOP && echo "EMERGENCY STOP SET (data/EMERGENCY_STOP) — in the normal path, running/fixing lane process groups hard-kill this tick; no drain window and in-flight WIP is lost. A hung forge read can delay the kill (#778). Clear with /sapwood-stop --clear-emergency only after human review."
 ```
 
 If the argument is `--clear-emergency`, clear the emergency-stop sentinel:
@@ -48,7 +51,7 @@ rm -f data/EMERGENCY_STOP && echo "emergency stop cleared (data/EMERGENCY_STOP r
 If the argument is `--lift`, clear the kill-switch sentinel:
 
 ```bash
-rm -f data/KILL_SWITCH && echo "kill switch lifted (data/KILL_SWITCH removed) — dispatch and merges can resume next tick."
+rm -f data/KILL_SWITCH && echo "kill switch lifted (data/KILL_SWITCH removed) — EMERGENCY_STOP or PAUSE, if still present, continues to apply."
 ```
 
 If the argument is `--pause`, pause new dispatch by creating the PAUSE sentinel:
@@ -60,13 +63,13 @@ mkdir -p data && touch data/PAUSE && echo "paused (data/PAUSE) — no new lane d
 If the argument is `--resume`, lift the pause by removing the PAUSE sentinel:
 
 ```bash
-rm -f data/PAUSE && echo "pause lifted (data/PAUSE removed) — dispatch can resume next tick."
+rm -f data/PAUSE && echo "pause lifted (data/PAUSE removed) — EMERGENCY_STOP or KILL_SWITCH, if still present, continues to apply."
 ```
 
 Otherwise (no argument, or any other argument), set the drain-first kill switch:
 
 ```bash
-mkdir -p data && touch data/KILL_SWITCH && echo "kill switch SET (data/KILL_SWITCH) — new dispatch/merges frozen; running workers drain within cfg.cost.drainWindowSec, then a hard stop. Run /sapwood-stop --lift to resume."
+mkdir -p data && touch data/KILL_SWITCH && echo "kill switch SET (data/KILL_SWITCH) — new dispatch/merges frozen; running workers drain within cfg.cost.drainWindowSec, then a hard stop. Run /sapwood-stop --lift to remove it; EMERGENCY_STOP or PAUSE, if present, still applies."
 ```
 
 Report the resulting message back to the user verbatim.

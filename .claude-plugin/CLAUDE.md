@@ -25,10 +25,12 @@ them itself or leaves the merge for a human.
 - **`/sapwood-status [db-path]`** — read engine state (active lanes, PRs awaiting
   review, spend vs. the daily ceiling, kill-switch/pause state) directly from
   `data/sapwood.sqlite`. Works with no engine session currently running.
-- **`/sapwood-stop [--pause|--resume|--lift]`** — human controls. No argument trips the
-  kill switch (freezes all new dispatch/merges, drains running workers). `--lift`
-  reverses it. `--pause` freezes new dispatch only (everything in flight keeps going);
-  `--resume` lifts the pause.
+- **`/sapwood-stop [--emergency|--clear-emergency|--pause|--resume|--lift]`** — three
+  human-control tiers. `--emergency` sets the strictest, no-drain stop; clear it with
+  `--clear-emergency` only after human review. No argument sets the drain-first kill
+  switch (freezes all new dispatch/merges, drains running workers), and `--lift`
+  removes it. `--pause` freezes new dispatch only (everything in flight keeps going);
+  `--resume` removes it.
 
 ## Config
 
