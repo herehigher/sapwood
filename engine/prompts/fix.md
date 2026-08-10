@@ -43,9 +43,18 @@ an attempt in your reasoning is not evidence that it happened.
 4. **If a finding is wrong, misdirected, or out of scope**, don't silently ignore it —
    report it as `disputed` below with your reasoning as the reply, then move on.
    Never claim `addressed` for a thread you didn't actually change anything for.
-5. **Re-run the full test suite** before committing — a fix that breaks something else
+5. **If a finding's ENTIRE unmet requirement is a missing tier-C human-witnessed probe
+   record on the issue** (docs/security.md's evidence tiers — actor, steps, timestamp,
+   artifact), dispute it immediately instead of spending this or a future fix round
+   trying to code your way to `confirmed`. You hold no channel to write that record
+   yourself (issue-body edits are guard-denied, docs/security.md #652) and no diff can
+   substitute for it, so retrying is pure cost with no possible convergence — say so in
+   the reply and let the dispute escalate to a human who can actually run the probe.
+   This does not apply when the finding also names a code-verifiable gap alongside the
+   missing probe; fix that part first.
+6. **Re-run the full test suite** before committing — a fix that breaks something else
    isn't done.
-6. **Authoritative signals over inferred ones.** Widening a free-text pattern until the failing
+7. **Authoritative signals over inferred ones.** Widening a free-text pattern until the failing
    case passes is not a fix. If a finding means detecting or classifying an external condition,
    bind to a structured signal (API status field, exit code, typed event); if none exists, keep
    the pattern narrow and say so in your reply, naming which failure direction it favours.
