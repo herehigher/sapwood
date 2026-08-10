@@ -19,21 +19,35 @@ first autonomous run.
 
 ## Install
 
-**Current production-install status: no install command is available yet.** The repository
-ships `.claude-plugin/plugin.json`, but it does not ship a marketplace manifest or an npm
-package. Its `engine/dist/` directory is build output and is not in the repository. The
-`sapwood` executable is declared by the engine workspace as `engine/dist/cli.js`, so a normal
-Claude Code plugin install has neither a PATH binary nor a prebuilt CLI to run.
+### Channel A — install from source (current, supported)
 
-Do not substitute a sapwood development checkout and local build for a production installation:
-that is useful to contributors, but it is not an onboarding path for an adopter. In particular,
-there is currently no public marketplace coordinate to give to `claude plugin install`, and the
-three documented plugin wrappers (`/sapwood-run`, `/sapwood-status`, `/sapwood-stop`) cannot
-replace the missing bare `sapwood init` and `sapwood validate` commands.
+Clone sapwood wherever you want it to live, then build its CLI:
 
-The rest of this page records the prerequisites and operating sequence that a released install
-must satisfy. The available CLI verbs, once the distribution supplies the engine, are
-`sapwood init`, `sapwood validate`, `sapwood run`, `sapwood status`, and `sapwood events`.
+```
+git clone https://github.com/herehigher/sapwood
+cd sapwood
+npm ci
+npm --workspace engine run build
+```
+
+This is the supported pre-v1 install channel: the clone stays on disk wherever you placed it,
+and the build creates `engine/dist/` there (it is not shipped in the repository). To put
+`sapwood` on your PATH for the commands below, run:
+
+```
+npm link --workspace engine
+```
+
+Alternatively, do not link it and replace every `sapwood <cmd>` below with
+`node <clone>/engine/dist/cli.js <cmd>`, where `<clone>` is the path to your clone. The available
+CLI verbs are `sapwood init`, `sapwood validate`, `sapwood run`, `sapwood status`, and
+`sapwood events`.
+
+### Channel B — Claude Code plugin/marketplace install: not yet available
+
+There is no marketplace coordinate, npm package, or prebuilt `engine/dist`; the three shipped
+plugin wrappers (`/sapwood-run`, `/sapwood-status`, `/sapwood-stop`) additionally require
+`npm ci` at the plugin root and cover only `run`, `status`, and `stop`, not `init` or `validate`.
 
 ## `sapwood init`
 
