@@ -111,8 +111,11 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   // #783: the companion to ci-pending-escalated for the CONCLUDED-but-not-green rollup — every
   // check finished, none failed, but at least one concluded without passing (SKIPPED/NEUTRAL/
   // CANCELLED/STALE/ACTION_REQUIRED). Unlike a pending rollup this can never resolve on its own
-  // head no matter how long it waits, so it escalates on its own (shorter) bound, `ci.inertEscalateAfterSec`,
-  // rather than sharing `ci.pendingEscalateAfterSec`'s clock. Registration/schema only here — the
+  // head no matter how long it waits, so it uses the SHORTER `ci.inertEscalateAfterSec` bound
+  // once inert. gate② opus round 1 P2 (#797) correction: this does NOT get an independent clock —
+  // it selects the shorter bound against the SAME shared CI-aging pin `ci-pending-escalated` uses
+  // (stamped once, at first not-green); see `ci.inertEscalateAfterSec`'s own config.ts/
+  // docs/configuration.md doc for the full semantics. Registration/schema only here — the
   // live escalation that actually emits this kind is the human-owned remainder (merge-driver.ts/
   // conductor.ts are guard-protected paths this issue does not touch); see drive.ts's
   // buildCiInertEscalationPayload/buildCiInertEscalationComment for the producer-reachable

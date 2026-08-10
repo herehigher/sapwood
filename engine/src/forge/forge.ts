@@ -125,12 +125,27 @@ export interface PRStatus {
    *  can NEVER resolve on its own head — no amount of waiting turns a concluded SKIPPED into
    *  SUCCESS. Complement-shaped (derived from `ciGreen`/`ciRed`, not a conclusion-name enumeration)
    *  so it never needs updating when GitHub adds a new terminal conclusion. `concluded` for a
-   *  modern CheckRun is `conclusion != null`; for a legacy StatusContext it is
-   *  `state ∉ {PENDING, EXPECTED}`; anything else (including a CheckRun with neither field
-   *  populated) fails closed to NOT concluded, same fail-closed-to-pending stance `ciGreen` already
-   *  takes. Same "additive, pre-existing callers unaffected" convention as `ciRed` above — absent
-   *  on any pre-#783 fixture/fake, readers treat that the same as `false`. */
+   *  modern CheckRun is a NON-EMPTY `conclusion` (the real `gh pr view --json statusCheckRollup`
+   *  transport reports an unfinished CheckRun as `conclusion: ""`, not `null` — an empty string
+   *  reads as absent, same as `null`/`undefined`, gate② opus round 1 #797); for a legacy
+   *  StatusContext it is a non-empty `state ∉ {PENDING, EXPECTED}`; anything else (including a
+   *  CheckRun with neither field populated) fails closed to NOT concluded, same
+   *  fail-closed-to-pending stance `ciGreen` already takes. Same "additive, pre-existing callers
+   *  unaffected" convention as `ciRed` above — absent on any pre-#783 fixture/fake, readers treat
+   *  that the same as `false`. */
   ciInert?: boolean;
+  /** gate② opus round 1 P2 (#797): the SAME rollup entries `ciGreen`/`ciRed`/`ciInert` were just
+   *  derived from, named — `{name, conclusion}` per entry, `conclusion` normalized to the modern
+   *  CheckRun's own conclusion, the legacy StatusContext's `state`, or `"UNKNOWN"` for an entry
+   *  with neither populated. Exists so a caller that needs to NAME the non-passing checks (the
+   *  `ci-inert-escalated` evidence, an honest discard reason) reads them off THIS SAME read
+   *  instead of issuing a second, separately-timed `getPRChecks` call — two independent reads can
+   *  disagree (a push landing between them, or a capped page that can't see every check this
+   *  uncapped rollup saw), so a second read is never a safe source of "the checks that decided
+   *  this boolean." Present (possibly `[]`) whenever `checks.length > 0`; absent when the rollup
+   *  itself is empty (same "additive, pre-existing callers unaffected" convention as `ciRed`
+   *  above — absent on any pre-#797 fixture/fake). */
+  ciChecks?: { name: string; conclusion: string }[];
 }
 
 /** #292: one rename-aware entry from GitHub's pull-request files API. The old path is retained
@@ -2887,9 +2902,10 @@ export function parsePRStatus(json: string): PRStatus {
     baseRefOid?: string;
     state: string;
     mergeable: string;
-    // CheckRun entries carry `conclusion`; legacy commit StatusContext entries carry
-    // `state` and no `conclusion`. The rollup can mix both.
-    statusCheckRollup?: { conclusion?: string | null; state?: string | null }[];
+    // CheckRun entries carry `name`/`conclusion`; legacy commit StatusContext entries carry
+    // `context`/`state` and no `name`/`conclusion`. The rollup can mix both — same dual-shape
+    // tolerance PR_CHECKS_QUERY's own `name ?? context` fallback already documents.
+    statusCheckRollup?: { name?: string; context?: string; conclusion?: string | null; state?: string | null }[];
   };
   const checks = d.statusCheckRollup ?? [];
   // FAIL CLOSED: green only when there is >=1 check AND every check CONCLUSIVELY PASSED.
@@ -2944,14 +2960,33 @@ export function parsePRStatus(json: string): PRStatus {
     checks.length > 0 &&
     checks.some((c) => (c.conclusion != null ? FAILING.has(c.conclusion) : c.state === "FAILURE" || c.state === "ERROR"));
   // #783: "concluded" is deliberately NOT "conclusion is a passing/failing name" — it is "GitHub
-  // is done deciding this check's outcome." A modern CheckRun signals that with a non-null
-  // `conclusion` (queued/in-progress CheckRuns report `conclusion: null`); a legacy StatusContext
-  // has no `conclusion` field at all and signals it via `state` being anything other than the two
-  // legacy in-flight states. Anything else (a CheckRun entry with neither populated) is NOT
-  // concluded — fail-closed to pending, so a mid-materialization rollup can never false-escalate.
-  const concluded = (c: { conclusion?: string | null; state?: string | null }) =>
-    c.conclusion !== undefined ? c.conclusion != null : c.state != null && c.state !== "PENDING" && c.state !== "EXPECTED";
+  // is done deciding this check's outcome." A modern CheckRun signals that with a non-EMPTY
+  // `conclusion`; a legacy StatusContext has no `conclusion` field at all and signals it via
+  // `state` being anything other than the two legacy in-flight states. Anything else (nothing
+  // usable in either field) is NOT concluded — fail-closed to pending, so a mid-materialization
+  // rollup can never false-escalate.
+  // gate② opus round 1 P1 (#797): `gh pr view --json statusCheckRollup` reports an UNFINISHED
+  // CheckRun as `conclusion: ""` (empty string, not `null`) with no `state` key at all —
+  // `{"__typename":"CheckRun","conclusion":"","status":"IN_PROGRESS",...}`. The prior
+  // `c.conclusion !== undefined` branch treated that empty string as a present, concluded value
+  // (`"" != null` is true), so `ciInert` fired on nearly every mid-CI PR — the ONLY production
+  // caller of `parsePRStatus` is `getPRStatus`, which feeds exactly this real `gh` shape.
+  // `nonEmpty` normalizes both an absent value AND an empty-string placeholder to "nothing here",
+  // so an in-flight CheckRun (empty conclusion, no state) correctly reads as not concluded.
+  const nonEmpty = (v?: string | null): string | null => (v == null || v === "" ? null : v);
+  const concluded = (c: { conclusion?: string | null; state?: string | null }) => {
+    if (nonEmpty(c.conclusion) != null) return true;
+    const st = nonEmpty(c.state);
+    return st != null && st !== "PENDING" && st !== "EXPECTED";
+  };
   const ciInert = checks.length > 0 && checks.every(concluded) && !ciGreen && !ciRed;
+  // gate② opus round 1 P2/P3 (#797): named alongside the booleans above, off the SAME rollup read
+  // — see `PRStatus.ciChecks`'s own doc for why a caller must never issue a second `getPRChecks`
+  // read to name the checks a `ciInert`/`ciRed` decision already saw.
+  const ciChecks = checks.map((c) => ({
+    name: nonEmpty(c.name) ?? nonEmpty(c.context) ?? "",
+    conclusion: nonEmpty(c.conclusion) ?? nonEmpty(c.state) ?? "UNKNOWN",
+  }));
   return {
     number: d.number,
     headOid: d.headRefOid,
@@ -2962,6 +2997,7 @@ export function parsePRStatus(json: string): PRStatus {
     ciInert,
     ...(d.baseRefOid !== undefined ? { baseOid: d.baseRefOid } : {}),
     ...(d.title !== undefined ? { title: d.title } : {}),
+    ...(checks.length > 0 ? { ciChecks } : {}),
   };
 }
 

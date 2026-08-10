@@ -344,14 +344,24 @@ const Ci = z
     // passing (cancelled/skipped/neutral/stale/action_required) — gate① is SUCCESS-only (#401), so
     // that lane cannot progress on its own either and is aged, and escalated, exactly the same.
     pendingEscalateAfterSec: z.number().int().positive().default(21600),
-    // #783: the companion bound for a CONCLUDED-but-not-green rollup (`PRStatus.ciInert`) — every
-    // check finished, none failed, but at least one concluded without passing (SKIPPED/NEUTRAL/
-    // CANCELLED/STALE/ACTION_REQUIRED). Unlike `pendingEscalateAfterSec`'s target (a check that
-    // may still finish), this state can NEVER resolve on its own head, so it gets its own
-    // (shorter) default — 900s, not 21600s — rather than sharing the pending clock. Schema only
-    // here; the drive-loop wiring that actually reads this is the human-owned remainder (#783's
-    // issue body) — merge-driver.ts/conductor.ts are guard-protected paths this key's own PR does
-    // not touch.
+    // gate② opus round 1 P2 (#797): the companion bound for a CONCLUDED-but-not-green rollup
+    // (`PRStatus.ciInert`) — every check finished, none failed, but at least one concluded without
+    // passing (SKIPPED/NEUTRAL/CANCELLED/STALE/ACTION_REQUIRED). Unlike `pendingEscalateAfterSec`'s
+    // target (a check that may still finish), this state can NEVER resolve on its own head, so it
+    // gets its own (shorter) default — 900s, not 21600s. CORRECTS the #783-era comment this
+    // replaces, which claimed this bound would run "rather than sharing the pending clock": once
+    // wired, it does NOT get an independent clock. `ciPendingDuration`'s durable pin
+    // (`CiPendingPin`) is stamped ONCE, at whichever moment gate① first goes not-green — pending or
+    // inert, whichever comes first — never re-stamped when a pending rollup later flips inert. So
+    // `inertEscalateAfterSec` only SELECTS THE SHORTER of the two bounds against that SAME shared
+    // pin once the rollup reads inert; a pending<->inert flip never resets it (only a head move or
+    // gate① actually resolving green/red does). Once an episode has escalated at this shorter
+    // bound, the `needsHuman` label latch — the same suppression `pendingEscalateAfterSec` already
+    // relies on — is what prevents a SECOND escalation later at the longer `pendingEscalateAfterSec`
+    // bound on that same episode, not a separate pin reset. Schema only here — the drive-loop wiring
+    // that reads this (and must implement this "shorter bound, same pin" semantics, not a fresh
+    // per-inertness timer) is the human-owned remainder (#783's issue body) — merge-driver.ts/
+    // conductor.ts are guard-protected paths this key's own PR does not touch.
     inertEscalateAfterSec: z.number().int().positive().default(900),
     requiredChecks: z
       .array(

@@ -1611,6 +1611,10 @@ test("parsePRStatus: clean mergeable PR with passing checks", () => {
     ciGreen: true,
     ciRed: false,
     ciInert: false,
+    // gate② opus round 1 P2/P3 (#797): ciChecks is additive — the same rollup entries named,
+    // present whenever checks.length > 0. This fixture's entry carries no `name`/`context`, so
+    // it normalizes to "" (never thrown, never guessed).
+    ciChecks: [{ name: "", conclusion: "SUCCESS" }],
   });
 });
 
@@ -1876,8 +1880,38 @@ test("parsePRStatus (#246): one red check among otherwise-passing ones is still 
 
 // ── #783: ciInert — every check CONCLUDED, none red, still not green (can never resolve on its
 // own head, unlike a genuinely pending rollup) ─────────────────────────────────────────────────
+//
+// gate② opus round 1 P1 (#797): `gh pr view --json statusCheckRollup` reports an in-flight
+// CheckRun as `{"__typename":"CheckRun","conclusion":"","status":"IN_PROGRESS",
+// "completedAt":"0001-01-01T00:00:00Z"}` — an EMPTY-STRING `conclusion`, never a bare `null`, and
+// no `state` key at all. `getPRStatus` (the ONLY production caller of `parsePRStatus`) can never
+// hand this parser a `{ conclusion: null }` entry for an in-flight check — only this real shape.
+// A fixture the production transport cannot produce is not a reverse test: REAL_IN_PROGRESS_CHECK
+// below is the PRIMARY evidence for every "not yet concluded" claim in this block; the
+// null-shaped fixtures are kept alongside it as additional (still-legal, still fail-closed)
+// cases, never the sole evidence.
 
-test("parsePRStatus (#783): a still-queued check alongside a SKIPPED check is NOT inert — the rollup hasn't concluded, still the long pending clock", () => {
+/** The actual `gh pr view --json statusCheckRollup` shape for an unfinished CheckRun. `status`/
+ *  `completedAt` are present (as the real transport emits them) but unread by `parsePRStatus`
+ *  (only `conclusion`/`state` are parsed) — included here so the fixture is byte-faithful to
+ *  what `getPRStatus` actually receives, not just to the two fields this parser happens to read. */
+const REAL_IN_PROGRESS_CHECK = { __typename: "CheckRun", conclusion: "", status: "IN_PROGRESS", completedAt: "0001-01-01T00:00:00Z" };
+
+test("parsePRStatus (#783/#797): a REAL in-flight CheckRun (empty-string conclusion, the actual `gh` shape) alongside a SKIPPED check is NOT inert — the rollup hasn't concluded, still the long pending clock", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 12,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SKIPPED" }, REAL_IN_PROGRESS_CHECK],
+    }),
+  );
+  assert.equal(s.ciInert, false);
+  assert.equal(s.ciGreen, false);
+});
+
+test("parsePRStatus (#783): a still-queued check alongside a SKIPPED check is NOT inert — null-shaped variant (additional case; the real transport never emits this shape, see REAL_IN_PROGRESS_CHECK above)", () => {
   const s = parsePRStatus(
     JSON.stringify({
       number: 12,
@@ -1889,6 +1923,21 @@ test("parsePRStatus (#783): a still-queued check alongside a SKIPPED check is NO
   );
   assert.equal(s.ciInert, false);
   assert.equal(s.ciGreen, false);
+});
+
+test("parsePRStatus (#783/#797): ciGreen/ciRed parity on the REAL in-flight fixture — a not-yet-concluded rollup is neither green nor red, exactly as the null-shaped fixture already established (#783's own doc: ciGreen/ciRed derivations are byte-for-byte unchanged by this issue)", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 12,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SUCCESS" }, REAL_IN_PROGRESS_CHECK],
+    }),
+  );
+  assert.equal(s.ciGreen, false);
+  assert.equal(s.ciRed, false);
+  assert.equal(s.ciInert, false);
 });
 
 test("parsePRStatus (#783): an all-SKIPPED rollup is inert and not green", () => {
@@ -1906,7 +1955,20 @@ test("parsePRStatus (#783): an all-SKIPPED rollup is inert and not green", () =>
   assert.equal(s.ciRed, false);
 });
 
-test("parsePRStatus (#783): a CheckRun with conclusion: null and no state field at all fails closed to NOT inert (reads as pending, same as today)", () => {
+test("parsePRStatus (#783/#797): a lone REAL in-flight CheckRun (empty-string conclusion, the actual `gh` shape) fails closed to NOT inert", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 14,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [REAL_IN_PROGRESS_CHECK],
+    }),
+  );
+  assert.equal(s.ciInert, false);
+});
+
+test("parsePRStatus (#783): a CheckRun with conclusion: null and no state field at all fails closed to NOT inert — null-shaped variant, additional case (reads as pending, same as today)", () => {
   const s = parsePRStatus(
     JSON.stringify({
       number: 14,

@@ -28,7 +28,7 @@
 
 import { createHash } from "node:crypto";
 import type { SapwoodConfig } from "../config/config.js";
-import type { IForge, PRCheckItem, PRReviewData, PRStatus } from "../forge/forge.js";
+import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
 import { labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js";
 import type { ApprovalResult, ReviewerAdapter } from "../roles/reviewer.js";
 import { changesRequestedOnHead, deriveBlockingSignal } from "../roles/reviewer.js";
@@ -171,13 +171,29 @@ export function refetchStillValid(
   if (data.headOid !== H) return { ok: false, reason: `data-head-mismatch:${data.headOid}` };
   if ((status.baseOid ?? null) !== B) return { ok: false, reason: `base-moved:${status.baseOid ?? "unknown"}` };
   if (deriveBlockingSignal(data).blocked) return { ok: false, reason: "newly-blocking" };
-  // #783: the pre-existing single reason ("ci-no-longer-green") was honest for a red regression
-  // but a LIE for `ciInert` — PR #766's discard read that way even though its rollup was never
-  // green on this head at all (every check concluded, none failed, none passed — SKIPPED/NEUTRAL
-  // throughout). `ciInert` is the authoritative signal for "never green on this generation";
-  // everything else `!ciGreen` covers (a genuine `ciRed` failure, or a rollup still pending) keeps
-  // the original wording.
-  if (!status.ciGreen) return { ok: false, reason: status.ciInert ? "ci-not-green" : "ci-no-longer-green" };
+  // gate② opus round 1 P2 (#797): the pre-existing single reason ("ci-no-longer-green", later
+  // split into "ci-no-longer-green"/"ci-not-green" keyed on `ciInert`) asserted a HISTORY claim
+  // this function has no way to prove — `status.ciInert` is a CURRENT-state signal, computed
+  // fresh from THIS refetch, not a memory of whether the head was ever green earlier. Both
+  // directions lied: a head that was NEVER green but still has one non-required check pending
+  // (not yet `ciInert` — still waiting) read as "no-longer-green", claiming a green past that
+  // never happened; a head that WAS green when the decisive verdict landed and then regressed to
+  // `ciInert` via a later CANCELLED check read as "ci-not-green", claiming it was NEVER green even
+  // though it was. Fix: never assert history — describe the CURRENT state only (ci-red / ci-inert
+  // / ci-pending), and name the concluded non-passing checks where this same read has them
+  // (`status.ciChecks` — the identical rollup `ciInert`/`ciRed` were just derived from, so the
+  // decision and the naming can never disagree; see `PRStatus.ciChecks`'s own doc).
+  if (!status.ciGreen) {
+    if (status.ciRed) return { ok: false, reason: "ci-red" };
+    if (status.ciInert) {
+      const named = (status.ciChecks ?? [])
+        .filter((c) => c.conclusion.toUpperCase() !== "SUCCESS")
+        .map((c) => `${c.name} (${c.conclusion})`)
+        .join(", ");
+      return { ok: false, reason: named ? `ci-inert: ${named}` : "ci-inert" };
+    }
+    return { ok: false, reason: "ci-pending" };
+  }
   return { ok: true };
 }
 
@@ -191,17 +207,27 @@ export interface CiInertEscalationCheck {
   conclusion: string;
 }
 
-/** Pure payload-builder for the `ci-inert-escalated` event (#783 AC4): given the PR's own check
- *  list, names every check that did NOT pass — the same rollup `ciInert` was computed from,
- *  fetched separately here (`PRStatus` itself carries no per-check detail) because the escalation
- *  evidence needs names, not just the boolean. Takes the full check list rather than requiring the
- *  caller to pre-filter to non-passing ones, so a caller can pass `getPRChecks`' page verbatim.
+/** Pure payload-builder for the `ci-inert-escalated` event (#783 AC4): given the PR's own status
+ *  rollup, names every check that did NOT pass — read off `status.ciChecks`, the EXACT SAME
+ *  rollup entries `ciInert` was computed from, not a second, separately-timed `getPRChecks` call.
+ *
+ *  gate② opus round 1 P2 (#797): the prior signature took a `PRCheckItem[]` — a DIFFERENT read
+ *  than the one that decided `ciInert` (`parsePRStatus`'s own `statusCheckRollup`, uncapped, vs.
+ *  `getPRChecks`'s capped GraphQL `contexts(first: cap)` page, unbound to any particular head).
+ *  Two consequences that made evidence and decision able to disagree: (1) a push landing between
+ *  the two reads could hand this function a DIFFERENT head's checks than the one `ciInert` was
+ *  true for — the same TOCTOU family `driveEngineAgentReview`'s own same-head revalidation guard
+ *  exists to close (#792/#795) — with no head parameter here to even detect it; (2) the capped
+ *  page can legitimately name ZERO checks (every non-passing one fell outside the cap) while the
+ *  caller still asserts `ciInert: true`, an escalation comment with no evidence in it. Sourcing
+ *  from `PRStatus.ciChecks` instead makes both impossible BY CONSTRUCTION: it is the same object,
+ *  from the same read, that already proved `ciInert`, so evidence and decision can never split.
  *  NOT wired to any live escalation — that wiring is the human-owned remainder (`merge-driver.ts`/
  *  `conductor.ts` are guard-protected paths this issue does not touch); this is the
  *  producer-reachable building block only. */
-export function buildCiInertEscalationPayload(checks: readonly PRCheckItem[]): { checks: CiInertEscalationCheck[] } {
-  const nonPassing = checks.filter((c) => (c.conclusion ?? c.state ?? "").toUpperCase() !== "SUCCESS");
-  return { checks: nonPassing.map((c) => ({ name: c.name, conclusion: c.conclusion ?? c.state ?? "UNKNOWN" })) };
+export function buildCiInertEscalationPayload(status: PRStatus): { checks: CiInertEscalationCheck[] } {
+  const nonPassing = (status.ciChecks ?? []).filter((c) => c.conclusion.toUpperCase() !== "SUCCESS");
+  return { checks: nonPassing.map((c) => ({ name: c.name, conclusion: c.conclusion })) };
 }
 
 /** Pure message-composition function for the `ci-inert-escalated` comment text (#783 AC5): names

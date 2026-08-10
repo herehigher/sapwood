@@ -185,31 +185,59 @@ test("refetchStillValid: CI regressed -> discard", () => {
   assert.equal(r.ok, false);
 });
 
-// ── #783: refetchStillValid's discard reason distinguishes never-green from no-longer-green ────
+// ── gate② opus round 1 P2 (#797): refetchStillValid's discard reason describes CURRENT state only
+// (ci-red / ci-inert / ci-pending) — it never asserts a history claim (see refetchStillValid's own
+// doc for why "never-green" vs. "no-longer-green" is unprovable from a current-state `ciInert`) ──
 
-test("refetchStillValid (#783): a red check -> discard reason is ci-no-longer-green (not ciInert)", () => {
+test("refetchStillValid (gate② opus round 1 P2, #797): a red rollup -> discard reason is ci-red", () => {
   const r = refetchStillValid(status({ ciGreen: false, ciRed: true, ciInert: false }), data(), "H1", "B1");
-  assert.deepEqual(r, { ok: false, reason: "ci-no-longer-green" });
+  assert.deepEqual(r, { ok: false, reason: "ci-red" });
 });
 
-test("refetchStillValid (#783): a still-pending rollup (neither ciRed nor ciInert) -> discard reason is ci-no-longer-green, unchanged from before #783", () => {
+test("refetchStillValid (gate② opus round 1 P2, #797): a still-pending rollup (neither ciRed nor ciInert) -> discard reason is ci-pending", () => {
   const r = refetchStillValid(status({ ciGreen: false, ciRed: false, ciInert: false }), data(), "H1", "B1");
-  assert.deepEqual(r, { ok: false, reason: "ci-no-longer-green" });
+  assert.deepEqual(r, { ok: false, reason: "ci-pending" });
 });
 
-test("refetchStillValid (#783): an inert rollup (concluded, never green, never red) -> discard reason is ci-not-green — honest that this head was never green", () => {
+test("refetchStillValid (gate② opus round 1 P2, #797): an inert rollup with no ciChecks attached -> discard reason is the bare ci-inert (no names to append)", () => {
   const r = refetchStillValid(status({ ciGreen: false, ciRed: false, ciInert: true }), data(), "H1", "B1");
-  assert.deepEqual(r, { ok: false, reason: "ci-not-green" });
+  assert.deepEqual(r, { ok: false, reason: "ci-inert" });
 });
 
-// ── #783: buildCiInertEscalationPayload / buildCiInertEscalationComment — pure, unwired ─────────
+test("refetchStillValid (gate② opus round 1 P2, #797): an inert rollup WITH ciChecks attached names the non-passing checks, drops the passing one", () => {
+  const r = refetchStillValid(
+    status({
+      ciGreen: false,
+      ciRed: false,
+      ciInert: true,
+      ciChecks: [
+        { name: "test", conclusion: "SUCCESS" },
+        { name: "lint", conclusion: "SKIPPED" },
+      ],
+    }),
+    data(),
+    "H1",
+    "B1",
+  );
+  assert.deepEqual(r, { ok: false, reason: "ci-inert: lint (SKIPPED)" });
+});
+
+// ── #783/#797: buildCiInertEscalationPayload / buildCiInertEscalationComment — pure, unwired ────
+//
+// gate② opus round 1 P2 (#797): buildCiInertEscalationPayload now takes the PRStatus itself, not
+// a separately-fetched PRCheckItem[] page — see the function's own doc for why a second read
+// could disagree with the ciInert decision (TOCTOU family, capped-page under-naming).
 
 test("buildCiInertEscalationPayload: names each non-passing check with its conclusion, drops passing ones", () => {
-  const payload = buildCiInertEscalationPayload([
-    { name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null },
-    { name: "lint", status: "COMPLETED", conclusion: "SKIPPED", state: null },
-    { name: "legacy-ctx", status: "COMPLETED", conclusion: null, state: "PENDING" },
-  ]);
+  const payload = buildCiInertEscalationPayload(
+    status({
+      ciChecks: [
+        { name: "test", conclusion: "SUCCESS" },
+        { name: "lint", conclusion: "SKIPPED" },
+        { name: "legacy-ctx", conclusion: "PENDING" },
+      ],
+    }),
+  );
   assert.deepEqual(payload, {
     checks: [
       { name: "lint", conclusion: "SKIPPED" },
@@ -218,13 +246,18 @@ test("buildCiInertEscalationPayload: names each non-passing check with its concl
   });
 });
 
-test("buildCiInertEscalationPayload: a malformed entry with neither conclusion nor state names UNKNOWN, never throws", () => {
-  const payload = buildCiInertEscalationPayload([{ name: "mystery", status: "COMPLETED", conclusion: null, state: null }]);
+test("buildCiInertEscalationPayload: a malformed entry with neither conclusion nor state names UNKNOWN (parsePRStatus's own normalization), never throws", () => {
+  const payload = buildCiInertEscalationPayload(status({ ciChecks: [{ name: "mystery", conclusion: "UNKNOWN" }] }));
   assert.deepEqual(payload, { checks: [{ name: "mystery", conclusion: "UNKNOWN" }] });
 });
 
 test("buildCiInertEscalationPayload: an all-passing rollup names nothing", () => {
-  const payload = buildCiInertEscalationPayload([{ name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null }]);
+  const payload = buildCiInertEscalationPayload(status({ ciChecks: [{ name: "test", conclusion: "SUCCESS" }] }));
+  assert.deepEqual(payload, { checks: [] });
+});
+
+test("buildCiInertEscalationPayload: no ciChecks attached (pre-#797 fixture/absent-rollup case) names nothing, never throws", () => {
+  const payload = buildCiInertEscalationPayload(status({ ciChecks: undefined }));
   assert.deepEqual(payload, { checks: [] });
 });
 
