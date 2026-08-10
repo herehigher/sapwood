@@ -17,10 +17,22 @@
 // verbatim as prose examples. `SAPWOOD_TEST_RUN_ID` (set once by run-tests.sh, exported to `node
 // --test`) is embedded by worker.test.ts/dashboard.test.ts into every tmp dir they create, which
 // in turn shows up in each real spawned process's own command line (a stub script's own path, or
-// the `--db-path` argv the dashboard child was launched with) — so this script matches ONLY
-// processes carrying THIS run's marker, never a same-shaped but foreign process. No marker, no
+// the `--db-path` argv the dashboard child was launched with) — so `../src/util/leak-sweep-
+// matcher.ts` (typechecked/linted/unit-tested, unlike this script itself — see its own doc) matches
+// ONLY processes carrying THIS run's marker, never a same-shaped but foreign process. No marker, no
 // scan: refuses to run a global, unattributed match rather than silently falling back to one.
+//
+// #786 gate② finding [sweep-ps-truncation]: `-ww` requests UNBOUNDED command-column width — without
+// it, `ps`'s COMMAND field can be silently truncated to (a platform-dependent) terminal width, and
+// the one run-id-bearing substring this script can key on sits 180+ characters deep into a real
+// leaderExitStub descendant's own command line (the registry-dir write, never run-id-scoped, comes
+// first — see leak-sweep-matcher.test.ts's own captured-shape fixtures). A truncated column would
+// make `findSurvivors()` return `[]` for a genuinely leaked process FOREVER, with this script still
+// printing "clean" — the exact silent-no-op failure mode this finding named. `pid=,command=` (empty
+// field names, a convention both BSD and GNU `ps` honor) suppresses the header row too, so there's
+// no `.slice(1)` guess about whether one was emitted.
 import { execFileSync } from "node:child_process";
+import { isLeakedSurvivorLine } from "../src/util/leak-sweep-matcher.js";
 
 const runId = process.env.SAPWOOD_TEST_RUN_ID;
 if (!runId) {
@@ -30,24 +42,14 @@ if (!runId) {
   process.exit(1);
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-const runIdPattern = escapeRegExp(runId);
-const reapSurvivor = new RegExp(`/sapwood-reap-${runIdPattern}-[^/\\s]+/`);
-const dashboardCliDir = new RegExp(`sapwood-dashboard-cli-${runIdPattern}-`);
-const distServerEntry = /dist-server\/start\.js\b/;
-
 function findSurvivors(): string[] {
   // argv array, no shell involved — same discipline as dashboard-launcher.ts's own subprocess calls.
-  const output = execFileSync("ps", ["-eo", "pid,command"], { encoding: "utf8" });
+  const output = execFileSync("ps", ["-ww", "-eo", "pid=,command="], { encoding: "utf8" });
   return output
     .split("\n")
-    .slice(1) // header row
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .filter((line) => reapSurvivor.test(line) || (distServerEntry.test(line) && dashboardCliDir.test(line)));
+    .filter((line) => isLeakedSurvivorLine(line, runId));
 }
 
 const survivors = findSurvivors();
