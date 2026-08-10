@@ -25,8 +25,9 @@ engine CLI:
   and `data/` resolve where the operator runs the command.
 - `sapwood-run.md` → `run` (rounds driver by default; `--once`/`--until-idle`
   are tick-driver-only). `sapwood-status.md` → `status` (reads SQLite without
-  an engine). `sapwood-stop.md` manages the `data/KILL_SWITCH` / `data/PAUSE`
-  control files directly; there is no CLI `stop` subcommand.
+  an engine). `sapwood-stop.md` manages the `data/EMERGENCY_STOP` /
+  `data/KILL_SWITCH` / `data/PAUSE` control files directly; there is no CLI `stop`
+  subcommand.
 
 Changing a command's behavior usually means changing `engine/src/cli.ts` and
 the command file together, and re-checking `.claude-plugin/CLAUDE.md`'s

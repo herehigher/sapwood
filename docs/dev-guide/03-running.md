@@ -25,7 +25,7 @@ The root build fans out to the engine workspace. TypeScript emits ESM, declarati
 
 ## Configuration
 
-The checked-in `sapwood.config.yaml` is the commented default for this repository. `loadConfig()` probes, in order, `sapwood.config.yaml`, `sapwood.config.yml`, then `sapwood.config.json`; `sapwood run --config <path>` (including `--dry-run`), `sapwood status --config <path>`, `sapwood events --config <path>`, and `sapwood validate [path]` bypass the probe. `status`/`events`' `--config` is authoritative once given (#710) — a bad path there is a hard error, never a silent fallback. Relative `logging.path`, `promptFile`, `goal.file`, and `doctrine.file` keys resolve from the selected config's directory, so an alternate config's default log lands beside that config; the DB (`data/sapwood.sqlite`), `KILL_SWITCH`/`PAUSE`, sessions, and worktree roots stay cwd-relative. JSON is accepted through the YAML parser. See [Configuration](../configuration.md) for the complete key reference.
+The checked-in `sapwood.config.yaml` is the commented default for this repository. `loadConfig()` probes, in order, `sapwood.config.yaml`, `sapwood.config.yml`, then `sapwood.config.json`; `sapwood run --config <path>` (including `--dry-run`), `sapwood status --config <path>`, `sapwood events --config <path>`, and `sapwood validate [path]` bypass the probe. `status`/`events`' `--config` is authoritative once given (#710) — a bad path there is a hard error, never a silent fallback. Relative `logging.path`, `promptFile`, `goal.file`, and `doctrine.file` keys resolve from the selected config's directory, so an alternate config's default log lands beside that config; the DB (`data/sapwood.sqlite`), `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree roots stay cwd-relative. JSON is accepted through the YAML parser. See [Configuration](../configuration.md) for the complete key reference.
 
 Environment variables read or propagated by the engine are deliberately narrow:
 
@@ -37,7 +37,7 @@ Environment variables read or propagated by the engine are deliberately narrow:
 | `SAPWOOD_GUARD_MODE` | Engine-set spawn variable carrying configured hard/soft guard mode; do not use it as a contributor override (`engine/src/guard/guard-hook.ts`). |
 | `SAPWOOD_WORKTREE_ROOT` | Engine-set absolute containment root for guarded session reads (`engine/src/guard/guard.ts`). |
 
-Human controls are files, not environment variables: `data/KILL_SWITCH` freezes dispatch and merges and starts bounded draining; `data/PAUSE` freezes only new dispatch (`State.killSwitchPath()` and `State.pausePath()` in `engine/src/state/state.ts`). `data/DIRECTIVE.md` is an optional round input configured by `round.directiveFile`, not a stop control.
+Human controls are three cwd-relative files, not environment variables: `data/EMERGENCY_STOP`, `data/KILL_SWITCH`, and `data/PAUSE` (`State.emergencyStopPath()`, `State.killSwitchPath()`, and `State.pausePath()` in `engine/src/state/state.ts`). `data/DIRECTIVE.md` is an optional round input configured by `round.directiveFile`, not a stop control.
 
 ## Running the loop from source
 
@@ -71,7 +71,7 @@ To exercise drain behavior safely, create `data/KILL_SWITCH` before the tick. Th
 When a run misbehaves, the evidence trail is layered — read it in this order:
 
 1. **`node --import tsx engine/src/cli.ts status`** — lane states, PRs in the
-   gate, spend vs. ceiling, kill-switch/pause; works read-only with no engine
+   gate, spend vs. ceiling, e-stop/kill switch/pause state; works read-only with no engine
    running.
 2. **`data/logs/sapwood.log`** — the engine's own diagnostic log
    (`engine/src/loop/logger.ts`).
@@ -103,4 +103,4 @@ Stop the local engine before deleting runtime files. All of the following are ge
 | `data/logs/` | Engine diagnostic history only. |
 | `data/rounds/`, `data/proxy-bundles/`, `data/directives/` | Derived round Markdown, frozen proxy evidence, and archived human directives. Some have SQLite index/source rows, so deleting only the files leaves incomplete artifacts. |
 
-Do not delete `data/KILL_SWITCH` or `data/PAUSE` as part of a blanket reset without deciding to lift those operator controls. Do not delete a retained worker worktree: it may contain WIP preserved for inspection (`engine/src/roles/worker.ts`).
+Do not delete `data/EMERGENCY_STOP`, `data/KILL_SWITCH`, or `data/PAUSE` as part of a blanket reset without deciding to lift those operator controls. Do not delete a retained worker worktree: it may contain WIP preserved for inspection (`engine/src/roles/worker.ts`).

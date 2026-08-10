@@ -23,12 +23,14 @@ them itself or leaves the merge for a human.
   `engine.driver: tick` in the config — the rounds driver rejects both. `--dry-run` =
   preview what would dispatch + a cost estimate, no worker spawned, no state written.
 - **`/sapwood-status [db-path]`** — read engine state (active lanes, PRs awaiting
-  review, spend vs. the daily ceiling, kill-switch/pause state) directly from
+  review, spend vs. the daily ceiling, e-stop/kill switch/pause state) directly from
   `data/sapwood.sqlite`. Works with no engine session currently running.
-- **`/sapwood-stop [--pause|--resume|--lift]`** — human controls. No argument trips the
-  kill switch (freezes all new dispatch/merges, drains running workers). `--lift`
-  reverses it. `--pause` freezes new dispatch only (everything in flight keeps going);
-  `--resume` lifts the pause.
+- **`/sapwood-stop [--emergency|--clear-emergency|--pause|--resume|--lift]`** — three
+  human-control tiers. `--emergency` sets the strictest, no-drain stop; clear it with
+  `--clear-emergency` only after human review. No argument sets the drain-first kill
+  switch (freezes all new dispatch/merges, drains running workers), and `--lift`
+  removes it. `--pause` freezes new dispatch only (everything in flight keeps going);
+  `--resume` removes it.
 
 ## Config
 
@@ -44,7 +46,7 @@ Full documentation lives in this repo's `docs/` directory:
   write a `Ready` issue.
 - `docs/configuration.md` — every config key, its default, and its meaning.
 - `docs/security.md` — the trust/governance model: producer≠reviewer≠merger, the guard
-  hook, human-merge-only paths, the kill switch vs. pause, cost ceilings.
+  hook, human-merge-only paths, the e-stop/kill switch/pause control tiers, cost ceilings.
 - `docs/troubleshooting.md` — what common failures (`needs-human`, a dirty-worktree
   degrade, tick errors, auth scope problems) mean and how to resolve them.
 - `docs/PLAN.md` — full architecture, decision log, and roadmap (contributor-facing;

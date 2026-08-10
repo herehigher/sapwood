@@ -23,7 +23,7 @@ required — the same DB a running engine is currently writing (WAL, concurrent-
 safe):
 
 - **`sapwood status [db-path] [--json]`** — a point-in-time snapshot: active/driving
-  lanes, spend vs. the daily ceiling, kill-switch/pause state, park episodes, base-CI-red.
+  lanes, spend vs. the daily ceiling, e-stop/kill switch/pause state, park episodes, base-CI-red.
   `--json` prints a documented, additive-only DTO (`formatVersion 1`) instead of the text
   summary — ignore fields you don't recognize rather than fail on them.
 - **`sapwood events [db-path] [options]`** — the event ledger itself, id-cursor and
@@ -114,10 +114,12 @@ Verified working pattern: `nohup`, backgrounded, and `disown`'d out of the launc
 shell's job table — this defeats `SIGHUP`-on-shell-exit and any other signal the shell
 would otherwise deliver to its own job, nothing more (the pgid/session/cgroup hierarchy
 below says precisely what it does and doesn't cover). `run`'s data dir
-(`data/sapwood.sqlite`, `KILL_SWITCH`/`PAUSE`, sessions, worktree roots) resolves
-**relative to the process's cwd, not to `--config`'s directory** — the CLI's own `run
---help` says so (`docs/configuration.md`'s loader-resolution note carries the same
-rule) — so `cd` into the deployment checkout FIRST, or the detached process silently
+(`data/sapwood.sqlite`, `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, worktree roots) resolves
+**relative to the process's cwd, not to `--config`'s directory** — today's `run --help`
+names the DB, `KILL_SWITCH`/`PAUSE`, sessions, and worktree roots; its `EMERGENCY_STOP`
+mention is tracked in [#778](https://github.com/herehigher/sapwood/issues/778)
+(`docs/configuration.md`'s loader-resolution note carries the full rule) — so `cd` into
+the deployment checkout FIRST, or the detached process silently
 takes root wherever the launching shell happened to be sitting. Use an absolute `node`
 here too (the lazy-load gotcha below applies to this line exactly as much as a script).
 Create the shell redirect's log directory before backgrounding, too: the shell performs
@@ -247,7 +249,7 @@ not just the launch line above:
   `status`/`events`/`park clear` all fall back to this cwd-relative default when no
   positional `db-path` is given, and `--config` does **not** change that resolution
   (`docs/configuration.md`'s loader-resolution note: logging/prompt/goal/doctrine paths
-  go config-file-relative, but the DB, `KILL_SWITCH`/`PAUSE`, sessions, and worktree
+  go config-file-relative, but the DB, `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree
   roots stay cwd-relative regardless). A detached poller's cwd is arbitrary — polling
   from anywhere but the deployment checkout silently prints `sapwood events: no state DB
   at data/sapwood.sqlite — engine has never run` and **exits 0**, indistinguishable from
@@ -396,18 +398,44 @@ Before ending a supervision session:
 
 ## Stop ritual
 
-The kill switch (`data/KILL_SWITCH`) and pause (`data/PAUSE`) are plain file sentinels
-next to the engine's state DB — see `/sapwood-stop`'s own doc
-(`commands/sapwood-stop.md`) for the exact commands and the two tiers' distinct
-semantics (kill switch freezes+drains everything; pause freezes only new dispatch).
-This section covers the supervision-side placement/removal discipline layered on top:
+Emergency stop (`data/EMERGENCY_STOP`), kill switch (`data/KILL_SWITCH`), and pause
+(`data/PAUSE`) are plain file sentinels next to the engine's state DB — see
+`/sapwood-stop`'s own doc (`commands/sapwood-stop.md`) for the same three tiers and
+their distinct semantics. This section covers the supervision-side placement/removal
+discipline layered on top:
 
-- **Sentinel placement.** Set `data/KILL_SWITCH` (`mkdir -p data && touch
-  data/KILL_SWITCH`) at the point you actually want dispatch/merges to freeze — the
-  engine picks it up at the very next tick-top gate, so there's no reason to pre-place it
-  "just in case." The natural placement for a clean stop is **at the last expected
-  merge** of a batch: once the lane(s) you're waiting on have merged, set the sentinel
-  before anything new could be dispatched into the gap.
+- **Emergency-stop placement and clearing.** Set it only for credential exposure,
+  destructive calls, or a cost blowout that cannot wait for the drain window:
+
+  ```bash
+  mkdir -p data && touch data/EMERGENCY_STOP
+  ```
+
+  It is checked before `data/KILL_SWITCH` every tick and wins when both are present. In the normal
+  path, it hard-kills every running/fixing lane's process group on that same tick: there is no drain
+  window, in-flight WIP is lost, and killed lanes escalate to `needs-human` with their
+  evidence preserved. The current kill path traverses terminal-reclaim and probe-before-reclaim
+  forge reads, so a hung forge call can delay the kill
+  ([#778](https://github.com/herehigher/sapwood/issues/778)). Clear it only after human review of
+  the emergency and of those escalations:
+
+  ```bash
+  rm -f data/EMERGENCY_STOP
+  ```
+
+- **Kill-switch placement and clearing.** For any other stop, use the drain-first kill
+  switch. Set `data/KILL_SWITCH` at the point you actually want dispatch/merges to
+  freeze — the engine picks it up at the very next tick-top gate, so there's no reason
+  to pre-place it "just in case." The natural placement for a clean stop is **at the
+  last expected merge** of a batch: once the lane(s) you're waiting on have merged, set
+  the sentinel before anything new could be dispatched into the gap.
+
+  ```bash
+  mkdir -p data && touch data/KILL_SWITCH
+  # After the drain/stop is complete and you intend to allow dispatch again:
+  rm -f data/KILL_SWITCH
+  ```
+
 - **Drain semantics.** A first stop signal (SIGTERM/SIGINT, or the kill-switch sentinel)
   freezes dispatch and asks in-flight lanes to hand off gracefully within
   `cfg.cost.drainWindowSec` (default 300s) before the conductor escalates to a hard kill.
@@ -430,14 +458,23 @@ This section covers the supervision-side placement/removal discipline layered on
   stopped growing. Only once corroborated, capture the PID/process tree and last event
   page, then follow the Stop ritual—using the second signal if graceful drain cannot
   complete—verify every lane descendant is gone, and do not restart unchanged.
-- **Sentinel removal.** `data/KILL_SWITCH`/`data/PAUSE` are OUT-OF-BAND controls — the
-  engine never removes either one itself. Remove the sentinel only once you intend the
-  *next* `sapwood run` (or the next tick, if the process is still alive under a signal
-  stop rather than a hard exit) to resume normal dispatch — a leftover `KILL_SWITCH`
-  after a stop-and-restart cycle silently re-freezes the fresh run, which reads as "the
-  engine won't dispatch anything" with no other symptom. Confirm removal with `sapwood
-  status`'s `kill switch: inactive` / `pause: inactive` lines before assuming the next
-  run will actually work.
+- **Pause placement and clearing.** Pause is the gentle tier: it freezes only new lane
+  dispatch while in-flight workers and PR review/merge proceed normally. Use it to hold
+  the queue while triaging or before a maintenance window, not to stop unsafe work.
+
+  ```bash
+  mkdir -p data && touch data/PAUSE
+  rm -f data/PAUSE
+  ```
+
+- **Sentinel removal.** `data/EMERGENCY_STOP`, `data/KILL_SWITCH`, and `data/PAUSE` are
+  OUT-OF-BAND controls — the engine never removes any of them itself. Remove a sentinel
+  only once you intend the *next* `sapwood run` (or the next tick, if the process is
+  still alive under a signal stop rather than a hard exit) to resume the control tier it
+  governs. A leftover strict sentinel after a stop-and-restart cycle silently blocks the
+  fresh run. After clearing an emergency stop, remember that a remaining kill switch
+  still wins over pause; confirm the intended state with `sapwood status` before assuming
+  the next run will dispatch.
 
 ## Interpretation pointers
 

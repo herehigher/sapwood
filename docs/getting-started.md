@@ -387,13 +387,15 @@ session. Channel A's controls are file sentinels in the target repo (the repo co
 
 ```sh
 mkdir -p data
-touch data/KILL_SWITCH  # emergency: freeze new dispatch and merges; drain workers
-rm -f data/KILL_SWITCH  # lift the kill switch on the next tick
-touch data/PAUSE        # gentle: stop new dispatch; in-flight work continues
-rm -f data/PAUSE        # resume dispatch on the next tick
+touch data/EMERGENCY_STOP  # strictest: no-drain hard kill; use only for emergencies
+rm -f data/EMERGENCY_STOP # clear only after human review
+touch data/KILL_SWITCH    # drain-first: freeze new dispatch and merges; drain workers
+rm -f data/KILL_SWITCH    # lift the kill switch on the next tick
+touch data/PAUSE          # gentle: stop new dispatch; in-flight work continues
+rm -f data/PAUSE          # remove PAUSE; dispatch resumes next tick only if no EMERGENCY_STOP or KILL_SWITCH remains
 ```
 
-See [`security.md`](security.md#two-tier-human-controls) for the full semantics, including
+See [`security.md`](security.md#human-controls-three-tiers) for the full semantics, including
 how pause interacts with `--until-idle`.
 
 ## Running under a supervisor
@@ -481,7 +483,11 @@ commands above for stop/pause control and the linked CLI for run/status.
 - **`/sapwood-status [db-path]`** — runs `sapwood status`, reading the state DB directly
   (`data/sapwood.sqlite` by default). Works even with no engine session currently
   running.
-- **`/sapwood-stop [--pause|--resume|--lift]`** — sapwood's two tiers of human control:
+- **`/sapwood-stop [--emergency|--clear-emergency|--pause|--resume|--lift]`** — sapwood's
+  three tiers of human control:
+  - **`--emergency`**: the strictest tier — hard-kills running/fixing lane process groups
+    without a drain window. In-flight WIP is lost; clear it with `--clear-emergency` only after
+    human review.
   - No argument: trips the **kill switch** — freezes all new dispatch and merges;
     running workers are asked to hand off gracefully, then the conductor escalates to a
     hard kill past the drain window. `--lift` reverses it.
@@ -489,7 +495,7 @@ commands above for stop/pause control and the linked CLI for run/status.
     flight (running workers, PRs moving through the review/merge gate) keeps going
     normally. `--resume` lifts it.
 
-  See [`security.md`](security.md#two-tier-human-controls) for the full semantics, including how
+  See [`security.md`](security.md#human-controls-three-tiers) for the full semantics, including how
   pause interacts with `--until-idle`.
 
 ## Writing a `Ready` issue

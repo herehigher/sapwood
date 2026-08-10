@@ -1199,7 +1199,7 @@ marker idempotency, output schema, escalation path) see
   as normal; no drain, nothing killed. Distinct from the kill switch's strict freeze +
   drain (if both are present, the kill switch's behavior governs). Wired into
   `/sapwood-stop --pause`/`--resume` and `sapwood status`'s `pause: …` line. See
-  `docs/security.md` for the full two-tier control model. **Goal-based stop conditions (#76):** optional `stop.afterIssuesMerged` /
+  `docs/security.md` for the full three-tier e-stop, kill-switch, and pause control model. **Goal-based stop conditions (#76):** optional `stop.afterIssuesMerged` /
   `stop.afterPRsOpened` / `stop.onMilestoneComplete` config (each overridable by a
   matching `--stop-after-issues` / `--stop-after-prs` / `--stop-on-milestone` CLI flag)
   are FINAL break conditions — "when is this run complete" — not a change to the loop's
