@@ -18,7 +18,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
@@ -80,6 +80,14 @@ import {
  *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
  *  so every deliberate real-clock read in this suite greps as one decision. */
 const realClock = (): Date => new Date();
+
+/** #786 gate② finding [ac3-unowned-process-match]: every `sapwood-reap-*` tmp dir this file
+ *  creates embeds `SAPWOOD_TEST_RUN_ID` (set by `engine/scripts/run-tests.sh` — a fresh value per
+ *  `npm test` invocation) so `check-no-leaked-test-processes.ts` can attribute a survivor to THIS
+ *  run specifically, never a concurrent/unrelated process whose argv happens to contain the same
+ *  generic prefix. Falls back to this process's own pid when run standalone (e.g. `node --test
+ *  src/roles/worker.test.ts` directly, no wrapper) so the prefix is still real and non-empty. */
+const REAP_TMP_PREFIX = `sapwood-reap-${process.env.SAPWOOD_TEST_RUN_ID ?? String(process.pid)}-`;
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 
@@ -1193,7 +1201,11 @@ const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"succes
  *  a retained `ChildProcess` does not decay the way the rejected pid-registry did (the object
  *  always addresses its own child, never a reused pid), so this is not a repeat of that mistake,
  *  just accepting a handle from one more place than "ask the supervisor for its own". */
-function killAnyRunningLanes(...targets: Array<WorkerSupervisor | ChildProcess | undefined>): void {
+// #786 gate② finding [ac1-untracked-term-stubs]: return type widened from `void` to the children
+// actually found alive and signaled — every existing call site ignores the return value (still
+// legal), and the suite-wide fallback sweep further down uses it to assert nothing needed rescuing,
+// the same discipline already applied to the descendant pid registry.
+function killAnyRunningLanes(...targets: Array<WorkerSupervisor | ChildProcess | undefined>): ChildProcess[] {
   const children: ChildProcess[] = [];
   for (const t of targets) {
     if (!t) continue;
@@ -1204,8 +1216,10 @@ function killAnyRunningLanes(...targets: Array<WorkerSupervisor | ChildProcess |
       children.push(t);
     }
   }
+  const signaled: ChildProcess[] = [];
   for (const child of children) {
     if (child.exitCode !== null || child.signalCode !== null) continue; // already exited -- nothing to do
+    signaled.push(child);
     const pid = child.pid;
     if (typeof pid === "number") {
       try {
@@ -1220,6 +1234,7 @@ function killAnyRunningLanes(...targets: Array<WorkerSupervisor | ChildProcess |
       /* already gone */
     }
   }
+  return signaled;
 }
 
 // #691 Codex gate② round 2 (ffa3c46 re-review, P2): retargeted from the pid-registry version --
@@ -1992,7 +2007,11 @@ test("reclaim kills a stubborn (ignores TERM) claude subtree via SIGKILL", async
   try {
     // Stubborn stub: ignore TERM -> only a process-group KILL stops it.
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n");
-    s = sup(dir, bin);
+    // #786 gate② finding [ac1-untracked-term-stubs]: this leader is TERM-immune and, in the normal
+    // case, already dead by the time `finally` runs (`s.reclaim()` below kills it) — but a hang
+    // BEFORE that point (e.g. inside `dispatch()`/`reclaim()` itself) would otherwise leak it past
+    // `--test-timeout`. trackForFallbackSweep registers it with the suite-wide after() sweep.
+    s = trackForFallbackSweep(sup(dir, bin));
     const { name } = await s.dispatch({ number: 2, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before reclaim");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
@@ -2789,16 +2808,21 @@ test("dispatch (#395 gate② round 3, P1): a LIVE worker leg heart-beats against
   let s: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> only SIGKILL ends it
-    s = new WorkerSupervisor({
-      now: realClock,
-      cfg,
-      stateDir: dir,
-      claudeBin: bin,
-      renderPrompt: () => "test prompt",
-      heartbeatMs: 15, // fast cadence so this test observes several ticks quickly
-      guardHookPath: mkHook(dir),
-      state,
-    });
+    // #786 gate② finding [ac1-untracked-term-stubs]: this leader is TERM-immune; registered with
+    // the suite-wide fallback sweep so a hang before this test's own finally-based kill still
+    // reaps it on timeout.
+    s = trackForFallbackSweep(
+      new WorkerSupervisor({
+        now: realClock,
+        cfg,
+        stateDir: dir,
+        claudeBin: bin,
+        renderPrompt: () => "test prompt",
+        heartbeatMs: 15, // fast cadence so this test observes several ticks quickly
+        guardHookPath: mkHook(dir),
+        state,
+      }),
+    );
     const { name } = await s.dispatch({ number: 11, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before we start observing heartbeats");
     const child = (s as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.get(name)!.child;
@@ -2886,15 +2910,20 @@ test("enforces worker timeout: a run past timeoutSec is killed and marked failed
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> needs the KILL
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
     let fakeNowMs = Date.now();
-    s = new WorkerSupervisor({
-      cfg: tcfg,
-      stateDir: dir,
-      claudeBin: bin,
-      renderPrompt: () => "p",
-      heartbeatMs: 20,
-      guardHookPath: mkHook(dir),
-      now: () => new Date(fakeNowMs),
-    });
+    // #786 gate② finding [ac1-untracked-term-stubs]: registered with the suite-wide fallback sweep
+    // — a hang before the timeout-kill path under test fires would otherwise leak this TERM-immune
+    // leader past `--test-timeout`.
+    s = trackForFallbackSweep(
+      new WorkerSupervisor({
+        cfg: tcfg,
+        stateDir: dir,
+        claudeBin: bin,
+        renderPrompt: () => "p",
+        heartbeatMs: 20,
+        guardHookPath: mkHook(dir),
+        now: () => new Date(fakeNowMs),
+      }),
+    );
     const { name } = await s.dispatch({ number: 5, title: "t", labels: [] });
     await waitForFile(ready, "stub installed its TERM trap before timeout");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
@@ -3984,15 +4013,20 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
     const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\ntouch "${trapReady}"\nfor _ in $(seq 1 600); do sleep 1; done\n`);
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
     let fakeNowMs = Date.now();
-    s = new WorkerSupervisor({
-      cfg: tcfg,
-      stateDir: dir,
-      claudeBin: bin,
-      renderPrompt: () => "p",
-      heartbeatMs: 20, // real timer -- but the elapsed-time MATH below is driven by fakeNowMs, not by how fast this fires
-      guardHookPath: mkHook(dir),
-      now: () => new Date(fakeNowMs),
-    });
+    // #786 gate② finding [ac1-untracked-term-stubs]: registered with the suite-wide fallback sweep
+    // — a hang anywhere in this test's own fake-clock-driven sequence would otherwise leak this
+    // TERM-immune leader past `--test-timeout`.
+    s = trackForFallbackSweep(
+      new WorkerSupervisor({
+        cfg: tcfg,
+        stateDir: dir,
+        claudeBin: bin,
+        renderPrompt: () => "p",
+        heartbeatMs: 20, // real timer -- but the elapsed-time MATH below is driven by fakeNowMs, not by how fast this fires
+        guardHookPath: mkHook(dir),
+        now: () => new Date(fakeNowMs),
+      }),
+    );
     const { name: laneName } = await s.dispatch({ number: 63, title: "t", labels: [] });
     // Bounded poll (20ms x 400 = 8s ceiling, same pattern PR #240 used for its own trap-ready
     // handshake) for the trap to be provably installed. The fake clock is still frozen at
@@ -4441,15 +4475,20 @@ test("#63/#69: a lane already reclaim()'d must never also be finalized as .hando
     // Ignores TERM -> survives requestHandoff's SIGTERM; only reclaim()'s SIGKILL stops it —
     // mirroring the "reclaim kills a stubborn claude subtree via SIGKILL" pattern above.
     const { bin, ready } = longRunningStub(dir, "trap '' TERM\n");
-    s1 = sup(dir, bin, worktreeRoot);
+    // #786 gate② finding [ac1-untracked-term-stubs]: both s1 and s2, plus s1's own snapshotted
+    // live handles (below — dispose() clears s1's OWN lanes map, stranding them from s1 itself),
+    // are registered with the suite-wide fallback sweep.
+    s1 = trackForFallbackSweep(sup(dir, bin, worktreeRoot));
     const { name: laneName } = await s1.dispatch({ number: 65, title: "t", labels: [] }, name);
     await waitForFile(ready, "stub installed its TERM trap before engine restart");
     writeFileSync(join(worktreePath, "wip.txt"), "uncommitted\n"); // post-dispatch WIP -> dirty
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
-    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) => l.child);
+    s1Children = [...(s1 as unknown as { lanes: Map<string, { child: ChildProcess }> }).lanes.values()].map((l) =>
+      trackForFallbackSweep(l.child),
+    );
     s1.dispose();
 
-    s2 = sup(dir, bin, worktreeRoot);
+    s2 = trackForFallbackSweep(sup(dir, bin, worktreeRoot));
     assert.equal(s2.requestHandoff(laneName), true); // detached SIGTERM sent (ignored by the stub)
     assert.equal(alive(pid), true, "stub ignores TERM — still alive right after the drain request");
 
@@ -5084,7 +5123,7 @@ test("reapChildren (#668 gate② finding [1]): a mixed batch — a fresh lane ge
 // ─────────────────────────────────────────────────────────────────────────────
 
 test("WorkerSupervisor.reapAll (#668): no live lanes -> resolves to [] immediately, no-op", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  const dir = mkdtempSync(join(tmpdir(), REAP_TMP_PREFIX));
   let s: WorkerSupervisor | undefined;
   try {
     s = sup(dir, "claude"); // never dispatches -> this.lanes is empty
@@ -5232,7 +5271,7 @@ test("WorkerSupervisor.reapAll (#668 r2[1], gate② round 3 P2 rework — DISCRI
 });
 
 test("WorkerSupervisor.reapAll (#668 r2[1], real end-to-end sentinel integration): a genuinely alive, reap-signaled lane lands the REAL .handoff sentinel via a full dispatch()+onExit() round trip — the fix's mechanism produces the correct file, not just the correct in-memory flag", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  const dir = mkdtempSync(join(tmpdir(), REAP_TMP_PREFIX));
   let s: WorkerSupervisor | undefined;
   try {
     const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n"); // cooperative graceful handoff
@@ -5338,6 +5377,153 @@ function reapPollSleep(opts: { held?: boolean } = {}): { sleep: (ms: number) => 
  *  test-process death (or a stop-file write that never lands) leaves the descendant running for at
  *  most 600s, never indefinitely — the same bounded-straggler ceiling every other stub in this file
  *  already carries. */
+// #786 (batch-12 close-out sweep): a suite-wide safety net for every descendant `leaderExitStub`
+// spawns, TERM-immune or not. Each descendant self-registers its OWN freshly-spawned pid into this
+// directory the instant it starts (never a stale/persisted pid, never a process-group signal
+// against a leader already waitpid'd — the exact identity-proof concerns #691/#668 already drove
+// this file's design toward). Two consumers of that registry:
+//
+// 1. Each `ignoreTerm: true` test below reads its OWN descendant's pid back out (via a before/after
+//    snapshot diff of this directory — handling `WorkerSupervisor.resume`'s same-name-respawn tests,
+//    which spawn a SECOND descendant reusing the SAME `descendantReadyFile`) and SIGKILLs it
+//    directly in its own `finally`, unconditionally — closing #786 gate② finding [ac1-sigkill-
+//    teardown]: the ordinary pass/fail path must itself SIGKILL, not rely solely on the cooperative
+//    stopFile door and a rarely-exercised fallback.
+// 2. `after()` below sweeps whatever's left — the ONLY path that still needs it is a test that
+//    hung past `--test-timeout` (verified empirically: node:test reports a timed-out test as failed
+//    WITHOUT unwinding its still-pending promise chain — no cancellation, nothing forces a stuck
+//    `await` to reject — yet subsequent tests and this file's `after()` hook still run). A dedicated
+//    test below (search "exercises the after() fallback") proves this path actually works by
+//    directly invoking the same sweep function `after()` uses, without needing a real 60s hang.
+//
+// Finding [stale-pid-sigkill]: BOTH consumers remove a pid's registry marker the moment they've
+// handled it (killed-or-confirmed-dead), not just at file-end — shrinking the window in which a
+// REUSED pid could be mistaken for a long-gone descendant from "the rest of this large file's run"
+// down to "this one descendant's own handling", normally well under a second.
+const termImmuneRegistryDir = mkdtempSync(join(tmpdir(), "sapwood-reap-pid-registry-"));
+
+function snapshotRegistryPids(): Set<string> {
+  try {
+    return new Set(readdirSync(termImmuneRegistryDir));
+  } catch {
+    return new Set();
+  }
+}
+
+/** Entries present now but absent from `before` — used to isolate THIS test's own descendant
+ *  pid(s) from any other still-registered entry, without needing `leaderExitStub` to return
+ *  anything beyond the stub path it already does. */
+function newRegistryPidsSince(before: Set<string>): number[] {
+  const now = snapshotRegistryPids();
+  const fresh: number[] = [];
+  for (const entry of now) {
+    if (before.has(entry)) continue;
+    const pid = Number(entry);
+    if (Number.isInteger(pid) && pid > 0) fresh.push(pid);
+  }
+  return fresh;
+}
+
+/** #786 gate② finding [ac1-registry-readiness-race]: a bounded wait (never an immediate, possibly-
+ *  empty read) for exactly `expectedCount` new registry pid(s) to appear since `before`, then
+ *  asserts the count — turning what would otherwise be a SILENTLY-SKIPPED SIGKILL (the pre-fix
+ *  failure mode: an empty capture quietly falls through to the cooperative-only stopFile door) into
+ *  a loud, named test failure if it's ever wrong. `leaderExitStub`'s own write-order fix (registers
+ *  before publishing readiness) already makes this non-racy by construction once the caller's own
+ *  readiness wait has resolved; this is the belt-and-braces confirmation the finding asked for. */
+async function waitForRegistryPids(before: Set<string>, expectedCount: number, message: string): Promise<number[]> {
+  await waitFor(() => newRegistryPidsSince(before).length >= expectedCount, message);
+  const pids = newRegistryPidsSince(before);
+  assert.equal(pids.length, expectedCount, `${message} — expected exactly ${expectedCount} new registry pid(s), got ${pids.length}`);
+  return pids;
+}
+
+/** Kills `pid` iff it is STILL alive right now (verified via signal 0 immediately before — never a
+ *  blind signal), then unregisters it regardless of outcome, closing finding [stale-pid-sigkill]'s
+ *  reuse window for this one pid the instant it's been handled. Returns whether a live process was
+ *  actually found and killed (vs. already gone). */
+function killRegisteredDescendant(pid: number): boolean {
+  let killed = false;
+  try {
+    process.kill(pid, 0);
+    process.kill(pid, "SIGKILL");
+    killed = true;
+  } catch {
+    /* already gone, or exited between the liveness check and the kill itself */
+  }
+  try {
+    rmSync(join(termImmuneRegistryDir, String(pid)), { force: true });
+  } catch {
+    /* already removed */
+  }
+  return killed;
+}
+
+/** The fallback sweep `after()` runs, extracted so a test can invoke it directly (see "exercises
+ *  the after() fallback" below) and prove it actually finds + kills a registered descendant, rather
+ *  than trusting an untested code path to fire correctly only during a real, slow timeout. */
+function sweepTermImmuneRegistry(): number[] {
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(termImmuneRegistryDir);
+  } catch {
+    entries = [];
+  }
+  const forceKilled: number[] = [];
+  for (const entry of entries) {
+    const pid = Number(entry);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    if (killRegisteredDescendant(pid)) forceKilled.push(pid);
+  }
+  return forceKilled;
+}
+
+// #786 gate② finding [ac1-untracked-term-stubs]: a SMALL, explicitly opt-in suite-wide registry
+// for the handful of tests elsewhere in this file that spawn a TERM-immune LEADER directly (a raw
+// `trap '' TERM` stub run through a WorkerSupervisor — `longRunningStub`/an inline `mkStub`, never
+// a `leaderExitStub` descendant) — a different shape the pid-file registry above doesn't cover: no
+// descendant, no self-registration, just the leader itself possibly still alive when a test hangs.
+// These leaders ARE already tracked, for as long as the test hasn't disposed its own supervisor, in
+// that supervisor's own `lanes` map — and `killAnyRunningLanes` (this file's own established,
+// live-handle-based, provably pid-reuse-safe kill mechanism, used throughout this file already —
+// see its own doc) already reaches both the leader and any descendant sharing its process group. It
+// has just never been called from anywhere OTHER than each test's own `finally`, which #786 already
+// established doesn't run on a `--test-timeout` hang. `trackForFallbackSweep` is opt-in, called only
+// at the specific TERM-immune-leader test sites (search "trackForFallbackSweep(" below) — NOT
+// retrofitted onto every one of this file's ~130 WorkerSupervisor construction sites, the other
+// ~125 of which spawn a FAST_STUB that exits in milliseconds and were never the shape this finding
+// named. `after()` sweeps whatever's left exactly like it already does for the descendant registry:
+// a safe no-op for a supervisor whose own test already `dispose()`d it (which clears `lanes`), and a
+// real kill only for one a hang left undisposed.
+// Widened to accept a raw ChildProcess too — a simulated-restart test that `dispose()`s its own
+// supervisor mid-test (clearing that supervisor's own `lanes`) must snapshot the LIVE handle first
+// (the exact pattern `killAnyRunningLanes`'s own doc already establishes for this); tracking that
+// snapshotted handle here is the only way the fallback sweep can still reach it after dispose().
+const allSupervisorsForFallbackSweep: Array<WorkerSupervisor | ChildProcess> = [];
+function trackForFallbackSweep<T extends WorkerSupervisor | ChildProcess>(s: T): T {
+  allSupervisorsForFallbackSweep.push(s);
+  return s;
+}
+
+after(() => {
+  // Every test's own `finally` should already have SIGKILLed and unregistered its own descendant
+  // (point 1 above) — so anything this sweep still finds means some test's own teardown never ran
+  // (e.g. a hang past `--test-timeout`), worth failing loudly on rather than silently masking.
+  const forceKilled = sweepTermImmuneRegistry();
+  rmSync(termImmuneRegistryDir, { recursive: true, force: true });
+  // finding [ac1-untracked-term-stubs]: the SAME "assert nothing needed rescuing" discipline,
+  // applied to the small opt-in supervisor registry above — killAnyRunningLanes's own liveness
+  // check (child.exitCode/signalCode on the LIVE handle) already makes this a safe no-op for every
+  // supervisor whose own test's `finally` already disposed it.
+  const supervisorForceKilled = killAnyRunningLanes(...allSupervisorsForFallbackSweep);
+  assert.deepEqual(forceKilled, [], `after() had to SIGKILL descendant pid(s) no test's own teardown reaped: ${forceKilled.join(", ")}`);
+  assert.deepEqual(
+    supervisorForceKilled,
+    [],
+    `after() had to SIGKILL ${supervisorForceKilled.length} TERM-immune leader(s) no test's own teardown reaped`,
+  );
+});
+
 function leaderExitStub(dir: string, descendantReadyFile: string, opts: { ignoreTerm?: boolean; stopFile?: string } = {}): string {
   const sigtermHandler = opts.ignoreTerm
     ? "process.on('SIGTERM',()=>{});"
@@ -5346,11 +5532,38 @@ function leaderExitStub(dir: string, descendantReadyFile: string, opts: { ignore
     ? `setInterval(()=>{if(require('fs').existsSync('${opts.stopFile}'))process.exit(0);},50);`
     : "setInterval(()=>{},1000);";
   const selfBound = "setTimeout(()=>process.exit(0),600000);"; // real 600s ceiling — see this function's own doc
+  // #786: self-register into termImmuneRegistryDir under this file's own pid, so after()'s sweep
+  // can find and SIGKILL it even if the spawning test never reaches its own `finally`.
+  // #786 gate② finding [ac1-registry-readiness-race]: registration MUST happen strictly before the
+  // ready-file write below, never after — a caller waits for readiness (directly, or transitively
+  // via the leader's own `.done.json`, since the leader's `while` loop below only exits once this
+  // file exists) as its signal that this descendant is fully set up, including registered. Both
+  // writes are synchronous (`writeFileSync`) statements in the SAME single-threaded script with no
+  // `await` between them, so ordering them registration-first makes "ready file exists" A PROOF
+  // that registration already happened — not a hope about relative scheduling of two independent
+  // processes (this file's own no-timing-dependent-assertions doctrine, applied to a race between a
+  // write and a poll rather than two timers).
+  const selfRegister = `require('fs').writeFileSync(require('path').join('${termImmuneRegistryDir}',String(process.pid)),'');`;
   return mkStub(
     dir,
     [
       "#!/usr/bin/env bash",
-      `( exec node -e "${sigtermHandler}require('fs').writeFileSync('${descendantReadyFile}','1');${idleLoop}${selfBound}" ) &`,
+      // #786 gate② finding [ac1-registry-readiness-race] ("a per-spawn barrier for resumed legs"):
+      // a resumed leg reuses this SAME generated script (and thus the SAME descendantReadyFile
+      // path) — without clearing a leftover marker from a PRIOR invocation first, this invocation's
+      // own `while` loop below would see the STALE file as already satisfied and fall through
+      // instantly, exiting this leader before ITS OWN new descendant has even started (module
+      // loading, V8 init) — reintroducing, for every invocation after the first, the exact startup
+      // race this function's own doc already closed for the FIRST one: onExit()'s reap fires the
+      // instant a leader exits and sends a synchronous SIGTERM, which a descendant still mid-startup
+      // (its own `process.on('SIGTERM', ...)` line not yet reached) dies from via the OS's ordinary
+      // default disposition, never reaching its self-register/ready-file writes at all (reproduced
+      // empirically: the resumed leg's descendant never appeared in the registry OR the process
+      // table). `rm -f` is a harmless no-op on the first invocation (nothing to remove yet) and
+      // resets the barrier on every subsequent one, so the wait loop below always waits for THIS
+      // invocation's own descendant, never a stale signal from an earlier one.
+      `rm -f "${descendantReadyFile}"`,
+      `( exec node -e "${sigtermHandler}${selfRegister}require('fs').writeFileSync('${descendantReadyFile}','1');${idleLoop}${selfBound}" ) &`,
       `while [ ! -f "${descendantReadyFile}" ]; do sleep 0.01; done`,
       "exit 0",
       "",
@@ -5373,11 +5586,56 @@ const waitBrieflyForGroupDeath = async (pid: number, timeoutMs = 5_000): Promise
   while (groupAlive(pid) && Date.now() < deadline) await sleep(20);
 };
 
+// #786 gate② finding [ac1-sigkill-teardown]: "No named test deliberately exercises the new
+// SIGKILL fallback or its timeout path." This test invokes `sweepTermImmuneRegistry()` — the exact
+// function `after()` calls — directly, against a descendant deliberately left registered with
+// nothing else about to reap it (standing in for a test whose own `finally` never runs, e.g. a
+// hang past `--test-timeout`), proving the fallback mechanism itself actually finds, kills, and
+// unregisters a survivor — without needing a real 60s hang to exercise it.
+test("sweepTermImmuneRegistry (#786): finds, SIGKILLs, and unregisters a descendant nothing else has reaped — the exact fallback after() relies on for a test that hung past its own teardown", async () => {
+  const dir = mkdtempSync(join(tmpdir(), REAP_TMP_PREFIX));
+  const descendantReadyFile = join(dir, "descendant.ready");
+  const registrySnapshotBefore = snapshotRegistryPids();
+  const bin = leaderExitStub(dir, descendantReadyFile, { ignoreTerm: true });
+  const leader = spawn(bin, [], { detached: true, stdio: "ignore" });
+  leader.unref();
+  try {
+    await waitForFile(descendantReadyFile, "the descendant never signaled readiness");
+    const newPids = await waitForRegistryPids(registrySnapshotBefore, 1, "exactly one descendant should have self-registered");
+    const descendantPid = newPids[0] as number;
+    assert.equal(alive(descendantPid), true, "sanity: the descendant is alive and TERM-immune before the sweep runs");
+
+    // Deliberately NO per-test cleanup of the descendant here — standing in for exactly what a
+    // hung test's own unreachable `finally` looks like: it's alive and registered, with nothing
+    // else about to reap it, at the moment the sweep runs.
+    const forceKilled = sweepTermImmuneRegistry();
+
+    assert.deepEqual(forceKilled, [descendantPid], "the sweep must find and report this exact descendant, no more no less");
+    await waitFor(() => !alive(descendantPid), "the sweep's SIGKILL must have actually ended the descendant");
+    assert.deepEqual(
+      snapshotRegistryPids(),
+      registrySnapshotBefore,
+      "the sweep must also remove the registry marker once handled — finding [stale-pid-sigkill]",
+    );
+  } finally {
+    if (leader.exitCode === null && leader.signalCode === null) {
+      try {
+        leader.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("WorkerSupervisor onExit (#668 round 8): a leader that exits ON ITS OWN while a live COOPERATIVE DESCENDANT shares its process group is reaped RIGHT THERE by the SINGLE SIGTERM alone — no escalation needed, no reapAll() call anywhere in this test, just onExit()'s own fire-and-forget signal", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  const dir = mkdtempSync(join(tmpdir(), REAP_TMP_PREFIX));
   let s: WorkerSupervisor | undefined;
+  let descendantPids: number[] = [];
   try {
     const descendantReadyFile = join(dir, "descendant.ready");
+    const registrySnapshotBefore = snapshotRegistryPids();
     const bin = leaderExitStub(dir, descendantReadyFile); // cooperative — dies from the one SIGTERM after its own REAL internal delay
     s = sup(dir, bin); // real default sleep — the descendant's own internal delay is the timing source, not an injected seam
     const { name } = await s.dispatch({ number: 675, title: "t", labels: [] });
@@ -5387,12 +5645,23 @@ test("WorkerSupervisor onExit (#668 round 8): a leader that exits ON ITS OWN whi
     // leaderExitStub's own doc) — so by the time `.done.json` lands, the descendant was DEFINITELY
     // alive and its SIGTERM handler registered, closing the startup race deterministically.
     await waitForFile(join(dir, `${name}.done.json`), "leader never exited / onExit never ran");
+    // #786 gate② finding [stale-pid-sigkill] (cooperative-descendant round): even a COOPERATIVE
+    // descendant self-registers (leaderExitStub's own doc — every descendant does, ignoreTerm or
+    // not), and its marker must still be removed once it's confirmed dead below, not left for
+    // `after()`'s file-end sweep — the same reuse-window concern already closed for the ignoreTerm
+    // tests applies here too.
+    descendantPids = await waitForRegistryPids(registrySnapshotBefore, 1, "the cooperative descendant never self-registered");
 
     // NO s.reapAll() call anywhere in this test — onExit()'s own fire-and-forget SIGTERM must do
     // the whole job by itself (round 8: no SIGKILL escalation exists on this path at all). Bounded
     // wait (never a fixed sleep) for the descendant to actually die from the single signal.
     await waitFor(() => !groupAlive(leaderPid), "onExit's own single SIGTERM never actually killed the cooperative descendant");
   } finally {
+    // #786 gate② finding [stale-pid-sigkill]: `killRegisteredDescendant` unregisters the marker
+    // regardless of whether the descendant is still alive — a safe no-op kill for THIS test (it's
+    // already dead by the time we get here, confirmed above), but it still closes the reuse window
+    // by removing the stale entry immediately instead of leaving it for the file-end sweep.
+    for (const pid of descendantPids) killRegisteredDescendant(pid);
     // killAnyRunningLanes(s) is a no-op here by construction (the LEADER's own ChildProcess handle
     // already shows exitCode !== null the instant onExit() has run, which the waitFor above already
     // waited for) — it's still called for the same reason every other site in this file does: this
@@ -5405,14 +5674,16 @@ test("WorkerSupervisor onExit (#668 round 8): a leader that exits ON ITS OWN whi
 });
 
 test("WorkerSupervisor.reapAll (#668 round 8): an in-flight leader-exit reap held at the injected poll seam is AWAITED by reapAll(), never abandoned — its reported outcome is included only after the held collaborator releases", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  const dir = mkdtempSync(join(tmpdir(), REAP_TMP_PREFIX));
   let s: WorkerSupervisor | undefined;
   let leaderPid = -1;
+  let descendantPids: number[] = [];
   const stopFile = join(dir, "stop-descendant");
   try {
     const descendantReadyFile = join(dir, "descendant.ready");
     // This collaborator ignores SIGTERM, so the held injected poll is the only thing that
     // controls when its in-flight reap settles; no assertion races the child's own timer.
+    const registrySnapshotBefore = snapshotRegistryPids();
     const bin = leaderExitStub(dir, descendantReadyFile, { ignoreTerm: true, stopFile });
     const { sleep, release } = reapPollSleep({ held: true });
     s = new WorkerSupervisor({
@@ -5429,6 +5700,12 @@ test("WorkerSupervisor.reapAll (#668 round 8): an in-flight leader-exit reap hel
     leaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
 
     await waitForFile(join(dir, `${name}.done.json`), "leader never exited / onExit never ran");
+    // #786 gate② finding [ac1-sigkill-teardown]: capture the descendant's own self-reported pid
+    // NOW (readiness is proven — leaderExitStub's own doc: the leader never exits until the
+    // descendant's ready file exists) so `finally` can SIGKILL it directly rather than relying
+    // solely on the cooperative stopFile door below. finding [ac1-registry-readiness-race]: a
+    // bounded wait + assert, never a bare read that could silently capture zero.
+    descendantPids = await waitForRegistryPids(registrySnapshotBefore, 1, "the leader-exit descendant never self-registered");
 
     // onExit() sends its SIGTERM before registering the promise. This descendant intentionally
     // ignores it, while the held sleep keeps the subsequent observation genuinely in flight.
@@ -5459,6 +5736,11 @@ test("WorkerSupervisor.reapAll (#668 round 8): an in-flight leader-exit reap hel
       "the settled entry is removed, never left registered",
     );
   } finally {
+    // #786 gate② finding [ac1-sigkill-teardown]: the deterministic teardown — every test that
+    // spawns a TERM-immune descendant kills it with SIGKILL here, unconditionally, not just as a
+    // fallback. Runs BEFORE the cooperative stopFile door (harmless either order; kept for anyone
+    // reading this diff against the prior cooperative-only version).
+    for (const pid of descendantPids) killRegisteredDescendant(pid);
     try {
       writeFileSync(stopFile, "1");
     } catch {
@@ -5472,7 +5754,7 @@ test("WorkerSupervisor.reapAll (#668 round 8): an in-flight leader-exit reap hel
 });
 
 test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is completely untouched by another lane's leader-exit reap — the new machinery never reaches beyond the exiting lane's own pgid", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  const dir = mkdtempSync(join(tmpdir(), REAP_TMP_PREFIX));
   let s: WorkerSupervisor | undefined;
   try {
     const descendantReadyFile = join(dir, "descendant.ready");
@@ -5503,15 +5785,20 @@ test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is
     // Real default sleep (no injected seam here — round 8's own lesson: an instant-resolving
     // sleep would exhaust the WHOLE virtual grace budget in microseconds, never giving the
     // leader-exit lane's cooperative descendant's own real internal delay a chance to fire).
-    s = new WorkerSupervisor({
-      now: realClock,
-      cfg,
-      stateDir: dir,
-      claudeBin: bin,
-      renderPrompt: (issue) => (issue.number === 900 ? "LEADER_EXIT_MARKER" : "HEALTHY_MARKER"),
-      heartbeatMs: 50,
-      guardHookPath: mkHook(dir),
-    });
+    // #786 gate② finding [ac1-untracked-term-stubs]: the HEALTHY branch's leader is TERM-immune
+    // (`trap '' TERM`); registered with the suite-wide fallback sweep — `s.reapAll()` below already
+    // reaps it in the normal case, but a hang before that point would otherwise leak it.
+    s = trackForFallbackSweep(
+      new WorkerSupervisor({
+        now: realClock,
+        cfg,
+        stateDir: dir,
+        claudeBin: bin,
+        renderPrompt: (issue) => (issue.number === 900 ? "LEADER_EXIT_MARKER" : "HEALTHY_MARKER"),
+        heartbeatMs: 50,
+        guardHookPath: mkHook(dir),
+      }),
+    );
 
     const { name: healthyName } = await s.dispatch({ number: 901, title: "t", labels: [] });
     await waitForFile(healthyReadyFile, "the healthy lane's stub never installed its TERM-ignoring trap");
@@ -5558,10 +5845,11 @@ test("WorkerSupervisor onExit (#668 round 5, reverse): a HEALTHY running lane is
 // ─────────────────────────────────────────────────────────────────────────────
 
 test("WorkerSupervisor.resume (#668 round 6 P1b, rebased round 8): a same-name respawn (fix-leg entry) while an EARLIER leg's leader-exit reap is still in flight WAITS for it — the old reap is never abandoned (it can SETTLE either way — confirmed dead or merely reported — the respawn gate only needs it to finish, not to succeed)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  const dir = mkdtempSync(join(tmpdir(), REAP_TMP_PREFIX));
   let s: WorkerSupervisor | undefined;
   let firstLeaderPid: number | undefined;
   let name: string | undefined;
+  let descendantPids: number[] = [];
   const stopFile = join(dir, "stop-descendant"); // #691-class fix: the pid-free door both descendants below exit through in `finally`
   try {
     const descendantReadyFile = join(dir, "descendant.ready");
@@ -5570,6 +5858,7 @@ test("WorkerSupervisor.resume (#668 round 6 P1b, rebased round 8): a same-name r
     // round 8 never escalates on this path, so an ignore-TERM descendant lets the held gate stay
     // fully deterministic (no real subprocess timing dependency at all) rather than needing a
     // real internal delay to race against.
+    const registrySnapshotBeforeFirst = snapshotRegistryPids();
     const bin = leaderExitStub(dir, descendantReadyFile, { ignoreTerm: true, stopFile });
     const { sleep, release } = reapPollSleep({ held: true });
     s = new WorkerSupervisor({
@@ -5588,6 +5877,11 @@ test("WorkerSupervisor.resume (#668 round 6 P1b, rebased round 8): a same-name r
     firstLeaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
 
     await waitForFile(join(dir, `${name}.done.json`), "the first leg never exited / onExit never ran");
+    // #786 gate② finding [ac1-sigkill-teardown]: capture the FIRST leg's descendant pid now,
+    // before the SECOND (resumed) leg spawns its own descendant into the same registry dir below.
+    // finding [ac1-registry-readiness-race]: a bounded wait + assert, never a bare read.
+    descendantPids = await waitForRegistryPids(registrySnapshotBeforeFirst, 1, "the first leg's descendant never self-registered");
+    const registrySnapshotAfterFirst = snapshotRegistryPids();
     assert.equal(groupAlive(firstLeaderPid), true, "sanity: the first leg's descendant is still alive — its reap hasn't been released yet");
     assert.ok(
       [...peekSupervisor(s).inFlightLeaderExitReaps.keys()].some((k) => k.startsWith(`${name}#`)),
@@ -5618,6 +5912,14 @@ test("WorkerSupervisor.resume (#668 round 6 P1b, rebased round 8): a same-name r
     release(); // let the held reap (and therefore the waiting resume()) actually SETTLE now — round 8: it reports, never kills, since the descendant ignores SIGTERM
     const { name: resumedName } = await resumePromise;
     assert.equal(resumedName, name);
+    // #786 gate② finding [ac1-sigkill-teardown]: capture the SECOND (resumed) leg's own descendant
+    // pid too — `finally` must SIGKILL both, not just the first. finding [ac1-registry-readiness-
+    // race]: `resumePromise` resolving only proves spawn CONFIRMATION, not that the leader script's
+    // own descendant has finished registering — a bounded wait closes that gap too, not just the
+    // first leg's.
+    descendantPids = descendantPids.concat(
+      await waitForRegistryPids(registrySnapshotAfterFirst, 1, "the resumed second leg's descendant never self-registered"),
+    );
     // Round 8: the FIRST leg's descendant is NEVER force-killed (it ignores SIGTERM, and this path
     // no longer escalates) — it's still alive here, on purpose. What matters for THIS test is that
     // resume() didn't proceed until the reap SETTLED (proven by the race above), not that the
@@ -5628,17 +5930,16 @@ test("WorkerSupervisor.resume (#668 round 6 P1b, rebased round 8): a same-name r
       "round 8: an ignore-TERM descendant is reported, never force-killed — it's still alive, by design",
     );
   } finally {
-    // #691-class fix (Codex gate② final on 85d220c): NO process.kill(-pid, ...) here anymore. Once
-    // a leader has been waitpid'd (which the whole test above forces), neither a `typeof` guard nor
-    // a `wrapper_pid` re-read off disk proves this test still CURRENTLY owns that pid — pid reuse
-    // would mean signalling a completely unrelated process group, exactly #691's own class this
-    // repo has now hit three times. Instead: ask both descendants to leave through their own
-    // pid-free door — the first leg's and the resumed second leg's descendant share the SAME `bin`
-    // (leaderExitStub's own doc), hence the SAME stopFile path, so ONE write reaches both — then
-    // wait, READ-ONLY (waitBrieflyForGroupDeath is a signal-0 probe, never a kill), for them to
-    // actually go. In `finally` (not the try body) so a failed assertion above still triggers this.
-    // Round 8's own "reported, never force-killed" meaning is untouched: the file poll is a
-    // SEPARATE channel from SIGTERM handling, so "ignores SIGTERM" still means exactly that.
+    // #786 gate② finding [ac1-sigkill-teardown]: the deterministic teardown — SIGKILL both
+    // descendants directly via their own self-reported pids (verified alive immediately before
+    // signaling — see killRegisteredDescendant's own doc), never a stale-pid or process-group
+    // signal against a leader already waitpid'd (the #691-class concern the comment below still
+    // documents for the cooperative door it predates).
+    for (const pid of descendantPids) killRegisteredDescendant(pid);
+    // #691-class fix (Codex gate② final on 85d220c): kept as a secondary, harmless channel — ask
+    // both descendants to leave through their own pid-free door too (a no-op once the direct
+    // SIGKILL above has already ended them) and wait, READ-ONLY (waitBrieflyForGroupDeath is a
+    // signal-0 probe, never a kill), for the leader-side process GROUP to actually go.
     try {
       writeFileSync(stopFile, "1");
     } catch {
@@ -5690,7 +5991,7 @@ test("WorkerSupervisor.resume (#668 round 6 P1b, RED-BEFORE differential): with 
 });
 
 test("WorkerSupervisor.reapAll (#668 round 6 P1b): TWO in-flight leader-exit reaps registered under the SAME lane name (different pids/keys) are BOTH awaited — reapAll() never returns early on just the first, and its outcome set includes both", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  const dir = mkdtempSync(join(tmpdir(), REAP_TMP_PREFIX));
   let s: WorkerSupervisor | undefined;
   try {
     s = sup(dir, "claude"); // dispatch() never called — both reaps are injected directly
@@ -5840,7 +6141,7 @@ test("signalOnceAndReport (#668 round 8): a COOPERATIVE descendant that dies fro
 });
 
 test("WorkerSupervisor onExit + reapAll (#668 round 8, real end-to-end): a leader-exited descendant that IGNORES SIGTERM is REPORTED — surfaced through reapAll()'s existing orphan path (confirmedDead: false) while still in flight — and is left completely alive, never force-killed", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reap-"));
+  const dir = mkdtempSync(join(tmpdir(), REAP_TMP_PREFIX));
   const descendantReadyFile = join(dir, "descendant.ready");
   const stopFile = join(dir, "stop-descendant"); // #691-class fix: the pid-free door the descendant exits through in `finally`
   const bin = leaderExitStub(dir, descendantReadyFile, { ignoreTerm: true, stopFile });
@@ -5856,10 +6157,16 @@ test("WorkerSupervisor onExit + reapAll (#668 round 8, real end-to-end): a leade
     sleep,
   });
   let leaderPid = -1;
+  let descendantPids: number[] = [];
   try {
+    const registrySnapshotBefore = snapshotRegistryPids();
     const { name } = await s.dispatch({ number: 679, title: "t", labels: [] });
     leaderPid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
     await waitForFile(join(dir, `${name}.done.json`), "leader never exited / onExit never ran");
+    // #786 gate② finding [ac1-sigkill-teardown]: capture the descendant's own self-reported pid now
+    // (readiness proven) so `finally` can SIGKILL it directly. finding [ac1-registry-readiness-
+    // race]: a bounded wait + assert, never a bare read.
+    descendantPids = await waitForRegistryPids(registrySnapshotBefore, 1, "the descendant never self-registered");
     assert.ok(
       [...peekSupervisor(s).inFlightLeaderExitReaps.keys()].some((k) => k.startsWith(`${name}#`)),
       "onExit() must have registered the in-flight reap",
@@ -5881,11 +6188,16 @@ test("WorkerSupervisor onExit + reapAll (#668 round 8, real end-to-end): a leade
       "the descendant is left completely alive — reported, never force-killed, exactly as round 8 specifies",
     );
   } finally {
-    // #691-class fix (Codex gate② final on 85d220c): NO process.kill(-pid, ...) here anymore — see
-    // the sibling resume test's finally (above) for the full reasoning. Ask the descendant to leave
-    // through its own pid-free door (the stop-file it polls for) and wait, READ-ONLY, for it to
-    // actually go; round 8's own "reported, never force-killed" meaning is untouched since the file
-    // poll is a channel wholly separate from SIGTERM handling.
+    // #786 gate② finding [ac1-sigkill-teardown]: the deterministic teardown — SIGKILL the
+    // descendant directly via its own self-reported pid, verified alive immediately before
+    // signaling (see killRegisteredDescendant's own doc).
+    for (const pid of descendantPids) killRegisteredDescendant(pid);
+    // #691-class fix (Codex gate② final on 85d220c): kept as a secondary, harmless channel — ask
+    // the descendant to leave through its own pid-free door too (a no-op once the direct SIGKILL
+    // above has already ended it) and wait, READ-ONLY, for the leader-side process group to go.
+    // Round 8's own "reported, never force-killed" meaning (asserted above, mid-test, BEFORE this
+    // `finally` ever runs) is untouched — the file poll is a channel wholly separate from SIGTERM
+    // handling, and this teardown only fires once the test's own assertions are already done.
     try {
       writeFileSync(stopFile, "1");
     } catch {

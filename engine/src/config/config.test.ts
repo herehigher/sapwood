@@ -963,6 +963,13 @@ test("#784: parseConfig/loadConfig themselves still only WARN on this combinatio
   }
 });
 
+test("#783: ci.inertEscalateAfterSec defaults to 900 and accepts an explicit override", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.ci.inertEscalateAfterSec, 900);
+  const overridden = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nci: { inertEscalateAfterSec: 120 }");
+  assert.equal(overridden.ci.inertEscalateAfterSec, 120);
+});
+
 test("#286: ci.requiredChecks defaults empty; app defaults to github-actions", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.deepEqual(cfg.ci.requiredChecks, []);

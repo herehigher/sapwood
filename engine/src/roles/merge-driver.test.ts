@@ -2874,7 +2874,10 @@ test("MergeDriver.driveOne (engine-agent, #782 AC1 'decisive-pin discard'): CI r
   const driver = new MergeDriver({ forge, reviewer, cfg });
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
   assert.equal(outcome.kind, "queued");
-  assert.match((outcome as { reason: string }).reason, /decisive-pin consume attempt discarded.*ci-no-longer-green/);
+  // gate② opus round 1 P2 (#797): refetchStillValid's reason is now state-descriptive
+  // (ci-red/ci-inert/ci-pending), never a history claim — this fixture's rollup is neither red
+  // nor inert (ciInert unset/false), so "still pending" is the honest current-state read.
+  assert.match((outcome as { reason: string }).reason, /decisive-pin consume attempt discarded.*ci-pending/);
   assert.deepEqual(outcome.ciPendingObservation, { pending: true, head: "HEAD" });
   assert.equal(outcome.reviewSilenceEscalation, undefined, "no attempt is outstanding — review-silence must stay closed");
   assert.equal(recorded.pin?.kind, "decisive", "the decisive pin is untouched — only the consume attempt for THIS tick was discarded");
