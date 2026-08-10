@@ -13,6 +13,12 @@
   box-sizing: border-box;
 }
 
+html {
+  /* §3 rail: the overview/cost anchors are plain in-page `#id` links (no routing) — this is
+   * the one line that makes them feel like navigation instead of a page jump. */
+  scroll-behavior: smooth;
+}
+
 body {
   margin: 0;
   background: var(--heartwood);
@@ -21,6 +27,92 @@ body {
   font-size: var(--text-0);
   line-height: var(--leading-body);
   font-weight: 400;
+}
+
+/* ---- §3 left icon rail (#727) --------------------------------------------- */
+
+.app-shell {
+  display: flex;
+  align-items: stretch;
+  min-height: 100vh;
+}
+
+.icon-rail {
+  flex: 0 0 56px;
+  width: 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  background: var(--panel);
+  border-right: var(--hairline);
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
+  color: var(--bark-text);
+}
+
+.icon-rail-wordmark {
+  color: var(--sap);
+}
+
+.icon-rail-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-card);
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.icon-rail-item:hover {
+  background: var(--heartwood);
+  color: var(--sapwood);
+}
+
+/* Config gear pins to the rail's bottom (§3: "config gear at bottom") — everything above it
+ * (wordmark, anchors, theme switch) keeps its natural top-down flow. */
+.icon-rail-config {
+  margin-top: auto;
+}
+
+.app-shell > .stack {
+  flex: 1;
+  min-width: 0;
+}
+
+/* §3's own responsive intent is silent on the rail specifically (only the five modules'
+ * 720 px stacking is spelled out) — proposed reading for gate②: dock the rail as a slim
+ * horizontal top bar rather than spend ~15% of a narrow viewport's width on a fixed sidebar,
+ * consistent with the single-column stack the rest of the page already falls back to below
+ * this same breakpoint. */
+@media (max-width: 720px) {
+  .app-shell {
+    flex-direction: column;
+  }
+
+  .icon-rail {
+    flex-direction: row;
+    width: 100%;
+    height: auto;
+    padding: var(--space-2);
+    position: sticky;
+    top: 0;
+    border-right: none;
+    border-bottom: var(--hairline);
+  }
+
+  .icon-rail-config {
+    margin-top: 0;
+    margin-left: auto;
+  }
 }
 
 h1,

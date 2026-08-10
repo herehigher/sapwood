@@ -6,6 +6,7 @@ import { Controls } from "./components/Controls.tsx";
 import type { CostBarGroup } from "./components/CostStrip.tsx";
 import { CostStrip } from "./components/CostStrip.tsx";
 import { Header } from "./components/Header.tsx";
+import { IconRail } from "./components/IconRail.tsx";
 import { LaneBoard } from "./components/LaneBoard.tsx";
 import { NeedsAttention } from "./components/NeedsAttention.tsx";
 import { readConfigPath } from "./config-captions.ts";
@@ -76,58 +77,63 @@ export function App({ now }: { now?: Date | undefined } = {}) {
   };
 
   return (
-    <main className="stack">
-      <header className="panel app-header">
-        <h1>sapwood</h1>
-        <Header
+    <div className="app-shell">
+      <IconRail onOpenConfig={() => setConfigOpen((v) => !v)} />
+      <main className="stack">
+        <header id="overview" className="panel app-header">
+          <Header
+            disconnected={disconnected}
+            isPending={loop.isPending}
+            engine={
+              loop.data
+                ? {
+                    state: loop.data.engine.state,
+                    pauseActive: loop.data.engine.pauseActive,
+                    standbyNextCheckSec: loop.data.engine.standbyNextCheckSec,
+                  }
+                : undefined
+            }
+            spend={loop.data?.spend}
+            parked={parked}
+          />
+          <Controls enabled={loop.data?.controlsEnabled ?? false} />
+          <Legend />
+        </header>
+
+        <NeedsAttention items={openAttention} titles={titles} repoUrl={repoUrl} now={clock} />
+
+        {loop.data && (
+          <Hero
+            events={events.events}
+            lanesMax={loop.data.lanes.max}
+            engine={loop.data.engine.state}
+            lanes={loop.data.lanes.items}
+            fixCap={fixCap}
+            roundPhase={loop.data.round?.phase ?? null}
+            config={loop.data.config}
+          />
+        )}
+
+        <LaneBoard
+          lanesMax={loop.data?.lanes.max ?? null}
+          lanes={loop.data?.lanes.items ?? []}
+          titles={titles}
+          repoUrl={repoUrl}
           disconnected={disconnected}
-          isPending={loop.isPending}
-          engine={
-            loop.data
-              ? {
-                  state: loop.data.engine.state,
-                  pauseActive: loop.data.engine.pauseActive,
-                  standbyNextCheckSec: loop.data.engine.standbyNextCheckSec,
-                }
-              : undefined
-          }
-          spend={loop.data?.spend}
-          parked={parked}
         />
-        <Controls enabled={loop.data?.controlsEnabled ?? false} />
-        <Legend />
-        <button type="button" onClick={() => setConfigOpen((v) => !v)}>
-          Config ▸
-        </button>
-      </header>
 
-      <NeedsAttention items={openAttention} titles={titles} repoUrl={repoUrl} now={clock} />
-
-      {loop.data && (
-        <Hero
+        <ActivityFeed
           events={events.events}
-          lanesMax={loop.data.lanes.max}
-          engine={loop.data.engine.state}
-          lanes={loop.data.lanes.items}
-          fixCap={fixCap}
-          roundPhase={loop.data.round?.phase ?? null}
-          config={loop.data.config}
+          pinnedAttention={openAttention}
+          titles={titles}
+          repoUrl={repoUrl}
+          disconnected={disconnected}
         />
-      )}
 
-      <LaneBoard
-        lanesMax={loop.data?.lanes.max ?? null}
-        lanes={loop.data?.lanes.items ?? []}
-        titles={titles}
-        repoUrl={repoUrl}
-        disconnected={disconnected}
-      />
+        <CostStrip groups={[byModel, byLane]} />
 
-      <ActivityFeed events={events.events} pinnedAttention={openAttention} titles={titles} repoUrl={repoUrl} disconnected={disconnected} />
-
-      <CostStrip groups={[byModel, byLane]} />
-
-      <ConfigDrawer config={loop.data?.config ?? null} open={configOpen} onClose={() => setConfigOpen(false)} />
-    </main>
+        <ConfigDrawer config={loop.data?.config ?? null} open={configOpen} onClose={() => setConfigOpen(false)} />
+      </main>
+    </div>
   );
 }
