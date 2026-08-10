@@ -37,7 +37,7 @@ test("mergeDecision #273: APPROVED_PR_LEVEL (bare 👍) always fails closed beca
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", "type:ops,infra", "OPEN", true), "ESCALATE");
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "OPEN", false), "ESCALATE");
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", ""), "ESCALATE"); // default trustedApproval=false
-  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "risk:fund-path", "OPEN", true), "ESCALATE"); // trusted 👍 but risk label still blocks
+  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "risk:example", "OPEN", true), "ESCALATE"); // trusted 👍 regardless of label
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "MERGED", true), "ESCALATE"); // trusted 👍 but non-OPEN still blocks
 });
 

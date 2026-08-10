@@ -3,15 +3,15 @@
 Frozen, point-in-time copy of the private predecessor project's PreToolUse safety guard, vendored so
 `guard.fuzz.test.ts`'s differential tests run everywhere (CI, a worker's ephemeral
 worktree) instead of only on a machine that happens to have a sibling checkout
-checkout (#427). **This is a reference implementation, not a live sync** — nothing
+(#427). **This is a reference implementation, not a live sync** — nothing
 updates it automatically, and nothing should.
 
 | | |
 |---|---|
 | Source repo | Private predecessor repository |
 | Source path | Predecessor safety hook (+ the two `__init__.py` files that make it importable) |
-| Last commit touching `guard.py` | Private predecessor commit (2026-06-22) |
-| Snapshot taken at predecessor-project HEAD | 2026-06-26 |
+| Last commit touching `guard.py` | `7e3dbd6d85790ea41547a2d55a30fbe80f2ce5d2` (2026-06-22) |
+| Snapshot taken at predecessor-project HEAD | `19b692b0de0ceb6fa139a467397d9884ad99a033` (2026-06-26) |
 | `guard.py` md5 | `b0f694e975d9bca60a5581744e361575` (841 lines) |
 
 Copied verbatim — no edits. If it is ever edited, it stops being a differential
