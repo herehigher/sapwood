@@ -298,6 +298,110 @@ test("#740: accumulateEventsPage's hero/titles/openAttention exactly match the p
   assert.deepEqual(actual.hero, heroState);
   assert.deepEqual(actual.titles, titles);
   assert.deepEqual(actual.openAttention, openAttention);
+
+  // #740 gate① finding [2]: the pre-existing comparison stopped at hero/titles/openAttention —
+  // `events` (the feed's bounded window) and `steps` (Hero's animation input) are reconstructed
+  // here too, against the exact pre-#740 formulas: `events` is the same `[...prev, ...fresh]
+  // .slice(-maxHistory)` `accumulateEventsPage` always used; `steps` is whatever Hero's OWN
+  // effect body (`foldEvents` fed the full classified history so far) produced for each page —
+  // the very thing that effect now hands off via `EventHistory.steps` instead of keeping private.
+  let expectedEvents: DomainEvent[] = [];
+  let expectedSteps: EventHistory["steps"] = [];
+  let heroForSteps = initialHeroState(null);
+  for (const p of pages) {
+    const fresh = p.wire.map(toDomainEvent);
+    expectedEvents = [...expectedEvents, ...fresh].slice(-MAX_EVENT_HISTORY);
+    heroForSteps = withLaneCount(heroForSteps, p.lanesMax);
+    const folded = foldEvents(heroForSteps, fresh);
+    heroForSteps = folded.state;
+    expectedSteps = folded.steps;
+  }
+  assert.deepEqual(
+    actual.events.map((e) => e.id),
+    expectedEvents.map((e) => e.id),
+  );
+  assert.deepEqual(actual.steps, expectedSteps);
+});
+
+// ── #740 gate① finding [2]: panel-level prop parity — the ACTUAL props Hero, LaneBoard,
+// ActivityFeed, and NeedsAttention receive from `App.tsx` (all sourced from one `EventHistory`)
+// must match independently-expected values, not just the internal hero/titles/openAttention
+// fields a prior round's test stopped at.
+
+test("#740 gate① [2]: the props Hero/LaneBoard/ActivityFeed/NeedsAttention actually receive from EventHistory match independent expectations", () => {
+  const wire1: LoopEvent[] = [
+    { id: 1, ts: "2026-08-06T00:00:00Z", kind: "dispatched", payload: { worker: "w1", issue: 5, issueTitle: "Widget" } },
+  ];
+  const wire2: LoopEvent[] = [{ id: 2, ts: "2026-08-06T00:00:01Z", kind: "drive-needs-human", payload: { worker: "w1", issue: 5, pr: 9 } }];
+
+  let history = accumulateEventsPage(EMPTY_EVENT_HISTORY, { events: wire1, lastId: 1 }, MAX_EVENT_HISTORY, 2);
+  history = accumulateEventsPage(history, { events: wire2, lastId: 2 }, MAX_EVENT_HISTORY, 2);
+
+  // What `App.tsx` actually hands each panel.
+  const heroProps = { heroState: history.hero, steps: history.steps };
+  const laneBoardProps = { titles: history.titles };
+  const openAttentionList = Object.values(history.openAttention);
+  const activityFeedProps = { events: history.events, pinnedAttention: openAttentionList, titles: history.titles };
+  const needsAttentionProps = { items: openAttentionList, titles: history.titles };
+
+  // Independently-expected values — folded straight from the wire, not through `accumulateEventsPage`.
+  const fresh1 = wire1.map(toDomainEvent);
+  const fresh2 = wire2.map(toDomainEvent);
+  const expectedHero = foldEvents(withLaneCount(initialHeroState(null), 2), [...fresh1, ...fresh2]).state;
+  const expectedSteps = foldEvents(withLaneCount(initialHeroState(null), 2), fresh1).state; // page-1 lane fit, then...
+  const expectedStepsFinal = foldEvents(expectedSteps, fresh2).steps; // ...page 2's OWN fresh steps
+  const expectedTitles = foldEntityTitles(fresh2, foldEntityTitles(fresh1, {}));
+  const expectedOpenAttention = foldOpenAttention(fresh2, foldOpenAttention(fresh1, {}));
+
+  assert.deepEqual(heroProps.heroState, expectedHero);
+  assert.deepEqual(heroProps.steps, expectedStepsFinal);
+  assert.deepEqual(laneBoardProps.titles, expectedTitles);
+  assert.deepEqual(activityFeedProps.titles, expectedTitles);
+  assert.deepEqual(
+    activityFeedProps.events.map((e) => e.id),
+    [1, 2],
+  );
+  assert.deepEqual(
+    activityFeedProps.pinnedAttention.map((e) => e.id),
+    Object.values(expectedOpenAttention).map((e) => e.id),
+  );
+  assert.deepEqual(needsAttentionProps.items, activityFeedProps.pinnedAttention);
+  assert.deepEqual(needsAttentionProps.titles, expectedTitles);
+});
+
+// ── #740 gate① finding [0]: render-ahead/effect lifecycle — `useEventHistory`'s render-ahead
+// `accumulateEventsPage` call and the value its effect persists into React state must be the
+// EXACT same object (never independently recomputed), or Hero's `[steps, heroState]` effect
+// (keyed by reference) fires twice for one batch. This is the pure-function-level proof of that
+// invariant — `useEventHistory` itself is a thin wrapper that persists exactly the value computed
+// here, never a second call (see its own doc / implementation).
+
+test("#740 gate① [0]: accumulateEventsPage is referentially stable — the SAME (history, page, maxHistory, lanesMax) tuple returns the exact prior reference, never a structurally-equal twin", () => {
+  const wire: LoopEvent[] = [{ id: 1, ts: "2026-08-06T00:00:00Z", kind: "dispatched", payload: { worker: "w1", issue: 1 } }];
+  const page1: EventsPage = { events: wire, lastId: 1 };
+
+  // "Render-ahead" call (what the hook computes synchronously every render).
+  const renderAhead = accumulateEventsPage(EMPTY_EVENT_HISTORY, page1, MAX_EVENT_HISTORY, 2);
+  // The settling render after the effect persists exactly that object: querying with a no-advance
+  // page (no fresh wire events) and the SAME lanesMax must return the identical reference back —
+  // proving a settled poll cannot manufacture a fresh `hero`/`steps` object for Hero's effect to
+  // spuriously re-fire against.
+  const settled = accumulateEventsPage(renderAhead, { events: [], lastId: 1 }, MAX_EVENT_HISTORY, 2);
+  assert.equal(settled, renderAhead);
+  assert.equal(settled.hero, renderAhead.hero);
+  assert.equal(settled.steps, renderAhead.steps);
+});
+
+test("#740 gate① [0]: a lanesMax-only refit (no fresh events) clears steps instead of replaying the previous batch's transitions", () => {
+  const wire: LoopEvent[] = [{ id: 1, ts: "2026-08-06T00:00:00Z", kind: "dispatched", payload: { worker: "w1", issue: 1 } }];
+  const withEvent = accumulateEventsPage(EMPTY_EVENT_HISTORY, { events: wire, lastId: 1 }, MAX_EVENT_HISTORY, 2);
+  assert.ok(withEvent.steps.length > 0, "the fixture must actually produce a transition to fold");
+
+  // lanesMax alone changes (2 -> 3) with no new wire events — the hero slice re-fits, but there is
+  // nothing new to animate.
+  const refit = accumulateEventsPage(withEvent, { events: [], lastId: 1 }, MAX_EVENT_HISTORY, 3);
+  assert.notEqual(refit.hero, withEvent.hero, "the fixture must actually exercise a lane-count refit");
+  assert.deepEqual(refit.steps, [], "stale steps from the PREVIOUS batch must not ride along with a refit-only hero change");
 });
 
 // ── #715 gate② round 3 [2]: accumulateSpendPage / spendByWorkerForDay ───────────────────────────
