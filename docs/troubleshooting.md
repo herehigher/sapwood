@@ -7,19 +7,18 @@ What common failures mean and how to respond.
 Choose the scenario that matches. This index links to the source procedure; it does not
 replace it.
 
-- **Stop everything:** [Kill switch (drain-first)](supervision.md#stop-ritual) ·
-  [Emergency stop (if unsafe work must die this tick)](supervision.md#stop-ritual) ·
-  [human controls](security.md#two-tier-human-controls)
-- **Stop new dispatch only:** [Pause](supervision.md#stop-ritual) · [human
-  controls](security.md#two-tier-human-controls)
+- **Stop everything:** [Kill switch](supervision.md#stop-ritual) · [Emergency
+  stop](supervision.md#stop-ritual) · [Human controls (three
+  tiers)](security.md#human-controls-three-tiers)
+- **Stop new dispatch only:** [Pause](supervision.md#stop-ritual) · [Human controls
+  (three tiers)](security.md#human-controls-three-tiers)
 - **A lane looks stuck:** [Stale heartbeat reclaim (and restart
   adoption)](#stale-heartbeat-reclaim-and-restart-adoption) · [Interpretation
   pointers](supervision.md#interpretation-pointers)
 - **Crashed mid-round:** [Crash & resume semantics
   (rerun-not-resume)](loop-walkthrough-v0.2.md#4-crash--resume-semantics-rerun-not-resume)
-- **I want to change direction:** Mid-round redirection is not supported; pause, edit
-  the issue, and re-dispatch. See [human controls](security.md#two-tier-human-controls)
-  and [Ready issue never dispatches](#ready-issue-never-dispatches).
+- **I want to change direction:** Pause stops only new dispatch; an in-flight lane runs to completion unless stopped with the [Kill switch](supervision.md#stop-ritual).
+  Editing it yields body-hash `needs-human`; follow [Human controls (three tiers)](security.md#human-controls-three-tiers) and [Ready issue never dispatches](#ready-issue-never-dispatches) for re-adjudication and gated re-entry (no redirect).
 
 ## Ready issue never dispatches
 
