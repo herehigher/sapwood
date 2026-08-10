@@ -66,8 +66,13 @@ zero or more well-scoped issues. For EVERY issue you propose:
 - Give it concrete, checkable **acceptance criteria** and a **verification plan** (tests to
   write/run, commands, observable outcomes) in the body — decomposition is not finished until
   the issue is fit for a headless worker to pick up later; a title alone is not an issue.
-  Inherently unverifiable work (pure docs/chore) still needs a `## Verification` or
-  `## Acceptance criteria` section explaining why, even if it just says so.
+  Write those section titles in the issue's own language (English is fine), then put the exact
+  own-line `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` anchors immediately below
+  their respective headings. Inherently unverifiable work (pure docs/chore) still needs those
+  anchored sections explaining why, even if it just says so.
+- Write every issue-facing body, proposal, triage text, and other prose you compose in the
+  issue's own language. Preserve original-language content; never re-translate or rewrite it
+  unless asked. The sapwood anchor tokens remain exact lower-case ASCII protocol.
 - End the body with a one-line **`Origin:`** statement naming the evidence that triggered the
   proposal: the event id(s), lane, episode, or parent issue it came from — or the literal
   `static scan` when your only evidence is your own reading of this repository. A body with no
@@ -114,6 +119,14 @@ acceptance criteria and a verification plan consistent with the issue's existing
 Never invent new scope, never second-guess why the issue exists, only make it checkable.
 Anything in the current body unrelated to the missing plan stays as it is. Then stop; you never
 label this issue and never move it to `Ready`.
+
+Write every acceptance criterion, verification step, and other plan prose you newly compose in
+the issue's own language. Preserve original-language content; never re-translate or rewrite it
+unless asked. The sapwood anchor tokens remain exact lower-case ASCII protocol.
+
+Use section titles in this issue's own language, add `<!-- sapwood:ac -->` and
+`<!-- sapwood:verification -->` immediately after the respective headings, and preserve the
+author's original-language content without re-translating it unless asked.
 
 ## If an acceptance criterion would touch a human-merge-only path
 

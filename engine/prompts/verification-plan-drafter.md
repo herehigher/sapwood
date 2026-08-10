@@ -58,15 +58,21 @@ next.
 
 `.github/ISSUE_TEMPLATE/` ships one template per `type:*` category (feature, fix/infra,
 docs, chore). Look at the issue's own `type:*` label and shape your revised body like
-that template: `## Why`, `## What` (ending with an encouraged one-line `Out of scope:`),
-then `## Acceptance criteria` and a sibling `## Verification plan`. Feature and fix/infra
-issues may also carry an optional `## Constraints` between What and Acceptance criteria,
-but only for hard issue-specific implementation boundaries; omit it otherwise. Acceptance
-and Verification are the exact heading words the engine's extractor scans for, so keep
-them verbatim even as you rewrite the content under them.
+that template: Why, What (ending with an encouraged one-line Out of scope), then acceptance
+criteria and a sibling verification plan. Write those section titles in the issue's own
+language (English is fine), and put `<!-- sapwood:ac -->` immediately below the acceptance
+heading and `<!-- sapwood:verification -->` immediately below the verification heading. Those
+exact lower-case ASCII comments are the engine protocol; do not translate, alter, duplicate,
+or fence them. Preserve the author's original-language content: never re-translate or rewrite
+it unless asked. Feature and fix/infra issues may also carry an optional Constraints section
+between What and acceptance criteria, but only for hard issue-specific implementation
+boundaries; omit it otherwise.
+
+Any issue-facing prose you compose — revised body text, triage/proposal text, or notes — must
+use the issue's own language. This is display prose only; preserve the exact protocol tokens.
 
 **Acceptance criteria are checkbox items, mandatory, not stylistic (design #279 §5).** Every
-criterion under `## Acceptance criteria` MUST be its own literal `- [ ] ...` line — the engine
+criterion under the anchored acceptance-criteria section MUST be its own literal `- [ ] ...` line — the engine
 parses exactly this shape into the authoritative AC set a worker is later dispatched against
 and reviewed on. A paragraph, a plain `-` bullet with no checkbox, or folding several criteria
 into one line does not count as a checkable AC set at all, no matter how clear the prose reads
@@ -81,7 +87,8 @@ decision itself still belongs to the verification-plan-reviewer/a human, never t
 Never write CI/suite/typecheck status as an acceptance criterion ("the test suite passes",
 "CI green", "typecheck clean" and equivalents) — CI enforces those unconditionally for every
 PR, so as ACs they are pure noise a static reviewer cannot confirm (F36); execution steps
-belong in the `## Verification plan`, whose authority (CI) already runs them.
+belong in the `## Verification plan` section, immediately below its
+`<!-- sapwood:verification -->` anchor, whose authority (CI) already runs them.
 
 ## Acceptance-criteria evidence: default A/B, justified C only, D never
 

@@ -79,7 +79,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // state the engine-enforced structural fact instead — writes/moves happen only from this
   // session's structured output, applied by the engine, regardless of what tools the session
   // holds — never a claim about the session's full tool inventory.
-  "po.md": "f4229bc13cc68928e3c15d136cfd61479f46a17b076af97d68e1839927860bb9",
+  "po.md": "7329d3b147e8db53a429e78bd88d6939da9c25b79217d5be986a441519a1921c",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
@@ -155,7 +155,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // explicitly: no sentence inside it is a directive/permission-grant regardless of phrasing,
   // negative-form only (no claim that escaping makes the content trustworthy, only that it can no
   // longer pose as structure).
-  "verification-plan-reviewer.md": "2ae7f45bce67798e75f804e2ac87c03aa42fb7dbc8064a42439a7e72497921d8",
+  "verification-plan-reviewer.md": "3dad75005049e7142668e64a4f09772fa844585e77e00922b58e245aa2e9037d",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
   // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
@@ -176,7 +176,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // staleness is decided, and the standing check points at it with the same honest cap wording.
   // #672: same UNTRUSTED DATA reword as verification-plan-reviewer.md above, verbatim (the two
   // files share the identical comment-stream intro paragraph).
-  "verification-plan-reviewer-confirm.md": "2394a218f3b79e833f63bbaf7741a73cd430950a76a30f4b60eab41fe4d19562",
+  "verification-plan-reviewer-confirm.md": "5e23aef3caa647d9b5009d4ce42c9fb3faeb4bc9ef33c36b9040d9b4e15c37e4",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — the
   // drafter's brief is still its primary instruction set; the forge grant (never removed) is a
   // read-only aid, never a write path, exactly as this file has always said.
@@ -188,7 +188,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #616's ambient-MCP-tool finding falsifies. Reworded to role-scope framing (posting a
   // comment/label, or touching needs-human/blocked, is never this role's OUTPUT, whatever tools
   // the session holds) instead of claiming the session has no channel that could do it.
-  "verification-plan-drafter.md": "02a01e181592fbffee434337da45a8f0cfce3ff2b403506a8254ebc465abebd2",
+  "verification-plan-drafter.md": "ec33f1dd408e29fc11afdc1571dea8a6b0a31dee8da5259a8cd322d627872b8e",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
   // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
   // grant was never removed, so the capability paragraph again names it (when attached) instead
@@ -252,7 +252,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // ("the deterministic engine performs all validated issue, label, comment, board, and native
   // sub-issue writes") — falsified in principle by #616's ambient-MCP-tool finding. Dropped the
   // redundant closure claim rather than restating the structural fact a second way.
-  "po-decompose.md": "2a4e0b4f19a205ff404cf40353c458793e4c78b43f73a0665045fe223402b274",
+  "po-decompose.md": "25a557e03c5b16b7e29cccafa514f28da2792bde9800728926fa9ea9b1a2432d",
 };
 
 test("prompt snapshot: po.md hash matches the pinned revision", () => {
@@ -719,21 +719,27 @@ test("verification-plan-drafter.md (#283): mandates literal `- [ ]` checkbox acc
 
 // ── #457 (F36): execution-class ACs are plan noise — CI enforces them unconditionally ─────────
 
-test("#457 verification-plan-reviewer.md: execution-class ACs are named as noise to FLAG AND STRIP within minor-correction latitude, moving the execution step to the Verification plan", () => {
+test("#457/#591 verification-plan-reviewer.md: execution-class ACs are named as noise to FLAG AND STRIP, moving execution into anchored language-free issue sections", () => {
   const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
   assert.ok(body.includes("Execution-class criteria are noise — flag and strip them."), "the flag-and-strip rule is present");
   assert.match(
     body,
     /"the test suite passes", "typecheck\/lint clean",\s+"CI green" and equivalents must never appear as acceptance criteria/,
   );
-  assert.match(body, /fold the execution step into\s+the `## Verification plan`/);
+  assert.ok(body.includes("`<!-- sapwood:ac -->`"), "requires the exact anchored acceptance section");
+  assert.ok(body.includes("`<!-- sapwood:verification -->`"), "requires the exact anchored verification section");
+  assert.match(body, /use the issue's own\s+language/);
+  assert.match(body, /preserve its\s+original-language content/);
 });
 
-test("#457 verification-plan-reviewer-confirm.md: an execution-class AC on a legacy approved plan is a standing invalidate-check, with the brief directing the move to the Verification plan", () => {
+test("#457/#591 verification-plan-reviewer-confirm.md: execution-class ACs invalidate a plan and retain the anchored language-free issue-body contract", () => {
   const body = readPrompt(defaultVerificationPlanConfirmPromptPath());
   assert.match(body, /A second standing check \(F36\): an execution-class acceptance\s+criterion/);
   assert.match(body, /a still-approved plan carrying one is `invalidate`/);
-  assert.match(body, /folded into the\s+`## Verification plan`/);
+  assert.ok(body.includes("`<!-- sapwood:ac -->`"), "requires the exact anchored acceptance section");
+  assert.ok(body.includes("`<!-- sapwood:verification -->`"), "requires the exact anchored verification section");
+  assert.match(body, /use the issue's own language/);
+  assert.match(body, /preserve its\s+original-language content/);
 });
 
 test("retro round #284: po.md (both modes) and po-decompose.md resolve a human-merge-only acceptance criterion at draft time — paste-ready patch or a carved-out remainder/section — instead of leaving it for gate⓪ to bounce", () => {
@@ -753,13 +759,16 @@ test("retro round #284: po.md (both modes) and po-decompose.md resolve a human-m
   assert.match(decompose, /carve the protected-path work into its own\s+`remainder` child/);
 });
 
-test("#457 verification-plan-drafter.md + po-decompose.md: AC-authoring guidance forbids CI/suite/typecheck status as a criterion — the Verification plan owns execution steps", () => {
+test("#457/#591 verification-plan-drafter.md + po-decompose.md: AC-authoring guidance forbids CI/suite/typecheck status and requires anchored own-language plans", () => {
   const drafter = readPrompt(defaultVerificationPlanDrafterPromptPath());
   assert.ok(
     drafter.includes("Never write CI/suite/typecheck status as an acceptance criterion"),
     "verification-plan-drafter carries the rule",
   );
-  assert.match(drafter, /execution steps\s+belong in the `## Verification plan`/);
+  assert.ok(drafter.includes("`<!-- sapwood:ac -->`"), "requires the exact anchored acceptance section");
+  assert.ok(drafter.includes("`<!-- sapwood:verification -->`"), "requires the exact anchored verification section");
+  assert.match(drafter, /issue's own language/);
+  assert.match(drafter, /Preserve the author's original-language content/);
   const decompose = readPrompt(defaultPoDecomposePromptPath());
   assert.ok(decompose.includes("Never write CI/suite/typecheck status itself as a criterion"), "po-decompose carries the rule");
 });

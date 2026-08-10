@@ -671,7 +671,7 @@ test("repo-root issue templates stay byte-identical to the packaged scaffold tem
   }
 });
 
-test("default issue-template paths resolve to four readable shipped files with the standard structure", () => {
+test("default issue-template paths resolve to four readable shipped files with anchored language-free plan sections", () => {
   for (const name of ISSUE_TEMPLATE_NAMES) {
     const path = defaultIssueTemplatePath(name);
     assert.ok(existsSync(path), `expected shipped issue template at ${path}`);
@@ -681,8 +681,10 @@ test("default issue-template paths resolve to four readable shipped files with t
     assert.match(text, /^## What$/m);
     assert.match(text, /^Out of scope:/m);
     assert.match(text, /^## Acceptance criteria$/m);
+    assert.match(text, /^<!-- sapwood:ac -->$/m);
     assert.match(text, /^- \[ \]/m);
     assert.match(text, /^## Verification plan$/m);
+    assert.match(text, /^<!-- sapwood:verification -->$/m);
     assert.doesNotMatch(text, /^### Verification/m);
     assert.equal(/^## Constraints$/m.test(text), name === "feature.md" || name === "fix.md");
   }

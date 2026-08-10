@@ -217,6 +217,17 @@ test("#469: an eligible-but-UNPOOLED issue still counts as nothing — the round
   assert.equal(await firstWorkSignal(ctx), null, "a valid PO `selected: []` judgment must not pin the probe true");
 });
 
+test("#591: probe-signals treats a fully anchored non-English plan as plan-complete, not milestone backlog work", async () => {
+  const ctx = baseCtx();
+  ctx.forge.listOpenIssues = async () => [
+    mkIssue({
+      milestone: "M-X",
+      body: "## 受け入れ条件\n<!-- sapwood:ac -->\n\n- [ ] 動作する\n\n## 検証\n<!-- sapwood:verification -->\n\n- npm test を実行する",
+    }),
+  ];
+  assert.equal(await firstWorkSignal(ctx), null);
+});
+
 // ── #630 (F32 follow-through, live park batch-7 round 312): gated-reentry-candidates must be
 // ── milestone-scoped like the dispatch path already is — an off-milestone needs-human carrier is
 // ── not work this run can ever consume, and must not hold the standby probe open over it. ──────

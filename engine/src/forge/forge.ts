@@ -2080,6 +2080,92 @@ function statusValue(item: RawItem, statusField: string): string | null {
   return null;
 }
 
+type MarkedSectionRole = "ac" | "verification";
+type MarkedSection = { start: number; level: number };
+type MarkedSectionAssociation = Record<MarkedSectionRole, string> & { plan: string };
+
+/**
+ * Associate exact sapwood section markers with the ATX heading immediately above each marker.
+ *
+ * `undefined` means no markers occurred outside fences, so callers must retain the legacy
+ * English-heading parser unchanged. `null` means marked mode was selected but its protocol was
+ * malformed: never fall back to legacy matching in that case. This deliberately mirrors
+ * extractMarkdownSections' fence-aware line scan rather than interpolating markers into that
+ * helper's heading regex: the marker belongs after a heading, not in its text.
+ */
+function associateMarkedSections(body: string): MarkedSectionAssociation | null | undefined {
+  const headings: Array<MarkedSection & { line: number }> = [];
+  const anchors: Array<{ role: string; heading: MarkedSection | undefined }> = [];
+  let offset = 0;
+  let fence: { character: "`" | "~"; length: number } | null = null;
+
+  for (const [lineNumber, rawLine] of body.split("\n").entries()) {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (fence) {
+      const closer = /^ {0,3}(`+|~+)[ \t]*$/.exec(line)?.[1];
+      if (closer?.[0] === fence.character && closer.length >= fence.length) fence = null;
+    } else {
+      const opener = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+      if (opener) {
+        fence = { character: opener[0] as "`" | "~", length: opener.length };
+      } else {
+        const heading = /^(#{1,6})\s/.exec(line);
+        if (heading) headings.push({ start: offset, level: heading[1]!.length, line: lineNumber });
+
+        // The grammar is intentionally exact: lower-case ASCII protocol tokens, an otherwise
+        // empty line, and no normalization/case folding. Any plausible reserved-namespace
+        // token selects marked mode; only the two roles below are then accepted. This keeps
+        // future digit/hyphenated sapwood protocol attempts from falling through to legacy
+        // English-heading parsing.
+        const marker = /^<!-- sapwood:([a-z0-9][a-z0-9-]*) -->$/.exec(line);
+        if (marker) {
+          const previous = headings[headings.length - 1];
+          anchors.push({
+            role: marker[1]!,
+            heading: previous?.line === lineNumber - 1 ? previous : undefined,
+          });
+        }
+      }
+    }
+    offset += rawLine.length + 1;
+  }
+
+  if (anchors.length === 0) return undefined;
+  if (
+    anchors.length !== 2 ||
+    anchors.some((anchor) => (anchor.role !== "ac" && anchor.role !== "verification") || anchor.heading === undefined)
+  ) {
+    return null;
+  }
+
+  const byRole = new Map<MarkedSectionRole, MarkedSection>();
+  for (const anchor of anchors) {
+    const role = anchor.role as MarkedSectionRole;
+    if (byRole.has(role)) return null;
+    byRole.set(role, anchor.heading!);
+  }
+  const ac = byRole.get("ac");
+  const verification = byRole.get("verification");
+  if (!ac || !verification) return null;
+
+  const sectionFor = (heading: MarkedSection) => {
+    const end = headings.find((candidate) => candidate.start > heading.start && candidate.level <= heading.level)?.start ?? body.length;
+    return { start: heading.start, end, text: body.slice(heading.start, end).trim() };
+  };
+  const acSection = sectionFor(ac);
+  const verificationSection = sectionFor(verification);
+  const planSections = [acSection, verificationSection]
+    .sort((left, right) => left.start - right.start)
+    // Match extractMarkdownSections' legacy behavior: a matching section nested inside an
+    // already-emitted matching ancestor is present in that ancestor's text, never appended twice.
+    .filter((section, index, sections) => !sections.slice(0, index).some((prior) => section.end <= prior.end));
+  return {
+    ac: acSection.text,
+    verification: verificationSection.text,
+    plan: planSections.map((section) => section.text).join("\n\n"),
+  };
+}
+
 /**
  * Extract every Verification/Acceptance section's raw text from an issue body (Decision #8's
  * plan) — the SAME fail-closed heading match `hasVerificationPlan` uses to gate dispatch,
@@ -2091,6 +2177,11 @@ function statusValue(item: RawItem, statusField: string): string | null {
  * the plan (verify:n/a issues have no section and are expected to hit this null).
  */
 export function extractVerificationPlan(body: string): string | null {
+  const marked = associateMarkedSections(body);
+  if (marked !== undefined) {
+    if (marked === null) return null;
+    return marked.plan;
+  }
   const sections = extractMarkdownSections(body, /(verification|acceptance)/);
   return sections.length ? sections.join("\n\n") : null;
 }
@@ -2099,6 +2190,8 @@ export function extractVerificationPlan(body: string): string | null {
  * extractVerificationPlan's historical Verification-or-Acceptance compatibility shape:
  * a dispatchable implementation issue needs both checkbox AC and concrete verification steps. */
 export function extractVerificationSection(body: string): string | null {
+  const marked = associateMarkedSections(body);
+  if (marked !== undefined) return marked?.verification ?? null;
   const sections = extractMarkdownSections(body, /verification/);
   return sections.length ? sections.join("\n\n") : null;
 }
@@ -2189,9 +2282,15 @@ const NEW_BLOCK_LINE = /^ {0,3}(?:[-*+]|\d+[.)])\s|^#{1,6}\s/;
  * folded text, not just the checkbox's own first line).
  */
 export function extractAcceptanceCriteria(body: string): AcceptanceCriterion[] | null {
-  const sections = extractMarkdownSections(body, /acceptance\s+criteria/);
-  if (sections.length === 0) return null;
-  const text = sections.join("\n\n");
+  const marked = associateMarkedSections(body);
+  const text =
+    marked === undefined
+      ? (() => {
+          const sections = extractMarkdownSections(body, /acceptance\s+criteria/);
+          return sections.length === 0 ? null : sections.join("\n\n");
+        })()
+      : (marked?.ac ?? null);
+  if (text === null) return null;
   const texts: string[] = [];
   let continuing = false;
   for (const rawLine of text.split("\n")) {
