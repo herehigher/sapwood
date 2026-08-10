@@ -89,10 +89,17 @@ that evidence gets gathered.
    in PLAN.md; the reviewer's fabrication charge on this point was withdrawn
    after citation.
 6. **Observability: competitive pressure is real, and one practice is worth
-   adopting.** One subject treats the public/private boundary of its
-   operator surfaces as a first-class, negatively-tested feature. Adopted for
-   the sapwood dashboard as #735 (redaction contract, showcase mode, trap
-   fixture — v0.2). Otherwise sapwood's dashboard scope holds its own.
+   adopting — at the right boundary.** One subject treats the public/private
+   boundary of its operator surfaces as a first-class, negatively-tested
+   feature. A follow-up adjudication (owner challenge + independent
+   architecture review, 2026-08-10, recorded on #735) relocated the borrowed
+   idea: the local dashboard needs no redaction (loopback-only, repo goes
+   public with history, served config already allowlist-choked and tested);
+   the system's one real local→public projection is the #146 demo-fixture
+   export that #704 later publishes, and the build-time gate (fail on
+   credential-shaped strings and host-absolute paths) landed there as an AC
+   on #146. #735 shrank to documenting the dashboard's
+   not-an-auth-boundary posture in `docs/security.md`.
 
 ## 3. Threats (re-ranked under review)
 
@@ -128,7 +135,9 @@ that evidence gets gathered.
    claim language is narrowed instead (folded into #734's scope).
 3. **Capability-boundary matrix + live regression probes** — filed as #734,
    milestone v0.3.1 (deferred until post-launch confirmation, owner ruling).
-4. **Dashboard public/private boundary** — filed as #735, milestone v0.2.
+4. **Dashboard public/private boundary** — adjudicated to the export
+   boundary: gate as an AC on #146 (consumed by #704); #735 rescoped to a
+   `docs/security.md` posture section (see §2.6).
 5. **Retire "thin engine" language everywhere outward-facing.** The honest
    form: *no wheel reinvention; compact within its boundary* — the engine
    does not rebuild issues/PRs/CI/review that the forge already provides.
