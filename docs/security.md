@@ -441,7 +441,28 @@ independently be at autonomy-L3 and credential-L0, or autonomy-L1 and credential
 | --- | --- | --- | --- | --- |
 | **L0** (today's default, unset `worker.deployKeyPath`/`worker.deployKeyId`) | The operator's REAL, unrestricted environment — `GH_TOKEN`/`gh`'s stored host config/git credential helpers, all inherited verbatim (`process.env`, unchanged) | `git push` over whatever transport the engine's own checkout uses (typically HTTPS via `gh`'s credential helper) | The worker CAN reach `gh pr create` (the `Bash(gh *)` grant is present); in practice the prompt no longer instructs it (#605) and `associateLanePr` opens the PR itself once the branch is confirmed pushed, adopting a worker-opened one via the `sapwood:pr-owner` marker rather than duplicating it | The operator's FULL forge credential — every repo it can reach, every write scope the token carries. Not scoped to this one repo. |
 | **L1** (`worker.deployKeyPath`+`worker.deployKeyId` reconciled green, #606) | `workerDeployKeyEnv()` COMPOSES the exact severing `workerCredentialFreeEnv()` does — `GH_CONFIG_DIR` repointed at a fresh, empty, per-lane directory, `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null`, `GIT_TERMINAL_PROMPT=0`, every `gh`/git credential-lookup env var stripped (`GH_*`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GIT_ASKPASS`, `GIT_CONFIG_*`, `SSH_AUTH_SOCK`) — PLUS `GIT_SSH_COMMAND` pinned to the per-repo write deploy key (`-o IdentitiesOnly=yes`, path shell-quoted) and an env-only `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` rewrite of the origin's HTTPS URL to the matching `git@github.com:` SSH form — no file touched, scoped to this one spawn's env. **A fix leg composes the SAME transport overlay onto its own `credentialFree` base** (the leg ALWAYS dispatches with `proxy.credentialFree: true` — `conductor.ts`'s `startFixLeg`) rather than losing L1, so every leg kind — dispatch, resume, fix — gets the deploy key when one is configured and preflight-green. `Bash(gh *)` drops out of the leg's `--allowedTools` grant (`WORKER_ALLOWED_TOOLS_NO_GH`) either way — a grant the env can no longer authenticate through is not offered either. | `git push` over SSH, authenticated ONLY by the deploy key | STRUCTURALLY UNREACHABLE — no forge API credential exists in the env at all, so there is no channel to attempt `gh pr create` through even if the prompt or a producer's own initiative tried. `associateLanePr` (engine-side, the operator's own credential) is the ONLY PR-open channel on this tier, not merely the preferred one. | The deploy key's own scope ONLY: git-transport write to this ONE repo, nothing else. A stolen key opens no other repo, carries no API write capability (label/milestone/board mutation, review approval, merge) in the FIRST place — theft is non-escalating BY CONSTRUCTION, not by a policy that could be bypassed. |
-| **L2** (enterprise checklist — NOT implemented by #606) | Tracked separately at [#339](https://github.com/herehigher/sapwood/issues/339); out of scope here. | — | — | — |
+| **L2** (enterprise guidance — NOT implemented by #606) | See the [L2 enterprise posture checklist](#l2-enterprise-posture-checklist). | — | — | — |
+
+### L2 enterprise posture checklist
+
+L2 is optional, docs-only enterprise guidance, not a product-required deployment path. It
+builds on L1 where its additional isolation and repository policy controls fit the operating
+environment:
+
+- **Use non-human identities.** Give the worker and merger separately scoped machine-account or
+  GitHub App identities; do not operate either role through a person's everyday GitHub identity.
+  Keep their permissions and credentials distinct, with no worker bypass of protected refs.
+- **Enforce the full repository ruleset posture.** Apply a branch ruleset that restricts create,
+  update, and deletion of every non-lane branch to the appropriate trusted identities; apply a
+  separate tag ruleset that restricts tag creation, update, and deletion; and apply a
+  `lane-*`-pattern ruleset that blocks force pushes and deletion. Review ruleset bypass lists so
+  the worker cannot evade any of these controls.
+- **Isolate the worker at the OS-account boundary.** Run worker legs under a dedicated OS account
+  that cannot read the conductor's or host user's credential stores, keychains, SSH agents, or
+  configuration files. Keep merger credentials available only to the separate conductor/host
+  account and enforce filesystem and OS credential-store permissions accordingly. This is the
+  control that supplies actual unreadability against worker-led host-credential theft; L1 alone
+  does not.
 
 **Activation is opt-in, not default-on.** `worker.deployKeyPath`/`worker.deployKeyId` unset (the
 shipped default, including this repo's own `sapwood.config.yaml` as of #606) is L0 — today's
@@ -2281,6 +2302,8 @@ point in its history."
 
 ## See also
 
+- [Trust model prerequisites](getting-started.md#trust-model-prerequisites) — the required
+  GitHub-side and identity setup before unattended merge.
 - [`configuration.md`](configuration.md) — the `guard`, `reviewer`, `merge`, `ci`,
   `escalation`, `cost`, `labels`, and `roles` config sections referenced above.
 - [`PLAN.md`](PLAN.md) — the full architecture, decision log, and the v0.2 round
