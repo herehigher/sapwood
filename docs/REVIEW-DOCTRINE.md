@@ -119,8 +119,25 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
   on the PR's branch — the change cannot influence the doctrine used for its own review, but it
   can still pass under the prior rules, so a human should confirm rule changes.
-
-## Adjudication doctrine
+- **A tier-C cannot-confirm is not a producer stall signal (round #368 retro finding, PR #791).**
+  `docs/security.md`'s evidence tiers make tier-C (human-witnessed probe) evidence
+  producer-unforgeable BY DESIGN: "the producer never self-executes or self-attests it." When a
+  criterion's only remaining gap is a missing tier-C probe RECORD on the issue — every other
+  clause, and every CI/engine-checkable sub-fact decomposed out of the probe, already
+  `confirmed`/`claim-accepted` — that gap cannot be closed by another fix round; only the operator
+  posting the record closes it. It is correct for that criterion to stay `cannot-confirm` and for
+  the PR to stay unmerged until the record lands — do not weaken that gate. But say so explicitly
+  in the finding's body (name the AC, name that the remaining gap is operator-owned, not
+  producer-owned) rather than writing it identically to a producer-fixable gap. PR #791 spent four
+  engine-agent review rounds where an operator-owned tier-C gap sat alongside genuinely
+  producer-fixable findings; the PO's own adjudication comment on that PR had to state after the
+  fact that "the fix leg should NOT attempt to fabricate [the probe] ... and should treat AC3's
+  probe row as out of its scope" — the review itself never said this, so nothing distinguished
+  "still buggy, fix again" from "code is done, waiting on a human" in the record the convergence
+  classifier (`review/convergence.ts`) and any human reading the thread had to work from. An
+  unlabeled operator-owned gap reads exactly like a producer failure to a mechanism, or a
+  reader, deciding whether a lane is still making progress — worth naming honestly at the point
+  the finding is written, rather than leaving it to be reconstructed later from PO comments.
 
 How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
 
