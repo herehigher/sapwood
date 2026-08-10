@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { type DomainEvent, toDomainEvent } from "../domain-event.ts";
-import { type EntityTitles, foldEntityTitles, foldOpenAttention, type OpenAttention } from "../entities.ts";
+import type { EntityTitles, OpenAttention } from "../entities.ts";
+import { type FoldStep, type HeroState, withLaneCount } from "../hero/state.ts";
+import { DEFAULT_EVENT_WINDOW, foldReplay, initialReplayState } from "../replay/reducer.ts";
 import { fetchEvents, fetchLoopState, fetchSpend } from "./client.ts";
 import type { EventsPage, LoopState, SpendPage, SpendRow } from "./types.ts";
 
@@ -12,8 +14,11 @@ export const POLL_MS = 3000;
 export const EVENTS_PAGE = 200;
 
 /** Bounds a long-running dashboard tab's memory — the feed only ever renders a bounded recent
- *  window anyway, so the oldest entries are dropped once history exceeds this. */
-export const MAX_EVENT_HISTORY = 2000;
+ *  window anyway, so the oldest entries are dropped once history exceeds this. #740 gate①: this
+ *  now re-exports `replay/reducer.ts`'s own `DEFAULT_EVENT_WINDOW` (ONE bound, not two numbers
+ *  that happen to agree) — `foldReplay` is what actually enforces the cap on `EventHistory.events`
+ *  now, so `checkpoint.ts`'s replay/scrub path caps its own `events` slice identically. */
+export const MAX_EVENT_HISTORY = DEFAULT_EVENT_WINDOW;
 
 /** Spend page size / history cap — same paging contract as events (§8), but the ledger writes far
  *  less often than the event feed, so a smaller cap easily covers a full day. */
@@ -46,7 +51,10 @@ export interface EventHistory {
    *  `DomainEvent[]`, not the raw wire `LoopEvent[]` (#715 gate② round 5 [0]): `accumulateEventsPage`
    *  below is the parse boundary that classifies each fresh wire event through `toDomainEvent`
    *  the instant it enters accumulated history, so nothing past this point ever sees the wire
-   *  `kind: string` again. */
+   *  `kind: string` again. #740 gate①: sourced from the shared reducer's own `ReplayState.events`
+   *  (`foldReplay`) rather than a second, separately-truncated copy — `checkpoint.ts`'s
+   *  fold-to-position produces the identical bounded window at any cursor, so ActivityFeed
+   *  replays through the SAME function live mode does, not a live-only side channel. */
   events: DomainEvent[];
   /** Durable, NEVER bounded by `maxHistory` — folded incrementally per page (`foldEntityTitles`'s
    *  own doc explains why: a title from an event that ages out of `events` must not be forgotten). */
@@ -54,52 +62,105 @@ export interface EventHistory {
   /** Durable, NEVER bounded by `maxHistory` — same reasoning as `titles`, for open attention items
    *  (`foldOpenAttention`'s own doc). #715 gate② [0]. */
   openAttention: OpenAttention;
+  /** #740: live mode's own running fold of the shared reducer's hero slice (lanes, droplets,
+   *  rings, ceiling state) — the same `foldReplay` a future replay/scrub path calls, not a
+   *  parallel implementation. Re-fitted to `lanesMax` on every call (`withLaneCount`), same order
+   *  `Hero.tsx` used to apply it in before folding, so a channel a fresh dispatch claims lands in
+   *  a correctly-sized array rather than an "extra" overflow slot. */
+  hero: HeroState;
+  /** This call's own fresh transitions/steps — Hero's animation input. Never accumulated across
+   *  calls (an unchanged poll reuses the SAME array reference, so Hero's animation effect, keyed
+   *  on this by reference, correctly does not re-fire). */
+  steps: FoldStep[];
 }
 
-export const EMPTY_EVENT_HISTORY: EventHistory = { after: 0, events: [], titles: {}, openAttention: {} };
+export const EMPTY_EVENT_HISTORY: EventHistory = {
+  after: 0,
+  events: [],
+  titles: {},
+  openAttention: {},
+  hero: initialReplayState(null).hero,
+  steps: [],
+};
 
 /**
  * Folds one `/api/events` page into an accumulated history, advancing the cursor — pure so it's
  * unit-testable without mounting a component. #715 gate② [4]: `useEvents(0)` used to hold the
  * cursor at 0 forever, so once the ledger passed one page (200 rows) every poll re-fetched the
- * SAME oldest 200 events and the feed could never see anything newer. This is NOT the full §9
- * "one state reducer" (the shared event-folding hook live mode and replay both feed from) — that
- * is bigger, shared infrastructure this issue doesn't need; this is the minimal live-only tail
- * accumulator the feed needs until it lands. Deduplicates `events` by id (a page can legitimately
- * overlap the previous one at its edge) and drops its oldest entries past `maxHistory` — but
- * `titles`/`openAttention` fold onto the PREVIOUS call's result and are never truncated (#715
- * gate② [0] round 2: the display window's cap must not double as the window those durable folds
- * depend on, or an escalation/title aging out of `events` would silently vanish with nothing
- * downstream the wiser).
+ * SAME oldest 200 events and the feed could never see anything newer.
+ *
+ * #740: the events/titles/openAttention/hero fold now runs through the shared `foldReplay`
+ * reducer (`replay/reducer.ts`) instead of separately-maintained call sites — this IS live mode's
+ * half of "one state reducer, live and replay both feed it" (§9); `checkpoint.ts`'s fold-to-
+ * position produces the SAME bounded `events` window at any cursor (#740 gate① finding [1] —
+ * `events` used to be sliced here alone, so a replay cursor could never reconstruct the feed).
+ * `lanesMax` re-fits the hero slice's channel count (`withLaneCount`) BEFORE folding fresh events,
+ * same order `Hero.tsx` used to apply it in internally, so a fresh dispatch still claims a
+ * properly-sized slot rather than an overflow "extra" channel. Deduplicates `events` by id (a page
+ * can legitimately overlap the previous one at its edge) — but `titles`/`openAttention` fold onto
+ * the PREVIOUS call's result and are never truncated (#715 gate② [0] round 2: the display window's
+ * cap must not double as the window those durable folds depend on, or an escalation/title aging
+ * out of `events` would silently vanish with nothing downstream the wiser). `steps` is cleared to
+ * `[]` whenever nothing fresh was folded (#740 gate① finding [0]) — a `lanesMax`-only refit must
+ * never leave a PREVIOUS batch's transitions attached to a NEW hero snapshot, or Hero's animation
+ * effect (keyed on `[steps, heroState]` by reference) replays a batch that already animated.
  */
-export function accumulateEventsPage(history: EventHistory, page: EventsPage, maxHistory = MAX_EVENT_HISTORY): EventHistory {
+export function accumulateEventsPage(
+  history: EventHistory,
+  page: EventsPage,
+  maxHistory = MAX_EVENT_HISTORY,
+  lanesMax: number | null = null,
+): EventHistory {
   const seen = new Set(history.events.map((e) => e.id));
   const freshWire = page.events.filter((e) => !seen.has(e.id));
   const after = Math.max(history.after, page.lastId);
-  if (freshWire.length === 0) return after === history.after ? history : { ...history, after };
+  const hero = withLaneCount(history.hero, lanesMax);
+  if (freshWire.length === 0) {
+    if (after === history.after && hero === history.hero) return history;
+    return { ...history, after, hero, steps: [] };
+  }
   // #715 gate② round 5 [0]: THE parse boundary — every fresh wire event is classified against
   // copy.ts's closed EventKind union right here, once, via toDomainEvent. Everything downstream
-  // (the slice below, foldEntityTitles, foldOpenAttention, and eventually ActivityFeed's render)
-  // consumes the resulting DomainEvent, never the raw wire `kind: string` again.
+  // (the shared reducer) consumes the resulting DomainEvent, never the raw wire `kind: string`
+  // again.
   const fresh = freshWire.map(toDomainEvent);
+  const { state, steps } = foldReplay(
+    { hero, titles: history.titles, openAttention: history.openAttention, events: history.events },
+    fresh,
+    maxHistory,
+  );
   return {
     after,
-    events: [...history.events, ...fresh].slice(-maxHistory),
-    titles: foldEntityTitles(fresh, history.titles),
-    openAttention: foldOpenAttention(fresh, history.openAttention),
+    events: state.events,
+    titles: state.titles,
+    openAttention: state.openAttention,
+    hero: state.hero,
+    steps,
   };
 }
+
+/** A page shape that folds no fresh events but still lets `accumulateEventsPage` re-fit the hero
+ *  slice's lane count when `lanesMax` alone changed (config arriving after first paint, or
+ *  changing under a running engine) — `useEventHistory`'s stand-in when the events query hasn't
+ *  resolved on this render yet, same "no data, still re-fit" behavior `Hero.tsx` used to get for
+ *  free from its own `[events, lanesMax]` effect dependency. */
+const noAdvance = (after: number): EventsPage => ({ events: [], lastId: after });
 
 /**
  * Polls the append-only feed and accumulates it into a growing, cursor-advancing history (§8's
  * feed contract: ascending pages, live mode polling the tail) instead of re-requesting the first
  * page forever. See `accumulateEventsPage`'s own doc for what this is (and is not) a replacement
- * for, and for why `titles`/`openAttention` are exposed separately from the bounded `events` tail.
+ * for, and for why `titles`/`openAttention`/`hero` are exposed separately from the bounded
+ * `events` tail. `lanesMax` is `/api/loop/state`'s `lanes.max` — the same value `Hero.tsx` used to
+ * receive as its own prop and fold with internally; it now flows in here instead, so hero, lane
+ * narrative, activity feed, ring counts, and header/needs-attention all read from ONE fold (#740).
  */
-export function useEventHistory(): {
+export function useEventHistory(lanesMax: number | null): {
   events: DomainEvent[];
   titles: EntityTitles;
   openAttention: DomainEvent[];
+  hero: HeroState;
+  steps: FoldStep[];
   error: unknown;
   isPending: boolean;
 } {
@@ -110,16 +171,26 @@ export function useEventHistory(): {
   // free. Without this, the very first page's data would be invisible until the effect commits
   // (a one-frame lag in the browser; permanently invisible under `renderToStaticMarkup`, which
   // never runs effects at all — a real gap `App.test.tsx`'s cost-strip regression test found).
-  const merged = query.data ? accumulateEventsPage(history, query.data) : history;
+  const merged = accumulateEventsPage(history, query.data ?? noAdvance(history.after), MAX_EVENT_HISTORY, lanesMax);
 
+  // #740 gate① finding [0]: the effect used to re-derive its own `accumulateEventsPage` call
+  // instead of persisting `merged` itself — a structurally-equal but REFERENCE-different `hero`/
+  // `steps` than the render-ahead value above. `Hero.tsx`'s animation effect is keyed on
+  // `[steps, heroState]` BY REFERENCE (React's `Object.is` dependency check), so that mismatch
+  // made it fire twice for the same batch: once for the render-ahead fold, again once this effect
+  // committed its own independently-recomputed equivalent. Persisting the EXACT `merged` object
+  // computed above — never a second call — makes the committed history and the render-ahead value
+  // the same reference, so a settled render sees `heroState`/`steps` stop changing at all.
   useEffect(() => {
-    if (query.data) setHistory((prev) => accumulateEventsPage(prev, query.data));
-  }, [query.data]);
+    if (merged !== history) setHistory(merged);
+  }, [merged, history]);
 
   return {
     events: merged.events,
     titles: merged.titles,
     openAttention: Object.values(merged.openAttention),
+    hero: merged.hero,
+    steps: merged.steps,
     error: query.error,
     isPending: query.isPending && merged.events.length === 0,
   };
