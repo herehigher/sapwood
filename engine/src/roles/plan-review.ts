@@ -219,7 +219,7 @@ export function renderCommentDigest(comments: readonly PRComment[]): string {
 
 const VerificationPlanReviewerMetadataSchema = z
   .object({
-    decision: z.enum(["approve", "draft_request", "verify_na"]),
+    decision: z.enum(["approve", "draft_request", "verify_na", "needs_human"]),
     issue: z.number().int().positive(),
   })
   .strict();
@@ -231,12 +231,14 @@ const VerificationPlanDrafterMetadataSchema = z
   .strict();
 
 export interface ReviewerDecision {
-  decision: "approve" | "draft_request" | "verify_na";
+  decision: "approve" | "draft_request" | "verify_na" | "needs_human";
   issue: number;
   /** The BODY block's raw text, when present. Meaning depends on `decision`: a revised issue
    *  body for "approve" (optional — omitted means the reviewer made no corrections), the
-   *  drafter's brief for "draft_request" (required), or the human-facing explanation for
-   *  "verify_na" (required). */
+   *  drafter's brief for "draft_request" (required), the human-facing explanation for
+   *  "verify_na" (required), or the human-facing explanation for "needs_human" (required —
+   *  a plan-fixable-by-redraft case never reaches this decision, see reviewOneIssue's
+   *  needs_human branch). */
   body?: string;
 }
 
@@ -760,7 +762,7 @@ async function reviewOneIssue(
     // #652: pre-apply checkpoint — recheck IMMEDIATELY before applying ANY reviewer-derived body
     // or label write, whether `decision` came from a real session (above) or a seed (#214's
     // invalidated-confirm handoff). A body edit or a pending comment landing WHILE the session
-    // ran discards the decision without applying any of it — approve/verify_na/draft_request
+    // ran discards the decision without applying any of it — approve/verify_na/draft_request/needs_human
     // alike, never a partial apply.
     // #652 round 1 (finding 1): a FRESH live read — never `currentBody` above, which is the body
     // the session (when one ran this cycle) was GIVEN, not what may have changed since. Compared
@@ -875,6 +877,34 @@ async function reviewOneIssue(
         /* contained — the labels+comment already landed; the hold stands without its event */
       }
       return false; // outcome 3 (verify:n/a proposal) — a human resolves it
+    }
+
+    if (decision.decision === "needs_human") {
+      // Outcome 4: the reviewer has determined NO redraft can make this issue dispatchable —
+      // typically, a human-merge-only path is a PREREQUISITE every acceptance criterion edits or
+      // depends on, so neither a patch-deliverable rewrite nor a `## Human-owned remainder`
+      // split leaves anything left to dispatch. Apply needs-human immediately instead of routing
+      // through a `draft_request` cycle that can only rediscover the same verdict: retro round
+      // #365 traced exactly this waste on issue #782, where 2 draft→re-review cycles ran (one
+      // reviewer session already having reached this same conclusion in cycle 0's own reasoning)
+      // before self-heal exhaustion applied the identical needs-human outcome this branch now
+      // reaches directly. `origin: "reviewer-verdict"` (distinct from `escalate()`'s
+      // "cycle-exhausted") keeps round-artifact.ts's degraded-phase breaker — which counts only
+      // `"session-failure"` — from ever seeing this healthy, working-as-designed verdict as a
+      // provider/session failure.
+      await deps.forge.addLabel(issue.number, l.needsHuman);
+      await deps.forge.addIssueComment(issue.number, `${decision.body}\n\n${marker}`);
+      try {
+        deps.state.appendEvent("plan-review-escalated", {
+          round_id: roundId,
+          issue: issue.number,
+          reason: "reviewer determined this issue is not dispatchable by any redraft",
+          origin: "reviewer-verdict",
+        });
+      } catch {
+        /* contained — the label/comment already landed; the hold stands without its event */
+      }
+      return false; // outcome 4 — needs-human, no draft cycle attempted
     }
 
     // Outcome 2: request-a-draft. At the cycle bound already -> self-heal exhausted, escalate.

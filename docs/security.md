@@ -2195,8 +2195,8 @@ a session was actually given:**
    rendered into the session's prompt. It rechecks immediately before applying ANY
    reviewer-derived body or label write, AND (round 1) immediately before the drafter's own body
    write — a pending comment OR a direct body edit landing WHILE a session ran discards that
-   cycle's decision (or the drafter's draft) without applying it, approve/verify_na/draft_request
-   alike, never partially.
+   cycle's decision (or the drafter's draft) without applying it, approve/verify_na/draft_request/
+   needs_human alike, never partially.
 2. **Dispatch** (`conductor.ts`'s DISPATCH loop) claims the issue first, then re-reads the live
    body followed by comments **inside the existing rollback-on-failure unit** — the refreshed
    body (never the pre-claim `getReadyIssues` body) is what the AC snapshot and the worker prompt
