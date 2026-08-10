@@ -716,6 +716,16 @@ test("the ring count and the PLAN/IMPLEMENT/OUTCOME phase captions render with -
   assert.match(html, /class="hero-ring-count" style="font-family:var\(--font-display\)"/);
 });
 
+test("#728 gate② finding [0] (run 31f166a9): `.hero-small` (10px) is declared BEFORE every 9px caption rule, so the lane caption and outcome tally — both `hero-small` PLUS a 9px class — render at their intended 9px, not the 10px a later `.hero-small` would silently win with", () => {
+  const smallIndex = heroCss.indexOf(".hero-small {");
+  assert.ok(smallIndex >= 0, ".hero-small rule must exist");
+  for (const rule of [".hero-node-caption {", ".hero-staleness,", ".hero-fixloop-label {"]) {
+    const ruleIndex = heroCss.indexOf(rule);
+    assert.ok(ruleIndex >= 0, `${rule} rule must exist`);
+    assert.ok(smallIndex < ruleIndex, `.hero-small must precede ${rule} in source order (equal specificity — later wins)`);
+  }
+});
+
 // ── #716 gate② P2-8: staleness, round outcome tally, model·effort/review-mode captions ──
 
 test("P2-8: the planning group's staleness caption reads seconds since the last folded event", () => {

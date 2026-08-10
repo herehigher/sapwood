@@ -51,6 +51,18 @@
   fill: var(--bark-text);
 }
 
+/* #728 gate② finding [0] (run 31f166a9): must precede every 9px caption rule below — a lane
+ * caption (`hero-num hero-small hero-node-caption`) and the outcome tally (`hero-num
+ * hero-small hero-outcome-tally`) both carry this class ALONGSIDE one of those, and CSS's
+ * equal-specificity/later-wins rule means whichever of the two is declared LAST in the file
+ * is what actually renders — with `.hero-small` declared after them (as it was before this
+ * fix), both silently rendered at 10px instead of their intended 9px, defeating #716's own
+ * anti-clipping fix for the outcome tally without anything in the markup or a naive read of
+ * either rule's declared `font-size` revealing it. */
+.hero-small {
+  font-size: 10px;
+}
+
 /* #716 gate② P2-8: the config-sourced model·effort / review-mode captions (planning trio,
  * lanes, SUMMARY, RETRO, REVIEW) and the staleness/outcome-tally captions — all small print,
  * never competing with a node's primary label. */
@@ -75,10 +87,6 @@
   font-family: var(--font-data);
   font-size: 9px;
   fill: var(--bark-text);
-}
-
-.hero-small {
-  font-size: 10px;
 }
 
 .hero-ring-count {
