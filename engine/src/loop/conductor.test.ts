@@ -3286,12 +3286,13 @@ test("tick DRIVE (#390): an ENGINE-AGENT lane's two-pass hold observation drives
   const gate = new FakeMergeGate();
   const runTick = () => tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
 
-  // The two outcomes are shaped EXACTLY as the engine-agent path produces them once #390's
-  // merge-driver.ts diff is applied (see merge-driver.test.ts's own skipped #390 tests): a held
-  // pass queues on checkPreflight's `hold-label-present` and carries the label in its ON-PR
-  // casing; the release pass carries `held:false`. This half of the pair is reviewer-kind
-  // agnostic ALREADY — the conductor only ever sees `holdObservation` — which is precisely why
-  // #390 is a merge-driver-side wiring gap and needs no conductor change to close.
+  // The two outcomes are shaped EXACTLY as the engine-agent path produces them — #390's
+  // merge-driver.ts wiring was applied by PR #814 (see merge-driver.test.ts's own un-skipped
+  // #390 tests): a held pass queues on checkPreflight's `hold-label-present` and carries the
+  // label in its ON-PR casing; the release pass carries `held:false`. This half of the pair is
+  // reviewer-kind agnostic ALREADY — the conductor only ever sees `holdObservation` — which is
+  // precisely why #390 was a merge-driver-side wiring gap and needed no conductor change to
+  // close.
   gate.outcomes[55] = {
     kind: "queued",
     pr: 55,
