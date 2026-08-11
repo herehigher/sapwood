@@ -44,7 +44,11 @@ export const WRITE_INVENTORY_ROLE_SESSIONS: readonly WriteInventoryRoleEntry[] =
   // `verification-plan-reviewer` entry above, not a second time here. Registering it separately
   // would assert a write path that does not exist — exactly the false-row failure mode
   // direction 2 (table row -> real write path) below exists to catch.
-  { roleId: "verification-plan-drafter", tableRole: "verification-plan-drafter", callSite: "plan-review.ts::reviewOneIssue (draft_request)" },
+  {
+    roleId: "verification-plan-drafter",
+    tableRole: "verification-plan-drafter",
+    callSite: "plan-review.ts::reviewOneIssue (draft_request)",
+  },
   { roleId: "harvest", tableRole: "harvest", callSite: "harvest.ts::createHarvestStub" },
   { roleId: "retro", tableRole: "retro", callSite: "retro.ts::createRetroStub" },
 ];
