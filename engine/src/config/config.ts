@@ -1350,9 +1350,14 @@ const Recovery = z
 // carriers (#699 charter principle 3, the standing user-tunables-in-config rule). Values are
 // passed through OPAQUELY — no engine-side language whitelist/validation beyond non-empty, so
 // this key never blocks a language the underlying model can write (fail-open by design, #701's
-// What item 1). Each surface defaults to `"en"`: an unset section is byte-for-byte today's
-// implicit norm (every shipped prompt already reads as English), so a zero-config parse changes
-// no rendered-prompt behavior — see prompts.test.ts's default-language snapshot coverage.
+// What item 1). Each surface defaults to `"en"`: an unset section leaves the working-language
+// BEHAVIOR unchanged from pre-#701 — every prompt's new working-language directive resolves to
+// `en` (English), the same language every shipped prompt already used before this key existed.
+// This is NOT byte-identical rendered output: the default render now additionally CONTAINS that
+// directive line (resolved to `en`), so the pinned snapshot hashes in prompts.test.ts moved for
+// every prompt that gained one. Those regenerated pins guard against FUTURE unintended drift of
+// this new default render — they assert stability going forward, not identity with the pre-#701
+// prompt bytes.
 //
 // The three surfaces are deliberately the small, named set #701 asked for (commit messages etc.
 // are NOT modeled — "keep the set small and add on demand, not speculatively," #701's What item
@@ -1363,7 +1368,9 @@ const Recovery = z
 //                     verification-plan-reviewer.md / verification-plan-reviewer-confirm.md /
 //                     harvest.md / retro.md / architect.md / engine-reviewer.md: issue bodies,
 //                     proposal/triage text, and review-comment prose the engine composes.
-//   - docs          — worker.md / fix.md / architect.md: documentation files/chapters a role edits.
+//   - docs          — worker.md / architect.md: documentation files/chapters a role edits. NOT
+//                     fix.md — a fix leg only receives `{{lang.codeComments}}` (its narrower var
+//                     set, #245 round-2 fix A7); it never touches docs prose.
 //
 // Precedence (docs/configuration.md "Language customization"): this config key takes precedence
 // over the target repo's own CLAUDE.md prose — #167's CLAUDE.md language entry point remains the

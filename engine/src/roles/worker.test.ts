@@ -5057,6 +5057,20 @@ test("#701: buildRenderPrompt — {{lang.codeComments}}/{{lang.docs}} default to
   assert.match(jaRendered, /documentation you edit in `fr`/);
 });
 
+test("#701 (per-surface independence, PM ruling on gate② P2 #2): changing ONLY language.codeComments leaves language.docs's rendered directive at its own 'en' default in the SAME render — the two surfaces are independently controlled, not one switch", () => {
+  const partialCfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4 },
+    language: { codeComments: "ja" }, // docs deliberately left unset
+  });
+  const rendered = buildRenderPrompt(partialCfg)({ number: 1, title: "t", labels: [], body: "b" });
+  assert.match(rendered, /Write code comments in `ja`/, "the overridden surface changed");
+  assert.match(
+    rendered,
+    /documentation you edit in `en`/,
+    "the untouched surface stayed at its own default, unaffected by the sibling override",
+  );
+});
+
 // ── #245 round-2 fix A7: buildRenderFixPrompt — deliberately NARROWER var set than
 //    buildRenderPrompt's own (issue.number/pr.number/labels.verifyNa only; never
 //    issue.title/body/labels — a fix leg's evidence channel is the PR-facing proxy tools, not

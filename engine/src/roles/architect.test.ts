@@ -952,6 +952,29 @@ test("#701: createArchitectStub renders {{lang.docs}}/{{lang.issuesAndPrs}} from
     });
     assert.equal(customRunner.calls[0]!.prompt, "docs=fr issuesAndPrs=ja");
     customState.close();
+
+    // #701 (per-surface independence, PM ruling on gate② P2 #2): overriding ONLY
+    // language.docs leaves language.issuesAndPrs's rendered directive at its own 'en' default
+    // in the SAME render — the two surfaces are independently controlled, not one switch.
+    const partialCfg = mkCfg({
+      roles: { architect: { promptFile: customPath } },
+      language: { docs: "fr" }, // issuesAndPrs deliberately left unset
+    });
+    const partialState = new State(":memory:");
+    const partialRunner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+    await createArchitectStub({
+      now: realClock,
+      forge,
+      state: partialState,
+      cfg: partialCfg,
+      runner: partialRunner,
+      planMdPath: "/nonexistent/PLAN.md",
+    }).run({
+      roundId: 3,
+      phase: "architecting",
+      marker: null,
+    });
+    assert.equal(partialRunner.calls[0]!.prompt, "docs=fr issuesAndPrs=en");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
