@@ -13,7 +13,8 @@ export type ControlsAction = { type: "request"; verb: ControlVerb } | { type: "c
  * which is the ONE phase the component's effect below is allowed to fire `POST /api/control`
  * from. This function is the actual proof of "no control POST fires without its confirm step" —
  * see Controls.test.tsx's header comment for why the proof lives here rather than in a simulated
- * click (this repo's test harness has no jsdom/testing-library).
+ * click (this test deliberately stays DOM-free; see the real-DOM test at the end of
+ * Controls.test.tsx).
  */
 export function controlsReducer(state: ControlsState, action: ControlsAction): ControlsState {
   switch (action.type) {
@@ -40,9 +41,10 @@ export type ControlEffectResult = { fired: false } | { fired: true; ok: true } |
 
 /**
  * The ONE place the component's effect is allowed to call the network — factored out of the
- * `useEffect` below so it is directly testable without a DOM: `renderToStaticMarkup` (this
- * repo's only test harness) never runs effects at all, so a test asserting "zero calls before
- * confirm, one call after" has to exercise this exact function across a real `controlsReducer`
+ * `useEffect` below so it is directly testable without a DOM: this extraction deliberately stays
+ * DOM-free (`renderToStaticMarkup` never runs effects at all; see the real-DOM test at the end of
+ * Controls.test.tsx), so a test asserting "zero calls before confirm, one call after" has to
+ * exercise this exact function across a real `controlsReducer`
  * transition rather than a simulated click (#739 gate② round 1 finding [1]:
  * ac6-confirm-flow-untested). NEVER rejects itself — a failed `onControl` is caught and reported
  * in the resolved result, never left to propagate as an unhandled rejection or to skip the

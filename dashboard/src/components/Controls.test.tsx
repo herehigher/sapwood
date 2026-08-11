@@ -1,18 +1,23 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CONTROL_VERBS } from "../api/types.ts";
 import { CONTROL_COPY } from "../copy.ts";
+import { registerRealDom } from "../test-dom.ts";
 import { Controls, controlsReducer, runControlEffect } from "./Controls.tsx";
 
+registerRealDom();
 test.afterEach(() => mock.restoreAll());
 
 // ── controlsReducer: the misfire-protection state machine (§3 Operations) ───────────────────
 //
-// No jsdom/testing-library in this repo (package.json's own test script is plain `node --test`
+// These tests deliberately stay DOM-free (package.json's own test script is plain `node --test`
 // over `react-dom/server`'s `renderToStaticMarkup`, which never runs effects or handles clicks —
-// see App.tsx's own comment on this). The reducer is therefore the actual proof of "no fetch
-// without confirm": every path through it is exercised directly, with no DOM in the loop at all.
+// see App.tsx's own comment on this); see the real-DOM test at the end of this file for the
+// button-click round trip. The reducer is therefore the actual proof of "no fetch without
+// confirm": every path through it is exercised directly, with no DOM in the loop at all.
 
 test("controlsReducer: a bare verb click never reaches the sending phase — confirmation is required first", () => {
   for (const verb of CONTROL_VERBS) {
@@ -134,8 +139,9 @@ test("request -> confirm, chained through the real reducer into the real effect:
 // left the promise's rejection unhandled AND skipped the `dispatch({ type: "settled" })` that
 // returns the reducer to `idle` — the reducer stayed wedged in `sending` forever, every button
 // disabled, until a full page reload. These tests pin the fix at the same level round 1's
-// confirm-flow tests did: chaining the real reducer into the real effect function, since this
-// harness has no jsdom to actually click a button and watch a rejection resolve.
+// confirm-flow tests did: chaining the real reducer into the real effect function directly,
+// rather than clicking a button and watching a rejection resolve through the DOM (see the
+// real-DOM test at the end of this file for that path).
 
 test("runControlEffect: a rejecting onControl never propagates the rejection — it resolves to an honest failure result", async () => {
   const boom = new Error("engine unreachable");
@@ -167,10 +173,11 @@ test("a rejected request still reports `fired: true` — the caller's dispatch({
 });
 
 test("Controls renders the failure caption, never the raw error/status text, once mounted with onControl already failing", async () => {
-  // No jsdom to observe the DOM after a real click+rejection round-trips through the effect, but
-  // the component's own failure caption is a fixed string (never derived from the error object) —
-  // pinned directly so a future edit can't accidentally start interpolating raw error text into
-  // it (the same no-leaked-fetch-error posture App.tsx's `disconnected` header already holds to).
+  // This test stays DOM-free (see the real-DOM test at the end of this file for a real
+  // click+rejection round trip); the component's own failure caption is a fixed string (never
+  // derived from the error object) — pinned directly so a future edit can't accidentally start
+  // interpolating raw error text into it (the same no-leaked-fetch-error posture App.tsx's
+  // `disconnected` header already holds to).
   const html = renderToStaticMarkup(<Controls enabled />);
   assert.doesNotMatch(html, /Couldn't reach the engine/, "not shown before any request has ever failed");
 });
@@ -186,4 +193,49 @@ test("the confirming dialog renders the exact CONTROL_COPY confirmation text for
 test("the confirming dialog does NOT render while idle — the dialog only appears once a verb is actually requested", () => {
   const html = renderToStaticMarkup(<Controls enabled initialState={{ phase: "idle" }} />);
   assert.doesNotMatch(html, /role="alertdialog"/);
+});
+
+// ── real DOM (retro #355) ────────────────────────────────────────────────────────────────────
+//
+// Every test above that touches the click/effect wiring says, in its own comment, that it's
+// working around "no jsdom in this harness" by chaining pure functions instead of clicking a
+// real button. That's exactly the class of gap gate② kept re-finding across rounds (#727/#739's
+// own "wiring unexercised" findings): a test can be green while the production onClick/useEffect
+// composition is broken, because nothing here ever dispatched a real event. `src/test-dom.ts`'s
+// `registerRealDom()`, called at the top of this file, now provides a real minimal DOM, so this
+// proves the actual button-click round trip once, directly against the reducer-chaining tests above.
+test("real DOM: clicking a verb button opens the confirm dialog; clicking Confirm fires onControl exactly once with that verb, then the dialog closes", async () => {
+  const onControl = mock.fn(async () => undefined);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<Controls enabled onControl={onControl} />);
+    });
+
+    const stopButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === CONTROL_COPY.stop.label);
+    assert.ok(stopButton, "the real stop button renders");
+    await act(async () => {
+      stopButton.click();
+    });
+
+    assert.equal(container.querySelector('[role="alertdialog"]')?.getAttribute("aria-label"), "confirm stop");
+    assert.equal(onControl.mock.calls.length, 0, "no call before the confirm click");
+
+    const confirmButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Confirm");
+    assert.ok(confirmButton, "the real confirm button renders");
+    await act(async () => {
+      confirmButton.click();
+    });
+
+    assert.equal(onControl.mock.calls.length, 1, "the production onClick -> reducer -> effect chain fired exactly once");
+    assert.deepEqual(onControl.mock.calls[0]?.arguments, ["stop"]);
+    assert.equal(container.querySelector('[role="alertdialog"]'), null, "the dialog closes once the request settles");
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
 });
