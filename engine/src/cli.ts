@@ -1649,7 +1649,10 @@ Flags:
         "hand off before a hard kill."
       );
     },
-    clearLine: "dispatch and merges resume at the next tick-top gate, UNLESS an emergency stop or pause is also present.",
+    clearLine:
+      "merges resume at the next tick-top gate unless an emergency stop remains; new dispatch resumes only if pause " +
+      "is ALSO absent — a remaining pause keeps new dispatch paused, but merges are unaffected by pause (it never " +
+      "froze them).",
   },
   estop: {
     tier: "estop",
@@ -1681,7 +1684,9 @@ Flags:
 `,
     activationLine: () =>
       "every running/fixing lane is hard-killed immediately, this same tick — NO drain window, and any in-flight WIP is LOST. Clear only after human review, with `sapwood estop clear`.",
-    clearLine: "a kill switch or pause, if still present, continues to apply.",
+    clearLine:
+      "a remaining kill switch keeps new dispatch AND merges frozen (drain-first); a remaining pause keeps only " +
+      "new dispatch frozen — merges are unaffected by pause.",
   },
 };
 

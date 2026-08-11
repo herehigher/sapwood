@@ -1,4 +1,5 @@
-# Pending human-applied patch — issue #731 (PM gate② finding, PR #818)
+# Pending human-applied patch — issue #731 (PM gate② finding + independent-reviewer gate② P1
+# (sol), PR #818)
 #
 # WHAT: extends guard.ts's Bash-argument accident fence to recognize the three stop-control
 #       CLI verbs #731 shipped — `sapwood pause`, `sapwood stop`, `sapwood estop` (activate AND
@@ -9,7 +10,16 @@
 #       minimal (大道至简): ONLY the three stop-control verbs, activate and clear forms — `park`/
 #       `run`/`status`/`events` are explicitly OUT of scope (a worker has ordinary legitimate
 #       reason to invoke those; widening this rule to every subcommand is a non-goal, not an
-#       oversight — the ALLOW matrix below proves it).
+#       oversight — the ALLOW matrix below proves it). Recognizes the DISCOVERABLE entrypoint
+#       forms only: the bare `sapwood` binary, `node .../cli.js`/`cli.ts` (path-prefixed or
+#       direct-executed), and `npx sapwood[@version]` (npm's own documented "run a specific/
+#       latest version" syntax). Deliberately does NOT chase adversarial forms that hide the
+#       command word behind an arbitrary package spec (`npx --offline file:<path>/engine`, a
+#       scoped `@scope/pkg`, an aliased binary) — those are an accepted, documented residual in
+#       the SAME class checkControlSentinelArg's own "hardcoded path inside a script" residual
+#       already is (docs/security.md's "Sentinel isolation boundary" section, updated by this
+#       patch's WHY below). Per gate② reviewer ruling: guard is an accident fence, not a hostile
+#       jail — fence the discoverable, document the adversarial, don't build machinery to chase it.
 #
 # WHY: #731 (PR #818, this same round) added first-class `sapwood pause|stop|estop` CLI verbs as
 #       thin wrappers over the three control-sentinel files. They resolve the sentinel path
@@ -28,6 +38,18 @@
 #       but it is not — the earlier residual is an obscure hand-rolled form; this is a first-
 #       class, operator-documented, worker-discoverable command. This patch is the accident
 #       fence's extension to cover it.
+#
+# WHY (round 2, gate② P1, independent reviewer sol): the first version of this patch only
+#       recognized a token whose basename was EXACTLY `sapwood`/`cli.js`/`cli.ts`, so it missed
+#       npx's own documented version-pinned invocation — `npx sapwood@latest stop` and
+#       `npx sapwood@1.2.3 pause` both returned ALLOW, reproduced live in a disposable clone
+#       (activation created data/KILL_SWITCH, clear removed it). The reviewer's ruling: fence the
+#       DISCOVERABLE forms (this one — npm's docs teach `pkg@version`) but do NOT chase fully
+#       adversarial package specs that hide the command word entirely (`file:` local paths, scoped
+#       packages) — those stay a documented residual, same class as the pre-existing one above.
+#       This revision adds the `sapwood@<version>` basename-prefix recognition, BLOCK regressions
+#       for it, and ONE pinned regression documenting the `file:`-form ALLOW as a deliberate,
+#       accepted boundary (not an oversight) — see guard.test.ts's own comment on that test.
 #
 # WHY IT IS A PATCH AND NOT A COMMIT: engine/src/guard/** is human-merge-only (CLAUDE.md
 #       "Non-negotiables"; canonical list docs/security.md "Human-merge-only paths"). An
@@ -62,19 +84,23 @@
 #
 # VERIFIED: this diff applies cleanly to main at ada7d4e (`git apply --check`, this issue's own
 #       CI step — see engine/src/guard/patch-731-apply-check.test.ts) and, applied + `npm test`
-#       in a disposable clone, the full engine suite is green (4782 passed / 4 pre-existing
+#       in a disposable clone, the full engine suite is green (4788 passed / 4 pre-existing
 #       skips / 0 failed), including every BLOCK/ALLOW row this patch's own guard.test.ts hunk
-#       adds (29 new cases: 15 BLOCK, 14 ALLOW/reverse). If guard.ts/guard.test.ts have moved or
-#       changed since ada7d4e, the hunks still locate by context (offset-tolerant); re-check the
-#       result and re-run the suite regardless.
+#       adds (35 new cases: 20 BLOCK, 15 ALLOW/reverse — including the one pinned KNOWN-RESIDUAL
+#       test for the `file:`-form ALLOW). Live-executed (not just unit-tested) in a disposable
+#       clone with a built CLI: `npx sapwood@latest stop`/`npx sapwood@1.2.3 pause` now BLOCK
+#       (the round-2 fix), and `npx --offline file:<checkout>/engine stop` still ALLOWs — the
+#       documented residual, reproduced exactly as the reviewer's own repro did. If guard.ts/
+#       guard.test.ts have moved or changed since ada7d4e, the hunks still locate by context
+#       (offset-tolerant); re-check the result and re-run the suite regardless.
 diff --git a/engine/src/guard/guard.ts b/engine/src/guard/guard.ts
-index 12bf2de..4142518 100644
+index 12bf2de..084f799 100644
 --- a/engine/src/guard/guard.ts
 +++ b/engine/src/guard/guard.ts
 @@ -592,6 +592,16 @@ function judgeFragment(fragment: string, cwd: string, depth = 0): string | null
    const w = checkBashWritePath(tokens, cwd);
    if (w) return w;
-
+ 
 +  // #731: sapwood pause/stop/estop CLI verbs — same control-sentinel boundary as the check
 +  // below, reached through the CLI verb instead of a literal path argument; scanned on the
 +  // original tokens same as the checks around it. Placed BEFORE checkControlSentinelArg
@@ -88,10 +114,10 @@ index 12bf2de..4142518 100644
    // #81: control sentinel referenced as a literal arg to any command (e.g. a node script
    // invoked with the sentinel path), scanned on the original tokens same as the write check.
    const cs = checkControlSentinelArg(tokens, cwd);
-@@ -781,6 +791,66 @@ function checkControlSentinelArg(tokens: string[], cwd: string): string | null {
+@@ -781,6 +791,84 @@ function checkControlSentinelArg(tokens: string[], cwd: string): string | null {
    return null;
  }
-
+ 
 +// ── #731: sapwood pause/stop/estop CLI verbs — same control-sentinel boundary as the check
 +// above, reached through the CLI verb instead of a literal path argument ───────────────────
 +// #731 added first-class `sapwood pause`/`stop`/`estop` verbs (each with a `clear` form) that
@@ -110,7 +136,13 @@ index 12bf2de..4142518 100644
 +// entrypoint, so flag order/position never matters). `park`/`run`/`status`/`events` are
 +// read/reconcile paths a worker has ordinary legitimate reason to invoke and stay OUT of scope
 +// — widening this rule to every subcommand is an explicit non-goal (#731 PR discussion), not an
-+// oversight.
++// oversight. Fences the DISCOVERABLE entrypoint forms — the bare `sapwood` binary, `node
++// .../cli.js`/`cli.ts`, and `npx sapwood[@version]` — the shapes an operator's own docs teach
++// and a worker could reach without deliberately hiding the command word. An ADVERSARIAL
++// invocation that hides it (`npx --offline file:<path>/engine stop`, a scoped package, an
++// aliased binary) is an accident fence's accepted residual, not a jail; docs/security.md's
++// sentinel-isolation section documents it in the same class as checkControlSentinelArg's own
++// "hardcoded path inside a script" residual above — an accident fence, not a hostile jail.
 +const STOP_CONTROL_VERBS = new Set(["pause", "stop", "estop"]);
 +
 +/** True when `tok`'s basename is the sapwood CLI entrypoint: the linked `sapwood` binary, or
@@ -121,10 +153,22 @@ index 12bf2de..4142518 100644
 + *  directory prefix (`engine/dist/`, `engine/src/`), so a clone checked out anywhere still
 + *  matches; the tradeoff (an unrelated project's own same-named `cli.js`/`cli.ts` would also
 + *  match) is the same coarse-but-safe posture `checkControlSentinelArg` already accepts for an
-+ *  arbitrary node-script indirection above. */
++ *  arbitrary node-script indirection above.
++ *
++ *  gate② P1 (sol, #731): a plain npx package-spec version suffix glued to the name with `@`
++ *  (`npx sapwood@latest stop`, `npx sapwood@1.2.3 pause`) is a DISCOVERABLE invocation shape —
++ *  the exact form npm's own docs teach for "run a specific/latest published version" — so the
++ *  bare `sapwood@<version>` prefix is also recognized here (basename() already yields
++ *  `sapwood@<version>` unsplit, since `@` isn't a path separator). Deliberately narrow: only a
++ *  token whose basename literally STARTS WITH `sapwood@` (case-insensitive) counts; a scoped
++ *  package (`@sapwood/engine`) naturally falls through basename()'s own `/`-split (its basename
++ *  is `engine[@version]`, never `sapwood...`), and a `file:`/local-path spec's basename is
++ *  whatever directory name follows, not `sapwood` at all — neither is chased here (accepted
++ *  residual, docs/security.md's sentinel-isolation section, same class as the hardcoded-path-
++ *  inside-a-script residual `checkControlSentinelArg` already documents). */
 +function isSapwoodCliEntrypoint(tok: string): boolean {
 +  const base = basename(tok).toLowerCase();
-+  return base === "sapwood" || base === "cli.js" || base === "cli.ts";
++  return base === "sapwood" || base === "cli.js" || base === "cli.ts" || base.startsWith("sapwood@");
 +}
 +
 +/**
@@ -156,13 +200,13 @@ index 12bf2de..4142518 100644
   * Detect a Bash command writing to a boundary file. Redirections and write commands are
   * scanned at ANY position (not just token[0]) so a wrapper (`uv run --with rich tee X`)
 diff --git a/engine/src/guard/guard.test.ts b/engine/src/guard/guard.test.ts
-index 70d7cca..58ab4c2 100644
+index 70d7cca..144e796 100644
 --- a/engine/src/guard/guard.test.ts
 +++ b/engine/src/guard/guard.test.ts
-@@ -269,6 +269,78 @@ test("BLOCK reason text: node kill.js ../../data/EMERGENCY_STOP names all three
+@@ -269,6 +269,103 @@ test("BLOCK reason text: node kill.js ../../data/EMERGENCY_STOP names all three
    assert.ok(d.reason.includes("control sentinel"), `reason must name the category: ${d.reason}`);
  });
-
+ 
 +// ── #731: sapwood pause/stop/estop CLI verbs — same control-sentinel boundary as the section
 +// above, reached through the CLI verb instead of a literal path argument. Scope is deliberately
 +// minimal: only the three stop-control verbs; park/run/status/events stay OUT of scope (see the
@@ -188,9 +232,20 @@ index 70d7cca..58ab4c2 100644
 +  "node engine/dist/cli.js estop --confirm",
 +  "node --import tsx engine/src/cli.ts stop",
 +  "node --import tsx engine/src/cli.ts estop clear",
-+  // npx/wrapper indirection
++  // path-prefixed direct execution (no `node` prefix) — judgeFragment's own tokens[0]
++  // basename-normalization (hasPathSep) already turns this into a bare "cli.js" before this
++  // check runs, same as it does for any other path-prefixed command word in this file.
++  "./cli.js pause",
++  "./engine/dist/cli.js stop",
++  // npx/wrapper indirection — bare package name
 +  "npx sapwood pause",
 +  "npx -y sapwood estop --confirm",
++  // gate② P1 (sol, #731): npx's own documented "run a specific/latest version" syntax — a
++  // DISCOVERABLE shape (npm's own docs teach it), not an adversarial one. Confirms
++  // isSapwoodCliEntrypoint's `sapwood@` prefix recognition actually fires.
++  "npx sapwood@latest stop",
++  "npx sapwood@1.2.3 pause",
++  "npx sapwood@latest estop --confirm",
 +];
 +for (const command of STOP_CONTROL_BLOCK) {
 +  test(`BLOCK (#731 stop-control verb): ${command}`, () => {
@@ -234,6 +289,20 @@ index 70d7cca..58ab4c2 100644
 +    assert.equal(d.allow, true, `should allow: ${command} (reason=${d.reason})`);
 +  });
 +}
++
++// gate② P1 (sol, #731): a KNOWN, ACCEPTED residual, pinned so a future reader sees this ALLOW
++// was a deliberate boundary — not an oversight nobody caught. An npx local-package/`file:` spec
++// (or an equivalent scoped-package/aliased invocation) hides the `sapwood` command word entirely
++// behind a directory path the fence has no way to distinguish from an arbitrary unrelated
++// package: this is the SAME residual class checkControlSentinelArg's own doc already accepts for
++// "a script that hardcodes the sentinel path inside its own source" — an accident fence, never a
++// hostile jail (docs/security.md's own framing, "Sentinel isolation boundary"). If this
++// assertion ever starts failing, that's a signal the fence's scope changed underneath this test —
++// update docs/security.md's residual note in the same change, don't just delete this test.
++test("ALLOW (#731 KNOWN RESIDUAL, accepted — see docs/security.md 'Sentinel isolation boundary'): npx --offline file:<path>/engine hides the command word behind a local-package spec", () => {
++  const d = bash("npx --offline file:../engine stop");
++  assert.equal(d.allow, true, `documented residual, not a bug: ${d.reason}`);
++});
 +
  // ── ALLOW matrix (benign / read-only) ────────────────────────────────────────
  const ALLOW: string[] = [

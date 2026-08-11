@@ -103,6 +103,21 @@ test("#731: sapwood stop clear removes data/KILL_SWITCH", () => {
   });
 });
 
+test("#731 gate② P2 (sol): sapwood stop clear's message does NOT conflate pause with emergency stop — a remaining PAUSE freezes only new dispatch, merges resume regardless of it", () => {
+  withDataDir((dir, dbPath) => {
+    new State(dbPath).close();
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const res = runCli(["node", "sapwood", "stop", "clear", dbPath]);
+    assert.equal(res.code, 0, res.stderr);
+    // Merges resume unconditionally w.r.t. pause — the message must never say pause blocks
+    // merges (the bug: "dispatch and merges resume ... UNLESS ... pause").
+    assert.match(res.stdout, /merges resume.*unless an emergency stop/i);
+    // New dispatch is the ONLY thing a remaining pause keeps frozen.
+    assert.match(res.stdout, /new dispatch resumes only if pause/i);
+    assert.match(res.stdout, /pause.*never froze them|merges are unaffected by pause/i);
+  });
+});
+
 test("#731: sapwood stop --config reports the configured drain window in its activation message", () => {
   withDataDir((dir, dbPath) => {
     const cfgPath = writeConfig(dir, "cost: { dailyBudgetUsd: 50, drainWindowSec: 42 }\n");
@@ -143,6 +158,18 @@ test("#731: sapwood estop clear removes data/EMERGENCY_STOP and does NOT require
     const s = new State(dbPath);
     assert.equal(s.isEstopActive(), false);
     s.close();
+  });
+});
+
+test("#731 gate② P2 (sol): sapwood estop clear's message distinguishes kill-switch (dispatch AND merges) from pause (dispatch only, never merges)", () => {
+  withDataDir((dir, dbPath) => {
+    new State(dbPath).close();
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+    const res = runCli(["node", "sapwood", "estop", "clear", dbPath]);
+    assert.equal(res.code, 0, res.stderr);
+    assert.match(res.stdout, /kill switch keeps new dispatch and merges frozen/i);
+    assert.match(res.stdout, /pause keeps only new dispatch frozen/i);
+    assert.match(res.stdout, /merges are unaffected by pause/i);
   });
 });
 
