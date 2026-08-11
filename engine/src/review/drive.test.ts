@@ -1236,6 +1236,58 @@ test("driveEngineAgentReview (#503): a FAILURE from an untrusted app does NOT ta
   assert.match(outcome.kind === "queued" ? outcome.reason : "", /CI-evidence not satisfied/);
 });
 
+// ── #795 (mirrors #792 gate② round 2): the ci-red route's OWN getPRChecks read is unbound to any
+// head, exactly like the preflight CI-evidence gate's was before #792 fixed that one — a push
+// landing between the top-of-function status0/data0 read and this route's getPRChecks call means
+// the checks page can describe a NEWER head than status0/data0, misattributing that newer head's
+// red check to status0's (older) head. Same fix technique: revalidate with one getPRStatus
+// re-read before trusting the checks page, fail-closed (fall through, never dispatch) on mismatch.
+
+test("driveEngineAgentReview (#795): a MID-READ head move — getPRChecks answers for a NEWER head (H2) than the status0/data0 pair (H1) it's paired with — must NOT attribute H2's red check to H1's ci-red route; falls through instead of dispatching a fix leg against the wrong head", async () => {
+  let evaluated = false;
+  let statusCalls = 0;
+  const h1Status = status({ ciGreen: false, ciRed: true, headOid: "H1" });
+  const h2Status = status({ ciGreen: true, ciRed: false, headOid: "H2" });
+  const { deps } = makeDeps({
+    forge: {
+      getPRStatus: async () => {
+        statusCalls++;
+        // call 1: the top-of-function Promise.all read (H1, red). call 2+: this fix's same-head
+        // revalidation after getPRChecks answers — simulates a push landing in between, moving the
+        // head to H2 (which happens to have resolved green).
+        return statusCalls === 1 ? h1Status : h2Status;
+      },
+      getPRReviewData: async () => data({ headOid: "H1" }),
+      // GitHub answers with whatever the CURRENT head's checks are, regardless of which head this
+      // pass is "about" — PRChecksPage (forge.ts) carries no head/sha to bind against.
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.notEqual(outcome.kind, "ci-red", "must not attribute H2's checks-read red to H1's already-stale status0/data0");
+  assert.equal(evaluated, false, "no session dispatched off a mid-read head move either");
+});
+
+test("driveEngineAgentReview (#795): revalidation getPRStatus THROWS — fail-closed, same as a mismatch (never trust the red without proof of same-head)", async () => {
+  let statusCalls = 0;
+  const { deps } = makeDeps({
+    forge: {
+      getPRStatus: async () => {
+        statusCalls++;
+        if (statusCalls === 1) return status({ ciGreen: false, ciRed: true, headOid: "H1" });
+        throw new Error("forge unavailable");
+      },
+      getPRChecks: async () => checksPage({ conclusion: "FAILURE" }),
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.notEqual(outcome.kind, "ci-red", "a failed revalidation must fail closed, never dispatch a fix leg on unproven evidence");
+});
+
 // ── #507 review P1: the ci-red route precedes the pin machinery, exactly like the conflict route ─
 
 test("driveEngineAgentReview (#503, #507 P1): decisive APPROVED pin + a required check that went red on the SAME head -> {kind:'ci-red'}, pin untouched, no session — the consume path's refetchStillValid must NOT swallow this forever", async () => {
