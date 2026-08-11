@@ -25,11 +25,32 @@
 // behavior change for the three existing Reviewer kinds — see finalizeVerdict's own doc) the
 // classic path already used inline. #288's production composition binds its dependency-rich
 // construction and crash-safe audit delivery outside buildReviewerByKind's limited classic seam.
+//
+// STATELESS SIGNAL PARITY on that second path, closing #287's original documented deviation —
+// the engine-agent path now reports every stateless signal the classic path does:
+//  - `holdObservation` (#294, wired by #390) — reported on EVERY engine-agent pass, from
+//    `driveEngineAgentOne`'s own wrapper, using the SAME `holdFrom` helper the classic path
+//    uses. This was the whole #390 gap: the engine-agent GATE always honored a hold
+//    (checkPreflight evaluates holdLabels and queues), but nothing REPORTED it, so the
+//    conductor could never emit pr-held/pr-released for such a lane and a held PR was
+//    indistinguishable from "waiting on review" in persisted data.
+//  - `reviewerTransition` (#54) and `reviewSilenceEscalation` (#170) — present since #288, on
+//    the ONE engine-agent shape that has an equivalent clock: an `unavailable` attempt pin aged
+//    against the persisted FIRST-attempt time (see driveEngineAgentOne's own unavailable
+//    branch). Deliberately NOT extended further — see #390's design doc
+//    (docs/design/390-engine-agent-signal-parity.md, "reviewerTransition /
+//    reviewSilenceEscalation decision") for why the remaining shapes have no engine-agent
+//    equivalent to key off rather than a missing wire.
+//  - `ciPendingObservation` / `ciPendingEscalation` (#426, wired by #782) — attached to every
+//    coherent same-head outcome via the `ciAging`/`resolvePending` closures inside
+//    `driveEngineAgentOne`, the engine-agent twin of the classic path's own `observed()`/
+//    `withSignals`.
+// No documented deviation remains between the two paths' stateless-signal coverage.
 
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
-import { labelsInclude, labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js";
-import type { CiInertEscalationPayload, EngineAgentDriveDeps } from "../review/drive.js";
+import { firstMatchingLabel, labelsInclude, labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js";
+import type { AttemptPin, CiInertEscalationPayload, EngineAgentDriveDeps, EngineAgentDriveOutcome } from "../review/drive.js";
 import { buildCiInertEscalationPayload, driveEngineAgentReview } from "../review/drive.js";
 import { escalateInstructionPathChanges } from "../review/instruction-path-escalation.js";
 import type {
@@ -620,12 +641,10 @@ export class MergeDriver {
     // from mixed reads" stance the gate itself takes, and both are one-tick transients — an
     // absent observation is a no-op at the conductor, never a release.
     // Exact case-insensitive identity (#248 G3), reported in on-PR casing (see the
-    // DriveOutcome.holdObservation doc above).
-    const heldLabel = data.labels.find((l) => cfg.escalation.holdLabels.some((h) => h.toLowerCase() === l.toLowerCase()));
-    const holdObservation: NonNullable<DriveOutcome["holdObservation"]> = {
-      held: heldLabel != null,
-      ...(heldLabel != null ? { label: heldLabel } : {}),
-    };
+    // DriveOutcome.holdObservation doc above). #390: computed by the shared `holdFrom` helper —
+    // the engine-agent path reports the same observation through the same one computation, so
+    // the two paths cannot drift.
+    const holdObservation = this.holdFrom(data.labels);
     // #426 review round 3 (P2): every `observed(...)` return additionally reports the LIVE HEAD it
     // saw, with `pending: "unknown"` — such a pass never derived a gate, so it genuinely does not
     // know whether gate① is pending, but it DOES know which head it is looking at. That is enough
@@ -925,11 +944,12 @@ export class MergeDriver {
    * assertion passes unchanged): the only difference is this no longer wraps each return in
    * `withSignals` (that wrapper is #54/#170-specific — reviewer-failover-transition /
    * review-silence-escalation signals keyed off the CLASSIC `ReviewTriggerPin`, which the
-   * engine-agent path has no equivalent of yet — see review/drive.ts's own doc on its companion
-   * `engine_review_first_attempt_at` clock). The classic call site re-wraps this method's return
-   * in `withSignals` itself (unchanged shape); `driveEngineAgentOne` (below) calls this directly,
-   * with no signal wrapping — engine-agent's #54/#170-equivalent visibility is out of this PR's
-   * scope (documented deviation, PR body).
+   * engine-agent path keys off its own `engine_review_first_attempt_at` clock instead — see
+   * review/drive.ts's own doc). The classic call site re-wraps this method's return in
+   * `withSignals` itself (unchanged shape); `driveEngineAgentOne` (below) calls this directly
+   * and attaches its OWN signals in its wrapper (#390: `holdObservation` on every pass, via the
+   * shared `holdFrom` helper; #288: the failover/silence pair on the unavailable-pin shape;
+   * #782: `ciPendingObservation`/`ciPendingEscalation` via the `ciAging` closure).
    *
    * `status`/`data` must already be a MUTUALLY CONSISTENT, freshly-fetched pair for the SAME
    * head — this method does not re-verify that itself (both callers already guarantee it: the
@@ -1049,20 +1069,23 @@ export class MergeDriver {
   }
 
   /**
-   * #287 (E4b, design #279 §2): the engine-agent drive path. Delegates the whole attempt-pin /
-   * preflight / identity-WAL / refetch pipeline to review/drive.ts's `driveEngineAgentReview`
-   * (see that module's own doc for the exact ordering and every fail-closed branch), then, only
-   * on a delivered + refetch-validated decisive verdict, converges on the SAME `finalizeVerdict`
-   * the classic path uses. #460 (F37): a `{kind:"conflict"}` outcome (CONFLICTING preflight)
-   * converges on the SAME CONFLICTING deriveGate block driveOne's classic path uses, below.
-   * Never throws (mirrors driveOne's own never-throws contract) — a missing `engineAgentDeps`
-   * fails closed to `queued` rather than crashing the tick loop.
+   * #287 (E4b, design #279 §2): the engine-agent drive path's public entry point. Delegates the
+   * whole attempt-pin / preflight / identity-WAL / refetch pipeline to review/drive.ts's
+   * `driveEngineAgentReview` (see that module's own doc for the exact ordering and every
+   * fail-closed branch), then hands the raw outcome to `gateEngineAgentOutcome` (below) for the
+   * pipeline-outcome -> DriveOutcome mapping. Never throws (mirrors driveOne's own never-throws
+   * contract) — a missing `engineAgentDeps` fails closed to `queued` rather than crashing the
+   * tick loop, and reports no observation at all: a lane with no drive context never read the PR,
+   * so there is nothing to observe (a no-op at the conductor, never a release).
    *
-   * #782: every outcome derived from a coherent same-head status/data pair now also carries
-   * `ciPendingObservation` (+ `ciPendingEscalation` past the bound) — the engine-agent twin of
-   * driveOne's own `observed()`/`withSignals`, via the `ciAging`/`resolvePending` closures below.
-   * `ciPendingPin` is threaded in by `driveOne` above, unchanged from what the conductor already
-   * supplies at its one call site.
+   * #390: the ONE place the engine-agent path attaches its `holdObservation` — the analogue of
+   * the classic path's `withSignals`/early-return pair, in a single wrapper so a branch inside
+   * `gateEngineAgentOutcome` nobody remembers to update still reports it (the same "attach it in
+   * the shared wrapper" lesson #426 review round 3 applied to the classic path's `observed`).
+   * Outcomes that carry their own PR read (`review.data` — conflict/ci-red/consume, and most
+   * queued shapes) use ITS labels, the exact snapshot this pass started from; everything else
+   * (merged/needs-human, and the rare mixed-read queue with no PR data at all) asks
+   * `engineAgentHold` for a live read (skipped on `merged` and when no hold label is configured).
    */
   private async driveEngineAgentOne(
     pr: number,
@@ -1075,11 +1098,11 @@ export class MergeDriver {
       return { kind: "queued", pr, reason: "engine-agent: no drive context supplied for this lane (missing engineAgentDeps)" };
     }
     // #782: the attempt pin as it stood BEFORE this pass — the one piece of state `resolvePending`
-    // below needs from OUTSIDE the returned outcome to detect a head move (review/drive.ts's own
-    // attempt-gate clears/rewrites the pin internally; this method never observes that directly,
-    // only its effect on the head this pass's outcome carries).
+    // (inside `gateEngineAgentOutcome`) needs from OUTSIDE the returned outcome to detect a head
+    // move (review/drive.ts's own attempt-gate clears/rewrites the pin internally; this method
+    // never observes that directly, only its effect on the head this pass's outcome carries).
     const pinBefore = engineAgentDeps.getAttemptPin();
-    const outcome = await driveEngineAgentReview(
+    const review = await driveEngineAgentReview(
       { ...engineAgentDeps, forge: this.deps.forge, cfg: this.deps.cfg, reviewerAdapter },
       pr,
       issue,
@@ -1088,7 +1111,68 @@ export class MergeDriver {
     // written a fresh pin this same tick (a head-move clear, a provisional 'unavailable' write, a
     // decisive upgrade). This is what `engineAgentCiPending`'s exclusivity invariant reads.
     const pinAfter = engineAgentDeps.getAttemptPin();
+    const gated = await this.gateEngineAgentOutcome(pr, review, engineAgentDeps, ciPendingPin, pinBefore, pinAfter);
+    const hold = "data" in review ? this.holdFrom(review.data.labels) : await this.engineAgentHold(pr, gated);
+    return hold ? { ...gated, holdObservation: hold } : gated;
+  }
 
+  /** #294/#390: the ONE hold-observation computation both drive paths use. Exact case-
+   *  insensitive identity (#248 G3) via the shared `firstMatchingLabel` witness, reported in the
+   *  label's ON-PR casing so the conductor's `pr-held` payload names the string a human actually
+   *  applied. Pure: it never gates anything — `deriveGate`'s own holdLabels WAIT check remains
+   *  the sole scheduling effect of a hold. */
+  private holdFrom(labels: readonly string[]): NonNullable<DriveOutcome["holdObservation"]> {
+    const label = firstMatchingLabel(labels, this.deps.cfg.escalation.holdLabels);
+    return { held: label != null, ...(label != null ? { label } : {}) };
+  }
+
+  /** #390: the hold observation for an engine-agent outcome whose triggering `review` carried no
+   *  PR data of its own (merged / needs-human / a rare mixed-read queue — see
+   *  `EngineAgentDriveOutcome`).
+   *   - MERGED is terminal: reported NOT-held unconditionally, the SAME ruling the classic path's
+   *     own MERGED early-return takes (#294 round 2) — the conductor closes the lane on this very
+   *     outcome, so announcing a hold no later pass could ever release would strand the episode,
+   *     while `held:false` lets a previously-announced one close with `pr-released`.
+   *   - No hold label CONFIGURED -> `held:false` by construction, with no read at all.
+   *   - Otherwise ONE live label read. That it is a SEPARATE read from whatever `review/drive.ts`
+   *     gated on is deliberate and not a mixed-read violation of the gate's own stance: the
+   *     observation gates nothing (it is pure visibility), and it is the same shape #288's own
+   *     engine-agent signals already use on this path (the unavailable-pin branch below refetches
+   *     status+data for exactly this reason) — engine-agent signals are derived from a
+   *     merge-driver-side live read, never from drive.ts's internal gate reads. A failed read
+   *     reports NOTHING, which is a no-op at the conductor and never a release (see
+   *     `DriveOutcome.holdObservation`). */
+  private async engineAgentHold(pr: number, outcome: DriveOutcome): Promise<DriveOutcome["holdObservation"]> {
+    if (outcome.kind === "merged" || this.deps.cfg.escalation.holdLabels.length === 0) return { held: false };
+    try {
+      return this.holdFrom((await this.deps.forge.getPRReviewData(pr)).labels);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * #390: `driveEngineAgentOne`'s gate half — the pipeline outcome -> DriveOutcome mapping,
+   * UNCHANGED (mechanical split of the pre-#390 method body, so the signal wrapper above has
+   * exactly one place to attach `holdObservation` to). Never throws, same contract as its caller.
+   * #460 (F37): a `{kind:"conflict"}` outcome (CONFLICTING preflight) converges on the SAME
+   * CONFLICTING deriveGate block driveOne's classic path uses, below.
+   *
+   * #782: every outcome derived from a coherent same-head status/data pair also carries
+   * `ciPendingObservation` (+ `ciPendingEscalation` past the bound) — the engine-agent twin of
+   * driveOne's own `observed()`/`withSignals`, via the `ciAging`/`resolvePending` closures below.
+   * `ciPendingPin` is threaded in by `driveOne`/`driveEngineAgentOne` above, unchanged from what
+   * the conductor already supplies at its one call site. `pinBefore`/`pinAfter` are the attempt
+   * pin as read by the caller immediately before/after `driveEngineAgentReview` ran.
+   */
+  private async gateEngineAgentOutcome(
+    pr: number,
+    outcome: EngineAgentDriveOutcome,
+    engineAgentDeps: Omit<EngineAgentDriveDeps, "forge" | "cfg" | "reviewerAdapter">,
+    ciPendingPin: CiPendingPin,
+    pinBefore: AttemptPin | null,
+    pinAfter: AttemptPin | null,
+  ): Promise<DriveOutcome> {
     /** #782 AC1/AC2: resolve this pass's three-value `pending` for `head`, applying the head-move
      *  episode-cancel FIRST (same shape as driveOne's own `headMoveCancel`, #426 review round 2) —
      *  a pin recorded for a head other than the one this pass observed means the episode is over,
