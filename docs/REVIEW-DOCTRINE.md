@@ -114,6 +114,42 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   ask: does the test's verdict itself depend on which of two uncontrolled real operations finishes
   first? If yes, it needs a seam. If the timing is only a generous, documented backstop around a
   deterministic fake or a bounded real passthrough, it is doctrine-compliant as written.
+- **Model the real thing, not a convenient proxy.** The failure class is DRIFT RISK, not
+  "unreality": a test constant that silently duplicates a value the repo already defines
+  elsewhere — a CSS rule, a cap constant — with nothing tying the two together, so the two can
+  silently diverge the moment the real source changes and the test stays green regardless. The
+  rule: read the value from its source, or pin the two together with an assertion that fails the
+  moment they disagree. This does NOT require asserting against "the real computed style after
+  cascade" or "real rendered bounding extents" in general — the default harness is DOM-free (real
+  DOM is opt-in per test file, see docs/dev-guide/07-dashboard.md). This repo's own accepted
+  remediation is a deterministic model plus a pinning assertion, not a live render: `textBox()`/
+  `CHAR_ADVANCE` in dashboard/src/hero/hero.test.ts turns each element's font-size and character
+  count into a rendered extent without a browser, tied to the same inputs the real draw path
+  uses, and the cascade/source-order assertion in hero.test.ts pins `.hero-small`'s declaration
+  order against every 9px caption rule instead of hand-copying which one wins. Evidence bar:
+  three instances across two issues, one round (#353) — two shapes
+  seen so far, not a closed list. (1) the test computes its expected value outside the thing it's
+  testing (a hand-picked font-size, a center-point distance) instead of reading it from, or
+  pinning it against, the source that actually decides it — PR #738 (issue #728)'s
+  `hero-small`/`hero-outcome-tally` CSS-cascade reorder left the actual computed size at 10px
+  while the overlap test still modeled 9px, and stayed green until a reviewer read the cascade by
+  hand; the same PR's first round modeled overlap from element *centers* rather than the
+  elements' actual rendered extents, so a wider label or a longer multi-digit tally could pass
+  every assertion while visually colliding. (2) the test exercises only the easy/nominal instance
+  of a rule while the AC's own wording names a combinatorial or boundary case it never constructs
+  — PR #737's render-cap test used a single pinned row, so an over-cap or aged-out pin (the exact
+  case the AC's "showing latest N of M" disclosure exists for) was never exercised. When an AC's
+  claim is about geometry, a rendered count, or a boundary condition, trace the value to what
+  actually decides it and either read it from there or pin the two together — never hand-copy a
+  value that already lives somewhere else in the codebase.
+
+  FINE, and NOT the same failure class: a literal that IS the specification — a golden value the
+  test exists to pin down, with nothing else in the codebase claiming to own it — is fine. A
+  literal that restates a value the codebase already owns elsewhere, untied to that source, is
+  the defect, regardless of whether the value happens to be correct today. `textBox()`/
+  `CHAR_ADVANCE` is the worked example of a compliant deterministic model: it substitutes for a
+  live render, but every input it consumes (font-size, character count) is the same value the
+  real draw path consumes, so it cannot silently diverge from what actually gets drawn.
 - **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
   be prominently flagged in review, with a recommendation to route it needs-human rather than
   auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
