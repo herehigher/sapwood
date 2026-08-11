@@ -2029,7 +2029,11 @@ tick), and excuses exactly two classes of edit from drift, both narrowly scoped:
    that gains its FIRST marker (a PO's very first #703-discipline comment) would still drift, since
    the blank line conventionally separating the marker from surrounding prose survives a bare
    line-removal as a dangling trailing newline or a doubled blank line that a markerless body never
-   had (#752 PO-adjudication finding 2).
+   had (#752 PO-adjudication finding 2). This collapse is WHOLE-BODY, not fence-aware like the
+   marker scan above — a whitespace-only blank-line-run change INSIDE a fenced code block is also
+   excused from drift, same as anywhere else in the body. Code samples are not byte-protected
+   against that one narrow class of edit; only well-formed marker lines get the fence-aware
+   treatment.
 
 Every other byte of the body still participates in the hash, so any non-marker edit still drifts
 fail-closed; a marker advance plus a real edit still drifts too. This normalization is scoped to

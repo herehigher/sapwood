@@ -3343,11 +3343,21 @@ async function checkAcDriftBeforeDrive(
  *  computation see the PO's advance the same tick it lands.
  *
  *  `liveBody` is `null` only when `checkAcDriftBeforeDrive` never performed a live read this call
- *  (its pre-#283 legacy-lane early return) — in that case `state.getAcSnapshot` below is also
- *  expected to return nothing, so this function's own early return covers it; there is no live
- *  body to fall back to and none is needed. Only the comment STREAM needs its own live read here —
- *  a comment can arrive without touching the body at all, which is exactly the batch-8 incident
- *  this whole feature exists to close.
+ *  (its pre-#283 legacy-lane early return, `w.ac_body_hash == null`) — on that arm, this function
+ *  falls back to `snapshot.body`, exactly the unconditional read it did before this fix. For a
+ *  genuinely pre-#283 lane (dispatched before AC snapshots existed at all), `state.getAcSnapshot`
+ *  below is also expected to return nothing, so the `!snapshot` early return covers it and the
+ *  fallback never runs. This is NOT proven for every shape, though: a lane whose OWN
+ *  `ac_body_hash` is null could still find a non-null, issue-keyed `ac_snapshots` row here if an
+ *  EARLIER or LATER dispatch against the same issue number left one behind — `snapshot.body` would
+ *  then be a real but UNOWNED body, possibly stale relative to this lane. Unlike
+ *  `checkAcDriftBeforeDrive` (which checks `snapshot.bodyHash !== expectedHash` ownership before
+ *  ever trusting a snapshot), this function does not verify ownership on the null-liveBody arm —
+ *  a pre-existing gap, byte-identical to this function's behavior before #752 (which always read
+ *  `snapshot.body` unconditionally, ownership-unchecked, on every call). Left as-is here — not a
+ *  regression this PR introduces or widens, and not this PR's scope to close.
+ *  Only the comment STREAM needs its own live read here — a comment can arrive without touching
+ *  the body at all, which is exactly the batch-8 incident this whole feature exists to close.
  *
  *  Returns `null` when the lane should drive normally this tick: no AC snapshot recorded (a
  *  pre-#283/#652 legacy lane — nothing to recheck a cursor against, same "drive normally"
