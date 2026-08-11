@@ -207,3 +207,32 @@ How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbati
    design/technical direction (architect/plan re-review) instead of grinding through more fix
    rounds. The nearest mechanism today is the fix-round cap escalating to a human — but the
    doctrine names DESIGN RE-ENTRY, not just human escalation, as the intended response.
+
+## Prompt architecture doctrine (#699)
+
+Three governing principles for what belongs in a role's SHIPPED PROMPT TEXT
+(`engine/prompts/*.md`), distilled by the owner (2026-08-06) after three batch-10 incidents —
+#698's "prompt text cannot prescribe a state the machinery has no representation for"; the
+no-positive-completeness rule (four recurrences); PR #686's finding-mandate removal — turned out
+to be symptoms of one question never asked systematically. Standing test for gate② on any
+prompt-touching PR; apply clause-by-clause, not file-by-file.
+
+1. **A — legitimate content.** Role definition, duties, scope, goals, deliverables, norms,
+   constraints. That is the whole legitimate surface.
+2. **B — judgment preemption.** Content that substitutes for the LLM's judgment — a pre-baked
+   conclusion, a verdict-steering assertion, a claim-shaped statement the model should derive from
+   evidence instead. Disposition: delete, or rewrite as a judgment-preserving goal/constraint.
+3. **C — machinery in prose.** A deterministic check/flow/value the engine, config, schema, or
+   guard could enforce (or already does — a drifting duplicate). Disposition: name the target
+   carrier and file a follow-up to move it there — never "fix" by rewording.
+
+**Q3 safety-floor exception.** A rule whose omission produces unsafe output (the AC-evidence-tier
+floor; the human-merge-only-paths enumeration) stays prompt-resident even where a pull-model
+channel — `engine/src/roles/skills-plugin.ts`'s (#639/#640) on-demand skill serving the same
+`docs/security.md` content — also exists: a session must actively invoke a skill, so it is never a
+load-bearing substitute for content that must be unconditionally seen. Where principle 3 collides
+with a floor like this, record the tension and the proposed carrier instead of deleting — a
+mechanically-pinned "mirror-pair discipline" test against the canonical source
+(`engine/src/roles/prompts.test.ts`'s `#628`/`#653` tests) is the shipped answer when a floor has
+more than one hand-maintained carrier. #699's own audit
+(`docs/design/699-prompt-architecture-audit.md`) is the worked example.
