@@ -120,13 +120,14 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   silently diverge the moment the real source changes and the test stays green regardless. The
   rule: read the value from its source, or pin the two together with an assertion that fails the
   moment they disagree. This does NOT require asserting against "the real computed style after
-  cascade" or "real rendered bounding extents" in general — the harness has no DOM. This repo's
-  own accepted remediation is a deterministic model plus a pinning assertion, not a live render:
-  `textBox()`/`CHAR_ADVANCE` (dashboard/src/hero/hero.test.ts:987-993) turns each element's
-  font-size and character count into a rendered extent without a browser, tied to the same
-  inputs the real draw path uses, and the cascade/source-order assertion at hero.test.ts:719
-  pins `.hero-small`'s declaration order against every 9px caption rule instead of hand-copying
-  which one wins. Evidence bar: three instances across two issues, one round (#353) — two shapes
+  cascade" or "real rendered bounding extents" in general — the default harness is DOM-free (real
+  DOM is opt-in per test file, see docs/dev-guide/07-dashboard.md). This repo's own accepted
+  remediation is a deterministic model plus a pinning assertion, not a live render: `textBox()`/
+  `CHAR_ADVANCE` in dashboard/src/hero/hero.test.ts turns each element's font-size and character
+  count into a rendered extent without a browser, tied to the same inputs the real draw path
+  uses, and the cascade/source-order assertion in hero.test.ts pins `.hero-small`'s declaration
+  order against every 9px caption rule instead of hand-copying which one wins. Evidence bar:
+  three instances across two issues, one round (#353) — two shapes
   seen so far, not a closed list. (1) the test computes its expected value outside the thing it's
   testing (a hand-picked font-size, a center-point distance) instead of reading it from, or
   pinning it against, the source that actually decides it — PR #738 (issue #728)'s
