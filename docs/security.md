@@ -1823,6 +1823,17 @@ stop-control verbs, apply-checked by `engine/src/guard/patch-731-apply-check.tes
 not as a documented-and-accepted residual, and apply the patch before relying on the
 guard to cover these verbs.
 
+**Once applied, the patch fences the *discoverable* stop-control invocation forms** — the
+bare `sapwood` binary, `node .../cli.js`/`cli.ts` (path-prefixed or direct-executed), and
+`npx sapwood[@version]` (npm's own documented "run a specific/latest version" syntax) —
+the shapes this repo's own operator docs and `--help` text teach. An invocation that hides
+the command word behind an arbitrary package spec instead — `npx file:<path>/engine`, a
+scoped package such as `npx @<scope>/engine`, or an aliased binary — is **not** fenced and
+is an **accepted residual**, in the SAME class as the hardcoded-sentinel-path-inside-a-
+script residual documented above: an accident fence recognizes the invocations an operator
+would actually reach for, not every way a determined adversary could construct one. This
+list is not exhaustive.
+
 Until every gap above is closed, treat the isolation boundary as "a worker won't
 accidentally step here, and the obvious direct/indirect vectors are blocked," not "a
 worker provably cannot reach here by any means."
