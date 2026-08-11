@@ -625,26 +625,40 @@ const PROTECTED_SUFFIXES = [
   "/engine/src/roles/merge-driver.ts",
 ];
 
-// Out-of-band control sentinels (#81, fable gate② follow-up to #80): data/KILL_SWITCH and
-// data/PAUSE live in the engine's OWN data dir (state.ts killSwitchPath()/pausePath()) —
-// outside worker worktrees (no --add-dir data) as a permission-layer boundary, not an OS
-// sandbox (docs/security.md's isolation-boundary note). A worker has zero legitimate reason
-// to touch either path: forging PAUSE starves competing dispatch, deleting KILL_SWITCH
-// defeats the hard-stop escape hatch. Matched on the normalized absolute path, so relative
-// traversal (`../../data/PAUSE`) resolves to the same block as the direct path. Matched
+// Out-of-band control sentinels (#81, fable gate② follow-up to #80): data/KILL_SWITCH,
+// data/PAUSE, and data/EMERGENCY_STOP live in the engine's OWN data dir (state.ts
+// killSwitchPath()/pausePath()/estopPath()) — outside worker worktrees (no --add-dir data)
+// as a permission-layer boundary, not an OS sandbox (docs/security.md's isolation-boundary
+// note). A worker has zero legitimate reason to touch any of the three: forging PAUSE
+// starves competing dispatch, deleting KILL_SWITCH defeats the hard-stop escape hatch, and
+// deleting EMERGENCY_STOP defeats the operator's immediate-stop control — the strictest of
+// the three tiers (#724), and this rule originally missed it (#779, found at gate② on PR
+// #774; #732). Matched on the normalized absolute path, so relative traversal
+// (`../../data/EMERGENCY_STOP`) resolves to the same block as the direct path. Matched
 // case-insensitively (#84 gate② P2-1): macOS/APFS is case-insensitive by default, so
 // `touch data/pause` creates the file existsSync(pausePath()) finds and `rm data/kill_switch`
-// deletes the real sentinel — the $-anchor keeps near-misses (data/paused) unaffected.
-const CONTROL_SENTINEL_RE = /\/data\/(KILL_SWITCH|PAUSE)$/i;
+// deletes the real sentinel — the $-anchor keeps near-misses (data/paused, data/EMERGENCY_STOPPED)
+// unaffected.
+const CONTROL_SENTINEL_RE = /\/data\/(KILL_SWITCH|PAUSE|EMERGENCY_STOP)$/i;
 
 /** If `abs` (a normalized absolute path) is a boundary file, return a short label; else null. */
 function protectedPathLabel(abs: string): string | null {
-  if (CONTROL_SENTINEL_RE.test(abs)) return "data/KILL_SWITCH or data/PAUSE (control sentinel)";
+  if (CONTROL_SENTINEL_RE.test(abs))
+    return "data/KILL_SWITCH, data/PAUSE, or data/EMERGENCY_STOP (control sentinel)";
   if (/\/\.claude\/settings(\.local)?\.json$/.test(abs)) return ".claude/settings.json (hook wiring)";
   if (/\/\.github\/workflows(\/|$)/.test(abs)) return ".github/workflows/** (CI integrity)";
   // The engine config carries guard.mode + reviewer/security settings — a worker editing it to
   // guard.mode:soft would make future workers observe-only. Human-merge-only (Codex #26 R2).
   if (/\/sapwood\.config\.(ya?ml|json)$/.test(abs)) return "sapwood.config.* (engine/guard config)";
+  // The init-starter template (`sapwood init`'s sampleConfig()/ensureConfig(), #386/#577) carries
+  // the same safe-by-default pin (merge.mode: produce-pr-and-stop) the root config's guard.mode/
+  // reviewer.* fields carry above — a worker weakening it here degrades every future `sapwood
+  // init`'s default, not just this repo's live config. #776 already routes edits to it through
+  // instruction-path escalation; this closes the matching HARD guard boundary the root config
+  // gets (#781, found at gate② on PR #776: guard allow=true for this file). Sibling rule, not a
+  // widened root regex, so the two labels/rationales stay distinct in reasons and tests.
+  if (/\/sapwood\.config\.example\.(ya?ml|json)$/.test(abs))
+    return "sapwood.config.example.* (init-starter template)";
   // The COMPILED guard artifacts are what each PreToolUse invocation actually executes — a
   // worker overwriting dist/guard-hook.js (or the guard.js it loads) with a no-op would disable
   // hard-mode enforcement for the next tool call. Protect the artifact, not just src (Codex #26 R3).

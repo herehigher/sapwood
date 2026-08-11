@@ -236,6 +236,16 @@ const BLOCK: [string, string, string][] = [
   // literal-arg matcher's `-`-prefix skip.
   ["node kill.js --target=../../data/PAUSE", CWD, "write-path"],
   ["node unpause.js --file=data/kill_switch", CWD, "write-path"],
+  // #779: EMERGENCY_STOP is the strictest of the three sentinels (#724) and was missing from
+  // this rule's first pass — same Bash-vector coverage as KILL_SWITCH/PAUSE above.
+  ["touch data/EMERGENCY_STOP", CWD, "write-path"],
+  ["rm data/EMERGENCY_STOP", CWD, "write-path"],
+  ["rm -f ../../data/EMERGENCY_STOP", CWD, "write-path"],
+  ["echo x > data/EMERGENCY_STOP", CWD, "write-path"],
+  ["node kill.js ../../data/EMERGENCY_STOP", CWD, "write-path"],
+  ["node kill.js --target=data/EMERGENCY_STOP", CWD, "write-path"],
+  ["touch data/emergency_stop", CWD, "write-path"],
+  ["rm ../../data/Emergency_Stop", CWD, "write-path"],
 ];
 
 for (const [command, cwd, kw] of BLOCK) {
@@ -340,6 +350,12 @@ const ALLOW: string[] = [
   "touch data/paused",
   "touch data/pause-notes.md",
   "node build.js --out=dist/app.js",
+  // #779 reverse test: EMERGENCY_STOP near-miss ($-anchored) must still pass.
+  "touch data/EMERGENCY_STOPPED",
+  "touch data/EMERGENCY_STOP.md",
+  // #781 reverse test: sapwood.config.example near-misses must still pass.
+  "touch sapwood.config.example2.yaml",
+  "touch sapwood.config.example-notes.md",
 ];
 
 for (const command of ALLOW) {
@@ -548,6 +564,20 @@ const WRITE_BLOCK: [string, string][] = [
   ["data/pause", "write-path"],
   ["data/kill_switch", "write-path"],
   ["/repo/data/Pause", "write-path"],
+  // #779: EMERGENCY_STOP — same direct-write, traversal, and case-variant coverage as
+  // KILL_SWITCH/PAUSE above (the strictest of the three sentinel tiers, #724).
+  ["data/EMERGENCY_STOP", "write-path"],
+  ["/repo/data/EMERGENCY_STOP", "write-path"],
+  ["../../data/EMERGENCY_STOP", "write-path"],
+  ["data/emergency_stop", "write-path"],
+  ["/repo/data/Emergency_Stop", "write-path"],
+  // #781: the init-starter template — same rule shape as sapwood.config.* above, but a
+  // separate match target (the root config and the shipped example are different files).
+  ["sapwood.config.example.yaml", "write-path"],
+  ["sapwood.config.example.yml", "write-path"],
+  ["sapwood.config.example.json", "write-path"],
+  ["/repo/sapwood.config.example.yaml", "write-path"],
+  ["../../sapwood.config.example.yaml", "write-path"],
 ];
 for (const [file_path, kw] of WRITE_BLOCK) {
   test(`WRITE BLOCK: ${file_path}`, () => {
@@ -557,7 +587,17 @@ for (const [file_path, kw] of WRITE_BLOCK) {
   });
 }
 
-for (const file_path of ["src/app.ts", "README.md", "/repo/engine/src/forge.ts", ".github/ISSUE_TEMPLATE.md", "data/README.md"]) {
+for (const file_path of [
+  "src/app.ts",
+  "README.md",
+  "/repo/engine/src/forge.ts",
+  ".github/ISSUE_TEMPLATE.md",
+  "data/README.md",
+  // #779 reverse: near-miss sentinel name stays allowed ($-anchor).
+  "data/EMERGENCY_STOPPED",
+  // #781 reverse: near-miss template name stays allowed ($-anchor).
+  "sapwood.config.example2.yaml",
+]) {
   test(`WRITE ALLOW: ${file_path}`, () => {
     assert.equal(guardDecision("Edit", { file_path }, CWD).allow, true);
   });
@@ -566,6 +606,13 @@ for (const file_path of ["src/app.ts", "README.md", "/repo/engine/src/forge.ts",
 // ── hook adapter: fail-closed ────────────────────────────────────────────────
 test("config write via Bash redirect is also blocked (worker can't echo > sapwood.config.yaml)", () => {
   const d = guardDecision("Bash", { command: "echo 'guard: {mode: soft}' > sapwood.config.yaml" }, CWD);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("write-path"));
+});
+
+// #781: the init-starter template gets the same Bash-redirect coverage as the root config above.
+test("init-starter template write via Bash redirect is also blocked (worker can't echo > sapwood.config.example.yaml)", () => {
+  const d = guardDecision("Bash", { command: "echo 'merge: {mode: auto}' > sapwood.config.example.yaml" }, CWD);
   assert.equal(d.allow, false);
   assert.ok(d.reason.toLowerCase().includes("write-path"));
 });

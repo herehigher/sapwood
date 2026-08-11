@@ -1520,7 +1520,9 @@ const ConfigSchemaRaw = z
           "engine/src/review/instruction-path-escalation.ts",
           "engine/src/config/config.ts",
           // #577: sapwood init's starter template is an instruction carrier too. Escalation makes
-          // edits human-merge-only; the separate hard guard boundary is tracked by #781.
+          // edits human-merge-only; guard.ts's protectedPathLabel also hard-blocks writes to it
+          // directly (#781), the same defense-in-depth relationship the two paths above have with
+          // the guard's own PROTECTED_SUFFIXES/config-file rule.
           "sapwood.config.example.yaml",
           // #539: docs/security.md carries the canonical human-merge-only list and documents this
           // mechanism's own trust chain — the same self-reference class as the two paths above.
