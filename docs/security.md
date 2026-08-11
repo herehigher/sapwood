@@ -586,7 +586,21 @@ startup or dispatch.
   whether this rule's patch has been applied, and nothing here closes a leg that bypasses the
   guard hook itself (a non-`claude`-CLI process, or a session the engine didn't dispatch —
   SAPWOOD_DEFAULT_BRANCH unset leaves the rule inactive by
-  design, same fail-safe stance the guard's other engine-set-env rules already take).
+  design, same fail-safe stance the guard's other engine-set-env rules already take). **What the
+  rule covers, stated plainly, not claimed as exhaustive:** every argv-VISIBLE raw-git push
+  form — direct refspec destinations, `--delete`/`--mirror`/`--all`, `--repo`/`--repo=`, an argv
+  `-c`/`--config` alias injection local to that one invocation, and any refspec token the guard
+  cannot statically prove safe (an unresolved `$`/backtick/`*`). It does **not** cover a push
+  whose effective subcommand is resolved through git STATE the argv itself never reveals — a
+  PRE-PERSISTED, repo-local `git config alias.*` (set by an earlier, separately-judged command)
+  or `GIT_CONFIG_*` environment aliases carried in from outside that one Bash call. Closing that
+  class would mean modeling git's own config resolution across commands and environment, not
+  scanning one more token spelling; it is an accepted residual, the same class
+  `checkControlSentinelArg`'s "a script that hardcodes the path internally, with no CLI argument"
+  residual already is — see [Sentinel isolation boundary](#sentinel-isolation-boundary-honest-statement)
+  — and GitHub branch protection (DR #616) is the backstop of record for it: this rule was always
+  framed as defense-in-depth AT the guard's enforcement point, never a complete jail around it
+  (gate② round 2, #679, PM ruling).
 - **Host-credential theft: engine-unpluggable.** L1 removes the forge API credential from the
   worker leg's OWN environment — it does nothing to, and cannot touch, the operator's real
   credential store on the HOST the engine itself runs on (`gh`'s `hosts.yml`, the OS keychain, an
