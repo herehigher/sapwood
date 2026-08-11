@@ -169,8 +169,8 @@ Flags:
   --config PATH  Load config from this path instead of probing the defaults. Selects
                  config-file-relative logging.path, promptFile, goal.file, and doctrine.file
                  keys (so its default log sits beside that config). The DB
-                 (data/sapwood.sqlite), KILL_SWITCH/PAUSE, sessions, and worktree roots
-                 remain relative to the current working directory.
+                 (data/sapwood.sqlite), EMERGENCY_STOP/KILL_SWITCH/PAUSE, sessions, and
+                 worktree roots remain relative to the current working directory.
   --once         Tick driver only (engine.driver: tick): run exactly one tick, then exit
                  (exit 1 if the tick attempt failed). No equivalent under the round
                  orchestrator, which has no notion of a single tick — passing it under

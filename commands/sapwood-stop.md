@@ -11,10 +11,11 @@ state DB (`engine/src/state/state.ts`) — no config edit needed for any of them
   before the kill switch every tick and wins when both sentinels are present. In the normal path,
   it hard-kills every running/fixing lane's process group on that same tick: there is no drain
   window, in-flight WIP is lost, and killed lanes escalate to `needs-human` with their evidence
-  preserved. The current kill path traverses terminal-reclaim and probe-before-reclaim forge
-  reads, so a hung forge call can delay the kill ([#778](https://github.com/herehigher/sapwood/issues/778)).
-  Use it only for credential exposure, destructive calls, or a cost blowout faster than the drain
-  window.
+  preserved. The kill itself is forge-free — a synchronous durable-PID signal that runs before any
+  terminal-reclaim or probe-before-reclaim forge read, so a hung or rejecting forge call can never
+  delay or prevent it (#778); only the `needs-human` labels/comments that follow are forge calls,
+  and they're best-effort, never gating the kill. Use it only for credential exposure, destructive
+  calls, or a cost blowout faster than the drain window.
 - **kill switch** (`data/KILL_SWITCH`, `killSwitchPath`) — the drain-first tier. Freezes ALL new
   dispatch and merges; running workers are asked to hand off gracefully within
   `cfg.cost.drainWindowSec`, then the conductor escalates to a hard kill. Use this to stop
@@ -39,7 +40,7 @@ effect on the next tick as described below.
 If the argument is `--emergency`, set the emergency-stop sentinel:
 
 ```bash
-mkdir -p data && touch data/EMERGENCY_STOP && echo "EMERGENCY STOP SET (data/EMERGENCY_STOP) — in the normal path, running/fixing lane process groups hard-kill this tick; no drain window and in-flight WIP is lost. A hung forge read can delay the kill (#778). Clear with /sapwood-stop --clear-emergency only after human review."
+mkdir -p data && touch data/EMERGENCY_STOP && echo "EMERGENCY STOP SET (data/EMERGENCY_STOP) — in the normal path, running/fixing lane process groups hard-kill this tick via a forge-free synchronous durable-PID signal; no drain window and in-flight WIP is lost. Clear with /sapwood-stop --clear-emergency only after human review."
 ```
 
 If the argument is `--clear-emergency`, clear the emergency-stop sentinel:

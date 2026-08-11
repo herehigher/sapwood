@@ -524,6 +524,25 @@ class FakeSupervisor implements Supervisor {
   clearStaleFixEntrySentinel(w: string): void {
     this.clearedFixEntrySentinels.push(w);
   }
+  /** #778: a pid-liveness fake — set per-worker (default false) to simulate a confirmed-alive
+   *  durable pid, once `enableDurablePidCapability()` below has attached the reader. Mirrors
+   *  round.test.ts's own FakeSupervisor fixture (#724) for the SAME optional capability. */
+  durablePids: Record<string, boolean> = {};
+  /** #778: every (worker, signal) pair signalDurablePid was called for, in order — the
+   *  forge-free hard-kill pass's proof that a confirmed-alive running/fixing lane actually got
+   *  signaled, independent of whether/when the forge-dependent probe() ever resolves. */
+  signalsSent: Array<{ worker: string; signal: "SIGTERM" | "SIGKILL" }> = [];
+  /** #778 (mirrors #724's round 4, P2-3): BOTH left genuinely unset by default — "no opinion,"
+   *  the same stance every other optional Supervisor method already takes; most existing fixture
+   *  callers never touch durable-pid behavior at all. */
+  durablePidAlive?: (w: string) => boolean;
+  signalDurablePid?: (w: string, signal: "SIGTERM" | "SIGKILL") => void;
+  enableDurablePidCapability(): void {
+    this.durablePidAlive = (w) => this.durablePids[w] ?? false;
+    this.signalDurablePid = (w, signal) => {
+      this.signalsSent.push({ worker: w, signal });
+    };
+  }
 }
 
 const LEGACY_LABEL_CONFIG = {
@@ -8290,6 +8309,74 @@ test("tick: EMERGENCY_STOP — the `emergency-stop` event is appended once per a
 
     const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["emergency-stop"]);
     assert.equal(events.length, 1);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #778 gate② finding (PR #774): before this fix, the E-STOP branch reached the hard kill only
+// AFTER adoptAndReclaimTerminal's own probe loop resolved for every running/fixing lane — and
+// that loop awaits `supervisor.probe`, which is forge-dependent (worker.ts's own `lanePr` ->
+// `forge.listOpenPrsForBranch` read). A wedged/never-resolving forge read therefore delayed or
+// permanently prevented the kill. Deterministic seam control, not a real-timer race (review
+// doctrine, matches dashboard.test.ts's own precedent): `tick(...)` is fired WITHOUT being
+// awaited (its own promise never settles here — `probe()` never resolves, so nothing downstream
+// of it ever does either), then `setImmediate` drains the microtask queue so every
+// already-resolved step ahead of the hung probe has run. Proven red against pre-#778 code: with
+// `hardKillLiveLanesUnderEstop`'s call site removed, `sup.signalsSent` stays `[]` here forever —
+// the ONLY kill mechanism on that code path is the reclaim() call deep inside
+// `drainThenEscalate`'s escalation loop, itself gated behind the SAME hung probe, so the
+// assertion below never observes a kill within the tick at all.
+test("tick: EMERGENCY_STOP + a forge probe that never resolves -> every running/fixing lane's process kill still completes within the tick (#778)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-forge-free-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    sup.enableDurablePidCapability();
+    seedRunning(st, "lane-run", 2);
+    sup.durablePids["lane-run"] = true;
+    st.upsertWorker({ name: "lane-fix", issue: 3, session_id: "s-lane-fix", state: "fixing", started_at: "t", ended_at: null });
+    sup.durablePids["lane-fix"] = true;
+    // Never resolves — the exact wedged-forge shape #778 is about (a hung `gh` read behind
+    // `Supervisor.lanePr`, surfaced here at the `probe()` boundary adoptAndReclaimTerminal and
+    // drainThenEscalate both await before they'd otherwise reach the kill).
+    sup.probe = (): Promise<LaneProbe> => new Promise<LaneProbe>(() => {});
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    void tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }); // never awaited — never settles
+    await new Promise((r) => setImmediate(r));
+
+    assert.deepEqual(
+      sup.signalsSent,
+      [
+        { worker: "lane-run", signal: "SIGKILL" },
+        { worker: "lane-fix", signal: "SIGKILL" },
+      ],
+      "both running/fixing lanes must be hard-killed via the forge-free durable-PID path before the hung probe ever resolves",
+    );
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: EMERGENCY_STOP + a Supervisor with no durable-PID capability -> unchanged pre-#778 behavior (probe+reclaim is still the only kill mechanism)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-no-durablepid-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor(); // durablePidAlive/signalDurablePid left genuinely unset
+    seedRunning(st, "lane-run", 2);
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE };
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+    assert.deepEqual(r.escalated, ["lane-run"]);
+    assert.deepEqual(sup.reclaimed, ["lane-run"]); // the ordinary reclaim() path, unchanged
+    assert.equal(st.getWorker("lane-run")?.state, "failed");
     st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

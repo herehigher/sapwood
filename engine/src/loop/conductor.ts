@@ -3380,6 +3380,42 @@ async function checkCommentCursorBeforeDrive(
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: "comment-cursor-stale" };
 }
 
+/** #778: EMERGENCY_STOP's own synchronous, forge-free hard-kill pass for running/fixing lanes —
+ *  the SAME `durablePidAlive`/`signalDurablePid` primitives round.ts's E-STOP sweep already uses
+ *  for driving/handoff rows (#724's own durable-PID pattern, worker.ts), applied here to
+ *  running/fixing rows too. Called FIRST in the E-STOP branch below, BEFORE
+ *  `adoptAndReclaimTerminal`'s own probe loop and BEFORE `drainThenEscalate`'s escalation loop —
+ *  both of which await `supervisor.probe` (a forge-dependent `gh` read via `Supervisor.lanePr`,
+ *  worker.ts) before ever reaching the kill. Gate② on PR #774 proved that ordering lets a hung or
+ *  rejecting forge read delay or prevent the hard kill entirely — the strictest safety control
+ *  must not depend on forge availability. This pass guarantees the OS-level process group is
+ *  already dead before either forge-touching path even starts running; whatever they do
+ *  afterward (terminal-state classification, needs-human labels, worktree bookkeeping) is pure
+ *  evidence/bookkeeping, best-effort, and never gates the kill itself — a forge failure there
+ *  cannot undo or block a kill that already happened.
+ *
+ *  Direct SIGKILL, no SIGTERM-then-grace step (unlike round.ts's driving/handoff sweep, which
+ *  owns the ONLY kill path those rows ever get under E-STOP): E-STOP's own documented contract
+ *  is "no drain window, hard-kill THIS SAME TICK" (the branch below), so a grace pause here
+ *  would just be a self-imposed delay this control exists to avoid. A graceful TERM-first
+ *  teardown still happens afterward via the ordinary `reclaim()` path (killTree/killByPid,
+ *  worker.ts) once/if its own probe() resolves — this pass is belt-and-suspenders over that, not
+ *  a replacement for it (`reclaim()` is still called, below, exactly as before this issue).
+ *
+ *  Optional capability, same "implement both or neither" contract as round.ts's sweep (see
+ *  `Supervisor.durablePidAlive`'s own doc, conductor.ts) — a Supervisor implementing neither
+ *  method is simply a no-op here, unchanged from pre-#778 behavior (the ordinary probe+reclaim
+ *  path below is its only kill mechanism). Never throws, never touches the forge or the DB —
+ *  `signalDurablePid` is itself documented as a safe no-op against an already-dead pid. */
+function hardKillLiveLanesUnderEstop(state: State, supervisor: Supervisor): void {
+  const canCheck = typeof supervisor.durablePidAlive === "function";
+  const canSignal = typeof supervisor.signalDurablePid === "function";
+  if (!canCheck || !canSignal) return;
+  for (const w of [...state.runningWorkers(), ...state.fixingWorkers()]) {
+    if (supervisor.durablePidAlive!(w.name)) supervisor.signalDurablePid!(w.name, "SIGKILL");
+  }
+}
+
 /** Shared by the EMERGENCY_STOP and KILL_SWITCH/stop-signal gates (#293, extracted from the
  *  single kill-switch branch this used to be the body of — behavior byte-for-byte unchanged for
  *  that caller): adopt any confirmed-intent handoff (so a resumed lane is visible to the
@@ -3487,6 +3523,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   never be shadowed by a switch that would otherwise wait out a drain window first. PAUSE is
   //   never reached (this branch returns before that check, same as the kill switch).
   if (estopActive) {
+    // #778: forge-free synchronous hard kill FIRST — before adoptAndReclaimTerminal's own probe
+    // loop (just below) or drainThenEscalate's escalation loop (further below) ever await a
+    // forge-dependent `supervisor.probe` call. See hardKillLiveLanesUnderEstop's own doc for why
+    // this ordering is the actual fix, not the two calls that follow it.
+    hardKillLiveLanesUnderEstop(state, supervisor);
     const { resumed, reclaimed } = await adoptAndReclaimTerminal(forge, state, supervisor, cfg, threshold, iso);
     // #293: "once per activation" — mirrors recordCeilingBreach's own first-detection framing
     // (the row's `reason` is overwritten every tick, so the ONLY way to know "was this already
