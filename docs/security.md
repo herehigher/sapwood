@@ -568,17 +568,24 @@ startup or dispatch.
   `guard.ts` had no `git push` handling at all, so a worker leg holding `Bash(git *)` (L0 host
   credentials, or an L1 deploy key on an unprotected default branch) could run `git push origin
   HEAD:<default-branch>` and skip gate①/gate② entirely. The engine now denies this at the guard
-  layer too: a deny rule (paste-ready as a human-applied patch, `docs/patches/`, since
-  `engine/src/guard/**` is human-merge-only — see "Human-merge-only paths" below) blocks refspec
+  layer too: a deny rule (paste-ready as a human-applied patch, `docs/patches/`, since guard.ts /
+  the guard hook wiring is human-merge-only — see "Human-merge-only paths" below) blocks refspec
   destinations naming the default branch, `--delete`, and `--mirror`/`--all`, active only when the
   engine's trusted spawn env `SAPWOOD_DEFAULT_BRANCH` is set (worker.ts resolves it from the same
   fact `getDefaultBranchChecks` already keys on and threads it into every dispatch/resume/fix-leg
-  spawn). This is engine-side defense-in-depth AT the guard's own sanctioned enforcement point —
-  it narrows the gap for a worker leg that goes through this guard's PreToolUse hook, but it is
-  **not a replacement for branch protection** (item 3's own WARN, #633): branch protection is the
-  mandatory backstop of record regardless of whether this rule's patch has been applied, and
-  nothing here closes a leg that bypasses the guard hook itself (a non-`claude`-CLI process, or a
-  session the engine didn't dispatch — SAPWOOD_DEFAULT_BRANCH unset leaves the rule inactive by
+  spawn). Precise-destination matching alone cannot prove a push is safe: an unresolved shell
+  variable/command-substitution (`HEAD:$SAPWOOD_DEFAULT_BRANCH`, expanded by the worker's OWN
+  shell before git ever runs), a `-c alias.*=` config injection (redefining what a later
+  subcommand token means), and a wildcard refspec destination (`refs/heads/*:refs/heads/*`) can
+  all reach the default branch without ever spelling it out as a literal token the guard could
+  string-compare — the rule's actual frame is "if this push's safety cannot be PROVEN, block it,"
+  not an enumeration of literal forms (gate② round 1, #679). This is engine-side defense-in-depth
+  AT the guard's own sanctioned enforcement point — it narrows the gap for a worker leg that goes
+  through this guard's PreToolUse hook, but it is **not a replacement for branch protection**
+  (item 3's own WARN, #633): branch protection is the mandatory backstop of record regardless of
+  whether this rule's patch has been applied, and nothing here closes a leg that bypasses the
+  guard hook itself (a non-`claude`-CLI process, or a session the engine didn't dispatch —
+  SAPWOOD_DEFAULT_BRANCH unset leaves the rule inactive by
   design, same fail-safe stance the guard's other engine-set-env rules already take).
 - **Host-credential theft: engine-unpluggable.** L1 removes the forge API credential from the
   worker leg's OWN environment — it does nothing to, and cannot touch, the operator's real

@@ -2770,6 +2770,134 @@ test("resume (#679): a genuine FIX-ENTRY resumed leg (opts.sessionId, no .handof
   }
 });
 
+// #679 gate② round 1 (sol P2 f-i): the four presence/absence tests above pin WHAT reaches the
+// spawn env, but never that deps.getDefaultBranch is called AT MOST ONCE per supervisor life —
+// resolveDefaultBranch's whole memoization claim (mirrors resolveDeployKeyPath's deployKeyProbe)
+// was asserted in worker.ts's own doc comment but never exercised across more than one spawn.
+test("resolveDefaultBranch memoizes: ONE deps.getDefaultBranch call across a dispatch + a fix-leg resume on the SAME supervisor (#679 gate② P2 f-i)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\necho '{"type":"result","subtype":"success","total_cost_usd":0.001,"model":"claude-stub","usage":{"input_tokens":1,"output_tokens":1}}'\nexit 0\n`,
+    );
+    let calls = 0;
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      getDefaultBranch: async () => {
+        calls += 1;
+        return "main";
+      },
+    });
+    const { name, sessionId } = await s.dispatch({ number: 683, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(
+      existsSync(join(dir, `${name}.done.json`)),
+      "dispatch must reach a terminal sentinel before the fix-leg resume precondition holds",
+    );
+    assert.equal(calls, 1, "dispatch alone must call the resolver exactly once");
+
+    await s.resume({ number: 683, title: "t", labels: [] }, name, { sessionId, prompt: "fix-leg: address findings" });
+    assert.equal(calls, 1, "resume() on the SAME supervisor must re-await the memoized promise, never re-invoke the resolver");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #679 gate② round 1 (sol P2 f-ii): the reverse test already covers deps.getDefaultBranch being
+// UNWIRED; this covers the resolver being WIRED but resolving "" — a distinct code path
+// (resolveDefaultBranch returns the resolved value as-is; dispatch()/resume() spread the env key
+// only when it's truthy) that the omission claim depends on just as much.
+test('dispatch OMITS SAPWOOD_DEFAULT_BRANCH when the WIRED deps.getDefaultBranch resolves "" (#679 gate② P2 f-ii)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nif [ -v SAPWOOD_DEFAULT_BRANCH ]; then echo "SET"; else echo "UNSET"; fi > "${join(dir, "db.seen.tmp")}"\nmv "${join(dir, "db.seen.tmp")}" "${join(dir, "db.seen")}"\nexit 0\n`,
+    );
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      getDefaultBranch: async () => "",
+    });
+    await s.dispatch({ number: 684, title: "t", labels: [] });
+    await waitForFile(join(dir, "db.seen"), "presence marker was not published");
+    assert.equal(readFileSync(join(dir, "db.seen"), "utf8").trim(), "UNSET");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #679 gate② round 1 (sol P2 f-iii): resolveDefaultBranch's doc claims a REJECTING resolver is
+// caught, logged once, and degrades to "" (never a blocked dispatch) — asserted in worker.ts's
+// comment but never exercised. Two dispatches on the same supervisor pin BOTH halves: the
+// underlying resolver is invoked at most once (the rejection itself is memoized, same as a
+// success would be), and the failure is logged exactly once, not once per dispatch.
+test("a REJECTING deps.getDefaultBranch stays non-fatal, is memoized (logged/invoked once), and omits SAPWOOD_DEFAULT_BRANCH (#679 gate② P2 f-iii)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nif [ -v SAPWOOD_DEFAULT_BRANCH ]; then echo "SET"; else echo "UNSET"; fi > "${join(dir, "db.seen.tmp")}"\nmv "${join(dir, "db.seen.tmp")}" "${join(dir, "db.seen")}"\nexit 0\n`,
+    );
+    let resolverCalls = 0;
+    const logs: string[] = [];
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      log: (m) => logs.push(m),
+      getDefaultBranch: async () => {
+        resolverCalls += 1;
+        throw new Error("boom: default-branch read failed");
+      },
+    });
+    await s.dispatch({ number: 685, title: "t", labels: [] });
+    await waitForFile(join(dir, "db.seen"), "presence marker was not published");
+    assert.equal(
+      readFileSync(join(dir, "db.seen"), "utf8").trim(),
+      "UNSET",
+      "a rejecting resolver must never block dispatch or set an empty-string env var",
+    );
+
+    // A second, independent lane on the SAME supervisor: the rejection is memoized exactly like
+    // a success would be, so the underlying resolver must not be re-invoked.
+    await s.dispatch({ number: 686, title: "t", labels: [] });
+    assert.equal(resolverCalls, 1, "the rejecting resolver must be invoked at most once per supervisor life (memoized)");
+    const branchFailureLogs = logs.filter((m) => m.includes("default branch"));
+    assert.equal(branchFailureLogs.length, 1, "the failure must be logged exactly once, not once per dispatch");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // #708: five worker legs backgrounded their OWN verification run (Bash tool `run_in_background`)
 // and then blocked polling it until heartbeat-stale reclaim (2026-08-05/06 dogfood, events
 // 9573/9578) — 2 of 3 lanes lost in one wave. Live audit (PR body) verified
