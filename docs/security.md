@@ -1800,22 +1800,30 @@ documented rather than blocked:
 - directory-level deletion that never names a sentinel, e.g. `rm -rf ../../data`
   (removes both sentinels *and* the state DB). Blocking the bare `data` suffix would
   false-positive on a worker legitimately removing a `data/` dir inside its own repo,
-  so this stays a documented residual instead of a guard rule;
-- **`sapwood pause`/`stop`/`estop` (#731)** — the CLI verbs that create/remove the
-  three sentinels — fall into the FIRST bullet's exact class: `sapwood pause`,
-  `sapwood stop`, and `sapwood estop --confirm` resolve the sentinel path internally
-  (`dirname(dbPath)` + the fixed filename), so none of them puts a literal
-  `data/PAUSE`/`data/KILL_SWITCH`/`data/EMERGENCY_STOP` token on the Bash command
-  line for `checkControlSentinelArg` to match — a worker with ordinary Bash access
-  can flip any tier by simply running the now-first-class command, no bespoke script
-  needed. `guard.ts` is human-merge-only (docs/security.md's own governance, this
-  page's opening list), so #731 could not extend its verb/path recognition to cover
-  these three subcommands without a separate human-merged change; teaching the guard
-  to also recognize `sapwood pause|stop|estop` (and `park clear`, `run`, `status`,
-  `events` — every subcommand a worker could otherwise invoke) as sentinel-adjacent
-  is tracked as follow-up, not closed here.
+  so this stays a documented residual instead of a guard rule.
 
-Until those are closed too, treat the isolation boundary as "a worker won't
+**`sapwood pause`/`stop`/`estop` (#731) are NOT an instance of the residual class above —
+they are a NEW, first-class gap the guard does not yet close.** The two bullets above are
+obscure hand-rolled forms a worker would have to construct deliberately. `sapwood pause`,
+`sapwood stop`, and `sapwood estop --confirm` are the opposite: a shipped, operator-
+documented CLI verb (docs/getting-started.md, docs/supervision.md,
+commands/sapwood-stop.md all tell an operator to run it) that any worker with ordinary
+Bash access can invoke by name. They resolve the sentinel path internally
+(`dirname(dbPath)` + the fixed filename) rather than taking it as a CLI argument, so no
+`data/PAUSE`/`data/KILL_SWITCH`/`data/EMERGENCY_STOP` token ever appears on the Bash
+command line for `checkControlSentinelArg` to match — including `sapwood estop clear`,
+which lifts an already-fired EMERGENCY_STOP with no sentinel path in sight. `guard.ts` is
+human-merge-only, so #731 cannot close this gap with a source edit in the same PR that
+opens it; instead, PR #818 ships **`docs/patches/731-guard-stop-control-verbs.patch`** — a
+paste-ready guard.ts/guard.test.ts diff (same route as
+`docs/patches/679-guard-default-branch-push.patch`) extending
+`checkControlSentinelArg`'s Bash-argument accident fence to recognize the three
+stop-control verbs, apply-checked by `engine/src/guard/patch-731-apply-check.test.ts`.
+**Until a human applies that patch, this specific gap stands open** — treat it as live,
+not as a documented-and-accepted residual, and apply the patch before relying on the
+guard to cover these verbs.
+
+Until every gap above is closed, treat the isolation boundary as "a worker won't
 accidentally step here, and the obvious direct/indirect vectors are blocked," not "a
 worker provably cannot reach here by any means."
 
