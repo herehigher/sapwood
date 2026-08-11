@@ -8455,6 +8455,56 @@ test("tick: EMERGENCY_STOP + a handoff lane with a CONFIRMED resume intent, adop
   }
 });
 
+// #778 gate② P1 (PR #810, sol-high CONFIRMATION round): even the in-branch sweep (window 2 in
+// hardKillLiveLanesUnderEstop's own doc) could be starved — `reconcileDrivingFixIntents`'s OLD
+// single sequential pass iterates `state.drivingWorkers()` in NAME order (`ORDER BY name`,
+// state.ts). An alphabetically EARLIER `unconfirmed` row's `await forge.addLabel(...)` hanging
+// forever blocks that SAME loop from ever reaching a LATER `confirmed` row — so the confirmed
+// row is never adopted into `fixing` at all THIS tick, and the in-branch sweep (which only runs
+// AFTER the whole `reconcileDrivingFixIntents` call returns) never gets a chance to see it
+// either. The confirmed row's own resume intent is durable proof a fix-leg child is ALREADY
+// live (crash-resumed from a now-dead prior engine process) — exactly the shape #724's own
+// detached-lane sweep treats as needing an E-STOP kill. Fixed by splitting
+// `reconcileDrivingFixIntents` into two phases under `immediate`: every confirmed row is
+// adopted-and-killed-at-the-seam FIRST (adoptConfirmedFixIntent, zero forge calls), and only
+// afterward does any unconfirmed row's `forge.addLabel` run.
+// Proven red against the pre-two-phase code (this round's starting point — single sequential
+// pass, no phase split): `sup.signalsSent` stayed `[]` for the confirmed row, replicating sol's
+// JSON evidence (`{"signals":[],"laterState":"driving","laterIntent":"confirmed","laterPidAlive":true}`).
+test("tick: EMERGENCY_STOP + an alphabetically earlier driving row's unconfirmed forge.addLabel hung, before a LATER confirmed-intent row -> the confirmed row's live child still receives SIGKILL within the tick (#778 gate② PR #810 sol-high confirmation-round repro)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-two-phase-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    sup.enableDurablePidCapability();
+    // Alphabetically EARLIER — reconcileDrivingFixIntents' OLD single pass would reach this row
+    // FIRST and hang forever inside its own forge.addLabel, before ever inspecting the row below.
+    seedDriving(st, "a-unconfirmed", 3, 30);
+    sup.resumeIntents["a-unconfirmed"] = "unconfirmed";
+    // Alphabetically LATER, with a CONFIRMED intent and a live durable pid — the already-live
+    // crash-resumed child sol's confirmation-round repro used.
+    seedDriving(st, "z-confirmed", 9, 90);
+    sup.resumeIntents["z-confirmed"] = "confirmed";
+    sup.durablePids["z-confirmed"] = true;
+    // Never resolves — the exact wedged-forge shape, hit by the row the OLD sequential loop
+    // reaches FIRST.
+    forge.addLabel = (): Promise<void> => new Promise<void>(() => {});
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    void tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }); // never awaited — never settles
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(
+      sup.signalsSent.some((s) => s.worker === "z-confirmed" && s.signal === "SIGKILL"),
+      "the LATER confirmed row's already-live child must be hard-killed even though an alphabetically EARLIER unconfirmed row is stuck forever in forge.addLabel",
+    );
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("tick: EMERGENCY_STOP + a Supervisor with no durable-PID capability -> unchanged pre-#778 behavior (probe+reclaim is still the only kill mechanism)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-no-durablepid-"));
   try {
