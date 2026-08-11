@@ -3510,6 +3510,22 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // itself for a confirmed-intent driving row (see that function's own `immediate` doc).
   const estopActive = state.isEstopActive();
 
+  // #778 gate② finding (PR #810 review): called HERE too, before reconcileDrivingFixIntents —
+  // not only inside the branch below. reconcileDrivingFixIntents' own "unconfirmed" intent leg
+  // awaits `forge.addLabel` (its ONLY forge call — verified: nothing else in that function
+  // touches the forge, and it never spawns a running/fixing process, only reclassifies an
+  // ALREADY-durably-alive driving row's child or forge-escalates a driving row that has no live
+  // process at all, per #293's own "a driving row has no live process" contract). A wedged
+  // forge there would otherwise stall THIS SAME tick's own await before it ever reached the
+  // in-branch call below — one call site earlier than the #778 fix originally closed. Calling
+  // it here first means every lane already running/fixing at tick-top is hard-killed
+  // unconditionally, regardless of what reconcileDrivingFixIntents does afterward. Idempotent
+  // (signalDurablePid is a safe no-op against an already-signaled/dead pid) — the in-branch call
+  // below is KEPT, not replaced: it is the only one that can see a lane reconcileDrivingFixIntents
+  // itself just adopted from `driving` into `fixing` (the confirmed-intent case, #724 gate②
+  // finding [0]), which is invisible to THIS earlier call since that adoption hasn't happened yet.
+  if (estopActive) hardKillLiveLanesUnderEstop(state, supervisor);
+
   // #245 round-2 fix A3: reconcile any driving-row fix-leg spawn intent BEFORE the kill-switch
   // gate — see reconcileDrivingFixIntents' own doc for the crash window this repairs.
   await reconcileDrivingFixIntents(forge, state, supervisor, cfg, iso, estopActive);
@@ -3523,10 +3539,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   never be shadowed by a switch that would otherwise wait out a drain window first. PAUSE is
   //   never reached (this branch returns before that check, same as the kill switch).
   if (estopActive) {
-    // #778: forge-free synchronous hard kill FIRST — before adoptAndReclaimTerminal's own probe
-    // loop (just below) or drainThenEscalate's escalation loop (further below) ever await a
-    // forge-dependent `supervisor.probe` call. See hardKillLiveLanesUnderEstop's own doc for why
-    // this ordering is the actual fix, not the two calls that follow it.
+    // #778: the SECOND of two hard-kill sweeps this tick (the first ran above, before
+    // reconcileDrivingFixIntents) — before adoptAndReclaimTerminal's own probe loop (just below)
+    // or drainThenEscalate's escalation loop (further below) ever await a forge-dependent
+    // `supervisor.probe` call. This one exists to catch what the FIRST sweep structurally
+    // cannot: a lane reconcileDrivingFixIntents itself just adopted from `driving` into `fixing`
+    // (the confirmed-intent case) is invisible to a kill pass that ran before that adoption. Both
+    // calls are forge-free and idempotent — see hardKillLiveLanesUnderEstop's own doc.
     hardKillLiveLanesUnderEstop(state, supervisor);
     const { resumed, reclaimed } = await adoptAndReclaimTerminal(forge, state, supervisor, cfg, threshold, iso);
     // #293: "once per activation" — mirrors recordCeilingBreach's own first-detection framing

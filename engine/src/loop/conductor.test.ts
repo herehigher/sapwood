@@ -8348,13 +8348,60 @@ test("tick: EMERGENCY_STOP + a forge probe that never resolves -> every running/
     void tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }); // never awaited — never settles
     await new Promise((r) => setImmediate(r));
 
+    // #778 gate② finding (PR #810 review): tick() now runs TWO forge-free hard-kill sweeps
+    // under E-STOP (before reconcileDrivingFixIntents, and again in the branch below it) — both
+    // observe these two already-running/fixing lanes, so each gets signaled twice. Idempotent
+    // (a duplicate SIGKILL against an already-dead pid is a documented no-op), so this asserts
+    // the SET of killed workers rather than an exact call count, which is an implementation
+    // detail of how many sweeps happen to run, not what AC1 actually requires.
+    const killed = [...new Set(sup.signalsSent.filter((s) => s.signal === "SIGKILL").map((s) => s.worker))].sort();
     assert.deepEqual(
-      sup.signalsSent,
-      [
-        { worker: "lane-run", signal: "SIGKILL" },
-        { worker: "lane-fix", signal: "SIGKILL" },
-      ],
+      killed,
+      ["lane-fix", "lane-run"],
       "both running/fixing lanes must be hard-killed via the forge-free durable-PID path before the hung probe ever resolves",
+    );
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #778 gate② finding (PR #810 review): the FIRST fix placed hardKillLiveLanesUnderEstop only
+// inside the `if (estopActive)` branch, AFTER `await reconcileDrivingFixIntents(...)` — but that
+// reconciliation's own "unconfirmed" fix-intent leg awaits `forge.addLabel`, ONE call site
+// earlier than the kill. A hung forge read there stalled the tick before the kill ever ran — the
+// exact #778 defect class, just moved one step up the call chain. Proven red against the
+// single-call-site version of the fix (the code as it stood before this test was added): with a
+// DRIVING lane carrying an "unconfirmed" resume intent and a never-resolving `forge.addLabel`,
+// `sup.signalsSent` stayed `[]` — `reconcileDrivingFixIntents`'s own await never returned, so
+// `tick()` never reached ITS `if (estopActive) { hardKillLiveLanesUnderEstop(...) }` call at all.
+// The fix hoists a SECOND call to right after `estopActive` is read, before
+// `reconcileDrivingFixIntents` is ever awaited — verified forge-free itself (no DB dependency on
+// the killed lanes, no process spawn of its own; see that call site's own doc in conductor.ts).
+test("tick: EMERGENCY_STOP + a driving lane's fix-intent reconcile hung on forge.addLabel -> the running lane's process kill still completes within the tick (#778 gate② PR #810)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-reconcile-hang-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    sup.enableDurablePidCapability();
+    seedRunning(st, "lane-run", 2);
+    sup.durablePids["lane-run"] = true;
+    // A driving lane whose resume intent is "unconfirmed" — reconcileDrivingFixIntents' OWN
+    // forge-touching branch (B4: label first, retry next tick on a failed/hung write).
+    seedDriving(st, "lane-drv", 5, 50);
+    sup.resumeIntents["lane-drv"] = "unconfirmed";
+    // Never resolves — the exact wedged-forge shape, surfaced one call site earlier than the
+    // #778 fix's original `supervisor.probe` boundary.
+    forge.addLabel = (): Promise<void> => new Promise<void>(() => {});
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    void tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }); // never awaited — never settles
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(
+      sup.signalsSent.some((s) => s.worker === "lane-run" && s.signal === "SIGKILL"),
+      "the running lane must be hard-killed even though reconcileDrivingFixIntents itself is stuck on a hung forge.addLabel",
     );
     st.close();
   } finally {
