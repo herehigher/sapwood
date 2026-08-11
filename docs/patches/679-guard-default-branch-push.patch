@@ -21,16 +21,20 @@
 #       depth AT the guard's own sanctioned enforcement point, an extension of the existing
 #       Category C mechanism, never a replacement for the backstop.
 #
-# WHY IT IS A PATCH AND NOT A COMMIT: engine/src/guard/** is human-merge-only (CLAUDE.md
-#       "Non-negotiables"; canonical list docs/security.md "Human-merge-only paths"). An
-#       autonomous worker's write to guard.ts/guard-hook.ts/guard.test.ts is denied at the tool
-#       level:
+# WHY IT IS A PATCH AND NOT A COMMIT: guard.ts / the guard hook wiring is human-merge-only
+#       (CLAUDE.md "Non-negotiables"; canonical list docs/security.md "Human-merge-only paths").
+#       An autonomous worker's write to guard.ts/guard-hook.ts/guard.test.ts is denied at the
+#       tool level:
 #         BLOCK [write-path] guard/reviewer/merge-driver source is human-merge-only
 #       The guard constrains Claude tool calls, never a human's editor.
 #
-# APPLY (from the repo root), then delete this file:
+# APPLY (from the repo root), then delete BOTH this file AND the apply-check test that exists
+# only to prove it in CI pre-apply (its job is done the moment the patch below lands for real —
+# leaving it in place afterward would either dangle on a deleted patch file or, if made to
+# tolerate that, silently stop verifying an accidental deletion of the real deny rule):
 #       git apply docs/patches/679-guard-default-branch-push.patch
 #       git rm docs/patches/679-guard-default-branch-push.patch
+#       git rm engine/src/guard/patch-679-apply-check.test.ts
 #       npm --workspace engine test    # exercises the new BLOCK/ALLOW rows this patch adds
 #
 # VERIFIED: this diff applies cleanly to main at ada7d4e (`git apply --check`, this issue's own
