@@ -11,18 +11,18 @@ acceptance criteria ask for them there); this file is the reviewable copy.
 
 - **Landed in PR #517:** the tests (`engine/src/roles/merge-driver.test.ts`,
   `engine/src/loop/conductor.test.ts`), committed skipped pending the wiring below.
-- **Landed (#788):** the wiring in `engine/src/roles/merge-driver.ts` — `holdFrom` (the shared
-  hold-observation computation), `engineAgentHold` (the live-read fallback for outcomes with no
-  PR data of their own), and `driveEngineAgentOne`'s split into a signal wrapper plus the
-  unchanged `gateEngineAgentOutcome` gate half. Applied by this commit, on branch
-  `pm-788-holdobservation-wiring` (PR closing #788). The patch had to be rebased by hand against
-  #782's `ciPendingObservation`/`ciPendingEscalation` wiring, which landed in `merge-driver.ts`
-  after this appendix was originally authored against PR #517's tip — both signal families are
-  preserved, and `merge-driver.ts`'s own module header now states the full current coverage
-  (`holdObservation` + `reviewerTransition` + `reviewSilenceEscalation` + `ciPendingObservation`)
-  rather than #390's original stale "ciPendingObservation stays classic-only" claim. All four
-  previously-skipped parity tests in `merge-driver.test.ts` now run and pass; the `#390 gap` pin
-  (asserting `holdObservation === undefined`) is deleted.
+- **Landed (#788), via PR #814:** the wiring in `engine/src/roles/merge-driver.ts` — `holdFrom`
+  (the shared hold-observation computation), `engineAgentHold` (the live-read fallback for
+  outcomes with no PR data of their own), and `driveEngineAgentOne`'s split into a signal wrapper
+  plus the unchanged `gateEngineAgentOutcome` gate half. Applied by this commit (PR #814's branch
+  dies on merge; the squash SHA that lands it is recorded on issue #788 at merge time). The patch
+  had to be rebased by hand against #782's `ciPendingObservation`/`ciPendingEscalation` wiring,
+  which landed in `merge-driver.ts` after this appendix was originally authored against PR #517's
+  tip — both signal families are preserved, and `merge-driver.ts`'s own module header now states
+  the full current coverage (`holdObservation` + `reviewerTransition` + `reviewSilenceEscalation`
+  + `ciPendingObservation`) rather than #390's original stale "ciPendingObservation stays
+  classic-only" claim. All four previously-skipped parity tests in `merge-driver.test.ts` now run
+  and pass; the `#390 gap` pin (asserting `holdObservation === undefined`) is deleted.
 
 ## What was wrong
 
@@ -108,4 +108,4 @@ observation. Before and after were mutually exclusive by construction, so the ch
 left half-applied silently. The actual #788 landing (post-#782 rebase) runs the full
 `merge-driver.test.ts` at 166 pass / 0 fail / 0 skipped and the full engine suite at 4735 pass /
 0 fail — higher than the scratch-tree counts above because #782 (and other work) added tests of
-its own in the interim; see PR #788 for that run's own numbers.
+its own in the interim; see PR #814 for that run's own numbers.

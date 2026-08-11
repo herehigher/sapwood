@@ -28,9 +28,11 @@
 //
 // STATELESS SIGNAL PARITY on that second path, closing #287's original documented deviation —
 // the engine-agent path now reports every stateless signal the classic path does:
-//  - `holdObservation` (#294, wired by #390) — reported on EVERY engine-agent pass, from
-//    `driveEngineAgentOne`'s own wrapper, using the SAME `holdFrom` helper the classic path
-//    uses. This was the whole #390 gap: the engine-agent GATE always honored a hold
+//  - `holdObservation` (#294, wired by #390) — attached from `driveEngineAgentOne`'s own
+//    wrapper, using the SAME `holdFrom` helper the classic path uses. Never fabricated: absent
+//    when the PR was never read (no `engineAgentDeps` for this lane) or the read failed
+//    (`engineAgentHold`'s own catch) — a conductor no-op in both cases, never a release. This
+//    was the whole #390 gap: the engine-agent GATE always honored a hold
 //    (checkPreflight evaluates holdLabels and queues), but nothing REPORTED it, so the
 //    conductor could never emit pr-held/pr-released for such a lane and a held PR was
 //    indistinguishable from "waiting on review" in persisted data.

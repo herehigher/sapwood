@@ -3478,16 +3478,41 @@ test("MergeDriver.driveOne (engine-agent, #390): hold then release across two pa
 
 test("MergeDriver.driveOne (engine-agent, #390): with NO hold label configured the observation is held:false by construction — no extra PR read is spent to learn it", async () => {
   const forge = new EngineAgentFakeForge();
-  forge.reviewData = { ...forge.reviewData, isDraft: true }; // any early preflight queue will do
+  // gate② (PR #814 finding 1): a preflight queue (e.g. isDraft:true) carries `status`/`data` on
+  // the RAW review outcome, so `driveEngineAgentOne`'s wrapper takes the `"data" in review` fast
+  // path (`holdFrom(review.data.labels)`) and never calls `engineAgentHold` at all — that fixture
+  // cannot discriminate this guard. A COHERENT CLOSED-without-merge outcome carries NO PR data of
+  // its own (drive.ts's terminal-state check returns `{kind:"needs-human", reason}` with neither
+  // `status` nor `data` attached — see the driveOne-level CLOSED test above for the same shape),
+  // which is the ONLY way to genuinely route through `engineAgentHold` and exercise its OWN
+  // `holdLabels.length === 0` guard.
+  forge.status = { ...forge.status, state: "CLOSED" };
+  forge.reviewData = { ...forge.reviewData, state: "CLOSED" };
   const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
   const cfg = mkEngineAgentCfg({ escalation: { humanLabels: ["needs-human", "blocked"], holdLabels: [] } });
   const recorded: EARecorded = { pin: null, wal: null };
   const driver = new MergeDriver({ forge, reviewer, cfg });
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.equal(outcome.kind, "needs-human");
   assert.deepEqual(outcome.holdObservation, { held: false });
   assert.equal(
     forge.reviewDataReads,
     1,
-    "only the drive pipeline's own PR-data read — the observation costs nothing when no hold label is configured",
+    "only the drive pipeline's own initial PR-data read — engineAgentHold's holdLabels.length === 0 guard skips the extra read entirely",
   );
+});
+
+test("MergeDriver.driveOne (engine-agent, #390): a MERGED outcome reports held:false unconditionally, even when the PR carries a configured hold label — MERGED is terminal, so no later pass could ever release an announced hold", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, state: "MERGED" };
+  // The hold label IS present on the live PR — if `engineAgentHold`'s merged short-circuit were
+  // ever removed, its live `getPRReviewData` read (below) would find it and wrongly report held.
+  forge.reviewData = { ...forge.reviewData, state: "MERGED", labels: ["Sapwood:Hold"] };
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
+  const cfg = mkEngineAgentCfg({ escalation: { humanLabels: ["needs-human", "blocked"], holdLabels: ["sapwood:hold"] } });
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.equal(outcome.kind, "merged");
+  assert.deepEqual(outcome.holdObservation, { held: false });
 });
