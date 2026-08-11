@@ -1624,6 +1624,12 @@ would let a worker weaken the very mechanism that constrains it. Any change to t
   is blocked exactly like a guard-mode change. Do not read "security-relevant config" below
   as scoping the block to a subset of the file's contents — it names *why* the file is
   protected, not *how much* of it is.
+- `sapwood.config.example.yaml` / `sapwood.config.example.json` — the `sapwood init` starter
+  template, guard-protected as a sibling rule to the root config above (same whole-file,
+  no-per-field-carve-out treatment; `engine/src/guard/guard.ts`'s match is a path pattern on
+  `sapwood.config.example.(ya?ml|json)`, case-insensitive). It carries the same
+  `merge.mode: produce-pr-and-stop` safe-by-default pin every future `sapwood init` inherits,
+  so weakening it here degrades that default repo-wide, not just this repo's live config.
 - `.claude/settings*.json` and `.github/workflows/**`
 
 The guard enforces this as a write-path denial (both for the `Write`/`Edit` tools and
