@@ -2909,9 +2909,10 @@ async function reconcileDrivingFixIntents(
       // acts on the row at all (before even requestHandoff) — an adopted child's own resume()
       // call already happened in a NOW-CRASHED process, so there is no "before resume()" moment
       // left to observe directly; this is the earliest point THIS process can still capture one.
-      // Superseded harmlessly once the eventual drain+fresh-resume produces its own, later
-      // (and by construction >=) cursor on the "fix-leg-resumed" event — fixLegJournalCursor
-      // picks whichever of the three cursor-bearing events is NEWEST for (worker, fixRounds).
+      // #798: this cursor stays meaningful even after the eventual drain+fresh-resume appends
+      // its own, later "fix-leg-resumed" cursor — fixLegJournalCursor now picks the EARLIEST of
+      // the three cursor-bearing events for (worker, fixRounds), not the newest, so THIS row (the
+      // round's true dispatch point) is the one that wins, not the resume's tighter one.
       const journalCursor = state.maxForgeProxyJournalId(w.name);
       // Never trust the adopted child's proxy channel across a crash (see doc above) — drain it
       // gracefully now rather than let it keep running against a dead evidence channel. Ordered
