@@ -2926,7 +2926,13 @@ function adoptConfirmedFixIntent(state: State, supervisor: Supervisor, w: Worker
  *  to the confirmed rows differs (see `reconcileDrivingFixIntents`' own doc). B4: label FIRST; a
  *  failed write must NOT terminalize the row — leave it `driving` and retry the whole escalation
  *  next tick (never a permanently-stranded failed+unlabeled row). */
-async function escalateUnconfirmedFixIntent(forge: IForge, state: State, cfg: SapwoodConfig, iso: () => string, w: WorkerRow): Promise<void> {
+async function escalateUnconfirmedFixIntent(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  iso: () => string,
+  w: WorkerRow,
+): Promise<void> {
   try {
     await forge.addLabel(w.issue, cfg.labels.needsHuman);
   } catch (e) {
