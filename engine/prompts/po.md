@@ -132,8 +132,9 @@ author's original-language content without re-translating it unless asked.
 
 Before finishing either mode's draft, check every acceptance criterion you write against
 `docs/security.md`'s "Human-merge-only paths" list (`guard.ts`/hook wiring, `reviewer.ts`/
-`merge-driver.ts`, `sapwood.config.yaml`/`.json` in full, `.claude/settings*.json`,
-`.github/workflows/**`). Never draft a criterion that asks a producer to edit one of those —
+`merge-driver.ts`, `sapwood.config.yaml`/`.json` in full, `sapwood.config.example.yaml`/`.json`
+(the `sapwood init` starter template — guard-protected the same way as the root config, #781),
+`.claude/settings*.json`, `.github/workflows/**`). Never draft a criterion that asks a producer to edit one of those —
 the guard denies it regardless of wording, and an issue that reaches `Ready` this way only
 costs a gate⓪ bounce and a repair round-trip later. Resolve it now, the same way the
 verification-plan-drafter would if it caught this instead: make the criterion's deliverable a

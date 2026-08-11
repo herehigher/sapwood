@@ -236,6 +236,16 @@ const BLOCK: [string, string, string][] = [
   // literal-arg matcher's `-`-prefix skip.
   ["node kill.js --target=../../data/PAUSE", CWD, "write-path"],
   ["node unpause.js --file=data/kill_switch", CWD, "write-path"],
+  // #779: EMERGENCY_STOP is the strictest of the three sentinels (#724) and was missing from
+  // this rule's first pass — same Bash-vector coverage as KILL_SWITCH/PAUSE above.
+  ["touch data/EMERGENCY_STOP", CWD, "write-path"],
+  ["rm data/EMERGENCY_STOP", CWD, "write-path"],
+  ["rm -f ../../data/EMERGENCY_STOP", CWD, "write-path"],
+  ["echo x > data/EMERGENCY_STOP", CWD, "write-path"],
+  ["node kill.js ../../data/EMERGENCY_STOP", CWD, "write-path"],
+  ["node kill.js --target=data/EMERGENCY_STOP", CWD, "write-path"],
+  ["touch data/emergency_stop", CWD, "write-path"],
+  ["rm ../../data/Emergency_Stop", CWD, "write-path"],
 ];
 
 for (const [command, cwd, kw] of BLOCK) {
@@ -245,6 +255,19 @@ for (const [command, cwd, kw] of BLOCK) {
     assert.ok(d.reason.toLowerCase().includes(kw), `reason must name ${kw}: ${d.reason}`);
   });
 }
+
+// gate② P2-5 on #809: checkControlSentinelArg's reason string used to be a hardcoded
+// "data/KILL_SWITCH / data/PAUSE" that went stale the moment #779 extended CONTROL_SENTINEL_RE
+// to EMERGENCY_STOP — asserting only the "write-path" keyword (the BLOCK loop above) would not
+// have caught that staleness. Pin the actual reason TEXT for a literal-arg EMERGENCY_STOP hit.
+test("BLOCK reason text: node kill.js ../../data/EMERGENCY_STOP names all three sentinel tiers, not a stale two-name string", () => {
+  const d = bash("node kill.js ../../data/EMERGENCY_STOP");
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.includes("EMERGENCY_STOP"), `reason must name EMERGENCY_STOP: ${d.reason}`);
+  assert.ok(d.reason.includes("KILL_SWITCH"), `reason must still name KILL_SWITCH: ${d.reason}`);
+  assert.ok(d.reason.includes("PAUSE"), `reason must still name PAUSE: ${d.reason}`);
+  assert.ok(d.reason.includes("control sentinel"), `reason must name the category: ${d.reason}`);
+});
 
 // ── ALLOW matrix (benign / read-only) ────────────────────────────────────────
 const ALLOW: string[] = [
@@ -340,6 +363,12 @@ const ALLOW: string[] = [
   "touch data/paused",
   "touch data/pause-notes.md",
   "node build.js --out=dist/app.js",
+  // #779 reverse test: EMERGENCY_STOP near-miss ($-anchored) must still pass.
+  "touch data/EMERGENCY_STOPPED",
+  "touch data/EMERGENCY_STOP.md",
+  // #781 reverse test: sapwood.config.example near-misses must still pass.
+  "touch sapwood.config.example2.yaml",
+  "touch sapwood.config.example-notes.md",
 ];
 
 for (const command of ALLOW) {
@@ -531,6 +560,10 @@ const WRITE_BLOCK: [string, string][] = [
   ["sapwood.config.yaml", "write-path"], // engine/guard config -> a worker can't set guard.mode:soft (#26 R2)
   ["/repo/sapwood.config.yml", "write-path"],
   ["sapwood.config.json", "write-path"],
+  // gate② P1 on #809: this rule was found missing case-insensitive matching — macOS/APFS is
+  // case-insensitive by default, so an uppercase/mixed-case name still hits the real file.
+  ["SAPWOOD.CONFIG.YAML", "write-path"],
+  ["sub/../Sapwood.Config.Yaml", "write-path"],
   ["/repo/engine/dist/guard/guard-hook.js", "write-path"], // compiled hook artifact -> can't overwrite the live hook (#26 R3)
   ["engine/dist/guard/guard.js", "write-path"],
   ["engine/src/roles/merge-driver.ts", "write-path"], // merge path source (gates + TOCTOU pin) (#13 follow-up)
@@ -548,6 +581,24 @@ const WRITE_BLOCK: [string, string][] = [
   ["data/pause", "write-path"],
   ["data/kill_switch", "write-path"],
   ["/repo/data/Pause", "write-path"],
+  // #779: EMERGENCY_STOP — same direct-write, traversal, and case-variant coverage as
+  // KILL_SWITCH/PAUSE above (the strictest of the three sentinel tiers, #724).
+  ["data/EMERGENCY_STOP", "write-path"],
+  ["/repo/data/EMERGENCY_STOP", "write-path"],
+  ["../../data/EMERGENCY_STOP", "write-path"],
+  ["data/emergency_stop", "write-path"],
+  ["/repo/data/Emergency_Stop", "write-path"],
+  // #781: the init-starter template — same rule shape as sapwood.config.* above, but a
+  // separate match target (the root config and the shipped example are different files).
+  ["sapwood.config.example.yaml", "write-path"],
+  ["sapwood.config.example.yml", "write-path"],
+  ["sapwood.config.example.json", "write-path"],
+  ["/repo/sapwood.config.example.yaml", "write-path"],
+  ["../../sapwood.config.example.yaml", "write-path"],
+  // gate② P1 on #809: same case-insensitivity gap as the root config rule above — the exact
+  // reproduction the reviewer posted (Write SAPWOOD.CONFIG.EXAMPLE.YAML => allow=true pre-fix).
+  ["SAPWOOD.CONFIG.EXAMPLE.YAML", "write-path"],
+  ["sub/../Sapwood.Config.Example.Yaml", "write-path"],
 ];
 for (const [file_path, kw] of WRITE_BLOCK) {
   test(`WRITE BLOCK: ${file_path}`, () => {
@@ -557,7 +608,17 @@ for (const [file_path, kw] of WRITE_BLOCK) {
   });
 }
 
-for (const file_path of ["src/app.ts", "README.md", "/repo/engine/src/forge.ts", ".github/ISSUE_TEMPLATE.md", "data/README.md"]) {
+for (const file_path of [
+  "src/app.ts",
+  "README.md",
+  "/repo/engine/src/forge.ts",
+  ".github/ISSUE_TEMPLATE.md",
+  "data/README.md",
+  // #779 reverse: near-miss sentinel name stays allowed ($-anchor).
+  "data/EMERGENCY_STOPPED",
+  // #781 reverse: near-miss template name stays allowed ($-anchor).
+  "sapwood.config.example2.yaml",
+]) {
   test(`WRITE ALLOW: ${file_path}`, () => {
     assert.equal(guardDecision("Edit", { file_path }, CWD).allow, true);
   });
@@ -568,6 +629,38 @@ test("config write via Bash redirect is also blocked (worker can't echo > sapwoo
   const d = guardDecision("Bash", { command: "echo 'guard: {mode: soft}' > sapwood.config.yaml" }, CWD);
   assert.equal(d.allow, false);
   assert.ok(d.reason.toLowerCase().includes("write-path"));
+});
+
+// #781: the init-starter template gets the same Bash-redirect coverage as the root config above.
+test("init-starter template write via Bash redirect is also blocked (worker can't echo > sapwood.config.example.yaml)", () => {
+  const d = guardDecision("Bash", { command: "echo 'merge: {mode: auto}' > sapwood.config.example.yaml" }, CWD);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("write-path"));
+});
+
+// gate② P1 on #809: case-insensitive Bash vectors for BOTH the root config rule and its
+// sibling example-template rule — the reviewer's exact reproduction list (redirect/mv-dest/
+// cp-dest), all of which returned allow=true before the `i` flag was added to either regex.
+const CONFIG_CASE_VARIANT_BLOCK: string[] = [
+  "echo x > SAPWOOD.CONFIG.EXAMPLE.YAML",
+  "mv /tmp/x Sapwood.Config.Example.Yaml",
+  "cp /tmp/x sapwood.config.example.YAML",
+  "echo x > SAPWOOD.CONFIG.YAML",
+  "mv /tmp/x Sapwood.Config.Yaml",
+  "cp /tmp/x sapwood.config.YAML",
+];
+for (const command of CONFIG_CASE_VARIANT_BLOCK) {
+  test(`BLOCK (case-insensitive config, #809 gate② P1): ${command}`, () => {
+    const d = bash(command);
+    assert.equal(d.allow, false, `should block: ${command}`);
+    assert.ok(d.reason.toLowerCase().includes("write-path"));
+  });
+}
+
+// Reverse: a case-variant NEAR-MISS (not the protected name) must still pass — the $-anchor
+// holds under the new `i` flag too, not just under the original case-sensitive match.
+test("ALLOW (case-insensitive near-miss): touch SAPWOOD.CONFIG.EXAMPLE2.YAML", () => {
+  assert.equal(bash("touch SAPWOOD.CONFIG.EXAMPLE2.YAML").allow, true);
 });
 
 test("hook: a blocking command yields a deny output naming the reason", () => {
