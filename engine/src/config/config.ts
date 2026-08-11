@@ -1345,6 +1345,48 @@ const Recovery = z
   })
   .strict();
 
+// #701: the development-language policy — WHICH working language every role composes free
+// text in, per surface, an explicit config-shaped fact rather than prose scattered across
+// carriers (#699 charter principle 3, the standing user-tunables-in-config rule). Values are
+// passed through OPAQUELY — no engine-side language whitelist/validation beyond non-empty, so
+// this key never blocks a language the underlying model can write (fail-open by design, #701's
+// What item 1). Each surface defaults to `"en"`: an unset section leaves the working-language
+// BEHAVIOR unchanged from pre-#701 — every prompt's new working-language directive resolves to
+// `en` (English), the same language every shipped prompt already used before this key existed.
+// This is NOT byte-identical rendered output: the default render now additionally CONTAINS that
+// directive line (resolved to `en`), so the pinned snapshot hashes in prompts.test.ts moved for
+// every prompt that gained one. Those regenerated pins guard against FUTURE unintended drift of
+// this new default render — they assert stability going forward, not identity with the pre-#701
+// prompt bytes.
+//
+// The three surfaces are deliberately the small, named set #701 asked for (commit messages etc.
+// are NOT modeled — "keep the set small and add on demand, not speculatively," #701's What item
+// 3) and correspond 1:1 to where a shipped prompt composes free text an operator might want in a
+// non-English language:
+//   - codeComments  — worker.md / fix.md: comments and identifier-adjacent prose in produced code.
+//   - issuesAndPrs  — po.md / po-decompose.md / verification-plan-drafter.md /
+//                     verification-plan-reviewer.md / verification-plan-reviewer-confirm.md /
+//                     harvest.md / retro.md / architect.md / engine-reviewer.md: issue bodies,
+//                     proposal/triage text, and review-comment prose the engine composes.
+//   - docs          — worker.md / architect.md: documentation files/chapters a role edits. NOT
+//                     fix.md — a fix leg only receives `{{lang.codeComments}}` (its narrower var
+//                     set, #245 round-2 fix A7); it never touches docs prose.
+//
+// Precedence (docs/configuration.md "Language customization"): this config key takes precedence
+// over the target repo's own CLAUDE.md prose — #167's CLAUDE.md language entry point remains the
+// FALLBACK carrier for a repo that never sets this section. This key governs the DEFAULT language
+// for content a role ORIGINATES; it does not override a role's separate, pre-existing duty (every
+// prompt below still states it) to preserve/match an existing issue's own already-established
+// language when continuing human-authored content — those are orthogonal concerns, not a
+// precedence conflict.
+const Language = z
+  .object({
+    codeComments: z.string().min(1).default("en"),
+    issuesAndPrs: z.string().min(1).default("en"),
+    docs: z.string().min(1).default("en"),
+  })
+  .strict();
+
 // #168: environment-failure park — detect (signature pattern sets per source), park, probe,
 // auto-resume, timed human escalation. User-tunable-in-config (same shipped-commented-YAML
 // precedent as labels.*/pricing.yaml): patterns are matched deterministically (env-failure.ts's
@@ -1483,6 +1525,7 @@ const ConfigSchemaRaw = z
     goal: Goal.default({}),
     doctrine: Doctrine.default({}),
     recovery: Recovery.default({}),
+    language: Language.default({}),
     reviewer: Reviewer.default({}),
     merge: Merge.default({}),
     labels: Labels.default({}),

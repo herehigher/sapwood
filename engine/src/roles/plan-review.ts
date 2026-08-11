@@ -133,6 +133,12 @@ function configVars(cfg: SapwoodConfig): Record<string, string> {
     "labels.blocked": cfg.labels.blocked,
     "labels.verifyNa": cfg.labels.verifyNa,
     "roles.verificationPlanReviewer.maxDraftCycles": String(cfg.roles.verificationPlanReviewer.maxDraftCycles),
+    // #701: the configured default working language for issue/PR-facing prose these roles
+    // originate (po.md, po-decompose.md, verification-plan-drafter.md,
+    // verification-plan-reviewer.md, verification-plan-reviewer-confirm.md all route through
+    // this one renderRolePrompt, so wiring it here covers every one of them at once). Opaque
+    // BCP-47-ish tag, `en` by default — see config.ts's `language` section doc comment.
+    "lang.issuesAndPrs": cfg.language.issuesAndPrs,
   };
 }
 

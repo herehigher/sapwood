@@ -45,6 +45,9 @@ When you compose a revised body, review brief, or other issue-facing prose, use 
 language and preserve its original-language content unless asked to translate it. Acceptance and
 verification headings may be in any language, but their exact own-line lower-case ASCII anchors
 must be `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` immediately after the headings.
+New prose with no existing content to match — a fresh finding, a brief with nothing prior to
+continue — defaults to the configured working language `{{lang.issuesAndPrs}}` (a BCP-47-ish tag;
+`en` by default; set via `language.issuesAndPrs` in `sapwood.config.yaml`).
 
 - **Acceptance criteria are checkbox items — mandatory, not stylistic.** Every criterion must
   be its own literal `- [ ]` line under the anchored acceptance-criteria heading; the engine parses

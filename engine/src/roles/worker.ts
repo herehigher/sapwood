@@ -4572,6 +4572,11 @@ const CONFIG_VARS: Record<string, (cfg: SapwoodConfig) => string> = {
   // explicit NO_DOCTRINE placeholder (see that module's doc comment), never a silent empty
   // substitution and never a startup throw.
   doctrine: (cfg) => loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars),
+  // #701: the configured default working language for code comments and for documentation the
+  // worker edits — opaque BCP-47-ish tag, `en` by default. See config.ts's `language` section
+  // doc comment.
+  "lang.codeComments": (cfg) => cfg.language.codeComments,
+  "lang.docs": (cfg) => cfg.language.docs,
 };
 
 /** Builds the `WorkerDeps.renderPrompt` closure (#74): loads the template ONCE, eagerly —
@@ -4655,6 +4660,9 @@ export function buildRenderFixPrompt(cfg: SapwoodConfig): (issueNumber: number, 
     "issue.number": (issueNumber) => String(issueNumber),
     "labels.verifyNa": () => cfg.labels.verifyNa,
     "pr.number": (_issueNumber, pr) => String(pr),
+    // #701: same working-language default as buildRenderPrompt's CONFIG_VARS above — a fix leg
+    // still writes code comments.
+    "lang.codeComments": () => cfg.language.codeComments,
   };
   for (const [, raw] of template.matchAll(/\{\{([^{}]*)\}\}/g)) {
     const name = raw!.trim();

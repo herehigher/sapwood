@@ -388,12 +388,66 @@ appears in a public PR comment.
 
 ## Language customization
 
-sapwood has no language-preference config key of its own — it doesn't need one. Every spawned
-session (worker, and every peripheral role) runs as a Claude Code session inside the target
-repo's own checkout, and Claude Code loads that repo's `CLAUDE.md` automatically. A language
-preference — "always respond in Japanese," "write commit messages in French" — belongs there,
-in the target repo's own `CLAUDE.md`, exactly like any other repo-specific working convention.
-There's nothing to configure in `sapwood.config.yaml` for this.
+### `language` (#701) — the development-language policy
+
+Every spawned session (worker, and every peripheral role) runs as a Claude Code session inside
+the target repo's own checkout, and Claude Code loads that repo's `CLAUDE.md` automatically —
+so a language preference has always been expressible there (#167's entry point). `language` adds
+an explicit, user-visible config knob for the same fact, per **surface**, so an operator adopting
+sapwood on a non-English codebase has a supported way to say "our code comments are Japanese, our
+PRs are English" without hand-writing that as `CLAUDE.md` prose:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `codeComments` | `en` | Working language for comments and identifier-adjacent prose the worker/fix-leg producer writes into code. |
+| `issuesAndPrs` | `en` | Working language for issue bodies, proposal/triage text, and review-comment prose the engine's peripheral roles (PO, verification-plan reviewer/drafter, architect, harvest, retro, the engine-agent reviewer) compose. |
+| `docs` | `en` | Working language for documentation files/chapters a role edits (e.g. the architect's `docs/PLAN.md` architecture-chapter proposals). |
+
+```yaml
+# language:
+#   codeComments: en   # BCP-47-ish tag (e.g. ja, zh-Hans, pt-BR); passed through opaquely
+#   issuesAndPrs: en    # — no engine-side language whitelist, so any tag the model can write works
+#   docs: en
+```
+
+Every key defaults to `en` (English) — an unset section leaves the working-language BEHAVIOR
+unchanged from before this key existed: each surface's directive resolves to `en`, the same
+language every shipped prompt already used. This is a behavioral invariant, not a byte-identical
+one — the default render now additionally CONTAINS that resolved directive line, so every shipped
+prompt that gained one has a new rendered form (and, for the pinned ones, a new `prompts.test.ts`
+snapshot hash). Those pins guard against FUTURE unintended drift of this default render; they
+don't assert identity with the prompt bytes from before this key existed. Values are opaque
+BCP-47-ish tags: sapwood never validates them against a language list, so any tag the underlying
+model can actually write in works, fail-open by design.
+
+**Mechanics.** Each surface's tag is threaded to the relevant shipped prompts as a `{{lang.*}}`
+template variable (the same `promptFile`/template-var pattern every other config-to-prompt key in
+this doc already uses) — `{{lang.codeComments}}` (worker.md, fix.md), `{{lang.issuesAndPrs}}`
+(po.md, po-decompose.md, verification-plan-drafter.md, verification-plan-reviewer.md,
+verification-plan-reviewer-confirm.md, architect.md, harvest.md, retro.md, engine-reviewer.md),
+and `{{lang.docs}}` (worker.md, architect.md — **not** fix.md, whose deliberately narrower var set,
+#245 round-2 fix A7, carries `{{lang.codeComments}}` only). Prompts receive the policy; they never
+hardcode a language directive.
+
+**Precedence.** This config key takes precedence over the target repo's own `CLAUDE.md` prose —
+#167's `CLAUDE.md` entry point becomes the **fallback** carrier for a repo that never sets
+`language` here. The config key governs the DEFAULT language a role uses for content it
+*originates*; it is orthogonal to (never overrides) a role's separate, pre-existing duty — every
+authoring prompt above still states it — to preserve or match an **existing** issue's own
+already-established language when continuing human-authored content (see "Issue-facing prose"
+below).
+
+**Interplay with #591 (parsing-language-freedom).** #591 made the engine's PARSING side
+language-free: non-English issue-body section headings are recognized via the exact
+`<!-- sapwood:ac -->`/`<!-- sapwood:verification -->` anchors described below, rather than
+English-regex heading matching. `language.issuesAndPrs` is the other half — the engine's OUTPUT
+side. They compose, and in one direction only: setting `language.issuesAndPrs` to a non-English
+tag makes engine-composed issue/PR prose non-English, which is only machine-safe for THIS loop's
+own parsing once the issue/PR body also carries #591's anchors — an operator who sets
+`issuesAndPrs` to a non-English tag should pair every issue template with the anchors (the
+shipped `.github/ISSUE_TEMPLATE/*.md` already do). Setting `language.codeComments` or
+`language.docs` carries no such dependency — sapwood never parses code comments or doc prose as
+protocol.
 
 **Issue-body headings may use any language.** Put an exact own-line marker immediately after
 each semantic section heading:
@@ -422,9 +476,11 @@ silently enter the `verify:n/a` doc-gate path, which requires the explicit confi
 
 Issue-facing prose an LLM composes (drafted bodies, triage/proposal text, and LLM-written notes)
 should use the issue's own language and preserve original-language content unless asked to
-translate it. Engine-authored static receipts and escalation comments remain English, including
-on non-English issues; this is a deliberate permanent-until-revisited boundary, not a language
-selection mechanism.
+translate it; new prose with no existing content to match defaults to the configured
+`language.issuesAndPrs` (`en` unless set — see `language` above). Engine-authored static receipts
+and escalation comments remain English, including on non-English issues; this is a deliberate
+permanent-until-revisited boundary, not a language selection mechanism (they are literal code
+strings, not LLM-composed prose, so `language.issuesAndPrs` does not reach them).
 
 **Other machine-parsed surfaces remain protocol identifiers.**
 

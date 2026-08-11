@@ -663,6 +663,40 @@ test("createRetroStub: roles.retro.promptFile override is honored (the #74 promp
   }
 });
 
+test("#701: createRetroStub renders {{lang.issuesAndPrs}} from cfg.language.issuesAndPrs — defaults to 'en', follows an override", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-retro-"));
+  try {
+    const promptPath = join(dir, "custom-lang-retro.md");
+    writeFileSync(promptPath, "lang={{lang.issuesAndPrs}}");
+
+    const defaultState = new State(":memory:");
+    const defaultRound = defaultState.startRound("2026-07-10T00:00:00.000Z");
+    const defaultRunner = new ScriptedRunner(doneResult("s1"));
+    const defaultCfg = mkCfg({ roles: { retro: { promptFile: promptPath } } });
+    await createRetroStub({ now: realClock, state: defaultState, cfg: defaultCfg, runner: defaultRunner, forge: new MinimalForge() }).run({
+      roundId: defaultRound.round_id,
+      phase: "retro",
+      marker: null,
+    });
+    assert.equal(defaultRunner.calls[0]!.prompt, "lang=en");
+    defaultState.close();
+
+    const jaState = new State(":memory:");
+    const jaRound = jaState.startRound("2026-07-10T00:00:00.000Z");
+    const jaRunner = new ScriptedRunner(doneResult("s1"));
+    const jaCfg = mkCfg({ roles: { retro: { promptFile: promptPath } }, language: { issuesAndPrs: "ja" } });
+    await createRetroStub({ now: realClock, state: jaState, cfg: jaCfg, runner: jaRunner, forge: new MinimalForge() }).run({
+      roundId: jaRound.round_id,
+      phase: "retro",
+      marker: null,
+    });
+    assert.equal(jaRunner.calls[0]!.prompt, "lang=ja");
+    jaState.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("defaultRetroPromptPath: resolves to the shipped prompts/retro.md, which exists and carries the mandatory review-findings-philosophy amendment", () => {
   const p = defaultRetroPromptPath();
   assert.ok(existsSync(p), `expected shipped prompt at ${p}`);

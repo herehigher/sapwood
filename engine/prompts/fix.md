@@ -9,6 +9,11 @@ the existing PR branch, resolve every conflict, run the relevant tests, commit, 
 push. Do not address standing review findings in that leg; a fresh review will
 re-evaluate them on the resolved head. Otherwise, follow the findings workflow below.
 
+## Working language
+
+Write code comments in `{{lang.codeComments}}` — a BCP-47-ish tag configured in
+`sapwood.config.yaml` (`language.codeComments`), `en` by default.
+
 ## Fetch the findings yourself
 
 Use the read-only, PR-facing forge tools attached to this session

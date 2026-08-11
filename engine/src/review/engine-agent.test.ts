@@ -796,6 +796,40 @@ test("evaluate(): a custom template using WHITESPACE placeholder forms renders f
   assert.doesNotMatch(prompt, /\{\{\s*[a-zA-Z0-9._-]+\s*\}\}/);
 });
 
+test("#701: evaluate() renders {{lang.issuesAndPrs}} from cfg.language.issuesAndPrs — defaults to 'en', follows an override, and is optional (not one of REQUIRED_PROMPT_PLACEHOLDERS)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "engine-agent-template-"));
+  const file = join(dir, "lang-render.md");
+  writeFileSync(file, "diff:{{diff}} body:{{issue-body}} ac:{{acceptance-criteria}} doctrine:{{doctrine}} lang:{{lang.issuesAndPrs}}");
+
+  const defaultCfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\n" +
+      `worker: { model: ${WORKER_MODEL} }\n` +
+      `reviewer: { mode: engine-agent, agent: { model: ${AGENT_MODEL}, promptFile: "${file}" } }\n`,
+  );
+  const { build: buildDefault, runner: runnerDefault } = mkDeps({
+    runnerQueue: [mkSessionResult({ resultText: ALL_CONFIRMED })],
+    cfg: defaultCfg,
+  });
+  await buildDefault().evaluate(ctx());
+  assert.match(runnerDefault.calls[0]!.prompt, /lang:en/);
+
+  const jaCfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\n" +
+      `worker: { model: ${WORKER_MODEL} }\n` +
+      `reviewer: { mode: engine-agent, agent: { model: ${AGENT_MODEL}, promptFile: "${file}" } }\n` +
+      "language: { issuesAndPrs: ja }\n",
+  );
+  const { build: buildJa, runner: runnerJa } = mkDeps({ runnerQueue: [mkSessionResult({ resultText: ALL_CONFIRMED })], cfg: jaCfg });
+  await buildJa().evaluate(ctx());
+  assert.match(runnerJa.calls[0]!.prompt, /lang:ja/);
+
+  // A template that never references {{lang.issuesAndPrs}} still loads — it's not a mandatory
+  // placeholder (loadEngineReviewerPromptTemplate's REQUIRED_PROMPT_PLACEHOLDERS is unchanged).
+  const noLangFile = join(dir, "no-lang.md");
+  writeFileSync(noLangFile, "{{diff}}\n{{issue-body}}\n{{acceptance-criteria}}\n{{doctrine}}\n");
+  assert.doesNotThrow(() => loadEngineReviewerPromptTemplate(noLangFile));
+});
+
 test("evaluate(): fallbackModel is 'none' — engine-agent never silently swaps models mid-session (D5)", async () => {
   const { build, runner } = mkDeps({ runnerQueue: [mkSessionResult({ resultText: ALL_CONFIRMED })] });
   await build().evaluate(ctx());
