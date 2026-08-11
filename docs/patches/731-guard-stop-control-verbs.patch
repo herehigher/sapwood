@@ -50,9 +50,14 @@
 #       since altered the surrounding context, re-verify with `git apply --check` before trusting
 #       either order blindly.
 #
-# APPLY (from the repo root), then delete this file:
+# APPLY (from the repo root), then delete this file AND its apply-check test:
 #       git apply docs/patches/731-guard-stop-control-verbs.patch
 #       git rm docs/patches/731-guard-stop-control-verbs.patch
+#       git rm engine/src/guard/patch-731-apply-check.test.ts
+#       # ^ that test's whole job is proving THIS patch applies cleanly pre-apply; once applied,
+#       #   the patch file it asserts existsSync() on is gone (by the git rm two lines up), so the
+#       #   test would fail on every future CI run if left behind — remove it, don't make it
+#       #   skip-when-absent (a passing-by-vacuity test is worse than no test).
 #       npm --workspace engine test    # exercises the new BLOCK/ALLOW rows this patch adds
 #
 # VERIFIED: this diff applies cleanly to main at ada7d4e (`git apply --check`, this issue's own
