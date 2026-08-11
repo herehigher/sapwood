@@ -818,6 +818,33 @@ test("#409 fix.md: carries the authoritative-signals rule (a fix leg is where pa
   assert.ok(!body.includes("Check what already exists before you build."), "reuse-before-build is scoped to fresh work, not rework");
 });
 
+test("#354 fix.md: dispute a tier-C-only finding on sight, with the true producer-unforgeability rationale (not a false guard-denial claim)", () => {
+  const body = readPrompt(defaultFixPromptPath());
+  assert.match(
+    body,
+    /Tier C is producer-unforgeable by definition/,
+    "the true, permission-layer-independent reason survives — not the false 'issue-body edits are guard-denied' claim",
+  );
+  assert.ok(!body.includes("guard-denied"), "the false guard-semantics claim is gone");
+  assert.ok(!body.includes("#652"), "the unresolvable-in-target-repos issue reference is gone");
+  assert.ok(
+    !body.includes("actor, steps, timestamp"),
+    "the tier-C field list is not restated — cite the ac-evidence-tiers doctrine line by name instead",
+  );
+  assert.ok(body.includes("ac-evidence-tiers"), "the doctrine line is cited by name");
+  assert.match(
+    body,
+    /a\s+disputed thread never resolves, so nothing merges on it and a human adjudicates/,
+    "states what is always true instead of promising an escalation event",
+  );
+  assert.match(body, /it is not\s+tier-C-only — fix it\./, "the unsure-means-fix-it tightener is present");
+  assert.match(
+    body,
+    /Quote the finding's own tier-C\s+requirement verbatim/,
+    "the dispute reply must quote the finding's own tier-C requirement verbatim",
+  );
+});
+
 test("#409 verification-plan-reviewer.md: unexecutable-mechanism plans are bounceable, WITHOUT licensing a re-litigation of the human's why/what", () => {
   const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
   assert.ok(body.includes("Mechanism assumptions are plan defects."), "the plan-defect ground is present");
