@@ -36,12 +36,12 @@ import {
   deployKeyTransportOverlay,
   discoverClaudeBin,
   EMPTY_MCP_CONFIG_JSON,
+  ENGINE_CLAUDE_LONG_FLAGS,
   extractFailureText,
   extractRateLimitResetAt,
   guardSettings,
   hasQuotaErrorStatus,
   hasRejectedRateLimitEvent,
-  LLM_PING_REQUIRED_LONG_FLAGS,
   loadFixPromptTemplate,
   loadWorkerPromptTemplate,
   MAX_EGRESS_SUSPECTS_PER_LEG,
@@ -1442,15 +1442,103 @@ test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no
       "text",
       "Respond with the single word 'pong' and nothing else.",
     ]);
-    // #799: LLM_PING_REQUIRED_LONG_FLAGS (the human-owned CI remainder's own import source) must
-    // name a subset of what THIS real invocation actually sent — a flag added to the argv above
-    // without updating that exported list would otherwise drift silently.
-    for (const flag of LLM_PING_REQUIRED_LONG_FLAGS) {
-      assert.ok(argv.includes(flag), `LLM_PING_REQUIRED_LONG_FLAGS names "${flag}", which the real argv above must contain`);
+    // #799 gate② P1 #4: every long flag (`--xxx`) THIS REAL invocation actually sent must be
+    // named in ENGINE_CLAUDE_LONG_FLAGS (the human-owned CI remainder's import source) — the
+    // REVERSE direction from ENGINE_CLAUDE_LONG_FLAGS's own derivation (which calls
+    // `llmPingArgv` directly, no spawn). probeLlmPing delegates to that SAME builder internally
+    // now, so this should hold tautologically; it guards against a future regression that
+    // re-inlines a literal argv array in probeLlmPing without routing back through the shared
+    // builder ENGINE_CLAUDE_LONG_FLAGS reads from.
+    for (const token of argv) {
+      if (!token.startsWith("--")) continue;
+      assert.ok(ENGINE_CLAUDE_LONG_FLAGS.includes(token), `ENGINE_CLAUDE_LONG_FLAGS must name "${token}", sent by this real invocation`);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("#799 gate② P1 #4: ENGINE_CLAUDE_LONG_FLAGS is derived from REAL argv-building calls, not a hand list — pinned exact set, and covers fresh + resume claudeArgs shapes", () => {
+  // Fresh dispatch (`--session-id`) vs resume (`--resume`) are mutually exclusive in ONE
+  // claudeArgs() call — exercise both maximal shapes directly (no spawn needed; claudeArgs is
+  // pure) and assert every long flag either can ever emit is covered.
+  const freshArgv = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    worktree: "lane",
+    name: "lane",
+    sessionId: "s",
+    addDir: "/tmp",
+    settings: "{}",
+    allowedTools: "Read",
+    disallowedTools: "Bash",
+    mcpConfig: "{}",
+    strictMcpConfig: true,
+    settingSources: "",
+    maxBudgetUsd: 1,
+    pluginDir: "/tmp/plugin",
+  });
+  const resumeArgv = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    worktree: "lane",
+    name: "lane",
+    sessionId: "s",
+    resumeSessionId: "prior",
+    addDir: "/tmp",
+    settings: "{}",
+    allowedTools: "Read",
+    disallowedTools: "Bash",
+    mcpConfig: "{}",
+    strictMcpConfig: true,
+    settingSources: "",
+    maxBudgetUsd: 1,
+    pluginDir: "/tmp/plugin",
+  });
+  for (const argv of [freshArgv, resumeArgv]) {
+    for (const token of argv) {
+      if (!token.startsWith("--")) continue;
+      assert.ok(ENGINE_CLAUDE_LONG_FLAGS.includes(token), `ENGINE_CLAUDE_LONG_FLAGS must name "${token}"`);
+    }
+  }
+  assert.ok(freshArgv.includes("--session-id"), "fresh shape uses --session-id");
+  assert.ok(resumeArgv.includes("--resume"), "resume shape uses --resume");
+  assert.ok(!freshArgv.includes("--resume") && !resumeArgv.includes("--session-id"), "the two shapes are mutually exclusive");
+  // Pinned exact set: any addition OR removal (a NEW field's flag, or a dropped one) must be a
+  // conscious, reviewed change to this test, not a silent drift — the exact failure class
+  // sol-high's gate② review demonstrated against the pre-fix 5-flag hand list.
+  assert.deepEqual(
+    ENGINE_CLAUDE_LONG_FLAGS,
+    [
+      "--add-dir",
+      "--allowedTools",
+      "--disallowedTools",
+      "--effort",
+      "--fallback-model",
+      "--include-hook-events",
+      "--max-budget-usd",
+      "--mcp-config",
+      "--model",
+      "--name",
+      "--no-session-persistence",
+      "--output-format",
+      "--permission-mode",
+      "--plugin-dir",
+      "--resume",
+      "--session-id",
+      "--setting-sources",
+      "--settings",
+      "--strict-mcp-config",
+      "--system-prompt",
+      "--tools",
+      "--verbose",
+      "--worktree",
+    ].sort(),
+  );
 });
 
 // #377: no PR-association dep (WorkerDeps.lanePr) — a lane built this way is never associated

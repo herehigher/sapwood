@@ -797,7 +797,7 @@ export function discoverClaudeBin(env: Record<string, string | undefined>): stri
  *  without updating both docs to the SAME exact string fails that test. Consumed by
  *  claude-version-startup-check.ts's once-per-engine-start WARN-only startup detector — never a
  *  gate, see that module's own doc — and by the human-owned CI remainder
- *  (docs/patches/799-ci-claude-cli-version-floor.patch) via `LLM_PING_REQUIRED_LONG_FLAGS` below. */
+ *  (docs/patches/799-ci-claude-cli-version-floor.patch) via `ENGINE_CLAUDE_LONG_FLAGS` below. */
 export const MIN_CLAUDE_CLI_VERSION = "2.1.209";
 
 /** #168: the ping probe's outcome. `detail` is set on FAILURE only — the first stderr (or
@@ -816,21 +816,30 @@ export interface LlmPingResult {
 const LLM_PING_SYSTEM_PROMPT = "You are a heartbeat responder. Only output the requested word.";
 const LLM_PING_PROMPT = "Respond with the single word 'pong' and nothing else.";
 
-/** #799 human-owned CI remainder (docs/patches/799-ci-claude-cli-version-floor.patch): the long
- *  flag names probeLlmPing's argv below depends on, extracted so a CI job can assert
- *  `claude --help` (against the pinned MIN_CLAUDE_CLI_VERSION, no auth, no spend) offers every
- *  one of them — one source the CI script imports, not a duplicated YAML list that can drift from
- *  the real argv. Hand-kept in sync with the literal argv array in probeLlmPing below; the
- *  "invoked with exactly the verified argv" test in worker.test.ts asserts each of these flags
- *  is literally present in a captured real invocation, so a probeLlmPing change that drops one
- *  without updating this list fails that test. */
-export const LLM_PING_REQUIRED_LONG_FLAGS = [
-  "--no-session-persistence",
-  "--strict-mcp-config",
-  "--tools",
-  "--max-budget-usd",
-  "--system-prompt",
-] as const;
+/** #799 gate② P1 #4 fix: probeLlmPing's argv, extracted to a pure builder so the CI floor-check
+ *  (`ENGINE_CLAUDE_LONG_FLAGS`, defined after `claudeArgs` below) can derive its required-flag
+ *  set by actually CALLING this function rather than hand-copying flag names into a second list
+ *  that can silently fall behind (sol-high gate② finding: a 5-flag hand list omitted even this
+ *  same function's own `--model`/`--output-format`, and 19 more flags `claudeArgs` can emit).
+ *  probeLlmPing itself calls this — one source, not two. */
+function llmPingArgv(probeModel: string, probeMaxBudgetUsd: number): string[] {
+  return [
+    "-p",
+    "--model",
+    probeModel,
+    "--no-session-persistence",
+    "--system-prompt",
+    LLM_PING_SYSTEM_PROMPT,
+    "--strict-mcp-config",
+    "--tools",
+    "",
+    "--max-budget-usd",
+    String(probeMaxBudgetUsd),
+    "--output-format",
+    "text",
+    LLM_PING_PROMPT,
+  ];
+}
 
 /** #168 (PR #180 review, P1-1 amendment — final form): the LLM-source probe for conductor.ts's
  *  park machinery (TickDeps.probeLlmReachable) — a REAL minimal inference ping, verified
@@ -882,26 +891,7 @@ export function probeLlmPing(claudeBin: string, probeModel: string, probeMaxBudg
     const firstLine = (s: string): string => s.trim().split("\n")[0]?.trim() ?? "";
     let child: ChildProcess;
     try {
-      child = spawn(
-        claudeBin,
-        [
-          "-p",
-          "--model",
-          probeModel,
-          "--no-session-persistence",
-          "--system-prompt",
-          LLM_PING_SYSTEM_PROMPT,
-          "--strict-mcp-config",
-          "--tools",
-          "",
-          "--max-budget-usd",
-          String(probeMaxBudgetUsd),
-          "--output-format",
-          "text",
-          LLM_PING_PROMPT,
-        ],
-        { stdio: ["ignore", "pipe", "pipe"] },
-      );
+      child = spawn(claudeBin, llmPingArgv(probeModel, probeMaxBudgetUsd), { stdio: ["ignore", "pipe", "pipe"] });
     } catch (e) {
       finish({ ok: false, detail: `ping spawn failed: ${e instanceof Error ? e.message : String(e)}` });
       return;
@@ -1293,6 +1283,57 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     "--verbose",
   ];
 }
+
+/** #799 gate② P1 #4 fix: EVERY optional `ClaudeArgsOpts` field is deliberately filled in below —
+ *  typed `Required<ClaudeArgsOpts>`, not `ClaudeArgsOpts`, so a FUTURE new optional field fails
+ *  to COMPILE here until this fixture supplies a value for it. Same completeness discipline as
+ *  `unstubbed-forge.test-support.ts`'s `MISSING_FROM_LIST` gives `IForge`: without it, a new
+ *  field could add a new long flag that silently never reaches `ENGINE_CLAUDE_LONG_FLAGS` below
+ *  (the same class of gap a hand-maintained flag list already failed on once — sol-high gate②
+ *  review of #799). `resumeSessionId` is set here (the "resume" shape); the "fresh" shape below
+ *  derives from this SAME object with that one field omitted, rather than a second
+ *  independently-typed fixture that could itself drift. */
+const MAXIMAL_CLAUDE_ARGS_OPTS: Required<ClaudeArgsOpts> = {
+  prompt: "prompt",
+  model: "model",
+  effort: "high",
+  fallbackModel: "sonnet",
+  worktree: "lane",
+  name: "lane",
+  sessionId: "session",
+  addDir: "/tmp/add-dir",
+  settings: "{}",
+  resumeSessionId: "prior-session",
+  allowedTools: "Read",
+  disallowedTools: "Bash",
+  mcpConfig: "{}",
+  strictMcpConfig: true,
+  settingSources: "",
+  maxBudgetUsd: 1,
+  pluginDir: "/tmp/plugin",
+};
+
+/** A long flag: `--xxx`, never a bare value or a short flag (`-p`) — the shape `claude --help`'s
+ *  own output lists flags in. */
+function isLongFlag(token: string): boolean {
+  return /^--[a-zA-Z][a-zA-Z-]*$/.test(token);
+}
+
+/** #799 gate② P1 #4 fix: the COMPLETE set of long flags the engine's OWN `claude` invocations
+ *  can ever emit — derived by actually CALLING `claudeArgs` (both the fresh-dispatch shape,
+ *  `--session-id`, and the resume shape, `--resume`) and `llmPingArgv` with every optional field
+ *  populated, rather than a hand-maintained list a future flag could silently miss. This is what
+ *  the CI floor-check (`docs/patches/799-ci-claude-cli-version-floor.patch`'s
+ *  `check-claude-cli-flags.ts`) asserts `claude --help` advertises — the human-owned CI
+ *  remainder's own promise to check EVERY flag the engine emits, not a curated subset. */
+export const ENGINE_CLAUDE_LONG_FLAGS: readonly string[] = (() => {
+  const { resumeSessionId: _resumeSessionId, ...freshOpts } = MAXIMAL_CLAUDE_ARGS_OPTS;
+  const freshArgv = claudeArgs(freshOpts);
+  const resumeArgv = claudeArgs(MAXIMAL_CLAUDE_ARGS_OPTS);
+  const pingArgv = llmPingArgv("probe-model", 0.05);
+  const all = [...freshArgv, ...resumeArgv, ...pingArgv].filter(isLongFlag);
+  return [...new Set(all)].sort();
+})();
 
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "handoff.json", "heartbeat", "jsonl"];
 
