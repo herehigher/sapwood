@@ -13,10 +13,11 @@ test.afterEach(() => mock.restoreAll());
 
 // ── controlsReducer: the misfire-protection state machine (§3 Operations) ───────────────────
 //
-// No jsdom/testing-library in this repo (package.json's own test script is plain `node --test`
+// These tests deliberately stay DOM-free (package.json's own test script is plain `node --test`
 // over `react-dom/server`'s `renderToStaticMarkup`, which never runs effects or handles clicks —
-// see App.tsx's own comment on this). The reducer is therefore the actual proof of "no fetch
-// without confirm": every path through it is exercised directly, with no DOM in the loop at all.
+// see App.tsx's own comment on this); see the real-DOM test at the end of this file for the
+// button-click round trip. The reducer is therefore the actual proof of "no fetch without
+// confirm": every path through it is exercised directly, with no DOM in the loop at all.
 
 test("controlsReducer: a bare verb click never reaches the sending phase — confirmation is required first", () => {
   for (const verb of CONTROL_VERBS) {
@@ -198,9 +199,9 @@ test("the confirming dialog does NOT render while idle — the dialog only appea
 // working around "no jsdom in this harness" by chaining pure functions instead of clicking a
 // real button. That's exactly the class of gap gate② kept re-finding across rounds (#727/#739's
 // own "wiring unexercised" findings): a test can be green while the production onClick/useEffect
-// composition is broken, because nothing here ever dispatched a real event. `test-dom-setup.ts`
-// (registered via the `test` script's `--import`) now provides a real minimal DOM, so this proves
-// the actual button-click round trip once, directly against the reducer-chaining tests above.
+// composition is broken, because nothing here ever dispatched a real event. `src/test-dom.ts`'s
+// `registerRealDom()`, called at the top of this file, now provides a real minimal DOM, so this
+// proves the actual button-click round trip once, directly against the reducer-chaining tests above.
 test("real DOM: clicking a verb button opens the confirm dialog; clicking Confirm fires onControl exactly once with that verb, then the dialog closes", async () => {
   const onControl = mock.fn(async () => undefined);
   const container = document.createElement("div");
@@ -214,7 +215,7 @@ test("real DOM: clicking a verb button opens the confirm dialog; clicking Confir
     const stopButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === CONTROL_COPY.stop.label);
     assert.ok(stopButton, "the real stop button renders");
     await act(async () => {
-      stopButton?.click();
+      stopButton.click();
     });
 
     assert.equal(container.querySelector('[role="alertdialog"]')?.getAttribute("aria-label"), "confirm stop");
@@ -223,7 +224,7 @@ test("real DOM: clicking a verb button opens the confirm dialog; clicking Confir
     const confirmButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Confirm");
     assert.ok(confirmButton, "the real confirm button renders");
     await act(async () => {
-      confirmButton?.click();
+      confirmButton.click();
     });
 
     assert.equal(onControl.mock.calls.length, 1, "the production onClick -> reducer -> effect chain fired exactly once");

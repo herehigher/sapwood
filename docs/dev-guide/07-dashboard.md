@@ -56,8 +56,8 @@ than closing the gap. A test file that needs to click something real now calls
 `act()` — see `Controls.test.tsx`'s own "real DOM" test for the pattern. It is opt-in **per
 file**, deliberately: Node's test runner isolates each `*.test.ts(x)` file into its own process,
 and happy-dom's `fetch` enforces same-origin/CORS against `window.location`, which breaks
-`server.test.ts`'s real network calls if registered process-wide — do not add it to the root
-`test` script's `--import`.
+`server.test.ts`'s real network calls if registered process-wide — do not add it to the
+dashboard workspace's `test` script's `--import`.
 
 **Upstream of all of it,** the engine already persists the enabling sources:
 append-only `events` and `spend_ledger`, `rounds`/`round_artifacts`, live worker

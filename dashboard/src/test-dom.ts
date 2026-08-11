@@ -25,7 +25,11 @@ export function registerRealDom(): void {
     // would drown out real signal in CI output.
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   });
-  test.after(async () => {
-    await GlobalRegistrator.unregister();
-  });
+  test.after(
+    async () => {
+      delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+      await GlobalRegistrator.unregister();
+    },
+    { timeout: 10_000 },
+  );
 }
