@@ -2187,6 +2187,15 @@ session. Workflow-command binding remains a documented residual: the agent revie
 changes in the diff, but the engine does not statically prove that a named CheckRun executed a
 particular command.
 
+The paragraph above describes `loadConfig`/`parseConfig` — every read-only consumer (`status`,
+`events`, and this same drive path once a run is already in flight) — which is why it still only
+warns. `sapwood run` itself goes further (#784): it refuses to start at all under this exact
+combination, with a hard startup error naming the combination, the consequence, and both
+remedies, so the "queues before spending" drive-path behavior above is unreachable via `run` in
+practice — a run under this combination never gets far enough to dispatch a PR that could queue.
+`sapwood validate` (#801) mirrors that same refusal rather than only warning, so an operator never
+sees `validate: OK` on a config `run` would hard-refuse.
+
 **Gate① is rollup-wide and strictly broader than `requiredChecks` (#783).** `requiredChecks`
 narrows which checks count as trusted EVIDENCE for a code-verifiable AC; it never narrows which
 checks gate the merge itself. `PRStatus.ciGreen` requires the ENTIRE status-check rollup to pass,

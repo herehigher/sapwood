@@ -12,7 +12,13 @@ import { hostname as osHostname } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
-import { ConfigSchema, DEFAULT_CONFIG_PATHS, parseConfig, type SapwoodConfig } from "../config/config.js";
+import {
+  ConfigSchema,
+  DEFAULT_CONFIG_PATHS,
+  engineAgentEmptyCiRequiredChecksError,
+  parseConfig,
+  type SapwoodConfig,
+} from "../config/config.js";
 import type { OwnerKind } from "../forge/forge.js";
 import { type GhRunner, gh, ghText } from "../forge/gh.js";
 import { createMissingLabels, describeLabelDrift, type LabelSpec, normalizeLabel, taxonomyLabels } from "../forge/labels.js";
@@ -328,6 +334,13 @@ function ensureConfig(cwd: string): string | null {
 
 function sampleConfig(): string {
   // Ship the target-repository example (repo root) with the package.
+  //
+  // #801: neither this fallback's own inline text below NOR the shipped example.yaml sets
+  // ci.requiredChecks — deliberately: init cannot know a real CI check name for an arbitrary
+  // target repository, and writing a plausible-looking WRONG one would silently defeat #784's
+  // startup refusal (the check would pass, but no real CheckRun would ever match, so PRs would
+  // still queue forever — just without the loud warning). init()'s own caller surfaces this gap
+  // as an explicit WARN action instead — see init()'s own comment at its `ensureConfig` call site.
   const here = dirname(fileURLToPath(import.meta.url));
   const sample = join(here, "..", "..", "..", "sapwood.config.example.yaml");
   if (existsSync(sample)) return readFileSync(sample, "utf8");
@@ -1333,6 +1346,26 @@ export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Pr
 
   const written = ensureConfig(cwd);
   actions.push(written ? `wrote starter config ${written}` : "config already present");
+
+  // #801: the shipped scaffold (sapwood.config.example.yaml, or the inline fallback below when
+  // that file is missing from the package) deliberately pins reviewer.mode: engine-agent (#501)
+  // but ships NO ci.requiredChecks — there is no real CI check name init could safely guess for
+  // an arbitrary target repository, and writing a plausible-looking WRONG one (e.g. "test") would
+  // silently reintroduce the exact queue-forever foot-gun #784 exists to catch, just one layer
+  // deeper (the startup check would pass, but the CI-evidence preflight would never find a
+  // matching CheckRun). So the scaffold stays honest and empty; instead, `sapwood run`'s own
+  // future refusal (#784) is surfaced HERE, at init time, so the operator is told BEFORE they
+  // ever hit it rather than discovering it only when `run` (or `validate`, #801) cliffs. `cfg` is
+  // whatever this run is actually acting on — the just-written starter's own effective defaults
+  // on fresh onboarding, or an already-customized file's real values on a re-run — so this never
+  // fires once the operator has configured ci.requiredChecks (or picked a non-engine-agent mode).
+  const ciConfigError = engineAgentEmptyCiRequiredChecksError(cfg);
+  if (ciConfigError) {
+    actions.push(
+      `config: WARN — ${ciConfigError} Configure this before your first \`sapwood run\` — see ` +
+        `docs/getting-started.md's "Before your first run: make gate① real" section.`,
+    );
+  }
 
   // #606 (#351 final ruling): L1 scoped-worker-identity deploy key — provisioned AFTER the
   // config file exists (ensureConfig above), since a fresh onboarding needs somewhere to write

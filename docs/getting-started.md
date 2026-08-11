@@ -170,8 +170,9 @@ configured lanes exist.
 > ```
 >
 > `reviewer.mode` defaults to `engine-agent`, which is a second paid, headless Claude session.
-> With the shipped empty `ci.requiredChecks` list, the reviewer gate queues fail-closed rather
-> than treating an unspecified check as evidence. Do not start an unattended run until the
+> With the shipped empty `ci.requiredChecks` list, `sapwood run` now refuses to start rather than
+> queueing every PR fail-closed forever (#784) — `sapwood validate` reports the same refusal.
+> Configure the check above before your first run. Do not start an unattended run until the
 > pull-request check above is visible and green on a human-authored test PR.
 
 For the operational distinction between a healthy wait, standby, a frozen ceiling, and a
