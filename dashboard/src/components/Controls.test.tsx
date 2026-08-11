@@ -139,8 +139,9 @@ test("request -> confirm, chained through the real reducer into the real effect:
 // left the promise's rejection unhandled AND skipped the `dispatch({ type: "settled" })` that
 // returns the reducer to `idle` — the reducer stayed wedged in `sending` forever, every button
 // disabled, until a full page reload. These tests pin the fix at the same level round 1's
-// confirm-flow tests did: chaining the real reducer into the real effect function, since this
-// harness has no jsdom to actually click a button and watch a rejection resolve.
+// confirm-flow tests did: chaining the real reducer into the real effect function directly,
+// rather than clicking a button and watching a rejection resolve through the DOM (see the
+// real-DOM test at the end of this file for that path).
 
 test("runControlEffect: a rejecting onControl never propagates the rejection — it resolves to an honest failure result", async () => {
   const boom = new Error("engine unreachable");
@@ -172,10 +173,11 @@ test("a rejected request still reports `fired: true` — the caller's dispatch({
 });
 
 test("Controls renders the failure caption, never the raw error/status text, once mounted with onControl already failing", async () => {
-  // No jsdom to observe the DOM after a real click+rejection round-trips through the effect, but
-  // the component's own failure caption is a fixed string (never derived from the error object) —
-  // pinned directly so a future edit can't accidentally start interpolating raw error text into
-  // it (the same no-leaked-fetch-error posture App.tsx's `disconnected` header already holds to).
+  // This test stays DOM-free (see the real-DOM test at the end of this file for a real
+  // click+rejection round trip); the component's own failure caption is a fixed string (never
+  // derived from the error object) — pinned directly so a future edit can't accidentally start
+  // interpolating raw error text into it (the same no-leaked-fetch-error posture App.tsx's
+  // `disconnected` header already holds to).
   const html = renderToStaticMarkup(<Controls enabled />);
   assert.doesNotMatch(html, /Couldn't reach the engine/, "not shown before any request has ever failed");
 });
