@@ -256,6 +256,19 @@ for (const [command, cwd, kw] of BLOCK) {
   });
 }
 
+// gate② P2-5 on #809: checkControlSentinelArg's reason string used to be a hardcoded
+// "data/KILL_SWITCH / data/PAUSE" that went stale the moment #779 extended CONTROL_SENTINEL_RE
+// to EMERGENCY_STOP — asserting only the "write-path" keyword (the BLOCK loop above) would not
+// have caught that staleness. Pin the actual reason TEXT for a literal-arg EMERGENCY_STOP hit.
+test("BLOCK reason text: node kill.js ../../data/EMERGENCY_STOP names all three sentinel tiers, not a stale two-name string", () => {
+  const d = bash("node kill.js ../../data/EMERGENCY_STOP");
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.includes("EMERGENCY_STOP"), `reason must name EMERGENCY_STOP: ${d.reason}`);
+  assert.ok(d.reason.includes("KILL_SWITCH"), `reason must still name KILL_SWITCH: ${d.reason}`);
+  assert.ok(d.reason.includes("PAUSE"), `reason must still name PAUSE: ${d.reason}`);
+  assert.ok(d.reason.includes("control sentinel"), `reason must name the category: ${d.reason}`);
+});
+
 // ── ALLOW matrix (benign / read-only) ────────────────────────────────────────
 const ALLOW: string[] = [
   "git push origin feat/m1-guard",
@@ -547,6 +560,10 @@ const WRITE_BLOCK: [string, string][] = [
   ["sapwood.config.yaml", "write-path"], // engine/guard config -> a worker can't set guard.mode:soft (#26 R2)
   ["/repo/sapwood.config.yml", "write-path"],
   ["sapwood.config.json", "write-path"],
+  // gate② P1 on #809: this rule was found missing case-insensitive matching — macOS/APFS is
+  // case-insensitive by default, so an uppercase/mixed-case name still hits the real file.
+  ["SAPWOOD.CONFIG.YAML", "write-path"],
+  ["sub/../Sapwood.Config.Yaml", "write-path"],
   ["/repo/engine/dist/guard/guard-hook.js", "write-path"], // compiled hook artifact -> can't overwrite the live hook (#26 R3)
   ["engine/dist/guard/guard.js", "write-path"],
   ["engine/src/roles/merge-driver.ts", "write-path"], // merge path source (gates + TOCTOU pin) (#13 follow-up)
@@ -578,6 +595,10 @@ const WRITE_BLOCK: [string, string][] = [
   ["sapwood.config.example.json", "write-path"],
   ["/repo/sapwood.config.example.yaml", "write-path"],
   ["../../sapwood.config.example.yaml", "write-path"],
+  // gate② P1 on #809: same case-insensitivity gap as the root config rule above — the exact
+  // reproduction the reviewer posted (Write SAPWOOD.CONFIG.EXAMPLE.YAML => allow=true pre-fix).
+  ["SAPWOOD.CONFIG.EXAMPLE.YAML", "write-path"],
+  ["sub/../Sapwood.Config.Example.Yaml", "write-path"],
 ];
 for (const [file_path, kw] of WRITE_BLOCK) {
   test(`WRITE BLOCK: ${file_path}`, () => {
@@ -615,6 +636,31 @@ test("init-starter template write via Bash redirect is also blocked (worker can'
   const d = guardDecision("Bash", { command: "echo 'merge: {mode: auto}' > sapwood.config.example.yaml" }, CWD);
   assert.equal(d.allow, false);
   assert.ok(d.reason.toLowerCase().includes("write-path"));
+});
+
+// gate② P1 on #809: case-insensitive Bash vectors for BOTH the root config rule and its
+// sibling example-template rule — the reviewer's exact reproduction list (redirect/mv-dest/
+// cp-dest), all of which returned allow=true before the `i` flag was added to either regex.
+const CONFIG_CASE_VARIANT_BLOCK: string[] = [
+  "echo x > SAPWOOD.CONFIG.EXAMPLE.YAML",
+  "mv /tmp/x Sapwood.Config.Example.Yaml",
+  "cp /tmp/x sapwood.config.example.YAML",
+  "echo x > SAPWOOD.CONFIG.YAML",
+  "mv /tmp/x Sapwood.Config.Yaml",
+  "cp /tmp/x sapwood.config.YAML",
+];
+for (const command of CONFIG_CASE_VARIANT_BLOCK) {
+  test(`BLOCK (case-insensitive config, #809 gate② P1): ${command}`, () => {
+    const d = bash(command);
+    assert.equal(d.allow, false, `should block: ${command}`);
+    assert.ok(d.reason.toLowerCase().includes("write-path"));
+  });
+}
+
+// Reverse: a case-variant NEAR-MISS (not the protected name) must still pass — the $-anchor
+// holds under the new `i` flag too, not just under the original case-sensitive match.
+test("ALLOW (case-insensitive near-miss): touch SAPWOOD.CONFIG.EXAMPLE2.YAML", () => {
+  assert.equal(bash("touch SAPWOOD.CONFIG.EXAMPLE2.YAML").allow, true);
 });
 
 test("hook: a blocking command yields a deny output naming the reason", () => {

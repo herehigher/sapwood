@@ -1641,10 +1641,19 @@ live dogfood configuration, and changing it remains human-merge-only through the
 (`engine/src/loop/init.ts`'s `sampleConfig()`/`ensureConfig()`). That template belongs
 to the default `escalation.instructionPaths` surface, so edits to it route to human merge
 review, **and** (#781) it is also guard-protected in its own right: `guard.ts`'s
-`protectedPathLabel` matches `sapwood.config.example.(ya?ml|json)` as a sibling rule to the
-root config's, denying the same `Write`/`Edit`/Bash-redirect/literal-arg vectors — a worker
-can no longer weaken the `merge.mode: produce-pr-and-stop` pin every future `sapwood init`
-inherits from this file.
+`protectedPathLabel` matches `sapwood.config.example.(ya?ml|json)`, case-insensitively, as a
+sibling rule to the root config's, denying the same recognized write vectors as the root
+config — the `Write`/`Edit` tools, Bash redirection, and the write-command set (`touch`,
+`rm`, `mv`, `cp`, `install`, `git rm`/`mv`/`restore`/`checkout`, `sed -i`, `perl -i`, `tee`,
+`dd`) when the template path appears as their argument — so a worker can no longer weaken the
+`merge.mode: produce-pr-and-stop` pin every future `sapwood init` inherits from this file
+through any of those routes. This does **not** extend to the literal-argument scan
+(`checkControlSentinelArg`) that catches an arbitrary command merely naming a control
+sentinel — that scanner is deliberately sentinel-only (marginal-complexity ruling on #809),
+so a script that takes the template's path as its own CLI argument (e.g. `node
+writer.js sapwood.config.example.yaml`) or hardcodes the path internally is outside the
+guard's coverage — the same residual class the "Sentinel isolation boundary" section below
+documents for the control sentinels.
 
 The consequence for the protected root config: **a worker cannot land a change to its
 comments — even a purely editorial one carrying no security meaning at all.** The guard

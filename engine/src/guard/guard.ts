@@ -643,22 +643,26 @@ const CONTROL_SENTINEL_RE = /\/data\/(KILL_SWITCH|PAUSE|EMERGENCY_STOP)$/i;
 
 /** If `abs` (a normalized absolute path) is a boundary file, return a short label; else null. */
 function protectedPathLabel(abs: string): string | null {
-  if (CONTROL_SENTINEL_RE.test(abs))
-    return "data/KILL_SWITCH, data/PAUSE, or data/EMERGENCY_STOP (control sentinel)";
+  if (CONTROL_SENTINEL_RE.test(abs)) return "data/KILL_SWITCH, data/PAUSE, or data/EMERGENCY_STOP (control sentinel)";
   if (/\/\.claude\/settings(\.local)?\.json$/.test(abs)) return ".claude/settings.json (hook wiring)";
   if (/\/\.github\/workflows(\/|$)/.test(abs)) return ".github/workflows/** (CI integrity)";
   // The engine config carries guard.mode + reviewer/security settings — a worker editing it to
   // guard.mode:soft would make future workers observe-only. Human-merge-only (Codex #26 R2).
-  if (/\/sapwood\.config\.(ya?ml|json)$/.test(abs)) return "sapwood.config.* (engine/guard config)";
+  // Matched case-insensitively (gate② P1 on #809, same bypass class #84 already closed for the
+  // sentinels above): macOS/APFS is case-insensitive by default, so `touch SAPWOOD.CONFIG.YAML`
+  // still lands on the real file — this rule was found missing the `i` flag the sentinel rule
+  // already carries, and is fixed here alongside the sibling template rule below rather than
+  // left adjacent-and-inconsistent.
+  if (/\/sapwood\.config\.(ya?ml|json)$/i.test(abs)) return "sapwood.config.* (engine/guard config)";
   // The init-starter template (`sapwood init`'s sampleConfig()/ensureConfig(), #386/#577) carries
   // the same safe-by-default pin (merge.mode: produce-pr-and-stop) the root config's guard.mode/
   // reviewer.* fields carry above — a worker weakening it here degrades every future `sapwood
   // init`'s default, not just this repo's live config. #776 already routes edits to it through
   // instruction-path escalation; this closes the matching HARD guard boundary the root config
   // gets (#781, found at gate② on PR #776: guard allow=true for this file). Sibling rule, not a
-  // widened root regex, so the two labels/rationales stay distinct in reasons and tests.
-  if (/\/sapwood\.config\.example\.(ya?ml|json)$/.test(abs))
-    return "sapwood.config.example.* (init-starter template)";
+  // widened root regex, so the two labels/rationales stay distinct in reasons and tests. Matched
+  // case-insensitively for the same reason as the root rule immediately above (gate② P1 on #809).
+  if (/\/sapwood\.config\.example\.(ya?ml|json)$/i.test(abs)) return "sapwood.config.example.* (init-starter template)";
   // The COMPILED guard artifacts are what each PreToolUse invocation actually executes — a
   // worker overwriting dist/guard-hook.js (or the guard.js it loads) with a no-op would disable
   // hard-mode enforcement for the next tool call. Protect the artifact, not just src (Codex #26 R3).
@@ -749,14 +753,14 @@ function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null
 }
 
 /**
- * #81: a control sentinel path (data/KILL_SWITCH, data/PAUSE) appearing as a literal
- * argument to ANY command — not just the recognized WRITE_CMDS verbs. Unlike guard.ts /
- * workflows (legitimately read by cat/cp-source), a worker has no legitimate reason to
- * reference either sentinel at all, so mere appearance is enough. This closes the
- * `node some-script.js ../../data/PAUSE`-style indirection where the script's own write is
- * opaque to the guard but the path argument on the Bash command line is not. (A script that
- * hardcodes the path internally, with no CLI argument, remains an open residual — see
- * docs/security.md's isolation-boundary note.)
+ * #81: a control sentinel path (data/KILL_SWITCH, data/PAUSE, data/EMERGENCY_STOP — #779
+ * extended this to all three) appearing as a literal argument to ANY command — not just the
+ * recognized WRITE_CMDS verbs. Unlike guard.ts / workflows (legitimately read by cat/cp-source),
+ * a worker has no legitimate reason to reference any of the three at all, so mere appearance is
+ * enough. This closes the `node some-script.js ../../data/EMERGENCY_STOP`-style indirection
+ * where the script's own write is opaque to the guard but the path argument on the Bash command
+ * line is not. (A script that hardcodes the path internally, with no CLI argument, remains an
+ * open residual — see docs/security.md's isolation-boundary note.)
  */
 function checkControlSentinelArg(tokens: string[], cwd: string): string | null {
   for (const t of tokens) {
@@ -765,8 +769,13 @@ function checkControlSentinelArg(tokens: string[], cwd: string): string | null {
     // substring after the first `=` for `-`-prefixed tokens (#84 gate② P2-2).
     const candidate = t.startsWith("-") ? (t.includes("=") ? t.slice(t.indexOf("=") + 1) : null) : t;
     if (!candidate) continue;
-    if (CONTROL_SENTINEL_RE.test(normalizePath(candidate, cwd))) {
-      return "BLOCK [write-path] data/KILL_SWITCH / data/PAUSE is a protected control sentinel";
+    const abs = normalizePath(candidate, cwd);
+    if (CONTROL_SENTINEL_RE.test(abs)) {
+      // Reuse protectedPathLabel's own sentinel label (guard② P2-5 on #809: this used to be a
+      // hardcoded two-name string that went stale the moment #779 added EMERGENCY_STOP to
+      // CONTROL_SENTINEL_RE without a matching update here) — one label string, not two that can
+      // drift apart, and it now names all three tiers per Decision.reason's category+hit contract.
+      return `BLOCK [write-path] ${protectedPathLabel(abs)} referenced as a command argument`;
     }
   }
   return null;
