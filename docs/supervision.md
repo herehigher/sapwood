@@ -414,10 +414,11 @@ discipline layered on top:
   path, it hard-kills every running/fixing lane's process group on that same tick: there is no drain
   window, in-flight WIP is lost, and killed lanes escalate to `needs-human` with their
   evidence preserved. The kill itself is forge-free — a synchronous durable-PID signal that runs
-  before any terminal-reclaim or probe-before-reclaim forge read, so a hung or rejecting forge
-  call can never delay or prevent it (#778); only the `needs-human` labels/comments that follow
-  are forge calls, and they're best-effort, never gating the kill. Clear it only after human
-  review of the emergency and of those escalations:
+  before any forge call, so a hung or rejecting forge call can never delay or prevent it (#778).
+  Everything after the kill — terminal-state classification/probing, drain escalation, and the
+  `needs-human` labels/comments — may still touch the forge, and is best-effort; none of it gates
+  process termination anymore. Clear it only after human review of the emergency and of those
+  escalations:
 
   ```bash
   rm -f data/EMERGENCY_STOP

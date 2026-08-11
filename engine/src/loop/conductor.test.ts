@@ -8409,6 +8409,52 @@ test("tick: EMERGENCY_STOP + a driving lane's fix-intent reconcile hung on forge
   }
 });
 
+// #778 gate② P1 (PR #810 review, sol-high repro): the two tick-level sweeps (before
+// reconcileDrivingFixIntents, and in-branch before adoptAndReclaimTerminal) both run BEFORE
+// adoptAndReclaimTerminal's own handoff-adoption loop ever executes — so neither can see a
+// `handoff` row with a CONFIRMED resume intent, whose child process already exists (adopted,
+// never spawned — see that loop's own doc) but is only reclassified `running`/`fixing` INSIDE
+// adoptAndReclaimTerminal itself. That same function then immediately awaits
+// `supervisor.probe` for every running/fixing lane, including the one it just adopted — a
+// third, structurally impossible-to-position sweep (sol-high: "this is the same crash-resume/
+// sibling defect class... contradicts #778's ordering requirement that termination precede any
+// forge association/probe work"). Fixed by killing AT THE ADOPTION SEAM instead — inline,
+// immediately after the row's state write, inside adoptAndReclaimTerminal itself.
+// Proven red against the pre-seam-kill code (this round's starting point: two sweeps, no
+// `estopActive` threaded into adoptAndReclaimTerminal): `sup.signalsSent` stayed `[]` —
+// replicated below.
+test("tick: EMERGENCY_STOP + a handoff lane with a CONFIRMED resume intent, adopted while the forge probe never resolves -> the adopted lane's process kill still completes within the tick (#778 gate② PR #810 sol-high repro)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-adoption-seam-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    sup.enableDurablePidCapability();
+    // A `handoff` row whose durable spawn intent is CONFIRMED — its child process already
+    // exists (adoption, never a spawn; adoptAndReclaimTerminal's own doc), crash-resumed from a
+    // NOW-DEAD prior engine process, exactly the shape sol's repro used.
+    st.upsertWorker({ name: "lane-ho", issue: 7, session_id: "s-lane-ho", state: "handoff", started_at: "t", ended_at: "t" });
+    sup.resumeIntents["lane-ho"] = "confirmed";
+    sup.durablePids["lane-ho"] = true;
+    // Never resolves — adoptAndReclaimTerminal's own second loop awaits this for the lane it
+    // JUST adopted, the exact window a fixed-point sweep positioned before this function is
+    // called can never close.
+    sup.probe = (): Promise<LaneProbe> => new Promise<LaneProbe>(() => {});
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    void tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }); // never awaited — never settles
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(
+      sup.signalsSent.some((s) => s.worker === "lane-ho" && s.signal === "SIGKILL"),
+      "the adopted handoff lane must be hard-killed AT THE ADOPTION SEAM, before adoptAndReclaimTerminal's own probe loop ever awaits the hung probe for the lane it just adopted",
+    );
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("tick: EMERGENCY_STOP + a Supervisor with no durable-PID capability -> unchanged pre-#778 behavior (probe+reclaim is still the only kill mechanism)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-no-durablepid-"));
   try {

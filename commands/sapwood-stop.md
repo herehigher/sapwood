@@ -12,10 +12,11 @@ state DB (`engine/src/state/state.ts`) — no config edit needed for any of them
   it hard-kills every running/fixing lane's process group on that same tick: there is no drain
   window, in-flight WIP is lost, and killed lanes escalate to `needs-human` with their evidence
   preserved. The kill itself is forge-free — a synchronous durable-PID signal that runs before any
-  terminal-reclaim or probe-before-reclaim forge read, so a hung or rejecting forge call can never
-  delay or prevent it (#778); only the `needs-human` labels/comments that follow are forge calls,
-  and they're best-effort, never gating the kill. Use it only for credential exposure, destructive
-  calls, or a cost blowout faster than the drain window.
+  forge call, so a hung or rejecting forge call can never delay or prevent it (#778). Everything
+  AFTER the kill — terminal-state classification/probing, drain escalation, and the
+  `needs-human` labels/comments — may still touch the forge, and is best-effort; none of it gates
+  process termination anymore. Use it only for credential exposure, destructive calls, or a cost
+  blowout faster than the drain window.
 - **kill switch** (`data/KILL_SWITCH`, `killSwitchPath`) — the drain-first tier. Freezes ALL new
   dispatch and merges; running workers are asked to hand off gracefully within
   `cfg.cost.drainWindowSec`, then the conductor escalates to a hard kill. Use this to stop

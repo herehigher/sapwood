@@ -3380,39 +3380,50 @@ async function checkCommentCursorBeforeDrive(
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: "comment-cursor-stale" };
 }
 
-/** #778: EMERGENCY_STOP's own synchronous, forge-free hard-kill pass for running/fixing lanes —
- *  the SAME `durablePidAlive`/`signalDurablePid` primitives round.ts's E-STOP sweep already uses
- *  for driving/handoff rows (#724's own durable-PID pattern, worker.ts), applied here to
- *  running/fixing rows too. Called FIRST in the E-STOP branch below, BEFORE
- *  `adoptAndReclaimTerminal`'s own probe loop and BEFORE `drainThenEscalate`'s escalation loop —
- *  both of which await `supervisor.probe` (a forge-dependent `gh` read via `Supervisor.lanePr`,
- *  worker.ts) before ever reaching the kill. Gate② on PR #774 proved that ordering lets a hung or
- *  rejecting forge read delay or prevent the hard kill entirely — the strictest safety control
- *  must not depend on forge availability. This pass guarantees the OS-level process group is
- *  already dead before either forge-touching path even starts running; whatever they do
- *  afterward (terminal-state classification, needs-human labels, worktree bookkeeping) is pure
- *  evidence/bookkeeping, best-effort, and never gates the kill itself — a forge failure there
- *  cannot undo or block a kill that already happened.
- *
- *  Direct SIGKILL, no SIGTERM-then-grace step (unlike round.ts's driving/handoff sweep, which
- *  owns the ONLY kill path those rows ever get under E-STOP): E-STOP's own documented contract
- *  is "no drain window, hard-kill THIS SAME TICK" (the branch below), so a grace pause here
- *  would just be a self-imposed delay this control exists to avoid. A graceful TERM-first
- *  teardown still happens afterward via the ordinary `reclaim()` path (killTree/killByPid,
- *  worker.ts) once/if its own probe() resolves — this pass is belt-and-suspenders over that, not
- *  a replacement for it (`reclaim()` is still called, below, exactly as before this issue).
+/** #778: EMERGENCY_STOP's own synchronous, forge-free hard-kill primitive for ONE lane — the
+ *  SAME `durablePidAlive`/`signalDurablePid` primitives round.ts's E-STOP sweep already uses for
+ *  driving/handoff rows (#724's own durable-PID pattern, worker.ts). Direct SIGKILL, no
+ *  SIGTERM-then-grace step (unlike round.ts's driving/handoff sweep, which owns the ONLY kill
+ *  path those rows ever get under E-STOP): E-STOP's own documented contract is "no drain window,
+ *  hard-kill THIS SAME TICK" (the branch below), so a grace pause here would just be a
+ *  self-imposed delay this control exists to avoid. A graceful TERM-first teardown still happens
+ *  afterward via the ordinary `reclaim()` path (killTree/killByPid, worker.ts) once/if its own
+ *  probe() resolves — this is belt-and-suspenders over that, not a replacement for it (`reclaim()`
+ *  is still called, below, exactly as before this issue).
  *
  *  Optional capability, same "implement both or neither" contract as round.ts's sweep (see
  *  `Supervisor.durablePidAlive`'s own doc, conductor.ts) — a Supervisor implementing neither
  *  method is simply a no-op here, unchanged from pre-#778 behavior (the ordinary probe+reclaim
- *  path below is its only kill mechanism). Never throws, never touches the forge or the DB —
- *  `signalDurablePid` is itself documented as a safe no-op against an already-dead pid. */
-function hardKillLiveLanesUnderEstop(state: State, supervisor: Supervisor): void {
+ *  path below is its only kill mechanism). Never throws, never makes a forge call, never WRITES
+ *  the DB (callers of the two functions below read `state.runningWorkers()`/`fixingWorkers()`,
+ *  but this primitive itself touches neither) — `signalDurablePid` is itself documented as a
+ *  safe no-op against an already-dead pid. */
+function hardKillOneLaneUnderEstop(supervisor: Supervisor, name: string): void {
   const canCheck = typeof supervisor.durablePidAlive === "function";
   const canSignal = typeof supervisor.signalDurablePid === "function";
   if (!canCheck || !canSignal) return;
+  if (supervisor.durablePidAlive!(name)) supervisor.signalDurablePid!(name, "SIGKILL");
+}
+
+/** #778: sweeps every lane ALREADY in `running`/`fixing` state at the moment it's called, via
+ *  `hardKillOneLaneUnderEstop` above — no forge call, one DB read each (`runningWorkers()`/
+ *  `fixingWorkers()`, no write). Called from THREE places in `tick()`'s E-STOP branch, each
+ *  closing a DIFFERENT window a forge-dependent await could otherwise stall the kill behind
+ *  (gate② findings on PR #774 and PR #810 — see each call site's own doc for which window):
+ *
+ *   1. Tick-top, before `reconcileDrivingFixIntents` is ever awaited — catches every lane that
+ *      was ALREADY running/fixing when E-STOP was detected, unconditionally.
+ *   2. In the E-STOP branch, after `reconcileDrivingFixIntents` returns — catches a lane THAT
+ *      call just adopted from `driving` into `fixing` (the confirmed-fix-intent case, #724
+ *      gate② finding [0]), invisible to sweep 1 since the adoption hadn't happened yet.
+ *   3. NOT here — `adoptAndReclaimTerminal`'s own handoff-adoption loop kills each row it adopts
+ *      individually, inline, via `hardKillOneLaneUnderEstop` directly (see that loop's own doc
+ *      for why a seam-level kill, not a third sweep, is the right shape there: sol's PR #810
+ *      gate② repro proved a fixed-point sweep can never precede an adoption that happens INSIDE
+ *      the very call this sweep would need to run after). */
+function hardKillLiveLanesUnderEstop(state: State, supervisor: Supervisor): void {
   for (const w of [...state.runningWorkers(), ...state.fixingWorkers()]) {
-    if (supervisor.durablePidAlive!(w.name)) supervisor.signalDurablePid!(w.name, "SIGKILL");
+    hardKillOneLaneUnderEstop(supervisor, w.name);
   }
 }
 
@@ -3431,6 +3442,17 @@ async function adoptAndReclaimTerminal(
   cfg: SapwoodConfig,
   threshold: number,
   iso: () => string,
+  /** #778 gate② P1 (PR #810 review, sol-high repro): whether E-STOP is active THIS tick. A
+   *  confirmed-intent handoff row adopted below already has a LIVE process (see this loop's own
+   *  "adoption, never a spawn" doc) — under E-STOP it must be hard-killed AT THE ADOPTION SEAM,
+   *  synchronously, right here, before the second loop below ever awaits the forge-dependent
+   *  `supervisor.probe`. A fixed-point sweep run before THIS function is called (tick()'s own
+   *  two E-STOP sweeps) cannot see this row, structurally — it isn't running/fixing until the
+   *  adoption a few lines below makes it so — so the kill has to live at the seam itself, not in
+   *  a sweep positioned relative to it. Default false: the OTHER caller of this function
+   *  (KILL_SWITCH/stop-signal, tick()) is a graceful drain, never a same-tick hard kill — passing
+   *  true there would kill a lane the switch's own contract promises to drain first. */
+  estopActive: boolean,
 ): Promise<{ resumed: ResumeOutcome[]; reclaimed: ReclaimOutcome[] }> {
   // A confirmed resume intent means its child already exists despite the DB still saying
   // `handoff`. Reconcile these rows BEFORE the drain snapshot so the hard safety boundary
@@ -3471,6 +3493,11 @@ async function adoptAndReclaimTerminal(
       { worker: w.name, issue: w.issue, attempt },
       spawnFactFrom(w.name, w.issue, result),
     );
+    // #778 gate② P1: THE adoption seam — see this function's own `estopActive` param doc for why
+    // it lives exactly here (right after the state write lands this row as running/fixing) and
+    // not in a sweep. `w.name` is the lane identity; the row's NEW state (running/fixing) is
+    // only for `resumed`'s own bookkeeping above.
+    if (estopActive) hardKillOneLaneUnderEstop(supervisor, w.name);
     resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt });
   }
   const reclaimed: ReclaimOutcome[] = [];
@@ -3519,11 +3546,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // forge there would otherwise stall THIS SAME tick's own await before it ever reached the
   // in-branch call below — one call site earlier than the #778 fix originally closed. Calling
   // it here first means every lane already running/fixing at tick-top is hard-killed
-  // unconditionally, regardless of what reconcileDrivingFixIntents does afterward. Idempotent
-  // (signalDurablePid is a safe no-op against an already-signaled/dead pid) — the in-branch call
-  // below is KEPT, not replaced: it is the only one that can see a lane reconcileDrivingFixIntents
-  // itself just adopted from `driving` into `fixing` (the confirmed-intent case, #724 gate②
-  // finding [0]), which is invisible to THIS earlier call since that adoption hasn't happened yet.
+  // unconditionally, regardless of what reconcileDrivingFixIntents does afterward. This is one
+  // of THREE places in the E-STOP path that guarantee a kill (see hardKillLiveLanesUnderEstop's
+  // own doc for all three, and why a third SWEEP was rejected in favor of a seam-level kill for
+  // adoptAndReclaimTerminal's own handoff adoption, gate② PR #810 sol-high repro).
   if (estopActive) hardKillLiveLanesUnderEstop(state, supervisor);
 
   // #245 round-2 fix A3: reconcile any driving-row fix-leg spawn intent BEFORE the kill-switch
@@ -3539,15 +3565,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   never be shadowed by a switch that would otherwise wait out a drain window first. PAUSE is
   //   never reached (this branch returns before that check, same as the kill switch).
   if (estopActive) {
-    // #778: the SECOND of two hard-kill sweeps this tick (the first ran above, before
-    // reconcileDrivingFixIntents) — before adoptAndReclaimTerminal's own probe loop (just below)
-    // or drainThenEscalate's escalation loop (further below) ever await a forge-dependent
-    // `supervisor.probe` call. This one exists to catch what the FIRST sweep structurally
+    // #778 gate② (PR #774, PR #810): the SECOND of the two tick-level hard-kill sweeps — before
+    // adoptAndReclaimTerminal's own probe loop (just below) or drainThenEscalate's escalation
+    // loop (further below) ever await a forge-dependent `supervisor.probe` call. This one exists
+    // to catch what the tick-top sweep (above, before reconcileDrivingFixIntents) structurally
     // cannot: a lane reconcileDrivingFixIntents itself just adopted from `driving` into `fixing`
-    // (the confirmed-intent case) is invisible to a kill pass that ran before that adoption. Both
-    // calls are forge-free and idempotent — see hardKillLiveLanesUnderEstop's own doc.
+    // (the confirmed-fix-intent case, #724 gate② finding [0]) is invisible to a sweep that ran
+    // BEFORE that adoption. adoptAndReclaimTerminal's OWN handoff-adoption loop (its own
+    // `estopActive` param, below) closes the analogous window for ITS adoption in-line, at the
+    // seam — a third sweep positioned after it would just be racing the same class of gap this
+    // one already exists to close, one function later; the seam is the fix there instead. Both
+    // sweeps here are forge-free and idempotent — see hardKillLiveLanesUnderEstop's own doc.
     hardKillLiveLanesUnderEstop(state, supervisor);
-    const { resumed, reclaimed } = await adoptAndReclaimTerminal(forge, state, supervisor, cfg, threshold, iso);
+    const { resumed, reclaimed } = await adoptAndReclaimTerminal(forge, state, supervisor, cfg, threshold, iso, estopActive);
     // #293: "once per activation" — mirrors recordCeilingBreach's own first-detection framing
     // (the row's `reason` is overwritten every tick, so the ONLY way to know "was this already
     // announced" is to read the PRIOR reason before this tick's own recordCeilingBreach call,
@@ -3612,7 +3642,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const stopSignalled = deps.stopRequested?.() ?? false;
   if (killSwitchActive || stopSignalled) {
     const drainReason: DrainReason = killSwitchActive ? "kill-switch" : "stop-signal";
-    const { resumed, reclaimed } = await adoptAndReclaimTerminal(forge, state, supervisor, cfg, threshold, iso);
+    // #778: `estopActive` is unconditionally false here — reaching this branch already proves
+    // it (the E-STOP branch above returns first when active). KILL_SWITCH/stop-signal is a
+    // graceful drain, not a same-tick hard kill; a confirmed-intent handoff row adopted below
+    // must NOT be killed at the seam under this gate — it's still owed its drain window.
+    const { resumed, reclaimed } = await adoptAndReclaimTerminal(forge, state, supervisor, cfg, threshold, iso, false);
     // drainThenEscalate re-reads runningWorkers()+fixingWorkers() AFTER the terminal reclaim
     // above transitioned those lanes out of `running`/`fixing`, so a just-recorded
     // handoff/done/driving lane is never re-touched.
