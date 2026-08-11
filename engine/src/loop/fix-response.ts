@@ -298,7 +298,10 @@ export function knownAuditFindingCounts(
  *  A lane can pass through adopt-then-resume, or started-then-handoff-then-resume, for the SAME
  *  round (fix_rounds bumped once, at whichever step first confirms the spawn) — up to three
  *  cursor-bearing events can therefore exist for one (worker, fixRounds). Picks the EARLIEST
- *  (lowest-id) of them, i.e. the round's true dispatch point, NOT the newest.
+ *  (lowest-id) of them, i.e. the earliest dispatch/adoption point this engine ever recorded for
+ *  the round, NOT the newest. (Not necessarily the round's TRUE first tool call on the crash-
+ *  adoption path — see `adoptConfirmedFixIntent`'s own doc, conductor.ts, for the accepted
+ *  residual gap there.)
  *
  *  #798 (batch-13 live evidence, ev#13006/ev#13106, lane-786/PR#794): this used to pick the
  *  NEWEST cursor instead, on the theory that a later cursor only ever "supersedes" an earlier one
@@ -312,10 +315,13 @@ export function knownAuditFindingCounts(
  *  never validate — `fix-response-invalid` discarded two already-completed fix legs in one batch,
  *  each paying for a full fresh review round instead. Picking the EARLIEST cursor for the round
  *  costs nothing on the safety side: every row this admits is still scoped to this exact (worker,
- *  fixRounds) pair (no cross-round leakage — see the D2 adversarial test below) and still must be
- *  `fetched`/`delivered` in the journal (journaledReviewThreadIds/journaledAuditRunIds' own status
- *  filter already excludes any call left mid-flight by a hard crash) — widening the window only
- *  ever admits calls the leg's OWN session genuinely made and was genuinely served a response for,
+ *  fixRounds) pair — the fold only ever picks among THIS round's own cursor-bearing events, never
+ *  reaching back into an earlier round's rows even when this round itself carries more than one
+ *  cursor event (no cross-round leakage — see the two D2 adversarial tests below, the second of
+ *  which pins exactly that multi-cursor-same-round shape) — and still must be `fetched`/
+ *  `delivered` in the journal (journaledReviewThreadIds/journaledAuditRunIds' own status filter
+ *  already excludes any call left mid-flight by a hard crash) — widening the window only ever
+ *  admits calls the leg's OWN session genuinely made and was genuinely served a response for,
  *  earlier in the SAME uninterrupted round.
  *
  *  Returns null only when NO cursor-bearing event exists for (worker, fixRounds) at all — the

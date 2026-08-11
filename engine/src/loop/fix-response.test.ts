@@ -462,6 +462,90 @@ test("computeFixResponseHarvest (D2 adversarial, cross-leg): round 2 must NOT tr
   st.close();
 });
 
+test("computeFixResponseHarvest (#798 gate② round 1 finding [1]): round 2's OWN earliest-wins fold (fix-leg-started + a later fix-leg-resumed, both fixRounds:2) still never reaches back to round 1's rows — earliest-wins is scoped PER ROUND, not global", () => {
+  const st = new State(":memory:");
+  // Round 1: dispatched, journals ONE threadId, never seen again.
+  st.appendEvent("fix-leg-started", { worker: "lane-fix", issue: 9, pr: 30, fixRounds: 1, journalCursor: 0 });
+  const round1Id = st.appendForgeProxyJournalIntent({
+    identity: { roundId: 1, phase: "fixing", role: "worker", session: "lane-fix", attempt: 1 },
+    seq: 1,
+    tool: "pr_review_threads",
+    proxyVersion: "1",
+    argsCanonical: JSON.stringify({ pr: 30 }),
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: "2026-07-19T00:00:01Z",
+  });
+  st.recordForgeProxyJournalResponse(round1Id, {
+    responseCanonical: JSON.stringify({ pr: 30, threads: [{ id: "ROUND1_ONLY" }] }),
+    contentHash: "h1",
+    truncated: false,
+    fetchedAt: "2026-07-19T00:00:01Z",
+  });
+  // Round 2: dispatched (cursor past round 1's row), journals its OWN threadId, then hands off
+  // and resumes — a SECOND, later cursor-bearing event for the SAME (worker, fixRounds:2).
+  const round2StartCursor = st.maxForgeProxyJournalId("lane-fix");
+  st.appendEvent("fix-leg-started", { worker: "lane-fix", issue: 9, pr: 30, fixRounds: 2, journalCursor: round2StartCursor });
+  const round2Id = st.appendForgeProxyJournalIntent({
+    identity: { roundId: 2, phase: "fixing", role: "worker", session: "lane-fix", attempt: 1 },
+    seq: 1,
+    tool: "pr_review_threads",
+    proxyVersion: "1",
+    argsCanonical: JSON.stringify({ pr: 30 }),
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: "2026-07-19T00:01:00Z",
+  });
+  st.recordForgeProxyJournalResponse(round2Id, {
+    responseCanonical: JSON.stringify({ pr: 30, threads: [{ id: "ROUND2_OWN" }] }),
+    contentHash: "h2",
+    truncated: false,
+    fetchedAt: "2026-07-19T00:01:00Z",
+  });
+  const round2ResumeCursor = st.maxForgeProxyJournalId("lane-fix"); // captured AFTER round2Id — the tighter, later cursor
+  st.appendEvent("fix-leg-resumed", {
+    worker: "lane-fix",
+    issue: 9,
+    pr: 30,
+    attempt: 1,
+    fixRounds: 2,
+    journalCursor: round2ResumeCursor,
+  });
+
+  // fixLegJournalCursor(lane-fix, 2) picks the EARLIEST of round2StartCursor/round2ResumeCursor —
+  // i.e. round2StartCursor — which still sits AFTER round 1's own row, never reaching back to it.
+  assert.equal(fixLegJournalCursor(st, "lane-fix", 2), round2StartCursor);
+
+  const claimingRound1 = computeFixResponseHarvest(st, {
+    worker: "lane-fix",
+    issue: 9,
+    fixRounds: 2,
+    prNumber: 30,
+    resultText: sapwoodResult({ threadResponses: [{ threadId: "ROUND1_ONLY", reply: "handled", resolution: "addressed" }] }),
+    headOid: "head-x",
+  });
+  assert.equal(
+    claimingRound1.kind,
+    "invalid",
+    "round 2's multi-cursor earliest-wins fold must never validate a threadId only round 1's journal ever saw",
+  );
+
+  const claimingRound2 = computeFixResponseHarvest(st, {
+    worker: "lane-fix",
+    issue: 9,
+    fixRounds: 2,
+    prNumber: 30,
+    resultText: sapwoodResult({ threadResponses: [{ threadId: "ROUND2_OWN", reply: "handled", resolution: "addressed" }] }),
+    headOid: "head-x",
+  });
+  assert.equal(claimingRound2.kind, "batch", "round 2's own pre-resume row must still validate — earliest-wins widens WITHIN the round");
+  st.close();
+});
+
 test("computeFixResponseHarvest (F1): an EQUAL journal row id to the cursor is EXCLUDED — a strict '>' comparison, not '>='", () => {
   const st = new State(":memory:");
   const id1 = st.appendForgeProxyJournalIntent({
