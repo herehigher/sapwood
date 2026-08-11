@@ -4,7 +4,7 @@
 // mid-flight live edit) lives in conductor.test.ts, against the real DISPATCH/DRIVE loops.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildAcSnapshot, checkAcSnapshotDrift, hashBody } from "./ac-snapshot.js";
+import { buildAcSnapshot, checkAcSnapshotDrift, hashBody, hashBodyForAcAuthority } from "./ac-snapshot.js";
 
 test("hashBody: deterministic and content-sensitive", () => {
   assert.equal(hashBody("hello"), hashBody("hello"));
@@ -63,4 +63,45 @@ test("checkAcSnapshotDrift: a mid-flight AC edit is drift, and the failure reaso
   if (!result.ok) {
     assert.match(result.reason, /snapshotted [0-9a-f]{12}, live [0-9a-f]{12}/);
   }
+});
+
+// ── #752: hashBodyForAcAuthority — marker-normalized AC-authority hash ──────────────────────────
+
+test("hashBodyForAcAuthority: a marker-line-only diff (the cursor advancing) hashes IDENTICALLY", () => {
+  const withMarker0 = "## Acceptance criteria\n\n- [ ] one\n\n<!-- sapwood:comments-adjudicated-through: 0 -->";
+  const withMarkerAdvanced = "## Acceptance criteria\n\n- [ ] one\n\n<!-- sapwood:comments-adjudicated-through: 5236875925 -->";
+  assert.equal(hashBodyForAcAuthority(withMarker0), hashBodyForAcAuthority(withMarkerAdvanced));
+});
+
+test("hashBodyForAcAuthority: a real (non-marker) diff still hashes DIFFERENTLY, marker held fixed", () => {
+  const a = "## Acceptance criteria\n\n- [ ] one\n\n<!-- sapwood:comments-adjudicated-through: 5 -->";
+  const b = "## Acceptance criteria\n\n- [ ] one EDITED\n\n<!-- sapwood:comments-adjudicated-through: 5 -->";
+  assert.notEqual(hashBodyForAcAuthority(a), hashBodyForAcAuthority(b));
+});
+
+test("hashBodyForAcAuthority: a marker advance PLUS a real edit still hashes differently from the original (real edit isn't masked)", () => {
+  const original = "## Acceptance criteria\n\n- [ ] one\n\n<!-- sapwood:comments-adjudicated-through: 0 -->";
+  const markerPlusRealEdit = "## Acceptance criteria\n\n- [ ] one EDITED\n\n<!-- sapwood:comments-adjudicated-through: 5 -->";
+  assert.notEqual(hashBodyForAcAuthority(original), hashBodyForAcAuthority(markerPlusRealEdit));
+});
+
+test("hashBodyForAcAuthority: unlike hashBody, differs from hashBody's own output when a marker is present", () => {
+  const body = "## Acceptance criteria\n\n- [ ] one\n\n<!-- sapwood:comments-adjudicated-through: 5 -->";
+  assert.notEqual(hashBodyForAcAuthority(body), hashBody(body));
+});
+
+test("checkAcSnapshotDrift: a live body that ONLY advances the cursor marker since dispatch is NOT drift", () => {
+  const dispatchBody = "## Acceptance criteria\n\n- [ ] one\n\n<!-- sapwood:comments-adjudicated-through: 0 -->";
+  const snap = buildAcSnapshot(1, dispatchBody, "t0");
+  const liveBody = "## Acceptance criteria\n\n- [ ] one\n\n<!-- sapwood:comments-adjudicated-through: 5236875925 -->";
+  const result = checkAcSnapshotDrift(liveBody, snap);
+  assert.equal(result.ok, true);
+});
+
+test("checkAcSnapshotDrift: a marker advance PLUS a real body edit still fails closed (real edit isn't masked by normalization)", () => {
+  const dispatchBody = "## Acceptance criteria\n\n- [ ] one\n\n<!-- sapwood:comments-adjudicated-through: 0 -->";
+  const snap = buildAcSnapshot(1, dispatchBody, "t0");
+  const liveBody = "## Acceptance criteria\n\n- [ ] one EDITED\n\n<!-- sapwood:comments-adjudicated-through: 5236875925 -->";
+  const result = checkAcSnapshotDrift(liveBody, snap);
+  assert.equal(result.ok, false);
 });

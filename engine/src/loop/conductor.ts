@@ -17,7 +17,7 @@ import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue, PRChangedFile, PRCheckItem } from "../forge/forge.js";
 import { firstMatchingLabel, labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge/labels.js";
 import { capDigest } from "../retro/retro-digest.js";
-import { buildAcSnapshot, checkAcSnapshotDrift, hashBody } from "../review/ac-snapshot.js";
+import { buildAcSnapshot, checkAcSnapshotDrift, hashBodyForAcAuthority } from "../review/ac-snapshot.js";
 import { parseEngineReviewArtifact } from "../review/audit.js";
 import {
   type CommentCursorResult,
@@ -3236,7 +3236,7 @@ async function checkAcDriftBeforeDrive(
     const result = checkAcSnapshotDrift(liveBody, snapshot);
     if (result.ok) return null; // ownership confirmed, no live-body drift -> drive normally
     reason = result.reason;
-    rebaselineCandidateHash = hashBody(liveBody);
+    rebaselineCandidateHash = hashBodyForAcAuthority(liveBody);
   }
 
   let labeled = 1;
@@ -4251,7 +4251,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         const ownedSnapshot = state.getAcSnapshot(w.issue);
         if (ownedSnapshot && ownedSnapshot.bodyHash === acBodyHash) {
           const liveBody = await forge.getIssueBody(w.issue);
-          const liveHash = hashBody(liveBody);
+          const liveHash = hashBodyForAcAuthority(liveBody);
           const candidateHash = w.ac_rebaseline_candidate_hash ?? null;
           if (candidateHash == null) {
             state.upsertWorker({ ...w, ac_rebaseline_candidate_hash: liveHash });

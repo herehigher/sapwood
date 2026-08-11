@@ -147,9 +147,11 @@ export function findStandaloneMarkerLines(body: string): string[] {
 
 /** #703: `body` with every standalone adjudication-marker line REMOVED (fence-aware, same rule
  *  as above). A role session has no standing to introduce or move the marker — see
- *  `applyRoleBodyRewrite`, the only caller. Not exported: the marker-strip is meaningless on its
- *  own without also restoring the current body's marker (or not), which is that function's job. */
-function stripStandaloneMarkerLines(body: string): string {
+ *  `applyRoleBodyRewrite`. Also reused by ac-snapshot.ts's `hashBodyForAcAuthority` (#752): the
+ *  marker is role-immutable operator metadata, not AC-authority text, so the AC-authority hash
+ *  normalizes it away using this SAME strip — one definition of "the marker line(s)", never two
+ *  that could disagree about what counts as one. */
+export function stripStandaloneMarkerLines(body: string): string {
   const markerLineIndices = new Set(scanStandaloneMarkerLines(body).map((m) => m.lineIndex));
   if (markerLineIndices.size === 0) return body;
   return body

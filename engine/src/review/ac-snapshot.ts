@@ -32,14 +32,42 @@
 // forge calls); everything here is a plain function over strings, easily corpus-tested.
 import { createHash } from "node:crypto";
 import { type AcceptanceCriterion, extractAcceptanceCriteria } from "../forge/forge.js";
+import { stripStandaloneMarkerLines } from "./comment-cursor.js";
 
 export type { AcceptanceCriterion };
 
 /** sha256 hex of the FULL issue body — deliberately the whole body, not just the AC section
  *  (design #279 §5, R3: "widened from AC-section-only" — a verification-plan edit or any other
- *  reviewer-relevant prose change must also count as drift, not just an AC-line edit). */
+ *  reviewer-relevant prose change must also count as drift, not just an AC-line edit).
+ *
+ *  Left RAW and UNMODIFIED by #752: `comment-cursor-gate.ts`'s `checkBodyDrift` calls this
+ *  directly, and it is the hash gate⓪'s session-input drift check (`plan-review.ts:525`) and
+ *  both write-time drift guards (`plan-review.ts:792`, `plan-review.ts:993`) run through — those
+ *  call sites are exactly where #703's invariant (a role body-write must not land silently over
+ *  an operator's freshly-advanced cursor marker) is enforced, so they must keep seeing a
+ *  marker-line edit as drift. Only the AC-AUTHORITY consumers below use the marker-normalized
+ *  `hashBodyForAcAuthority` instead — see that function's own doc for why the two must diverge. */
 export function hashBody(body: string): string {
   return createHash("sha256").update(body).digest("hex");
+}
+
+/** #752 (issue Ruling, candidate 1): sha256 hex of `body` with every standalone
+ *  `sapwood:comments-adjudicated-through` marker line stripped first (`stripStandaloneMarkerLines`,
+ *  comment-cursor.ts — the SAME strip `applyRoleBodyRewrite` uses, so "what counts as the marker
+ *  line" never has two definitions). The cursor marker is role-immutable OPERATOR metadata
+ *  (#703 item 1) whose position semantics `comment-cursor.ts` owns — it is not AC-authority text,
+ *  so a marker-only body edit (a PO advancing the cursor per #703 discipline, with no other byte
+ *  changed) must not read as AC drift. Every other byte of the body still participates in the
+ *  hash, so any non-marker edit still drifts fail-closed.
+ *
+ *  This is the ONE function backing every AC-authority site (issue Ruling's own requirement — all
+ *  four MUST share it or a staged #676 rebaseline candidate can never match the snapshot on a
+ *  later tick): `buildAcSnapshot`/`checkAcSnapshotDrift` below, the #676 re-baseline candidate pin
+ *  (`conductor.ts`'s `checkAcDriftBeforeDrive`), and its confirmation compare (`conductor.ts`'s
+ *  GATED-RECLAIM candidate-hash check). Never used by `hashBody`/`checkBodyDrift` — see
+ *  `hashBody`'s own doc for why those stay raw. */
+export function hashBodyForAcAuthority(body: string): string {
+  return hashBody(stripStandaloneMarkerLines(body));
 }
 
 /** The persisted AC-authority manifest for one dispatch attempt. `body` is the FULL snapshotted
@@ -71,7 +99,7 @@ export interface AcSnapshot {
 export function buildAcSnapshot(issue: number, body: string, at: string): AcSnapshot {
   return {
     issue,
-    bodyHash: hashBody(body),
+    bodyHash: hashBodyForAcAuthority(body),
     body,
     manifest: extractAcceptanceCriteria(body) ?? [],
     snapshottedAt: at,
@@ -87,11 +115,19 @@ export function buildAcSnapshot(issue: number, body: string, at: string): AcSnap
  *  string for the drift-explaining comment conductor.ts posts; the caller (conductor.ts's DRIVE
  *  loop) treats this as "route to needsHuman, never call driveOne this tick, never silently
  *  re-extract" — a gate this PR (#283) already enforces for every reviewer kind, independent of
- *  whether that reviewer kind is yet wired to consume the snapshotted body itself. */
+ *  whether that reviewer kind is yet wired to consume the snapshotted body itself.
+ *
+ *  #752 NOTE (non-blocking, not a behavior change): the `ok: true` arm hands back
+ *  `snapshot.body` — the body as it was AT DISPATCH TIME — which, now that the drift check below
+ *  ignores marker-only edits, can carry a STALE marker line relative to the current live body (a
+ *  PO advancing the cursor after dispatch no longer bumps the snapshot). Harmless today because
+ *  every `computeCommentCursor` call site (comment-cursor-gate.ts) reads a LIVE body, never this
+ *  snapshot body — but that's an accident of call-site layout, not a stated contract. A future
+ *  caller must not derive cursor state from this returned body. */
 export type AcDriftResult = { ok: true; body: string; manifest: AcceptanceCriterion[] } | { ok: false; reason: string };
 
 export function checkAcSnapshotDrift(liveBody: string, snapshot: AcSnapshot): AcDriftResult {
-  const liveHash = hashBody(liveBody);
+  const liveHash = hashBodyForAcAuthority(liveBody);
   if (liveHash === snapshot.bodyHash) {
     return { ok: true, body: snapshot.body, manifest: snapshot.manifest };
   }

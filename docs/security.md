@@ -2006,6 +2006,24 @@ proceed; a human must re-adjudicate (a renewed gate⓪ pass) before the lane can
 again. A lane with no recorded snapshot (dispatched before this feature shipped) is not
 treated as drift — it drives normally, so this only ever tightens NEW dispatches.
 
+**The AC-authority hash is marker-normalized, not the raw body hash (#752).** #703's cursor
+discipline requires every PO comment on an issue to advance the
+`<!-- sapwood:comments-adjudicated-through: N -->` marker in the same body edit — which, against
+a raw full-body hash, would make a legitimate cursor advance on an in-flight issue *always* read
+as AC drift. `ac-snapshot.ts`'s `hashBodyForAcAuthority` strips the standalone marker line(s)
+before hashing (`comment-cursor.ts`'s `stripStandaloneMarkerLines`, the same strip
+`applyRoleBodyRewrite` uses) and is the ONE function backing every AC-authority site:
+`buildAcSnapshot`, `checkAcSnapshotDrift` above, the #676 re-baseline candidate pin, and its
+confirmation compare — all four must share it, or a staged #676 candidate could never match the
+snapshot on a later tick. Every other byte of the body still participates in the hash, so any
+non-marker edit still drifts fail-closed; a marker advance plus a real edit still drifts too (only
+an edit that is *exactly* the marker line is excused). This normalization is scoped to AC
+authority only: `ac-snapshot.ts`'s own `hashBody` and `comment-cursor-gate.ts`'s `checkBodyDrift`
+(the functions gate⓪'s session-input drift check and both write-time drift guards call) stay raw
+and unmodified — those call sites are exactly where #703's own invariant (a role body-write must
+not land silently over an operator's freshly-advanced marker) is enforced, and normalizing them
+too would defeat it.
+
 **The engine-agent session consumes the snapshot directly.** Its adapter resolves
 `state.getAcSnapshot(issue)` and builds the review prompt from that frozen full body and AC
 manifest; it never re-fetches the issue body or re-extracts acceptance criteria for session input.
