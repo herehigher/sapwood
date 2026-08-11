@@ -524,6 +524,25 @@ class FakeSupervisor implements Supervisor {
   clearStaleFixEntrySentinel(w: string): void {
     this.clearedFixEntrySentinels.push(w);
   }
+  /** #778: a pid-liveness fake — set per-worker (default false) to simulate a confirmed-alive
+   *  durable pid, once `enableDurablePidCapability()` below has attached the reader. Mirrors
+   *  round.test.ts's own FakeSupervisor fixture (#724) for the SAME optional capability. */
+  durablePids: Record<string, boolean> = {};
+  /** #778: every (worker, signal) pair signalDurablePid was called for, in order — the
+   *  forge-free hard-kill pass's proof that a confirmed-alive running/fixing lane actually got
+   *  signaled, independent of whether/when the forge-dependent probe() ever resolves. */
+  signalsSent: Array<{ worker: string; signal: "SIGTERM" | "SIGKILL" }> = [];
+  /** #778 (mirrors #724's round 4, P2-3): BOTH left genuinely unset by default — "no opinion,"
+   *  the same stance every other optional Supervisor method already takes; most existing fixture
+   *  callers never touch durable-pid behavior at all. */
+  durablePidAlive?: (w: string) => boolean;
+  signalDurablePid?: (w: string, signal: "SIGTERM" | "SIGKILL") => void;
+  enableDurablePidCapability(): void {
+    this.durablePidAlive = (w) => this.durablePids[w] ?? false;
+    this.signalDurablePid = (w, signal) => {
+      this.signalsSent.push({ worker: w, signal });
+    };
+  }
 }
 
 const LEGACY_LABEL_CONFIG = {
@@ -8290,6 +8309,217 @@ test("tick: EMERGENCY_STOP — the `emergency-stop` event is appended once per a
 
     const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["emergency-stop"]);
     assert.equal(events.length, 1);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #778 gate② finding (PR #774): before this fix, the E-STOP branch reached the hard kill only
+// AFTER adoptAndReclaimTerminal's own probe loop resolved for every running/fixing lane — and
+// that loop awaits `supervisor.probe`, which is forge-dependent (worker.ts's own `lanePr` ->
+// `forge.listOpenPrsForBranch` read). A wedged/never-resolving forge read therefore delayed or
+// permanently prevented the kill. Deterministic seam control, not a real-timer race (review
+// doctrine, matches dashboard.test.ts's own precedent): `tick(...)` is fired WITHOUT being
+// awaited (its own promise never settles here — `probe()` never resolves, so nothing downstream
+// of it ever does either), then `setImmediate` drains the microtask queue so every
+// already-resolved step ahead of the hung probe has run. Proven red against pre-#778 code: with
+// `hardKillLiveLanesUnderEstop`'s call site removed, `sup.signalsSent` stays `[]` here forever —
+// the ONLY kill mechanism on that code path is the reclaim() call deep inside
+// `drainThenEscalate`'s escalation loop, itself gated behind the SAME hung probe, so the
+// assertion below never observes a kill within the tick at all.
+test("tick: EMERGENCY_STOP + a forge probe that never resolves -> every running/fixing lane's process kill still completes within the tick (#778)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-forge-free-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    sup.enableDurablePidCapability();
+    seedRunning(st, "lane-run", 2);
+    sup.durablePids["lane-run"] = true;
+    st.upsertWorker({ name: "lane-fix", issue: 3, session_id: "s-lane-fix", state: "fixing", started_at: "t", ended_at: null });
+    sup.durablePids["lane-fix"] = true;
+    // Never resolves — the exact wedged-forge shape #778 is about (a hung `gh` read behind
+    // `Supervisor.lanePr`, surfaced here at the `probe()` boundary adoptAndReclaimTerminal and
+    // drainThenEscalate both await before they'd otherwise reach the kill).
+    sup.probe = (): Promise<LaneProbe> => new Promise<LaneProbe>(() => {});
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    void tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }); // never awaited — never settles
+    await new Promise((r) => setImmediate(r));
+
+    // #778 gate② finding (PR #810 review): tick() now runs TWO forge-free hard-kill sweeps
+    // under E-STOP (before reconcileDrivingFixIntents, and again in the branch below it) — both
+    // observe these two already-running/fixing lanes, so each gets signaled twice. Idempotent
+    // (a duplicate SIGKILL against an already-dead pid is a documented no-op), so this asserts
+    // the SET of killed workers rather than an exact call count, which is an implementation
+    // detail of how many sweeps happen to run, not what AC1 actually requires.
+    const killed = [...new Set(sup.signalsSent.filter((s) => s.signal === "SIGKILL").map((s) => s.worker))].sort();
+    assert.deepEqual(
+      killed,
+      ["lane-fix", "lane-run"],
+      "both running/fixing lanes must be hard-killed via the forge-free durable-PID path before the hung probe ever resolves",
+    );
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #778 gate② finding (PR #810 review): the FIRST fix placed hardKillLiveLanesUnderEstop only
+// inside the `if (estopActive)` branch, AFTER `await reconcileDrivingFixIntents(...)` — but that
+// reconciliation's own "unconfirmed" fix-intent leg awaits `forge.addLabel`, ONE call site
+// earlier than the kill. A hung forge read there stalled the tick before the kill ever ran — the
+// exact #778 defect class, just moved one step up the call chain. Proven red against the
+// single-call-site version of the fix (the code as it stood before this test was added): with a
+// DRIVING lane carrying an "unconfirmed" resume intent and a never-resolving `forge.addLabel`,
+// `sup.signalsSent` stayed `[]` — `reconcileDrivingFixIntents`'s own await never returned, so
+// `tick()` never reached ITS `if (estopActive) { hardKillLiveLanesUnderEstop(...) }` call at all.
+// The fix hoists a SECOND call to right after `estopActive` is read, before
+// `reconcileDrivingFixIntents` is ever awaited — verified forge-free itself (no DB dependency on
+// the killed lanes, no process spawn of its own; see that call site's own doc in conductor.ts).
+test("tick: EMERGENCY_STOP + a driving lane's fix-intent reconcile hung on forge.addLabel -> the running lane's process kill still completes within the tick (#778 gate② PR #810)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-reconcile-hang-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    sup.enableDurablePidCapability();
+    seedRunning(st, "lane-run", 2);
+    sup.durablePids["lane-run"] = true;
+    // A driving lane whose resume intent is "unconfirmed" — reconcileDrivingFixIntents' OWN
+    // forge-touching branch (B4: label first, retry next tick on a failed/hung write).
+    seedDriving(st, "lane-drv", 5, 50);
+    sup.resumeIntents["lane-drv"] = "unconfirmed";
+    // Never resolves — the exact wedged-forge shape, surfaced one call site earlier than the
+    // #778 fix's original `supervisor.probe` boundary.
+    forge.addLabel = (): Promise<void> => new Promise<void>(() => {});
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    void tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }); // never awaited — never settles
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(
+      sup.signalsSent.some((s) => s.worker === "lane-run" && s.signal === "SIGKILL"),
+      "the running lane must be hard-killed even though reconcileDrivingFixIntents itself is stuck on a hung forge.addLabel",
+    );
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #778 gate② P1 (PR #810 review, sol-high repro): the two tick-level sweeps (before
+// reconcileDrivingFixIntents, and in-branch before adoptAndReclaimTerminal) both run BEFORE
+// adoptAndReclaimTerminal's own handoff-adoption loop ever executes — so neither can see a
+// `handoff` row with a CONFIRMED resume intent, whose child process already exists (adopted,
+// never spawned — see that loop's own doc) but is only reclassified `running`/`fixing` INSIDE
+// adoptAndReclaimTerminal itself. That same function then immediately awaits
+// `supervisor.probe` for every running/fixing lane, including the one it just adopted — a
+// third, structurally impossible-to-position sweep (sol-high: "this is the same crash-resume/
+// sibling defect class... contradicts #778's ordering requirement that termination precede any
+// forge association/probe work"). Fixed by killing AT THE ADOPTION SEAM instead — inline,
+// immediately after the row's state write, inside adoptAndReclaimTerminal itself.
+// Proven red against the pre-seam-kill code (this round's starting point: two sweeps, no
+// `estopActive` threaded into adoptAndReclaimTerminal): `sup.signalsSent` stayed `[]` —
+// replicated below.
+test("tick: EMERGENCY_STOP + a handoff lane with a CONFIRMED resume intent, adopted while the forge probe never resolves -> the adopted lane's process kill still completes within the tick (#778 gate② PR #810 sol-high repro)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-adoption-seam-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    sup.enableDurablePidCapability();
+    // A `handoff` row whose durable spawn intent is CONFIRMED — its child process already
+    // exists (adoption, never a spawn; adoptAndReclaimTerminal's own doc), crash-resumed from a
+    // NOW-DEAD prior engine process, exactly the shape sol's repro used.
+    st.upsertWorker({ name: "lane-ho", issue: 7, session_id: "s-lane-ho", state: "handoff", started_at: "t", ended_at: "t" });
+    sup.resumeIntents["lane-ho"] = "confirmed";
+    sup.durablePids["lane-ho"] = true;
+    // Never resolves — adoptAndReclaimTerminal's own second loop awaits this for the lane it
+    // JUST adopted, the exact window a fixed-point sweep positioned before this function is
+    // called can never close.
+    sup.probe = (): Promise<LaneProbe> => new Promise<LaneProbe>(() => {});
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    void tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }); // never awaited — never settles
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(
+      sup.signalsSent.some((s) => s.worker === "lane-ho" && s.signal === "SIGKILL"),
+      "the adopted handoff lane must be hard-killed AT THE ADOPTION SEAM, before adoptAndReclaimTerminal's own probe loop ever awaits the hung probe for the lane it just adopted",
+    );
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #778 gate② P1 (PR #810, sol-high CONFIRMATION round): even the in-branch sweep (window 2 in
+// hardKillLiveLanesUnderEstop's own doc) could be starved — `reconcileDrivingFixIntents`'s OLD
+// single sequential pass iterates `state.drivingWorkers()` in NAME order (`ORDER BY name`,
+// state.ts). An alphabetically EARLIER `unconfirmed` row's `await forge.addLabel(...)` hanging
+// forever blocks that SAME loop from ever reaching a LATER `confirmed` row — so the confirmed
+// row is never adopted into `fixing` at all THIS tick, and the in-branch sweep (which only runs
+// AFTER the whole `reconcileDrivingFixIntents` call returns) never gets a chance to see it
+// either. The confirmed row's own resume intent is durable proof a fix-leg child is ALREADY
+// live (crash-resumed from a now-dead prior engine process) — exactly the shape #724's own
+// detached-lane sweep treats as needing an E-STOP kill. Fixed by splitting
+// `reconcileDrivingFixIntents` into two phases under `immediate`: every confirmed row is
+// adopted-and-killed-at-the-seam FIRST (adoptConfirmedFixIntent, zero forge calls), and only
+// afterward does any unconfirmed row's `forge.addLabel` run.
+// Proven red against the pre-two-phase code (this round's starting point — single sequential
+// pass, no phase split): `sup.signalsSent` stayed `[]` for the confirmed row, replicating sol's
+// JSON evidence (`{"signals":[],"laterState":"driving","laterIntent":"confirmed","laterPidAlive":true}`).
+test("tick: EMERGENCY_STOP + an alphabetically earlier driving row's unconfirmed forge.addLabel hung, before a LATER confirmed-intent row -> the confirmed row's live child still receives SIGKILL within the tick (#778 gate② PR #810 sol-high confirmation-round repro)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-two-phase-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    sup.enableDurablePidCapability();
+    // Alphabetically EARLIER — reconcileDrivingFixIntents' OLD single pass would reach this row
+    // FIRST and hang forever inside its own forge.addLabel, before ever inspecting the row below.
+    seedDriving(st, "a-unconfirmed", 3, 30);
+    sup.resumeIntents["a-unconfirmed"] = "unconfirmed";
+    // Alphabetically LATER, with a CONFIRMED intent and a live durable pid — the already-live
+    // crash-resumed child sol's confirmation-round repro used.
+    seedDriving(st, "z-confirmed", 9, 90);
+    sup.resumeIntents["z-confirmed"] = "confirmed";
+    sup.durablePids["z-confirmed"] = true;
+    // Never resolves — the exact wedged-forge shape, hit by the row the OLD sequential loop
+    // reaches FIRST.
+    forge.addLabel = (): Promise<void> => new Promise<void>(() => {});
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    void tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() }); // never awaited — never settles
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(
+      sup.signalsSent.some((s) => s.worker === "z-confirmed" && s.signal === "SIGKILL"),
+      "the LATER confirmed row's already-live child must be hard-killed even though an alphabetically EARLIER unconfirmed row is stuck forever in forge.addLabel",
+    );
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: EMERGENCY_STOP + a Supervisor with no durable-PID capability -> unchanged pre-#778 behavior (probe+reclaim is still the only kill mechanism)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-estop-no-durablepid-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor(); // durablePidAlive/signalDurablePid left genuinely unset
+    seedRunning(st, "lane-run", 2);
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE };
+    writeFileSync(join(dir, "EMERGENCY_STOP"), "");
+
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+    assert.deepEqual(r.escalated, ["lane-run"]);
+    assert.deepEqual(sup.reclaimed, ["lane-run"]); // the ordinary reclaim() path, unchanged
+    assert.equal(st.getWorker("lane-run")?.state, "failed");
     st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

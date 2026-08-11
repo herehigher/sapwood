@@ -1519,8 +1519,15 @@ const ConfigSchemaRaw = z
           // one-bootstrap-PR exposure window.
           "engine/src/review/instruction-path-escalation.ts",
           "engine/src/config/config.ts",
-          // #577: sapwood init's starter template is an instruction carrier too. Escalation makes
-          // edits human-merge-only; the separate hard guard boundary is tracked by #781.
+          // #577: sapwood init's starter template is an instruction carrier too, so it belongs on
+          // this escalation surface exactly like the two paths above — but unlike them, it is
+          // ALSO independently guard-protected: guard.ts's protectedPathLabel hard-blocks direct
+          // writes to it (#781, sibling rule to the root config's PROTECTED_SUFFIXES/config-file
+          // match). The two paths immediately above (instruction-path-escalation.ts, config.ts)
+          // have no such hard-guard counterpart — they rely on escalation alone, a producer CAN
+          // still write them and a human adjudicates the merge — so this entry is stronger than
+          // those two, not "the same relationship": the guard denies the write outright, escalation
+          // never even gets a session-produced diff to review.
           "sapwood.config.example.yaml",
           // #539: docs/security.md carries the canonical human-merge-only list and documents this
           // mechanism's own trust chain — the same self-reference class as the two paths above.

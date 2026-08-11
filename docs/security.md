@@ -1624,6 +1624,12 @@ would let a worker weaken the very mechanism that constrains it. Any change to t
   is blocked exactly like a guard-mode change. Do not read "security-relevant config" below
   as scoping the block to a subset of the file's contents — it names *why* the file is
   protected, not *how much* of it is.
+- `sapwood.config.example.yaml` / `sapwood.config.example.json` — the `sapwood init` starter
+  template, guard-protected as a sibling rule to the root config above (same whole-file,
+  no-per-field-carve-out treatment; `engine/src/guard/guard.ts`'s match is a path pattern on
+  `sapwood.config.example.(ya?ml|json)`, case-insensitive). It carries the same
+  `merge.mode: produce-pr-and-stop` safe-by-default pin every future `sapwood init` inherits,
+  so weakening it here degrades that default repo-wide, not just this repo's live config.
 - `.claude/settings*.json` and `.github/workflows/**`
 
 The guard enforces this as a write-path denial (both for the `Write`/`Edit` tools and
@@ -1638,10 +1644,22 @@ and review is not something the conductor should be configured to auto-merge.
 The path-based denial protects this repository's root `sapwood.config.yaml`: it is the
 live dogfood configuration, and changing it remains human-merge-only through the guard.
 `sapwood init` instead ships `sapwood.config.example.yaml` as the starter template
-(`engine/src/loop/init.ts`'s `sampleConfig()`/`ensureConfig()`). That template now belongs
+(`engine/src/loop/init.ts`'s `sampleConfig()`/`ensureConfig()`). That template belongs
 to the default `escalation.instructionPaths` surface, so edits to it route to human merge
-review. It is **not** guard-protected: extending the hard guard boundary to the template is
-tracked separately in #781.
+review, **and** (#781) it is also guard-protected in its own right: `guard.ts`'s
+`protectedPathLabel` matches `sapwood.config.example.(ya?ml|json)`, case-insensitively, as a
+sibling rule to the root config's, denying the same recognized write vectors as the root
+config — the `Write`/`Edit` tools, Bash redirection, and the write-command set (`touch`,
+`rm`, `mv`, `cp`, `install`, `git rm`/`mv`/`restore`/`checkout`, `sed -i`, `perl -i`, `tee`,
+`dd`) when the template path appears as their argument — so a worker can no longer weaken the
+`merge.mode: produce-pr-and-stop` pin every future `sapwood init` inherits from this file
+through any of those routes. This does **not** extend to the literal-argument scan
+(`checkControlSentinelArg`) that catches an arbitrary command merely naming a control
+sentinel — that scanner is deliberately sentinel-only (marginal-complexity ruling on #809),
+so a script that takes the template's path as its own CLI argument (e.g. `node
+writer.js sapwood.config.example.yaml`) or hardcodes the path internally is outside the
+guard's coverage — the same residual class the "Sentinel isolation boundary" section below
+documents for the control sentinels.
 
 The consequence for the protected root config: **a worker cannot land a change to its
 comments — even a purely editorial one carrying no security meaning at all.** The guard
@@ -1763,18 +1781,17 @@ The engine's `data/` directory (which holds all three sentinels and the state DB
 outside worker git worktrees as a **permission-layer boundary** — the worker process is
 not launched with `--add-dir data`, so it has no `claude`-tool path into that directory.
 This is **not an OS-level sandbox**, so the guard (`engine/src/guard/guard.ts`) adds
-defense-in-depth (#81) on top of that boundary. The guard's control-sentinel rule currently
-covers **only** `data/KILL_SWITCH` and `data/PAUSE`; `data/EMERGENCY_STOP` is not yet covered,
-and that guard coverage is tracked in [#779](https://github.com/herehigher/sapwood/issues/779).
-For the two covered sentinels, any `Write`/`Edit` targeting
-`data/KILL_SWITCH` or `data/PAUSE` (including via relative traversal, e.g.
-`../../data/PAUSE`) is denied, as is `Bash` `touch`/`rm`/`mv`/`git rm`/redirect-to-path
-targeting either sentinel, and a sentinel path appearing as a literal argument to any
-other command (e.g. `node some-script.js ../../data/PAUSE`) — including glued to a
-flag (`--target=../../data/PAUSE`) — with the
-sentinel names matched case-insensitively (macOS/APFS default is case-insensitive, so
-`data/pause` hits the real file). What remains open, deliberately documented rather
-than blocked:
+defense-in-depth (#81) on top of that boundary. The guard's control-sentinel rule covers
+all three tiers — `data/KILL_SWITCH`, `data/PAUSE`, and (#779, closing the gap left by
+#724 adding the strictest tier without a matching guard update) `data/EMERGENCY_STOP`.
+For every covered sentinel, any `Write`/`Edit` targeting it (including via relative
+traversal, e.g. `../../data/EMERGENCY_STOP`) is denied, as is `Bash`
+`touch`/`rm`/`mv`/`git rm`/redirect-to-path targeting it, and a sentinel path appearing
+as a literal argument to any other command (e.g. `node some-script.js
+../../data/EMERGENCY_STOP`) — including glued to a flag (`--target=../../data/PAUSE`) —
+with the sentinel names matched case-insensitively (macOS/APFS default is
+case-insensitive, so `data/pause` hits the real file). What remains open, deliberately
+documented rather than blocked:
 
 - a script written via the ordinarily-permitted `Write` tool that hardcodes the
   sentinel path *inside its own source* rather than taking it as a CLI argument — the

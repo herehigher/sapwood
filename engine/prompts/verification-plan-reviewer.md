@@ -81,8 +81,10 @@ must be `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` immediately af
   heuristic with its failure direction. A checkability defect, never a scope re-litigation.
 - **Feasibility against human-merge-only paths.** Cross-check the acceptance criteria against
   `docs/security.md`'s "Human-merge-only paths" list (`guard.ts`/hook wiring, `reviewer.ts`/
-  `merge-driver.ts`, `sapwood.config.yaml`/`.json` **in full**, `.claude/settings*.json`,
-  `.github/workflows/**`). `sapwood.config.*` is blocked as a whole file by path pattern, not
+  `merge-driver.ts`, `sapwood.config.yaml`/`.json` **in full**, `sapwood.config.example.yaml`/
+  `.json` (the `sapwood init` starter — guard-protected in its own right, #781),
+  `.claude/settings*.json`, `.github/workflows/**`). `sapwood.config.*` (root and the
+  starter template alike) is blocked as a whole file by path pattern, not
   by field — an AC that only touches a comment, a non-security default, or an unrelated key in
   that file is just as infeasible as one touching guard/reviewer/merge mode; do not wave it
   through because the specific edit "isn't security-relevant". If satisfying an AC as written

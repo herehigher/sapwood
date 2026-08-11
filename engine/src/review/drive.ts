@@ -585,22 +585,48 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     }
     const failing = requiredChecksRed(checksPage0.checks, deps.cfg.ci.requiredChecks);
     if (failing.length > 0) {
-      // #608: a standing #502 base-red pin means the DEFAULT BRANCH is red, and every open PR's
-      // merge-ref CI inherits that failure verbatim — a fix-leg push cannot fix the base, and
-      // rerolling CI against a still-red base only self-perpetuates (batch-4's probeLlmPing
-      // incident: ~$28 across 3 lanes). Only route to the wait when the PR's ENTIRE failing set is
-      // already covered by the pin's (same run names, the evidence the pin already carries) — a
-      // failing run NOT in the pin's set is this lane's own red, still a legitimate fix leg.
-      const basePin = deps.getBaseRedPin?.() ?? null;
-      if (basePin && failing.every((f) => basePin.failing.includes(f))) {
-        return {
-          kind: "queued",
-          reason: `engine-agent: CI-red is base-inherited (the default branch is CI-red at ${basePin.sha} — ${basePin.failing.join(", ")}): ${failing.join(", ")}`,
-          status: status0,
-          data: data0,
-        };
+      // #795 (mirrors #792 gate② round 2's identical fix on the OTHER getPRChecks call site,
+      // the preflight CI-evidence gate further below): `getPRChecks` is NOT bound to `status0`'s
+      // head the way `getPRStatus`/`getPRReviewData` are to each other — PRChecksPage (forge.ts)
+      // carries no head/sha at all. A push landing between the top-of-function read and THIS read
+      // means the checks page can describe a NEWER head than status0/data0, misattributing that
+      // newer head's red check to status0's (older, possibly already-resolved) head and
+      // dispatching a fix leg the producer can't act on correctly. Revalidated with one cheap
+      // getPRStatus re-read; on ANY mismatch (or a failed revalidation — fail-closed, "cannot
+      // prove same-head" reads the same as "not same-head") this route dispatches NOTHING and
+      // falls through to the rest of the pipeline, which re-derives from a fresh, coherent
+      // status0/data0 pair next tick — same "never derive a signal from mixed reads" discipline
+      // the preflight gate's own #792 fix follows. Scoping (AC2): this is the SECOND of the two
+      // getPRChecks call sites in this function; the preflight CI-evidence gate's call site
+      // already carries the #792 revalidation guard, so every consumer of an unbound checks read
+      // in this preflight now has same-head discipline.
+      let sameHead = false;
+      try {
+        const revalidated = await deps.forge.getPRStatus(pr);
+        sameHead = revalidated.headOid === status0.headOid;
+      } catch {
+        // sameHead stays false — cannot prove it, fail closed.
       }
-      return { kind: "ci-red", status: status0, data: data0, failing };
+      if (sameHead) {
+        // #608: a standing #502 base-red pin means the DEFAULT BRANCH is red, and every open PR's
+        // merge-ref CI inherits that failure verbatim — a fix-leg push cannot fix the base, and
+        // rerolling CI against a still-red base only self-perpetuates (batch-4's probeLlmPing
+        // incident: ~$28 across 3 lanes). Only route to the wait when the PR's ENTIRE failing set
+        // is already covered by the pin's (same run names, the evidence the pin already carries)
+        // — a failing run NOT in the pin's set is this lane's own red, still a legitimate fix leg.
+        const basePin = deps.getBaseRedPin?.() ?? null;
+        if (basePin && failing.every((f) => basePin.failing.includes(f))) {
+          return {
+            kind: "queued",
+            reason: `engine-agent: CI-red is base-inherited (the default branch is CI-red at ${basePin.sha} — ${basePin.failing.join(", ")}): ${failing.join(", ")}`,
+            status: status0,
+            data: data0,
+          };
+        }
+        return { kind: "ci-red", status: status0, data: data0, failing };
+      }
+      // Head moved mid-read: fall through to the rest of the pipeline instead of returning here —
+      // the next getPRChecks/getPRStatus reads (preflight, below) will re-derive from a fresh pair.
     }
   }
 

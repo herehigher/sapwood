@@ -86,7 +86,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // step to name the real entry point and distinguishable live-vs-condition fixture values for
   // this criterion shape. Mirrored into po-decompose.md and verification-plan-drafter.md below,
   // and into verification-plan-reviewer.md's gate⓪ checklist so it's enforced, not just authored.
-  "po.md": "84f44547cd94e3a6a0c5fd31615165c6fa28d175e8dff5bb37074c77e3dde15d",
+  // #809 (gate② F4): the human-merge-only paths list now also names sapwood.config.example.*
+  // (guard-protected in its own right by #781) — hash moved for that addition.
+  "po.md": "cb264de2435fb270264506eb392a58a55a45f6f894471b22cf7aef4daaa8c8ac",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
@@ -167,7 +169,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // retro round #365: adds outcome 4 (`needs_human`) — escalate directly, no draft cycle, when a
   // human-merge-only path is a PREREQUISITE the whole plan depends on (issue #782 this round
   // burned 2 wasted draft→re-review cycles reaching the identical verdict via outcome 2).
-  "verification-plan-reviewer.md": "9b99c5bc89502b6ef6b216a33617053202445084b942680191c9e8105aab1773",
+  // #809 (gate② F4): same sapwood.config.example.* addition to the human-merge-only paths
+  // list as po.md above — hash moved for that addition.
+  "verification-plan-reviewer.md": "41e6194c144d40d0244d55072eb21c59c5c51d9c5e0c8d89780ec46867e55705",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
   // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
@@ -202,7 +206,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // the session holds) instead of claiming the session has no channel that could do it.
   // retro round #363: same fix as po.md above, mirrored into the drafter's own AC-authoring
   // guidance.
-  "verification-plan-drafter.md": "3239e857f15cb542c7cc2f1e491a11b7695264ee74c9f3107893d6d6e3d324ba",
+  // #809 (gate② F4): same sapwood.config.example.* addition to the human-merge-only paths
+  // list as po.md above — hash moved for that addition.
+  "verification-plan-drafter.md": "b77839852a79fb720f373b0910376b6212aa27563348b5ff0520f3996d618c94",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
   // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
   // grant was never removed, so the capability paragraph again names it (when attached) instead
