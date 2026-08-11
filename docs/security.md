@@ -561,6 +561,25 @@ startup or dispatch.
   is not stopped by anything L1 adds. #606 does not add branch-scoped git-refs enforcement,
   `--force-with-lease`, or any other push-time API check beyond what a worker leg does today;
   this residual is accepted, stated here rather than silently assumed closed.
+- **Raw git-transport push to the default branch — narrowed, not eliminated (#679).** Item 3
+  below (and the "CAN still `git push` directly to an unprotected default branch, bypassing the
+  review gate entirely via raw git transport" language it uses) named this as an open gap: the
+  guard's Category C (`gh pr merge` etc.) enforces producer≠merger at the `gh` layer only —
+  `guard.ts` had no `git push` handling at all, so a worker leg holding `Bash(git *)` (L0 host
+  credentials, or an L1 deploy key on an unprotected default branch) could run `git push origin
+  HEAD:<default-branch>` and skip gate①/gate② entirely. The engine now denies this at the guard
+  layer too: a deny rule (paste-ready as a human-applied patch, `docs/patches/`, since
+  `engine/src/guard/**` is human-merge-only — see "Human-merge-only paths" below) blocks refspec
+  destinations naming the default branch, `--delete`, and `--mirror`/`--all`, active only when the
+  engine's trusted spawn env `SAPWOOD_DEFAULT_BRANCH` is set (worker.ts resolves it from the same
+  fact `getDefaultBranchChecks` already keys on and threads it into every dispatch/resume/fix-leg
+  spawn). This is engine-side defense-in-depth AT the guard's own sanctioned enforcement point —
+  it narrows the gap for a worker leg that goes through this guard's PreToolUse hook, but it is
+  **not a replacement for branch protection** (item 3's own WARN, #633): branch protection is the
+  mandatory backstop of record regardless of whether this rule's patch has been applied, and
+  nothing here closes a leg that bypasses the guard hook itself (a non-`claude`-CLI process, or a
+  session the engine didn't dispatch — SAPWOOD_DEFAULT_BRANCH unset leaves the rule inactive by
+  design, same fail-safe stance the guard's other engine-set-env rules already take).
 - **Host-credential theft: engine-unpluggable.** L1 removes the forge API credential from the
   worker leg's OWN environment — it does nothing to, and cannot touch, the operator's real
   credential store on the HOST the engine itself runs on (`gh`'s `hosts.yml`, the OS keychain, an

@@ -2506,6 +2506,11 @@ async function runTickEngine(
       // marker (forge.ts's associateLanePr) — never a PR body's prose mention of the issue number,
       // which is what handed lane-294 a stranger's PR in the 2026-07-24 F15 case.
       lanePr: buildLanePrAssociator(forge, log),
+      // #679: resolves SAPWOOD_DEFAULT_BRANCH — the SAME `getDefaultBranchChecks` read
+      // #502's base-branch CI awareness already uses, just for its `branch` field instead of
+      // its check contexts (cap:1, the cheapest non-zero read — this call never needs the
+      // contexts page itself, see worker.ts's WorkerDeps.getDefaultBranch doc).
+      getDefaultBranch: () => forge.getDefaultBranchChecks(1).then((page) => page.branch),
       renderPrompt,
       // #244 (Codex sol-high PR #260 review round 2, P2): wires the durable `proxy-mint-failed`
       // event into the REAL tick-driver run — without this, a mint failure on a live proxy-
@@ -2716,6 +2721,8 @@ async function runRoundsEngine(
       now: systemClock,
       // #377: same branch+marker association as the tick driver above.
       lanePr: buildLanePrAssociator(forge, log),
+      // #679: same SAPWOOD_DEFAULT_BRANCH wiring as the tick driver above.
+      getDefaultBranch: () => forge.getDefaultBranchChecks(1).then((page) => page.branch),
       renderPrompt,
       // #244 (Codex sol-high PR #260 review round 2, P2): same durable mint-failure observability
       // as the tick-driver path above, wired into the round-orchestrator's own WorkerSupervisor.

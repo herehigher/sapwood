@@ -1527,6 +1527,16 @@ export interface WorkerDeps {
    *  which is the fail-closed direction: conductor.ts escalates such a lane to a human rather
    *  than driving a guessed merge target. */
   lanePr?: (lane: { name: string; issue: number; branch: string | null; sessionOver: boolean }) => Promise<LanePrOutcome>;
+  /** #679: resolves the repository's DEFAULT BRANCH name — the same fact forge.ts's
+   *  `getDefaultBranchChecks` already keys on (its `BranchChecksPage.branch` field), so a
+   *  base-branch name in sapwood config never becomes a second source of truth for a fact the
+   *  forge already owns (same stance DEFAULT_BRANCH_CHECKS_QUERY's own doc takes). Set into the
+   *  spawn env as SAPWOOD_DEFAULT_BRANCH (dispatch/resume/fix legs — a fix leg IS a resume()
+   *  call, conductor.ts's startFixLeg), the trusted-env fact the #679 guard patch's raw-git-
+   *  transport-push deny rule keys its activation on. Omitted -> SAPWOOD_DEFAULT_BRANCH is never
+   *  set (the fail-safe direction: the rule stays inactive rather than block on a guessed name),
+   *  same "optional, additive, degrades to zero behavior change" contract lanePr above carries. */
+  getDefaultBranch?: () => Promise<string>;
   /** Worker prompt for an issue. Default: a minimal imperative skeleton. */
   renderPrompt?: (issue: Issue) => string;
   /** Path to the compiled guard hook (node <path>). Default: the dist sibling of this module. */
@@ -2031,6 +2041,9 @@ export class WorkerSupervisor implements Supervisor {
   // to `ssh` per lane. The WARN-on-failure log fires exactly once, inside the Promise's own
   // `.then` (see resolveDeployKeyEnv), never re-logged on a later dispatch that just re-awaits it.
   private deployKeyProbe?: Promise<LlmPingResult>;
+  // #679: memoized SAPWOOD_DEFAULT_BRANCH resolution — same "probe once per supervisor life"
+  // stance as deployKeyProbe above (see resolveDefaultBranch's own doc for the rationale).
+  private defaultBranchProbe?: Promise<string>;
 
   constructor(private readonly deps: WorkerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "state");
@@ -2085,6 +2098,31 @@ export class WorkerSupervisor implements Supervisor {
     }
     const result = await this.deployKeyProbe;
     return result.ok ? path : undefined;
+  }
+
+  /** #679: resolves the repository's default branch name for the SAPWOOD_DEFAULT_BRANCH spawn
+   *  env — the same fact WorkerDeps.getDefaultBranch's own doc points at (forge.ts's
+   *  `getDefaultBranchChecks`, via a bound closure so worker.ts never depends on the forge
+   *  interface directly, the same convention `lanePr` already uses). Memoized once per
+   *  supervisor life (mirrors resolveDeployKeyPath's `deployKeyProbe`): the default branch
+   *  essentially never changes mid-run, and a dispatch/resume/fix-leg spawn should never block
+   *  on a fresh GraphQL round-trip when a prior one on this same instance already answered.
+   *  Returns "" (never throws) when `deps.getDefaultBranch` is unset OR its call rejects — a
+   *  read failure degrades to "SAPWOOD_DEFAULT_BRANCH omitted, rule inactive", never a blocked
+   *  dispatch over a best-effort defense-in-depth fact (#679's guard patch treats unset the same
+   *  as "not an engine-dispatched session"). */
+  private async resolveDefaultBranch(): Promise<string> {
+    if (!this.deps.getDefaultBranch) return "";
+    if (this.defaultBranchProbe === undefined) {
+      const getDefaultBranch = this.deps.getDefaultBranch;
+      this.defaultBranchProbe = getDefaultBranch().catch((e) => {
+        this.log(
+          `[sapwood:worker] failed to resolve the repository's default branch (non-fatal, SAPWOOD_DEFAULT_BRANCH omitted): ${e instanceof Error ? e.message : String(e)}`,
+        );
+        return "";
+      });
+    }
+    return this.defaultBranchProbe;
   }
 
   /** #671: public wrapper around resolveDeployKeyPath()'s memoized SSH preflight, for cli.ts's
@@ -2258,6 +2296,9 @@ export class WorkerSupervisor implements Supervisor {
     // key's transport overlay onto its own stricter base env (see baseEnv below). No longer
     // "mutually exclusive" with credentialFree — the two postures COMPOSE.
     const deployKeyPath = await this.resolveDeployKeyPath();
+    // #679: resolved unconditionally too — every dispatch gets SAPWOOD_DEFAULT_BRANCH in its
+    // spawn env when deps.getDefaultBranch is wired (see resolveDefaultBranch's own doc).
+    const defaultBranch = await this.resolveDefaultBranch();
     // #244 (Codex sol-high PR #260 review, P1) + #606 gate② round 1 (P1-3): a fresh, empty,
     // per-lane GH_CONFIG_DIR — created whenever EITHER credentialFree OR an L1 deploy key is in
     // play (cheap, and keeps the directory's lifecycle tied to the lane's own stateDir rather
@@ -2362,6 +2403,11 @@ export class WorkerSupervisor implements Supervisor {
         ...WORKER_DISABLE_BACKGROUND_TASKS_ENV,
         SAPWOOD_GUARD_MODE: guardMode,
         SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, laneName),
+        // #679: only set when resolved — an empty/unresolved default branch must OMIT the var
+        // entirely (not set it to ""), so the guard patch's inactivity check (`if
+        // (!defaultBranch) return null`) reads the same "not engine-dispatched" signal an
+        // actually-unset env var gives, never a live-but-empty one.
+        ...(defaultBranch ? { SAPWOOD_DEFAULT_BRANCH: defaultBranch } : {}),
       },
     });
     // Register the lane + `exit` handler BEFORE any await. Node does not replay `exit` to
@@ -2798,6 +2844,9 @@ export class WorkerSupervisor implements Supervisor {
           ...(deployKeyPath ? deployKeyTransportOverlay(deployKeyPath, this.deps.cfg.board.owner, this.deps.cfg.board.repo) : {}),
         }
       : (deployKeyEnv ?? process.env);
+    // #679: same unconditional resolution as dispatch() — a resumed leg (including a fix leg,
+    // resume()'s own fix-entry mode) gets SAPWOOD_DEFAULT_BRANCH too, not just fresh dispatch.
+    const defaultBranch = await this.resolveDefaultBranch();
     try {
       // SAPWOOD_WORKTREE_ROOT (#235 PR-A): same lane/worktree as the original dispatch — a
       // resumed leg must keep Read/Grep/Glob confined too, not just the fresh-dispatch path.
@@ -2811,6 +2860,8 @@ export class WorkerSupervisor implements Supervisor {
           ...WORKER_DISABLE_BACKGROUND_TASKS_ENV,
           SAPWOOD_GUARD_MODE: guardMode,
           SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, name),
+          // #679: same omit-when-unresolved rule as dispatch() — see that call site's comment.
+          ...(defaultBranch ? { SAPWOOD_DEFAULT_BRANCH: defaultBranch } : {}),
         },
       });
     } catch (e) {

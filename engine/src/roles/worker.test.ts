@@ -2605,6 +2605,171 @@ test("dispatch sets SAPWOOD_WORKTREE_ROOT to the resolved absolute worktree path
   }
 });
 
+// #679: SAPWOOD_DEFAULT_BRANCH reaches the worker's spawn env, resolved via WorkerDeps.
+// getDefaultBranch (cli.ts wires this to forge.ts's getDefaultBranchChecks — see that field's
+// own doc) — the trusted fact the #679 guard patch's raw-git-transport-push deny rule keys its
+// activation on. Set at spawn exactly where SAPWOOD_GUARD_MODE/SAPWOOD_WORKTREE_ROOT are, on
+// dispatch(), resume(), and a genuine fix-leg entry (resume() with opts.sessionId, no .handoff
+// sentinel — resume() is a fix leg's ONLY production spawn path, conductor.ts's startFixLeg).
+test("dispatch sets SAPWOOD_DEFAULT_BRANCH from deps.getDefaultBranch (#679)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\necho "$SAPWOOD_DEFAULT_BRANCH" > "${join(dir, "db.seen.tmp")}"\nmv "${join(dir, "db.seen.tmp")}" "${join(dir, "db.seen")}"\nexit 0\n`,
+    );
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      getDefaultBranch: async () => "main",
+    });
+    await s.dispatch({ number: 679, title: "t", labels: [] });
+    await waitForFile(join(dir, "db.seen"), "SAPWOOD_DEFAULT_BRANCH was not published");
+    assert.equal(readFileSync(join(dir, "db.seen"), "utf8").trim(), "main");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Reverse test: WorkerDeps.getDefaultBranch omitted (the common case today — no shipped caller
+// wires it yet in most configurations) must leave SAPWOOD_DEFAULT_BRANCH UNSET, not set-to-empty
+// — the guard patch's inactivity check reads an actually-unset env var, and this pins that the
+// widening never regresses an existing dispatch into carrying a live-but-empty var instead.
+test("dispatch OMITS SAPWOOD_DEFAULT_BRANCH entirely when deps.getDefaultBranch is not wired (#679 reverse test)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      // printf '%s' with no trailing echo distinguishes "unset" (prints nothing, `-z` true) from
+      // "set to empty string" (also prints nothing) is NOT possible via echo alone — use `-v` to
+      // tell them apart.
+      `#!/usr/bin/env bash\nif [ -v SAPWOOD_DEFAULT_BRANCH ]; then echo "SET"; else echo "UNSET"; fi > "${join(dir, "db.seen.tmp")}"\nmv "${join(dir, "db.seen.tmp")}" "${join(dir, "db.seen")}"\nexit 0\n`,
+    );
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    await s.dispatch({ number: 680, title: "t", labels: [] });
+    await waitForFile(join(dir, "db.seen"), "presence marker was not published");
+    assert.equal(readFileSync(join(dir, "db.seen"), "utf8").trim(), "UNSET");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume: also sets SAPWOOD_DEFAULT_BRANCH (#679) — a resumed leg keeps the same closure, not just fresh dispatch", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const ready = join(dir, "stub-ready");
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        `  echo "$SAPWOOD_DEFAULT_BRANCH" > "${join(dir, "resume-db.seen.tmp")}"`,
+        `  mv "${join(dir, "resume-db.seen.tmp")}" "${join(dir, "resume-db.seen")}"`,
+        '  echo \'{"type":"result","subtype":"success","total_cost_usd":0.05,"model":"claude-stub","usage":{"input_tokens":1,"output_tokens":1}}\'',
+        "  exit 0",
+        "fi",
+        "trap 'exit 0' TERM",
+        `touch "${ready}"`,
+        "for _ in $(seq 1 600); do sleep 1; done",
+        "",
+      ].join("\n"),
+    );
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      getDefaultBranch: async () => "main",
+    });
+    const { name } = await s.dispatch({ number: 681, title: "t", labels: [] });
+    await waitForFile(ready, "stub installed its TERM trap before handoff");
+    assert.equal(s.requestHandoff(name), true);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
+    await s.resume({ number: 681, title: "t", labels: [] }, name);
+    await waitForFile(join(dir, "resume-db.seen"), "resumed SAPWOOD_DEFAULT_BRANCH was not published");
+    assert.equal(readFileSync(join(dir, "resume-db.seen"), "utf8").trim(), "main");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume (#679): a genuine FIX-ENTRY resumed leg (opts.sessionId, no .handoff sentinel) also carries SAPWOOD_DEFAULT_BRANCH — resume() is a fix leg's ONLY production spawn path (conductor.ts's startFixLeg)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        `  echo "$SAPWOOD_DEFAULT_BRANCH" > "${join(dir, "fix-db.seen.tmp")}"`,
+        `  mv "${join(dir, "fix-db.seen.tmp")}" "${join(dir, "fix-db.seen")}"`,
+        '  echo \'{"type":"result","subtype":"success","total_cost_usd":0.001,"model":"claude-stub","usage":{"input_tokens":1,"output_tokens":1}}\'',
+        "fi",
+        `echo '{"type":"result","subtype":"success","total_cost_usd":0.001,"model":"claude-stub","usage":{"input_tokens":1,"output_tokens":1}}'`,
+        "exit 0",
+      ].join("\n"),
+    );
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "issue-rendered-prompt",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      getDefaultBranch: async () => "main",
+    });
+    // Driving-lane precondition: a fresh dispatch completes DONE quickly (no --resume in the
+    // fake stub's first invocation), leaving a done sentinel and NO handoff sentinel — exactly
+    // what a fix leg starts from.
+    const { name, sessionId } = await s.dispatch({ number: 682, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.done.json`)));
+    assert.ok(!existsSync(join(dir, `${name}.handoff.json`)), "no handoff sentinel — the fix-leg-entry precondition");
+
+    await s.resume({ number: 682, title: "t", labels: [] }, name, {
+      sessionId,
+      prompt: "fix-leg: address PR #650's gate② review findings",
+    });
+    await waitForFile(join(dir, "fix-db.seen"), "fix-leg SAPWOOD_DEFAULT_BRANCH was not published");
+    assert.equal(readFileSync(join(dir, "fix-db.seen"), "utf8").trim(), "main");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // #708: five worker legs backgrounded their OWN verification run (Bash tool `run_in_background`)
 // and then blocked polling it until heartbeat-stale reclaim (2026-08-05/06 dogfood, events
 // 9573/9578) — 2 of 3 lanes lost in one wave. Live audit (PR body) verified
