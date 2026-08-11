@@ -561,6 +561,46 @@ startup or dispatch.
   is not stopped by anything L1 adds. #606 does not add branch-scoped git-refs enforcement,
   `--force-with-lease`, or any other push-time API check beyond what a worker leg does today;
   this residual is accepted, stated here rather than silently assumed closed.
+- **Raw git-transport push to the default branch — narrowed, not eliminated (#679).** Item 3
+  below (and the "CAN still `git push` directly to an unprotected default branch, bypassing the
+  review gate entirely via raw git transport" language it uses) named this as an open gap: the
+  guard's Category C (`gh pr merge` etc.) enforces producer≠merger at the `gh` layer only —
+  `guard.ts` had no `git push` handling at all, so a worker leg holding `Bash(git *)` (L0 host
+  credentials, or an L1 deploy key on an unprotected default branch) could run `git push origin
+  HEAD:<default-branch>` and skip gate①/gate② entirely. The engine now denies this at the guard
+  layer too: a deny rule (paste-ready as a human-applied patch, `docs/patches/`, since guard.ts /
+  the guard hook wiring is human-merge-only — see "Human-merge-only paths" below) blocks refspec
+  destinations naming the default branch, `--delete`, and `--mirror`/`--all`, active only when the
+  engine's trusted spawn env `SAPWOOD_DEFAULT_BRANCH` is set (worker.ts resolves it from the same
+  fact `getDefaultBranchChecks` already keys on and threads it into every dispatch/resume/fix-leg
+  spawn). Precise-destination matching alone cannot prove a push is safe: an unresolved shell
+  variable/command-substitution (`HEAD:$SAPWOOD_DEFAULT_BRANCH`, expanded by the worker's OWN
+  shell before git ever runs), a `-c alias.*=` config injection (redefining what a later
+  subcommand token means), and a wildcard refspec destination (`refs/heads/*:refs/heads/*`) can
+  all reach the default branch without ever spelling it out as a literal token the guard could
+  string-compare — the rule's actual frame is "if this push's safety cannot be PROVEN, block it,"
+  not an enumeration of literal forms (gate② round 1, #679). This is engine-side defense-in-depth
+  AT the guard's own sanctioned enforcement point — it narrows the gap for a worker leg that goes
+  through this guard's PreToolUse hook, but it is **not a replacement for branch protection**
+  (item 3's own WARN, #633): branch protection is the mandatory backstop of record regardless of
+  whether this rule's patch has been applied, and nothing here closes a leg that bypasses the
+  guard hook itself (a non-`claude`-CLI process, or a session the engine didn't dispatch —
+  SAPWOOD_DEFAULT_BRANCH unset leaves the rule inactive by
+  design, same fail-safe stance the guard's other engine-set-env rules already take). **What the
+  rule covers, stated plainly, not claimed as exhaustive:** every argv-VISIBLE raw-git push
+  form — direct refspec destinations, `--delete`/`--mirror`/`--all`, `--repo`/`--repo=`, an argv
+  `-c`/`--config` alias injection local to that one invocation, and any refspec token the guard
+  cannot statically prove safe (an unresolved `$`/backtick/`*`). It does **not** cover a push
+  whose effective subcommand is resolved through git STATE the argv itself never reveals — a
+  PRE-PERSISTED, repo-local `git config alias.*` (set by an earlier, separately-judged command)
+  or `GIT_CONFIG_*` environment aliases carried in from outside that one Bash call. Closing that
+  class would mean modeling git's own config resolution across commands and environment, not
+  scanning one more token spelling; it is an accepted residual, the same class
+  `checkControlSentinelArg`'s "a script that hardcodes the path internally, with no CLI argument"
+  residual already is — see [Sentinel isolation boundary](#sentinel-isolation-boundary-honest-statement)
+  — and GitHub branch protection (DR #616) is the backstop of record for it: this rule was always
+  framed as defense-in-depth AT the guard's enforcement point, never a complete jail around it
+  (gate② round 2, #679, PM ruling).
 - **Host-credential theft: engine-unpluggable.** L1 removes the forge API credential from the
   worker leg's OWN environment — it does nothing to, and cannot touch, the operator's real
   credential store on the HOST the engine itself runs on (`gh`'s `hosts.yml`, the OS keychain, an
