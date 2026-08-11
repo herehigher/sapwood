@@ -25,7 +25,7 @@ The root build fans out to the engine workspace. TypeScript emits ESM, declarati
 
 ## Configuration
 
-The checked-in `sapwood.config.yaml` is the commented default for this repository. `loadConfig()` probes, in order, `sapwood.config.yaml`, `sapwood.config.yml`, then `sapwood.config.json`; `sapwood run --config <path>` (including `--dry-run`), `sapwood status --config <path>`, `sapwood events --config <path>`, and `sapwood validate [path]` bypass the probe. `status`/`events`' `--config` is authoritative once given (#710) — a bad path there is a hard error, never a silent fallback. Relative `logging.path`, `promptFile`, `goal.file`, and `doctrine.file` keys resolve from the selected config's directory, so an alternate config's default log lands beside that config; the DB (`data/sapwood.sqlite`), `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree roots stay cwd-relative. JSON is accepted through the YAML parser. See [Configuration](../configuration.md) for the complete key reference.
+The checked-in `sapwood.config.yaml` is the commented default for this repository. `loadConfig()` probes, in order, `sapwood.config.yaml`, `sapwood.config.yml`, then `sapwood.config.json`; `sapwood run --config <path>` (including `--dry-run`), `sapwood status --config <path>`, `sapwood events --config <path>`, `sapwood pause|stop|estop --config <path>` (#731), and `sapwood validate [path]` bypass the probe. `status`/`events`/`pause`/`stop`/`estop`'s `--config` is authoritative once given (#710) — a bad path there is a hard error, never a silent fallback. Relative `logging.path`, `promptFile`, `goal.file`, and `doctrine.file` keys resolve from the selected config's directory, so an alternate config's default log lands beside that config; the DB (`data/sapwood.sqlite`), `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree roots stay cwd-relative. JSON is accepted through the YAML parser. See [Configuration](../configuration.md) for the complete key reference.
 
 Environment variables read or propagated by the engine are deliberately narrow:
 
@@ -37,7 +37,7 @@ Environment variables read or propagated by the engine are deliberately narrow:
 | `SAPWOOD_GUARD_MODE` | Engine-set spawn variable carrying configured hard/soft guard mode; do not use it as a contributor override (`engine/src/guard/guard-hook.ts`). |
 | `SAPWOOD_WORKTREE_ROOT` | Engine-set absolute containment root for guarded session reads (`engine/src/guard/guard.ts`). |
 
-Human controls are three cwd-relative files, not environment variables: `data/EMERGENCY_STOP`, `data/KILL_SWITCH`, and `data/PAUSE` (`State.emergencyStopPath()`, `State.killSwitchPath()`, and `State.pausePath()` in `engine/src/state/state.ts`). `data/DIRECTIVE.md` is an optional round input configured by `round.directiveFile`, not a stop control.
+Human controls are three cwd-relative files, not environment variables: `data/EMERGENCY_STOP`, `data/KILL_SWITCH`, and `data/PAUSE` (`State.estopPath()`, `State.killSwitchPath()`, and `State.pausePath()` in `engine/src/state/state.ts`). Reachable via raw `touch`/`rm` or the first-class `sapwood pause`/`stop`/`estop` CLI verbs, each with a `clear` form (#731) — `estop` additionally requires `--confirm` to activate. `data/DIRECTIVE.md` is an optional round input configured by `round.directiveFile`, not a stop control.
 
 ## Running the loop from source
 

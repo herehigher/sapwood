@@ -401,13 +401,21 @@ Emergency stop (`data/EMERGENCY_STOP`), kill switch (`data/KILL_SWITCH`), and pa
 (`data/PAUSE`) are plain file sentinels next to the engine's state DB — see
 `/sapwood-stop`'s own doc (`commands/sapwood-stop.md`) for the same three tiers and
 their distinct semantics. This section covers the supervision-side placement/removal
-discipline layered on top:
+discipline layered on top.
+
+(#731) Every `mkdir -p data && touch ...` / `rm -f ...` pair below has an equivalent
+first-class CLI verb — `sapwood pause`/`pause clear`, `sapwood stop`/`stop clear`,
+`sapwood estop --confirm`/`estop clear` — a thin wrapper over the exact same file, so
+either form is fine; the CLI form additionally prints the tier's live semantics and
+(for `stop`) the configured drain window, and `estop` refuses to activate without
+`--confirm` (owner ruling, non-negotiable — see `sapwood estop --help`).
 
 - **Emergency-stop placement and clearing.** Set it only for credential exposure,
   destructive calls, or a cost blowout that cannot wait for the drain window:
 
   ```bash
   mkdir -p data && touch data/EMERGENCY_STOP
+  # equivalent: sapwood estop --confirm
   ```
 
   It is checked before `data/KILL_SWITCH` every tick and wins when both are present. In the normal
@@ -422,6 +430,7 @@ discipline layered on top:
 
   ```bash
   rm -f data/EMERGENCY_STOP
+  # equivalent: sapwood estop clear (no --confirm needed to clear)
   ```
 
 - **Kill-switch placement and clearing.** For any other stop, use the drain-first kill
@@ -433,8 +442,10 @@ discipline layered on top:
 
   ```bash
   mkdir -p data && touch data/KILL_SWITCH
+  # equivalent: sapwood stop
   # After the drain/stop is complete and you intend to allow dispatch again:
   rm -f data/KILL_SWITCH
+  # equivalent: sapwood stop clear
   ```
 
 - **Drain semantics.** A first stop signal (SIGTERM/SIGINT, or the kill-switch sentinel)
@@ -465,7 +476,9 @@ discipline layered on top:
 
   ```bash
   mkdir -p data && touch data/PAUSE
+  # equivalent: sapwood pause
   rm -f data/PAUSE
+  # equivalent: sapwood pause clear
   ```
 
 - **Sentinel removal.** `data/EMERGENCY_STOP`, `data/KILL_SWITCH`, and `data/PAUSE` are

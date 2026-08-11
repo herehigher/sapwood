@@ -17,11 +17,13 @@ sapwood validate [path]
 
 The loader probes, in order: `sapwood.config.yaml`, `sapwood.config.yml`,
 `sapwood.config.json`. An explicit path from `sapwood run --config <path>` (including
-`--dry-run`), `sapwood status --config <path>`, `sapwood events --config <path>`, or
-`sapwood validate [path]` bypasses the probe. `--config` on `status`/`events` is
-authoritative once given (#710): a missing/unreadable/invalid file there is a hard error,
-never a silent fallback to the probe — the opposite of the no-flag case, which stays
-best-effort (a missing config there degrades to "unknown" fields, not a failure). Relative
+`--dry-run`), `sapwood status --config <path>`, `sapwood events --config <path>`, `sapwood
+pause|stop|estop --config <path>` (#731), or `sapwood validate [path]` bypasses the probe.
+`--config` on `status`/`events`/`pause`/`stop`/`estop` is authoritative once given (#710): a
+missing/unreadable/invalid file there is a hard error, never a silent fallback to the probe —
+the opposite of the no-flag case, which stays best-effort (a missing config there degrades to
+"unknown" fields, not a failure). `stop`'s activation message additionally echoes
+`cost.drainWindowSec` from whichever config resolved. Relative
 `logging.path`, `promptFile`, `goal.file`, `doctrine.file`, and `worker.deployKeyPath` keys
 resolve from the selected config's directory, so an alternate config's default log lands
 beside it; the DB (`data/sapwood.sqlite`), `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree

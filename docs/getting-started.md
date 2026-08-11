@@ -41,7 +41,9 @@ npm link --workspace engine
 Alternatively, do not link it and replace every `sapwood <cmd>` below with
 `node <clone>/engine/dist/cli.js <cmd>`, where `<clone>` is the path to your clone. The available
 CLI verbs include `sapwood init`, `sapwood validate`, `sapwood run`, `sapwood status`,
-`sapwood events`, and `sapwood park clear`.
+`sapwood events`, `sapwood park clear`, and the stop-control verbs `sapwood pause`/`stop`/
+`estop` (each with a `clear` form; `estop` additionally requires `--confirm` to activate —
+#731, see `sapwood estop --help`).
 
 ### Channel B — Claude Code plugin/marketplace install: not yet available
 
@@ -383,7 +385,8 @@ shapes are:
 
 At every level, `sapwood status` tells you what's happening without needing a live
 session. Channel A's controls are file sentinels in the target repo (the repo containing
-`data/`):
+`data/`), reachable either as raw `touch`/`rm` or (#731) as first-class `sapwood` CLI
+verbs — both act on the exact same three files:
 
 ```sh
 mkdir -p data
@@ -394,6 +397,20 @@ rm -f data/KILL_SWITCH    # lift the kill switch on the next tick
 touch data/PAUSE          # gentle: stop new dispatch; in-flight work continues
 rm -f data/PAUSE          # remove PAUSE; dispatch resumes next tick only if no EMERGENCY_STOP or KILL_SWITCH remains
 ```
+
+```sh
+sapwood estop --confirm   # equivalent to touch data/EMERGENCY_STOP — --confirm is REQUIRED
+sapwood estop clear       # equivalent to rm -f data/EMERGENCY_STOP
+sapwood stop              # equivalent to touch data/KILL_SWITCH
+sapwood stop clear        # equivalent to rm -f data/KILL_SWITCH
+sapwood pause             # equivalent to touch data/PAUSE
+sapwood pause clear       # equivalent to rm -f data/PAUSE
+```
+
+The CLI form additionally prints the tier's live semantics on activation (and, for
+`stop`, the configured drain window) and is idempotent — re-running an already-active
+verb, or clearing an already-inactive one, is a normal exit-0 no-op. `sapwood <tier>
+--help` documents each tier's exact semantics.
 
 See [`security.md`](security.md#human-controls-three-tiers) for the full semantics, including
 how pause interacts with `--until-idle`.
@@ -476,7 +493,8 @@ burst, which makes the engine's own two backstops — and checking
 These thin wrappers are available only in a Claude Code session that has loaded the sapwood
 plugin. They are **not** loaded by Channel A's clone/build/link install, and Channel B's
 marketplace installation is not yet available. Channel A users should use the file-sentinel
-commands above for stop/pause control and the linked CLI for run/status.
+commands (raw or the `sapwood pause`/`stop`/`estop` CLI verbs, #731) above for stop/pause
+control and the linked CLI for run/status.
 
 - **`/sapwood-run [--once|--until-idle|--dry-run]`** — runs `sapwood run` with the given
   mode and reports its output. No flags = daemon mode.

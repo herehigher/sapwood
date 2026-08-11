@@ -1802,7 +1802,39 @@ documented rather than blocked:
   false-positive on a worker legitimately removing a `data/` dir inside its own repo,
   so this stays a documented residual instead of a guard rule.
 
-Until those are closed too, treat the isolation boundary as "a worker won't
+**`sapwood pause`/`stop`/`estop` (#731) are NOT an instance of the residual class above —
+they are a NEW, first-class gap the guard does not yet close.** The two bullets above are
+obscure hand-rolled forms a worker would have to construct deliberately. `sapwood pause`,
+`sapwood stop`, and `sapwood estop --confirm` are the opposite: a shipped, operator-
+documented CLI verb (docs/getting-started.md, docs/supervision.md,
+commands/sapwood-stop.md all tell an operator to run it) that any worker with ordinary
+Bash access can invoke by name. They resolve the sentinel path internally
+(`dirname(dbPath)` + the fixed filename) rather than taking it as a CLI argument, so no
+`data/PAUSE`/`data/KILL_SWITCH`/`data/EMERGENCY_STOP` token ever appears on the Bash
+command line for `checkControlSentinelArg` to match — including `sapwood estop clear`,
+which lifts an already-fired EMERGENCY_STOP with no sentinel path in sight. `guard.ts` is
+human-merge-only, so #731 cannot close this gap with a source edit in the same PR that
+opens it; instead, PR #818 ships **`docs/patches/731-guard-stop-control-verbs.patch`** — a
+paste-ready guard.ts/guard.test.ts diff (same route as
+`docs/patches/679-guard-default-branch-push.patch`) extending
+`checkControlSentinelArg`'s Bash-argument accident fence to recognize the three
+stop-control verbs, apply-checked by `engine/src/guard/patch-731-apply-check.test.ts`.
+**Until a human applies that patch, this specific gap stands open** — treat it as live,
+not as a documented-and-accepted residual, and apply the patch before relying on the
+guard to cover these verbs.
+
+**Once applied, the patch fences the *discoverable* stop-control invocation forms** — the
+bare `sapwood` binary, `node .../cli.js`/`cli.ts` (path-prefixed or direct-executed), and
+`npx sapwood[@version]` (npm's own documented "run a specific/latest version" syntax) —
+the shapes this repo's own operator docs and `--help` text teach. An invocation that hides
+the command word behind an arbitrary package spec instead — `npx file:<path>/engine`, a
+scoped package such as `npx @<scope>/engine`, or an aliased binary — is **not** fenced and
+is an **accepted residual**, in the SAME class as the hardcoded-sentinel-path-inside-a-
+script residual documented above: an accident fence recognizes the invocations an operator
+would actually reach for, not every way a determined adversary could construct one. This
+list is not exhaustive.
+
+Until every gap above is closed, treat the isolation boundary as "a worker won't
 accidentally step here, and the obvious direct/indirect vectors are blocked," not "a
 worker provably cannot reach here by any means."
 
