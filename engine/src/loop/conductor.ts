@@ -2885,6 +2885,67 @@ async function reclaimTerminalLane(
  *     escalation from scratch.
  *   - "none": no resume intent recorded at all — an ordinary `driving` lane #246 may still call
  *     `startFixLeg` on later. Nothing to reconcile. */
+/** The CONFIRMED-intent leg's per-row work — shared by the ordinary single-pass loop and the
+ *  E-STOP two-phase split below (`reconcileDrivingFixIntents`' own doc): identical side effects
+ *  either way. Only `immediate` differs: it skips `requestHandoff` (#293/#724 — see that
+ *  function's own historical doc) AND, #778 gate② P1 (PR #810, two confirmation rounds), hard-
+ *  kills the just-adopted lane AT THE ADOPTION SEAM, synchronously, right here — before ANY
+ *  forge call (this row's own — there are none in this branch — or a LATER row's, in phase 2)
+ *  can intervene. sol-high's confirmation-round repro proved that under the OLD single-pass
+ *  loop, an alphabetically EARLIER `unconfirmed` row's hung `forge.addLabel` could block this
+ *  SAME sequential loop from ever reaching a LATER `confirmed` row at all — leaving an
+ *  already-live crash-resumed child's process running for as long as the forge stayed wedged.
+ *  The two-phase split in `reconcileDrivingFixIntents` closes that by running EVERY confirmed
+ *  row (this function, forge-free) to completion before ANY unconfirmed row's forge work ever
+ *  starts — so by the time phase 2 could hang, every phase-1 kill has already happened. */
+function adoptConfirmedFixIntent(state: State, supervisor: Supervisor, w: WorkerRow, immediate: boolean): void {
+  // #247 F1 (Codex sol-high PR #265 review round 2, P1): captured BEFORE this reconciliation
+  // acts on the row at all (before even requestHandoff) — an adopted child's own resume()
+  // call already happened in a NOW-CRASHED process, so there is no "before resume()" moment
+  // left to observe directly; this is the earliest point THIS process can still capture one.
+  // Superseded harmlessly once the eventual drain+fresh-resume produces its own, later
+  // (and by construction >=) cursor on the "fix-leg-resumed" event — fixLegJournalCursor
+  // picks whichever of the three cursor-bearing events is NEWEST for (worker, fixRounds).
+  const journalCursor = state.maxForgeProxyJournalId(w.name);
+  // Never trust the adopted child's proxy channel across a crash (see doc above) — drain it
+  // gracefully now rather than let it keep running against a dead evidence channel. Ordered
+  // FIRST (B3): durable + idempotent, so a crash before the upsert below just re-enters this
+  // same branch next tick. Skipped entirely under `immediate` (#293/#724).
+  if (!immediate) supervisor.requestHandoff(w.name);
+  // B1: consume any stale PRIOR-leg sentinel resume() itself may not have gotten to.
+  supervisor.clearStaleFixEntrySentinel(w.name);
+  const fixRounds = (w.fix_rounds ?? 0) + 1;
+  state.upsertWorker({ ...w, state: "fixing", ended_at: null, fix_rounds: fixRounds });
+  state.appendEvent("fix-leg-adopted", { worker: w.name, issue: w.issue, fixRounds, journalCursor });
+  // #778 gate② P1: the adoption seam itself — see this function's own doc above.
+  if (immediate) hardKillOneLaneUnderEstop(supervisor, w.name);
+}
+
+/** The UNCONFIRMED-intent leg's per-row work — shared by the ordinary single-pass loop and the
+ *  E-STOP two-phase split below. Identical side effects either way; only WHEN it runs relative
+ *  to the confirmed rows differs (see `reconcileDrivingFixIntents`' own doc). B4: label FIRST; a
+ *  failed write must NOT terminalize the row — leave it `driving` and retry the whole escalation
+ *  next tick (never a permanently-stranded failed+unlabeled row). */
+async function escalateUnconfirmedFixIntent(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  iso: () => string,
+  w: WorkerRow,
+): Promise<void> {
+  try {
+    await forge.addLabel(w.issue, cfg.labels.needsHuman);
+  } catch (e) {
+    state.appendEvent("fix-leg-undecidable-label-failed", { worker: w.name, issue: w.issue, error: String(e) });
+    return;
+  }
+  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1, gated_escalation_carrier: "issue" });
+  // #295 (Codex P2, PR #371): `pr` rides along so the escalation-resolution sweep can
+  // observe an external merge/close of this lane's PR — without it the sweep could only
+  // ever see issue closure or label removal for this source.
+  state.appendEvent("fix-leg-undecidable", { worker: w.name, issue: w.issue, ...(w.pr != null ? { pr: w.pr } : {}) });
+}
+
 async function reconcileDrivingFixIntents(
   forge: IForge,
   state: State,
@@ -2899,45 +2960,49 @@ async function reconcileDrivingFixIntents(
    *  adopted into `fixing` (so it's visible to THIS SAME tick's hard-kill pass, which scans
    *  running+fixing lanes) but the graceful handoff request itself is skipped — matching every
    *  other lane shape's treatment under this sentinel. Default false: every pre-#293 caller
-   *  (ordinary ticks, kill-switch, stop-signal) is unaffected. */
+   *  (ordinary ticks, kill-switch, stop-signal) is unaffected.
+   *
+   *  #778 gate② P1 (PR #810, two confirmation rounds): ALSO switches this function from a
+   *  single top-to-bottom pass into a TWO-PHASE snapshot pass — see `adoptConfirmedFixIntent`'s
+   *  own doc for the sequential-hang defect this closes (sol-high's confirmation-round repro:
+   *  an earlier alphabetical `unconfirmed` row's hung `forge.addLabel` blocking a later
+   *  `confirmed` row from ever being reached). `state.drivingWorkers()` is read ONCE into a
+   *  snapshot and split by intent BEFORE either phase runs, so phase 2 can never observe a row
+   *  phase 1 itself just changed (a `driving` row phase 1 promoted to `fixing` was never
+   *  `unconfirmed` to begin with — the split is a partition, not a race). The ordinary
+   *  (non-`immediate`) path below is UNCHANGED — same single interleaved pass, byte-identical
+   *  to pre-#778 behavior; the split applies ONLY under E-STOP, where forge-free-before-forge
+   *  ordering is a safety requirement, not merely a convenience. */
   immediate = false,
 ): Promise<void> {
+  if (immediate) {
+    const rows = state.drivingWorkers();
+    const confirmedRows: WorkerRow[] = [];
+    const unconfirmedRows: WorkerRow[] = [];
+    for (const w of rows) {
+      const intent = supervisor.resumeIntentState(w.name, w.issue);
+      if (intent === "confirmed") confirmedRows.push(w);
+      else if (intent === "unconfirmed") unconfirmedRows.push(w);
+      // "none": nothing to reconcile, in either phase.
+    }
+    // Phase 1: EVERY confirmed row, adopted and hard-killed at the seam, zero forge calls —
+    // see adoptConfirmedFixIntent's own doc for why this must fully finish before phase 2 ever
+    // starts a single forge call.
+    for (const w of confirmedRows) adoptConfirmedFixIntent(state, supervisor, w, true);
+    // Phase 2: only now does any forge call happen — every confirmed child is already killed,
+    // so a hang or rejection here can no longer gate a single process termination.
+    for (const w of unconfirmedRows) await escalateUnconfirmedFixIntent(forge, state, cfg, iso, w);
+    return;
+  }
+  // Ordinary (non-E-STOP) path: one interleaved pass, in `state.drivingWorkers()`'s own order —
+  // byte-identical to pre-#778 behavior (no drain-window safety requirement here; interleaving
+  // is harmless when nothing is racing a hung forge call against a live process's kill).
   for (const w of state.drivingWorkers()) {
     const intent = supervisor.resumeIntentState(w.name, w.issue);
     if (intent === "confirmed") {
-      // #247 F1 (Codex sol-high PR #265 review round 2, P1): captured BEFORE this reconciliation
-      // acts on the row at all (before even requestHandoff) — an adopted child's own resume()
-      // call already happened in a NOW-CRASHED process, so there is no "before resume()" moment
-      // left to observe directly; this is the earliest point THIS process can still capture one.
-      // Superseded harmlessly once the eventual drain+fresh-resume produces its own, later
-      // (and by construction >=) cursor on the "fix-leg-resumed" event — fixLegJournalCursor
-      // picks whichever of the three cursor-bearing events is NEWEST for (worker, fixRounds).
-      const journalCursor = state.maxForgeProxyJournalId(w.name);
-      // Never trust the adopted child's proxy channel across a crash (see doc above) — drain it
-      // gracefully now rather than let it keep running against a dead evidence channel. Ordered
-      // FIRST (B3): durable + idempotent, so a crash before the upsert below just re-enters this
-      // same branch next tick. Skipped entirely under `immediate` (#293/#724) — see this
-      // function's own `immediate` doc above.
-      if (!immediate) supervisor.requestHandoff(w.name);
-      // B1: consume any stale PRIOR-leg sentinel resume() itself may not have gotten to.
-      supervisor.clearStaleFixEntrySentinel(w.name);
-      const fixRounds = (w.fix_rounds ?? 0) + 1;
-      state.upsertWorker({ ...w, state: "fixing", ended_at: null, fix_rounds: fixRounds });
-      state.appendEvent("fix-leg-adopted", { worker: w.name, issue: w.issue, fixRounds, journalCursor });
+      adoptConfirmedFixIntent(state, supervisor, w, false);
     } else if (intent === "unconfirmed") {
-      // B4: label FIRST; a failed write must NOT terminalize the row — leave it `driving` and
-      // retry the whole escalation next tick (never a permanently-stranded failed+unlabeled row).
-      try {
-        await forge.addLabel(w.issue, cfg.labels.needsHuman);
-      } catch (e) {
-        state.appendEvent("fix-leg-undecidable-label-failed", { worker: w.name, issue: w.issue, error: String(e) });
-        continue;
-      }
-      state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1, gated_escalation_carrier: "issue" });
-      // #295 (Codex P2, PR #371): `pr` rides along so the escalation-resolution sweep can
-      // observe an external merge/close of this lane's PR — without it the sweep could only
-      // ever see issue closure or label removal for this source.
-      state.appendEvent("fix-leg-undecidable", { worker: w.name, issue: w.issue, ...(w.pr != null ? { pr: w.pr } : {}) });
+      await escalateUnconfirmedFixIntent(forge, state, cfg, iso, w);
     }
     // "none": nothing to reconcile.
   }
@@ -3380,6 +3445,65 @@ async function checkCommentCursorBeforeDrive(
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: "comment-cursor-stale" };
 }
 
+/** #778: EMERGENCY_STOP's own synchronous, forge-free hard-kill primitive for ONE lane — the
+ *  SAME `durablePidAlive`/`signalDurablePid` primitives round.ts's E-STOP sweep already uses for
+ *  driving/handoff rows (#724's own durable-PID pattern, worker.ts). Direct SIGKILL, no
+ *  SIGTERM-then-grace step (unlike round.ts's driving/handoff sweep, which owns the ONLY kill
+ *  path those rows ever get under E-STOP): E-STOP's own documented contract is "no drain window,
+ *  hard-kill THIS SAME TICK" (the branch below), so a grace pause here would just be a
+ *  self-imposed delay this control exists to avoid. A graceful TERM-first teardown still happens
+ *  afterward via the ordinary `reclaim()` path (killTree/killByPid, worker.ts) once/if its own
+ *  probe() resolves — this is belt-and-suspenders over that, not a replacement for it (`reclaim()`
+ *  is still called, below, exactly as before this issue).
+ *
+ *  Optional capability, same "implement both or neither" contract as round.ts's sweep (see
+ *  `Supervisor.durablePidAlive`'s own doc, conductor.ts) — a Supervisor implementing neither
+ *  method is simply a no-op here, unchanged from pre-#778 behavior (the ordinary probe+reclaim
+ *  path below is its only kill mechanism). Never throws, never makes a forge call, never WRITES
+ *  the DB (callers of the two functions below read `state.runningWorkers()`/`fixingWorkers()`,
+ *  but this primitive itself touches neither) — `signalDurablePid` is itself documented as a
+ *  safe no-op against an already-dead pid. */
+function hardKillOneLaneUnderEstop(supervisor: Supervisor, name: string): void {
+  const canCheck = typeof supervisor.durablePidAlive === "function";
+  const canSignal = typeof supervisor.signalDurablePid === "function";
+  if (!canCheck || !canSignal) return;
+  if (supervisor.durablePidAlive!(name)) supervisor.signalDurablePid!(name, "SIGKILL");
+}
+
+/** #778: sweeps every lane ALREADY in `running`/`fixing` state at the moment it's called, via
+ *  `hardKillOneLaneUnderEstop` above — no forge call, one DB read each (`runningWorkers()`/
+ *  `fixingWorkers()`, no write). This is TWO of the FOUR places in the E-STOP path that
+ *  guarantee a kill, each closing a DIFFERENT window a forge-dependent await could otherwise
+ *  stall the kill behind (gate② findings on PR #774 and two rounds on PR #810 — see each call
+ *  site's own doc for which window):
+ *
+ *   1. Tick-top, before `reconcileDrivingFixIntents` is ever awaited — catches every lane that
+ *      was ALREADY running/fixing when E-STOP was detected, unconditionally.
+ *   2. In the E-STOP branch, after `reconcileDrivingFixIntents` returns — catches a lane THAT
+ *      call just adopted from `driving` into `fixing` (the confirmed-fix-intent case, #724
+ *      gate② finding [0]), invisible to sweep 1 since the adoption hadn't happened yet.
+ *   3. NOT here — `adoptAndReclaimTerminal`'s own handoff-adoption loop kills each row it adopts
+ *      individually, inline, via `hardKillOneLaneUnderEstop` directly (see that loop's own doc
+ *      for why a seam-level kill, not a third sweep, is the right shape there: sol's PR #810
+ *      gate② repro (round 1) proved a fixed-point sweep can never precede an adoption that
+ *      happens INSIDE the very call this sweep would need to run after).
+ *   4. NOT here either — `adoptConfirmedFixIntent` (called from `reconcileDrivingFixIntents`'s
+ *      OWN two-phase split under `immediate`) kills each confirmed-intent `driving` row it
+ *      adopts individually, inline, at ITS OWN adoption seam, for the exact same structural
+ *      reason as (3): sol's PR #810 gate② repro (confirmation round) proved that even sweep 2
+ *      above can be starved — an alphabetically earlier `unconfirmed` row's hung
+ *      `forge.addLabel` could block `reconcileDrivingFixIntents`'s OLD single sequential pass
+ *      from ever reaching a LATER `confirmed` row, so sweep 2 (which only runs AFTER that
+ *      whole call returns) never got a chance to see it either. The two-phase split closes this
+ *      by running every confirmed row's seam kill (4) to completion BEFORE any unconfirmed
+ *      row's forge call (phase 2) ever starts — sweep 2 above still runs afterward too, but is
+ *      now redundant for this specific row (harmless: idempotent). */
+function hardKillLiveLanesUnderEstop(state: State, supervisor: Supervisor): void {
+  for (const w of [...state.runningWorkers(), ...state.fixingWorkers()]) {
+    hardKillOneLaneUnderEstop(supervisor, w.name);
+  }
+}
+
 /** Shared by the EMERGENCY_STOP and KILL_SWITCH/stop-signal gates (#293, extracted from the
  *  single kill-switch branch this used to be the body of — behavior byte-for-byte unchanged for
  *  that caller): adopt any confirmed-intent handoff (so a resumed lane is visible to the
@@ -3395,6 +3519,17 @@ async function adoptAndReclaimTerminal(
   cfg: SapwoodConfig,
   threshold: number,
   iso: () => string,
+  /** #778 gate② P1 (PR #810 review, sol-high repro): whether E-STOP is active THIS tick. A
+   *  confirmed-intent handoff row adopted below already has a LIVE process (see this loop's own
+   *  "adoption, never a spawn" doc) — under E-STOP it must be hard-killed AT THE ADOPTION SEAM,
+   *  synchronously, right here, before the second loop below ever awaits the forge-dependent
+   *  `supervisor.probe`. A fixed-point sweep run before THIS function is called (tick()'s own
+   *  two E-STOP sweeps) cannot see this row, structurally — it isn't running/fixing until the
+   *  adoption a few lines below makes it so — so the kill has to live at the seam itself, not in
+   *  a sweep positioned relative to it. Default false: the OTHER caller of this function
+   *  (KILL_SWITCH/stop-signal, tick()) is a graceful drain, never a same-tick hard kill — passing
+   *  true there would kill a lane the switch's own contract promises to drain first. */
+  estopActive: boolean,
 ): Promise<{ resumed: ResumeOutcome[]; reclaimed: ReclaimOutcome[] }> {
   // A confirmed resume intent means its child already exists despite the DB still saying
   // `handoff`. Reconcile these rows BEFORE the drain snapshot so the hard safety boundary
@@ -3435,6 +3570,11 @@ async function adoptAndReclaimTerminal(
       { worker: w.name, issue: w.issue, attempt },
       spawnFactFrom(w.name, w.issue, result),
     );
+    // #778 gate② P1: THE adoption seam — see this function's own `estopActive` param doc for why
+    // it lives exactly here (right after the state write lands this row as running/fixing) and
+    // not in a sweep. `w.name` is the lane identity; the row's NEW state (running/fixing) is
+    // only for `resumed`'s own bookkeeping above.
+    if (estopActive) hardKillOneLaneUnderEstop(supervisor, w.name);
     resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt });
   }
   const reclaimed: ReclaimOutcome[] = [];
@@ -3474,6 +3614,21 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // itself for a confirmed-intent driving row (see that function's own `immediate` doc).
   const estopActive = state.isEstopActive();
 
+  // #778 gate② finding (PR #810 review): called HERE too, before reconcileDrivingFixIntents —
+  // not only inside the branch below. reconcileDrivingFixIntents' own "unconfirmed" intent leg
+  // awaits `forge.addLabel` (its ONLY forge call — verified: nothing else in that function
+  // touches the forge, and it never spawns a running/fixing process, only reclassifies an
+  // ALREADY-durably-alive driving row's child or forge-escalates a driving row that has no live
+  // process at all, per #293's own "a driving row has no live process" contract). A wedged
+  // forge there would otherwise stall THIS SAME tick's own await before it ever reached the
+  // in-branch call below — one call site earlier than the #778 fix originally closed. Calling
+  // it here first means every lane already running/fixing at tick-top is hard-killed
+  // unconditionally, regardless of what reconcileDrivingFixIntents does afterward. This is one
+  // of THREE places in the E-STOP path that guarantee a kill (see hardKillLiveLanesUnderEstop's
+  // own doc for all three, and why a third SWEEP was rejected in favor of a seam-level kill for
+  // adoptAndReclaimTerminal's own handoff adoption, gate② PR #810 sol-high repro).
+  if (estopActive) hardKillLiveLanesUnderEstop(state, supervisor);
+
   // #245 round-2 fix A3: reconcile any driving-row fix-leg spawn intent BEFORE the kill-switch
   // gate — see reconcileDrivingFixIntents' own doc for the crash window this repairs.
   await reconcileDrivingFixIntents(forge, state, supervisor, cfg, iso, estopActive);
@@ -3487,7 +3642,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   never be shadowed by a switch that would otherwise wait out a drain window first. PAUSE is
   //   never reached (this branch returns before that check, same as the kill switch).
   if (estopActive) {
-    const { resumed, reclaimed } = await adoptAndReclaimTerminal(forge, state, supervisor, cfg, threshold, iso);
+    // #778 gate② (PR #774, PR #810): the SECOND of the two tick-level hard-kill sweeps — before
+    // adoptAndReclaimTerminal's own probe loop (just below) or drainThenEscalate's escalation
+    // loop (further below) ever await a forge-dependent `supervisor.probe` call. This one exists
+    // to catch what the tick-top sweep (above, before reconcileDrivingFixIntents) structurally
+    // cannot: a lane reconcileDrivingFixIntents itself just adopted from `driving` into `fixing`
+    // (the confirmed-fix-intent case, #724 gate② finding [0]) is invisible to a sweep that ran
+    // BEFORE that adoption. adoptAndReclaimTerminal's OWN handoff-adoption loop (its own
+    // `estopActive` param, below) closes the analogous window for ITS adoption in-line, at the
+    // seam — a third sweep positioned after it would just be racing the same class of gap this
+    // one already exists to close, one function later; the seam is the fix there instead. Both
+    // sweeps here are forge-free and idempotent — see hardKillLiveLanesUnderEstop's own doc.
+    hardKillLiveLanesUnderEstop(state, supervisor);
+    const { resumed, reclaimed } = await adoptAndReclaimTerminal(forge, state, supervisor, cfg, threshold, iso, estopActive);
     // #293: "once per activation" — mirrors recordCeilingBreach's own first-detection framing
     // (the row's `reason` is overwritten every tick, so the ONLY way to know "was this already
     // announced" is to read the PRIOR reason before this tick's own recordCeilingBreach call,
@@ -3552,7 +3719,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const stopSignalled = deps.stopRequested?.() ?? false;
   if (killSwitchActive || stopSignalled) {
     const drainReason: DrainReason = killSwitchActive ? "kill-switch" : "stop-signal";
-    const { resumed, reclaimed } = await adoptAndReclaimTerminal(forge, state, supervisor, cfg, threshold, iso);
+    // #778: `estopActive` is unconditionally false here — reaching this branch already proves
+    // it (the E-STOP branch above returns first when active). KILL_SWITCH/stop-signal is a
+    // graceful drain, not a same-tick hard kill; a confirmed-intent handoff row adopted below
+    // must NOT be killed at the seam under this gate — it's still owed its drain window.
+    const { resumed, reclaimed } = await adoptAndReclaimTerminal(forge, state, supervisor, cfg, threshold, iso, false);
     // drainThenEscalate re-reads runningWorkers()+fixingWorkers() AFTER the terminal reclaim
     // above transitioned those lanes out of `running`/`fixing`, so a just-recorded
     // handoff/done/driving lane is never re-touched.

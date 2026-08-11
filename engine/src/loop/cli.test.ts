@@ -208,7 +208,7 @@ test("run --help documents config-relative file keys and cwd-relative runtime pa
   assert.match(result.stdout, /--config PATH/);
   assert.match(result.stdout, /config-file-relative logging\.path, promptFile, goal\.file, and doctrine\.file/);
   assert.match(result.stdout, /default log sits beside that config/);
-  assert.match(result.stdout, /DB\s+\(data\/sapwood\.sqlite\), KILL_SWITCH\/PAUSE, sessions, and worktree roots/);
+  assert.match(result.stdout, /DB\s+\(data\/sapwood\.sqlite\), EMERGENCY_STOP\/KILL_SWITCH\/PAUSE, sessions, and\s+worktree roots/);
   assert.match(result.stdout, /remain relative to the current working directory/);
 });
 
