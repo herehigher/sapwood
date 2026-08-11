@@ -928,7 +928,7 @@ test("tick DRIVE: AC-snapshot drift routes to needs-human with a drift-explainin
   st.close();
 });
 
-test("#752 (inverted #676 drift test): a live body edit that ONLY advances the cursor marker (no other byte changed) is NOT AC-snapshot drift — driveOne IS invoked, no needs-human escalation", async () => {
+test("#752 (inverted #676 drift test): a live body edit that ONLY advances the cursor marker (no other byte changed), backed by a REAL comment at that marker id, is NOT AC-snapshot drift AND not a stale comment-cursor — driveOne IS invoked, no needs-human escalation of either kind", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -943,17 +943,34 @@ test("#752 (inverted #676 drift test): a live body edit that ONLY advances the c
   const workerName = (dispatchedOutcome as { worker: string }).worker;
   // The worker finishes with a PR — promotes to `driving` on the NEXT tick's RECLAIM phase.
   sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
-  // A PO advances the adjudication-cursor marker per #703 discipline — no other byte of the
-  // body changes.
+  // A PO leaves an actual comment on the issue — this IS the production shape (#703's discipline
+  // is "advance the marker to the comment you just adjudicated," never a marker-only edit floating
+  // free of any real comment; the pre-extension version of this test used a marker value with NO
+  // matching comment in the stream, which hid the #752 PO-adjudication finding 1 bug entirely: a
+  // cursor computed from the STALE dispatch-time snapshot body — whose own marker is still "0" —
+  // sees zero comments as "pending" only because the fake's comment stream was empty too. With a
+  // real comment present, the stale-snapshot computation instead reports it as PENDING (never
+  // adjudicated, from the "0" cursor's point of view) and wrongly escalates comment-cursor-stale.
+  forge.externalIssueComments[7] = [{ id: "5236875925", login: "the-po", body: "adjudicated, folding into the body below." }];
+  // The PO advances the adjudication-cursor marker per #703 discipline to point at that comment —
+  // no other byte of the body changes.
   forge.issueBodies[7] =
     "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests\n\n<!-- sapwood:comments-adjudicated-through: 5236875925 -->";
   const gate = new FakeMergeGate();
   const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
-  assert.equal(gate.calls.length, 1, "driveOne IS invoked — a marker-only edit is not AC-authority drift");
+  assert.equal(
+    gate.calls.length,
+    1,
+    "driveOne IS invoked — a marker-only edit backed by the comment it names is not drift and not a stale cursor",
+  );
   assert.ok(!forge.labelsAdded.some(([n, l]) => n === 7 && l === "needs-human"), "no needs-human label from a marker-only edit");
   assert.ok(
     !r.driven.some((d) => d.kind === "needs-human" && d.issue === 7 && d.reason.startsWith("ac-snapshot-drift")),
     "driven[] carries no ac-snapshot-drift entry for this lane",
+  );
+  assert.ok(
+    !r.driven.some((d) => d.kind === "needs-human" && d.issue === 7 && d.reason === "comment-cursor-stale"),
+    "driven[] carries no comment-cursor-stale entry either — the cursor gate reads the LIVE body, which names the real comment",
   );
   st.close();
 });

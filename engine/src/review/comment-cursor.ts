@@ -100,8 +100,14 @@ function findStandaloneMarkerValues(body: string): string[] {
  *  read path) still only needs the parsed VALUE, but #703's writer-side helpers below
  *  (`findStandaloneMarkerLines`, `stripStandaloneMarkerLines`, `applyRoleBodyRewrite`) need the
  *  exact original text and its line so they can preserve/remove whole lines verbatim. One walk,
- *  never two independent copies that could drift apart. */
-function scanStandaloneMarkerLines(body: string): Array<{ lineIndex: number; raw: string; value: string }> {
+ *  never two independent copies that could drift apart.
+ *
+ *  Exported (#752 finding 3, PO adjudication on PR #812): ac-snapshot.ts's AC-authority strip
+ *  needs each marker line's PARSED VALUE, not just its raw text (`findStandaloneMarkerLines`
+ *  above), to decide which marker lines are well-formed enough to excuse from the AC-authority
+ *  hash — see that module's `stripAcAuthorityMarkerLines` for why. Purely additive visibility:
+ *  this function's own behavior, and every existing caller in THIS file, is unchanged. */
+export function scanStandaloneMarkerLines(body: string): Array<{ lineIndex: number; raw: string; value: string }> {
   const lines = body.split(/\r?\n/);
   const found: Array<{ lineIndex: number; raw: string; value: string }> = [];
   let fence: { char: string; len: number } | null = null;

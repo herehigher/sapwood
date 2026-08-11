@@ -3191,6 +3191,18 @@ function settleHumanMergeOnly(state: State, w: WorkerRow, pr: number, reason: st
  *  automatic reentry either — a label-write failure here is permanently manual, same as every
  *  other escalation's accepted stance in this file (gated_escalation_labeled=0 permanently
  *  excludes a row from GATED RECLAIM — "manual drive as before #147"). */
+/** Return shape for `checkAcDriftBeforeDrive`: the drive-blocking outcome (or `null` to drive
+ *  normally), PLUS the live body this check itself fetched — `null` when no live read happened
+ *  this call (the pre-#283 legacy-lane early return, or an anomaly branch that never reaches the
+ *  live-body fetch). #752 finding 1 (PO adjudication on PR #812): the caller threads `liveBody`
+ *  straight into `checkCommentCursorBeforeDrive` so that sibling check never needs (and never
+ *  performs) a second `forge.getIssueBody` call this tick — see that function's own doc for why
+ *  it can no longer default to `snapshot.body`. */
+interface AcDriftCheckResult {
+  outcome: DrivenOutcome | null;
+  liveBody: string | null;
+}
+
 async function checkAcDriftBeforeDrive(
   forge: IForge,
   state: State,
@@ -3198,9 +3210,9 @@ async function checkAcDriftBeforeDrive(
   w: WorkerRow,
   pr: number,
   iso: () => string,
-): Promise<DrivenOutcome | null> {
+): Promise<AcDriftCheckResult> {
   const expectedHash = w.ac_body_hash ?? null;
-  if (expectedHash == null) return null; // pre-#283 legacy lane, no snapshot ever expected -> drive normally
+  if (expectedHash == null) return { outcome: null, liveBody: null }; // pre-#283 legacy lane, no snapshot ever expected -> drive normally
 
   const snapshot = state.getAcSnapshot(w.issue);
   let reason: string;
@@ -3231,10 +3243,15 @@ async function checkAcDriftBeforeDrive(
     try {
       liveBody = await forge.getIssueBody(w.issue);
     } catch (e) {
-      return { kind: "queued", worker: w.name, issue: w.issue, pr, reason: `ac-drift-check-unavailable: ${String(e)}` };
+      return {
+        outcome: { kind: "queued", worker: w.name, issue: w.issue, pr, reason: `ac-drift-check-unavailable: ${String(e)}` },
+        liveBody: null,
+      };
     }
     const result = checkAcSnapshotDrift(liveBody, snapshot);
-    if (result.ok) return null; // ownership confirmed, no live-body drift -> drive normally
+    // ownership confirmed, no live-body drift -> drive normally, but hand the live body we just
+    // fetched back to the caller so checkCommentCursorBeforeDrive doesn't have to re-fetch it.
+    if (result.ok) return { outcome: null, liveBody };
     reason = result.reason;
     rebaselineCandidateHash = hashBodyForAcAuthority(liveBody);
   }
@@ -3297,20 +3314,40 @@ async function checkAcDriftBeforeDrive(
         `original acceptance criteria/verification plan, or explicitly re-approve the new body.`,
     )
     .catch(() => {});
-  return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `ac-snapshot-drift: ${reason}` };
+  return {
+    outcome: { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `ac-snapshot-drift: ${reason}` },
+    liveBody: null,
+  };
 }
 
 /** #652: comment-adjudication cursor — review-time recheck, called for every driving lane
  *  immediately AFTER checkAcDriftBeforeDrive (above) confirms the live body has NOT drifted, and
  *  BEFORE `gate.driveOne` is ever invoked. "Before DRIVE invokes gate②, comment freshness is
- *  rechecked using the cursor embedded in the SNAPSHOTTED body; a comment arriving while the
- *  worker runs escalates exactly like existing body drift" (design adjudicated 2026-08-05).
+ *  rechecked using the cursor embedded in the LIVE body; a comment arriving while the worker runs
+ *  escalates exactly like existing body drift" (design adjudicated 2026-08-05).
  *
- *  Deliberately checks against `snapshot.body`, never a fresh live body read: the sibling
- *  drift check just above already re-confirmed the live body still matches that snapshot, so a
- *  second body fetch here would be redundant, not more current. Only the comment STREAM needs a
- *  live read — a comment can arrive without touching the body at all, which is exactly the
- *  batch-8 incident this whole feature exists to close.
+ *  #752 finding 1 (PO adjudication on PR #812, P1 — fixes a real production bounce): computes the
+ *  cursor from `liveBody` — the SAME live body `checkAcDriftBeforeDrive` just fetched and
+ *  confirmed AC-authority-matches the snapshot — never `snapshot.body` (the dispatch-time text).
+ *  Before this fix, this function read `snapshot.body` on the (now-known-false) theory that "the
+ *  sibling drift check already re-confirmed the live body still matches that snapshot, so a
+ *  second read would be redundant" — true only while the AC-authority hash was the RAW body hash.
+ *  Once #752 made that hash marker-normalized (this same PR), a PO's own marker advance — the
+ *  #703-mandated way of recording "I've adjudicated through comment N" — passes the drift check
+ *  (marker-only edits are excused from AC drift by design) while leaving `snapshot.body` carrying
+ *  the STALE pre-advance marker value. Computing the cursor from that stale snapshot body then
+ *  read the PO's own advance as unadjudicated and bounced the lane to `comment-cursor-stale` —
+ *  the exact batch-8-shaped failure this whole mechanism exists to prevent, now self-inflicted by
+ *  the AC-authority normalization. Threading the already-fetched live body costs no second forge
+ *  call (the caller passes through what `checkAcDriftBeforeDrive` returned) and makes the cursor
+ *  computation see the PO's advance the same tick it lands.
+ *
+ *  `liveBody` is `null` only when `checkAcDriftBeforeDrive` never performed a live read this call
+ *  (its pre-#283 legacy-lane early return) — in that case `state.getAcSnapshot` below is also
+ *  expected to return nothing, so this function's own early return covers it; there is no live
+ *  body to fall back to and none is needed. Only the comment STREAM needs its own live read here —
+ *  a comment can arrive without touching the body at all, which is exactly the batch-8 incident
+ *  this whole feature exists to close.
  *
  *  Returns `null` when the lane should drive normally this tick: no AC snapshot recorded (a
  *  pre-#283/#652 legacy lane — nothing to recheck a cursor against, same "drive normally"
@@ -3328,13 +3365,14 @@ async function checkCommentCursorBeforeDrive(
   w: WorkerRow,
   pr: number,
   iso: () => string,
+  liveBody: string | null,
 ): Promise<DrivenOutcome | null> {
   const snapshot = state.getAcSnapshot(w.issue);
   if (!snapshot) return null;
 
   let cursorResult: CommentCursorResult;
   try {
-    cursorResult = await checkCommentCursorFreshness(forge, w.issue, snapshot.body);
+    cursorResult = await checkCommentCursorFreshness(forge, w.issue, liveBody ?? snapshot.body);
   } catch (e) {
     return { kind: "queued", worker: w.name, issue: w.issue, pr, reason: `comment-cursor-check-unavailable: ${String(e)}` };
   }
@@ -4437,16 +4475,17 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // called for this lane. See checkAcDriftBeforeDrive's own doc for the fail-closed ordering
       // guarantee (drift routes to needsHuman and skips driveOne entirely this tick; a missing
       // snapshot is not drift and drives normally).
-      const driftOutcome = await checkAcDriftBeforeDrive(forge, state, cfg, w, pr, iso);
-      if (driftOutcome) {
-        driven.push(driftOutcome);
+      const driftCheck = await checkAcDriftBeforeDrive(forge, state, cfg, w, pr, iso);
+      if (driftCheck.outcome) {
+        driven.push(driftCheck.outcome);
         continue;
       }
       // #652: comment-adjudication cursor recheck — immediately after the AC-snapshot drift
       // check above confirms the body itself hasn't drifted, and still BEFORE gate.driveOne. A
       // comment can arrive without ever touching the body (the batch-8 incident shape); see
-      // checkCommentCursorBeforeDrive's own doc for the fail-closed ordering.
-      const cursorOutcome = await checkCommentCursorBeforeDrive(forge, state, cfg, w, pr, iso);
+      // checkCommentCursorBeforeDrive's own doc for the fail-closed ordering. #752: threads the
+      // live body the drift check above already fetched — no second forge fetch here.
+      const cursorOutcome = await checkCommentCursorBeforeDrive(forge, state, cfg, w, pr, iso, driftCheck.liveBody);
       if (cursorOutcome) {
         driven.push(cursorOutcome);
         continue;
