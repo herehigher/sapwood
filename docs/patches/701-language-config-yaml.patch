@@ -21,19 +21,20 @@
 # Generated against sapwood.config.yaml at blob ce85405. If the file has since
 # moved, the hunk still locates by context (offset-tolerant); re-check the result.
 diff --git a/sapwood.config.yaml b/sapwood.config.yaml
-index ce85405..943e52d 100644
+index ce85405..7324c67 100644
 --- a/sapwood.config.yaml
 +++ b/sapwood.config.yaml
-@@ -461,6 +461,17 @@
+@@ -461,6 +461,18 @@
    maxChars: 20000 # deterministic truncation cap (same marked-cut-never-silent-drop contract
                     # as round.directiveMaxChars / roles.architect.lastMergedMaxChars).
 
 +# #701: the development-language policy — the working language every role composes free text
 +# in, per surface (code comments, issue/PR prose, docs). Every key defaults to `en`; this
-+# repo's own working language is English, so the section is left commented (byte-identical to
-+# unset). Uncomment and set a BCP-47-ish tag per surface to change it — see
-+# docs/configuration.md's "language" section for the full mechanics, the #167 CLAUDE.md
-+# fallback precedence, and the #591 issues/PRs-surface interplay.
++# repo's own working language is English, so the section is left commented — equivalent to
++# leaving `language` unset (the schema default resolves every surface to `en`), not a claim
++# that applying this patch is byte-identical either way. Uncomment and set a BCP-47-ish tag
++# per surface to change it — see docs/configuration.md's "language" section for the full
++# mechanics, the #167 CLAUDE.md fallback precedence, and the #591 issues/PRs-surface interplay.
 +# language:
 +#   codeComments: en
 +#   issuesAndPrs: en
