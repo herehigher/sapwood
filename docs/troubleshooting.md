@@ -160,8 +160,9 @@ before moving, deleting, or restoring `data/`. Recovery:
 
 1. Check `sapwood status` — it reports `kill switch: ACTIVE` and shows any in-flight
    lanes still draining.
-2. Once you're satisfied it's safe to resume, run `rm -f data/KILL_SWITCH` (or
-   `/sapwood-stop --lift` in a session where the plugin is loaded).
+2. Once you're satisfied it's safe to resume, run `sapwood stop clear` (equivalent to
+   `rm -f data/KILL_SWITCH`; or `/sapwood-stop --lift` in a session where the plugin
+   is loaded — #731 added the CLI verb, all three act on the exact same file).
 3. Dispatch and merges resume on the **next tick** — a switch lifted mid-tick doesn't
    take effect within that same tick.
 

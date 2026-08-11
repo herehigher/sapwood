@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 // `sapwood` CLI. M0.5 shipped `init`; `run` (the M4 loop driver, #46) and `validate` (#49)
 // landed next; `status` + `run --dry-run` (#15) land here. The plugin's slash commands
 // (/sapwood-run, /sapwood-status, /sapwood-stop) are thin wrappers that shell out to this CLI
@@ -130,6 +130,12 @@ Commands:
     --json             Machine-readable events instead of the text listing
   park clear     Clear a park episode receipt-first (refuses under a live engine)
     --source SOURCE  Clear only this park source (default: every open episode)
+  pause [clear]  Create/remove the data/PAUSE sentinel — freeze new dispatch only, in-flight
+                 lanes proceed normally (see --help for the full tier semantics)
+  stop [clear]   Create/remove the data/KILL_SWITCH sentinel — freeze dispatch/merges, drain
+                 in-flight workers, then hard-kill (see --help)
+  estop [clear]  Create/remove the data/EMERGENCY_STOP sentinel — immediate hard kill, no
+                 drain, in-flight WIP is lost. Activating REQUIRES --confirm (see --help)
   dashboard      Start the read-only dashboard server and open it in a browser (see --help)
     --port PORT    Bind this port instead of the default (see --help)
     --config PATH  Load config from this path instead of probing the defaults (#710)
@@ -1484,6 +1490,265 @@ export function runPark(argv: string[]): { stdout: string; stderr: string; code:
   }
 }
 
+// ── #731: `sapwood pause` / `stop` / `estop` — first-class CLI verbs over the three file
+// sentinels (data/PAUSE, data/KILL_SWITCH, data/EMERGENCY_STOP) state.ts's own pausePath/
+// killSwitchPath/estopPath already define and conductor.ts's tick() already reads. THIN WRAPPERS
+// ONLY (#731's own "架构优先/大道至简" instruction): every function below does nothing but
+// create/remove one of those three files — the engine's tick-top detection is untouched, zero
+// bytes of loop/state-machine code changed by this feature. Mirrors `sapwood park clear`'s own
+// [db-path] positional + --config resolution shape: --config is validated the SAME way status/
+// events do (#710 — authoritative once given, hard error on a bad path, never a silent
+// fallback), but per run's own --config doc ("The DB ... EMERGENCY_STOP/KILL_SWITCH/PAUSE ...
+// remain relative to the current working directory"), --config never changes WHICH sentinel file
+// gets touched — only the optional [db-path] positional does that (same escape hatch status/park
+// clear already give an operator or a test; the DB path's dirname is the sentinel's directory,
+// exactly state.ts's own `dataDir = dirname(path)`).
+//
+// Verb shape: `sapwood <tier> [db-path] [--config PATH]` activates; `sapwood <tier> clear
+// [db-path] [--config PATH]` clears — `clear` is recognized ONLY as the very first token (same
+// precedent as `park clear`'s own `args[0] !== "clear"` check), so it can never be confused with
+// a db-path positional. `estop` additionally requires `--confirm` to activate (owner ruling
+// 2026-08-07, #731: "the confirmation is REQUIRED and not up for removal at review") — `clear`
+// does not need it, since lifting an already-fired estop is not itself a destructive act.
+//
+// Idempotent both ways (AC: "re-activation idempotency, documented and tested") — activating an
+// already-active tier, or clearing an already-inactive one, is a normal exit-0 no-op, same as a
+// second `touch`/`rm -f` on the same path.
+
+const SENTINEL_FILENAME = { pause: "PAUSE", stop: "KILL_SWITCH", estop: "EMERGENCY_STOP" } as const;
+type SentinelTier = keyof typeof SENTINEL_FILENAME;
+
+/** Parsed `sapwood pause|stop|estop [clear] [db-path] [--config PATH] [--confirm]` args. Pure
+ *  (no I/O), same flat help/error shape every other subcommand parser here uses. `confirm` is
+ *  only ever set to true when `allowConfirm` (estop only) — on pause/stop, `--confirm` falls
+ *  through to the unknown-flag check below, never silently accepted. */
+interface SentinelArgs {
+  help: boolean;
+  error?: string | undefined;
+  mode: "activate" | "clear";
+  dbPath: string;
+  configPath?: string | undefined;
+  confirm: boolean;
+}
+
+function parseSentinelArgs(argv: string[], allowConfirm: boolean): SentinelArgs {
+  const args = argv.slice(3);
+  if (args.includes("--help") || args.includes("-h")) {
+    return { help: true, mode: "activate", dbPath: DEFAULT_DB_PATH, confirm: false };
+  }
+  let mode: "activate" | "clear" = "activate";
+  let rest = args;
+  if (args[0] === "clear") {
+    mode = "clear";
+    rest = args.slice(1);
+  }
+  const positionals: string[] = [];
+  let configPath: string | undefined;
+  let confirm = false;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!;
+    if (a === "--config") {
+      // Same fail-closed value-taking parse as status/events/park clear's own --config/--source:
+      // a missing or flag-shaped operand is always an error, never a silent fallback to the
+      // default probe.
+      const next = rest[i + 1];
+      if (next === undefined || next.startsWith("-")) {
+        return { help: false, error: "--config requires a path", mode, dbPath: DEFAULT_DB_PATH, confirm };
+      }
+      configPath = next;
+      i++;
+      continue;
+    }
+    if (allowConfirm && a === "--confirm") {
+      confirm = true;
+      continue;
+    }
+    if (a.startsWith("-")) {
+      return { help: false, error: `unknown flag: ${a}`, mode, dbPath: DEFAULT_DB_PATH, confirm };
+    }
+    positionals.push(a);
+  }
+  if (positionals.length > 1) {
+    return { help: false, error: `unexpected argument(s): ${positionals.slice(1).join(" ")}`, mode, dbPath: DEFAULT_DB_PATH, confirm };
+  }
+  return { help: false, mode, dbPath: positionals[0] ?? DEFAULT_DB_PATH, configPath, confirm };
+}
+
+/** One tier's fixed copy: help text, the activation confirmation requirement, and the honest
+ *  semantics sentence restated at both activation and in --help (owner ruling: "restate the
+ *  destructive consequence" for estop; the other two get their own real, distinct semantics —
+ *  never a templated placeholder). */
+interface SentinelSpec {
+  tier: SentinelTier;
+  usage: string;
+  requireConfirm: boolean;
+  /** Printed on successful activation. `cfg` is the best-effort/explicit config load result
+   *  (undefined when none was found/given) — used ONLY to enrich the message with a real
+   *  configured number (e.g. stop's drain window) when available; never required for the
+   *  command to function, matching status's own "config-derived fields are best-effort" stance. */
+  activationLine: (cfg: SapwoodConfig | undefined) => string;
+  clearLine: string;
+}
+
+const SENTINEL_SPECS: Record<SentinelTier, SentinelSpec> = {
+  pause: {
+    tier: "pause",
+    requireConfirm: false,
+    usage: `\
+usage: sapwood pause [clear] [db-path] [--config PATH]
+
+The gentle stop tier (#75): creates/removes the data/PAUSE file sentinel — a thin wrapper,
+identical in effect to \`touch data/PAUSE\` / \`rm -f data/PAUSE\`. Freezes NEW lane dispatch
+only, as of the engine's next tick-top gate: no in-flight lane is affected — running workers
+keep working, and PRs already open keep moving through the review/merge gate. No drain, no
+freeze, nothing killed.
+
+  sapwood pause          Create data/PAUSE (idempotent: already-active is a no-op, exit 0)
+  sapwood pause clear    Remove data/PAUSE (idempotent: already-inactive is a no-op, exit 0)
+
+Flags:
+  --config PATH  Load config from this path instead of probing the defaults — same #710
+                 resolution semantics as \`status --config\`: authoritative once given, a
+                 missing/invalid path is a hard error, never a silent fallback. Never changes
+                 WHICH file gets touched (that is always [db-path]'s directory) — config is
+                 read only to enrich this command's own messages.
+  --help, -h     Print this help and exit
+`,
+    activationLine: () =>
+      "no new lane dispatch as of the engine's next tick-top gate — in-flight lanes (running workers, open PRs at the review/merge gate) proceed exactly as normal.",
+    clearLine: "dispatch resumes at the next tick-top gate, UNLESS a kill switch or emergency stop is also present (those win).",
+  },
+  stop: {
+    tier: "stop",
+    requireConfirm: false,
+    usage: `\
+usage: sapwood stop [clear] [db-path] [--config PATH]
+
+The drain-first stop tier: creates/removes the data/KILL_SWITCH file sentinel — a thin
+wrapper, identical in effect to \`touch data/KILL_SWITCH\` / \`rm -f data/KILL_SWITCH\`. Freezes
+ALL new dispatch and merges as of the engine's next tick-top gate; running workers are asked
+to hand off gracefully within the configured drain window, then the conductor escalates to a
+hard kill. Use \`sapwood estop\` instead when the drain window itself is too slow (credential
+exposure, a destructive call, or a cost blowout).
+
+  sapwood stop          Create data/KILL_SWITCH (idempotent: already-active is a no-op, exit 0)
+  sapwood stop clear    Remove data/KILL_SWITCH (idempotent: already-inactive is a no-op, exit 0)
+
+Flags:
+  --config PATH  Load config from this path instead of probing the defaults — same #710
+                 resolution semantics as \`status --config\`: authoritative once given, a
+                 missing/invalid path is a hard error, never a silent fallback. Never changes
+                 WHICH file gets touched (that is always [db-path]'s directory); when it
+                 resolves, cfg.cost.drainWindowSec is echoed in the activation message.
+  --help, -h     Print this help and exit
+`,
+    activationLine: (cfg) => {
+      const drain = cfg ? `${cfg.cost.drainWindowSec}s` : "the configured drain window (cfg.cost.drainWindowSec)";
+      return (
+        `new dispatch and merges freeze as of the engine's next tick-top gate; running workers get up to ${drain} to ` +
+        "hand off before a hard kill."
+      );
+    },
+    clearLine: "dispatch and merges resume at the next tick-top gate, UNLESS an emergency stop or pause is also present.",
+  },
+  estop: {
+    tier: "estop",
+    requireConfirm: true,
+    usage: `\
+usage: sapwood estop --confirm [clear] [db-path] [--config PATH]
+
+The strictest stop tier (#293): creates/removes the data/EMERGENCY_STOP file sentinel — a
+thin wrapper, identical in effect to \`touch data/EMERGENCY_STOP\` / \`rm -f data/EMERGENCY_STOP\`.
+Checked BEFORE the kill switch every tick and wins when both are present. In the normal path
+it hard-kills every running/fixing lane's process group on that SAME tick: there is NO drain
+window, and any IN-FLIGHT WORK-IN-PROGRESS IS LOST. Use it only for credential exposure, a
+destructive call, or a cost blowout faster than \`sapwood stop\`'s drain window can contain.
+
+  sapwood estop --confirm   Create data/EMERGENCY_STOP (idempotent: already-active is a no-op)
+  sapwood estop clear       Remove data/EMERGENCY_STOP — does NOT require --confirm; lifting an
+                            already-fired estop is not itself a destructive act, only review of
+                            the emergency and any resulting escalations is.
+
+Flags:
+  --confirm      REQUIRED to activate (owner ruling, 2026-08-07: not up for removal at
+                 review) — non-interactive, no TTY prompt, agent-friendly. Restates the
+                 destructive consequence above; omitting it is a hard refusal, exit 1, no
+                 sentinel written.
+  --config PATH  Load config from this path instead of probing the defaults — same #710
+                 resolution semantics as \`status --config\`. Never changes WHICH file gets
+                 touched (that is always [db-path]'s directory).
+  --help, -h     Print this help and exit
+`,
+    activationLine: () =>
+      "every running/fixing lane is hard-killed immediately, this same tick — NO drain window, and any in-flight WIP is LOST. Clear only after human review, with `sapwood estop clear`.",
+    clearLine: "a kill switch or pause, if still present, continues to apply.",
+  },
+};
+
+function runSentinelCommand(argv: string[], spec: SentinelSpec): { stdout: string; stderr: string; code: number } {
+  const parsed = parseSentinelArgs(argv, spec.requireConfirm);
+  if (parsed.help) return { stdout: spec.usage, stderr: "", code: 0 };
+  if (parsed.error) {
+    return { stdout: "", stderr: `sapwood ${spec.tier}: ${parsed.error}\n\n${spec.usage}`, code: 1 };
+  }
+  const { mode, dbPath, configPath, confirm } = parsed;
+  // #710: config resolution BEFORE any filesystem write — an explicit --config's failure must
+  // never be masked by (or race) the sentinel write itself. Best-effort when omitted, exactly
+  // resolveCliConfig's own contract (never fatal on its own).
+  const configResult = resolveCliConfig(configPath);
+  if (!configResult.ok) {
+    return { stdout: "", stderr: formatConfigLoadError(spec.tier, configResult.error), code: 1 };
+  }
+  const filename = SENTINEL_FILENAME[spec.tier];
+  // Same dataDir convention state.ts's own pausePath/killSwitchPath/estopPath use:
+  // dirname(dbPath) — cwd-relative by default (DEFAULT_DB_PATH's own dirname is "data"), never
+  // config-file-relative (see this section's header comment).
+  const sentinelPath = join(dirname(dbPath), filename);
+
+  if (mode === "clear") {
+    if (!existsSync(sentinelPath)) {
+      return { stdout: `sapwood ${spec.tier}: ${sentinelPath} was not present — nothing to clear.\n`, stderr: "", code: 0 };
+    }
+    rmSync(sentinelPath, { force: true });
+    return { stdout: `sapwood ${spec.tier}: ${sentinelPath} removed — ${spec.clearLine}\n`, stderr: "", code: 0 };
+  }
+
+  // Activation. estop's owner-ruled confirmation gate runs BEFORE any write — a mis-fired estop
+  // with no --confirm must leave the filesystem untouched, not merely print a warning after the
+  // fact (#731: "the confirmation is REQUIRED and not up for removal at review").
+  if (spec.requireConfirm && !confirm) {
+    return {
+      stdout: "",
+      stderr:
+        `sapwood ${spec.tier}: refusing to activate without --confirm — this is an IMMEDIATE hard kill with NO drain ` +
+        `window; any in-flight work-in-progress is lost. Re-run with --confirm to proceed.\n\n${spec.usage}`,
+      code: 1,
+    };
+  }
+  if (existsSync(sentinelPath)) {
+    return { stdout: `sapwood ${spec.tier}: ${sentinelPath} already ACTIVE — no change.\n`, stderr: "", code: 0 };
+  }
+  mkdirSync(dirname(sentinelPath), { recursive: true });
+  writeFileSync(sentinelPath, "");
+  return {
+    stdout: `sapwood ${spec.tier}: ${sentinelPath} created — ${spec.activationLine(configResult.cfg)}\n`,
+    stderr: "",
+    code: 0,
+  };
+}
+
+export function runPause(argv: string[]): { stdout: string; stderr: string; code: number } {
+  return runSentinelCommand(argv, SENTINEL_SPECS.pause);
+}
+
+export function runStop(argv: string[]): { stdout: string; stderr: string; code: number } {
+  return runSentinelCommand(argv, SENTINEL_SPECS.stop);
+}
+
+export function runEstop(argv: string[]): { stdout: string; stderr: string; code: number } {
+  return runSentinelCommand(argv, SENTINEL_SPECS.estop);
+}
+
 // ── #743: `sapwood dashboard` — start the read-only data server + open a browser ───────────
 
 const DASHBOARD_BUILD_HINT = "npm run build -w dashboard";
@@ -1735,6 +2000,15 @@ export function runCli(argv: string[]): CliResult {
   }
   if (arg === "park") {
     return runPark(argv);
+  }
+  if (arg === "pause") {
+    return runPause(argv);
+  }
+  if (arg === "stop") {
+    return runStop(argv);
+  }
+  if (arg === "estop") {
+    return runEstop(argv);
   }
   if (arg === "dashboard") {
     const parsed = parseDashboardArgs(argv);

@@ -32,6 +32,14 @@ The precedence order is emergency stop, then kill switch, then pause. If both
 `data/EMERGENCY_STOP` and `data/KILL_SWITCH` are present, emergency stop wins; either strict tier
 already subsumes pause's dispatch restriction.
 
+(#731) The same three tiers are also reachable as first-class `sapwood` CLI verbs — outside a
+Claude Code session, or for scripting/an agent supervisor: `sapwood pause` / `sapwood pause
+clear`, `sapwood stop` / `sapwood stop clear`, and `sapwood estop --confirm` / `sapwood estop
+clear` (activating `estop` refuses without `--confirm` — no TTY prompt, agent-friendly; see
+`sapwood estop --help`). This slash command still shells the raw `touch`/`rm` below rather than
+the CLI verbs — both act on the exact same three sentinel files, so either path is equally valid;
+they are not shown as commands here only because this file's flag-per-tier shape predates #731.
+
 Note for `sapwood run --until-idle`: a paused engine dispatches nothing, so once its
 in-flight lanes finish it counts as idle and the run EXITS ("finish the round, then
 stop"). Removing `data/PAUSE` afterwards resumes nothing by itself — start a new

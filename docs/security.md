@@ -1800,7 +1800,20 @@ documented rather than blocked:
 - directory-level deletion that never names a sentinel, e.g. `rm -rf ../../data`
   (removes both sentinels *and* the state DB). Blocking the bare `data` suffix would
   false-positive on a worker legitimately removing a `data/` dir inside its own repo,
-  so this stays a documented residual instead of a guard rule.
+  so this stays a documented residual instead of a guard rule;
+- **`sapwood pause`/`stop`/`estop` (#731)** — the CLI verbs that create/remove the
+  three sentinels — fall into the FIRST bullet's exact class: `sapwood pause`,
+  `sapwood stop`, and `sapwood estop --confirm` resolve the sentinel path internally
+  (`dirname(dbPath)` + the fixed filename), so none of them puts a literal
+  `data/PAUSE`/`data/KILL_SWITCH`/`data/EMERGENCY_STOP` token on the Bash command
+  line for `checkControlSentinelArg` to match — a worker with ordinary Bash access
+  can flip any tier by simply running the now-first-class command, no bespoke script
+  needed. `guard.ts` is human-merge-only (docs/security.md's own governance, this
+  page's opening list), so #731 could not extend its verb/path recognition to cover
+  these three subcommands without a separate human-merged change; teaching the guard
+  to also recognize `sapwood pause|stop|estop` (and `park clear`, `run`, `status`,
+  `events` — every subcommand a worker could otherwise invoke) as sentinel-adjacent
+  is tracked as follow-up, not closed here.
 
 Until those are closed too, treat the isolation boundary as "a worker won't
 accidentally step here, and the obvious direct/indirect vectors are blocked," not "a
