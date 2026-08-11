@@ -6,6 +6,16 @@ Owner-directed clause-level audit of the engine's 14 shipped role-prompt files
 finding that would change prompt behavior is filed as its own follow-up issue instead (#699's own
 AC: "No behavior-changing prompt edit ships in the audit PR itself").
 
+**Gate② correction (sol, this PR's round 1).** The first version of this ledger classified
+`doctrine-template.md` and `goal-template.md` as human-facing scaffolds "out of the B/C frame" and
+did not clause-classify them. sol proved that claim false for the rendered path: both templates are
+copied verbatim by `sapwood init` into the repo's live `goal.file`/`doctrine.file`, and until a
+human edits the copy away, three loaders (`align.ts`'s `{{plan.md}}`, `architect.ts`'s
+`{{plan.architectureChapter}}`, `doctrine.ts`'s `{{doctrine}}`) substitute that content RAW,
+uncommented, into live worker/architect/po-align prompts. Both are in-scope prompt carriers. This
+revision clause-classifies both at the same SHA with the same rigor as the other 12 files — see
+their rows below and Finding 2.
+
 **Audited SHA:** `2b4a1a4496d1769779cac2d966e0778e6052aa42` (`main`, immediately after #701/PR #821
 merged the working-language policy — this audit reviews #701's `{{lang.*}}` directives as already
 settled and does not re-litigate them; see #699's own sequencing note).
@@ -58,12 +68,13 @@ Those are recorded below as **considered, not findings** rather than silently sk
 | `verification-plan-reviewer-confirm.md` | 153 | role/two-outcome charter, mostly A | 0 | 1 (shared) | See Finding 1. |
 | `harvest.md` | 86 | role/one-job charter/non-negotiables, all A | 0 | 0 | Clean. |
 | `retro.md` | 146 | role/two-rules charter, all A | 0 | 0 | Clean — proactively avoids the no-positive-completeness trap ("you are not limited to the three categories named in this issue's scope if you find something more important"), a good worked counter-example to the recurring class #699's own Why cites. |
-| `doctrine-template.md` | 75 | scaffold comment + seeded doctrine content | 0 | 0 | Not itself a role-directive prompt — a template copied verbatim into a fresh repo, then edited by a human. Its body is the same review-doctrine prose already governed by `docs/REVIEW-DOCTRINE.md`'s own carrier rules; not re-classified here. |
-| `goal-template.md` | 37 | scaffold headings + HTML-comment authoring guidance for a human, not an LLM role | 0 | 0 | Same as above — a human-facing scaffold, out of the B/C frame. |
+| `doctrine-template.md` | 75 | lines 17-75 (`# Review doctrine` heading onward): the same technical-invariants/adjudication-doctrine prose `docs/REVIEW-DOCTRINE.md` governs — A by that doc's own carrier rules | 0 | 1 (shared, lines 1-16) | See Finding 2. |
+| `goal-template.md` | 37 | section headings + 4 of 5 comment blocks (Goal/Non-goals/Constraints/Current-milestone, lines 12-13/17-18/21-23/35-37): pure authoring guidance to a human, no engine-behavior claim — A | 0 | 1 (shared, lines 27-31) | See Finding 2. |
 
-**Totals: 0 B findings across all 14 files. 1 C-class finding, shared across 5 files (po.md,
-po-decompose.md, verification-plan-drafter.md, verification-plan-reviewer.md,
-verification-plan-reviewer-confirm.md).**
+**Totals: 0 B findings across all 14 files. 2 C-class findings: Finding 1, shared across 5 files
+(po.md, po-decompose.md, verification-plan-drafter.md, verification-plan-reviewer.md,
+verification-plan-reviewer-confirm.md); Finding 2, shared across 2 files (doctrine-template.md,
+goal-template.md).**
 
 Zero B findings is a real result, not an artifact of a shallow pass: this repo's prompt suite has
 already been through #454/design #402 §6a's enforced-vs-judged partitioning (engine-reviewer.md),
@@ -134,6 +145,62 @@ protected-path token sets against each other (and ideally against `docs/security
 addition to the canonical list fails every un-mirrored carrier the same day it's added), plus the
 two content fixes themselves. Filed as **#828** (see "Follow-up issues filed" below).
 
+## Finding 2 (C-class) — scaffold HTML comments are live-injected raw into worker/architect/po-align prompts
+
+**What.** `doctrine-template.md` and `goal-template.md` author their guidance to the HUMAN who will
+customize a fresh `sapwood init`'d repo as inline `<!-- ... -->` HTML comments —
+`goal-template.md:6-7` says so explicitly: *"Fill in each section for this project, then delete
+these HTML comments (or leave them — they're invisible in rendered markdown)."* That claim is true
+only for a human viewing rendered markdown; it is false for the channel that actually matters here.
+None of the three loaders that substitute these files' content into a live prompt strip HTML
+comments:
+
+- `align.ts::readPlanMd` returns `readFileSync(path, "utf8")` unmodified, substituted whole as
+  po-align's `{{plan.md}}`.
+- `architect.ts::loadArchitectureChapterWithStatus` (via `util/markdown.ts::extractMarkdownSections`)
+  extracts only the `## Architecture` section, but does not strip comments within it, substituted
+  as `{{plan.architectureChapter}}`.
+- `doctrine.ts::loadDoctrine` returns `readFileSync(path, "utf8")`, length-capped only
+  (`capDigest`), substituted as `worker.md`'s `{{doctrine}}` / `architect.md`'s `{{round.doctrine}}`.
+
+So for any repo that has run `sapwood init` and not yet customized its goal/doctrine files —
+`sapwood init`'s own steady-state output — the architect session's `{{plan.architectureChapter}}`,
+which `architect.md` itself frames as *"the ground truth an issue's approach must not contradict —
+not a suggestion,"* is literally:
+
+> `goal-template.md:27-31`: "The system's shape as decided so far... (the architect peripheral
+> reads exactly this section every round and flags issues that contradict it). If this section is
+> missing or empty, the architect proceeds with an explicit 'no architecture chapter available'
+> placeholder — advisory only, it never blocks a round."
+
+— the architect session's own engine-degrade-behavior restated in prose (`architect.ts`'s literal
+fallback string, `"(No \"## Architecture\" heading found in ... — proceeding with no architecture
+chapter available.)"`, is a near-paraphrase of what this comment describes), delivered TO that same
+session AS IF it were locked architecture. A worker/architect session in the same fresh-init state
+also receives `doctrine-template.md:4-9` — `` Configured as `doctrine.file` in sapwood.config.yaml
+(default: docs/REVIEW-DOCTRINE.md) `` plus the absent-file `NO_DOCTRINE` fallback description — as
+if it were review doctrine.
+
+**Why this is C, not B.** Both cited passages restate deterministic engine facts already enforced
+in code (`config.ts`'s `doctrine.file` default; `doctrine.ts`'s `NO_DOCTRINE` fallback;
+`architect.ts`'s missing-heading placeholder) — exactly principle 3's definition. It is a sharper
+case than Finding 1's hand-copy drift: this duplicate isn't merely present in a file nobody
+renders — it is LIVE-SERVED as role content, to the exact session the comment happens to describe.
+No B concern: neither passage preempts a role's judgment about a specific case; the harm is
+input-channel contamination, not verdict-steering. `goal-template.md`'s other four comment blocks
+(Goal/Non-goals/Constraints/Current-milestone) are pure authoring guidance with no engine-behavior
+claim — read A, not C, though they share the same delivery-channel defect at a lower severity (see
+disposition).
+
+**Disposition.** Not a prose rewrite of either template (out of scope for this audit, and it would
+only fix newly-`sapwood init`'d repos going forward, not already-scaffolded ones still carrying the
+unedited file). Fix at the loader: strip HTML comments from the content each of the three
+substitution points actually renders, leaving the on-disk file's human-facing comments untouched
+for an editor/GitHub reader. `docs/REVIEW-DOCTRINE.md` — this repo's OWN live doctrine file, out of
+#699's `engine/prompts/` scope — carries the identical leading-comment shape and is subject to the
+identical mechanism; noted as a pointer, not a separate finding, per #699's own charter for
+out-of-scope material the audit trips over. Filed as **#830**.
+
 ## Considered, not findings — duplicate-looking content this audit checked and found already governed
 
 Recorded explicitly so a "no further B/C findings" claim below is checked, not assumed silent.
@@ -169,8 +236,12 @@ The contrast with Finding 1 is the point: this repo already has the right tool
 - **#828** — fix `po-decompose.md`'s and `verification-plan-reviewer-confirm.md`'s
   human-merge-only-paths text, and add a `prompts.test.ts` mirror-pair test covering all five
   carriers against `docs/security.md`'s canonical section. (Finding 1.)
-
-(Issue number filled in below once filed — see the PR body for the final number.)
+- **#830** — strip HTML comments at the three loader/substitution points (`doctrine.ts::loadDoctrine`,
+  `align.ts`'s `{{plan.md}}`, `architect.ts`'s `{{plan.architectureChapter}}`) so scaffold authoring
+  guidance in `doctrine-template.md`/`goal-template.md` stops reaching a live prompt as if it were
+  role content, with an `init.test.ts`-anchored fixture/integration test. Different root cause from
+  #828 (live-injection of unstripped comments, not hand-copy drift across independent files) —
+  filed separately, not folded in. (Finding 2.)
 
 ## Residual risks / known edges
 
@@ -187,8 +258,12 @@ The contrast with Finding 1 is the point: this repo already has the right tool
   a future audit re-run should re-check this ledger's own classifications rather than trust them
   as a closed set (the same "no positive-completeness claims" discipline this repo already applies
   to its prompts applies to this ledger too).
-- **`doctrine-template.md`/`goal-template.md` were read but not clause-classified the same way** —
-  they are scaffolds for a human to fill in and edit, not standing instructions to an LLM role in
-  the same sense as the other 12 files. If a future audit wants B/C classification of the
-  *doctrine content itself* (the seeded review-doctrine prose these two templates ship), that
-  belongs to `docs/REVIEW-DOCTRINE.md`'s own maintenance discipline, not a repeat of this audit.
+- **`doctrine-template.md`'s seeded review-doctrine BODY (lines 17-75)** is the same prose
+  `docs/REVIEW-DOCTRINE.md` already governs under its own carrier/maintenance rules; this audit
+  classifies it A (legitimate judgment-rule content for an LLM reviewer, by that doc's own explicit
+  stance — "deliberately PROSE, not a lint/DSL") but does not re-litigate its substance, consistent
+  with #699's charter that existing doctrine is input, not itself a re-derivation target.
+- **`docs/REVIEW-DOCTRINE.md`'s own leading HTML comment shares Finding 2's exact defect** (verified
+  above) but the file lives under `docs/`, not `engine/prompts/` — outside #699's named scope. Per
+  #699's own instruction for out-of-scope material the audit trips over ("it files a pointer, not a
+  finding"), this is recorded as a pointer inside #830 rather than a third finding of its own.
