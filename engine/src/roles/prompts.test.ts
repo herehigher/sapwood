@@ -813,11 +813,7 @@ test("#354 fix.md: dispute a tier-C-only finding on sight, with the true produce
     /a\s+disputed thread never resolves, so nothing merges on it and a human adjudicates/,
     "states what is always true instead of promising an escalation event",
   );
-  assert.match(
-    body,
-    /it is not\s+tier-C-only — fix it\./,
-    "the unsure-means-fix-it tightener is present",
-  );
+  assert.match(body, /it is not\s+tier-C-only — fix it\./, "the unsure-means-fix-it tightener is present");
   assert.match(
     body,
     /Quote the finding's own tier-C\s+requirement verbatim/,
