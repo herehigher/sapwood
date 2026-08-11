@@ -315,6 +315,91 @@ test("#633: the branch-protection detector is invoked exactly once per engine st
   }
 });
 
+// #799: the claude-version startup check, wired through the SAME two production entry points
+// (`runTickEngine`/`runRoundsEngine`) as the #633 branch-protection detector above — same
+// production-only-when-both-unset seam shape (EngineOverrides.claudeVersionProbe), so a wiring
+// test can observe/replace the check's OUTCOME without ever spawning a real `claude` binary.
+test("#799: the claude-version startup check runs after run-started on the tick driver path, and a below-floor arm never gates dispatch of a ready issue", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-claude-version-wiring-"));
+  const previousCwd = process.cwd();
+  const previousBin = process.env.CLAUDE_BIN;
+  const state = new State(":memory:");
+  class ReadyForge extends FakeForge {
+    claimCalls = 0;
+    override async getReadyIssues(): Promise<Issue[]> {
+      return [{ number: 9, title: "ready work", labels: [] }];
+    }
+    override async claimIssue(): Promise<void> {
+      this.claimCalls++;
+    }
+    override async getAuthenticatedActor(): Promise<string | null> {
+      return "sapwood-bot";
+    }
+    override async getDefaultBranchChecks(): Promise<{ branch: string; headOid: string; checks: never[]; total: number }> {
+      return { branch: "main", headOid: "deadbeef", checks: [], total: 0 };
+    }
+  }
+  const forge = new ReadyForge();
+  try {
+    // A real stub `claude` binary (zero token, matches this file's own FAST_STUB convention) —
+    // set via CLAUDE_BIN so a real worker dispatch this test's ReadyForge triggers has something
+    // safe to spawn instead of ever touching a real `claude` on PATH. guard.mode: "soft" skips
+    // the compiled-guard-hook-file existence check dispatch() otherwise fail-closes on outside a
+    // real build. chdir into the tmp dir so WorkerSupervisor's default stateDir (cwd-anchored)
+    // writes nowhere near the real checkout.
+    process.env.CLAUDE_BIN = mkStub(dir, FAST_STUB);
+    process.chdir(dir);
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" }, guard: { mode: "soft" } }),
+      forge,
+      state,
+      logger: silentLogger,
+      claudeVersionProbe: async () => ({ ok: true, stdout: "1.0.0" }), // below MIN_CLAUDE_CLI_VERSION
+    });
+    assert.equal(code, 0, "a below-floor CLI never gates startup or dispatch (AC6)");
+    const kinds = state.eventsAfterId(0, ["run-started", "claude-cli-version-checked"]).map((e) => e.kind);
+    assert.deepEqual(kinds, ["run-started", "claude-cli-version-checked"], "the check runs strictly after run-started (AC3)");
+    assert.equal(forge.claimCalls, 1, "dispatch of the ready issue proceeded normally despite the below-floor arm (AC6)");
+  } finally {
+    process.chdir(previousCwd);
+    if (previousBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = previousBin;
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#799: the claude-version startup check is invoked exactly once per engine start on the rounds driver path, after run-started", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  let calls = 0;
+  try {
+    const code = await runEngine(["node", "sapwood", "run"], {
+      cfg: mkCfg(), // engine.driver unset -> defaults to "rounds"
+      forge,
+      state,
+      logger: silentLogger,
+      sleep: async () => {},
+      // Same immediate-stop shape as the #633 rounds wiring test above — proves the startup
+      // detector fired, not a real round.
+      registerSignals: (requestStop) => {
+        requestStop();
+        return () => {};
+      },
+      claudeVersionProbe: async () => {
+        calls++;
+        return { ok: true, stdout: "9.9.9" };
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(calls, 1);
+    const kinds = state.eventsAfterId(0, ["run-started", "claude-cli-version-checked"]).map((e) => e.kind);
+    assert.deepEqual(kinds, ["run-started", "claude-cli-version-checked"]);
+  } finally {
+    state.close();
+  }
+});
+
 test("sapwood run startup reconcile is quiet when rows match and forge-down is non-fatal", async () => {
   const cfg = mkCfg({ engine: { driver: "tick" } });
   const healthyState = new State(":memory:");

@@ -29,6 +29,7 @@ import {
 } from "./forge/forge.js";
 import { type BaseRedPin, baseRedPin } from "./loop/base-ci.js";
 import { createBranchProtectionDetector } from "./loop/branch-protection-warning.js";
+import { detectClaudeVersionStartupTier } from "./loop/claude-version-startup-check.js";
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
 import {
   type BrowserOpenResult,
@@ -66,7 +67,15 @@ import { MergeDriver } from "./roles/merge-driver.js";
 import { RoleRunner, type RoleRunnerDeps } from "./roles/peripheral.js";
 import { makeFallbackReviewers, makeReviewer } from "./roles/reviewer.js";
 import { resolveSkillsPluginDir } from "./roles/skills-plugin.js";
-import { buildRenderFixPrompt, buildRenderPrompt, discoverClaudeBin, probeLlmPing, WorkerSupervisor } from "./roles/worker.js";
+import {
+  buildRenderFixPrompt,
+  buildRenderPrompt,
+  type ClaudeVersionProbeResult,
+  discoverClaudeBin,
+  probeClaudeVersion,
+  probeLlmPing,
+  WorkerSupervisor,
+} from "./roles/worker.js";
 // #642: event-kinds registry validation for `events --kind`/`--exclude-kind` arguments (the
 // #425 registry's own doc: "add [a narrowing guard] with its first real caller" — this is it).
 import { EVENT_KIND_NAMES, isKnownEventKind } from "./state/event-kinds/index.js";
@@ -2510,6 +2519,13 @@ export interface EngineOverrides {
    *  test that specifically wants to observe/replace the check sets this directly instead of
    *  faking a `forge`-side capability. See branch-protection-warning.ts's own doc. */
   checkBranchProtection?: () => Promise<boolean>;
+  /** #799: injection seam for the claude-version startup detector's underlying probe — same
+   *  "production passes none" convention as `checkBranchProtection` above. Production always
+   *  resolves the binary via `discoverClaudeBin(process.env)` (never overridable — AC3: never a
+   *  second discovery implementation) and probes it for real; a wiring test that wants to
+   *  observe/replace the check's OUTCOME without spawning a real `claude` sets this instead. See
+   *  claude-version-startup-check.ts's own doc. */
+  claudeVersionProbe?: (claudeBin: string) => Promise<ClaudeVersionProbeResult>;
 }
 
 function createRunLogger(cfg: SapwoodConfig, override?: EngineLogger): { logger: EngineLogger; path: string } {
@@ -2819,6 +2835,14 @@ async function runTickEngine(
     // it shares (seeds, never re-probes) THIS instance's memoized SSH preflight; see
     // deploy-key-startup-check.ts's own doc for the full placement rationale.
     await detectDeployKeyStartupTier(supervisor, cfg, state, log);
+    // #799: startup Claude Code CLI version check — resolves the binary through the SAME
+    // discoverClaudeBin(process.env) result the worker/probe paths themselves use (never a
+    // second discovery implementation, AC3), then probes it with `--version` ONLY (zero spend,
+    // no gate, AC6). Same never-gating placement as detectDeployKeyStartupTier immediately
+    // above; see claude-version-startup-check.ts's own doc for the full rationale.
+    await detectClaudeVersionStartupTier(discoverClaudeBin(process.env), state, log, {
+      probe: overrides.claudeVersionProbe ?? probeClaudeVersion,
+    });
     const stopMode = parseRunStopMode(argv);
     const stop = resolveStopConfig(argv, cfg);
     // #76: same fail-fast stance as buildRenderPrompt above — a typo'd milestone goal must abort
@@ -3026,6 +3050,10 @@ async function runRoundsEngine(
     // after construction, so it shares (seeds, never re-probes) THIS instance's memoized SSH
     // preflight. See deploy-key-startup-check.ts's own doc.
     await detectDeployKeyStartupTier(supervisor, cfg, state, log);
+    // #799: same placement/rationale as runTickEngine above — see claude-version-startup-check.ts.
+    await detectClaudeVersionStartupTier(discoverClaudeBin(process.env), state, log, {
+      probe: overrides.claudeVersionProbe ?? probeClaudeVersion,
+    });
     // #253: a default forge MCP proxy mint, shared by every peripheral role session this
     // RoleRunner instance ever runs across the whole `sapwood run` (round 0 / phase "peripheral"
     // is its own fixed SENTINEL audit identity, informational only — see buildTickFixLegResume's

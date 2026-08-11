@@ -124,6 +124,20 @@ Concurrency and dispatch shape.
 
 Per-worker execution.
 
+**Minimum Claude Code CLI version: 2.1.209** ([#799](https://github.com/herehigher/sapwood/issues/799),
+[`docs/PLAN.md:129`](PLAN.md)). `2.1.209` is the ONLY version this repo has evidence for — the exact
+CLI the engine's worker/probe argv (`--no-session-persistence`, `--strict-mcp-config`, `--tools`,
+`--max-budget-usd`, `--system-prompt`) was verified against (`engine/src/roles/worker.ts`'s
+`MIN_CLAUDE_CLI_VERSION`, next to `probeLlmPing`'s own doc comment). An older CLI missing one of
+those flags fails **every** worker leg and **every** environment probe with
+`error: unknown option ...` — the engine's env-failure classifier reads that as a provider outage,
+not a CLI mismatch, so the loop parks and backs off instead of naming the real, fixable cause. A
+once-per-engine-start startup check (`engine/src/loop/claude-version-startup-check.ts`) reports the
+installed version against this floor in the log and the event stream (`claude-cli-version-checked`)
+— **WARN-only, never a gate**: a below-floor or undeterminable version never blocks startup or
+dispatch. Upgrade with `npm i -g @anthropic-ai/claude-code@latest`. See also
+[Getting started: Requirements](getting-started.md#requirements).
+
 | Key | Default | Meaning |
 |---|---|---|
 | `model` | `opus` | Model the headless worker runs as. `reviewer.agent.model` defaults one tier ABOVE it (`fable`, #582 option (a)) so the gate sits at or above the producer — see [Reviewer tier vs. worker tier](#reviewer-tier-vs-worker-tier). |

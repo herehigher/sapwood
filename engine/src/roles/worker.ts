@@ -781,6 +781,25 @@ export function discoverClaudeBin(env: Record<string, string | undefined>): stri
   return b ? b : "claude";
 }
 
+/** #799 (PLAN.md:129 — "state a minimum Claude Code CLI version and test against it in CI",
+ *  never previously built): the minimum Claude Code CLI version this engine's worker/probe argv
+ *  is verified against — the ONLY version this repo has evidence for. probeLlmPing's own doc
+ *  below states it: "verified working against claude CLI 2.1.209" for `--no-session-persistence`,
+ *  `--strict-mcp-config`, `--tools`, `--max-budget-usd`, `--system-prompt`. An older CLI missing
+ *  one of those flags fails every probe/worker leg with `error: unknown option ...`, which #168's
+ *  deterministic signature classifier reads as an ENVIRONMENT failure (the loop parks the LLM
+ *  source and backs off) rather than naming the real, fixable cause. Do not invent a newer
+ *  unverified number here — that fails the drift test below by construction (it can only compare
+ *  this constant against the docs, never re-derive "what the CLI actually verifies").
+ *
+ *  Drift-tested against docs/getting-started.md's Requirements bullet and docs/configuration.md's
+ *  `worker` section (claude-version-startup-check.test.ts's AC1/AC2 test) — changing this value
+ *  without updating both docs to the SAME exact string fails that test. Consumed by
+ *  claude-version-startup-check.ts's once-per-engine-start WARN-only startup detector — never a
+ *  gate, see that module's own doc — and by the human-owned CI remainder
+ *  (docs/patches/799-ci-claude-cli-version-floor.patch) via `LLM_PING_REQUIRED_LONG_FLAGS` below. */
+export const MIN_CLAUDE_CLI_VERSION = "2.1.209";
+
 /** #168: the ping probe's outcome. `detail` is set on FAILURE only — the first stderr (or
  *  stdout) error line, a timeout note, or a spawn error — so the recorded probe event lets an
  *  operator distinguish "provider still down" (a 429/overloaded error) from a local
@@ -796,6 +815,22 @@ export interface LlmPingResult {
  *  --system-prompt REPLACES the CLI's default (much larger) system prompt. */
 const LLM_PING_SYSTEM_PROMPT = "You are a heartbeat responder. Only output the requested word.";
 const LLM_PING_PROMPT = "Respond with the single word 'pong' and nothing else.";
+
+/** #799 human-owned CI remainder (docs/patches/799-ci-claude-cli-version-floor.patch): the long
+ *  flag names probeLlmPing's argv below depends on, extracted so a CI job can assert
+ *  `claude --help` (against the pinned MIN_CLAUDE_CLI_VERSION, no auth, no spend) offers every
+ *  one of them — one source the CI script imports, not a duplicated YAML list that can drift from
+ *  the real argv. Hand-kept in sync with the literal argv array in probeLlmPing below; the
+ *  "invoked with exactly the verified argv" test in worker.test.ts asserts each of these flags
+ *  is literally present in a captured real invocation, so a probeLlmPing change that drops one
+ *  without updating this list fails that test. */
+export const LLM_PING_REQUIRED_LONG_FLAGS = [
+  "--no-session-persistence",
+  "--strict-mcp-config",
+  "--tools",
+  "--max-budget-usd",
+  "--system-prompt",
+] as const;
 
 /** #168 (PR #180 review, P1-1 amendment — final form): the LLM-source probe for conductor.ts's
  *  park machinery (TickDeps.probeLlmReachable) — a REAL minimal inference ping, verified
@@ -908,6 +943,83 @@ export function probeLlmPing(claudeBin: string, probeModel: string, probeMaxBudg
       // API errors land), else the first stdout line, else the bare exit code.
       const detail = firstLine(stderr) || firstLine(stdout) || `ping exited ${code} with no output`;
       finish({ ok: false, detail });
+    });
+  });
+}
+
+// ── #799: the version probe — claude-version-startup-check.ts's own detector logic lives in
+// loop/, but the ACTUAL spawn lives HERE, next to probeLlmPing, on purpose: this file's own
+// `#69 grep-invariant` test (below, "the ONLY child_process importers are worker.ts...") is a
+// repo-wide structural check that no OTHER engine module shells out — the "Claude CLI coupling
+// isolated in worker.ts" property PLAN.md:129 itself names as a v1 requirement. Adding a second
+// spawn call in loop/claude-version-startup-check.ts would either violate that invariant or force
+// widening its allowlist; keeping the spawn here and exporting only the RESULT type/function
+// keeps the isolation property intact while still letting the startup module own the arm/log/
+// event logic. detectClaudeVersionStartupTier (loop/claude-version-startup-check.ts) is the only
+// production caller.
+
+/** The version probe's raw outcome — same two-shape contract as `LlmPingResult` above
+ *  (`{ok:true,...}` / `{ok:false,detail}`), so failure surfacing reads the same way as its
+ *  sibling. */
+export type ClaudeVersionProbeResult = { ok: true; stdout: string } | { ok: false; detail: string };
+
+/** Bounded probe timeout. `--version` is a local, no-network CLI invocation — unlike
+ *  probeLlmPing's real inference round-trip, which is why THAT probe needs a user-configurable
+ *  `probeTimeoutSec` — so a short, fixed bound is appropriate here and deliberately NOT a new
+ *  config key (user-tunable values belong in config only when there is a real tuning need; a
+ *  healthy `--version` call returns in milliseconds, and an unhealthy one should hard-kill fast
+ *  rather than hold up startup). */
+export const CLAUDE_VERSION_PROBE_TIMEOUT_MS = 5_000;
+
+/** Spawns `<claudeBin> --version` and resolves the raw result — never throws: a spawn error, a
+ *  hang past `CLAUDE_VERSION_PROBE_TIMEOUT_MS` (hard SIGKILL), and a non-zero exit all resolve
+ *  `{ ok: false, detail }` instead of rejecting, exactly like probeLlmPing's own never-throws
+ *  contract. */
+export function probeClaudeVersion(claudeBin: string): Promise<ClaudeVersionProbeResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (r: ClaudeVersionProbeResult): void => {
+      if (settled) return;
+      settled = true;
+      resolve(r);
+    };
+    let child: ChildProcess;
+    try {
+      child = spawn(claudeBin, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      finish({ ok: false, detail: `version probe spawn failed: ${e instanceof Error ? e.message : String(e)}` });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      finish({ ok: false, detail: `version probe timed out after ${CLAUDE_VERSION_PROBE_TIMEOUT_MS}ms (hard-killed)` });
+    }, CLAUDE_VERSION_PROBE_TIMEOUT_MS);
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      finish({ ok: false, detail: `version probe spawn error: ${e.message}` });
+    });
+    // 'close', not 'exit' — same #578 rationale as above: stdio buffers are only guaranteed
+    // complete once every stream has closed, not the moment the child terminates.
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        const firstLine = (stderr || stdout).trim().split("\n")[0]?.trim();
+        finish({ ok: false, detail: `version probe exited ${code}${firstLine ? `: ${firstLine}` : ""}` });
+        return;
+      }
+      finish({ ok: true, stdout });
     });
   });
 }

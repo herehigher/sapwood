@@ -28,6 +28,13 @@ export const RUN_EVENT_KINDS = defineKinds({
     actionability: "routine",
     see: "#671",
   },
+  "claude-cli-version-checked": {
+    tags: [],
+    meaning:
+      "startup recorded the installed Claude Code CLI version against the engine's declared floor (ok/below-floor/indeterminate) — visibility, not a gate (#799).",
+    actionability: "routine",
+    see: "#799",
+  },
 
   // Liveness watchdog + the run-level breakers (rapid-restart, consecutive-stalls, idle-churn).
   // None of these are `escalation-source:*` — see ESCALATION_SOURCES' own "DELIBERATELY ABSENT"

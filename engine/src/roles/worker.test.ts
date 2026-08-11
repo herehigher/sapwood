@@ -41,10 +41,12 @@ import {
   guardSettings,
   hasQuotaErrorStatus,
   hasRejectedRateLimitEvent,
+  LLM_PING_REQUIRED_LONG_FLAGS,
   loadFixPromptTemplate,
   loadWorkerPromptTemplate,
   MAX_EGRESS_SUSPECTS_PER_LEG,
   MAX_INCONCLUSIVE_PR_PROBES,
+  MIN_CLAUDE_CLI_VERSION,
   parseAssistantUsageDeltas,
   parseCostUsd,
   parseCostUsdOrNull,
@@ -822,6 +824,13 @@ test("discoverClaudeBin: env CLAUDE_BIN wins, else 'claude'", () => {
   assert.equal(discoverClaudeBin({ CLAUDE_BIN: "" }), "claude"); // empty -> default
 });
 
+// #799: MIN_CLAUDE_CLI_VERSION's shape is load-bearing for claude-version-startup-check.ts's
+// parseClaudeVersion/compareVersion — a non-dotted-triple value would silently break that
+// module's floor comparison rather than fail loud here.
+test("MIN_CLAUDE_CLI_VERSION: a dotted major.minor.patch triple", () => {
+  assert.match(MIN_CLAUDE_CLI_VERSION, /^\d+\.\d+\.\d+$/);
+});
+
 test("claudeArgs: headless flags, stream-json, worktree/session; no --max-budget-usd (soft budget is monitored, not a hard cut)", () => {
   const args = claudeArgs({
     prompt: "do the thing",
@@ -1433,6 +1442,12 @@ test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no
       "text",
       "Respond with the single word 'pong' and nothing else.",
     ]);
+    // #799: LLM_PING_REQUIRED_LONG_FLAGS (the human-owned CI remainder's own import source) must
+    // name a subset of what THIS real invocation actually sent — a flag added to the argv above
+    // without updating that exported list would otherwise drift silently.
+    for (const flag of LLM_PING_REQUIRED_LONG_FLAGS) {
+      assert.ok(argv.includes(flag), `LLM_PING_REQUIRED_LONG_FLAGS names "${flag}", which the real argv above must contain`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
