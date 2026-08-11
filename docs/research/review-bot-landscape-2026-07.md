@@ -1,5 +1,7 @@
 # GitHub auto-review bots: invocation & execution mechanisms (landscape, 2026-07)
 
+> **Process record.** Internal design/research artifact from sapwood's own development history — not end-user documentation.
+
 Research snapshot informing sapwood's gate② reviewer-adapter design. Produced from two
 independent investigations (Codex gpt-5.6-sol medium; Claude Sonnet with official-doc web
 research) cross-validated against each other and against sapwood's implementation

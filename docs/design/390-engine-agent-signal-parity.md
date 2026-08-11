@@ -1,5 +1,7 @@
 # #390 — engine-agent stateless signal parity (hold observation)
 
+> **Process record.** Internal design/research artifact from sapwood's own development history — not end-user documentation.
+
 Design/handoff record for issue #390. Two things live here, and the reason they live in a
 *file* rather than only in PR #517's description is itself a finding from this repo's own
 engine-agent reviewer: a reviewing session's materials contain the file diff, the issue body,

@@ -1,5 +1,7 @@
 # Dashboard 成品预期图 — v2（部件分解阶段）
 
+> **Process record.** Internal design/research artifact from sapwood's own development history — not end-user documentation.
+
 部件流：hero（冻结·26 号图）→ header（冻结·32 号图）→ lanes（冻结·37 号图）
 → cost strip（冻结·40 号图）→ needs-attention strip（冻结·41 号图+42 重chip 嫁接）。
 **mockup 阶段就此收官（用户裁决 2026-07-21）**：activity feed / config

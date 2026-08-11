@@ -1,5 +1,7 @@
 # Design #279 — engine-side LLM review agent (`engine-agent`)
 
+> **Process record.** Internal design/research artifact from sapwood's own development history — not end-user documentation.
+
 Status: **adjudicated design** (issue #279, M10). Negotiated over five adversarial
 review rounds with Codex (gpt-5.6-sol high), final verdict APPROVE (2026-07-21);
 owner rulings D1–D5 recorded below. Inline `[R2-n]`/`[R3]`/`[R4]` markers anchor

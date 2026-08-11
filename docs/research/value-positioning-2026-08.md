@@ -1,5 +1,7 @@
 # Value & positioning review #2 — 2026-08
 
+> **Process record.** Internal design/research artifact from sapwood's own development history — not end-user documentation.
+
 **Status:** adjudicated. Method: three independent deep-research passes over three
 recently prominent open-source projects in the loop/graph-engineering space
 (selected by the owner), each pass grounded in the subject's actual source tree;

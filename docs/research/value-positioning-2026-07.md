@@ -1,5 +1,7 @@
 # Value & positioning research — 2026-07
 
+> **Process record.** Internal design/research artifact from sapwood's own development history — not end-user documentation.
+
 **Status:** adjudicated. Initial synthesis was adversarially reviewed by three
 independent perspectives (product, market, architecture — the architecture pass
 source-audited `engine/src`, `guard.ts`, and PLAN.md rather than taking claims on
