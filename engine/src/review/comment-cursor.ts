@@ -100,8 +100,14 @@ function findStandaloneMarkerValues(body: string): string[] {
  *  read path) still only needs the parsed VALUE, but #703's writer-side helpers below
  *  (`findStandaloneMarkerLines`, `stripStandaloneMarkerLines`, `applyRoleBodyRewrite`) need the
  *  exact original text and its line so they can preserve/remove whole lines verbatim. One walk,
- *  never two independent copies that could drift apart. */
-function scanStandaloneMarkerLines(body: string): Array<{ lineIndex: number; raw: string; value: string }> {
+ *  never two independent copies that could drift apart.
+ *
+ *  Exported (#752 finding 3, PO adjudication on PR #812): ac-snapshot.ts's AC-authority strip
+ *  needs each marker line's PARSED VALUE, not just its raw text (`findStandaloneMarkerLines`
+ *  above), to decide which marker lines are well-formed enough to excuse from the AC-authority
+ *  hash — see that module's `stripAcAuthorityMarkerLines` for why. Purely additive visibility:
+ *  this function's own behavior, and every existing caller in THIS file, is unchanged. */
+export function scanStandaloneMarkerLines(body: string): Array<{ lineIndex: number; raw: string; value: string }> {
   const lines = body.split(/\r?\n/);
   const found: Array<{ lineIndex: number; raw: string; value: string }> = [];
   let fence: { char: string; len: number } | null = null;
@@ -148,7 +154,21 @@ export function findStandaloneMarkerLines(body: string): string[] {
 /** #703: `body` with every standalone adjudication-marker line REMOVED (fence-aware, same rule
  *  as above). A role session has no standing to introduce or move the marker — see
  *  `applyRoleBodyRewrite`, the only caller. Not exported: the marker-strip is meaningless on its
- *  own without also restoring the current body's marker (or not), which is that function's job. */
+ *  own without also restoring the current body's marker (or not), which is that function's job.
+ *
+ *  ac-snapshot.ts's AC-authority hash does NOT reuse this strip (#752 finding 3, PO adjudication
+ *  on PR #812) — it has its own deliberately STRICTER sibling, `stripAcAuthorityMarkerLines`,
+ *  which only excuses a marker line whose value is well-formed (`"0"` or a bare digit run,
+ *  `/^\d+$/`). The two solve different problems and must diverge: THIS strip's job is role-rewrite
+ *  RESTORATION — `applyRoleBodyRewrite` must remove ANY marker-shaped line a role wrote,
+ *  valid-shaped or not, because a role has no standing to write one regardless of what its payload
+ *  says, and the CURRENT body's own (separately-validated) marker is what gets restored
+ *  afterward. `stripAcAuthorityMarkerLines`'s job is AC-authority EXCUSAL from the drift hash — a
+ *  security boundary where a malformed/malicious marker-shaped line (e.g. one smuggling extra
+ *  payload) must NOT be silently excused, so it stays in the hash and drifts fail-closed instead
+ *  of being stripped. `scanStandaloneMarkerLines` above is the ONE shared walk both strips build
+ *  on, so "what counts as a marker-shaped LINE" never has two definitions — only "which of those
+ *  lines gets excused" differs, by design, between the two callers. */
 function stripStandaloneMarkerLines(body: string): string {
   const markerLineIndices = new Set(scanStandaloneMarkerLines(body).map((m) => m.lineIndex));
   if (markerLineIndices.size === 0) return body;

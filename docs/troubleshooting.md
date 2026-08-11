@@ -47,7 +47,13 @@ capacity. A `Ready` board status alone is not enough.
   new body, then remove `sapwood:needs-human` to request gated re-entry. If the original
   `needs-human` label write failed, that lane is permanently outside automatic re-entry even if a
   human later adds or removes the label; review and merge its PR manually. It is not evidence that
-  a fresh `Ready` issue was silently skipped.
+  a fresh `Ready` issue was silently skipped. A comment that ONLY advances the
+  `sapwood:comments-adjudicated-through` cursor marker (#703's per-comment discipline) does not by
+  itself trigger this (#752) — the AC-authority hash ignores that one well-formed marker line; any
+  other body edit still drifts as above. The sibling `comment-cursor-stale` recheck (still ahead of
+  gate②) also correctly recognizes that same marker advance rather than bouncing it as pending
+  (#752 PO-adjudication finding 1, fixed in the same change) — a marker-only comment does not
+  produce either escalation.
 
 The run narrative defaults to `data/logs/sapwood.log` and is also teed to stderr; use
 `sapwood status` for active lanes and `sapwood events --issue ISSUE` for durable escalation

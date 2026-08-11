@@ -1233,6 +1233,36 @@ test("createPlanReviewStub (#652 round 1, finding 1): pre-apply checkpoint — a
   state.close();
 });
 
+test("createPlanReviewStub (#752): pre-apply checkpoint — a MARKER-ONLY body edit (cursor advance, no other byte changed) mid-session STILL discards the decision as body-drift — gate0's raw hashBody/checkBodyDrift is unaffected by the #752 AC-authority normalization", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 16, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[16] = NO_PLAN_BODY; // fresh cursor (no marker, zero comments) -> pre-spend passes
+  const markerOnlyEditedBody = `${NO_PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 5236875925 -->`;
+  const runner = new ScriptedRunner([
+    {
+      result: doneResult("reviewer-0", sapwoodResult({ decision: "approve", issue: 16 }, PLAN_BODY)),
+      // A PO advances the cursor marker per #703 discipline WHILE this session runs — no other
+      // byte of the body changes.
+      effect: () => {
+        forge.issueBodies[16] = markerOnlyEditedBody;
+      },
+    },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 7, phase: "plan_review", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "the approve decision's body write is discarded, never applied");
+  assert.ok(!forge.issueLabels[16]?.includes("plan:approved"), "never approved — the decision was discarded, not applied");
+  assert.equal(forge.issueBodies[16], markerOnlyEditedBody, "the PO's marker advance survives untouched");
+  const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["comment-cursor-stale"]);
+  assert.equal(events.length, 1);
+  const payload = events[0]!.payload as { checkpoint: string; cause: string };
+  assert.equal(payload.checkpoint, "gate0-pre-apply");
+  assert.equal(payload.cause, "body-drift");
+  state.close();
+});
+
 test("createPlanReviewStub (#652 round 1, finding 1): pre-apply checkpoint — an UNCHANGED body between session-render and re-read still passes (the reverse test: body-drift never fires on its own read)", async () => {
   const forge = new FakeForge();
   forge.poolEligibleIssues = [{ number: 13, title: "t", labels: [ROUND_POOL_LABEL] }];
@@ -1465,6 +1495,34 @@ test("createPlanReviewStub (#652 round 1, finding 2): a DIRECT body edit (no com
   assert.equal(forge.updateIssueBodyCalls.length, 0, "the drafter's revised body is discarded, never applied");
   assert.equal(forge.issueBodies[15], editedBody, "the maintainer's direct edit survives untouched");
   assert.ok(forge.labelsAdded.some(([n, l]) => n === 15 && l === "needs-human"));
+  const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["comment-cursor-stale"]);
+  assert.equal(events.length, 1);
+  const payload = events[0]!.payload as { checkpoint: string; cause: string };
+  assert.equal(payload.checkpoint, "gate0-pre-drafter-write");
+  assert.equal(payload.cause, "body-drift");
+  state.close();
+});
+
+test("createPlanReviewStub (#752): pre-drafter-write checkpoint — a MARKER-ONLY body edit arriving during the drafter session STILL discards its output as body-drift", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 17, title: "t", labels: [ROUND_POOL_LABEL] }];
+  forge.issueBodies[17] = NO_PLAN_BODY;
+  const markerOnlyEditedBody = `${NO_PLAN_BODY}\n\n<!-- sapwood:comments-adjudicated-through: 5236875925 -->`;
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 17 }, "missing acceptance criteria")) },
+    {
+      result: doneResult("drafter-0", sapwoodResult({ issue: 17 }, PLAN_BODY)),
+      effect: () => {
+        forge.issueBodies[17] = markerOnlyEditedBody;
+      },
+    },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 9, phase: "plan_review", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "the drafter's revised body is discarded, never applied");
+  assert.equal(forge.issueBodies[17], markerOnlyEditedBody, "the PO's marker advance survives untouched");
   const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["comment-cursor-stale"]);
   assert.equal(events.length, 1);
   const payload = events[0]!.payload as { checkpoint: string; cause: string };

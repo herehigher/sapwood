@@ -121,6 +121,17 @@ test("checkBodyDrift: whitespace-only differences still count as drift (hash com
   assert.notEqual(result, null);
 });
 
+// #752: checkBodyDrift calls hashBody directly (raw, unmodified) — a marker-only advance must
+// STILL read as drift here, unlike the AC-authority hash (ac-snapshot.test.ts). This is #703's
+// invariant: a role body-write must not land silently over an operator's freshly-advanced marker.
+test("checkBodyDrift: a marker-only advance (no other byte changed) STILL counts as drift — #703's write-time guard must not be defeated by #752's AC-authority normalization", () => {
+  const sessionRenderedBody = "## Acceptance criteria\n\n- [ ] one\n\n<!-- sapwood:comments-adjudicated-through: 0 -->";
+  const liveBody = "## Acceptance criteria\n\n- [ ] one\n\n<!-- sapwood:comments-adjudicated-through: 5236875925 -->";
+  const result = checkBodyDrift(liveBody, sessionRenderedBody);
+  assert.notEqual(result, null);
+  assert.equal(result?.ok, false);
+});
+
 // ── escalateCommentCursorStale: needs-human + deduplicated pointer comment ─────────────────────
 
 test("escalateCommentCursorStale: applies needs-human and posts the pointer comment on a fresh stale condition", async () => {

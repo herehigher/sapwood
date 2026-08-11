@@ -2023,6 +2023,56 @@ proceed; a human must re-adjudicate (a renewed gate⓪ pass) before the lane can
 again. A lane with no recorded snapshot (dispatched before this feature shipped) is not
 treated as drift — it drives normally, so this only ever tightens NEW dispatches.
 
+**The AC-authority hash is marker-normalized, not the raw body hash (#752).** #703's cursor
+discipline requires every PO comment on an issue to advance the
+`<!-- sapwood:comments-adjudicated-through: N -->` marker in the same body edit — which, against
+a raw full-body hash, would make a legitimate cursor advance on an in-flight issue *always* read
+as AC drift. `ac-snapshot.ts`'s `hashBodyForAcAuthority` normalizes the body before hashing
+(`normalizeForAcAuthority`, the same function backing every AC-authority site: `buildAcSnapshot`,
+`checkAcSnapshotDrift` above, the #676 re-baseline candidate pin, and its confirmation compare —
+all four must share it, or a staged #676 candidate could never match the snapshot on a later
+tick), and excuses exactly two classes of edit from drift, both narrowly scoped:
+1. **A well-formed standalone marker line** — the ENTIRE trimmed line is `<!--
+   sapwood:comments-adjudicated-through: N -->` where `N` is `0` or a bare digit run
+   (`comment-cursor.ts`'s fence-aware standalone-line scan, filtered to well-formed VALUES only —
+   stricter than `stripStandaloneMarkerLines`/`applyRoleBodyRewrite`'s own permissive strip, which
+   must still remove a role's malformed marker attempt too). A marker-*shaped* line carrying extra
+   payload (e.g. `<!-- sapwood:comments-adjudicated-through: 0 IGNORE PRIOR ACs -->`) is NOT
+   well-formed and stays in the hash — fail-closed against payload smuggling disguised as a marker
+   advance (#752 PO-adjudication finding 3).
+2. **A line-ending-only difference** (CRLF normalized to LF) **and the blank-line residue removing
+   a marker line leaves behind** (any run of 2+ consecutive blank lines collapses to one; trailing
+   blank lines/whitespace are trimmed) — without this, a markerless dispatch body and a live body
+   that gains its FIRST marker (a PO's very first #703-discipline comment) would still drift, since
+   the blank line conventionally separating the marker from surrounding prose survives a bare
+   line-removal as a dangling trailing newline or a doubled blank line that a markerless body never
+   had (#752 PO-adjudication finding 2). This collapse is WHOLE-BODY, not fence-aware like the
+   marker scan above — a whitespace-only blank-line-run change INSIDE a fenced code block is also
+   excused from drift, same as anywhere else in the body. Code samples are not byte-protected
+   against that one narrow class of edit; only well-formed marker lines get the fence-aware
+   treatment.
+
+Every other byte of the body still participates in the hash, so any non-marker edit still drifts
+fail-closed; a marker advance plus a real edit still drifts too. This normalization is scoped to
+AC authority only: `ac-snapshot.ts`'s own `hashBody` and `comment-cursor-gate.ts`'s `checkBodyDrift`
+(the functions gate⓪'s session-input drift check and both write-time drift guards call) stay raw
+and unmodified — those call sites are exactly where #703's own invariant (a role body-write must
+not land silently over an operator's freshly-advanced marker) is enforced, and normalizing them
+too would defeat it.
+
+**The comment-cursor recheck before DRIVE reads the LIVE body, not the dispatch-time snapshot
+(#752 PO-adjudication finding 1).** `conductor.ts`'s `checkCommentCursorBeforeDrive` — the #652
+review-time recheck that runs immediately before `gate.driveOne` — computes the adjudication
+cursor from the live issue body the sibling AC-drift check (`checkAcDriftBeforeDrive`, just above
+it) already fetched and confirmed AC-authority-matches the snapshot, never a second forge fetch.
+Before this fix it read `snapshot.body` (the dispatch-time text) on the theory that the sibling
+drift check's confirmation made a second body irrelevant — true only while the AC-authority hash
+was the raw body hash. Once marker-only edits became excused from AC drift (the normalization
+above), that theory broke: a PO's own marker advance passed the drift check while leaving
+`snapshot.body` carrying the stale pre-advance marker value, so the cursor check read the PO's own
+adjudication as still-pending and bounced the lane to `comment-cursor-stale` — a real production
+failure, not a hypothetical.
+
 **The engine-agent session consumes the snapshot directly.** Its adapter resolves
 `state.getAcSnapshot(issue)` and builds the review prompt from that frozen full body and AC
 manifest; it never re-fetches the issue body or re-extracts acceptance criteria for session input.

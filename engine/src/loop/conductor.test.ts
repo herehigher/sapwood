@@ -26,7 +26,7 @@ import {
   readPrOwner,
 } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
-import { hashBody } from "../review/ac-snapshot.js";
+import { hashBody, hashBodyForAcAuthority } from "../review/ac-snapshot.js";
 import type { EngineReviewArtifact } from "../review/audit.js";
 import { classicThreadFindingKey, engineAgentFindingKey } from "../review/finding-key.js";
 import { type DriveOutcome, MergeDriver } from "../roles/merge-driver.js";
@@ -947,6 +947,53 @@ test("tick DRIVE: AC-snapshot drift routes to needs-human with a drift-explainin
   st.close();
 });
 
+test("#752 (inverted #676 drift test): a live body edit that ONLY advances the cursor marker (no other byte changed), backed by a REAL comment at that marker id, is NOT AC-snapshot drift AND not a stale comment-cursor — driveOne IS invoked, no needs-human escalation of either kind", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const originalBody =
+    "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests\n\n<!-- sapwood:comments-adjudicated-through: 0 -->";
+  // Dispatch normally so the AC snapshot lands through the real DISPATCH path.
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: originalBody }];
+  forge.issueBodies[7] = originalBody;
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const dispatchedOutcome = firstTick.dispatched.find((d) => d.kind === "dispatched");
+  assert.ok(dispatchedOutcome);
+  const workerName = (dispatchedOutcome as { worker: string }).worker;
+  // The worker finishes with a PR — promotes to `driving` on the NEXT tick's RECLAIM phase.
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
+  // A PO leaves an actual comment on the issue — this IS the production shape (#703's discipline
+  // is "advance the marker to the comment you just adjudicated," never a marker-only edit floating
+  // free of any real comment; the pre-extension version of this test used a marker value with NO
+  // matching comment in the stream, which hid the #752 PO-adjudication finding 1 bug entirely: a
+  // cursor computed from the STALE dispatch-time snapshot body — whose own marker is still "0" —
+  // sees zero comments as "pending" only because the fake's comment stream was empty too. With a
+  // real comment present, the stale-snapshot computation instead reports it as PENDING (never
+  // adjudicated, from the "0" cursor's point of view) and wrongly escalates comment-cursor-stale.
+  forge.externalIssueComments[7] = [{ id: "5236875925", login: "the-po", body: "adjudicated, folding into the body below." }];
+  // The PO advances the adjudication-cursor marker per #703 discipline to point at that comment —
+  // no other byte of the body changes.
+  forge.issueBodies[7] =
+    "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests\n\n<!-- sapwood:comments-adjudicated-through: 5236875925 -->";
+  const gate = new FakeMergeGate();
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(
+    gate.calls.length,
+    1,
+    "driveOne IS invoked — a marker-only edit backed by the comment it names is not drift and not a stale cursor",
+  );
+  assert.ok(!forge.labelsAdded.some(([n, l]) => n === 7 && l === "needs-human"), "no needs-human label from a marker-only edit");
+  assert.ok(
+    !r.driven.some((d) => d.kind === "needs-human" && d.issue === 7 && d.reason.startsWith("ac-snapshot-drift")),
+    "driven[] carries no ac-snapshot-drift entry for this lane",
+  );
+  assert.ok(
+    !r.driven.some((d) => d.kind === "needs-human" && d.issue === 7 && d.reason === "comment-cursor-stale"),
+    "driven[] carries no comment-cursor-stale entry either — the cursor gate reads the LIVE body, which names the real comment",
+  );
+  st.close();
+});
+
 test("#676: GATED RECLAIM re-baselines the AC snapshot on supervisor clear — drift, label, clear, reentry drives normally with no re-escalation", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
@@ -1206,7 +1253,13 @@ test('#685 gate② finding [1] round 3 ("null-pin-anything"): a null-candidate r
   const stageTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
   assert.equal(gate.calls.length, 0, "driveOne must NOT be called on the staging tick — nothing has been reclaimed yet");
   assert.equal(st.getWorker("lane-null")?.state, "failed", "not yet reclaimed — staging only");
-  assert.equal(st.getWorker("lane-null")?.ac_rebaseline_candidate_hash, hashBody(v2), "v2's hash is now staged as the candidate");
+  // #752: v2 carries a cursor marker — the staged candidate is the AC-authority (marker-
+  // normalized) hash, never the raw hashBody.
+  assert.equal(
+    st.getWorker("lane-null")?.ac_rebaseline_candidate_hash,
+    hashBodyForAcAuthority(v2),
+    "v2's AC-authority hash is now staged as the candidate",
+  );
   assert.equal(st.getAcSnapshot(21)?.body, v1, "the AC snapshot is untouched by a staging-only pass");
   assert.equal(
     stageTick.gatedReclaimed.some((r) => r.issue === 21 && r.kind === "reclaimed"),
