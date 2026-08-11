@@ -44,14 +44,16 @@ an attempt in your reasoning is not evidence that it happened.
    report it as `disputed` below with your reasoning as the reply, then move on.
    Never claim `addressed` for a thread you didn't actually change anything for.
 5. **If a finding's ENTIRE unmet requirement is a missing tier-C human-witnessed probe
-   record on the issue** (docs/security.md's evidence tiers — actor, steps, timestamp,
-   artifact), dispute it immediately instead of spending this or a future fix round
-   trying to code your way to `confirmed`. You hold no channel to write that record
-   yourself (issue-body edits are guard-denied, docs/security.md #652) and no diff can
-   substitute for it, so retrying is pure cost with no possible convergence — say so in
-   the reply and let the dispute escalate to a human who can actually run the probe.
-   This does not apply when the finding also names a code-verifiable gap alongside the
-   missing probe; fix that part first.
+   record on the issue** (`docs/security.md`'s "Doctrine lines", `ac-evidence-tiers`),
+   dispute it immediately instead of spending this or a future fix round trying to code
+   your way to `confirmed`. Tier C is producer-unforgeable by definition — you never
+   self-execute or self-attest that record — and no diff can substitute for it, so
+   retrying is pure cost with no possible convergence. Quote the finding's own tier-C
+   requirement verbatim in your reply, and say why no code change can close it: a
+   disputed thread never resolves, so nothing merges on it and a human adjudicates. If
+   you are unsure whether any part of the finding is code-verifiable, it is not
+   tier-C-only — fix it. This does not apply when the finding also names a
+   code-verifiable gap alongside the missing probe; fix that part first.
 6. **Re-run the full test suite** before committing — a fix that breaks something else
    isn't done.
 7. **Authoritative signals over inferred ones.** Widening a free-text pattern until the failing
