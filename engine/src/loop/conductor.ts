@@ -2903,9 +2903,20 @@ function adoptConfirmedFixIntent(state: State, supervisor: Supervisor, w: Worker
   // acts on the row at all (before even requestHandoff) — an adopted child's own resume()
   // call already happened in a NOW-CRASHED process, so there is no "before resume()" moment
   // left to observe directly; this is the earliest point THIS process can still capture one.
-  // Superseded harmlessly once the eventual drain+fresh-resume produces its own, later
-  // (and by construction >=) cursor on the "fix-leg-resumed" event — fixLegJournalCursor
-  // picks whichever of the three cursor-bearing events is NEWEST for (worker, fixRounds).
+  // #798 (gate② round 1 finding [0]): NOT the round's true dispatch point — the adopted child
+  // may already have made (and gotten journaled) tool calls BEFORE the crash, and this cursor,
+  // captured AFTER the crash, still excludes every one of them. `fixLegJournalCursor` now picks
+  // the EARLIEST cursor-bearing event per (worker, fixRounds), but on THIS path this event is
+  // the ONLY cursor-bearing event that will ever exist for this round (`fix_rounds` is bumped
+  // right here, and the crashed process's own `fix-leg-started` for this round never landed) —
+  // so earliest-wins changes nothing here; it fixes the started-then-handoff-then-resumed shape
+  // (ev#13006/ev#13106), not this crash-adoption one. A once-more-eventual resume of THIS leg
+  // still appends its own later "fix-leg-resumed" cursor, and earliest-wins correctly keeps
+  // trusting THIS (adoption-time) cursor over that later one — it just cannot reach back past
+  // the crash to recover the child's true pre-crash dispatch point, since no cursor was ever
+  // captured before the crash. Accepted, pre-existing gap (identical under the OLD newest-wins
+  // fold), out of #798's AC set; closing it would need a cursor written before the crashed
+  // process's own resume() call, e.g. carried on the resume-intent record itself.
   const journalCursor = state.maxForgeProxyJournalId(w.name);
   // Never trust the adopted child's proxy channel across a crash (see doc above) — drain it
   // gracefully now rather than let it keep running against a dead evidence channel. Ordered

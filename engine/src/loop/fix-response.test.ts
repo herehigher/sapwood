@@ -305,12 +305,16 @@ test("fixLegJournalCursor: no matching event -> null (fail-closed — the caller
   st.close();
 });
 
-test("fixLegJournalCursor (F1): picks up fix-leg-resumed and fix-leg-adopted events too, whichever is NEWEST for (worker, fixRounds)", () => {
+test("fixLegJournalCursor (#798): picks up fix-leg-resumed and fix-leg-adopted events too, whichever is EARLIEST for (worker, fixRounds) — the round's true dispatch point, not the tightest/most-recent one", () => {
   const st = new State(":memory:");
   st.appendEvent("fix-leg-started", { worker: "lane-fix", issue: 9, pr: 30, fixRounds: 1, journalCursor: 3 });
   st.appendEvent("fix-leg-adopted", { worker: "lane-fix", issue: 9, fixRounds: 1, journalCursor: 8 });
   st.appendEvent("fix-leg-resumed", { worker: "lane-fix", issue: 9, pr: 30, attempt: 1, fixRounds: 1, journalCursor: 15 });
-  assert.equal(fixLegJournalCursor(st, "lane-fix", 1), 15, "the LATEST (highest-id) cursor-bearing event wins");
+  assert.equal(
+    fixLegJournalCursor(st, "lane-fix", 1),
+    3,
+    "the EARLIEST (lowest-id) cursor-bearing event wins — a resumed/adopted leg's session preserves everything since true dispatch (#798)",
+  );
   st.close();
 });
 
@@ -326,6 +330,85 @@ test("fixLegJournalCursor: an event missing a journalCursor field (e.g. a hypoth
     fixRounds: 1,
   } as unknown as EventPayloadFor<"fix-leg-started">);
   assert.equal(fixLegJournalCursor(st, "lane-fix", 1), null);
+  st.close();
+});
+
+test("computeFixResponseHarvest (#798 regression — ev#13006/ev#13106 shape): a fix leg that hands off and resumes still validates against the runId its dispatch was anchored to, even though the resume's OWN cursor lands strictly AFTER the anchoring pr_audit_comments journal row", () => {
+  const st = new State(":memory:");
+  // Attempt 1: the round is dispatched — cursor 0, nothing journaled yet.
+  st.appendEvent("fix-leg-started", { worker: "lane-fix", issue: 9, pr: 30, fixRounds: 1, journalCursor: 0 });
+  // The leg calls pr_audit_comments before running out of budget — this is the SAME journal row
+  // its eventual structured answer names by runId.
+  const auditId = st.appendForgeProxyJournalIntent({
+    identity: { roundId: 1, phase: "fixing", role: "worker", session: "lane-fix", attempt: 1 },
+    seq: 1,
+    tool: "pr_audit_comments",
+    proxyVersion: "1",
+    argsCanonical: JSON.stringify({ pr: 30 }),
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: "2026-08-11T00:00:01Z",
+  });
+  st.recordForgeProxyJournalResponse(auditId, {
+    responseCanonical: JSON.stringify({
+      pr: 30,
+      comments: [{ id: "IC_1", kind: "engine-agent", head: "head-x", diff: "d", runId: "bc164602", body: "…" }],
+      returned: 1,
+      complete: true,
+    }),
+    contentHash: "h",
+    truncated: false,
+    fetchedAt: "2026-08-11T00:00:01Z",
+  });
+  st.recordEngineReviewWal("lane-fix", {
+    runId: "bc164602",
+    head: "head-x",
+    base: "base-x",
+    diffHash: "d",
+    attemptStart: "2026-08-11T00:00:00Z",
+  });
+  st.recordEngineReviewWalArtifact(
+    "lane-fix",
+    "bc164602",
+    "rejected",
+    JSON.stringify({
+      perAC: [],
+      findings: [{ id: "F-0", body: "finding body" }],
+      sessionActualIdentities: [{ provider: "anthropic", model: "m" }],
+      sessionSpends: [{ kind: "known", usd: 0 }],
+      promptHash: "p",
+    }),
+  );
+  // Soft-budget handoff, then resume: the SAME round (fixRounds unchanged), but the resume's own
+  // cursor is captured AFTER the audit-comments row above already exists — this is journalCursor
+  // 958/983's shape from lane-786 (ev#13006/ev#13106): the anchor row now sits BEFORE the resume
+  // cursor, not after it.
+  const resumeCursor = st.maxForgeProxyJournalId("lane-fix");
+  assert.ok(
+    resumeCursor >= auditId,
+    "the resume cursor must land AT OR PAST the anchoring journal row's own id to reproduce the bug shape (listForgeProxyJournalForSession's strict '>' excludes an equal id too)",
+  );
+  st.appendEvent("fix-leg-resumed", { worker: "lane-fix", issue: 9, pr: 30, attempt: 1, fixRounds: 1, journalCursor: resumeCursor });
+
+  const resultText = sapwoodResult({
+    threadResponses: [],
+    findingResponses: [{ runId: "bc164602", findingIndex: 0, reply: "fixed as suggested", resolution: "addressed" }],
+  });
+  const outcome = computeFixResponseHarvest(st, {
+    worker: "lane-fix",
+    issue: 9,
+    fixRounds: 1,
+    prNumber: 30,
+    resultText,
+    headOid: "head-x",
+  });
+  assert.equal(
+    outcome.kind,
+    "batch",
+    "the resumed leg's honest answer against the runId it was dispatched for must validate, not be discarded as fix-response-invalid",
+  );
   st.close();
 });
 
@@ -376,6 +459,90 @@ test("computeFixResponseHarvest (D2 adversarial, cross-leg): round 2 must NOT tr
     headOid: "head-x",
   });
   assert.equal(outcome.kind, "invalid", "round 2 must never validate a threadId only round 1's journal ever saw");
+  st.close();
+});
+
+test("computeFixResponseHarvest (#798 gate② round 1 finding [1]): round 2's OWN earliest-wins fold (fix-leg-started + a later fix-leg-resumed, both fixRounds:2) still never reaches back to round 1's rows — earliest-wins is scoped PER ROUND, not global", () => {
+  const st = new State(":memory:");
+  // Round 1: dispatched, journals ONE threadId, never seen again.
+  st.appendEvent("fix-leg-started", { worker: "lane-fix", issue: 9, pr: 30, fixRounds: 1, journalCursor: 0 });
+  const round1Id = st.appendForgeProxyJournalIntent({
+    identity: { roundId: 1, phase: "fixing", role: "worker", session: "lane-fix", attempt: 1 },
+    seq: 1,
+    tool: "pr_review_threads",
+    proxyVersion: "1",
+    argsCanonical: JSON.stringify({ pr: 30 }),
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: "2026-07-19T00:00:01Z",
+  });
+  st.recordForgeProxyJournalResponse(round1Id, {
+    responseCanonical: JSON.stringify({ pr: 30, threads: [{ id: "ROUND1_ONLY" }] }),
+    contentHash: "h1",
+    truncated: false,
+    fetchedAt: "2026-07-19T00:00:01Z",
+  });
+  // Round 2: dispatched (cursor past round 1's row), journals its OWN threadId, then hands off
+  // and resumes — a SECOND, later cursor-bearing event for the SAME (worker, fixRounds:2).
+  const round2StartCursor = st.maxForgeProxyJournalId("lane-fix");
+  st.appendEvent("fix-leg-started", { worker: "lane-fix", issue: 9, pr: 30, fixRounds: 2, journalCursor: round2StartCursor });
+  const round2Id = st.appendForgeProxyJournalIntent({
+    identity: { roundId: 2, phase: "fixing", role: "worker", session: "lane-fix", attempt: 1 },
+    seq: 1,
+    tool: "pr_review_threads",
+    proxyVersion: "1",
+    argsCanonical: JSON.stringify({ pr: 30 }),
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: "2026-07-19T00:01:00Z",
+  });
+  st.recordForgeProxyJournalResponse(round2Id, {
+    responseCanonical: JSON.stringify({ pr: 30, threads: [{ id: "ROUND2_OWN" }] }),
+    contentHash: "h2",
+    truncated: false,
+    fetchedAt: "2026-07-19T00:01:00Z",
+  });
+  const round2ResumeCursor = st.maxForgeProxyJournalId("lane-fix"); // captured AFTER round2Id — the tighter, later cursor
+  st.appendEvent("fix-leg-resumed", {
+    worker: "lane-fix",
+    issue: 9,
+    pr: 30,
+    attempt: 1,
+    fixRounds: 2,
+    journalCursor: round2ResumeCursor,
+  });
+
+  // fixLegJournalCursor(lane-fix, 2) picks the EARLIEST of round2StartCursor/round2ResumeCursor —
+  // i.e. round2StartCursor — which still sits AFTER round 1's own row, never reaching back to it.
+  assert.equal(fixLegJournalCursor(st, "lane-fix", 2), round2StartCursor);
+
+  const claimingRound1 = computeFixResponseHarvest(st, {
+    worker: "lane-fix",
+    issue: 9,
+    fixRounds: 2,
+    prNumber: 30,
+    resultText: sapwoodResult({ threadResponses: [{ threadId: "ROUND1_ONLY", reply: "handled", resolution: "addressed" }] }),
+    headOid: "head-x",
+  });
+  assert.equal(
+    claimingRound1.kind,
+    "invalid",
+    "round 2's multi-cursor earliest-wins fold must never validate a threadId only round 1's journal ever saw",
+  );
+
+  const claimingRound2 = computeFixResponseHarvest(st, {
+    worker: "lane-fix",
+    issue: 9,
+    fixRounds: 2,
+    prNumber: 30,
+    resultText: sapwoodResult({ threadResponses: [{ threadId: "ROUND2_OWN", reply: "handled", resolution: "addressed" }] }),
+    headOid: "head-x",
+  });
+  assert.equal(claimingRound2.kind, "batch", "round 2's own pre-resume row must still validate — earliest-wins widens WITHIN the round");
   st.close();
 });
 

@@ -295,12 +295,38 @@ export function knownAuditFindingCounts(
  *  (`listForgeProxyJournalForSession`'s `id > afterId`) is a true strict ordering, closing defect
  *  (1); and the adoption path now carries its own cursor too, closing defect (3).
  *
- *  Looks up whichever of the three event kinds is NEWEST for (worker, fixRounds) — a lane can
- *  pass through adopt-then-resume for the SAME round (fix_rounds bumped once, at whichever step
- *  first confirms the spawn), so the tightest, most-recent cursor for that round wins. Returns
- *  null only when NO cursor-bearing event exists for (worker, fixRounds) at all — the caller
- *  treats null as "trust nothing this round", fail-closed; `journalCursor: 0` (a session with no
- *  prior journal rows at cursor time) is a perfectly valid cursor, not "no cursor found". */
+ *  A lane can pass through adopt-then-resume, or started-then-handoff-then-resume, for the SAME
+ *  round (fix_rounds bumped once, at whichever step first confirms the spawn) — up to three
+ *  cursor-bearing events can therefore exist for one (worker, fixRounds). Picks the EARLIEST
+ *  (lowest-id) of them, i.e. the earliest dispatch/adoption point this engine ever recorded for
+ *  the round, NOT the newest. (Not necessarily the round's TRUE first tool call on the crash-
+ *  adoption path — see `adoptConfirmedFixIntent`'s own doc, conductor.ts, for the accepted
+ *  residual gap there.)
+ *
+ *  #798 (batch-13 live evidence, ev#13006/ev#13106, lane-786/PR#794): this used to pick the
+ *  NEWEST cursor instead, on the theory that a later cursor only ever "supersedes" an earlier one
+ *  harmlessly. That is false for `fix-leg-resumed`: `supervisor.resume()` continues the SAME
+ *  Claude Code session (same worktree/branch/session — never a fresh dispatch, conductor.ts's
+ *  fixing-continuation resume), so a `.handoff`-preserved session's conversation history still
+ *  includes every tool call made before the handoff, including whichever `pr_audit_comments` /
+ *  `pr_review_threads` call the leg's structured answer is anchored to. Picking the NEWEST
+ *  (resume-time) cursor excluded that earlier call's journal row from `known`/`knownFindings`
+ *  below, so the leg's own honest answer against the runId it was actually dispatched for could
+ *  never validate — `fix-response-invalid` discarded two already-completed fix legs in one batch,
+ *  each paying for a full fresh review round instead. Picking the EARLIEST cursor for the round
+ *  costs nothing on the safety side: every row this admits is still scoped to this exact (worker,
+ *  fixRounds) pair — the fold only ever picks among THIS round's own cursor-bearing events, never
+ *  reaching back into an earlier round's rows even when this round itself carries more than one
+ *  cursor event (no cross-round leakage — see the two D2 adversarial tests below, the second of
+ *  which pins exactly that multi-cursor-same-round shape) — and still must be `fetched`/
+ *  `delivered` in the journal (journaledReviewThreadIds/journaledAuditRunIds' own status filter
+ *  already excludes any call left mid-flight by a hard crash) — widening the window only ever
+ *  admits calls the leg's OWN session genuinely made and was genuinely served a response for,
+ *  earlier in the SAME uninterrupted round.
+ *
+ *  Returns null only when NO cursor-bearing event exists for (worker, fixRounds) at all — the
+ *  caller treats null as "trust nothing this round", fail-closed; `journalCursor: 0` (a session
+ *  with no prior journal rows at cursor time) is a perfectly valid cursor, not "no cursor found". */
 /** #425: the three cursor-bearing fix-leg kinds, DERIVED from the registry's `fix-leg` tag
  *  instead of the inline array that used to sit in the read below. The same tag keys the payload
  *  map (state/event-kinds/payloads.ts), so this list and `eventsSince`'s typed overload are the
@@ -309,17 +335,21 @@ export const FIX_LEG_CURSOR_KINDS = kindsTagged("fix-leg");
 
 export function fixLegJournalCursor(state: Pick<State, "eventsSince">, worker: string, fixRounds: number): number | null {
   const events = state.eventsSince("1970-01-01T00:00:00.000Z", FIX_LEG_CURSOR_KINDS);
-  for (let i = events.length - 1; i >= 0; i--) {
+  let earliest: number | null = null;
+  for (const event of events) {
     // #425 phase 1.5: `payload` is typed (FixLegCursorPayload) rather than cast — the writer in
     // conductor.ts is held to the SAME shape, so renaming a field there fails to compile HERE.
     // The `typeof` guard stays anyway: the typed read is a compile-time claim about what this
     // engine writes, and this fold also crosses legacy rows written before a field existed.
-    const payload = events[i]!.payload;
-    if (payload.worker === worker && payload.fixRounds === fixRounds && typeof payload.journalCursor === "number") {
-      return payload.journalCursor;
-    }
+    const payload = event.payload;
+    if (payload.worker !== worker || payload.fixRounds !== fixRounds || typeof payload.journalCursor !== "number") continue;
+    // #798: `events` is id-ordered (eventsSince's own `ORDER BY id`), so cursor values across the
+    // SAME round should already be non-decreasing — MIN is taken explicitly anyway rather than
+    // just returning the first match, so this stays correct even if that ordering assumption ever
+    // stops holding for some future writer.
+    if (earliest === null || payload.journalCursor < earliest) earliest = payload.journalCursor;
   }
-  return null;
+  return earliest;
 }
 
 /** The stable key identifying ONE fix round's whole batch of thread responses (D4/D6
