@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { parseConfig } from "../config/config.js";
+import { runEngine } from "../cli.js";
+import { engineAgentEmptyCiRequiredChecksError, parseConfig } from "../config/config.js";
 import type { GhRunner } from "../forge/gh.js";
+import { State } from "../state/state.js";
 import {
   clearDeployKeyConfigFromJson,
   clearDeployKeyConfigFromYaml,
@@ -1321,6 +1323,73 @@ test("init: a fresh fixture repo receives a starter config pinned to produce-pr-
 
     const starter = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
     assert.equal(parseConfig(starter).merge.mode, "produce-pr-and-stop");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #801: `sapwood init` scaffolds a config pairing reviewer.mode: engine-agent (#501 default)
+// with NO ci.requiredChecks — the exact shape `sapwood run` hard-refuses at startup (#784). The
+// scaffold is deliberately NOT given a guessed check name (see init.ts's own comment on why that
+// would be worse — a wrong name would silently reintroduce the queue-forever foot-gun one layer
+// deeper), so this smoke test pins the alternative the issue's AC accepts: init's own output
+// warns explicitly, BEFORE the operator ever reaches `run`, and that warning is not a guess —
+// `sapwood run` on the EXACT scaffold init just wrote refuses with the identical predicate
+// (engineAgentEmptyCiRequiredChecksError, #784/#801), so there is no gap between what init said
+// and what `run` actually does. The init→run path is never a silent cliff.
+test("init→run smoke (#801): sapwood init warns about its own scaffold's engine-agent + empty ci.requiredChecks combination, and sapwood run on that exact scaffold refuses with the SAME predicate — no undisclosed cliff", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((label) => label.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+  });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      ...nonInteractive,
+      sshKeygen: failSshKeygen,
+      probeSshAuth: failProbeSshAuth,
+    });
+
+    // init told the operator, in its own printed action list, before they ever ran `sapwood run`.
+    const warning = actions.find((a) => a.startsWith("config: WARN"));
+    assert.ok(warning, "init must warn about the engine-agent + empty ci.requiredChecks scaffold");
+    assert.match(warning!, /reviewer\.mode is "engine-agent"/);
+    assert.match(warning!, /ci\.requiredChecks is empty/);
+
+    const starterPath = join(dir, "sapwood.config.yaml");
+    const starterCfg = parseConfig(readFileSync(starterPath, "utf8"));
+    // The scaffold itself reproduces exactly the combination the warning named — proving the
+    // warning wasn't testing a DIFFERENT config than what actually landed on disk.
+    assert.ok(engineAgentEmptyCiRequiredChecksError(starterCfg));
+
+    // `sapwood run` against that EXACT file refuses at startup — ZERO forge/dispatch work, same
+    // as cli-rounds.test.ts's own #784 smoke test — with the identical message init already
+    // showed the operator, never a surprise second failure mode. Same stderr-capture shape as
+    // cli-rounds.test.ts's own (unexported, so duplicated here) captureStderr helper.
+    const state = new State(":memory:");
+    try {
+      const originalWrite = process.stderr.write.bind(process.stderr);
+      let stderr = "";
+      process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+        stderr += chunk.toString();
+        return true;
+      }) as typeof process.stderr.write;
+      let code: number;
+      try {
+        code = await runEngine(["node", "sapwood", "run", "--config", starterPath], { state, logger: { log() {} } });
+      } finally {
+        process.stderr.write = originalWrite;
+      }
+      assert.equal(code, 1);
+      assert.match(stderr, /reviewer\.mode is "engine-agent"/);
+      assert.match(stderr, /ci\.requiredChecks is empty/);
+    } finally {
+      state.close();
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

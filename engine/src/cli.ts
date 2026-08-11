@@ -420,7 +420,11 @@ function reviewerTierWarning(cfg: SapwoodConfig, pricing: PricingTable): string 
  *  ZodError -> issues one per line, exit 1; anything else (missing/unreadable file, already
  *  naming the path per Node's own ENOENT message, or loadConfig's own "no config found"
  *  message) -> exit 1; success -> one-line OK summary. Fully synchronous (loadConfig is sync
- *  fs + Zod), so unlike init/run it never needs the async engine-wiring fallthrough. */
+ *  fs + Zod), so unlike init/run it never needs the async engine-wiring fallthrough.
+ *  #801: must reject everything the real `sapwood run` refuses at startup, not just what
+ *  loadConfig's own parse accepts — engineAgentEmptyCiRequiredChecksError (#784) is checked
+ *  right after loadConfig, mirroring runEngine's own startup ordering, so a config `run` would
+ *  hard-refuse never reports OK here either. */
 export function runValidate(argv: string[]): { stdout: string; stderr: string; code: number } {
   const args = argv.slice(3);
   if (args.includes("--help") || args.includes("-h")) {
@@ -429,6 +433,15 @@ export function runValidate(argv: string[]): { stdout: string; stderr: string; c
   const path = args[0];
   try {
     const cfg = loadConfig(path);
+    // #801: same predicate `sapwood run` refuses on (#784), checked FIRST — `sapwood validate`
+    // must reject everything the real run would reject at startup, and this combination
+    // (reviewer.mode: engine-agent + empty ci.requiredChecks) is a startup-order refusal in
+    // `run` itself (before buildRenderPrompt/buildRenderFixPrompt/pricing), so validate mirrors
+    // that same ordering rather than only checking it after the other validations below.
+    const ciConfigError = engineAgentEmptyCiRequiredChecksError(cfg);
+    if (ciConfigError) {
+      return { stdout: "", stderr: `${ciConfigError}\n`, code: 1 };
+    }
     // Validate the prompt template too (#74) — `sapwood validate` must reject everything the
     // real run would reject at startup, including a missing promptFile or unknown {{var}}.
     buildRenderPrompt(cfg);

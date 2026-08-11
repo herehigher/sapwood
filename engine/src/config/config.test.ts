@@ -932,7 +932,11 @@ test("#784: engineAgentEmptyCiRequiredChecksError fires for engine-agent + empty
   assert.match(defaultedError!, /queue fail-closed at the CI-evidence preflight forever/);
   assert.match(defaultedError!, /nothing will ever be reviewed/);
   assert.match(defaultedError!, /add at least one entry to ci\.requiredChecks/);
-  assert.match(defaultedError!, /set reviewer\.mode to something other than "engine-agent"/);
+  // #801: remedy (2) names the legal reviewer.mode alternatives instead of a vague "something
+  // other than" — and the citation is an in-repo doc, not the unreachable "design #279 §4.3".
+  assert.match(defaultedError!, /set reviewer\.mode to one of "different-model-codex", "same-model-trusted", or "human"/);
+  assert.match(defaultedError!, /docs\/configuration\.md/);
+  assert.doesNotMatch(defaultedError!, /design #279/);
 
   // Explicit: the same combination written out by hand must produce the same refusal.
   const explicit = parseConfig(`${BASE_ENGINE_AGENT}ci: { requiredChecks: [] }`);

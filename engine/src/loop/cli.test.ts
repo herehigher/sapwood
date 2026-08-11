@@ -1031,7 +1031,10 @@ test("validate: appears in top-level --help usage", () => {
 test("validate: valid config prints OK summary with path + key effective values, exits 0", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
   const path = join(dir, "sapwood.config.yaml");
-  writeFileSync(path, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
+  // #801: ci.requiredChecks set — the default reviewer.mode (engine-agent) + an empty
+  // ci.requiredChecks is now its OWN rejection (#784 parity, tested separately below); this
+  // fixture's own intent is the OK-summary rendering, so it must not also trip that check.
+  writeFileSync(path, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nci:\n  requiredChecks:\n    - name: test\n");
   try {
     const r = runCli(["node", "sapwood", "validate", path]);
     assert.equal(r.code, 0);
@@ -1048,7 +1051,12 @@ test("validate: valid config prints OK summary with path + key effective values,
 test("validate: worker.promptFile pointing nowhere fails validation, exits 1 (#74)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
   const path = join(dir, "sapwood.config.yaml");
-  writeFileSync(path, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  promptFile: /nonexistent/nope.md\n");
+  // #801: ci.requiredChecks set so this test's own #784-unrelated failure mode isn't shadowed
+  // by the (also-empty-by-default) engine-agent/ci.requiredChecks refusal.
+  writeFileSync(
+    path,
+    "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nci:\n  requiredChecks:\n    - name: test\nworker:\n  promptFile: /nonexistent/nope.md\n",
+  );
   try {
     const r = runCli(["node", "sapwood", "validate", path]);
     assert.equal(r.code, 1);
@@ -1063,7 +1071,11 @@ test("validate: worker.promptFile with an unknown {{var}} fails validation, exit
   const cfgPath = join(dir, "sapwood.config.yaml");
   const promptPath = join(dir, "bad.md");
   writeFileSync(promptPath, "do {{issue.url}}");
-  writeFileSync(cfgPath, `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  promptFile: ${promptPath}\n`);
+  // #801: ci.requiredChecks set — see the sibling promptFile-missing test's own comment above.
+  writeFileSync(
+    cfgPath,
+    `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nci:\n  requiredChecks:\n    - name: test\nworker:\n  promptFile: ${promptPath}\n`,
+  );
   try {
     const r = runCli(["node", "sapwood", "validate", cfgPath]);
     assert.equal(r.code, 1);
@@ -1078,7 +1090,11 @@ test("validate: worker.promptFile with an unknown {{var}} fails validation, exit
 test("validate: worker.fixPromptFile pointing nowhere fails validation, exits 1 (#245 round-2 fix A7)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
   const path = join(dir, "sapwood.config.yaml");
-  writeFileSync(path, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  fixPromptFile: /nonexistent/nope.md\n");
+  // #801: ci.requiredChecks set — see the promptFile-missing test's own comment above.
+  writeFileSync(
+    path,
+    "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nci:\n  requiredChecks:\n    - name: test\nworker:\n  fixPromptFile: /nonexistent/nope.md\n",
+  );
   try {
     const r = runCli(["node", "sapwood", "validate", path]);
     assert.equal(r.code, 1);
@@ -1093,7 +1109,11 @@ test("validate: worker.fixPromptFile with an unknown {{var}} fails validation, e
   const cfgPath = join(dir, "sapwood.config.yaml");
   const promptPath = join(dir, "bad-fix.md");
   writeFileSync(promptPath, "fix {{issue.title}}");
-  writeFileSync(cfgPath, `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  fixPromptFile: ${promptPath}\n`);
+  // #801: ci.requiredChecks set — see the promptFile-missing test's own comment above.
+  writeFileSync(
+    cfgPath,
+    `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nci:\n  requiredChecks:\n    - name: test\nworker:\n  fixPromptFile: ${promptPath}\n`,
+  );
   try {
     const r = runCli(["node", "sapwood", "validate", cfgPath]);
     assert.equal(r.code, 1);
@@ -1107,7 +1127,12 @@ test("validate: relative worker.promptFile resolves against the CONFIG's directo
   const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
   const cfgPath = join(dir, "sapwood.config.yaml");
   writeFileSync(join(dir, "my-prompt.md"), "do #{{issue.number}}");
-  writeFileSync(cfgPath, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  promptFile: my-prompt.md\n");
+  // #801: ci.requiredChecks set — this test asserts code 0, so it must not also trip the
+  // engine-agent/empty-ci.requiredChecks refusal (see the promptFile-missing test's comment above).
+  writeFileSync(
+    cfgPath,
+    "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nci:\n  requiredChecks:\n    - name: test\nworker:\n  promptFile: my-prompt.md\n",
+  );
   try {
     // cwd is the repo, NOT `dir` — validation must still find dir/my-prompt.md.
     const r = runCli(["node", "sapwood", "validate", cfgPath]);
@@ -1146,6 +1171,54 @@ test("validate --help / -h prints validate usage and exits 0", () => {
   }
 });
 
+// ── #801: `sapwood validate` <-> `sapwood run` parity on the #784 hard error ──────────────────
+// #784 made `sapwood run` refuse engine-agent + empty ci.requiredChecks at startup (see
+// cli-rounds.test.ts's own "#784: sapwood run --config <fixture...>" test), but `runValidate`
+// never called the same predicate — a config `run` would hard-refuse could still report
+// "sapwood validate: OK". This regression pins that `validate` now shares the SAME refusal.
+test("#801: sapwood validate refuses engine-agent + empty ci.requiredChecks — same startup refusal `sapwood run` enforces (#784)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
+  const path = join(dir, "sapwood.config.yaml");
+  // Both offending values are DEFAULTED, not written — reviewer.mode defaults to engine-agent
+  // (#501) and ci.requiredChecks defaults to [] (#286), the exact shape #784/#801 are about.
+  writeFileSync(path, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
+  try {
+    const r = runCli(["node", "sapwood", "validate", path]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout, "");
+    assert.match(r.stderr, /reviewer\.mode is "engine-agent"/);
+    assert.match(r.stderr, /ci\.requiredChecks is empty/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#801: sapwood validate does NOT refuse when ci.requiredChecks is set — the hardening is specific to the empty-list combination, not any use of engine-agent", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
+  const path = join(dir, "sapwood.config.yaml");
+  writeFileSync(path, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nci:\n  requiredChecks:\n    - name: test\n");
+  try {
+    const r = runCli(["node", "sapwood", "validate", path]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /sapwood validate: OK/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#801: sapwood validate does NOT refuse a non-engine-agent reviewer.mode with empty ci.requiredChecks — same reverse-test the #784 hard error itself pins", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
+  const path = join(dir, "sapwood.config.yaml");
+  writeFileSync(path, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nreviewer:\n  mode: human\n");
+  try {
+    const r = runCli(["node", "sapwood", "validate", path]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /sapwood validate: OK/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #582: `sapwood validate` reviewer-tier inversion warning ──────────────────────────────
 // D5 enforces that the two models DIFFER but says nothing about ORDERING, so a config can
 // legitimately parse with the reviewer weaker than the producer it gates. WARNING, never a
@@ -1167,7 +1240,11 @@ function validateWith(o: { worker?: string; reviewer?: string; pricing?: string 
     }
     const worker = o.worker !== undefined || pricingLine !== "" ? `worker:\n${o.worker ? `  model: ${o.worker}\n` : ""}${pricingLine}` : "";
     const reviewer = o.reviewer !== undefined ? `reviewer:\n  mode: engine-agent\n  agent:\n    model: ${o.reviewer}\n` : "";
-    writeFileSync(path, `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n${worker}${reviewer}`);
+    // #801: ci.requiredChecks set unconditionally — reviewer.mode DEFAULTS to engine-agent (#501)
+    // even when `o.reviewer` is omitted, so every one of this helper's callers would otherwise
+    // trip the #784 engine-agent/empty-ci.requiredChecks refusal these tests aren't about.
+    const ci = "ci:\n  requiredChecks:\n    - name: test\n";
+    writeFileSync(path, `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n${ci}${worker}${reviewer}`);
     return runCli(["node", "sapwood", "validate", path]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
