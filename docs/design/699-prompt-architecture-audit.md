@@ -69,7 +69,7 @@ Those are recorded below as **considered, not findings** rather than silently sk
 | `harvest.md` | 86 | role/one-job charter/non-negotiables, all A | 0 | 0 | Clean. |
 | `retro.md` | 146 | role/two-rules charter, all A | 0 | 0 | Clean — proactively avoids the no-positive-completeness trap ("you are not limited to the three categories named in this issue's scope if you find something more important"), a good worked counter-example to the recurring class #699's own Why cites. |
 | `doctrine-template.md` | 75 | lines 17-75 (`# Review doctrine` heading onward): the same technical-invariants/adjudication-doctrine prose `docs/REVIEW-DOCTRINE.md` governs — A by that doc's own carrier rules | 0 | 1 (shared, lines 1-16) | See Finding 2. |
-| `goal-template.md` | 37 | section headings + 4 of 5 comment blocks (Goal/Non-goals/Constraints/Current-milestone, lines 12-13/17-18/21-23/35-37): pure authoring guidance to a human, no engine-behavior claim — A | 0 | 1 (shared, lines 27-31) | See Finding 2. |
+| `goal-template.md` | 37 | section headings + the LEADING comment block's lines 6-7 + all 4 SECTION-LOCAL comment blocks (Goal/Non-goals/Constraints/Current-milestone, lines 12-13/17-18/21-23/35-37): pure authoring guidance to a human, no engine-behavior claim — A | 0 | 1 (shared, two citations: lines 27-31 AND the leading block's lines 2-4) | See Finding 2. |
 
 **Totals: 0 B findings across all 14 files. 2 C-class findings: Finding 1, shared across 5 files
 (po.md, po-decompose.md, verification-plan-drafter.md, verification-plan-reviewer.md,
@@ -181,16 +181,30 @@ also receives `doctrine-template.md:4-9` — `` Configured as `doctrine.file` in
 (default: docs/REVIEW-DOCTRINE.md) `` plus the absent-file `NO_DOCTRINE` fallback description — as
 if it were review doctrine.
 
+`goal-template.md` also carries a SIXTH comment block this finding covers, missed in this ledger's
+first pass and added on gate② re-review (sol): a LEADING block at lines 1-8, before any heading —
+so it reaches only po-align's whole-file `{{plan.md}}` substitution (`align.ts::readPlanMd`), never
+architect's chapter-scoped `{{plan.architectureChapter}}` extraction, which starts at the first `##`
+heading. Lines 2-4 are the same class as 27-31 and `doctrine-template.md:4-9` — deterministic
+engine/config facts, not authoring guidance: *"Read by the aligning (PO) and architecting
+peripherals every round, and cited by retro proposals as their basis. Configured as `` `goal.file`
+`` in sapwood.config.yaml (default: `docs/PLAN.md`)."* — C. Lines 6-7 (*"This file was scaffolded
+because none existed yet. Fill in each section for this project, then delete these HTML comments
+..."*) are authoring guidance to the human — A, same as the four section-local blocks. This is the
+SAME mechanism and the SAME finding as the rest of this section, not a new one: `{{plan.md}}` is
+already one of the three substitution points #830's loader-side fix covers, so no third finding and
+no additional follow-up — lines 2-4 are simply a second citation folded into #830's scope.
+
 **Why this is C, not B.** Both cited passages restate deterministic engine facts already enforced
 in code (`config.ts`'s `doctrine.file` default; `doctrine.ts`'s `NO_DOCTRINE` fallback;
 `architect.ts`'s missing-heading placeholder) — exactly principle 3's definition. It is a sharper
 case than Finding 1's hand-copy drift: this duplicate isn't merely present in a file nobody
 renders — it is LIVE-SERVED as role content, to the exact session the comment happens to describe.
 No B concern: neither passage preempts a role's judgment about a specific case; the harm is
-input-channel contamination, not verdict-steering. `goal-template.md`'s other four comment blocks
-(Goal/Non-goals/Constraints/Current-milestone) are pure authoring guidance with no engine-behavior
-claim — read A, not C, though they share the same delivery-channel defect at a lower severity (see
-disposition).
+input-channel contamination, not verdict-steering. `goal-template.md`'s other four section-local
+comment blocks (Goal/Non-goals/Constraints/Current-milestone) and the authoring-guidance half of its
+leading block (lines 6-7) are pure authoring guidance with no engine-behavior claim — read A, not C,
+though they share the same delivery-channel defect at a lower severity (see disposition).
 
 **Disposition.** Not a prose rewrite of either template (out of scope for this audit, and it would
 only fix newly-`sapwood init`'d repos going forward, not already-scaffolded ones still carrying the
