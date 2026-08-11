@@ -681,7 +681,7 @@ used verbatim.
 **#640: per-label semantics (writer/remover/gates/distinguish-from) are a typed registry, not
 just this table's prose.** `engine/src/forge/labels.ts`'s `LABEL_SEMANTICS` — one entry per
 workflow, taxonomy, and hold label, exhaustive at compile time — is rendered into the
-`sapwood-labels` skill (see [`security.md`](security.md#role-session-skill-injection-an-accident-fence-not-a-jail-639))
+`sapwood-labels` skill (see [`security.md`](security.md#role-session-skill-injection--an-accident-fence-not-a-jail-639))
 against THIS repo's resolved names, so a role session reading it never sees a default or a
 `labels.prefix` template. This table stays the operator-facing reference (defaults, config
 keys); the registry is that same knowledge's role-session-facing, compile-checked twin.

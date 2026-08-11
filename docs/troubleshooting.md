@@ -200,6 +200,8 @@ A crash can also leave a stray `sapwood.lock.tmp-*` file in `data/` — a sideca
 atomic create. Its name is unique per process start and is never re-matched by a later
 engine: harmless, safe to delete.
 
+## Environment-failure park (#168)
+
 A failure whose structured error output matches an environment-failure signature — an
 LLM-provider issue (429 / usage-limit / credit-exhausted) or a forge issue (network unreachable
 / 5xx / `gh` auth errors) — is treated as a fault in *sapwood's own environment*, not in the

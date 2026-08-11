@@ -1,5 +1,7 @@
 # #355 — machine-consumed worker refusal signal (design pass)
 
+> **Process record.** Internal design/research artifact from sapwood's own development history — not end-user documentation.
+
 Design-review record for issue #355. Design-only issue (verification plan: "Design-review
 path") — no code change ships from this issue itself; the decision below is carried into a
 separate implementation issue, filed with its own AC/verification.

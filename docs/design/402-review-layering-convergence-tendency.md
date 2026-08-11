@@ -1,5 +1,7 @@
 # Design #402 — review layering, convergence, and tendency
 
+> **Process record.** Internal design/research artifact from sapwood's own development history — not end-user documentation.
+
 Status: **adjudicated and shipped** (issue #402, `verify:n/a` doc-gate). Originally a
 design-first document — nothing in it was implemented by the issue that produced it;
 the deliverable was this doc plus the implementation issues in §11. All six follow-ups

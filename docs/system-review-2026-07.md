@@ -1,5 +1,7 @@
 # System review — July 2026
 
+> **Process record.** Internal design/research artifact from sapwood's own development history — not end-user documentation.
+
 Distilled outcomes of a full-system design review (2026-07-12): architecture
 assessment, principles locked, mechanism clarifications, and the resulting
 roadmap (milestone M5 for the current version; a v1.0 backlog for what must
