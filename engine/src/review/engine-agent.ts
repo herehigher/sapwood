@@ -505,6 +505,11 @@ export class EngineAgentReviewer implements ReviewerAdapter {
       "issue-body": snapshot.body,
       "acceptance-criteria": acText,
       doctrine: doctrineText,
+      // #701: the configured default working language for this review's free-text findings — an
+      // issues/PRs surface (review comments the engine authors). Optional: NOT one of
+      // REQUIRED_PROMPT_PLACEHOLDERS above, so a custom promptFile that doesn't reference it
+      // still loads. See config.ts's `language` section doc comment.
+      "lang.issuesAndPrs": this.deps.cfg.language.issuesAndPrs,
     });
   }
 }

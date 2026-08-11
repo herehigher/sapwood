@@ -5042,6 +5042,21 @@ test("buildRenderPrompt: the shipped default prompt builds clean (all its vars a
   assert.doesNotMatch(rendered, /\{\{/);
 });
 
+test("#701: buildRenderPrompt — {{lang.codeComments}}/{{lang.docs}} default to 'en' with no config, and follow an explicit language.* override", () => {
+  const defaultCfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
+  const defaultRendered = buildRenderPrompt(defaultCfg)({ number: 1, title: "t", labels: [], body: "b" });
+  assert.match(defaultRendered, /Write code comments in `en`/);
+  assert.match(defaultRendered, /documentation you edit in `en`/);
+
+  const jaCfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4 },
+    language: { codeComments: "ja", docs: "fr" },
+  });
+  const jaRendered = buildRenderPrompt(jaCfg)({ number: 1, title: "t", labels: [], body: "b" });
+  assert.match(jaRendered, /Write code comments in `ja`/);
+  assert.match(jaRendered, /documentation you edit in `fr`/);
+});
+
 // ── #245 round-2 fix A7: buildRenderFixPrompt — deliberately NARROWER var set than
 //    buildRenderPrompt's own (issue.number/pr.number/labels.verifyNa only; never
 //    issue.title/body/labels — a fix leg's evidence channel is the PR-facing proxy tools, not
@@ -5073,6 +5088,17 @@ test("buildRenderFixPrompt: the shipped default prompt builds clean (all its var
   assert.match(rendered, /#77/);
   assert.match(rendered, /#42/);
   assert.doesNotMatch(rendered, /\{\{/);
+});
+
+test("#701: buildRenderFixPrompt — {{lang.codeComments}} defaults to 'en' and follows an explicit override", () => {
+  const defaultCfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
+  assert.match(buildRenderFixPrompt(defaultCfg)(42, 77), /Write code comments in `en`/);
+
+  const zhCfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4 },
+    language: { codeComments: "zh-Hans" },
+  });
+  assert.match(buildRenderFixPrompt(zhCfg)(42, 77), /Write code comments in `zh-Hans`/);
 });
 
 test("buildRenderFixPrompt: supported vars are issue.number/pr.number/labels.verifyNa ONLY — issue.title/issue.body/issue.labels are UNKNOWN and fail closed at build time (A7 narrowing)", () => {

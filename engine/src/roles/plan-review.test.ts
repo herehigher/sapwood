@@ -972,6 +972,14 @@ test("renderRolePrompt: substitutes issue + config + extra vars; fails closed on
   assert.throws(() => renderRolePrompt("{{nope}}", issue, cfg), /unknown variable/);
 });
 
+test("#701: renderRolePrompt exposes {{lang.issuesAndPrs}} from cfg.language.issuesAndPrs — defaults to 'en', follows an override", () => {
+  const issue: Issue = { number: 9, title: "T", labels: [], body: "B" };
+  const defaultOut = renderRolePrompt("{{lang.issuesAndPrs}}", issue, mkCfg());
+  assert.equal(defaultOut, "en");
+  const jaOut = renderRolePrompt("{{lang.issuesAndPrs}}", issue, mkCfg({ language: { issuesAndPrs: "ja" } }));
+  assert.equal(jaOut, "ja");
+});
+
 test("defaultVerificationPlanReviewerPromptPath / defaultVerificationPlanDrafterPromptPath: resolve to real shipped files that describe the structured-output contract, not a `gh` command", () => {
   const reviewerTemplate = loadRolePromptTemplate(undefined, defaultVerificationPlanReviewerPromptPath());
   const drafterTemplate = loadRolePromptTemplate(undefined, defaultVerificationPlanDrafterPromptPath());

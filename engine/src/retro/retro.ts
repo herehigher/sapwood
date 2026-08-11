@@ -323,7 +323,13 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
         deps.cfg.roles.retro.tendencyRounds,
       );
       const template = loadRolePromptTemplate(deps.cfg.roles.retro.promptFile, defaultRetroPromptPath());
-      const rendered = renderFactsTemplate(template, { ...factVars(facts), "round.digest": digest });
+      // #701: the configured default working language for the proposal prose this role composes
+      // (an issues/PRs surface) — see config.ts's `language` section doc comment.
+      const rendered = renderFactsTemplate(template, {
+        ...factVars(facts),
+        "round.digest": digest,
+        "lang.issuesAndPrs": deps.cfg.language.issuesAndPrs,
+      });
       const role = deps.cfg.roles.retro;
       // Same outcome-check-and-retry as harvest.ts (gate② P2 on the sibling #100/#101 PRs:
       // RoleRunner.run never throws on the session's own outcome, so an unchecked failed/

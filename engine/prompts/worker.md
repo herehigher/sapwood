@@ -26,6 +26,12 @@ start: it names failure classes this repo's reviewers have flagged more than onc
 {{doctrine}}
 </review-doctrine>
 
+## Working language
+
+Write code comments in `{{lang.codeComments}}` and any documentation you edit in `{{lang.docs}}`
+— BCP-47-ish tags configured in `sapwood.config.yaml` (`language.codeComments` /
+`language.docs`), both `en` by default.
+
 ## Non-negotiables (do not deviate)
 
 - **producer ≠ reviewer ≠ merger.** You write and push code. You never approve a

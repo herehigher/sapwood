@@ -1345,6 +1345,41 @@ const Recovery = z
   })
   .strict();
 
+// #701: the development-language policy — WHICH working language every role composes free
+// text in, per surface, an explicit config-shaped fact rather than prose scattered across
+// carriers (#699 charter principle 3, the standing user-tunables-in-config rule). Values are
+// passed through OPAQUELY — no engine-side language whitelist/validation beyond non-empty, so
+// this key never blocks a language the underlying model can write (fail-open by design, #701's
+// What item 1). Each surface defaults to `"en"`: an unset section is byte-for-byte today's
+// implicit norm (every shipped prompt already reads as English), so a zero-config parse changes
+// no rendered-prompt behavior — see prompts.test.ts's default-language snapshot coverage.
+//
+// The three surfaces are deliberately the small, named set #701 asked for (commit messages etc.
+// are NOT modeled — "keep the set small and add on demand, not speculatively," #701's What item
+// 3) and correspond 1:1 to where a shipped prompt composes free text an operator might want in a
+// non-English language:
+//   - codeComments  — worker.md / fix.md: comments and identifier-adjacent prose in produced code.
+//   - issuesAndPrs  — po.md / po-decompose.md / verification-plan-drafter.md /
+//                     verification-plan-reviewer.md / verification-plan-reviewer-confirm.md /
+//                     harvest.md / retro.md / architect.md / engine-reviewer.md: issue bodies,
+//                     proposal/triage text, and review-comment prose the engine composes.
+//   - docs          — worker.md / fix.md / architect.md: documentation files/chapters a role edits.
+//
+// Precedence (docs/configuration.md "Language customization"): this config key takes precedence
+// over the target repo's own CLAUDE.md prose — #167's CLAUDE.md language entry point remains the
+// FALLBACK carrier for a repo that never sets this section. This key governs the DEFAULT language
+// for content a role ORIGINATES; it does not override a role's separate, pre-existing duty (every
+// prompt below still states it) to preserve/match an existing issue's own already-established
+// language when continuing human-authored content — those are orthogonal concerns, not a
+// precedence conflict.
+const Language = z
+  .object({
+    codeComments: z.string().min(1).default("en"),
+    issuesAndPrs: z.string().min(1).default("en"),
+    docs: z.string().min(1).default("en"),
+  })
+  .strict();
+
 // #168: environment-failure park — detect (signature pattern sets per source), park, probe,
 // auto-resume, timed human escalation. User-tunable-in-config (same shipped-commented-YAML
 // precedent as labels.*/pricing.yaml): patterns are matched deterministically (env-failure.ts's
@@ -1483,6 +1518,7 @@ const ConfigSchemaRaw = z
     goal: Goal.default({}),
     doctrine: Doctrine.default({}),
     recovery: Recovery.default({}),
+    language: Language.default({}),
     reviewer: Reviewer.default({}),
     merge: Merge.default({}),
     labels: Labels.default({}),

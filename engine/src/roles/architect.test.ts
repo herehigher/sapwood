@@ -906,6 +906,57 @@ test("createArchitectStub: cfg.roles.architect.promptFile override is actually l
   }
 });
 
+test("#701: createArchitectStub renders {{lang.docs}}/{{lang.issuesAndPrs}} from cfg.language — defaults to 'en', follows an override", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-"));
+  try {
+    const customPath = join(dir, "custom-lang-architect.md");
+    writeFileSync(customPath, "docs={{lang.docs}} issuesAndPrs={{lang.issuesAndPrs}}");
+    const forge = new FakeForge();
+    forge.planReviewCandidates = [{ number: 7, title: "t", labels: [] }];
+
+    const defaultCfg = mkCfg({ roles: { architect: { promptFile: customPath } } });
+    const defaultState = new State(":memory:");
+    const defaultRunner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+    await createArchitectStub({
+      now: realClock,
+      forge,
+      state: defaultState,
+      cfg: defaultCfg,
+      runner: defaultRunner,
+      planMdPath: "/nonexistent/PLAN.md",
+    }).run({
+      roundId: 3,
+      phase: "architecting",
+      marker: null,
+    });
+    assert.equal(defaultRunner.calls[0]!.prompt, "docs=en issuesAndPrs=en");
+    defaultState.close();
+
+    const customCfg = mkCfg({
+      roles: { architect: { promptFile: customPath } },
+      language: { docs: "fr", issuesAndPrs: "ja" },
+    });
+    const customState = new State(":memory:");
+    const customRunner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+    await createArchitectStub({
+      now: realClock,
+      forge,
+      state: customState,
+      cfg: customCfg,
+      runner: customRunner,
+      planMdPath: "/nonexistent/PLAN.md",
+    }).run({
+      roundId: 3,
+      phase: "architecting",
+      marker: null,
+    });
+    assert.equal(customRunner.calls[0]!.prompt, "docs=fr issuesAndPrs=ja");
+    customState.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── scope assertion: role write scope limited to issues (acceptance criterion 4) ───────────
 
 test("createArchitectStub: the architect session runs under the base issues-only DENY scope — no write/exec grant, ever", async () => {

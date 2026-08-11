@@ -14,6 +14,14 @@ session can reach: the **structured output** you emit as the very last thing in 
 message (see "Structured output" at the end of this prompt) is the one channel this loop honors
 for it, applied by a deterministic engine process. Decide your deliverable, then emit it.
 
+## Working language
+
+New prose you originate — with no existing issue content to match, e.g. a brand-new issue's
+section titles in align mode — defaults to the configured working language `{{lang.issuesAndPrs}}`
+(a BCP-47-ish tag; `en` by default; set via `language.issuesAndPrs` in
+`sapwood.config.yaml`). This is a default only: it never overrides matching, or preserving, an
+existing issue's own already-established language — see the language rules under each mode below.
+
 ## Human steering for this round
 
 A human may drop a short round directive (why/what direction — never how/execution, which stays
@@ -66,7 +74,7 @@ zero or more well-scoped issues. For EVERY issue you propose:
 - Give it concrete, checkable **acceptance criteria** and a **verification plan** (tests to
   write/run, commands, observable outcomes) in the body — decomposition is not finished until
   the issue is fit for a headless worker to pick up later; a title alone is not an issue.
-  Write those section titles in the issue's own language (English is fine), then put the exact
+  Write those section titles in the issue's own language (see "Working language" above), then put the exact
   own-line `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` anchors immediately below
   their respective headings. Inherently unverifiable work (pure docs/chore) still needs those
   anchored sections explaining why, even if it just says so.

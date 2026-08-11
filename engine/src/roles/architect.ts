@@ -694,6 +694,11 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         "labels.blocked": deps.cfg.labels.blocked,
         "labels.needsHuman": deps.cfg.labels.needsHuman,
         "round.directive": directive,
+        // #701: the architect touches both a docs surface (the architecture-chapter reads/
+        // proposals it drafts against docs/PLAN.md) and an issues/PRs surface (contradiction
+        // findings, drop/needs-human comments) — see config.ts's `language` section doc comment.
+        "lang.docs": deps.cfg.language.docs,
+        "lang.issuesAndPrs": deps.cfg.language.issuesAndPrs,
       });
 
       // #251: this session dispatch's input-manifest rows — ONE attempt number, derived

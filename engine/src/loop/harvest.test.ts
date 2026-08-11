@@ -474,6 +474,45 @@ test("createHarvestStub: roles.harvest.promptFile override is honored (the #74 p
   }
 });
 
+test("#701: createHarvestStub renders {{lang.issuesAndPrs}} from cfg.language.issuesAndPrs — defaults to 'en', follows an override", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-harvest-"));
+  try {
+    const promptPath = join(dir, "custom-lang-harvest.md");
+    writeFileSync(promptPath, "lang={{lang.issuesAndPrs}}");
+    const resultText = sapwoodResult({ comments: [{ issue: 9, body: "hi" }] });
+
+    const defaultState = new State(":memory:");
+    const defaultRound = defaultState.startRound("2026-07-10T00:00:00.000Z");
+    defaultState.appendEvent("drive-needs-human", { worker: "lane-a", issue: 9, pr: 1, reason: "x" });
+    const defaultRunner = new ScriptedRunner(doneResult("s1", resultText));
+    const defaultCfg = mkCfg({ roles: { harvest: { promptFile: promptPath } } });
+    await createHarvestStub({ now: realClock, forge: new MinimalForge(), state: defaultState, cfg: defaultCfg, runner: defaultRunner }).run(
+      {
+        roundId: defaultRound.round_id,
+        phase: "harvesting",
+        marker: null,
+      },
+    );
+    assert.equal(defaultRunner.calls[0]!.prompt, "lang=en");
+    defaultState.close();
+
+    const jaState = new State(":memory:");
+    const jaRound = jaState.startRound("2026-07-10T00:00:00.000Z");
+    jaState.appendEvent("drive-needs-human", { worker: "lane-a", issue: 9, pr: 1, reason: "x" });
+    const jaRunner = new ScriptedRunner(doneResult("s1", resultText));
+    const jaCfg = mkCfg({ roles: { harvest: { promptFile: promptPath } }, language: { issuesAndPrs: "ja" } });
+    await createHarvestStub({ now: realClock, forge: new MinimalForge(), state: jaState, cfg: jaCfg, runner: jaRunner }).run({
+      roundId: jaRound.round_id,
+      phase: "harvesting",
+      marker: null,
+    });
+    assert.equal(jaRunner.calls[0]!.prompt, "lang=ja");
+    jaState.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #110 PR3: malformed/schema-invalid/out-of-set structured output — the isValid hook ──────
 
 test("validateHarvestOutput: no structured block at all -> fail-closed", () => {

@@ -274,7 +274,13 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
         ranSession = true;
         const template = loadRolePromptTemplate(deps.cfg.roles.harvest.promptFile, defaultHarvestPromptPath());
         const artifactMd = capRoundArtifactMarkdown(renderRoundArtifactMarkdown(artifact), deps.cfg.roles.harvest.artifactMaxChars);
-        const rendered = renderFactsTemplate(template, factVars(artifact, artifactMd));
+        // #701: the configured default working language for the needs-human briefing comments
+        // this role composes (an issues/PRs surface) — see config.ts's `language` section doc
+        // comment.
+        const rendered = renderFactsTemplate(template, {
+          ...factVars(artifact, artifactMd),
+          "lang.issuesAndPrs": deps.cfg.language.issuesAndPrs,
+        });
         const role = deps.cfg.roles.harvest;
         // RoleRunner.run never throws on the session's OWN outcome (failed/timeout return
         // normally) — checked here, not assumed (gate② P2 on the sibling #100/#101 PRs: both

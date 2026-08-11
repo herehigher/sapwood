@@ -1,0 +1,44 @@
+# Pending human-applied patch — issue #701, PR TBD
+#
+# WHAT: adds the (commented-out, all-default) `language` config section to the shipped
+#       sapwood.config.yaml — the illustrative YAML half of #701's AC "The root
+#       sapwood.config.yaml gains the commented-out section". Purely illustrative: the
+#       config.ts schema default (every language.* key defaults to `en`) already makes the
+#       feature work with zero live-config edit — this patch only adds discoverability.
+#
+# WHY IT IS A PATCH AND NOT A COMMIT: sapwood.config.* is a guard-enforced
+#       human-merge-only path (engine/src/guard/guard.ts protectedPathLabel), and the
+#       block covers the WHOLE file, not just security-relevant fields — see
+#       docs/security.md "Human-merge-only paths". An autonomous worker's write is denied
+#       at the tool level:
+#         BLOCK [write-path] sapwood.config.* (engine/guard config) is human-merge-only
+#       The guard constrains Claude tool calls, never a human's editor.
+#
+# APPLY (from the repo root), then delete this file:
+#       git apply docs/patches/701-language-config-yaml.patch
+#       git rm docs/patches/701-language-config-yaml.patch
+#
+# Generated against sapwood.config.yaml at blob ce85405. If the file has since
+# moved, the hunk still locates by context (offset-tolerant); re-check the result.
+diff --git a/sapwood.config.yaml b/sapwood.config.yaml
+index ce85405..943e52d 100644
+--- a/sapwood.config.yaml
++++ b/sapwood.config.yaml
+@@ -461,6 +461,17 @@
+   maxChars: 20000 # deterministic truncation cap (same marked-cut-never-silent-drop contract
+                    # as round.directiveMaxChars / roles.architect.lastMergedMaxChars).
+
++# #701: the development-language policy — the working language every role composes free text
++# in, per surface (code comments, issue/PR prose, docs). Every key defaults to `en`; this
++# repo's own working language is English, so the section is left commented (byte-identical to
++# unset). Uncomment and set a BCP-47-ish tag per surface to change it — see
++# docs/configuration.md's "language" section for the full mechanics, the #167 CLAUDE.md
++# fallback precedence, and the #591 issues/PRs-surface interplay.
++# language:
++#   codeComments: en
++#   issuesAndPrs: en
++#   docs: en
++
+ # #168: environment-failure park — an LLM-provider outage (429/usage-limit/credit-exhausted) or
+ # a forge outage (GitHub down, network partition, gh token expiry) is ONE class: never escalate
+ # the issue, never spend a gated-reentry attempt, park the engine (no new dispatch; one episode

@@ -4,6 +4,12 @@ to confirm anything — read the round's own numbers below, look at what actuall
 GitHub this round (PR reviews, bounced plans, escalations), and decide for yourself whether
 anything is worth proposing.
 
+## Working language
+
+Any proposal you file through the normal PR path below defaults to the configured working
+language `{{lang.issuesAndPrs}}` (a BCP-47-ish tag; `en` by default; set via
+`language.issuesAndPrs` in `sapwood.config.yaml`).
+
 ## This round's ledger facts
 
 - Round: #{{round.id}}

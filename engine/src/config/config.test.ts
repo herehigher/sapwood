@@ -2223,6 +2223,29 @@ test("dashboardConfigSubset: unlisted keys never leave the engine — no local p
   }
 });
 
+test("#701: language.{codeComments,issuesAndPrs,docs} default to 'en' when the section is omitted entirely", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\n");
+  assert.deepEqual(cfg.language, { codeComments: "en", issuesAndPrs: "en", docs: "en" });
+});
+
+test("#701: language.* accepts an explicit per-surface override, leaving the other surfaces at their own default", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanguage: { codeComments: ja }\n");
+  assert.equal(cfg.language.codeComments, "ja");
+  assert.equal(cfg.language.issuesAndPrs, "en");
+  assert.equal(cfg.language.docs, "en");
+});
+
+test("#701: language.* is passed through opaquely — any non-empty tag parses, no engine-side language whitelist", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanguage: { issuesAndPrs: zh-Hans, docs: pt-BR }\n");
+  assert.equal(cfg.language.issuesAndPrs, "zh-Hans");
+  assert.equal(cfg.language.docs, "pt-BR");
+});
+
+test("#701: language.* rejects an empty-string value (min(1)) and an unknown sub-key (strict schema, same as every other config section)", () => {
+  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanguage: { codeComments: '' }\n"));
+  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanguage: { commitMessages: en }\n"));
+});
+
 test("configHash: stable for identical config (key order included), changes when config changes", () => {
   const a = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { max: 4 }\n");
   const b = parseConfig("lanes: { max: 4 }\nboard: { projectNumber: 1, repo: r, owner: a }\n");

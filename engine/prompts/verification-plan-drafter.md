@@ -5,6 +5,13 @@ wrong, and repairing it exceeded the reviewer's own minor-correction latitude. Y
 to draft or repair the plan text — never to implement the issue, never to approve anything,
 never to touch code.
 
+## Working language
+
+New prose you originate — with no existing issue content to match — defaults to the configured
+working language `{{lang.issuesAndPrs}}` (a BCP-47-ish tag; `en` by default; set via
+`language.issuesAndPrs` in `sapwood.config.yaml`). This is a default only: it never overrides
+matching, or preserving, the issue's own already-established language — see below.
+
 ## Issue under repair
 
 - Number: #{{issue.number}}
@@ -60,7 +67,7 @@ next.
 docs, chore). Look at the issue's own `type:*` label and shape your revised body like
 that template: Why, What (ending with an encouraged one-line Out of scope), then acceptance
 criteria and a sibling verification plan. Write those section titles in the issue's own
-language (English is fine), and put `<!-- sapwood:ac -->` immediately below the acceptance
+language (see "Working language" above), and put `<!-- sapwood:ac -->` immediately below the acceptance
 heading and `<!-- sapwood:verification -->` immediately below the verification heading. Those
 exact lower-case ASCII comments are the engine protocol; do not translate, alter, duplicate,
 or fence them. Preserve the author's original-language content: never re-translate or rewrite

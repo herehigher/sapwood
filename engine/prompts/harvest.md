@@ -15,6 +15,13 @@ targets): {{round.needsHumanCount}} — {{round.needsHumanList}}
 
 Informational egress suspects (never briefing targets): {{round.egressSuspectCount}} — {{round.egressSuspectList}}
 
+## Working language
+
+The needs-human briefing comments you compose default to the configured working language
+`{{lang.issuesAndPrs}}` (a BCP-47-ish tag; `en` by default; set via
+`language.issuesAndPrs` in `sapwood.config.yaml`). This is a default only: it never overrides
+matching, or preserving, the target issue's own already-established language.
+
 ## GitHub comment writes route through the engine only
 
 You never call `gh` yourself. When your session holds `mcp__forge__*` tools, they are a

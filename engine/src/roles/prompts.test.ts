@@ -88,7 +88,10 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // and into verification-plan-reviewer.md's gate⓪ checklist so it's enforced, not just authored.
   // #809 (gate② F4): the human-merge-only paths list now also names sapwood.config.example.*
   // (guard-protected in its own right by #781) — hash moved for that addition.
-  "po.md": "cb264de2435fb270264506eb392a58a55a45f6f894471b22cf7aef4daaa8c8ac",
+  // #701: new "Working language" section states the configured `language.issuesAndPrs` default
+  // (`{{lang.issuesAndPrs}}`) for prose this role originates; the pre-existing "(English is
+  // fine)" parenthetical now points at it instead of naming a literal language.
+  "po.md": "f75ad07d5f88d777cbf977c6b0957b20cce5250dbddaf119c3c6ea62f15753ee",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
@@ -118,7 +121,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #616's ambient-MCP-tool finding falsifies. Reworded to the structural fact (comment/label
   // writes are engine-applied from the structured output only) without claiming anything about
   // what tools this session does or doesn't hold.
-  "architect.md": "77802e2a2ff0e6c9fbffcd69922a2f8a11fb91bf03f8edf0465abd6bfe66b943",
+  // #701: new "Working language" section names `{{lang.docs}}` (architecture-chapter prose) and
+  // `{{lang.issuesAndPrs}}` (design notes / contradiction explanations) as configured defaults.
+  "architect.md": "65e704855e9bf12bce4be28915d359c240577a0dbbeb6bc64c025a831faaae33",
   // #457 (F36): intentional edits — execution-class ACs are plan noise (CI already enforces
   // ci.requiredChecks unconditionally): verification-plan-reviewer flags-and-strips them, the confirm pass
   // invalidates legacy plans carrying them, drafter/decompose never author them.
@@ -171,7 +176,10 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // burned 2 wasted draft→re-review cycles reaching the identical verdict via outcome 2).
   // #809 (gate② F4): same sapwood.config.example.* addition to the human-merge-only paths
   // list as po.md above — hash moved for that addition.
-  "verification-plan-reviewer.md": "41e6194c144d40d0244d55072eb21c59c5c51d9c5e0c8d89780ec46867e55705",
+  // #701: appends a sentence naming `{{lang.issuesAndPrs}}` as the configured default working
+  // language for prose with nothing existing to match, right after the pre-existing "use the
+  // issue's own language" sentence.
+  "verification-plan-reviewer.md": "a86677917c8e0a3d024dd5a8807a05ff3e8be09792a11992edd715ada0e21edb",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
   // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
@@ -192,7 +200,8 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // staleness is decided, and the standing check points at it with the same honest cap wording.
   // #672: same UNTRUSTED DATA reword as verification-plan-reviewer.md above, verbatim (the two
   // files share the identical comment-stream intro paragraph).
-  "verification-plan-reviewer-confirm.md": "5e23aef3caa647d9b5009d4ce42c9fb3faeb4bc9ef33c36b9040d9b4e15c37e4",
+  // #701: same appended working-language sentence as verification-plan-reviewer.md above.
+  "verification-plan-reviewer-confirm.md": "73770c8ca68b85addaa4b3a0081aed5ecad99ca43c72690aa4229e1c0ed895ed",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — the
   // drafter's brief is still its primary instruction set; the forge grant (never removed) is a
   // read-only aid, never a write path, exactly as this file has always said.
@@ -208,7 +217,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // guidance.
   // #809 (gate② F4): same sapwood.config.example.* addition to the human-merge-only paths
   // list as po.md above — hash moved for that addition.
-  "verification-plan-drafter.md": "b77839852a79fb720f373b0910376b6212aa27563348b5ff0520f3996d618c94",
+  // #701: new "Working language" section states the configured `language.issuesAndPrs` default;
+  // the pre-existing "(English is fine)" parenthetical now points at it.
+  "verification-plan-drafter.md": "8e7b5ac585051ba4e061790fd02af3c31d1f0015932d7fab6a5fa8e5be56f93c",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
   // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
   // grant was never removed, so the capability paragraph again names it (when attached) instead
@@ -218,7 +229,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // guarding the structured-output ask all asserted tool-inventory completeness #616's
   // ambient-MCP-tool finding falsifies. Reworded to the structural fact (comment writes are
   // engine-applied from the structured output only) without a tool-inventory claim.
-  "harvest.md": "84a66fb8255eb5d2bb5e836d376ebc3663404623415d26134af0e6e20fe6a9e0",
+  // #701: new "Working language" section states the configured `language.issuesAndPrs` default
+  // for the needs-human briefing comments this role composes.
+  "harvest.md": "cb9ae494f67956fda857d19e6bd9188bcafceb16bb6423bd5e701aa60cbb7319",
   // #453 (design #402 R5): intentional edit — the digest's new finding-class tendency table is
   // pointed at, with the design-source rule and the stated blind spot. The FIRST deliberate
   // change to this file since #235 pinned it as "already code-aware, do not touch"; that ruling
@@ -241,7 +254,10 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // MCP tool could add — #616's finding). Reworded to name what actually opens the PR instead
   // (the engine, from the pushed branch + `.sapwood-retro-pr`) rather than claiming the session
   // lacks the capability outright.
-  "retro.md": "e88d4378313ef8bf1e6f9ffcb32add3f3f8058816471d9afb18e6e38891c6e5b",
+  // #701: new "Working language" section states the configured `language.issuesAndPrs` default
+  // for proposal prose this role composes — the second deliberate edit since #235's tool-scope
+  // freeze (after #453's tendency-table section; see the retro.md snapshot test's own name below).
+  "retro.md": "f8fbb96b150f85d26d67ac8ab89d4fd74e7aa5cda86922ddb4ce527cf1bb787d",
   // #529: same categorical→conditional GitHub-access fix as architect.md.
   // #533 proposed removing po-pool's ISSUE_TOOLS grant and substituting each candidate's full
   // body in its place; the owner reversed the grant-removal half only. po-pool KEEPS its
@@ -273,7 +289,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // sub-issue writes") — falsified in principle by #616's ambient-MCP-tool finding. Dropped the
   // redundant closure claim rather than restating the structural fact a second way.
   // retro round #363: same fix as po.md above, mirrored for decomposed child issues.
-  "po-decompose.md": "753aefa9fca4efe260c94bccb9f81694c94713085056de122b02bbd8ee7e5983",
+  // #701: new "Working language" section states the configured `language.issuesAndPrs` default;
+  // the pre-existing "(English is fine)" parenthetical now points at it.
+  "po-decompose.md": "49929fcfc775d4c9bb3009ed4f0476bccad4f57b9e726f0f60ee59cf7a24d542",
 };
 
 test("prompt snapshot: po.md hash matches the pinned revision", () => {
@@ -300,7 +318,7 @@ test("prompt snapshot: harvest.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultHarvestPromptPath())), SNAPSHOT_HASHES["harvest.md"]);
 });
 
-test("prompt snapshot: retro.md hash matches the pinned revision (#235's tool-scope freeze still holds — the only edit since is #453's tendency-table section)", () => {
+test("prompt snapshot: retro.md hash matches the pinned revision (#235's tool-scope freeze still holds — the only edits since are #453's tendency-table section and #701's working-language line)", () => {
   assert.equal(sha256(readPrompt(defaultRetroPromptPath())), SNAPSHOT_HASHES["retro.md"]);
   // #235 AC item 3 was about retro's TOOL SCOPE, and that half is still pinned byte-wise below:
   // the prompt gained no tool grant, no `gh` instruction, and no direct-write path.
@@ -1325,5 +1343,48 @@ test("#328 (re-scoped): verification-plan-reviewer.md, verification-plan-reviewe
       !/be DROPPED/.test(body),
       `${name}: must not instruct that the AC be dropped — a sole-AC drop yields zero checkboxes, which validateDrafterOutput rejects`,
     );
+  }
+});
+
+test("#701 (Tier B): no shipped role prompt hardcodes 'English' as a literal working-language directive — the #701 sweep replaced every such mention with a `{{lang.*}}` template-var reference", () => {
+  const allPromptPaths: Record<string, string> = {
+    "po.md": defaultPoPromptPath(),
+    "po-decompose.md": defaultPoDecomposePromptPath(),
+    "po-pool.md": defaultPoolPromptPath(),
+    "verification-plan-drafter.md": defaultVerificationPlanDrafterPromptPath(),
+    "verification-plan-reviewer.md": defaultVerificationPlanReviewerPromptPath(),
+    "verification-plan-reviewer-confirm.md": defaultVerificationPlanConfirmPromptPath(),
+    "architect.md": defaultArchitectPromptPath(),
+    "harvest.md": defaultHarvestPromptPath(),
+    "retro.md": defaultRetroPromptPath(),
+    "worker.md": defaultPromptPath(),
+    "fix.md": defaultFixPromptPath(),
+    "engine-reviewer.md": defaultEngineReviewerPromptPath(),
+  };
+  for (const [name, path] of Object.entries(allPromptPaths)) {
+    const body = readPrompt(path);
+    assert.ok(!/\bEnglish\b/.test(body), `${name}: must not name "English" as a hardcoded language directive — use {{lang.*}} instead`);
+  }
+});
+
+test("#701: every role prompt that composes free text for a language surface references that surface's `{{lang.*}}` template variable", () => {
+  const expectations: Array<[string, string, string[]]> = [
+    ["po.md", defaultPoPromptPath(), ["{{lang.issuesAndPrs}}"]],
+    ["po-decompose.md", defaultPoDecomposePromptPath(), ["{{lang.issuesAndPrs}}"]],
+    ["verification-plan-drafter.md", defaultVerificationPlanDrafterPromptPath(), ["{{lang.issuesAndPrs}}"]],
+    ["verification-plan-reviewer.md", defaultVerificationPlanReviewerPromptPath(), ["{{lang.issuesAndPrs}}"]],
+    ["verification-plan-reviewer-confirm.md", defaultVerificationPlanConfirmPromptPath(), ["{{lang.issuesAndPrs}}"]],
+    ["architect.md", defaultArchitectPromptPath(), ["{{lang.issuesAndPrs}}", "{{lang.docs}}"]],
+    ["harvest.md", defaultHarvestPromptPath(), ["{{lang.issuesAndPrs}}"]],
+    ["retro.md", defaultRetroPromptPath(), ["{{lang.issuesAndPrs}}"]],
+    ["worker.md", defaultPromptPath(), ["{{lang.codeComments}}", "{{lang.docs}}"]],
+    ["fix.md", defaultFixPromptPath(), ["{{lang.codeComments}}"]],
+    ["engine-reviewer.md", defaultEngineReviewerPromptPath(), ["{{lang.issuesAndPrs}}"]],
+  ];
+  for (const [name, path, vars] of expectations) {
+    const body = readPrompt(path);
+    for (const v of vars) {
+      assert.ok(body.includes(v), `${name}: must reference ${v}`);
+    }
   }
 });

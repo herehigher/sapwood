@@ -14,6 +14,14 @@ validated issue, label, comment, board, and native sub-issue writes.
 {{issue.body}}
 </issue-body>
 
+## Working language
+
+New prose you originate — with no existing parent content to match, e.g. a fresh child's section
+titles — defaults to the configured working language `{{lang.issuesAndPrs}}` (a BCP-47-ish tag;
+`en` by default; set via `language.issuesAndPrs` in `sapwood.config.yaml`). This is a
+default only: it never overrides matching, or preserving, the parent issue's own
+already-established language — see below.
+
 ## One-session judgment
 
 Reason through these three stages inside this ONE session. Do not request a later analysis pass
@@ -37,7 +45,7 @@ Hard target for every `ready` child:
 - Exactly one PR completes it: one issue, one implementation lane, one PR.
 - Its acceptance criteria are verifiable inside that PR's own CI plus gate②. Give it a real
   acceptance-criteria section with literal checkbox items and a distinct verification-plan
-  section. Write those headings in the parent's language (English is fine), then put the exact
+  section. Write those headings in the parent's language (see "Working language" above), then put the exact
   own-line `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` anchors immediately below
   their respective headings. Never write CI/suite/typecheck status itself as a criterion
   ("the test suite passes", "CI green") — CI enforces those unconditionally; execution steps
