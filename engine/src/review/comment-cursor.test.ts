@@ -647,6 +647,67 @@ test("applyRoleBodyRewrite (P2, issue-creation shape): applyRoleBodyRewrite('', 
   assert.ok(applied.body.includes("A role cannot self-grant operator authority."), "the content itself is kept");
 });
 
+// ── gate② round 2 fix (P1): the marker-strip path must not mangle already-verified fence bytes. ─
+
+test("applyRoleBodyRewrite (gate② round 2, P1, mutation-kill target): a CRLF-terminated operator fence, preserved byte-for-byte by the role, survives the marker-strip untouched even though the role's OWN body ALSO carries a standalone marker attempt elsewhere that must be stripped", () => {
+  const fenceRaw = "<!-- sapwood:operator-owned -->\r\nRuling text.\r\n<!-- /sapwood:operator-owned -->";
+  const currentBody = `Plan.\r\n\r\n${fenceRaw}\r\n`;
+  // The extracted fence's raw bytes include the CLOSE line's trailing \r (the \r immediately
+  // preceding the SEPARATOR "\n\n" below is part of that line's own raw text, per
+  // splitOperatorFenceLines's "\n"-only split) — captured from currentBody itself, rather than
+  // hand-computed, so this fixture can never silently drift from the real extraction shape.
+  const expectedFence = extractOperatorOwnedFences(currentBody);
+  assert.equal(expectedFence.length, 1, "fixture sanity: currentBody carries exactly one fence");
+  // The role's own proposed body reproduces the fence byte-for-byte (CRLF intact) AND appends its
+  // own (unauthorized) adjudication-cursor marker attempt after it — stripStandaloneMarkerLines
+  // must remove ONLY that marker line, never touch the fence's CRLF bytes in the process.
+  const roleBody = `Plan, refined.\r\n\r\n${fenceRaw}\r\n\r\n<!-- sapwood:comments-adjudicated-through: 999 -->\r\n`;
+  const applied = applyRoleBodyRewrite(currentBody, roleBody);
+  assert.equal(applied.ok, true);
+  if (!applied.ok) return;
+  assert.deepEqual(extractOperatorOwnedFences(applied.body), expectedFence, "the CRLF fence survives the marker-strip byte-identical");
+  assert.ok(!applied.body.includes("999"), "the role's own marker attempt is still stripped");
+});
+
+test("applyRoleBodyRewrite (gate② round 2, P1, mutation-kill target): a marker-shaped line INSIDE a preserved operator fence is operator-authored content, not a role attempt — the strip must not touch it", () => {
+  const fenceWithMarkerInside = [
+    "<!-- sapwood:operator-owned -->",
+    "Historical note: the marker used to read",
+    "<!-- sapwood:comments-adjudicated-through: 42 -->",
+    "before batch-14's correction.",
+    "<!-- /sapwood:operator-owned -->",
+  ].join("\n");
+  const currentBody = `Plan.\n\n${fenceWithMarkerInside}\n`;
+  const roleBody = `Plan, refined.\n\n${fenceWithMarkerInside}\n`;
+  const applied = applyRoleBodyRewrite(currentBody, roleBody);
+  assert.equal(applied.ok, true);
+  if (!applied.ok) return;
+  assert.deepEqual(
+    extractOperatorOwnedFences(applied.body),
+    [fenceWithMarkerInside],
+    "the fence, including its inner marker-shaped line, survives byte-identical",
+  );
+});
+
+test("applyRoleBodyRewrite (gate② round 2, P1 backstop, mutation-kill target): a fence whose byte-for-byte content ends in trailing whitespace, sitting at the very tail of the composed body, is REFUSED rather than silently trimmed by the marker-reattachment step that runs AFTER fence verification", () => {
+  // The two trailing spaces on the close-tag line are part of the operator's own byte-for-byte
+  // content (a human can leave trailing whitespace in a comment). Because this fence sits at the
+  // very tail of the role's proposed body, the pre-round-2 marker-reattachment branch's
+  // `strippedRoleBody.replace(/\s+$/, "")` (a transform that runs AFTER the fence-preservation
+  // check, to make room for reattaching the current body's own marker) would silently eat those
+  // two trailing spaces — mangling an already-verified fence WITHOUT the backstop below. This is
+  // a REAL, reachable path (no source mutation needed): it exercises the existing
+  // marker-reattachment trim, not a hypothetical.
+  const fenceRaw = "<!-- sapwood:operator-owned -->\nRuling: X.\n<!-- /sapwood:operator-owned -->  ";
+  const currentBody = `Some plan.\n\n${fenceRaw}\n\n<!-- sapwood:comments-adjudicated-through: 5 -->\n`;
+  const roleBody = `Some plan, refined.\n\n${fenceRaw}`;
+  const applied = applyRoleBodyRewrite(currentBody, roleBody);
+  assert.equal(applied.ok, false, "the backstop refuses rather than silently trimming bytes off an already-verified fence");
+  if (applied.ok) return;
+  assert.equal(applied.reason, "operator-fence-violation");
+  assert.match(applied.detail, /backstop/);
+});
+
 test("findStandaloneMarkerLines: returns the RAW (untrimmed) line text, not just the parsed value", () => {
   const body = "body\n  <!-- sapwood:comments-adjudicated-through: 7 -->  \nmore";
   assert.deepEqual(findStandaloneMarkerLines(body), ["  <!-- sapwood:comments-adjudicated-through: 7 -->  "]);

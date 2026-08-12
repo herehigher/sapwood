@@ -168,14 +168,56 @@ export function findStandaloneMarkerLines(body: string): string[] {
  *  payload) must NOT be silently excused, so it stays in the hash and drifts fail-closed instead
  *  of being stripped. `scanStandaloneMarkerLines` above is the ONE shared walk both strips build
  *  on, so "what counts as a marker-shaped LINE" never has two definitions — only "which of those
- *  lines gets excused" differs, by design, between the two callers. */
+ *  lines gets excused" differs, by design, between the two callers.
+ *
+ *  gate② round 2 fix (P1): this function does NOT reuse `scanStandaloneMarkerLines`'s own
+ *  `body.split(/\r?\n/)` walk for its OWN reconstruction, and deliberately duplicates a slimmer
+ *  scan instead — two changes from the pre-round-2 shape:
+ *  (1) Byte-preserving reconstruction. `applyRoleBodyRewrite` verifies operator-fence bytes
+ *  against the UNSTRIPPED `roleBody` before this function ever runs; the pre-round-2
+ *  implementation then rebuilt the WHOLE body via `body.split(/\r?\n/).filter(...).join("\n")`,
+ *  which silently rewrites EVERY internal CRLF to LF — including bytes inside an
+ *  already-verified operator fence, invalidating that earlier check's result one step later. This
+ *  version reuses `splitOperatorFenceLines`'s raw+term technique (split on `"\n"` only, each kept
+ *  line rebuilt with its OWN original terminator) — recognition still trims (a trailing `\r` never
+ *  defeats standalone-line recognition), only reconstruction is raw, mirroring the operator-fence
+ *  path's own split between the two concerns.
+ *  (2) Protected-range awareness. A marker-shaped line sitting INSIDE an operator-owned fence
+ *  already present in `body` is operator-owned CONTENT, never a role's own marker attempt, and
+ *  must never be stripped — the pre-round-2 walk had no concept of "inside a fence" at all (it
+ *  only tracked GFM CODE fences, an unrelated syntax) and would strip such a line regardless of
+ *  where it sat. This function's ONLY caller (`applyRoleBodyRewrite`) always invokes it on
+ *  `roleBodyFenceStripped` — `stripUnpreservedOperatorFenceTags`'s own output, which by
+ *  construction leaves behind ONLY fences already byte-identical to a real current-body fence — so
+ *  a fresh `scanOperatorFences(body)` on THIS input's own blocks is sufficient to identify every
+ *  protected line range; no separate "is this really the operator's fence" check is needed. */
 function stripStandaloneMarkerLines(body: string): string {
-  const markerLineIndices = new Set(scanStandaloneMarkerLines(body).map((m) => m.lineIndex));
+  const lines = splitOperatorFenceLines(body);
+  const protectedRanges = scanOperatorFences(body).blocks.map((b): [number, number] => [b.openLine, b.closeLine]);
+  const isProtected = (lineIndex: number): boolean => protectedRanges.some(([s, e]) => lineIndex >= s && lineIndex <= e);
+
+  const markerLineIndices = new Set<number>();
+  let codeFence: { char: string; len: number } | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i]!.raw.trim();
+    const fenceMatch = FENCE_RE.exec(trimmed);
+    if (fenceMatch) {
+      const run = fenceMatch[1]!;
+      if (codeFence === null) {
+        codeFence = { char: run[0]!, len: run.length };
+      } else if (run[0] === codeFence.char && run.length >= codeFence.len && trimmed.length === run.length) {
+        codeFence = null;
+      }
+      continue;
+    }
+    if (codeFence !== null) continue;
+    if (MARKER_LINE_RE.test(trimmed) && !isProtected(i)) markerLineIndices.add(i);
+  }
   if (markerLineIndices.size === 0) return body;
-  return body
-    .split(/\r?\n/)
+  return lines
     .filter((_, i) => !markerLineIndices.has(i))
-    .join("\n");
+    .map((l) => l.raw + l.term)
+    .join("");
 }
 
 /** #827: the operator-owned section fence — `<!-- sapwood:operator-owned -->` … `<!--
@@ -454,7 +496,20 @@ function stripUnpreservedOperatorFenceTags(currentFences: readonly string[], rol
  *  that function's own doc for the strip-the-tags-keep-the-content mechanism. This runs even when
  *  `currentBody` carries no fence at all (`currentFences` empty) — including issue-creation.ts's
  *  `applyRoleBodyRewrite("", ...)` call, where a role-proposed BRAND-NEW body's own forged fence
- *  tags are stripped by construction, never accepted as authoritative. */
+ *  tags are stripped by construction, never accepted as authoritative.
+ *
+ *  gate② round 2 fix (P1, defense in depth): the fence checks above only ever verify `roleBody`
+ *  — the role's UNSTRIPPED, unmodified proposal — before this function's OWN later transforms
+ *  (fence-tag stripping, marker stripping, marker reattachment) run. Nothing structurally stopped
+ *  one of those LATER transforms from itself altering a byte inside an already-verified fence (the
+ *  marker-strip's pre-round-2 EOL-normalization bug was exactly this: verified-then-mangled).
+ *  Rather than trust every future transform to individually preserve fence bytes forever, the
+ *  FINAL composed body is re-checked against the SAME `currentFences` right before returning: if
+ *  any fence no longer reproduces byte-for-byte, the write is refused — never silently returned
+ *  with mangled "verified" bytes. The marker reattachment appends OUTSIDE any fence (after a
+ *  blank-line separator), so a passing write's fences are always exactly where
+ *  `stripUnpreservedOperatorFenceTags` left them; this backstop exists for whatever a FUTURE
+ *  transform gets wrong, not because the current pipeline is expected to trip it. */
 export type RoleBodyRewriteResult =
   | { ok: true; body: string }
   | { ok: false; reason: "operator-fence-violation"; detail: string }
@@ -487,9 +542,23 @@ export function applyRoleBodyRewrite(currentBody: string, roleBody: string): Rol
   const roleBodyFenceStripped = stripUnpreservedOperatorFenceTags(currentFences, roleBody);
   const currentMarkerLines = findStandaloneMarkerLines(currentBody);
   const strippedRoleBody = stripStandaloneMarkerLines(roleBodyFenceStripped);
-  if (currentMarkerLines.length === 0) return { ok: true, body: strippedRoleBody };
-  const withoutTrailingWhitespace = strippedRoleBody.replace(/\s+$/, "");
-  return { ok: true, body: `${withoutTrailingWhitespace}\n\n${currentMarkerLines.join("\n")}\n` };
+  const finalBody =
+    currentMarkerLines.length === 0 ? strippedRoleBody : `${strippedRoleBody.replace(/\s+$/, "")}\n\n${currentMarkerLines.join("\n")}\n`;
+
+  // gate② round 2 fix (P1 backstop) — see this function's own doc above.
+  const finalMissing = missingOperatorFences(currentFences, finalBody);
+  if (finalMissing.length > 0) {
+    return {
+      ok: false,
+      reason: "operator-fence-violation",
+      detail:
+        `the composed body no longer reproduces ${finalMissing.length} operator-owned fenced ` +
+        `block(s) (\`${OPERATOR_FENCE_OPEN}\` … \`${OPERATOR_FENCE_CLOSE}\`) byte-for-byte after marker ` +
+        "normalization (backstop check) — refusing rather than writing a body whose already-verified " +
+        "fence bytes were altered by a later transform",
+    };
+  }
+  return { ok: true, body: finalBody };
 }
 
 export type MarkerWritePreconditionResult = { ok: true } | { ok: false; reason: "malformed-marker" | "duplicate-marker"; detail: string };
