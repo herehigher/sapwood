@@ -21,6 +21,7 @@
 // constraint, mirroring retainOrDeleteWorktree's `git worktree prune` note).
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { pidIsAlive } from "./instance-lock.js";
 
@@ -57,29 +58,56 @@ export function parseWorktreeListPorcelain(output: string): WorktreeRegistration
 }
 
 /** The `claude` CLI's own lock-reason format (confirmed against this repo's live registrations,
- *  #825): `claude session <name> (pid <pid> start <date>)`. A reason with no parseable pid is
- *  never guessed at — classifyRegistration treats it as an unknown, permanently-alive owner. */
+ *  #825): `claude session <name> (pid <pid> start <date>)`, anchored start-to-end — a reason
+ *  that merely CONTAINS a `pid <digits>` fragment (e.g. an unrelated hand-lock reading `debug
+ *  pid 123`) does NOT match. #825 gate② finding [janitor-scope-not-enforced]: a loose substring
+ *  match let an out-of-contract lock reason parse as an owner pid at all; failing to match here
+ *  means "unknown owner", never a guessed pid — classifyRegistration treats that the same as an
+ *  unparseable reason: an unrecognized owner is never assumed dead. */
+const CLAUDE_SESSION_LOCK_RE = /^claude session \S+ \(pid (\d+) start .+\)$/;
+
 export function extractLockPid(lockReason: string): number | null {
-  const m = /\bpid (\d+)\b/.exec(lockReason);
+  const m = CLAUDE_SESSION_LOCK_RE.exec(lockReason);
   return m ? Number(m[1]) : null;
 }
 
-export type WorktreeJanitorVerdict = "reap" | "alive" | "present" | "unlocked";
+/** True when `candidatePath` resolves to strictly inside `root` (never equal to it — the root
+ *  directory itself is never a worktree registration). Used to keep this janitor's blast radius
+ *  to the repo's OWN `.claude/worktrees/` tree — see classifyRegistration's "out-of-root" verdict. */
+function isUnderRoot(candidatePath: string, root: string): boolean {
+  const rel = relative(resolve(root), resolve(candidatePath));
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+export type WorktreeJanitorVerdict = "reap" | "alive" | "present" | "unlocked" | "out-of-root";
 
 export interface WorktreeJanitorClassifyDeps {
   directoryExists(path: string): boolean;
   isPidAlive(pid: number): boolean;
+  /** #825 gate② finding [janitor-scope-not-enforced]: the janitor's blast radius is bounded to
+   *  THIS repo's own `.claude/worktrees/` tree — a locked registration living anywhere else
+   *  (e.g. a differently-named `.claude/worktrees-legacy/`, or an unrelated repo's own worktree
+   *  sharing this process's filesystem) is never a candidate, regardless of lock-reason shape or
+   *  pid liveness. See createWorktreeJanitorDeps for the real default. */
+  worktreeRoot: string;
 }
 
-/** #825 AC1-3: the janitor's whole scope boundary, in one place.
+/** #825 AC1-3 (+ gate② finding [janitor-scope-not-enforced]): the janitor's whole scope
+ *  boundary, in one place.
+ *   - a path outside `deps.worktreeRoot`: "out-of-root" — never touched, no matter what the lock
+ *     reason says or whether its pid is dead. Checked FIRST, before the lock reason is even
+ *     parsed: scope is a property of the PATH, not something a crafted lock reason can talk its
+ *     way around.
  *   - unlocked (no `locked` line at all): out of scope — this janitor only governs LOCKED
  *     role/lane registrations, never an ordinary developer worktree.
- *   - a lock reason with no parseable pid: "alive" — an unrecognized owner is never assumed dead.
+ *   - a lock reason that doesn't match the claude CLI's own anchored format (or has no
+ *     parseable pid): "alive" — an unrecognized owner is never assumed dead.
  *   - dead pid + missing directory: "reap".
  *   - dead pid + present directory: "present" — never reaped by THIS janitor (out of scope; the
  *     mtime/ctime purity check owns present-directory deletion).
  *   - alive pid (any directory state): "alive" — never touched. */
 export function classifyRegistration(reg: WorktreeRegistration, deps: WorktreeJanitorClassifyDeps): WorktreeJanitorVerdict {
+  if (!isUnderRoot(reg.path, deps.worktreeRoot)) return "out-of-root";
   if (reg.lockReason === null) return "unlocked";
   const pid = extractLockPid(reg.lockReason);
   if (pid === null || deps.isPidAlive(pid)) return "alive";
@@ -145,6 +173,7 @@ export async function sweepWorktreeJanitorOnce(
  *  worker.ts's/reconcile.ts's own `worktreeRoot` default). */
 export function createWorktreeJanitorDeps(repoRoot: string = process.cwd()): WorktreeJanitorDeps {
   return {
+    worktreeRoot: join(repoRoot, ".claude", "worktrees"),
     async listRegistrations() {
       const { stdout } = await pexecFile("git", ["-C", repoRoot, "worktree", "list", "--porcelain"]);
       return parseWorktreeListPorcelain(stdout);

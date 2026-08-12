@@ -10,9 +10,18 @@ import {
   extractLockPid,
   parseWorktreeListPorcelain,
   sweepWorktreeJanitorOnce,
+  type WorktreeJanitorClassifyDeps,
   type WorktreeJanitorDeps,
   type WorktreeRegistration,
 } from "./worktree-janitor.js";
+
+const ROOT = "/repo/.claude/worktrees";
+const classifyDeps = (over: Partial<WorktreeJanitorClassifyDeps> = {}): WorktreeJanitorClassifyDeps => ({
+  worktreeRoot: ROOT,
+  isPidAlive: () => false,
+  directoryExists: () => false,
+  ...over,
+});
 
 function fakeDeps(over: Partial<WorktreeJanitorDeps> & { registrations: WorktreeRegistration[] }): WorktreeJanitorDeps & {
   unlocked: string[];
@@ -29,6 +38,7 @@ function fakeDeps(over: Partial<WorktreeJanitorDeps> & { registrations: Worktree
       return pruneCalls;
     },
     listRegistrations: async () => over.registrations,
+    worktreeRoot: over.worktreeRoot ?? ROOT,
     directoryExists: over.directoryExists ?? (() => false),
     isPidAlive: over.isPidAlive ?? (() => false),
     unlock: over.unlock ?? (async (path) => void unlocked.push(path)),
@@ -69,31 +79,56 @@ test("extractLockPid parses the claude CLI's own lock-reason format", () => {
   assert.equal(extractLockPid("some unrelated reason"), null);
 });
 
+test("extractLockPid (#825 gate② [janitor-scope-not-enforced]): a reason that merely CONTAINS a pid <digits> fragment, but isn't the anchored claude-session format, does not parse", () => {
+  assert.equal(extractLockPid("debug pid 111"), null);
+  assert.equal(extractLockPid("pid 111"), null);
+  assert.equal(extractLockPid("claude session x (pid 111 start now) extra trailing text"), null);
+});
+
 test("classifyRegistration: dead pid + missing directory -> reap (AC1)", () => {
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/role-x", lockReason: "claude session role-x (pid 111 start now)" };
-  const verdict = classifyRegistration(reg, { isPidAlive: () => false, directoryExists: () => false });
+  const verdict = classifyRegistration(reg, classifyDeps({ isPidAlive: () => false, directoryExists: () => false }));
   assert.equal(verdict, "reap");
 });
 
 test("classifyRegistration: alive pid -> alive, regardless of directory state (AC2)", () => {
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/role-x", lockReason: "claude session role-x (pid 111 start now)" };
-  assert.equal(classifyRegistration(reg, { isPidAlive: () => true, directoryExists: () => false }), "alive");
-  assert.equal(classifyRegistration(reg, { isPidAlive: () => true, directoryExists: () => true }), "alive");
+  assert.equal(classifyRegistration(reg, classifyDeps({ isPidAlive: () => true, directoryExists: () => false })), "alive");
+  assert.equal(classifyRegistration(reg, classifyDeps({ isPidAlive: () => true, directoryExists: () => true })), "alive");
 });
 
 test("classifyRegistration: dead pid + present directory -> present, never reaped (AC3)", () => {
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/role-x", lockReason: "claude session role-x (pid 111 start now)" };
-  assert.equal(classifyRegistration(reg, { isPidAlive: () => false, directoryExists: () => true }), "present");
+  assert.equal(classifyRegistration(reg, classifyDeps({ isPidAlive: () => false, directoryExists: () => true })), "present");
 });
 
 test("classifyRegistration: unlocked registration is out of scope", () => {
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null };
-  assert.equal(classifyRegistration(reg, { isPidAlive: () => false, directoryExists: () => false }), "unlocked");
+  assert.equal(classifyRegistration(reg, classifyDeps()), "unlocked");
 });
 
 test("classifyRegistration: lock reason with no parseable pid is treated as alive (fail-safe)", () => {
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/role-x", lockReason: "some hand-written reason" };
-  assert.equal(classifyRegistration(reg, { isPidAlive: () => false, directoryExists: () => false }), "alive");
+  assert.equal(classifyRegistration(reg, classifyDeps()), "alive");
+});
+
+test("classifyRegistration: a lock reason merely CONTAINING a pid <digits> fragment (not the claude CLI's own anchored format) is treated as alive, never reaped (#825 gate② [janitor-scope-not-enforced])", () => {
+  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/role-x", lockReason: "debug pid 111" };
+  // Dead pid + missing directory would otherwise be "reap" — this reason must not parse as an owner pid at all.
+  assert.equal(classifyRegistration(reg, classifyDeps({ isPidAlive: () => false, directoryExists: () => false })), "alive");
+});
+
+test("classifyRegistration: a registration OUTSIDE worktreeRoot is never reaped, even dead pid + missing directory (#825 gate② [janitor-scope-not-enforced])", () => {
+  const reg: WorktreeRegistration = { path: "/repo/some/other/place", lockReason: "claude session role-x (pid 111 start now)" };
+  assert.equal(classifyRegistration(reg, classifyDeps({ isPidAlive: () => false, directoryExists: () => false })), "out-of-root");
+});
+
+test("classifyRegistration: a sibling directory whose name merely starts with worktreeRoot (e.g. worktrees-legacy) is out-of-root, not a false-positive prefix match", () => {
+  const reg: WorktreeRegistration = {
+    path: "/repo/.claude/worktrees-legacy/role-x",
+    lockReason: "claude session role-x (pid 111 start now)",
+  };
+  assert.equal(classifyRegistration(reg, classifyDeps({ isPidAlive: () => false, directoryExists: () => false })), "out-of-root");
 });
 
 test("sweepWorktreeJanitorOnce: reaps a dead-pid/missing-directory registration (AC1)", async () => {
@@ -164,6 +199,16 @@ test("sweepWorktreeJanitorOnce: mixed backlog — reaps candidates, skips alive/
   assert.equal(result.skippedAlive, 1);
   assert.equal(result.skippedPresent, 1);
   assert.equal(result.remaining, 0);
+});
+
+test("sweepWorktreeJanitorOnce: a registration outside worktreeRoot is never unlocked/removed, even dead-pid + missing-directory (#825 gate② [janitor-scope-not-enforced])", async () => {
+  const outOfRoot: WorktreeRegistration = { path: "/repo/some/other/place", lockReason: "claude session role-x (pid 111 start now)" };
+  const deps = fakeDeps({ registrations: [outOfRoot], isPidAlive: () => false, directoryExists: () => false });
+  const result = await sweepWorktreeJanitorOnce(deps);
+  assert.deepEqual(result, { reaped: [], failed: [], skippedAlive: 0, skippedPresent: 0, remaining: 0 });
+  assert.deepEqual(deps.unlocked, []);
+  assert.deepEqual(deps.removed, []);
+  assert.equal(deps.pruneCalls, 0);
 });
 
 test("sweepWorktreeJanitorOnce: a failed unlock/remove is recorded and does not block the rest of the batch", async () => {
