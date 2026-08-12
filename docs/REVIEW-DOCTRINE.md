@@ -150,25 +150,10 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   `CHAR_ADVANCE` is the worked example of a compliant deterministic model: it substitutes for a
   live render, but every input it consumes (font-size, character count) is the same value the
   real draw path consumes, so it cannot silently diverge from what actually gets drawn.
-- **Fake-verdict rule (engine side).** When an acceptance criterion's claim is about a POLICY
-  decision — a reclaim/retention check, a threshold comparison, an mtime/ctime scan, anything
-  the codebase computes rather than states — a test that configures a fake collaborator to
-  already return that decision, and then asserts against the fake's own canned value, proves
-  the fake was read back correctly. It proves nothing about the policy, because the production
-  function that actually decides the outcome never ran. This is the engine-side sibling of the
-  "Model the real thing" rule above: that rule is about which VALUE an assertion checks against
-  (a hand-copied constant vs. the source of truth); this one is about whether the DECISION LOGIC
-  under test executes at all. Worked example (#824/PR#835, gate② round 1, findings
-  `ac1-clean-reclaim-fixture` / `ac2-dirty-reclaim-fixture`): a worktree-reclaim AC's "clean
-  worktree" case set `FakeSupervisor.reclaimResults` to `worktreeRetained: false` for a path that
-  was never created, and the "dirty worktree" case preloaded `worktreeRetained: true` without
-  ever establishing a `dispatched_at` baseline or mutating a file afterward — in both cases the
-  real `WorkerSupervisor.reclaim`/mtime-ctime logic never ran; the test only checked that the
-  fixture's own preset value flowed through. The fix (accepted in gate② round 2) was to build the
-  real fixture — an actual directory, a real `dispatched_at`, a real post-baseline write where
-  the AC calls for one — and let the production reclaim policy decide, not the fixture author.
-  When a fake's return value IS the fact the AC asks to prove, exercise the real function that
-  produces that value instead of asserting the fake's own setup.
+- **Fake-verdict rule (engine side).** Presetting a fake to a POLICY decision then asserting it
+  proves readback only — deciding logic never ran. Sibling of "Model the real thing" (VALUE vs.
+  DECIDING). #824/PR#835 ac1/ac2: reclaimResults preset w/o baseline; fixed via real
+  dispatched_at+write. If fake IS the fact, run real function.
 - **Unwired-test rule.** A dashboard test that renders an extracted pure function, a bare
   component with hand-built props, or a query/hook in isolation proves that piece is correct in
   isolation — it does not prove the app actually wires it up. Recurring class across #759
