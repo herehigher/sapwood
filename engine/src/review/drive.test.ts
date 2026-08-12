@@ -653,6 +653,43 @@ test("#823 driveEngineAgentReview (gate② round 1 P1, liveness): advisoryReview
   assert.equal(deadlineMsSeen, 5, "the injected override, not the default constant, reached the race");
 });
 
+test("#823 driveEngineAgentReview (gate② round 2 P2, liveness): a REJECTING injected sleep still counts as the deadline firing — a never-settling evaluate() call + a rejecting sleep still parks (no hang), with no unhandled rejection; deterministic, no real-timer dependence", async () => {
+  const filename = ".claude/rules/team/reviewer.md";
+  let unhandled: unknown;
+  const onUnhandledRejection = (reason: unknown): void => {
+    unhandled = reason;
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+  try {
+    const { deps } = makeDeps({
+      forge: { getPRChangedFiles: async () => ({ files: [{ filename }], complete: true }) },
+      // Never settles — same hazard as the round 1 liveness tests. Combined with a REJECTING
+      // sleep below, this is the exact shape gate② round 2 flagged: with only a fulfillment
+      // handler on `sleep()`, this op's own missing settlement would never be rescued by the
+      // deadline either, so the whole race would hang forever.
+      evaluate: () => new Promise<never>(() => {}),
+      // A broken injected timer — rejects instead of resolving. Must still count as "the deadline
+      // fired", never as "no deadline at all".
+      sleep: async () => {
+        throw new Error("injected sleep is broken");
+      },
+    });
+    const outcome = await driveEngineAgentReview(deps, 1, 2);
+    assert.deepEqual(outcome, {
+      kind: "needs-human",
+      reason: "engine-agent: gate:HUMAN:instruction-path-change:.claude/rules/team/reviewer.md",
+    });
+    // Flush the microtask queue a couple of turns — no real timer, so this stays deterministic —
+    // giving a would-be unhandled rejection (if the fix regressed) a chance to be observed before
+    // the assertion below runs.
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(unhandled, undefined, "the rejecting injected sleep must never surface as a Node unhandled rejection");
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandledRejection);
+  }
+});
+
 test("#823 driveEngineAgentReview: the advisory evaluate() call's ReviewContext carries only the live diff + PRReviewData — no PR-body/instructions field for an in-PR edit to influence (instructions are the reviewerAdapter's own engine-construction-time doctrine/prompt/AC-snapshot — see engine-agent.ts's EngineAgentReviewer constructor-loaded promptTemplate/deps.doctrine and evaluate()'s dispatch-time getAcSnapshot call, never a live re-fetch, AC3)", async () => {
   const filename = ".claude/rules/team/reviewer.md";
   const fixedData = data({ labels: [] });

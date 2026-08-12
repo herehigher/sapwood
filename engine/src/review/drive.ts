@@ -363,7 +363,12 @@ async function raceWithDeadline(op: Promise<void>, deadlineMs: number, sleep?: (
     };
     const onDeadline = (): void => finish(() => reject(new Error(`engine-agent: advisory review exceeded its ${deadlineMs}ms deadline`)));
     if (sleep) {
-      void sleep(deadlineMs).then(onDeadline);
+      // #823 (gate② round 2 P2): a REJECTING injected `sleep` must still count as the deadline
+      // firing, never as "no deadline" — an injectable seam is reachable by any composition root,
+      // not just tests, so a broken timer must fail closed the same way every other failure on
+      // this route does. `onDeadline` is passed as BOTH handlers so `sleep`'s returned promise is
+      // never left with only a fulfillment reaction (which would also be an unhandled rejection).
+      void sleep(deadlineMs).then(onDeadline, onDeadline);
     } else {
       const t = setTimeout(onDeadline, deadlineMs);
       clearRealTimer = () => clearTimeout(t);
