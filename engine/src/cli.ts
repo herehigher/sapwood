@@ -61,6 +61,7 @@ import { type PeripheralPhase, RoundScopedForge, type RoundStopHit, type RoundsR
 import { createDefaultPeripherals } from "./loop/round-defaults.js";
 import { detectConsecutiveStalls } from "./loop/stall-breaker.js";
 import { createUserSettingsWatch } from "./loop/user-settings-watch.js";
+import { createWorktreeJanitorDeps, sweepWorktreeJanitorOnce } from "./loop/worktree-janitor.js";
 import { createProxyMint } from "./proxy/mint.js";
 import { makeProductionEngineAgent } from "./review/production.js";
 import { MergeDriver } from "./roles/merge-driver.js";
@@ -2306,6 +2307,26 @@ export async function normalizeUnplacedBoardItems(
   }
 }
 
+/** #825: ONE bounded cycle of the dead-registration worktree janitor per engine start (see
+ *  worktree-janitor.ts's own doc for the scope/batching rationale) — same best-effort,
+ *  never-a-startup-blocker posture as normalizeUnplacedBoardItems above. Bounding to a single
+ *  cycle here is deliberate: a backlog of hundreds must never stall startup; the next engine
+ *  start (or the operator-run one-shot backlog-clearance path, `runWorktreeJanitorToCompletion`)
+ *  picks up whatever this cycle didn't reach. */
+async function sweepWorktreeJanitorStartup(log: (message: string) => void): Promise<void> {
+  try {
+    const result = await sweepWorktreeJanitorOnce(createWorktreeJanitorDeps());
+    if (result.reaped.length > 0 || result.failed.length > 0) {
+      log(
+        `[sapwood:startup] worktree janitor: reaped ${result.reaped.length} dead-pid/missing-directory registration(s), ` +
+          `${result.failed.length} failed, ${result.remaining} left for the next cycle`,
+      );
+    }
+  } catch (error) {
+    log(`[sapwood:startup] worktree janitor sweep failed; continuing: ${String(error)}`);
+  }
+}
+
 /** #379 F1: provision every label the RESOLVED config names, once per engine start — the label
  *  counterpart to normalizeUnplacedBoardItems' board normalization above, and deliberately the
  *  same posture: idempotent, best-effort, never a startup blocker.
@@ -2519,6 +2540,14 @@ export interface EngineOverrides {
    *  test that specifically wants to observe/replace the check sets this directly instead of
    *  faking a `forge`-side capability. See branch-protection-warning.ts's own doc. */
   checkBranchProtection?: () => Promise<boolean>;
+  /** #825: injection seam for the worktree-janitor startup sweep — same "production passes
+   *  none" convention as `checkBranchProtection` above, and for the same reason: the real sweep
+   *  shells real `git worktree` commands, so it only builds in true production (`overrides.forge`
+   *  unset, the only combination `main()` itself ever passes). Every existing test sets `forge`,
+   *  so none of them ever spawns a real `git worktree list/unlock/remove/prune` as a side effect
+   *  of exercising engine startup; a wiring test that wants to observe invocation sets this seam
+   *  directly instead. See worktree-janitor.ts's own doc. */
+  worktreeJanitorSweep?: () => Promise<void>;
   /** #799: injection seam for the claude-version startup detector's underlying probe — same
    *  "production passes none" convention as `checkBranchProtection` above. Production always
    *  resolves the binary via `discoverClaudeBin(process.env)` (never overridable — AC3: never a
@@ -2849,6 +2878,13 @@ async function runTickEngine(
     // startup with zero dispatch, not silently stop the run after the first wave of workers.
     await assertStopMilestoneExists(forge, stop);
     await normalizeUnplacedBoardItems(forge, state, log);
+    // #825: same best-effort startup-pass stance as the board normalization above — one bounded
+    // cycle of the dead-registration worktree janitor. Real sweep only in true production
+    // (overrides.forge unset) — same gating as checkBranchProtection above, for the same reason
+    // (this shells real `git worktree` commands).
+    const worktreeJanitorSweep =
+      overrides.worktreeJanitorSweep ?? (overrides.forge === undefined ? () => sweepWorktreeJanitorStartup(log) : async () => {});
+    await worktreeJanitorSweep();
     // #379 F1: same best-effort startup-pass stance as the board normalization above — provisions
     // any workflow label this repo is missing so the round's own label writes can land.
     await reconcileWorkflowLabels(forge, state, cfg, log);
@@ -3095,6 +3131,13 @@ async function runRoundsEngine(
     // with zero dispatch, checked here identically for the round path's own FINAL stop condition.
     await assertStopMilestoneExists(forge, stop);
     await normalizeUnplacedBoardItems(forge, state, log);
+    // #825: same best-effort startup-pass stance as the board normalization above — one bounded
+    // cycle of the dead-registration worktree janitor. Real sweep only in true production
+    // (overrides.forge unset) — same gating as checkBranchProtection above, for the same reason
+    // (this shells real `git worktree` commands).
+    const worktreeJanitorSweep =
+      overrides.worktreeJanitorSweep ?? (overrides.forge === undefined ? () => sweepWorktreeJanitorStartup(log) : async () => {});
+    await worktreeJanitorSweep();
     // #379 F1: same best-effort startup-pass stance as the board normalization above — provisions
     // any workflow label this repo is missing so the round's own label writes can land.
     await reconcileWorkflowLabels(forge, state, cfg, log);
