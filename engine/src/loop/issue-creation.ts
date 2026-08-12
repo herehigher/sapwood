@@ -134,7 +134,11 @@ export async function createIssueProposals(deps: IssueCreationBatchDeps): Promis
     // `endsWith` check (this file's own doc, line 7) is never at risk — the proposal marker is
     // always the unconditional literal suffix of `markedBody`, regardless of what got stripped
     // out of `proposal.body` first.
-    const markedBody = `${applyRoleBodyRewrite("", proposal.body)}\n\n${marker}`;
+    // #827: an empty `currentBody` carries no operator-owned fence by construction — the reject
+    // arm can never fire here, `extractOperatorOwnedFences("")` is always `[]`.
+    const rewrite = applyRoleBodyRewrite("", proposal.body);
+    if (!rewrite.ok) throw new Error(`unreachable: applyRoleBodyRewrite("", ...) refused — ${rewrite.detail}`);
+    const markedBody = `${rewrite.body}\n\n${marker}`;
     const issue = await deps.forge.createIssue(proposal.title, markedBody);
     if (claimedIssues.has(issue)) {
       throw new Error(`issue #${issue} cannot satisfy more than one proposal receipt`);

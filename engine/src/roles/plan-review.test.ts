@@ -19,7 +19,7 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
-import { findStandaloneMarkerLines } from "../review/comment-cursor.js";
+import { extractOperatorOwnedFences, findStandaloneMarkerLines } from "../review/comment-cursor.js";
 import { checkCommentCursorFreshness } from "../review/comment-cursor-gate.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
@@ -425,6 +425,94 @@ test("createPlanReviewStub (#703b): a drafter session's drafted body carries a m
   const applied = forge.issueBodies[61]!;
   assert.ok(!applied.includes("5000"), "the drafter has no standing to introduce a marker that never existed");
   assert.deepEqual(findStandaloneMarkerLines(applied), []);
+  state.close();
+});
+
+// ── #827: operator-owned section fence — the gate⓪ drafter path is the exact call path issue
+// #752 exercised (a PO ruling rewritten in place during plan review). A drafter output that
+// alters the fence is refused entirely; one that leaves it alone survives byte-identical. ──────
+
+const OPERATOR_RULING = [
+  "<!-- sapwood:operator-owned -->",
+  "Ruling: comment-cursor reads LIVE body, not a snapshot.",
+  "<!-- /sapwood:operator-owned -->",
+].join("\n");
+
+test("createPlanReviewStub (#827): a drafter-proposed body that REWORDS text inside the operator-owned fence is refused end-to-end — needs-human, no write lands, the event names the violation", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 70, title: "t", labels: [ROUND_POOL_LABEL] }];
+  const currentBody = `${NO_PLAN_BODY}\n\n${OPERATOR_RULING}\n`;
+  forge.issueBodies[70] = currentBody;
+  const cfg = mkCfg();
+  // The exact #752 shape: the drafter refines the ruling's own wording in place, keeping the
+  // substance but rewriting the sentence — plus a legitimate verification-plan addition.
+  const rewordedFence = [
+    "<!-- sapwood:operator-owned -->",
+    "Ruling: comment-cursor always reads the LIVE body (refined wording).",
+    "<!-- /sapwood:operator-owned -->",
+  ].join("\n");
+  const draftedBodyWithRewordedFence = `${PLAN_BODY}\n\n${rewordedFence}\n`;
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 70 }, "add a verification plan")) },
+    { result: doneResult("drafter-0", sapwoodResult({ issue: 70 }, draftedBodyWithRewordedFence)) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["verification-plan-reviewer", "verification-plan-drafter"],
+    "the write is refused right after the drafter session — no further reviewer re-review",
+  );
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "the reworded body never lands");
+  assert.equal(forge.issueBodies[70], currentBody, "the issue body is completely untouched");
+  assert.ok((forge.issueLabels[70] ?? []).includes(cfg.labels.needsHuman));
+  const fenceEvents = state.eventsSince("2020-01-01T00:00:00.000Z", ["operator-fence-violated"]);
+  assert.equal(fenceEvents.length, 1);
+  const fencePayload = fenceEvents[0]!.payload as { round_id: number; issue: number; phase: string; detail: string };
+  assert.equal(fencePayload.round_id, 1);
+  assert.equal(fencePayload.issue, 70);
+  assert.equal(fencePayload.phase, "gate0-write-drafter");
+  assert.match(fencePayload.detail, /operator-owned/);
+  const escalatedEvents = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
+  assert.equal(escalatedEvents.length, 1);
+  const escalatedPayload = escalatedEvents[0]!.payload as { origin?: string };
+  assert.equal(
+    escalatedPayload.origin,
+    "operator-fence-violation",
+    "must never count toward the empty-spin breaker's session-failure signal",
+  );
+  state.close();
+});
+
+test("createPlanReviewStub (#827 AC2, integration): the operator-owned fence survives a full gate⓪ draft round byte-identical, while the drafter's OTHER edits still apply", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 71, title: "t", labels: [ROUND_POOL_LABEL] }];
+  const currentBody = `${NO_PLAN_BODY}\n\n${OPERATOR_RULING}\n`;
+  forge.issueBodies[71] = currentBody;
+  const cfg = mkCfg();
+  // The drafter adds a real verification plan and appends content AFTER the fence — the fence's
+  // own bytes (open tag, ruling text, close tag) are reproduced verbatim.
+  const draftedBodyPreservingFence = `${PLAN_BODY}\n\n${OPERATOR_RULING}\n\nDrafter's additional context, appended after the fence.`;
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 71 }, "add a verification plan")) },
+    { result: doneResult("drafter-0", sapwoodResult({ issue: 71 }, draftedBodyPreservingFence)) },
+    { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 71 })) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  const applied = forge.issueBodies[71]!;
+  assert.deepEqual(extractOperatorOwnedFences(applied), [OPERATOR_RULING], "the fence's bytes are byte-identical to the pre-round body");
+  assert.ok(
+    applied.includes("Drafter's additional context, appended after the fence."),
+    "the drafter's non-conflicting addition still applies",
+  );
+  assert.ok(applied.includes("## Acceptance criteria"), "the drafter's verification-plan addition still applies");
+  assert.ok((forge.issueLabels[71] ?? []).includes("plan:approved"));
+  assert.equal(state.eventsSince("2020-01-01T00:00:00.000Z", ["operator-fence-violated"]).length, 0);
   state.close();
 });
 

@@ -185,6 +185,13 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
     actionability: "intervene",
     see: "#296",
   },
+  "operator-fence-violated": {
+    tags: [],
+    meaning:
+      "a role-proposed issue-body rewrite altered, removed, or reordered bytes inside an operator-owned `<!-- sapwood:operator-owned -->` fence; the write was refused (plan-review's reviewer/drafter paths escalate needs-human via `plan-review-escalated`, po-triage logs and skips the write).",
+    actionability: "intervene",
+    see: "#827",
+  },
 
   // Architect.
   "architect-review-degraded": {
