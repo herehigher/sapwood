@@ -360,24 +360,44 @@ test("#799: the claude-version startup check runs after run-started on the tick 
     const kinds = state.eventsAfterId(0, ["run-started", "claude-cli-version-checked"]).map((e) => e.kind);
     assert.deepEqual(kinds, ["run-started", "claude-cli-version-checked"], "the check runs strictly after run-started (AC3)");
     assert.equal(forge.claimCalls, 1, "dispatch of the ready issue proceeded normally despite the below-floor arm (AC6)");
-    // #799 gate② P1 #2 (sol-high): dispatch() is fire-and-forget — it returns the moment the
-    // child is SPAWNED, not once its terminal sentinel write has landed (worker.test.ts's own
-    // "dispatch -> stub claude runs -> .done sentinel" test polls for exactly this same reason).
-    // `runEngine()` resolving therefore does NOT prove the spawned lane's onExit finalize has
-    // finished writing its sentinel file — sol-high reproduced a REAL flake from this: the full
-    // suite ended `4801 pass / 1 fail` on an ENOENT writing `lane-9-*.handoff.json.tmp` because
-    // this test's own `rmSync` below raced that still-in-flight write. Poll (bounded, on an
-    // OBSERVABLE filesystem condition — never a blind sleep, docs/timing-dependent-tests-ban) for
-    // the lane's finalize to settle: a terminal sentinel exists AND no atomic-write `.tmp` file
-    // remains, before tearing down.
+    // #799 gate② P1 #2 (sol-high round 1 + round 2): dispatch() is fire-and-forget — it returns
+    // the moment the child is SPAWNED, not once its terminal sentinel write has landed
+    // (worker.test.ts's own "dispatch -> stub claude runs -> .done sentinel" test polls for
+    // exactly this same reason). `runEngine()` resolving therefore does NOT prove the spawned
+    // lane's onExit finalize has finished writing its sentinel file — sol-high round 1
+    // reproduced a REAL flake from this: the full suite ended `4801 pass / 1 fail` on an ENOENT
+    // writing `lane-9-*.handoff.json.tmp` because this test's own `rmSync` below raced that
+    // still-in-flight write.
+    //
+    // Round 1's fix polled but silently fell through on exhaustion — sol-high round 2's
+    // discriminating mutation (forcing the loop's own `settled` check to always read `false`)
+    // still PASSED after burning the full ~4s poll budget, because nothing downstream ever
+    // consulted whether the condition was actually observed; teardown proceeded regardless. That
+    // is a timing assumption wearing a poll's clothing, not an enforced wait. Fixed: track
+    // whether quiescence was ACTUALLY observed (`quiesced`) and assert it explicitly — an
+    // exhausted, unsatisfied poll now FAILS the test here, before `finally`'s teardown ever runs,
+    // instead of silently proceeding into the exact race this poll exists to prevent. The poll
+    // itself stays bounded and condition-based (never a blind sleep, docs/timing-dependent-
+    // tests-ban) — only the "what happens when it's never satisfied" behavior changed.
     const stateDir = join(dir, "data", "sessions", "state");
+    let quiesced = false;
     for (let i = 0; i < 200; i++) {
       const entries = existsSync(stateDir) ? readdirSync(stateDir) : [];
       const settled = entries.some((f) => /\.(done|failed|handoff)\.json$/.test(f));
       const inFlight = entries.some((f) => f.endsWith(".tmp"));
-      if (settled && !inFlight) break;
+      if (settled && !inFlight) {
+        quiesced = true;
+        break;
+      }
       await sleep(20);
     }
+    assert.ok(
+      quiesced,
+      "the dispatched lane's async finalize (spawn -> stdio close -> terminal sentinel write) never " +
+        "settled within the bounded poll — proceeding to state.close()/rmSync here would race a still-" +
+        "in-flight write, the exact flake sol-high's gate② review reproduced; failing HERE instead of " +
+        "silently falling through into that race",
+    );
   } finally {
     process.chdir(previousCwd);
     if (previousBin === undefined) delete process.env.CLAUDE_BIN;

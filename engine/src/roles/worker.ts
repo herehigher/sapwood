@@ -961,6 +961,17 @@ export type ClaudeVersionProbeResult = { ok: true; stdout: string } | { ok: fals
  *  rather than hold up startup). */
 export const CLAUDE_VERSION_PROBE_TIMEOUT_MS = 5_000;
 
+/** #799 gate② P1 #4 (round 2, sol-high): the version probe's own argv — extracted the same way
+ *  `llmPingArgv` was, so `ENGINE_CLAUDE_LONG_FLAGS` below can derive its required-flag set by
+ *  actually CALLING this too, not just the worker/ping argv builders. Round 1's fix covered
+ *  fresh + resume `claudeArgs` shapes and `llmPingArgv`, but omitted THIS probe entirely — sol-
+ *  high's round-2 reproduction: `probeClaudeVersion` really spawns `claudeBin ["--version"]`
+ *  (below), so a real engine install's complete fresh+resume+ping+version-probe argv union is
+ *  24 flags, not the 23 the round-1 derivation covered. `probeClaudeVersion` calls this. */
+function versionProbeArgv(): string[] {
+  return ["--version"];
+}
+
 /** Spawns `<claudeBin> --version` and resolves the raw result — never throws: a spawn error, a
  *  hang past `CLAUDE_VERSION_PROBE_TIMEOUT_MS` (hard SIGKILL), and a non-zero exit all resolve
  *  `{ ok: false, detail }` instead of rejecting, exactly like probeLlmPing's own never-throws
@@ -975,7 +986,7 @@ export function probeClaudeVersion(claudeBin: string): Promise<ClaudeVersionProb
     };
     let child: ChildProcess;
     try {
-      child = spawn(claudeBin, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn(claudeBin, versionProbeArgv(), { stdio: ["ignore", "pipe", "pipe"] });
     } catch (e) {
       finish({ ok: false, detail: `version probe spawn failed: ${e instanceof Error ? e.message : String(e)}` });
       return;
@@ -1319,19 +1330,25 @@ function isLongFlag(token: string): boolean {
   return /^--[a-zA-Z][a-zA-Z-]*$/.test(token);
 }
 
-/** #799 gate② P1 #4 fix: the COMPLETE set of long flags the engine's OWN `claude` invocations
- *  can ever emit — derived by actually CALLING `claudeArgs` (both the fresh-dispatch shape,
- *  `--session-id`, and the resume shape, `--resume`) and `llmPingArgv` with every optional field
- *  populated, rather than a hand-maintained list a future flag could silently miss. This is what
- *  the CI floor-check (`docs/patches/799-ci-claude-cli-version-floor.patch`'s
- *  `check-claude-cli-flags.ts`) asserts `claude --help` advertises — the human-owned CI
- *  remainder's own promise to check EVERY flag the engine emits, not a curated subset. */
+/** #799 gate② P1 #4 fix (round 1 + round 2, sol-high): the COMPLETE set of long flags the
+ *  engine's OWN `claude` invocations can ever emit — derived by actually CALLING `claudeArgs`
+ *  (both the fresh-dispatch shape, `--session-id`, and the resume shape, `--resume`),
+ *  `llmPingArgv`, AND `versionProbeArgv` with every optional field populated, rather than a
+ *  hand-maintained list a future flag could silently miss. Round 1 covered only the worker argv
+ *  + the LLM-ping probe (23 flags); round 2 closes the gap sol-high's reproduction found — the
+ *  version-floor startup check ALSO spawns `claude` (`probeClaudeVersion`, `["--version"]`), and
+ *  that argv had never been folded in, so a real installed CLI's true fresh+resume+ping+version
+ *  union (24 flags) exceeded what this set asserted (23). This is what the CI floor-check
+ *  (`docs/patches/799-ci-claude-cli-version-floor.patch`'s `check-claude-cli-flags.ts`) asserts
+ *  `claude --help` advertises — the human-owned CI remainder's own promise to check EVERY long
+ *  flag the engine emits across EVERY shape it spawns `claude` in, not a curated subset. */
 export const ENGINE_CLAUDE_LONG_FLAGS: readonly string[] = (() => {
   const { resumeSessionId: _resumeSessionId, ...freshOpts } = MAXIMAL_CLAUDE_ARGS_OPTS;
   const freshArgv = claudeArgs(freshOpts);
   const resumeArgv = claudeArgs(MAXIMAL_CLAUDE_ARGS_OPTS);
   const pingArgv = llmPingArgv("probe-model", 0.05);
-  const all = [...freshArgv, ...resumeArgv, ...pingArgv].filter(isLongFlag);
+  const versionArgv = versionProbeArgv();
+  const all = [...freshArgv, ...resumeArgv, ...pingArgv, ...versionArgv].filter(isLongFlag);
   return [...new Set(all)].sort();
 })();
 

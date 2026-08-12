@@ -54,6 +54,7 @@ import {
   parseResultText,
   parseSessionInit,
   parseToolUsage,
+  probeClaudeVersion,
   probeDeployKeySsh,
   probeLlmPing,
   type ReapableChild,
@@ -1458,6 +1459,23 @@ test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no
   }
 });
 
+test("#799 gate② P1 #4 (round 2): ENGINE_CLAUDE_LONG_FLAGS covers the version-probe argv too — includes '--version', the flag round 1's derivation omitted (sol-high reproduction: a real fresh+resume+ping+version union is 24 flags, not 23)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-version-probe-argv-"));
+  try {
+    const argsFile = join(dir, "args.txt");
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\0' "$@" > "${argsFile}"\necho '2.1.209'\nexit 0\n`);
+    await probeClaudeVersion(bin);
+    const argv = readFileSync(argsFile, "utf8").split("\0").slice(0, -1);
+    assert.deepEqual(argv, ["--version"], "the real spawned version-probe argv is exactly ['--version']");
+    assert.ok(
+      ENGINE_CLAUDE_LONG_FLAGS.includes("--version"),
+      "ENGINE_CLAUDE_LONG_FLAGS must name '--version' — the version-probe's own argv",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("#799 gate② P1 #4: ENGINE_CLAUDE_LONG_FLAGS is derived from REAL argv-building calls, not a hand list — pinned exact set, and covers fresh + resume claudeArgs shapes", () => {
   // Fresh dispatch (`--session-id`) vs resume (`--resume`) are mutually exclusive in ONE
   // claudeArgs() call — exercise both maximal shapes directly (no spawn needed; claudeArgs is
@@ -1536,6 +1554,7 @@ test("#799 gate② P1 #4: ENGINE_CLAUDE_LONG_FLAGS is derived from REAL argv-bui
       "--system-prompt",
       "--tools",
       "--verbose",
+      "--version",
       "--worktree",
     ].sort(),
   );
