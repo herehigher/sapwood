@@ -1581,6 +1581,25 @@ legitimate work, and denying the edit would mask that intent. The worker may pro
 human must adjudicate it. Setting `escalation.instructionPaths: []` explicitly turns the mechanism
 off.
 
+**Merge authority stays human; review labor should not (#823).** Before #823, this route parked
+the PR needs-human with zero engine review — the human had to arrange an out-of-band review
+themselves. Now, on a FRESH escalation (never on a later, already-`sapwood:human-merge-only`-
+latched tick — the label write is the idempotence latch, so a repeat tick does not re-run this),
+the engine also runs ONE engine-agent review session and posts its verdict as a PR comment before
+parking, prefixed with a prominent banner marking it "instruction-path change: human-merge-only —
+ADVISORY, not consumed by the merge driver". That session's instructions come from the reviewer's
+own engine-construction-time sources — the doctrine text and prompt template `EngineAgentReviewer`
+loads once at construction (engine-agent.ts), plus the dispatch-time AC snapshot (design #279 §5)
+— never a live re-fetch of the PR's own (now human-merge-only) body, so an in-PR instruction-path
+edit cannot influence how this review of itself is conducted. The verdict is advisory labor for
+the human reviewer only: the route returns `needs-human` unconditionally, whether the session
+approves, rejects, or produces nothing at all — no verdict from it ever reaches the merge driver's
+consume path. Fail-closed: if the review session (or the diff fetch, or the comment post) fails,
+the PR still parks needs-human exactly as before, with no different reason string a caller could
+key on. See `review/drive.ts`'s `runAdvisoryInstructionPathReview` for the implementation and
+`drive.test.ts` for the regression coverage (never-consumed, fail-closed, latch-skips-rerun,
+construction-time-instructions).
+
 ### Which carriers are covered, and how immediate the protection is (#527)
 
 Two families, protecting two different sessions, with two different timings. Being precise about

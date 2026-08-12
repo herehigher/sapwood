@@ -304,6 +304,82 @@ export function buildCiInertEscalationComment(head: string, checks: readonly CiI
   );
 }
 
+/** #823: build the advisory-review PR comment — a prominent banner (this exact phrase is what
+ *  makes the verdict's non-authority legible to a human reader, and is what drive.test.ts greps
+ *  for) followed by the verdict's own content. Pure formatter, same shape as this module's other
+ *  comment builder (`buildCiInertEscalationComment`) — never fetches or decides anything itself. */
+export function buildAdvisoryReviewComment(result: ApprovalResult): string {
+  const banner =
+    "**instruction-path change: human-merge-only — ADVISORY, not consumed by the merge driver** (#292, #823)\n\n" +
+    "This PR edits a reviewer-instruction path, so a human reviews and merges it regardless of the " +
+    "verdict below — the merge driver never reads or acts on this comment. The engine-agent review " +
+    "that follows is informational labor for that human reviewer only.";
+  const body = ((): string => {
+    switch (result.kind) {
+      case "approved":
+        return "Engine-agent verdict: no blocking findings.";
+      case "rejected":
+        return `Engine-agent verdict: ${result.findings.length} finding(s):\n\n${result.findings.map((f) => `- ${f.body}`).join("\n")}`;
+      case "pending":
+        return "Engine-agent verdict: pending — the session produced no decisive artifact this attempt.";
+      case "unavailable":
+        return `Engine-agent review unavailable: ${result.reason}`;
+    }
+  })();
+  return `${banner}\n\n${body}`;
+}
+
+/**
+ * #823: run ONE advisory-only engine-agent review on the instruction-path-change escalation route
+ * (#292), immediately after `escalateInstructionPathChanges` returns a FRESH `"escalated"` result
+ * — the call site below never invokes this for `"latched"` (a PR that already carries the label):
+ * the label write IS the idempotence latch (see that function's own doc, "latched PRs never fetch
+ * the list again"), and re-running a paid session every tick forever on an already-parked PR would
+ * be pure waste with nothing new to say.
+ *
+ * NEVER consumed: the route this is called from returns `{kind:"needs-human"}` unconditionally,
+ * both before and after this call — see the call site below. This function's return type is
+ * `void`; nothing it computes can reach `{kind:"consume"}`, and it never touches the decisive
+ * pin/WAL/audit machinery this module uses elsewhere (`deps.recordAttemptPin`/`deps.recordWal`/
+ * `deps.auditDelivery` — the only writers of that machinery in this module — are none of them
+ * called here).
+ *
+ * Fail-closed by construction (#823 AC2): every failure mode (diff fetch, `evaluate()` — whether
+ * it throws or rejects — the comment post) is caught here and swallowed. This function itself
+ * never throws, matching `driveEngineAgentReview`'s own never-throws contract; the caller does not
+ * branch on this function's outcome at all, so the PR parks either way — only the ADVISORY LABOR
+ * is best-effort, never the park.
+ *
+ * Instructions provably come from engine-construction-time sources, never the PR head (#823 AC3):
+ * `deps.reviewerAdapter.evaluate` is the SAME `ReviewerAdapter` this module drives for the
+ * ordinary (non-instruction-path) route, and for the shipped `EngineAgentReviewer`
+ * (engine-agent.ts) its prompt template and doctrine text are loaded EXACTLY ONCE, at construction
+ * (`this.promptTemplate = loadEngineReviewerPromptTemplate(...)` in that class's constructor, and
+ * `EngineAgentReviewerDeps.doctrine`'s own doc: "load once at construction, never per-call") —
+ * never re-read per `evaluate()` call, and never from the materialized PR tree under review. The
+ * acceptance-criteria text `evaluate()` judges against is likewise the DISPATCH-TIME snapshot
+ * (`getAcSnapshot`, design #279 §5), never a live issue-body re-fetch. This function supplies only
+ * the two genuinely live, per-call inputs every other `evaluate()` call site in this module
+ * supplies too: the diff text (fetched here — the identity/WAL machinery further down this
+ * function never runs on this route) and the already-fetched `PRReviewData` — no PR body, no
+ * prompt override, nothing an in-PR instruction-path edit could use to influence how THIS review
+ * of itself is conducted.
+ */
+export async function runAdvisoryInstructionPathReview(
+  deps: Pick<EngineAgentDriveDeps, "forge" | "reviewerAdapter">,
+  pr: number,
+  issue: number,
+  data: PRReviewData,
+): Promise<void> {
+  try {
+    const diffText = await deps.forge.getPRDiff(pr);
+    const result = await deps.reviewerAdapter.evaluate({ forge: deps.forge, pr, issue, data, diffText });
+    await deps.forge.addPRComment(pr, buildAdvisoryReviewComment(result));
+  } catch {
+    // Fail-closed (#823 AC2): swallow every failure here — the caller parks needs-human either way.
+  }
+}
+
 /** `resolveReviewVerdict`-shaped synthetic action, so the caller (merge-driver.ts's
  *  driveEngineAgentOne) can hand an engine-agent decisive result to the EXACT SAME
  *  `finalizeVerdict` helper the classic Reviewer path already uses (deriveGate + mergeDecision +
@@ -481,6 +557,10 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     return { kind: "needs-human", reason: "engine-agent: gate:HUMAN:instruction-path-latch" };
   }
   if (instructionEscalation.kind === "escalated") {
+    // #823: best-effort advisory review labor on this FRESH escalation (never on a "latched"
+    // repeat tick, see runAdvisoryInstructionPathReview's own doc) — its outcome is discarded by
+    // construction; the park below is unconditional either way.
+    await runAdvisoryInstructionPathReview(deps, pr, issue, data0);
     return {
       kind: "needs-human",
       reason:
