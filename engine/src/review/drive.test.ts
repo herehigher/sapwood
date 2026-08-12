@@ -7,8 +7,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { IForge, PRCheckItem, PRReviewData, PRStatus } from "../forge/forge.js";
-import type { ApprovalResult } from "../roles/reviewer.js";
+import type { ApprovalResult, ReviewContext } from "../roles/reviewer.js";
 import {
+  ADVISORY_REVIEW_DEADLINE_MS,
+  buildAdvisoryReviewComment,
   buildCiInertEscalationComment,
   buildCiInertEscalationPayload,
   CI_INERT_NAME_CAP,
@@ -375,13 +377,15 @@ interface Recorded {
 
 function makeDeps(overrides: {
   forge?: Partial<IForge>;
-  evaluate?: () => Promise<ApprovalResult>;
+  evaluate?: (ctx: ReviewContext) => Promise<ApprovalResult>;
   auditDelivery?: EngineAgentDriveDeps["auditDelivery"];
   reconcileAuditDelivery?: EngineAgentDriveDeps["reconcileAuditDelivery"];
   cfg?: SapwoodConfig;
   now?: () => Date;
   runIds?: string[];
   getBaseRedPin?: EngineAgentDriveDeps["getBaseRedPin"];
+  advisoryReviewDeadlineMs?: EngineAgentDriveDeps["advisoryReviewDeadlineMs"];
+  sleep?: EngineAgentDriveDeps["sleep"];
 }): { deps: EngineAgentDriveDeps; recorded: Recorded } {
   const recorded: Recorded = { pin: null, wal: null };
   let runIdCursor = 0;
@@ -424,6 +428,8 @@ function makeDeps(overrides: {
     reconcileAuditDelivery: overrides.reconcileAuditDelivery ?? (async () => ({ delivered: false, reason: "nothing to reconcile" })),
     ciChecksCap: 20,
     ...(overrides.getBaseRedPin ? { getBaseRedPin: overrides.getBaseRedPin } : {}),
+    ...(overrides.advisoryReviewDeadlineMs !== undefined ? { advisoryReviewDeadlineMs: overrides.advisoryReviewDeadlineMs } : {}),
+    ...(overrides.sleep ? { sleep: overrides.sleep } : {}),
   };
   return { deps, recorded };
 }
@@ -477,14 +483,15 @@ test("driveEngineAgentReview: split-state reads (status0.state !== data0.state, 
   assert.match(outcome.kind === "queued" ? outcome.reason : "", /gate-state-mismatch/);
 });
 
-test("#292 driveEngineAgentReview: instruction edit labels/comments once before CI, identity, WAL, or a paid session", async () => {
-  const filename = ".claude/rules/team/reviewer`\n\u202e.md";
+test("#292/#823 driveEngineAgentReview: instruction edit labels/comments, makes ONE advisory evaluate() call (ADVISORY-banner comment posted) before parking, before CI/identity/WAL — never consumed (kind stays needs-human even on an APPROVED verdict); a latched (second) tick skips the advisory evaluate() call entirely", async () => {
+  const filename = ".claude/rules/team/reviewer`\n‮.md";
   let latched = false;
   let fileReads = 0;
   let labelWrites = 0;
-  let comments = 0;
+  const comments: string[] = [];
   let checkReads = 0;
-  let evaluated = false;
+  let evaluateCount = 0;
+  let diffFetches = 0;
   const { deps, recorded } = makeDeps({
     forge: {
       // #397: the latch is `human-merge-only` now, not `needs-human` — this path's verdict is
@@ -499,17 +506,22 @@ test("#292 driveEngineAgentReview: instruction edit labels/comments once before 
         latched = true;
       },
       addPRComment: async (_pr, body) => {
-        comments++;
-        assert.match(body, /\.claude\/rules\/team\/reviewer\?\?\?\.md.*#292/);
+        comments.push(body);
       },
       getPRChecks: async () => {
         checkReads++;
         return checksPage();
       },
+      getPRDiff: async () => {
+        diffFetches++;
+        return "diff-text";
+      },
     },
+    // #823: a DECISIVE APPROVED verdict — proves that even an approval on this route can never
+    // flip the outcome to {kind:"consume"}; the route's own return is unconditional.
     evaluate: async () => {
-      evaluated = true;
-      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+      evaluateCount++;
+      return { kind: "approved", headOid: "H1", evidence: { freshApprovingReviews: 0, freshTrustedSignals: 0 } };
     },
   });
 
@@ -520,16 +532,220 @@ test("#292 driveEngineAgentReview: instruction edit labels/comments once before 
   });
   assert.equal(fileReads, 1);
   assert.equal(labelWrites, 1);
-  assert.equal(comments, 1);
-  assert.equal(checkReads, 0);
-  assert.equal(evaluated, false);
-  assert.equal(recorded.wal, null);
+  assert.equal(checkReads, 0, "the advisory review must never reach the CI-evidence preflight gate");
+  assert.equal(evaluateCount, 1, "#823: reviewerAdapter.evaluate() is now called once (one logical advisory evaluation) on this route");
+  assert.equal(diffFetches, 1);
+  assert.equal(comments.length, 2, "#292's own escalation comment, plus #823's advisory-review comment");
+  assert.match(comments[0]!, /\.claude\/rules\/team\/reviewer\?\?\?\.md.*#292/);
+  assert.match(comments[1]!, /ADVISORY, not consumed by the merge driver/);
+  assert.match(comments[1]!, /no blocking findings/i);
+  assert.equal(recorded.wal, null, "#823: the advisory evaluate() call must never write the decisive WAL/pin machinery");
+  assert.equal(recorded.pin, null);
 
   const second = await driveEngineAgentReview(deps, 1, 2);
   assert.deepEqual(second, { kind: "needs-human", reason: "engine-agent: gate:HUMAN:instruction-path-latch" });
   assert.equal(fileReads, 1);
   assert.equal(labelWrites, 1);
-  assert.equal(comments, 1);
+  assert.equal(evaluateCount, 1, "latched ticks never re-run the advisory evaluate() call — same idempotence as the label latch itself");
+  assert.equal(comments.length, 2);
+});
+
+test("#823 driveEngineAgentReview: the advisory evaluate() call throwing still parks needs-human with the SAME reason (fail-closed, AC2)", async () => {
+  const filename = ".claude/rules/team/reviewer.md";
+  const { deps } = makeDeps({
+    forge: { getPRChangedFiles: async () => ({ files: [{ filename }], complete: true }) },
+    evaluate: async () => {
+      throw new Error("evaluate() crashed hard");
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, {
+    kind: "needs-human",
+    reason: "engine-agent: gate:HUMAN:instruction-path-change:.claude/rules/team/reviewer.md",
+  });
+});
+
+test("#823 driveEngineAgentReview: the advisory review's diff fetch failing still parks needs-human (fail-closed, AC2) — evaluate() is never called", async () => {
+  const filename = ".claude/rules/team/reviewer.md";
+  let evaluated = false;
+  const { deps } = makeDeps({
+    forge: {
+      getPRChangedFiles: async () => ({ files: [{ filename }], complete: true }),
+      getPRDiff: async () => {
+        throw new Error("diff API down");
+      },
+    },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "approved", headOid: "H1", evidence: { freshApprovingReviews: 0, freshTrustedSignals: 0 } };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, {
+    kind: "needs-human",
+    reason: "engine-agent: gate:HUMAN:instruction-path-change:.claude/rules/team/reviewer.md",
+  });
+  assert.equal(evaluated, false, "no diff text means evaluate() is never called");
+});
+
+test("#823 driveEngineAgentReview: the advisory comment post failing still parks needs-human (fail-closed, AC2)", async () => {
+  const filename = ".claude/rules/team/reviewer.md";
+  let commentCalls = 0;
+  const { deps } = makeDeps({
+    forge: {
+      getPRChangedFiles: async () => ({ files: [{ filename }], complete: true }),
+      addPRComment: async () => {
+        commentCalls++;
+        throw new Error("comments API down");
+      },
+    },
+    evaluate: async () => ({ kind: "approved", headOid: "H1", evidence: { freshApprovingReviews: 0, freshTrustedSignals: 0 } }),
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, {
+    kind: "needs-human",
+    reason: "engine-agent: gate:HUMAN:instruction-path-change:.claude/rules/team/reviewer.md",
+  });
+  // #292's own escalation comment (swallowed internally by escalateInstructionPathChanges) plus
+  // #823's advisory comment (swallowed by runAdvisoryInstructionPathReview) — both attempted.
+  assert.equal(commentCalls, 2);
+});
+
+test("#823 driveEngineAgentReview (gate② round 1 P1, liveness): a NEVER-SETTLING evaluate() call does not block the park — the advisory operation is bounded by a deadline race, exercised deterministically (an injected `sleep` resolves immediately; no real timer duration is awaited, no reliance on real timing per repo rule)", async () => {
+  const filename = ".claude/rules/team/reviewer.md";
+  let deadlineMsSeen: number | undefined;
+  const { deps } = makeDeps({
+    forge: { getPRChangedFiles: async () => ({ files: [{ filename }], complete: true }) },
+    // Never settles — the exact liveness hazard gate② found: a hung diff fetch/evaluate()/comment
+    // post must not hold the unconditional needs-human park hostage forever.
+    evaluate: () => new Promise<never>(() => {}),
+    // Deterministic stand-in for the real timer (repo rule: no timing-dependent tests) — resolves
+    // on the next microtask regardless of `ms`, so this test's pass/fail never depends on real
+    // wall-clock duration, only on which branch of the race the implementation takes.
+    sleep: async (ms) => {
+      deadlineMsSeen = ms;
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, {
+    kind: "needs-human",
+    reason: "engine-agent: gate:HUMAN:instruction-path-change:.claude/rules/team/reviewer.md",
+  });
+  assert.equal(deadlineMsSeen, ADVISORY_REVIEW_DEADLINE_MS, "the default deadline constant was used (no override supplied)");
+});
+
+test("#823 driveEngineAgentReview (gate② round 1 P1, liveness): advisoryReviewDeadlineMs override is threaded through to the deadline race", async () => {
+  const filename = ".claude/rules/team/reviewer.md";
+  let deadlineMsSeen: number | undefined;
+  const { deps } = makeDeps({
+    forge: { getPRChangedFiles: async () => ({ files: [{ filename }], complete: true }) },
+    evaluate: () => new Promise<never>(() => {}),
+    sleep: async (ms) => {
+      deadlineMsSeen = ms;
+    },
+    advisoryReviewDeadlineMs: 5,
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, {
+    kind: "needs-human",
+    reason: "engine-agent: gate:HUMAN:instruction-path-change:.claude/rules/team/reviewer.md",
+  });
+  assert.equal(deadlineMsSeen, 5, "the injected override, not the default constant, reached the race");
+});
+
+test("#823 driveEngineAgentReview (gate② round 2 P2, liveness): a REJECTING injected sleep still counts as the deadline firing — a never-settling evaluate() call + a rejecting sleep still parks (no hang), with no unhandled rejection; deterministic, no real-timer dependence", async () => {
+  const filename = ".claude/rules/team/reviewer.md";
+  let unhandled: unknown;
+  const onUnhandledRejection = (reason: unknown): void => {
+    unhandled = reason;
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+  try {
+    const { deps } = makeDeps({
+      forge: { getPRChangedFiles: async () => ({ files: [{ filename }], complete: true }) },
+      // Never settles — same hazard as the round 1 liveness tests. Combined with a REJECTING
+      // sleep below, this is the exact shape gate② round 2 flagged: with only a fulfillment
+      // handler on `sleep()`, this op's own missing settlement would never be rescued by the
+      // deadline either, so the whole race would hang forever.
+      evaluate: () => new Promise<never>(() => {}),
+      // A broken injected timer — rejects instead of resolving. Must still count as "the deadline
+      // fired", never as "no deadline at all".
+      sleep: async () => {
+        throw new Error("injected sleep is broken");
+      },
+    });
+    const outcome = await driveEngineAgentReview(deps, 1, 2);
+    assert.deepEqual(outcome, {
+      kind: "needs-human",
+      reason: "engine-agent: gate:HUMAN:instruction-path-change:.claude/rules/team/reviewer.md",
+    });
+    // Flush the microtask queue a couple of turns — no real timer, so this stays deterministic —
+    // giving a would-be unhandled rejection (if the fix regressed) a chance to be observed before
+    // the assertion below runs.
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(unhandled, undefined, "the rejecting injected sleep must never surface as a Node unhandled rejection");
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandledRejection);
+  }
+});
+
+test("#823 driveEngineAgentReview: the advisory evaluate() call's ReviewContext carries only the live diff + PRReviewData — no PR-body/instructions field for an in-PR edit to influence (instructions are the reviewerAdapter's own engine-construction-time doctrine/prompt/AC-snapshot — see engine-agent.ts's EngineAgentReviewer constructor-loaded promptTemplate/deps.doctrine and evaluate()'s dispatch-time getAcSnapshot call, never a live re-fetch, AC3)", async () => {
+  const filename = ".claude/rules/team/reviewer.md";
+  const fixedData = data({ labels: [] });
+  let capturedCtx: ReviewContext | undefined;
+  const { deps } = makeDeps({
+    forge: {
+      getPRReviewData: async () => fixedData,
+      getPRChangedFiles: async () => ({ files: [{ filename }], complete: true }),
+      getPRDiff: async () => "the-diff-text",
+    },
+    evaluate: async (ctx) => {
+      capturedCtx = ctx;
+      return { kind: "pending", headOid: "H1" };
+    },
+  });
+  await driveEngineAgentReview(deps, 7, 42);
+  assert.ok(capturedCtx, "evaluate() must have been called");
+  assert.deepEqual(Object.keys(capturedCtx!).sort(), ["data", "diffText", "forge", "issue", "pr"]);
+  assert.equal(capturedCtx!.data, fixedData, "the SAME already-fetched PRReviewData — no second, potentially-live re-fetch");
+  assert.equal(capturedCtx!.diffText, "the-diff-text");
+  assert.equal(capturedCtx!.pr, 7);
+  assert.equal(capturedCtx!.issue, 42);
+});
+
+// ── buildAdvisoryReviewComment: pure formatter, one case per ApprovalResult variant (#823) ────
+
+test("buildAdvisoryReviewComment: approved verdict -> banner + 'no blocking findings'", () => {
+  const c = buildAdvisoryReviewComment({ kind: "approved", headOid: "H1", evidence: { freshApprovingReviews: 0, freshTrustedSignals: 0 } });
+  assert.match(c, /ADVISORY, not consumed by the merge driver/);
+  assert.match(c, /no blocking findings/i);
+});
+
+test("buildAdvisoryReviewComment: rejected verdict -> banner + every finding body listed", () => {
+  const c = buildAdvisoryReviewComment({
+    kind: "rejected",
+    headOid: "H1",
+    findings: [
+      { id: "f1", body: "issue one" },
+      { id: "f2", body: "issue two" },
+    ],
+  });
+  assert.match(c, /ADVISORY, not consumed by the merge driver/);
+  assert.match(c, /issue one/);
+  assert.match(c, /issue two/);
+});
+
+test("buildAdvisoryReviewComment: pending verdict -> banner + an explicit 'no decisive artifact' note", () => {
+  const c = buildAdvisoryReviewComment({ kind: "pending", headOid: "H1" });
+  assert.match(c, /ADVISORY, not consumed by the merge driver/);
+  assert.match(c, /pending/i);
+});
+
+test("buildAdvisoryReviewComment: unavailable verdict -> banner + the reason text", () => {
+  const c = buildAdvisoryReviewComment({ kind: "unavailable", headOid: null, reason: "materialize failed: disk full" });
+  assert.match(c, /ADVISORY, not consumed by the merge driver/);
+  assert.match(c, /materialize failed: disk full/);
 });
 
 test("#292 driveEngineAgentReview: changed-files failure queues fail-closed before CI/session work", async () => {
