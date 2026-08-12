@@ -516,6 +516,54 @@ test("createPlanReviewStub (#827 AC2, integration): the operator-owned fence sur
   state.close();
 });
 
+test("createPlanReviewStub (P3b, gate② round 1 fix): a REVIEWER approve-with-revision that REWORDS text inside the operator-owned fence is refused end-to-end — needs-human, no write lands, the event names the violation and the phase is gate0-write-apply", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [{ number: 72, title: "t", labels: [ROUND_POOL_LABEL] }];
+  const currentBody = `${PLAN_BODY}\n\n${OPERATOR_RULING}\n`;
+  forge.issueBodies[72] = currentBody;
+  const cfg = mkCfg();
+  // The reviewer approves, but its own revised body rewords the ruling's own sentence in place —
+  // the SAME shape #752 exercised, just through the reviewer's write site instead of the
+  // drafter's (`applyRoleBodyRewrite`'s ONE mechanism guards both call sites identically).
+  const rewordedFence = [
+    "<!-- sapwood:operator-owned -->",
+    "Ruling: comment-cursor always reads the LIVE body (reworded by the reviewer).",
+    "<!-- /sapwood:operator-owned -->",
+  ].join("\n");
+  const revisedBodyWithRewordedFence = `${PLAN_BODY}\n\n${rewordedFence}\n`;
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 72 }, revisedBodyWithRewordedFence)) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["verification-plan-reviewer"],
+    "the write is refused right after the reviewer session — no drafter, no re-review",
+  );
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "the reworded body never lands");
+  assert.equal(forge.issueBodies[72], currentBody, "the issue body is completely untouched");
+  assert.ok((forge.issueLabels[72] ?? []).includes(cfg.labels.needsHuman));
+  const fenceEvents = state.eventsSince("2020-01-01T00:00:00.000Z", ["operator-fence-violated"]);
+  assert.equal(fenceEvents.length, 1);
+  const fencePayload = fenceEvents[0]!.payload as { round_id: number; issue: number; phase: string; detail: string };
+  assert.equal(fencePayload.round_id, 1);
+  assert.equal(fencePayload.issue, 72);
+  assert.equal(fencePayload.phase, "gate0-write-apply");
+  assert.match(fencePayload.detail, /operator-owned/);
+  const escalatedEvents = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
+  assert.equal(escalatedEvents.length, 1);
+  const escalatedPayload = escalatedEvents[0]!.payload as { origin?: string };
+  assert.equal(
+    escalatedPayload.origin,
+    "operator-fence-violation",
+    "must never count toward the empty-spin breaker's session-failure signal",
+  );
+  state.close();
+});
+
 test("createPlanReviewStub (#703c): no marker anywhere (current body or role output) — the applied body is exactly the role's body, unchanged behavior", async () => {
   const forge = new FakeForge();
   forge.poolEligibleIssues = [{ number: 62, title: "t", labels: [ROUND_POOL_LABEL] }];

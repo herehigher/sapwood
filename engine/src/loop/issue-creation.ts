@@ -134,8 +134,14 @@ export async function createIssueProposals(deps: IssueCreationBatchDeps): Promis
     // `endsWith` check (this file's own doc, line 7) is never at risk — the proposal marker is
     // always the unconditional literal suffix of `markedBody`, regardless of what got stripped
     // out of `proposal.body` first.
-    // #827: an empty `currentBody` carries no operator-owned fence by construction — the reject
-    // arm can never fire here, `extractOperatorOwnedFences("")` is always `[]`.
+    // #827 / gate② round 1 fix (P2): an empty `currentBody` carries no operator-owned fence by
+    // construction — `operatorFenceScanResult("")` is never malformed and `extractOperatorOwnedFences("")`
+    // is always `[]`, so NEITHER refusal arm (`malformed-operator-fence`, `operator-fence-violation`)
+    // can ever fire here; the throw below stays genuinely unreachable. What DOES apply here: a
+    // role-proposed brand-new body has no standing to introduce its OWN operator-owned fence tags
+    // either — `applyRoleBodyRewrite` strips any such tags from `proposal.body` (content kept, tag
+    // lines dropped; see `stripUnpreservedOperatorFenceTags`'s own doc), never accepts them as
+    // authoritative just because this is the issue's first-ever body.
     const rewrite = applyRoleBodyRewrite("", proposal.body);
     if (!rewrite.ok) throw new Error(`unreachable: applyRoleBodyRewrite("", ...) refused — ${rewrite.detail}`);
     const markedBody = `${rewrite.body}\n\n${marker}`;

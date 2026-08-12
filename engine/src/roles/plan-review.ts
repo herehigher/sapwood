@@ -663,13 +663,14 @@ async function reviewOneIssue(
   };
 
   /** #827: a role-produced body (reviewer's approve-with-revision, or the drafter's redraft)
-   *  altered/removed an operator-owned fenced block — `applyRoleBodyRewrite` already refused to
-   *  apply it (`ok: false`). Escalate to needs-human, same forge+state shape as `escalate` above,
-   *  but tagged with its OWN `operator-fence-violated` event (naming the violation for a reader
-   *  who never opens the forge comment) and `origin: "operator-fence-violation"` — a healthy,
-   *  working-as-designed catch, not a session/provider failure, so it must NOT count toward
-   *  round-artifact.ts's empty-spin breaker (which counts only `"session-failure"`; see that
-   *  file's own doc). */
+   *  altered/removed an operator-owned fenced block, OR (gate② round 1 fix, P1a) the current
+   *  body's own fence boundary was already malformed (an unclosed opener) — either way
+   *  `applyRoleBodyRewrite` already refused to apply it (`ok: false`). Escalate to needs-human,
+   *  same forge+state shape as `escalate` above, but tagged with its OWN `operator-fence-violated`
+   *  event (naming the violation for a reader who never opens the forge comment) and `origin:
+   *  "operator-fence-violation"` — a healthy, working-as-designed catch, not a session/provider
+   *  failure, so it must NOT count toward round-artifact.ts's empty-spin breaker (which counts
+   *  only `"session-failure"`; see that file's own doc). */
   const escalateOperatorFenceViolation = async (checkpoint: string, detail: string): Promise<void> => {
     const reason = `role write refused — ${detail}`;
     await escalateForge(reason);

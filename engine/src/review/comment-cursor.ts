@@ -194,52 +194,118 @@ function stripStandaloneMarkerLines(body: string): string {
 const OPERATOR_FENCE_OPEN = "<!-- sapwood:operator-owned -->";
 const OPERATOR_FENCE_CLOSE = "<!-- /sapwood:operator-owned -->";
 
-/** Every operator-owned fenced block in `body`, BYTE-FOR-BYTE including both tag lines, in
- *  document order. An open tag with no matching close (malformed authoring — a human left a fence
- *  unclosed) yields no block for that open: nothing to protect if the boundary itself is broken,
- *  so `missingOperatorFences` below simply has nothing to compare there, same as if the fence were
- *  absent entirely. Fences do not nest — a second open before the first close is just content of
- *  the still-open block, mirroring the #703 marker walk's own no-nesting stance on GFM fences. */
-export function extractOperatorOwnedFences(body: string): string[] {
-  const lines = body.split(/\r?\n/);
-  const blocks: string[] = [];
+/** gate② round 1 fix (P1b): the whole fence path below splits ONLY on `"\n"` — never `/\r?\n/` —
+ *  and every line record keeps its RAW text (any trailing `\r` still attached) plus its absolute
+ *  character `start` offset in `body`. `raw.trim()` (which drops a trailing `\r` along with other
+ *  whitespace) is used ONLY to RECOGNIZE a fence-tag/code-fence line; a fenced BLOCK's bytes are
+ *  always taken by slicing the ORIGINAL string between two line offsets (`body.slice(...)`), never
+ *  by rejoining an array with a literal `"\n"` — the pre-fix bug: `body.split(/\r?\n/)` then
+ *  `.join("\n")` silently rewrote every internal CRLF to LF, so a role flipping ONLY the fence's
+ *  EOL bytes reproduced byte-for-byte-*looking* text that the (LF-normalized) comparison accepted.
+ *  Recognition and comparison are deliberately different operations on the SAME underlying text
+ *  now: trim for recognition, raw slice for comparison. */
+function splitOperatorFenceLines(body: string): Array<{ raw: string; term: string; start: number }> {
+  const result: Array<{ raw: string; term: string; start: number }> = [];
+  let start = 0;
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === "\n") {
+      result.push({ raw: body.slice(start, i), term: "\n", start });
+      start = i + 1;
+    }
+  }
+  result.push({ raw: body.slice(start), term: "", start });
+  return result;
+}
+
+interface OperatorFenceBlock {
+  raw: string;
+  openLine: number;
+  closeLine: number;
+}
+
+/** The one walk every operator-fence consumer below builds on — mirrors
+ *  `scanStandaloneMarkerLines`'s GFM-code-fence awareness and no-nesting stance (a second open
+ *  before the first close is content of the still-open block, never a new boundary), extended with
+ *  two things the #703 marker walk never needed: (1) `malformed` — true when the loop ends with an
+ *  unmatched opener still pending (gate② round 1 fix, P1a: an unclosed `<!-- sapwood:operator-owned
+ *  -->` is now an EXPLICIT, ambiguous result, not silently "no block found here", indistinguishable
+ *  from "no fence at all"); (2) each block's `openLine`/`closeLine` (0-indexed line positions, not
+ *  just its raw text) — `stripUnpreservedOperatorFenceTags` below needs to know exactly WHICH
+ *  lines a matched/preserved block owns, so it never touches a byte inside one while stripping a
+ *  role's forged tag lines elsewhere in the same body. */
+function scanOperatorFences(body: string): {
+  blocks: OperatorFenceBlock[];
+  malformed: boolean;
+  lines: Array<{ raw: string; term: string; start: number }>;
+} {
+  const lines = splitOperatorFenceLines(body);
+  const blocks: OperatorFenceBlock[] = [];
   let codeFence: { char: string; len: number } | null = null;
-  let openIndex: number | null = null;
+  let openLine: number | null = null;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.trim();
-    const fenceMatch = FENCE_RE.exec(line);
+    const trimmed = lines[i]!.raw.trim();
+    const fenceMatch = FENCE_RE.exec(trimmed);
     if (fenceMatch) {
       const run = fenceMatch[1]!;
       if (codeFence === null) {
         codeFence = { char: run[0]!, len: run.length };
-      } else if (run[0] === codeFence.char && run.length >= codeFence.len && line.length === run.length) {
+      } else if (run[0] === codeFence.char && run.length >= codeFence.len && trimmed.length === run.length) {
         codeFence = null;
       }
       continue;
     }
     if (codeFence !== null) continue;
-    if (openIndex === null) {
-      if (line === OPERATOR_FENCE_OPEN) openIndex = i;
-    } else if (line === OPERATOR_FENCE_CLOSE) {
-      blocks.push(lines.slice(openIndex, i + 1).join("\n"));
-      openIndex = null;
+    if (openLine === null) {
+      if (trimmed === OPERATOR_FENCE_OPEN) openLine = i;
+    } else if (trimmed === OPERATOR_FENCE_CLOSE) {
+      const openL = lines[openLine]!;
+      const closeL = lines[i]!;
+      // Raw substring of the ORIGINAL body, open-line start through close-line end — see
+      // `splitOperatorFenceLines`'s own doc for why this (never a rejoin) is what makes the
+      // comparison CRLF-sensitive.
+      blocks.push({ raw: body.slice(openL.start, closeL.start + closeL.raw.length), openLine, closeLine: i });
+      openLine = null;
     }
   }
-  return blocks;
+  return { blocks, malformed: openLine !== null, lines };
 }
 
-/** #827: which of `currentBody`'s operator-owned fenced blocks are missing — altered, removed, or
- *  present with different bytes — from `roleBody`. Multiset comparison, not a `Set`: two
- *  byte-identical fences in `currentBody` require two matching copies in `roleBody`, not one
- *  shared by both. Empty when `currentBody` carries no fences at all (nothing to protect) or every
- *  fence survives somewhere in `roleBody` unmodified — a role may move/append around a fence
- *  freely, it just may never change what is BETWEEN its own open and close tags. */
-function missingOperatorFences(currentBody: string, roleBody: string): string[] {
-  const current = extractOperatorOwnedFences(currentBody);
-  if (current.length === 0) return [];
+/** gate② round 1 fix (P1a): the explicit malformed/ambiguous result an unmatched opener now
+ *  produces, alongside whatever well-formed blocks the same body also carries.
+ *  `extractOperatorOwnedFences` below still returns only `blocks` (unchanged shape for its
+ *  existing callers/tests) — this is the richer result `applyRoleBodyRewrite` reads `malformed`
+ *  off of, refusing the ENTIRE write rather than silently treating a broken CURRENT-body boundary
+ *  as "no fence here" (which would leave the operator's testimony unprotected). */
+export function operatorFenceScanResult(body: string): { blocks: string[]; malformed: boolean } {
+  const scan = scanOperatorFences(body);
+  return { blocks: scan.blocks.map((b) => b.raw), malformed: scan.malformed };
+}
+
+/** Every operator-owned fenced block in `body`, BYTE-FOR-BYTE (CRLF included, see
+ *  `splitOperatorFenceLines`) including both tag lines, in document order. An open tag with no
+ *  matching close (malformed authoring — a human left a fence unclosed) still yields no block for
+ *  that open — see `operatorFenceScanResult` above for the EXPLICIT malformed signal
+ *  `applyRoleBodyRewrite` now acts on; this function's own shape is unchanged for callers that only
+ *  ever care about well-formed blocks. Fences do not nest — a second open before the first close is
+ *  just content of the still-open block, mirroring the #703 marker walk's own no-nesting stance on
+ *  GFM fences. */
+export function extractOperatorOwnedFences(body: string): string[] {
+  return operatorFenceScanResult(body).blocks;
+}
+
+/** #827: which of `currentFences` (already extracted from the CURRENT body) are missing — altered,
+ *  removed, or present with different bytes — from `roleBody`. Multiset comparison, not a `Set`:
+ *  two byte-identical fences in the current body require two matching copies in `roleBody`, not
+ *  one shared by both. Empty when `currentFences` is empty (nothing to protect) or every fence
+ *  survives somewhere in `roleBody` unmodified — a role may move/append around a fence freely, it
+ *  just may never change what is BETWEEN its own open and close tags. Deliberately does NOT (and
+ *  cannot) detect REORDERING: a multiset has no position, so two byte-identical fences that simply
+ *  swapped places are correctly not a violation at all — moving a fence is explicitly allowed. */
+function missingOperatorFences(currentFences: readonly string[], roleBody: string): string[] {
+  if (currentFences.length === 0) return [];
   const remaining = extractOperatorOwnedFences(roleBody);
   const missing: string[] = [];
-  for (const fence of current) {
+  for (const fence of currentFences) {
     const idx = remaining.indexOf(fence);
     if (idx === -1) {
       missing.push(fence);
@@ -248,6 +314,73 @@ function missingOperatorFences(currentBody: string, roleBody: string): string[] 
     }
   }
   return missing;
+}
+
+/** gate② round 1 fix (P2): a role body has no standing to introduce its OWN operator-owned fence
+ *  tags — `missingOperatorFences` above already refuses a write that loses or alters a REAL current
+ *  fence, but nothing previously stopped a role from planting a BRAND-NEW `<!--
+ *  sapwood:operator-owned -->` … `<!-- /sapwood:operator-owned -->` pair of its own (or a bare,
+ *  unclosed attempt at one) — which would then read as genuine operator authority forever after,
+ *  including at brand-new issue creation (`issue-creation.ts`'s `applyRoleBodyRewrite("", ...)`,
+ *  where `currentFences` is always `[]` and so nothing was ever "missing" to violate).
+ *
+ *  Stance: STRIP the tag LINES, keep the CONTENT — same as the #703 marker's own role-authored-
+ *  marker stance and #805's finding-marker stance ("a role's OWN attempt is never trusted,
+ *  regardless of shape"), not a silent full-block removal (that would delete legitimate role prose
+ *  that merely happened to sit between two tag-shaped lines).
+ *
+ *  Mechanism: `currentFences` (raw; the caller must only invoke this AFTER `missingOperatorFences`
+ *  returned empty, i.e. every current fence is already known present in `roleBody`) identifies
+ *  which of `roleBody`'s own fence-shaped blocks are the PRESERVED real ones — matched byte-for-
+ *  byte, multiset, same rule as the violation check. Every line inside a matched block's
+ *  `[openLine, closeLine]` span is untouchable, verbatim, no exceptions (even if it happens to also
+ *  look like a tag line — that byte sequence is exactly what made the block match in the first
+ *  place). Every OTHER standalone open/close tag line found anywhere else in `roleBody` — a whole
+ *  new forged pair, a lone unclosed attempt, a stray unmatched closer, fence-code-quoted examples
+ *  excluded (same recognition rule as everywhere else in this file) — is removed; its own inner
+ *  content, if any, is left in place untouched. */
+function stripUnpreservedOperatorFenceTags(currentFences: readonly string[], roleBody: string): string {
+  const scan = scanOperatorFences(roleBody);
+  const remaining = [...currentFences];
+  const protectedRanges: Array<[number, number]> = [];
+  for (const block of scan.blocks) {
+    const idx = remaining.indexOf(block.raw);
+    if (idx !== -1) {
+      remaining.splice(idx, 1);
+      protectedRanges.push([block.openLine, block.closeLine]);
+    }
+  }
+  const isProtected = (lineIndex: number): boolean => protectedRanges.some(([s, e]) => lineIndex >= s && lineIndex <= e);
+
+  // Every standalone open/close tag line in `roleBody`, fence-code-aware, INDEPENDENT of pairing —
+  // this deliberately also catches a lone unclosed opener or a stray closer with no opener, which
+  // `scan.blocks` above (paired boundaries only) never records at all.
+  const tagLines: number[] = [];
+  {
+    let codeFence: { char: string; len: number } | null = null;
+    for (let i = 0; i < scan.lines.length; i++) {
+      const trimmed = scan.lines[i]!.raw.trim();
+      const fenceMatch = FENCE_RE.exec(trimmed);
+      if (fenceMatch) {
+        const run = fenceMatch[1]!;
+        if (codeFence === null) {
+          codeFence = { char: run[0]!, len: run.length };
+        } else if (run[0] === codeFence.char && run.length >= codeFence.len && trimmed.length === run.length) {
+          codeFence = null;
+        }
+        continue;
+      }
+      if (codeFence !== null) continue;
+      if (trimmed === OPERATOR_FENCE_OPEN || trimmed === OPERATOR_FENCE_CLOSE) tagLines.push(i);
+    }
+  }
+
+  const toRemove = new Set(tagLines.filter((i) => !isProtected(i)));
+  if (toRemove.size === 0) return roleBody;
+  return scan.lines
+    .filter((_, i) => !toRemove.has(i))
+    .map((l) => l.raw + l.term)
+    .join("");
 }
 
 /** #703 (ruling v2, PO batch-11 2026-08-06 — supersedes v1's "validator unchanged" stance with
@@ -293,33 +426,67 @@ function missingOperatorFences(currentBody: string, roleBody: string): string[] 
  *  human comments by choosing an engine id positioned after them.
  *
  *  #827 (chosen arm: REJECT, not silent-restore — consistent with #703's own write-time guard,
- *  `checkMarkerWritePrecondition`): checked FIRST, before any marker normalization. If `roleBody`
- *  altered, removed, or reworded a single byte inside any `currentBody` operator-owned fence
- *  (`missingOperatorFences` above), the ENTIRE rewrite is refused — `ok: false`, naming the
- *  violation in `detail` so the caller can both refuse the forge write and emit a durable event.
- *  Unlike the marker's own strip-and-restore (silent, single-line, always safe to auto-fix), an
- *  operator-owned fence can hold arbitrary multi-line prose: silently splicing the operator's
- *  original text back in would hide from the ROLE (and from review) that its output was rejected,
- *  and would still throw away whatever legitimate, non-conflicting edits shared the same
- *  `roleBody` — reject-the-whole-write is the honest failure mode, exactly like a `current` body
- *  with an already-invalid marker refuses rather than "repairing" itself. Nothing outside a fence
- *  is restricted: content appended before, between, or after fences passes through unmodified. */
-export type RoleBodyRewriteResult = { ok: true; body: string } | { ok: false; reason: "operator-fence-violation"; detail: string };
+ *  `checkMarkerWritePrecondition`): checked FIRST, before any marker normalization, in TWO steps.
+ *  (1) gate② round 1 fix (P1a): if `currentBody`'s own fence boundary is MALFORMED (an unclosed
+ *  `<!-- sapwood:operator-owned -->` opener, `operatorFenceScanResult(currentBody).malformed`),
+ *  the write is refused OUTRIGHT — `ok: false, reason: "malformed-operator-fence"` — regardless of
+ *  what `roleBody` contains. Before this fix, a malformed CURRENT fence extracted no block at all
+ *  (indistinguishable from "no fence exists"), so the role write proceeded silently and the
+ *  operator's own (broken-boundary) testimony went completely unprotected; a malformed fence must
+ *  never be silently "repaired" or ignored, exactly like the marker's own `malformed-marker` arm.
+ *  (2) If `roleBody` altered, removed, or reworded a single byte inside any well-formed
+ *  `currentBody` operator-owned fence (`missingOperatorFences` above), the ENTIRE rewrite is
+ *  refused — `ok: false, reason: "operator-fence-violation"` — naming the violation in `detail` so
+ *  the caller can both refuse the forge write and emit a durable event. Unlike the marker's own
+ *  strip-and-restore (silent, single-line, always safe to auto-fix), an operator-owned fence can
+ *  hold arbitrary multi-line prose: silently splicing the operator's original text back in would
+ *  hide from the ROLE (and from review) that its output was rejected, and would still throw away
+ *  whatever legitimate, non-conflicting edits shared the same `roleBody` — reject-the-whole-write
+ *  is the honest failure mode, exactly like a `current` body with an already-invalid marker
+ *  refuses rather than "repairing" itself. Nothing outside a fence is restricted: content appended
+ *  before, between, or after fences passes through unmodified — and reordering a byte-identical
+ *  fence relative to the rest of the body is explicitly NOT a violation (a multiset comparison has
+ *  no position to compare; see `missingOperatorFences`'s own doc).
+ *
+ *  gate② round 1 fix (P2): once both checks above pass, `roleBody` is ALSO run through
+ *  `stripUnpreservedOperatorFenceTags` — a role has no standing to introduce its OWN operator-owned
+ *  fence tags either (they would otherwise read as genuine operator authority forever after); see
+ *  that function's own doc for the strip-the-tags-keep-the-content mechanism. This runs even when
+ *  `currentBody` carries no fence at all (`currentFences` empty) — including issue-creation.ts's
+ *  `applyRoleBodyRewrite("", ...)` call, where a role-proposed BRAND-NEW body's own forged fence
+ *  tags are stripped by construction, never accepted as authoritative. */
+export type RoleBodyRewriteResult =
+  | { ok: true; body: string }
+  | { ok: false; reason: "operator-fence-violation"; detail: string }
+  | { ok: false; reason: "malformed-operator-fence"; detail: string };
 
 export function applyRoleBodyRewrite(currentBody: string, roleBody: string): RoleBodyRewriteResult {
-  const missing = missingOperatorFences(currentBody, roleBody);
+  const currentScan = operatorFenceScanResult(currentBody);
+  if (currentScan.malformed) {
+    return {
+      ok: false,
+      reason: "malformed-operator-fence",
+      detail:
+        `the issue body carries an unclosed \`${OPERATOR_FENCE_OPEN}\` fence (an opener with no matching ` +
+        `\`${OPERATOR_FENCE_CLOSE}\`) — a role write cannot proceed while the operator-owned boundary itself ` +
+        "is ambiguous",
+    };
+  }
+  const currentFences = currentScan.blocks;
+  const missing = missingOperatorFences(currentFences, roleBody);
   if (missing.length > 0) {
     return {
       ok: false,
       reason: "operator-fence-violation",
       detail:
-        `the role-proposed body altered, removed, or reordered ${missing.length} operator-owned fenced ` +
+        `the role-proposed body altered or removed ${missing.length} operator-owned fenced ` +
         `block(s) (\`${OPERATOR_FENCE_OPEN}\` … \`${OPERATOR_FENCE_CLOSE}\`) — a role may append content ` +
         "after a fence but never modify the bytes inside one",
     };
   }
+  const roleBodyFenceStripped = stripUnpreservedOperatorFenceTags(currentFences, roleBody);
   const currentMarkerLines = findStandaloneMarkerLines(currentBody);
-  const strippedRoleBody = stripStandaloneMarkerLines(roleBody);
+  const strippedRoleBody = stripStandaloneMarkerLines(roleBodyFenceStripped);
   if (currentMarkerLines.length === 0) return { ok: true, body: strippedRoleBody };
   const withoutTrailingWhitespace = strippedRoleBody.replace(/\s+$/, "");
   return { ok: true, body: `${withoutTrailingWhitespace}\n\n${currentMarkerLines.join("\n")}\n` };
