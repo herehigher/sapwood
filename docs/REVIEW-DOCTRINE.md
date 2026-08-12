@@ -150,6 +150,10 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   `CHAR_ADVANCE` is the worked example of a compliant deterministic model: it substitutes for a
   live render, but every input it consumes (font-size, character count) is the same value the
   real draw path consumes, so it cannot silently diverge from what actually gets drawn.
+- **Fake-verdict rule (engine side).** Presetting a fake to a POLICY decision then asserting it
+  proves readback only — deciding logic never ran. Sibling of "Model the real thing" (VALUE vs.
+  DECIDING). #824/PR#835 ac1/ac2: reclaimResults preset w/o baseline; fixed via real
+  dispatched_at+write. If fake IS the fact, run real function.
 - **Unwired-test rule.** A dashboard test that renders an extracted pure function, a bare
   component with hand-built props, or a query/hook in isolation proves that piece is correct in
   isolation — it does not prove the app actually wires it up. Recurring class across #759
