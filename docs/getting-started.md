@@ -7,9 +7,15 @@ first autonomous run.
 ## Requirements
 
 - **Node.js ≥ 24** (the engine uses the built-in `node:sqlite`, no native build step).
-- **Claude Code CLI ≥ 2.0**, authenticated and able to run the configured models with
-  `claude -p` in a non-interactive shell. Workers and the default `engine-agent` reviewer
-  are headless Claude sessions; this is a real Anthropic usage path and incurs real spend.
+- **Claude Code CLI ≥ 2.1.209** — the engine's declared minimum (`MIN_CLAUDE_CLI_VERSION`,
+  `engine/src/roles/worker.ts`; see [Configuration: `worker`](configuration.md#worker) for why
+  this exact version), authenticated and able to run the configured models with `claude -p` in a
+  non-interactive shell. Workers and the default `engine-agent` reviewer are headless Claude
+  sessions; this is a real Anthropic usage path and incurs real spend. A CLI below the floor is
+  not refused outright — a once-per-start startup check WARNs (never blocks) when the resolved
+  binary is older or its version could not be determined; an unnoticed below-floor CLI instead
+  fails every worker leg and every environment probe with `error: unknown option ...`, which the
+  engine misreads as a provider outage rather than an outdated CLI.
 - **GitHub CLI (`gh`)**, authenticated with the `project` scope:
   ```
   gh auth login
