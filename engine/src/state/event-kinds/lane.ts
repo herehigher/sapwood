@@ -184,6 +184,13 @@ export const LANE_EVENT_KINDS = defineKinds({
     actionability: "routine",
     see: "#447",
   },
+  "human-merge-only-closed": {
+    tags: [],
+    meaning:
+      "a parked human-merge-only lane's PR (#397 bucket 2) was found MERGED and closed out — in-progress cleared, board set done, worktree run through the same mtime/ctime reclaim policy the DEAD path uses, worker row terminalized. Never re-drives the lane (#824).",
+    actionability: "routine",
+    see: "#824",
+  },
 
   // Cost ceiling, per lane (the run-level breach state lives in run.ts).
   "ceiling-escalated": {

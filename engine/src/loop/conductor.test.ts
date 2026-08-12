@@ -14366,3 +14366,169 @@ test("#399 tick: a FIXING lane — the state the dogfood run had no PR-side sign
   assert.deepEqual(forge.laneStatePrLabelsRemoved, [[73, LANE_STATE_LABEL]]);
   st.close();
 });
+
+// ── #824: a parked human-merge-only lane (#397 bucket 2) never re-drives, but nothing else ever
+//   re-read its PR either — batch-14 (PR #812) idled six hours after a human merge before an
+//   operator cleaned up the label/row/worktree by hand. closeOutMergedHumanMergeOnlyLanes is the
+//   missing close-out sweep, the bucket-2 analog of reviveEnvFailedPrLanes's `lane-revival-terminal`.
+
+const seedParkedHumanMergeOnly = (st: State, name: string, issue: number, pr: number) => {
+  st.upsertWorker({ name, issue, session_id: `s-${name}`, state: "failed", started_at: "t0", ended_at: "t1", pr });
+  st.appendEvent("drive-human-merge-only", { worker: name, issue, pr, reason: "gate:HUMAN:instruction-path-changed" });
+};
+
+test("#824 AC1: a parked human-merge-only lane whose PR reads MERGED and whose worktree is CLEAN is closed out in one sweep — in-progress cleared, board done, worktree run through the reclaim check (deleted), row terminal, never re-enters gatedFailedWorkers()/unlabeledGatedWorkers()", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  seedParkedHumanMergeOnly(st, "lane-hmo1", 900, 700);
+  forge.issueLabelsByIssue[900] = [cfg.labels.inProgress];
+  forge.prStatus = { ...forge.prStatus, state: "MERGED" };
+  sup.reclaimResults["lane-hmo1"] = { worktreePath: "/tmp/wt-hmo1", worktreeRetained: false };
+
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+  assert.deepEqual(r.humanMergeOnlyClosed, [{ kind: "closed", worker: "lane-hmo1", issue: 900, pr: 700 }]);
+  assert.deepEqual(sup.reclaimed, ["lane-hmo1"], "the worktree went through the sanctioned reclaim policy, not an unconditional delete");
+  assert.deepEqual(forge.boardSet, [[900, "done"]]);
+  assert.deepEqual(forge.labelsRemoved, [[900, cfg.labels.inProgress]]);
+  assert.deepEqual(forge.labelsAdded, [], "a clean close-out never touches needs-human");
+  assert.equal(st.getWorker("lane-hmo1")?.state, "done");
+  assert.equal(st.getWorker("lane-hmo1")?.gated_escalation_labeled, 0);
+  assert.equal(st.eventsAfterId(0, ["human-merge-only-closed"]).length, 1);
+  // AC4: the close-out must never resurrect the lane into gated reentry's candidate sets.
+  assert.equal(st.gatedFailedWorkers().length, 0);
+  assert.equal(st.unlabeledGatedWorkers().length, 0);
+  assert.equal(st.parkedHumanMergeOnlyWorkers().length, 0, "state='failed' would keep it in this sweep's own candidate set forever");
+
+  // Terminal: a further tick finds nothing left to do and spends no further PR reads.
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+  assert.deepEqual(r2.humanMergeOnlyClosed, []);
+  assert.equal(forge.getPRStatusCalls, 1, "the closed-out lane left the candidate set — no further reads");
+  st.close();
+});
+
+test("#824 AC2: a parked human-merge-only lane whose PR reads MERGED but whose worktree is DIRTY (past dispatched_at) is left on disk, the human is escalated with the path, and the row/board/in-progress label are left untouched — mirroring the DEAD/reclaim retention policy", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  // A REAL directory: releaseVanishedWorktrees() runs every tick and does a genuine existsSync
+  // check against the retained path — a fake never-existed path would read back "gone" on the
+  // very next tick and silently defeat the retained-worktree guard this test exercises.
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-824-dirty-"));
+  try {
+    seedParkedHumanMergeOnly(st, "lane-hmo2", 901, 701);
+    forge.issueLabelsByIssue[901] = [cfg.labels.inProgress];
+    forge.prStatus = { ...forge.prStatus, state: "MERGED" };
+    sup.reclaimResults["lane-hmo2"] = { worktreePath: dir, worktreeRetained: true };
+
+    const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+    assert.deepEqual(r.humanMergeOnlyClosed, [{ kind: "retained", worker: "lane-hmo2", issue: 901, pr: 701, worktreePath: dir }]);
+    assert.deepEqual(forge.labelsAdded, [[901, cfg.labels.needsHuman]]);
+    assert.deepEqual(forge.boardSet, [], "no board write — a human still owns the worktree, the PR merge alone doesn't close this out");
+    assert.deepEqual(forge.labelsRemoved, [], "in-progress is left standing — the lane is not actually closed yet");
+    assert.equal(
+      st.getWorker("lane-hmo2")?.state,
+      "failed",
+      "row left exactly as parking found it, same as the DEAD/reclaim retention branch",
+    );
+    assert.equal(st.eventsAfterId(0, ["worktree-retained"]).length, 1);
+    assert.equal(st.eventsAfterId(0, ["human-merge-only-closed"]).length, 0);
+    assert.equal(forge.issueComments.length, 1, "the salvage comment reportRetainedWorktree posts");
+    assert.equal(st.gatedFailedWorkers().length, 0, "still never reachable from gated reentry");
+
+    // Next tick: the retained-worktree guard skips the lane entirely — zero further PR reads, no
+    // repeated escalation/comment spam.
+    const before = forge.getPRStatusCalls;
+    const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+    assert.deepEqual(r2.humanMergeOnlyClosed, []);
+    assert.equal(forge.getPRStatusCalls, before, "an already-retained lane costs zero further PR reads");
+    assert.deepEqual(sup.reclaimed, ["lane-hmo2"], "reclaim() is never re-attempted once retained");
+    assert.equal(forge.labelsAdded.length, 1, "no duplicate escalation");
+    assert.equal(forge.issueComments.length, 1, "no duplicate salvage comment");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    st.close();
+  }
+});
+
+test("#824 AC3: a parked human-merge-only lane whose PR is CLOSED without merging is left completely untouched", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  seedParkedHumanMergeOnly(st, "lane-hmo3", 902, 702);
+  forge.issueLabelsByIssue[902] = [cfg.labels.inProgress];
+  forge.prStatus = { ...forge.prStatus, state: "CLOSED" };
+
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+  assert.deepEqual(r.humanMergeOnlyClosed, []);
+  assert.deepEqual(sup.reclaimed, [], "worktree is never touched for a declined PR");
+  assert.deepEqual(forge.boardSet, []);
+  assert.deepEqual(forge.labelsRemoved, []);
+  assert.deepEqual(forge.labelsAdded, []);
+  assert.equal(st.getWorker("lane-hmo3")?.state, "failed");
+  assert.equal(st.parkedHumanMergeOnlyWorkers().length, 1, "still a candidate — re-observed next cycle, honest and bounded");
+  st.close();
+});
+
+test("#824 AC3: a PR-status read failure for a parked human-merge-only lane leaves it untouched, retried next cycle", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  seedParkedHumanMergeOnly(st, "lane-hmo4", 903, 703);
+  forge.issueLabelsByIssue[903] = [cfg.labels.inProgress];
+  forge.getPRStatus = () => {
+    throw new Error("simulated forge outage");
+  };
+
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+  assert.deepEqual(r.humanMergeOnlyClosed, []);
+  assert.deepEqual(sup.reclaimed, []);
+  assert.deepEqual(forge.boardSet, []);
+  assert.deepEqual(forge.labelsRemoved, []);
+  assert.equal(st.getWorker("lane-hmo4")?.state, "failed");
+  assert.equal(st.parkedHumanMergeOnlyWorkers().length, 1);
+  st.close();
+});
+
+test("#824 AC5: at most one PR read per parked human-merge-only lane per sweep cycle, across multiple lanes and multiple ticks", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  // A REAL directory for lane-b's retained worktree — see #824 AC2's own comment: a fake path
+  // reads back as "gone" to releaseVanishedWorktrees()'s genuine existsSync check, which would
+  // silently defeat the retained-worktree read-skip this test's fourth tick asserts.
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-824-readcount-"));
+  try {
+    seedParkedHumanMergeOnly(st, "lane-a", 910, 810);
+    seedParkedHumanMergeOnly(st, "lane-b", 911, 811);
+    forge.prStatus = { ...forge.prStatus, state: "OPEN" }; // neither merged yet
+
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+    assert.equal(forge.getPRStatusCalls, 2, "one read per lane, first cycle");
+
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+    assert.equal(forge.getPRStatusCalls, 4, "still open — one more read per lane, second cycle (unmemoized, AC3's own tolerance)");
+
+    // lane-a's PR merges onto a clean worktree; lane-b's merges onto a dirty one.
+    sup.reclaimResults["lane-a"] = { worktreePath: "/tmp/wt-a-never-created", worktreeRetained: false };
+    sup.reclaimResults["lane-b"] = { worktreePath: dir, worktreeRetained: true };
+    forge.prStatus = { ...forge.prStatus, state: "MERGED" };
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+    assert.equal(forge.getPRStatusCalls, 6, "one more read per lane this cycle — never more than one per lane");
+    assert.equal(st.getWorker("lane-a")?.state, "done");
+    assert.equal(st.getWorker("lane-b")?.state, "failed");
+
+    // Fourth tick: lane-a is gone (closed out), lane-b is guarded by its retained worktree — zero
+    // reads for either.
+    await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+    assert.equal(forge.getPRStatusCalls, 6, "closed-out lane-a left the candidate set, retained lane-b is guarded — zero further reads");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    st.close();
+  }
+});

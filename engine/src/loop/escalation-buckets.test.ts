@@ -406,6 +406,15 @@ const SITE_INVENTORY: Record<
     src: 'return { kind: "needs-human", reason: `engine-agent: gate:HUMAN:pr-state-${data0.state}` };',
     why: "engine-agent: PR no longer OPEN",
   },
+  // 1i — #824: the parked-human-merge-only close-out sweep's dirty-worktree escalation. Textually
+  // positioned after tick() (see closeOutMergedHumanMergeOnlyLanes's own doc) so it lands as the
+  // newest, highest-numbered conductor.ts site rather than renumbering every site above it.
+  "loop/conductor.ts#22": {
+    bucket: "needs-human",
+    carrier: "issue",
+    src: "await forge.addLabel(w.issue, cfg.labels.needsHuman);",
+    why: "a parked human-merge-only lane's PR merged but its worktree failed the mtime/ctime purity check — issue-born, same #69 P1 retention policy as the DEAD path, but single-carrier: the PR is already MERGED and closed, so there is no live auto-merge risk for a PR-side label to guard against",
+  },
 };
 
 function engineSourceFiles(dir: string, out: string[] = []): string[] {
@@ -458,7 +467,7 @@ test("#397 AC: EVERY escalation write site in engine source is classified into e
   }
 });
 
-test("#397 AC: the corrected site inventory — 8 PR-side label writes, 30 issue-side (#398 moved fix-response's escalation to the PR and deleted its issue twin, and folded escalateNeedsHuman/review-disputed/review-non-convergent into the shared carrier writer's two arms; #652 added the comment-adjudication cursor's shared escalation site; retro round #365 added the needs_human direct-escalation site), and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
+test("#397 AC: the corrected site inventory — 8 PR-side label writes, 31 issue-side (#398 moved fix-response's escalation to the PR and deleted its issue twin, and folded escalateNeedsHuman/review-disputed/review-non-convergent into the shared carrier writer's two arms; #652 added the comment-adjudication cursor's shared escalation site; retro round #365 added the needs_human direct-escalation site; #824 added the parked-human-merge-only dirty-worktree escalation site), and the non-gate-prefixed merge-driver/rollback sites are all present", () => {
   const sites = scanEscalationSites();
   const labelSites = sites.filter(
     (s) => SITE_INVENTORY[s.key]!.src.includes("addLabel(") || SITE_INVENTORY[s.key]!.src.includes("addPRLabel("),
@@ -471,8 +480,8 @@ test("#397 AC: the corrected site inventory — 8 PR-side label writes, 30 issue
   );
   assert.equal(
     labelSites.length - prSide.length,
-    30,
-    "issue-side escalation writes (#397's count, minus #398's deleted fix-response issue twin, minus the three issue writes — escalateNeedsHuman, review-disputed, review-non-convergent — now folded into the shared carrier writer, plus #652's comment-adjudication cursor site, plus retro round #365's needs_human direct-escalation site)",
+    31,
+    "issue-side escalation writes (#397's count, minus #398's deleted fix-response issue twin, minus the three issue writes — escalateNeedsHuman, review-disputed, review-non-convergent — now folded into the shared carrier writer, plus #652's comment-adjudication cursor site, plus retro round #365's needs_human direct-escalation site, plus #824's parked-human-merge-only dirty-worktree escalation site)",
   );
   // The four sites the AC names explicitly because they carry no `gate:HUMAN:` reason prefix.
   for (const key of ["roles/merge-driver.ts#4", "roles/merge-driver.ts#5", "roles/merge-driver.ts#6", "loop/conductor.ts#0"]) {

@@ -2424,6 +2424,33 @@ export class State {
       .all() as unknown as WorkerRow[];
   }
 
+  /** #824: parked human-merge-only lanes — #397's bucket 2 ("a human must MERGE this PR"),
+   *  settleHumanMergeOnly's own write (`state='failed'` + `pr` set, `gated_escalation_labeled: 0`
+   *  forever). These rows already live inside `unlabeledGatedWorkers()`'s SHAPE, but this is a
+   *  deliberately SEPARATE query, not a filter over that method's result: auditGatedEscalationFlags
+   *  (reconcile.ts)'s own startup-only merged/closed-issue fallback can set `gated_reentry_capped
+   *  = 1` on one of these rows before the #824 close-out sweep ever runs — its CLOSED-issue branch
+   *  fires first, since a merge with "Closes #N" auto-closes the linked issue. Depending on that
+   *  column here would let a restart between park and merge silently steal the row from this
+   *  query, reproducing the exact leftover-bookkeeping gap #824 exists to close. Scoping via the
+   *  `drive-human-merge-only` event itself (not a column) is what makes this query correct
+   *  regardless of what any other pass has done to `gated_reentry_capped`/`gated_escalation_labeled`. */
+  parkedHumanMergeOnlyWorkers(): WorkerRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM workers w
+         WHERE w.state = 'failed' AND w.pr IS NOT NULL
+           AND EXISTS (
+             SELECT 1 FROM events e
+             WHERE e.kind = 'drive-human-merge-only'
+               AND json_extract(e.payload, '$.worker') = w.name
+               AND json_extract(e.payload, '$.pr') = w.pr
+           )
+         ORDER BY w.name`,
+      )
+      .all() as unknown as WorkerRow[];
+  }
+
   /** #384 (F12): lanes that ended TERMINALLY with no PR of their own on record — the entire
    *  local precondition for an orphaned engine PR. A lane only ever gets its `pr` column written
    *  at the running->driving transition (or the DEAD-with-PR rescue), so a terminal row with a

@@ -1532,6 +1532,17 @@ export type GatedReclaimOutcome =
    *  for why one more tick's confirmation is the fix, not a fresh read used twice. */
   | { kind: "candidate-staged"; worker: string; issue: number; pr: number };
 
+/** #824: outcome of one parked human-merge-only lane's close-out attempt this tick. "closed" —
+ *  the PR read MERGED and the worktree passed the mtime/ctime purity check (or never existed):
+ *  in-progress cleared, board set done, worker row terminalized. "retained" — the PR read MERGED
+ *  but the worktree failed the purity check: left on disk, a human is escalated with the path,
+ *  and the row/board/label are left exactly as parking found them (mirrors the DEAD/reclaim
+ *  retention policy — see closeOutMergedHumanMergeOnlyLanes's own doc). A CLOSED-without-merge PR
+ *  or a PR-read failure produce no outcome at all — the lane is left untouched for the next cycle. */
+export type HumanMergeOnlyCloseOutOutcome =
+  | { kind: "closed"; worker: string; issue: number; pr: number }
+  | { kind: "retained"; worker: string; issue: number; pr: number; worktreePath: string | null };
+
 /** #172: one handoff-lane decision that changed durable state this tick. */
 export type ResumeOutcome =
   | { kind: "resumed"; worker: string; issue: number; attempt: number }
@@ -1577,6 +1588,10 @@ export interface TickResult {
    *  tick — recorded / resolved / still-retrying / escalated-to-needs-human. Empty when nothing
    *  was pending and no fixing lane's terminal reclaim enqueued anything new this tick. */
   fixResponses: FixResponseWriteOutcome[];
+  /** #824: parked human-merge-only lanes closed out (or escalated for a dirty worktree) this
+   *  tick because their PR read MERGED. Empty when there were no parked human-merge-only lanes,
+   *  or none of their PRs had merged yet. */
+  humanMergeOnlyClosed: HumanMergeOnlyCloseOutOutcome[];
 }
 
 export interface TickDeps {
@@ -1923,7 +1938,7 @@ async function attemptRollback(
  *  structured event always lands even if both forge calls fail. The human-attention label is the
  *  caller's job (every retention call site already applies it on its own escalation branch). */
 async function reportRetainedWorktree(
-  forge: IForge,
+  forge: Pick<IForge, "addIssueComment">,
   state: State,
   worker: string,
   issue: number,
@@ -3753,6 +3768,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       resumed,
       fixingReclaimed: [],
       fixResponses: [],
+      humanMergeOnlyClosed: [],
     };
   }
 
@@ -3819,6 +3835,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       resumed,
       fixingReclaimed: [],
       fixResponses: [],
+      humanMergeOnlyClosed: [],
     };
   }
 
@@ -3895,6 +3912,16 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   is `driving` and leaves the candidate set. Runs BEFORE DRIVE below, so a revived lane is
   //   re-driven from live PR state this same tick.
   await reviveEnvFailedPrLanes(forge, state, cfg, deps.log);
+
+  // ── HUMAN-MERGE-ONLY CLOSE-OUT (#824): the bucket-2 sibling of LANE REVIVAL above — a lane
+  //   #397 parked as "a human must MERGE this PR" is (correctly) never re-driven, but nothing
+  //   else ever re-read that PR either, so a merge sat unreconciled for hours in the batch-14
+  //   live incident (ev#13590) until an operator cleaned it up by hand. Runs every tick,
+  //   unconditionally (no `isParked()`/`paused` gate — it never returns a lane to `driving`, only
+  //   terminal bookkeeping on an already-`failed` row, the same "regardless of paused" stance
+  //   GATED RECLAIM/MID-RUN ORPHAN SWEEP already take for read-only reconciliation). See
+  //   closeOutMergedHumanMergeOnlyLanes's own doc for the full close-out/retention policy.
+  const humanMergeOnlyClosed = await closeOutMergedHumanMergeOnlyLanes(forge, state, supervisor, cfg, iso, deps.log);
 
   // ── FIX RESPONSE RETRY (#247): same "drain every durably-persisted recovery-path write
   //   before this tick does anything else" convention as ROLLBACK RETRY above, for the
@@ -6158,7 +6185,94 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     resumed,
     fixingReclaimed,
     fixResponses,
+    humanMergeOnlyClosed,
   };
+}
+
+/** #824: a parked human-merge-only lane (#397 bucket 2, settleHumanMergeOnly) never gets
+ *  re-driven — reconcile.ts's revival pass explicitly fences it out (see the
+ *  HUMAN_MERGE_ONLY_EVENT check in reviveEnvFailedPrLanes), by design: a human owns its next
+ *  action, not the engine. But nothing ELSE ever re-reads that PR either, so once a human merges
+ *  it the lane's `in-progress` label, worker row, and worktree are all left behind forever —
+ *  batch-14 (2026-08-11, lane-752/PR#812) idled six hours before an operator cleaned it up by
+ *  hand (ev#13590). This sweep is the missing close-out, the bucket-2 analog of
+ *  reviveEnvFailedPrLanes's own `lane-revival-terminal` handling for bucket 1.
+ *
+ *  Candidate set: `state.parkedHumanMergeOnlyWorkers()` — see that method's own doc for why it is
+ *  a dedicated query rather than a filter over `unlabeledGatedWorkers()`. A worktree already
+ *  retained-and-unreleased (`state.unreleasedRetainedWorktrees()`) is skipped with NO forge read
+ *  at all: #69's retention is a one-shot human-salvage escalation, and re-running it every tick
+ *  would both spend an unbounded number of PR reads over the lane's lifetime and repost the same
+ *  salvage comment forever. This is what keeps AC5's "at most one PR read per lane per cycle"
+ *  bound cheap across many cycles, not just within one.
+ *
+ *  CLOSED-without-merge and a PR-read failure are both left completely untouched — no event, no
+ *  write, re-observed next cycle — the same tolerance reviveEnvFailedPrLanes' own branch 3
+ *  already accepts for an unmerged CLOSED PR (rare, honest, bounded).
+ *
+ *  On MERGED, the worktree is run through the SAME sanctioned reclaim policy the DEAD/reclaim
+ *  path uses (`supervisor.reclaim`, which is `retainOrDeleteWorktree` under the hood) — never an
+ *  unconditional delete. A dirty worktree is left on disk and escalated (needs-human label + the
+ *  same `reportRetainedWorktree` comment the DEAD path posts); the row, board, and in-progress
+ *  label are left exactly as parking found them, mirroring that path's retention policy exactly.
+ *  Only a CLEAN worktree (or one that never existed) reaches the full close-out: board -> done,
+ *  `in-progress` removed (board first, label second, healOrphanedIssues' own load-bearing
+ *  ordering — a label-write failure after the board already moved is safe to retry, nothing here
+ *  is re-driven either way), and the row terminalized to `done` — which is what makes the row
+ *  permanently invisible to this query, `gatedFailedWorkers()`, and `unlabeledGatedWorkers()`
+ *  alike (all three require `state = 'failed'`), so the close-out can never be re-driven (AC4).
+ *  Unlike the retained-PR label add, no PR-side label is written here: the PR is already MERGED
+ *  and closed, so there is no live auto-merge risk for a label to guard against (contrast the
+ *  DEAD path's dual issue+PR label add, which exists because that PR is still OPEN).
+ *
+ *  #397/#398 site-inventory note: this function's `addLabel` call is deliberately positioned
+ *  textually AFTER tick() (rather than beside reportRetainedWorktree, which it otherwise reads
+ *  most naturally next to) so it lands as escalation-buckets.test.ts's newest, highest-ordinal
+ *  `loop/conductor.ts` site rather than shifting every other pinned site's ordinal by one. */
+export async function closeOutMergedHumanMergeOnlyLanes(
+  forge: Pick<IForge, "getPRStatus" | "setBoardStatus" | "removeLabel" | "addLabel" | "addIssueComment">,
+  state: State,
+  supervisor: Pick<Supervisor, "reclaim">,
+  cfg: { labels: { inProgress: string; needsHuman: string } },
+  iso: () => string,
+  log: (message: string) => void = console.error,
+): Promise<HumanMergeOnlyCloseOutOutcome[]> {
+  let candidates: WorkerRow[];
+  try {
+    candidates = state.parkedHumanMergeOnlyWorkers();
+  } catch (error) {
+    log(`[sapwood:conductor] human-merge-only close-out could not read the worker table; skipped: ${String(error)}`);
+    return [];
+  }
+  const retainedWorkers = new Set(state.unreleasedRetainedWorktrees().map((r) => r.worker));
+  const outcomes: HumanMergeOnlyCloseOutOutcome[] = [];
+  for (const w of candidates) {
+    if (w.pr == null) continue; // fail-safe; parkedHumanMergeOnlyWorkers() already filters this
+    if (retainedWorkers.has(w.name)) continue; // already escalated on a prior pass; a human owns it now
+    const pr = w.pr;
+    try {
+      const prState = (await forge.getPRStatus(pr)).state;
+      if (prState !== "MERGED") continue; // CLOSED (declined) or still OPEN — left untouched, AC3
+      const r = await supervisor.reclaim(w.name);
+      if (r.worktreeRetained) {
+        await forge.addLabel(w.issue, cfg.labels.needsHuman);
+        await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath, cfg.labels.needsHuman);
+        outcomes.push({ kind: "retained", worker: w.name, issue: w.issue, pr, worktreePath: r.worktreePath });
+        continue;
+      }
+      await forge.setBoardStatus(w.issue, "done");
+      await forge.removeLabel(w.issue, cfg.labels.inProgress);
+      state.upsertWorkerWithEvent({ ...w, state: "done", ended_at: iso() }, "human-merge-only-closed", {
+        worker: w.name,
+        issue: w.issue,
+        pr,
+      });
+      outcomes.push({ kind: "closed", worker: w.name, issue: w.issue, pr });
+    } catch (error) {
+      log(`[sapwood:conductor] human-merge-only close-out of ${w.name} (#${w.issue}, PR #${pr}) failed; continuing: ${String(error)}`);
+    }
+  }
+  return outcomes;
 }
 
 /** #451 (gate② P1): per-item excerpt cap for the escalation comment's reviewer-finding / producer-
