@@ -17,6 +17,7 @@ import {
   extractOperatorOwnedFences,
   findStandaloneMarkerLines,
   operatorFenceScanResult,
+  scanStandaloneMarkerLines,
 } from "./comment-cursor.js";
 
 function entry(id: string, isEngine = false): CommentStreamEntry {
@@ -706,6 +707,49 @@ test("applyRoleBodyRewrite (gate② round 2, P1 backstop, mutation-kill target):
   if (applied.ok) return;
   assert.equal(applied.reason, "operator-fence-violation");
   assert.match(applied.detail, /backstop/);
+});
+
+// ── gate② round 3 fix (P2): a marker line INSIDE a preserved fence must not ALSO be reattached ──
+
+test("applyRoleBodyRewrite (gate② round 3, P2, mutation-kill target): a marker line INSIDE a preserved operator fence must not ALSO be reattached as 'the current marker' — it survives exactly once, nothing duplicated", () => {
+  const fenceWithMarker = [
+    "<!-- sapwood:operator-owned -->",
+    "<!-- sapwood:comments-adjudicated-through: 42 -->",
+    "<!-- /sapwood:operator-owned -->",
+  ].join("\n");
+  const currentBody = `Plan.\n\n${fenceWithMarker}\n`;
+  const roleBody = `Plan, refined.\n\n${fenceWithMarker}\n`;
+  const applied = applyRoleBodyRewrite(currentBody, roleBody);
+  assert.equal(applied.ok, true);
+  if (!applied.ok) return;
+  const markerLines = scanStandaloneMarkerLines(applied.body);
+  assert.equal(markerLines.length, 1, "the fenced marker survives exactly once — no duplicate appended after the body");
+  assert.equal(markerLines[0]!.value, "42");
+  assert.deepEqual(extractOperatorOwnedFences(applied.body), [fenceWithMarker], "the fence itself, marker included, is unchanged");
+});
+
+test("applyRoleBodyRewrite (gate② round 3, P2): a REAL out-of-fence marker and a FENCED marker coexist — only the real one is reattached, exactly once", () => {
+  const fenceWithMarker = [
+    "<!-- sapwood:operator-owned -->",
+    "<!-- sapwood:comments-adjudicated-through: 42 -->",
+    "<!-- /sapwood:operator-owned -->",
+  ].join("\n");
+  const realMarker = "<!-- sapwood:comments-adjudicated-through: 7 -->";
+  const currentBody = `Plan.\n\n${fenceWithMarker}\n\n${realMarker}\n`;
+  // The role's own output has no standing to carry the real (out-of-fence) marker itself — it
+  // gets stripped from roleBody like any role-authored marker attempt would be, and reattached
+  // from currentBody's own real marker afterward.
+  const roleBody = `Plan, refined.\n\n${fenceWithMarker}\n`;
+  const applied = applyRoleBodyRewrite(currentBody, roleBody);
+  assert.equal(applied.ok, true);
+  if (!applied.ok) return;
+  const markerLines = scanStandaloneMarkerLines(applied.body);
+  assert.deepEqual(
+    markerLines.map((m) => m.value),
+    ["42", "7"],
+    "the fenced marker stays put in document order, the real marker is reattached exactly once",
+  );
+  assert.deepEqual(extractOperatorOwnedFences(applied.body), [fenceWithMarker], "the fence itself is unaffected");
 });
 
 test("findStandaloneMarkerLines: returns the RAW (untrimmed) line text, not just the parsed value", () => {

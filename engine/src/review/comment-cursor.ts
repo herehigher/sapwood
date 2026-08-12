@@ -509,11 +509,41 @@ function stripUnpreservedOperatorFenceTags(currentFences: readonly string[], rol
  *  with mangled "verified" bytes. The marker reattachment appends OUTSIDE any fence (after a
  *  blank-line separator), so a passing write's fences are always exactly where
  *  `stripUnpreservedOperatorFenceTags` left them; this backstop exists for whatever a FUTURE
- *  transform gets wrong, not because the current pipeline is expected to trip it. */
+ *  transform gets wrong, not because the current pipeline is expected to trip it.
+ *
+ *  gate② round 3 fix (P2): the marker lines this function REATTACHES after a role rewrite are
+ *  `currentBody`'s standalone marker lines EXCLUDING any that sit INSIDE an operator-owned fence
+ *  (`currentMarkerLinesForReattach` below) — never the raw, fence-unaware `findStandaloneMarkerLines`.
+ *  A marker-shaped line inside a fence is operator-authored prose PROTECTED by the fence (round 2's
+ *  own protected-range stance): it already survives verbatim as part of the fence's preserved
+ *  bytes, with no help from this reattachment step. Treating it ALSO as "the body's adjudication
+ *  cursor to reattach" appended a SECOND copy after the body — two marker lines in the final body,
+ *  which fails closed as `duplicate-marker` on the very next write. If `currentBody`'s ONLY
+ *  marker-shaped line(s) are inside fences, the reattach branch now sees zero markers and appends
+ *  nothing; a real, out-of-fence marker coexisting with a fenced one is still reattached exactly
+ *  once, untouched. */
 export type RoleBodyRewriteResult =
   | { ok: true; body: string }
   | { ok: false; reason: "operator-fence-violation"; detail: string }
   | { ok: false; reason: "malformed-operator-fence"; detail: string };
+
+/** gate② round 3 fix (P2): `currentBody`'s standalone adjudication-cursor marker lines, excluding
+ *  any that sit INSIDE an operator-owned fence — see `applyRoleBodyRewrite`'s own doc for why. Not
+ *  exported and does not touch `findStandaloneMarkerLines`'s own exported read semantics (every
+ *  OTHER caller — this file's own tests, ac-snapshot.ts's sibling strip — reads every standalone
+ *  marker line regardless of fence membership, unchanged); this is a narrower view used ONLY for
+ *  deciding what `applyRoleBodyRewrite` re-anchors after a role rewrite. Line-index compatible
+ *  with `scanOperatorFences`'s own block ranges: both walks split on the SAME positions for any
+ *  body using ordinary `"\n"`/`"\r\n"` line endings (a bare, lone `\r` with no following `\n` is
+ *  the one case that could desync them, and does not occur in this codebase's marker/fence
+ *  syntax). */
+function currentMarkerLinesForReattach(currentBody: string): string[] {
+  const protectedRanges = scanOperatorFences(currentBody).blocks.map((b): [number, number] => [b.openLine, b.closeLine]);
+  const isProtected = (lineIndex: number): boolean => protectedRanges.some(([s, e]) => lineIndex >= s && lineIndex <= e);
+  return scanStandaloneMarkerLines(currentBody)
+    .filter((m) => !isProtected(m.lineIndex))
+    .map((m) => m.raw);
+}
 
 export function applyRoleBodyRewrite(currentBody: string, roleBody: string): RoleBodyRewriteResult {
   const currentScan = operatorFenceScanResult(currentBody);
@@ -540,7 +570,7 @@ export function applyRoleBodyRewrite(currentBody: string, roleBody: string): Rol
     };
   }
   const roleBodyFenceStripped = stripUnpreservedOperatorFenceTags(currentFences, roleBody);
-  const currentMarkerLines = findStandaloneMarkerLines(currentBody);
+  const currentMarkerLines = currentMarkerLinesForReattach(currentBody);
   const strippedRoleBody = stripStandaloneMarkerLines(roleBodyFenceStripped);
   const finalBody =
     currentMarkerLines.length === 0 ? strippedRoleBody : `${strippedRoleBody.replace(/\s+$/, "")}\n\n${currentMarkerLines.join("\n")}\n`;
