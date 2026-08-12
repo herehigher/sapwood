@@ -11720,6 +11720,162 @@ test("#484 AC3: the live sweep↔reentry cycle (round 262: resolve -> sweep -> r
   st.close();
 });
 
+// #826: batch-14's lane-745 shape — a lane escalated for a reason UNRELATED to AC drift (so
+// `ac_rebaseline_eligible` was never set and GATED RECLAIM's own reclaim path never re-baselines
+// the stale dispatch-time snapshot), whose PR is hand-merged while a REAL post-dispatch AC edit
+// sits unadjudicated. GATED RECLAIM's own MERGED branch hands the lane straight to DRIVE this
+// same tick (the lane-433/#484 path) — but pre-fix, DRIVE's checkAcDriftBeforeDrive ran BEFORE
+// driveOne and re-escalated needs-human onto a lane that had already reached terminal success,
+// exactly the ev#13481/13482 + ev#13495/13496 double-fire this issue exists to close. #752's
+// marker-normalized hashing does not excuse this: the edit here is a real, non-marker AC change.
+test("#826: gated-reentry close-out on a MERGED PR skips the AC-drift escalation entirely — no needs-human on a terminal lane", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+
+  const originalBody = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  st.recordAcSnapshot({ issue: 745, bodyHash: hashBody(originalBody), body: originalBody, manifest: [], snapshottedAt: "t0" });
+  // Escalated by a NON-AC-drift path (e.g. review-disputed / fix-rounds cap): the dispatch-time
+  // snapshot is still on file, but `ac_rebaseline_eligible` was never set — only
+  // checkAcDriftBeforeDrive/checkCommentCursorBeforeDrive ever touch that column.
+  st.upsertWorker({
+    name: "lane-745",
+    issue: 745,
+    session_id: "s-lane-745",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 791,
+    gated_escalation_labeled: 1,
+    ac_body_hash: hashBody(originalBody),
+  });
+  forge.issueLabelsByIssue[745] = []; // a human cleared needs-human — the unrelated finding was addressed
+  // A genuine, real PO adjudication edit to the AC lands after dispatch — never rebaselined.
+  forge.issueBodies[745] = "## Acceptance criteria\n\n- [ ] one, ADJUDICATED\n\n## Verification plan\nrun tests";
+  forge.prStatus = { ...forge.prStatus, state: "MERGED" }; // the PR merged despite the drift
+  gate.outcomes[791] = { kind: "merged", pr: 791, headOid: "H1" };
+
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r.gatedReclaimed, [{ kind: "merged", worker: "lane-745", issue: 745, pr: 791, attempts: 0 }]);
+  assert.deepEqual(
+    r.driven,
+    [{ kind: "merged", worker: "lane-745", issue: 745, pr: 791 }],
+    "no needs-human — the close-out reaches the ordinary merged terminal",
+  );
+  assert.equal(st.getWorker("lane-745")?.state, "done");
+  assert.deepEqual(forge.boardSet, [[745, "done"]]);
+  assert.deepEqual(forge.labelsAdded, [], "no needs-human re-applied to a terminal, merged lane");
+  assert.deepEqual(forge.issueComments, [], "no drift-explaining comment posted on a terminal lane");
+  // #826 gate② finding [0] ("merged-drift-exemption-not-durable"): settlement never depends on
+  // DRIVE's own per-lane loop (gate.driveOne) running this tick — GATED RECLAIM settles the lane
+  // directly, so there is no "flip to driving, hope DRIVE gets to it" handoff for a deferred or
+  // restarted pass to lose.
+  assert.equal(gate.calls.length, 0, "settled directly by GATED RECLAIM — driveOne is never invoked for this lane");
+
+  // A second close-out pass over the same (now `done`) lane emits no additional label writes —
+  // it has left gatedFailedWorkers()/drivingWorkers() for good.
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r2.gatedReclaimed, []);
+  assert.deepEqual(r2.driven, []);
+  assert.deepEqual(forge.labelsAdded, []);
+  st.close();
+});
+
+// #826 gate② finding [0] ("merged-drift-exemption-not-durable"): the exact deferral vector the
+// finding named — "the earlier pendingThreadWriteWorkers branch skips driveOne" — reproduced
+// directly. A lane whose name ALSO carries a pending thread write (leftover from a prior fixing
+// episode) would, under the old design, flip to `driving` and then have its would-be DRIVE pass
+// skipped by the pendingThreadWriteWorkers guard — deferring settlement to a LATER tick with an
+// empty (tick-local) exemption set, reopening the AC-drift race. Settling directly in GATED
+// RECLAIM (this fix) never reaches that guard at all, so the deferral vector cannot exist.
+test("#826 gate② finding [0]: a lane with a pending thread write under its own name still settles in ONE tick — merged settlement never routes through the pendingThreadWriteWorkers-guarded DRIVE loop", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+
+  const originalBody = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  st.recordAcSnapshot({ issue: 746, bodyHash: hashBody(originalBody), body: originalBody, manifest: [], snapshottedAt: "t0" });
+  st.upsertWorker({
+    name: "lane-746",
+    issue: 746,
+    session_id: "s-lane-746",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 792,
+    gated_escalation_labeled: 1,
+    ac_body_hash: hashBody(originalBody),
+  });
+  // A leftover pending thread write under this SAME lane name — the exact condition that makes
+  // DRIVE's pendingThreadWriteWorkers guard skip gate.driveOne for a `driving` lane.
+  st.enqueueThreadWrite(
+    { worker: "lane-746", issue: 746, pr: 792, threadId: "t1", reply: "done", resolution: "addressed", batchKey: "b1", fixRounds: 1 },
+    "t0",
+  );
+  forge.issueLabelsByIssue[746] = [];
+  forge.issueBodies[746] = "## Acceptance criteria\n\n- [ ] one, ADJUDICATED\n\n## Verification plan\nrun tests";
+  forge.prStatus = { ...forge.prStatus, state: "MERGED" };
+  gate.outcomes[792] = { kind: "merged", pr: 792, headOid: "H1" };
+
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r.gatedReclaimed, [{ kind: "merged", worker: "lane-746", issue: 746, pr: 792, attempts: 0 }]);
+  assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-746", issue: 746, pr: 792 }], "settled in the SAME tick, not deferred");
+  assert.equal(st.getWorker("lane-746")?.state, "done");
+  assert.deepEqual(forge.labelsAdded, [], "no needs-human — the pending thread write never blocks this settlement");
+  st.close();
+});
+
+// #832 gate② finding [0] ("direct-merged-settlement-drops-signals"): GATED RECLAIM's direct
+// settlement (settleMergedLane) never produces a DriveOutcome for DRIVE's own generic
+// holdObservation handling to read, so it must carry BOTH signals gate.driveOne's terminal-MERGED
+// early return exists to preserve: the PR's title (for the `merged` event's `prTitle`) and the
+// `held: false` observation that closes a standing `pr-held` episode with `pr-released` —
+// "any standing hold label on a merged PR is moot" (merge-driver.ts's own comment on that path).
+test("#832 gate② finding [0]: GATED RECLAIM's direct MERGED settlement carries prTitle and closes a standing pr-held episode with pr-released", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+
+  st.upsertWorker({
+    name: "lane-m2",
+    issue: 800,
+    session_id: "s-lane-m2",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 900,
+    gated_escalation_labeled: 1,
+  });
+  // A hold episode was announced earlier (a human applied `hold` while the escalation stood) and
+  // never closed — DRIVE never revisited this lane once it went `failed`.
+  st.appendEvent("pr-held", { worker: "lane-m2", issue: 800, pr: 900, label: "hold" });
+  forge.issueLabelsByIssue[800] = [];
+  forge.prStatus = { ...forge.prStatus, state: "MERGED", title: "fix(engine): the titled PR" };
+
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r.gatedReclaimed, [{ kind: "merged", worker: "lane-m2", issue: 800, pr: 900, attempts: 0 }]);
+  assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-m2", issue: 800, pr: 900 }]);
+  const mergedEvent = st.eventsAfterId(0, ["merged"]).find((e) => (e.payload as { pr: number }).pr === 900);
+  assert.ok(mergedEvent, "a merged event was recorded for this PR");
+  assert.equal(
+    (mergedEvent!.payload as { prTitle?: string }).prTitle,
+    "fix(engine): the titled PR",
+    "prTitle is carried through from prStatus.title",
+  );
+  assert.equal(
+    st.lastHoldEvent("lane-m2", 900),
+    "pr-released",
+    "the standing hold episode is closed on merge settlement, same as driveOne's own MERGED early return",
+  );
+  st.close();
+});
+
 // #167 review (Codex P2+P3 adjudication): capHitEscalationNote — direct unit tests for the
 // helper extracted from the gated-reentry-cap escalation comment above. Covers the two
 // defects the review found: (a) unconditionally citing "review doctrine, adjudication point

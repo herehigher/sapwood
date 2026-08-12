@@ -1886,6 +1886,88 @@ async function handleRollbackFailure(
   return { kind: "retrying", issue: row.issue, attempts, reason: row.reason };
 }
 
+/** #826 gate② finding [0] ("merged-drift-exemption-not-durable"): the ONE settlement path for a
+ *  lane whose PR is confirmed MERGED — shared by DRIVE's own `gate.driveOne` "merged" outcome and
+ *  GATED RECLAIM's MERGED branch (this file's #147/#484 terminality-before-cap discovery). A
+ *  prior version of the GATED RECLAIM fix flipped the row to `driving` and relied on DRIVE
+ *  re-observing MERGED via `gate.driveOne` later in the SAME tick to actually settle it — with the
+ *  "already proven merged" fact living only in a tick-local `Set`. Any deferral between the two
+ *  phases (the `pendingThreadWriteWorkers` skip a few lines below DRIVE's own AC-drift check, or a
+ *  process restart between GATED RECLAIM and DRIVE) left a `driving` lane with no durable memory
+ *  of the observation, so the NEXT tick's fresh (empty) set let `checkAcDriftBeforeDrive` run
+ *  again and reapply `needs-human` to a lane that had already reached terminal success — exactly
+ *  the escalation this whole change exists to close. Settling HERE, atomically, in the same call
+ *  that observed MERGED, removes the handoff (and the tick-local set) entirely: a lane either gets
+ *  fully settled in one step or never leaves its pre-settlement state, so there is no intermediate
+ *  "proven merged but not yet reflected" window for a later tick to lose. The remaining crash
+ *  window (between `state.upsertWorker` below and `forge.setBoardStatus`) is the SAME one
+ *  `attemptRollback`'s pending-rollback recovery already covers for every other merge settlement —
+ *  not a new risk this introduces. */
+async function settleMergedLane(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  iso: () => string,
+  log: ((msg: string) => void) | undefined,
+  rollbacks: RollbackOutcome[],
+  w: WorkerRow,
+  pr: number,
+  headOid: string,
+  title?: string,
+): Promise<DrivenOutcome> {
+  state.upsertWorker({ ...w, state: "done", ended_at: iso() });
+  if (state.parkRow("forge") != null) {
+    state.addPendingRollback(w.issue, "done", MERGED_BOARD_DONE_REASON, iso());
+  } else {
+    try {
+      await forge.setBoardStatus(w.issue, "done");
+    } catch (e) {
+      const rollbackId = state.addPendingRollback(w.issue, "done", MERGED_BOARD_DONE_REASON, iso());
+      rollbacks.push(
+        await handleRollbackFailure(
+          forge,
+          state,
+          cfg,
+          { id: rollbackId, issue: w.issue, target: "done", reason: MERGED_BOARD_DONE_REASON, attempts: 0 },
+          e,
+          iso,
+        ),
+      );
+    }
+  }
+  // #570: the merge is the single most consequential thing the engine does (it writes to main),
+  // and until now it was DB-only — an operator tailing sapwood.log saw a PR get drive-queued and
+  // then nothing. Logged BEFORE the append for the same reason as the queued line elsewhere: a
+  // crash between the two costs a duplicate log line on the rerun, never a missing one. No dedupe
+  // needed — unlike "queued", this outcome is terminal (the lane goes `done`), so it is reported
+  // at most once per lane.
+  log?.(`[sapwood:drive] lane ${w.name} pr #${pr} MERGED (${headOid})`);
+  state.appendEvent("merged", {
+    worker: w.name,
+    issue: w.issue,
+    pr,
+    headOid,
+    // #420: offline/replay tooltip source (frontend-design §11 #3) — omitted, never null.
+    ...(title !== undefined ? { prTitle: title } : {}),
+  });
+  // #832 gate② finding [0] ("direct-merged-settlement-drops-signals"): `gate.driveOne` reports
+  // `holdObservation: { held: false }` for a terminal MERGED PR specifically so the conductor's
+  // hold-episode bookkeeping (DRIVE's per-lane loop, which reads `outcome.holdObservation`
+  // BEFORE dispatching on `outcome.kind`) can close a previously-announced `pr-held` episode with
+  // `pr-released` — "any standing hold label on a merged PR is moot" (merge-driver.ts's own
+  // comment on that early return). GATED RECLAIM's direct settlement call site never produces a
+  // `DriveOutcome` to read a `holdObservation` off, so it would otherwise skip that close-out
+  // entirely and strand the episode open forever (the lane goes `done` and is never revisited).
+  // Closing it HERE, unconditionally, covers both call sites: MERGED always implies held:false,
+  // and this is a no-op when there is nothing to close, including the DRIVE-driven call, where
+  // the generic pre-switch handling has typically already closed it (`lastHoldEvent` is no
+  // longer 'pr-held' by the time this runs, so the check below skips a duplicate append).
+  if (state.lastHoldEvent(w.name, pr) === "pr-held") {
+    state.appendEvent("pr-released", { worker: w.name, issue: w.issue, pr });
+  }
+  return { kind: "merged", worker: w.name, issue: w.issue, pr };
+}
+
 /**
  * One attempt at a durably-persisted board mutation (#31). `row` may be a
  * freshly-inserted pending_rollbacks row (attempts: 0, its own attempt not yet made) or one
@@ -4260,6 +4342,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   through would just strand the lane in `driving`).
   const gate = deps.mergeGate;
   const gatedReclaimed: GatedReclaimOutcome[] = [];
+  // #826: declared here (rather than at DRIVE's own section below) so GATED RECLAIM's MERGED
+  // branch can push its settlement outcome into the SAME array DRIVE does — see
+  // settleMergedLane's own doc for why that branch settles directly instead of handing the lane
+  // to DRIVE.
+  const driven: DrivenOutcome[] = [];
   if (gate) {
     for (const w of state.gatedFailedWorkers()) {
       if (w.pr == null) continue; // fail-safe; gatedFailedWorkers() already filters this
@@ -4303,21 +4390,23 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       //   for the same lane, because every arm below leaves gatedFailedWorkers() (driving, or
       //   latched). Unguarded, like the label read above: a forge read failure propagates and the
       //   next tick re-observes, rather than being swallowed into a wrong decision.
-      const prState = (await forge.getPRStatus(pr)).state;
+      const prStatus = await forge.getPRStatus(pr);
+      const prState = prStatus.state;
       if (prState === "MERGED") {
-        // The lane-433 path, now reachable at ANY attempt count. Hand the lane to DRIVE (which
-        // runs below, this same tick — `gate` is non-null here) and let it record the honest
-        // `merged` terminal with its board-Done write and rollback handling, rather than
-        // duplicating that settlement here. Deliberately NOT the RECLAIM transition below: no
-        // attempt is burned and no `gated-reentry` episode-reset event is emitted, because
-        // nothing is being re-entered — a finished lane is being collected.
-        state.upsertWorkerWithEvent({ ...w, state: "driving", ended_at: iso() }, "gated-reentry-merged", {
-          worker: w.name,
-          issue: w.issue,
-          pr,
-          attempts,
-        });
+        // The lane-433 path, now reachable at ANY attempt count. #826 gate② finding [0]
+        // ("merged-drift-exemption-not-durable"): settled DIRECTLY here, via the SAME
+        // settleMergedLane path DRIVE's own "merged" gate.driveOne outcome uses — see that
+        // function's own doc. A prior version of this fix instead flipped the row to `driving`
+        // and handed it to DRIVE (which runs below, this same tick) to settle, with "already
+        // proven merged" recorded only in a tick-local Set; a deferred or restarted close-out
+        // pass lost that memory and re-ran DRIVE's AC-drift check against a lane that had
+        // nothing left to protect. Settling atomically here closes that window. Deliberately NOT
+        // the RECLAIM transition below: no attempt is burned and no `gated-reentry` episode-reset
+        // event is emitted, because nothing is being re-entered — a finished lane is being
+        // collected.
+        state.appendEvent("gated-reentry-merged", { worker: w.name, issue: w.issue, pr, attempts });
         gatedReclaimed.push({ kind: "merged", worker: w.name, issue: w.issue, pr, attempts });
+        driven.push(await settleMergedLane(forge, state, cfg, iso, deps.log, rollbacks, w, pr, prStatus.headOid, prStatus.title));
         continue;
       }
       const issueState = (await forge.getIssueMeta(w.issue)).state;
@@ -4539,7 +4628,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   preserved structurally: tick() never calls forge.mergePR itself — that lives one level
   //   down, in deps.mergeGate.driveOne (merge-driver.ts), invoked ONLY from here. Omitted
   //   mergeGate -> driving lanes stay driving with no gate/merge activity (pre-#13 behavior).
-  const driven: DrivenOutcome[] = [];
+  //   (`driven` itself is declared up in GATED RECLAIM, above — see #826's comment there.)
   // #375 review round 1 (P1): lanes whose OWN fixable branch, THIS tick, actually hit a
   // ceiling-caused admission block or a genuine fix-rounds-cap exhaustion — the OBSERVED truth
   // DRIVE just produced, as opposed to the `drivingLaneTerminalForDrain` heuristic the
@@ -4667,6 +4756,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // called for this lane. See checkAcDriftBeforeDrive's own doc for the fail-closed ordering
       // guarantee (drift routes to needsHuman and skips driveOne entirely this tick; a missing
       // snapshot is not drift and drives normally).
+      //
+      // #826: a lane GATED RECLAIM has already proven terminal-success (its PR is MERGED) never
+      // reaches this loop at all — that branch settles it directly (settleMergedLane) instead of
+      // flipping it to `driving` and relying on this check to let it through. So every lane seen
+      // here genuinely has a drive left to protect, and this check is unconditional again.
       const driftCheck = await checkAcDriftBeforeDrive(forge, state, cfg, w, pr, iso);
       if (driftCheck.outcome) {
         driven.push(driftCheck.outcome);
@@ -5013,42 +5107,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       }
       switch (outcome.kind) {
         case "merged":
-          state.upsertWorker({ ...w, state: "done", ended_at: iso() });
-          if (state.parkRow("forge") != null) {
-            state.addPendingRollback(w.issue, "done", MERGED_BOARD_DONE_REASON, iso());
-          } else {
-            try {
-              await forge.setBoardStatus(w.issue, "done");
-            } catch (e) {
-              const rollbackId = state.addPendingRollback(w.issue, "done", MERGED_BOARD_DONE_REASON, iso());
-              rollbacks.push(
-                await handleRollbackFailure(
-                  forge,
-                  state,
-                  cfg,
-                  { id: rollbackId, issue: w.issue, target: "done", reason: MERGED_BOARD_DONE_REASON, attempts: 0 },
-                  e,
-                  iso,
-                ),
-              );
-            }
-          }
-          // #570: the merge is the single most consequential thing the engine does (it writes to
-          // main), and until now it was DB-only — an operator tailing sapwood.log saw a PR get
-          // drive-queued and then nothing. Logged BEFORE the append for the same reason as the
-          // queued line above: a crash between the two costs a duplicate log line on the rerun,
-          // never a missing one. No dedupe needed — unlike "queued", this outcome is terminal
-          // (the lane goes `done`), so it is reported at most once per lane.
-          deps.log?.(`[sapwood:drive] lane ${w.name} pr #${pr} MERGED (${outcome.headOid})`);
-          state.appendEvent("merged", {
-            worker: w.name,
-            issue: w.issue,
-            pr,
-            headOid: outcome.headOid,
-            // #420: offline/replay tooltip source (frontend-design §11 #3) — omitted, never null.
-            ...(outcome.title !== undefined ? { prTitle: outcome.title } : {}),
-          });
-          driven.push({ kind: "merged", worker: w.name, issue: w.issue, pr });
+          // #826: shared with GATED RECLAIM's own MERGED branch — see settleMergedLane's own doc.
+          driven.push(await settleMergedLane(forge, state, cfg, iso, deps.log, rollbacks, w, pr, outcome.headOid, outcome.title));
           break;
         case "needs-human":
           // #397 bucket 2: "a human must MERGE this PR" is a DIFFERENT required action from "the
