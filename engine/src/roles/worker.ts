@@ -1137,6 +1137,23 @@ export const WORKER_ALLOWED_TOOLS_NO_GH = WORKER_ALLOWED_TOOLS.split(",")
  *  presence there changes nothing. */
 export const WORKER_DISABLE_BACKGROUND_TASKS_ENV: NodeJS.ProcessEnv = { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" };
 
+/** #679 (CI-repair, PR #835): dispatch()/resume() must OMIT SAPWOOD_DEFAULT_BRANCH from a spawn's
+ *  env entirely when `defaultBranch` didn't resolve THIS call — never merely skip ADDING it.
+ *  `baseEnv` at both call sites is (or derives from) `process.env` verbatim, so an ambient
+ *  SAPWOOD_DEFAULT_BRANCH already exported in the supervisor's OWN process environment — ordinary
+ *  on a persistent self-hosted CI runner (unlike an ephemeral hosted one, it carries env across
+ *  jobs) and in any worker-dispatched session — would otherwise leak straight through to the
+ *  child even on a call this supervisor itself couldn't resolve a branch for, which is exactly
+ *  the false "SET" the #679 reverse tests exist to catch (live: PR #835's CI, self-hosted
+ *  mac-mini-docker-runner, red on exactly this). A spread that only conditionally ADDS the key
+ *  can never remove one the base already carried; explicit deletion is the only thing that
+ *  actually guarantees absence regardless of what's ambient. */
+function omitStaleDefaultBranch(env: NodeJS.ProcessEnv, defaultBranch: string | undefined): NodeJS.ProcessEnv {
+  if (defaultBranch) env.SAPWOOD_DEFAULT_BRANCH = defaultBranch;
+  else delete env.SAPWOOD_DEFAULT_BRANCH;
+  return env;
+}
+
 /** The full `claude -p` argv. Pure, so every flag is testable without spawning. NOTE: no
  *  --max-budget-usd — the per-worker budget is SOFT (monitored + graceful handoff), never a
  *  hard mid-step kill (PLAN.md). The hard ceiling is the conductor's, not the CLI's. */
@@ -2398,17 +2415,18 @@ export class WorkerSupervisor implements Supervisor {
       // #708: WORKER_DISABLE_BACKGROUND_TASKS_ENV placed AFTER baseEnv, same reason
       // SAPWOOD_GUARD_MODE/SAPWOOD_WORKTREE_ROOT are — so it wins even if an inherited
       // process.env somehow already carried CLAUDE_CODE_DISABLE_BACKGROUND_TASKS unset/cleared.
-      env: {
-        ...baseEnv,
-        ...WORKER_DISABLE_BACKGROUND_TASKS_ENV,
-        SAPWOOD_GUARD_MODE: guardMode,
-        SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, laneName),
-        // #679: only set when resolved — an empty/unresolved default branch must OMIT the var
-        // entirely (not set it to ""), so the guard patch's inactivity check (`if
-        // (!defaultBranch) return null`) reads the same "not engine-dispatched" signal an
-        // actually-unset env var gives, never a live-but-empty one.
-        ...(defaultBranch ? { SAPWOOD_DEFAULT_BRANCH: defaultBranch } : {}),
-      },
+      // #679: SAPWOOD_DEFAULT_BRANCH is set/omitted by omitStaleDefaultBranch AFTER the spread —
+      // see that function's own doc for why an unresolved `defaultBranch` must actively DELETE
+      // the key rather than merely skip adding it (baseEnv can already carry a stale ambient one).
+      env: omitStaleDefaultBranch(
+        {
+          ...baseEnv,
+          ...WORKER_DISABLE_BACKGROUND_TASKS_ENV,
+          SAPWOOD_GUARD_MODE: guardMode,
+          SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, laneName),
+        },
+        defaultBranch,
+      ),
     });
     // Register the lane + `exit` handler BEFORE any await. Node does not replay `exit` to
     // listeners attached after it fires, so a fast exit (instant completion / the CLI
@@ -2855,14 +2873,16 @@ export class WorkerSupervisor implements Supervisor {
         stdio: ["ignore", jsonlFd, jsonlFd],
         // #708: same env-precedence rationale as dispatch()'s own spawn() call above — a
         // resumed leg must keep the background-task closure too, not just the fresh-dispatch path.
-        env: {
-          ...baseEnv,
-          ...WORKER_DISABLE_BACKGROUND_TASKS_ENV,
-          SAPWOOD_GUARD_MODE: guardMode,
-          SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, name),
-          // #679: same omit-when-unresolved rule as dispatch() — see that call site's comment.
-          ...(defaultBranch ? { SAPWOOD_DEFAULT_BRANCH: defaultBranch } : {}),
-        },
+        // #679: same omitStaleDefaultBranch call as dispatch() — see that function's own doc.
+        env: omitStaleDefaultBranch(
+          {
+            ...baseEnv,
+            ...WORKER_DISABLE_BACKGROUND_TASKS_ENV,
+            SAPWOOD_GUARD_MODE: guardMode,
+            SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, name),
+          },
+          defaultBranch,
+        ),
       });
     } catch (e) {
       closeSync(jsonlFd);
